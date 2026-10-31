@@ -12,7 +12,45 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    str::FromStr,
 };
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Shard {
+    index: u32,
+    count: u32,
+}
+
+impl FromStr for Shard {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let (index, count) = value.split_once('/').context("shard must be INDEX/COUNT")?;
+        let shard = Self {
+            index: index.parse()?,
+            count: count.parse()?,
+        };
+        ensure!(
+            shard.count > 0 && shard.index < shard.count,
+            "shard requires 0 <= INDEX < COUNT"
+        );
+        Ok(shard)
+    }
+}
+
+impl Shard {
+    fn contains(self, id: &str) -> bool {
+        let digest = Sha256::digest(id.as_bytes());
+        let number = u64::from_be_bytes(digest[..8].try_into().unwrap());
+        number % u64::from(self.count) == u64::from(self.index)
+    }
+}
+
+#[derive(Default)]
+pub struct RunOptions {
+    pub shard: Option<Shard>,
+    pub output_dir: Option<PathBuf>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
@@ -60,6 +98,7 @@ enum Status {
     Running,
     Passed,
     Failed,
+    NewlyPassing,
     /// Unlisted failing contract tracked as pending work in the campaign summary.
     Pending,
     /// Listed in `deferred.txt` as outside the accepted domain.
@@ -77,6 +116,7 @@ struct ContractResult {
     specification: &'static str,
     domain: &'static str,
     status: Status,
+    expected_pass: bool,
     partitions: Vec<PartitionResult>,
     expected_outcomes: &'static [ExpectedOutcome],
     generated_cases: u32,
@@ -87,11 +127,20 @@ struct ContractResult {
 struct Report<'a> {
     schema: u32,
     settings: &'a Settings,
+    shard: Option<Shard>,
     source_sha256: String,
     revision: String,
     versions: serde_json::Value,
     contracts: Vec<ContractResult>,
     source_unchanged: bool,
+    completed: bool,
+}
+
+impl Report<'_> {
+    fn checkpoint(&self, output: &Path, directory: &Path) -> Result<()> {
+        write_json(&directory.join("report.json"), self)?;
+        write_json(&output.join("report.json"), self)
+    }
 }
 #[derive(Serialize, Deserialize)]
 pub struct ConcreteCase {
@@ -238,14 +287,35 @@ fn save_case(path: &Path, contract: &str, case: Case, settings: &Settings) -> Re
 }
 
 pub fn campaign(settings: Settings) -> Result<PathBuf> {
+    campaign_with_options(settings, RunOptions::default())
+}
+
+pub fn campaign_with_options(settings: Settings, options: RunOptions) -> Result<PathBuf> {
     settings.validate()?;
     let contracts = registry::contracts(settings.depth)?;
+    run_campaign(settings, options, contracts)
+}
+
+fn run_campaign(
+    settings: Settings,
+    options: RunOptions,
+    mut contracts: Vec<Contract>,
+) -> Result<PathBuf> {
     ensure!(
         contracts.iter().any(|c| c.id.starts_with(&settings.select)),
         "no contracts match {}",
         settings.select
     );
-    let output = evidence_directory()?;
+    contracts.retain(|contract| {
+        contract.id.starts_with(&settings.select)
+            && options
+                .shard
+                .is_none_or(|shard| shard.contains(contract.id))
+    });
+    let output = match options.output_dir {
+        Some(path) => path,
+        None => evidence_directory()?,
+    };
     fs::create_dir_all(&output)?;
     let directory = tempfile::Builder::new()
         .prefix("run-")
@@ -261,12 +331,14 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
     )?;
     let (source_sha256, revision) = identity()?;
     let mut report = Report {
-        schema: 1,
+        schema: 2,
         settings: &settings,
+        shard: options.shard,
         source_sha256,
         revision,
         versions: versions()?,
         source_unchanged: false,
+        completed: false,
         contracts: contracts
             .iter()
             .map(|c| {
@@ -278,6 +350,7 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
                     domain: entry.domain,
                     expected_outcomes: entry.expected_outcomes,
                     status: Status::NotRun,
+                    expected_pass: crate::passing(c.id),
                     partitions: c
                         .witnesses
                         .iter()
@@ -294,19 +367,19 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
             .collect::<Result<_>>()?,
     };
     let executor = Executor::new(settings.limits);
-    write_json(&output.join("report.json"), &report)?;
+    report.checkpoint(&output, &directory)?;
     for (index, contract) in contracts.iter().enumerate() {
-        let result = &mut report.contracts[index];
-        if !contract.id.starts_with(&settings.select) {
-            continue;
-        }
         if let Some(reason) = crate::deferred(contract.id) {
+            let result = &mut report.contracts[index];
             result.status = Status::Deferred;
             result.error = Some(reason.to_string());
             eprintln!("{}: deferred ({reason})", contract.id);
+            report.checkpoint(&output, &directory)?;
             continue;
         }
-        result.status = Status::Running;
+        report.contracts[index].status = Status::Running;
+        report.checkpoint(&output, &directory)?;
+        let result = &mut report.contracts[index];
         let artifacts = directory.join(contract.id);
         fs::create_dir_all(&artifacts)?;
         eprintln!("Checking {}", contract.id);
@@ -336,6 +409,8 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
         }
         if result.status != Status::Failed {
             let attempts = Cell::new(0u32);
+            let original_saved = Cell::new(false);
+            let save_error = std::cell::RefCell::new(None);
             let passed = std::cell::RefCell::new(
                 contract
                     .witnesses
@@ -362,16 +437,30 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
                 }
                 let index = attempts.get();
                 attempts.set(index + 1);
-                evaluate(
+                if let Err(error) = evaluate(
                     contract,
                     &case,
                     &executor,
                     &artifacts.join(format!("generated-{index}")),
-                )
-                .map_err(|error| TestCaseError::fail(format!("{error:#}")))?;
+                ) {
+                    if !original_saved.replace(true)
+                        && let Err(error) = save_case(
+                            &artifacts.join("original.json"),
+                            contract.id,
+                            case,
+                            &settings,
+                        )
+                    {
+                        *save_error.borrow_mut() = Some(error);
+                    }
+                    return Err(TestCaseError::fail(format!("{error:#}")));
+                }
                 passed.borrow_mut().push(case);
                 Ok(())
             });
+            if let Some(error) = save_error.into_inner() {
+                return Err(error.context("cannot preserve original counterexample"));
+            }
             result.executions += attempts.get();
             match outcome {
                 Ok(()) => {
@@ -405,7 +494,7 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
                 eprintln!("{}: pending (not in passing.txt)", contract.id);
             }
             (false, Status::Passed) => {
-                result.status = Status::Failed;
+                result.status = Status::NewlyPassing;
                 result.error = Some(format!(
                     "passes but is not listed; add {} to crates/conformance/passing.txt",
                     contract.id
@@ -416,16 +505,20 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
         if let Some(error) = &result.error {
             eprintln!("{}: {error}", contract.id);
         }
+        report.checkpoint(&output, &directory)?;
     }
     report.source_unchanged = identity()?.0 == report.source_sha256;
-    write_json(&directory.join("report.json"), &report)?;
-    write_json(&output.join("report.json"), &report)?;
+    report.completed = true;
+    report.checkpoint(&output, &directory)?;
     ensure!(
         report.source_unchanged,
         "source changed during campaign; report cannot establish current evidence"
     );
     ensure!(
-        report.contracts.iter().all(|c| c.status != Status::Failed),
+        report
+            .contracts
+            .iter()
+            .all(|c| !matches!(c.status, Status::Failed | Status::NewlyPassing)),
         "contract failures; see {}",
         directory.display()
     );
@@ -433,6 +526,10 @@ pub fn campaign(settings: Settings) -> Result<PathBuf> {
 }
 
 pub fn replay(path: &Path) -> Result<()> {
+    replay_with_output(path, None)
+}
+
+pub fn replay_with_output(path: &Path, output: Option<&Path>) -> Result<()> {
     let saved: SavedCase = serde_json::from_slice(&fs::read(path)?)?;
     saved.settings.validate()?;
     let contracts = registry::contracts(saved.settings.depth)?;
@@ -440,19 +537,24 @@ pub fn replay(path: &Path) -> Result<()> {
         .iter()
         .find(|c| c.id == saved.contract)
         .context("unknown contract in replay")?;
-    let output = evidence_directory()?;
+    let output = match output {
+        Some(path) => path.to_path_buf(),
+        None => evidence_directory()?,
+    };
     fs::create_dir_all(&output)?;
     let directory = tempfile::Builder::new()
         .prefix("replay-")
         .tempdir_in(output)?
         .keep();
     let executor = Executor::new(saved.settings.limits);
+    let infrastructure_error = Cell::new(false);
     let outcome = std::iter::once((&saved.case, &saved.source))
         .chain(saved.metamorphic.iter().map(|v| (&v.case, &v.source)))
         .enumerate()
         .map(|(index, (case, source))| {
-            let evidence =
-                executor.execute_source(case, source, &directory.join(index.to_string()))?;
+            let evidence = executor
+                .execute_source(case, source, &directory.join(index.to_string()))
+                .inspect_err(|_| infrastructure_error.set(true))?;
             (contract.check)(case, &evidence)?;
             Ok(evidence)
         })
@@ -460,8 +562,104 @@ pub fn replay(path: &Path) -> Result<()> {
         .and_then(|evidence| check_metamorphic(&evidence));
     write_json(
         &directory.join("replay.json"),
-        &serde_json::json!({"input":saved,"source_identity":identity()?,"versions":versions()?,"passed":outcome.is_ok(),"error":outcome.as_ref().err().map(|e|format!("{e:#}"))}),
+        &serde_json::json!({
+            "input": saved,
+            "source_identity": identity()?,
+            "versions": versions()?,
+            "passed": outcome.is_ok(),
+            "outcome": if outcome.is_ok() { "passed" } else if infrastructure_error.get() { "error" } else { "failed" },
+            "error": outcome.as_ref().err().map(|e|format!("{e:#}")),
+        }),
     )?;
     eprintln!("Replay evidence: {}", directory.display());
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::{Form, Number, Program};
+    use proptest::strategy::Strategy;
+
+    #[test]
+    fn failed_campaign_retains_original_minimum_and_completed_report() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut contract = registry::contracts(0)?.remove(0);
+        contract.witnesses.clear();
+        contract.strategy = (10i64..32)
+            .prop_map(|number| {
+                Case::Program(Program {
+                    expression: Number::Integer(number),
+                    form: Form::Direct,
+                })
+            })
+            .boxed();
+        contract.check = |_, _| anyhow::bail!("injected conformance failure");
+        let id = contract.id;
+        let outcome = run_campaign(
+            Settings {
+                cases: 1,
+                seed: 42,
+                ..Settings::default()
+            },
+            RunOptions {
+                output_dir: Some(directory.path().to_path_buf()),
+                ..RunOptions::default()
+            },
+            vec![contract],
+        );
+        assert!(outcome.is_err());
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(directory.path().join("report.json"))?)?;
+        assert_eq!(report["completed"], true);
+        assert_eq!(report["source_unchanged"], true);
+        assert_eq!(report["contracts"][0]["status"], "failed");
+        let run = fs::read_dir(directory.path())?
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
+            .context("missing campaign evidence")?
+            .path()
+            .join(id);
+        let original: SavedCase = serde_json::from_slice(&fs::read(run.join("original.json"))?)?;
+        let minimal: SavedCase = serde_json::from_slice(&fs::read(run.join("minimal.json"))?)?;
+        assert_eq!(original.settings.seed, 42);
+        assert!(!original.metamorphic.is_empty());
+        assert!(matches!(
+            minimal.case,
+            Case::Program(Program {
+                expression: Number::Integer(10),
+                ..
+            })
+        ));
+        assert_eq!(
+            fs::read_to_string(run.join("original.ts"))?,
+            original.source
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shards_partition_contracts_without_changing_assignment_order() -> Result<()> {
+        let contracts = registry::contracts(0)?;
+        for count in [1, 4, 128] {
+            for contract in &contracts {
+                let assigned = (0..count)
+                    .filter(|index| {
+                        Shard {
+                            index: *index,
+                            count,
+                        }
+                        .contains(contract.id)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(assigned.len(), 1, "{}", contract.id);
+                let shard: Shard = format!("{}/{}", assigned[0], count).parse()?;
+                assert!(shard.contains(contract.id));
+            }
+        }
+        for invalid in ["0/0", "4/4", "-1/4", "0", "0/4/2"] {
+            assert!(invalid.parse::<Shard>().is_err());
+        }
+        Ok(())
+    }
 }

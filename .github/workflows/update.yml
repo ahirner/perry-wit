@@ -1,0 +1,355 @@
+name: Dependency updates
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate the selected workflow ref without publishing a PR
+        type: boolean
+        default: false
+      seed:
+        description: Seed (empty uses the original run's UTC date, YYYYMMDD)
+        default: ''
+      cases:
+        description: Generated cases per contract
+        type: number
+        default: 8
+      depth:
+        description: Generator depth (0–6)
+        type: number
+        default: 3
+      shrink_limit:
+        description: Maximum shrink attempts per failure
+        type: number
+        default: 100
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: dependency-updates
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      enabled: ${{ steps.settings.outputs.enabled }}
+      publishable: ${{ steps.snapshot.outputs.publishable }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve schedule and campaign settings
+        id: settings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPDATE_CADENCE: ${{ vars.DEPENDENCY_UPDATE_CADENCE || 'daily' }}
+          UPDATE_SEED: ${{ inputs.seed }}
+          UPDATE_CASES: ${{ inputs.cases }}
+          UPDATE_DEPTH: ${{ inputs.depth }}
+          UPDATE_SHRINK_LIMIT: ${{ inputs.shrink_limit }}
+        run: |
+          python3 - <<'PY'
+          from datetime import datetime, timezone
+          import json, os, pathlib, subprocess
+          created = subprocess.check_output(['gh', 'api', f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}", '--jq', '.created_at'], text=True).strip()
+          date = datetime.fromisoformat(created.replace('Z', '+00:00')).astimezone(timezone.utc)
+          cadence = os.environ['UPDATE_CADENCE']
+          if cadence not in ('daily', 'weekly'):
+              raise ValueError('DEPENDENCY_UPDATE_CADENCE must be daily or weekly')
+          enabled = os.environ['GITHUB_EVENT_NAME'] != 'schedule' or cadence == 'daily' or date.weekday() == 0
+          settings = {key: int(os.environ.get('UPDATE_' + key.upper()) or default) for key, default in [('seed', date.strftime('%Y%m%d')), ('cases', 8), ('depth', 3), ('shrink_limit', 100)]}
+          for key, low, high in [('seed', 0, 2**64 - 1), ('cases', 1, 10000), ('depth', 0, 6), ('shrink_limit', 0, 10000)]:
+              if not low <= settings[key] <= high:
+                  raise ValueError(f'{key} must be in {low}..{high}')
+          pathlib.Path('artifacts/source').mkdir(parents=True, exist_ok=True)
+          pathlib.Path('artifacts/source/settings.json').write_text(json.dumps(settings))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'enabled={str(enabled).lower()}\n')
+          PY
+      - uses: ./.github/actions/nix-ci
+        if: steps.settings.outputs.enabled == 'true'
+      - name: Preserve update branch and merge main
+        id: branch
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          UPDATE_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: bash scripts/dependency_branch.sh prepare
+      - name: Update and commit Nix inputs
+        id: flake
+        if: steps.settings.outputs.enabled == 'true'
+        run: |
+          nix flake update
+          bash scripts/dependency_branch.sh commit 'chore: update Nix flake inputs' flake.lock
+      - name: Advance Perry and pliron pins
+        id: pins
+        if: steps.settings.outputs.enabled == 'true'
+        run: python3 scripts/update_upstream.py
+      - name: Update compiler Cargo lockfile
+        id: cargo
+        if: steps.settings.outputs.enabled == 'true'
+        run: nix develop -c cargo update --manifest-path Cargo.toml
+      - name: Update runtime Cargo lockfile
+        id: runtime
+        if: steps.settings.outputs.enabled == 'true'
+        run: nix develop -c cargo update --manifest-path runtime/Cargo.toml
+      - name: Freeze snapshots, including incomplete proposals
+        id: snapshot
+        if: ${{ always() && steps.settings.outputs.enabled == 'true' && hashFiles('artifacts/source/branch.json') != '' }}
+        env:
+          PREPARATION_STEPS: ${{ toJSON(steps) }}
+        run: |
+          bash scripts/dependency_branch.sh commit 'chore: update Rust dependencies and upstream revisions' Cargo.toml Cargo.lock runtime/Cargo.lock flake.lock
+          bash scripts/dependency_branch.sh bundle
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          directory = pathlib.Path('artifacts/source')
+          steps = json.loads(os.environ['PREPARATION_STEPS'])
+          metadata = json.loads((directory / 'branch.json').read_text())
+          metadata.update(candidate=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              settings=json.loads((directory / 'settings.json').read_text()),
+              errors=[f"Preparation: {name}: {steps[name]['outcome']}" for name in ['branch', 'flake', 'pins', 'cargo', 'runtime'] if steps[name]['outcome'] != 'success'],
+              run_url=f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+          if (directory / 'upstreams.json').exists():
+              metadata['upstreams'] = json.loads((directory / 'upstreams.json').read_text())
+          (directory / 'metadata.json').write_text(json.dumps(metadata, indent=2))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('publishable=true\n')
+          PY
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() && steps.settings.outputs.enabled == 'true' }}
+        with:
+          name: dependency-source
+          path: artifacts/source/
+          retention-days: 14
+
+  build:
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.outputs.publishable == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [baseline, candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PHASE: ${{ matrix.phase }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: dependency-source
+          path: artifacts/source
+      - run: bash scripts/dependency_branch.sh restore "$PHASE"
+      - uses: ./.github/actions/nix-ci
+        with:
+          cargo-cache: 'true'
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build the frozen conformance runner
+        id: build
+        timeout-minutes: 32
+        run: |
+          mkdir -p artifacts/build
+          date +%s > artifacts/build/started
+          if [[ "$PHASE" == candidate ]] && jq -e '.errors | length > 0' artifacts/source/metadata.json; then
+            echo 'Dependency preparation failed; candidate cannot be validated.' >&2
+            exit 1
+          fi
+          nix develop -c bash -euo pipefail -c '
+            cargo fetch --manifest-path runtime/Cargo.toml --locked
+            cargo build --locked -p perry-conformance
+          ' 2>&1 | tee artifacts/build/build.log
+          nix develop -c bash -c 'target/debug/perry-conformance list > artifacts/build/catalog.json'
+          mkdir -p artifacts/binary
+          tar -cf artifacts/binary/runner.tar -C target/debug perry-conformance
+      - name: Record build identity and duration
+        if: always()
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, time
+          directory = pathlib.Path('artifacts/build')
+          directory.mkdir(parents=True, exist_ok=True)
+          started = directory / 'started'
+          report = dict(completed=os.environ['BUILD_OUTCOME'] == 'success',
+              revision=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              source_unchanged=subprocess.run(['git', 'diff', '--quiet', 'HEAD', '--']).returncode == 0,
+              seconds=round(time.time() - int(started.read_text())) if started.exists() else None)
+          (directory / 'build.json').write_text(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-build-${{ matrix.phase }}
+          path: artifacts/build/
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        if: steps.build.outcome == 'success'
+        with:
+          name: binary-${{ matrix.phase }}
+          path: artifacts/binary/
+          retention-days: 3
+
+  campaign:
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.prepare.outputs.publishable == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [baseline, candidate]
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PHASE: ${{ matrix.phase }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: dependency-source
+          path: artifacts/source
+      - run: bash scripts/dependency_branch.sh restore "$PHASE"
+      - uses: ./.github/actions/nix-ci
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-${{ matrix.phase }}
+          path: artifacts/binary
+      - name: Run deterministic conformance shard
+        run: python3 scripts/conformance_ci.py campaign --phase "$PHASE" --shard "$SHARD" --output artifacts/campaign
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-campaign-${{ matrix.phase }}-${{ matrix.shard }}
+          path: artifacts/campaign/
+          retention-days: 14
+
+  replay:
+    needs: [prepare, campaign]
+    if: ${{ !cancelled() && needs.prepare.outputs.publishable == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        phase: [baseline, candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PHASE: ${{ matrix.phase }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: dependency-source
+          path: artifacts/source
+      - run: bash scripts/dependency_branch.sh restore "$PHASE"
+      - uses: ./.github/actions/nix-ci
+      - uses: actions/download-artifact@v8
+        with:
+          name: binary-${{ matrix.phase }}
+          path: artifacts/binary
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: results-campaign-*
+          path: artifacts/results
+      - name: Replay concrete cases against this snapshot
+        timeout-minutes: 8
+        run: nix develop -c python3 scripts/conformance_ci.py replay --phase "$PHASE" --output artifacts/replay
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-replay-${{ matrix.phase }}
+          path: artifacts/replay/
+          retention-days: 14
+
+  suite:
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.outputs.publishable == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: dependency-source
+          path: artifacts/source
+      - run: bash scripts/dependency_branch.sh restore candidate
+      - uses: ./.github/actions/nix-ci
+        with:
+          cargo-cache: 'true'
+          cachix-token: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Run the standard suite after the upgrade commits
+        timeout-minutes: 41
+        run: |
+          jq -e '.errors | length == 0' artifacts/source/metadata.json
+          nix develop -c python3 scripts/ci_checks.py --output-dir artifacts/suite
+      - name: Record tested identity
+        if: always()
+        run: |
+          mkdir -p artifacts/suite
+          unchanged=false
+          if git diff --quiet HEAD --; then unchanged=true; fi
+          jq -n --arg revision "$(git rev-parse HEAD)" --argjson unchanged "$unchanged" \
+            '{revision: $revision, source_unchanged: $unchanged}' > artifacts/suite/identity.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: results-suite
+          path: artifacts/suite/
+          retention-days: 14
+
+  publish:
+    needs: [prepare, build, campaign, replay, suite]
+    if: ${{ !cancelled() && needs.prepare.outputs.publishable == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: dependency-source
+          path: artifacts/source
+      - run: bash scripts/dependency_branch.sh restore candidate
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          pattern: results-*
+          path: artifacts/results
+      - name: Compare snapshots and retain review evidence
+        run: |
+          python3 scripts/dependency_evidence.py
+          cat artifacts/comparison/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: dependency-comparison
+          path: artifacts/comparison/
+          retention-days: 14
+      - name: Update the persistent PR
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
+        run: bash scripts/dependency_branch.sh publish
+      - name: Check dry-run result
+        if: inputs.dry_run
+        run: jq -e .ready artifacts/comparison/comparison.json

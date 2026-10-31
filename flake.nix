@@ -103,7 +103,10 @@
             (pkgs.lib.optional (builtins.pathExists (source + "/.gitignore")) (source + "/.gitignore"))
             source;
         };
-        repoSource = cleanSource ./.;
+        repoSource = pkgs.lib.cleanSourceWith {
+          src = cleanSource ./.;
+          filter = path: type: path != toString ./dependency-evidence;
+        };
 
         # Common source filter for Rust crate builds
         commonFilter = path: type:

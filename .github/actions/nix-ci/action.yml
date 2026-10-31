@@ -1,0 +1,38 @@
+name: Nix CI environment
+description: Set up Nix, Cachix, and optional Cargo build caching
+inputs:
+  cachix-token:
+    description: Cachix upload token
+    default: ''
+  cargo-cache:
+    description: Cache Cargo downloads and build artifacts
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: endersonmenezes/free-disk-space@v4
+      if: inputs.cargo-cache == 'true' && runner.os == 'Linux'
+      with:
+        rm_cmd: rmz
+        remove_android: true
+        remove_dotnet: true
+        remove_haskell: true
+        remove_tool_cache: true
+    - uses: cachix/install-nix-action@v31
+    - uses: cachix/cachix-action@v17
+      with:
+        name: cybertreiber
+        authToken: ${{ inputs.cachix-token }}
+    - uses: actions/cache@v4
+      if: inputs.cargo-cache == 'true'
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+          runtime/target
+          !target/conformance
+          !target/ci
+        key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.job }}-${{ github.sha }}
+        restore-keys: |
+          rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.lock', 'rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
