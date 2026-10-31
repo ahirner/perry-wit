@@ -80,7 +80,9 @@ jobs:
           shopt -s nullglob
           for case in target/{before,after}/conformance/run-*/*/{minimal,failure}.json; do
             phase=$(cut -d/ -f2 <<< "$case")
-            directory="scripts/dependency-evidence/$phase/$(basename "$(dirname "$case")")"
+            contract=$(basename "$(dirname "$case")")
+            grep -Fxq "$contract" crates/conformance/passing.txt || continue
+            directory="scripts/dependency-evidence/$phase/$contract"
             mkdir -p "$directory"
             cp "${case%.json}".* "$directory/"
           done
