@@ -38,6 +38,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
       - uses: cachix/install-nix-action@v31
       - uses: cachix/cachix-action@v17
         with:
