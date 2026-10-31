@@ -1,0 +1,125 @@
+name: Dependency updates
+
+on:
+  schedule:
+    - cron: '17 4 * * *' # Change the last * to 1 for weekly Monday updates.
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Random seed (empty uses the workflow run ID, stable across reruns)
+        default: ''
+      depth:
+        description: Conformance generator depth (0–6)
+        type: number
+        default: 3
+
+permissions:
+  contents: read
+concurrency:
+  group: dependency-updates
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SEED: ${{ inputs.seed || github.run_id }}
+      DEPTH: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.depth) || '3' }}
+    steps:
+      - uses: endersonmenezes/free-disk-space@v4
+        with:
+          rm_cmd: rmz
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v17
+        with:
+          name: cybertreiber
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Conformance before updates
+        id: before
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          nix develop -c cargo fetch --manifest-path runtime/Cargo.toml --locked
+          nix develop -c cargo build --locked -p perry-conformance
+          nix develop -c env CARGO_TARGET_DIR="$PWD/target/before" target/debug/perry-conformance check --seed "$SEED" --depth "$DEPTH"
+      - name: Update Nix, upstream revisions, and both Cargo lockfiles
+        id: update
+        continue-on-error: true
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          nix flake update --commit-lock-file
+          perry=$(git ls-remote https://github.com/PerryTS/perry HEAD | cut -f1)
+          pliron=$(git ls-remote https://github.com/pliron-org/pliron HEAD | cut -f1)
+          [[ "$perry" =~ ^[0-9a-f]{40}$ && "$pliron" =~ ^[0-9a-f]{40}$ ]]
+          sed -i -E "/^perry-(hir|parser) = /s/rev = \"[^\"]+\"/rev = \"$perry\"/; /^pliron = /s/rev = \"[^\"]+\"/rev = \"$pliron\"/" Cargo.toml
+          nix develop -c bash -euo pipefail -c 'cargo update; cargo update --manifest-path runtime/Cargo.toml'
+          git add Cargo.toml Cargo.lock runtime/Cargo.lock
+          git diff --cached --quiet || git commit -m 'chore: update Rust dependencies and upstream revisions'
+      - name: Conformance after updates
+        id: after
+        if: steps.update.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: |
+          nix develop -c cargo fetch --manifest-path runtime/Cargo.toml --locked
+          nix develop -c cargo build --locked -p perry-conformance
+          nix develop -c env CARGO_TARGET_DIR="$PWD/target/after" target/debug/perry-conformance check --seed "$SEED" --depth "$DEPTH"
+      - name: Retain the runner's saved counterexamples for review
+        if: ${{ !cancelled() }}
+        run: |
+          shopt -s nullglob
+          for case in target/{before,after}/conformance/run-*/*/{minimal,failure}.json; do
+            phase=$(cut -d/ -f2 <<< "$case")
+            directory="scripts/dependency-evidence/$phase/$(basename "$(dirname "$case")")"
+            mkdir -p "$directory"
+            cp "${case%.json}".* "$directory/"
+          done
+      - uses: actions/upload-artifact@v7
+        id: evidence
+        if: ${{ !cancelled() }}
+        with:
+          name: conformance-evidence
+          path: |
+            target/before/conformance/
+            target/after/conformance/
+          retention-days: 14
+      - uses: DeterminateSystems/update-flake-lock@v27
+        id: pr
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
+          branch: codex/update-dependencies
+          base: main
+          # Publish the tested locks using the Nix inputs already fetched above.
+          nix-options: --offline
+          pr-title: 'chore: update Nix and Rust dependencies'
+          pr-assignees: ahirner
+          pr-body: |
+            Updates Nix inputs, Perry/pliron revisions, and both Cargo lockfiles.
+            Conformance: seed `${{ env.SEED }}`, depth `${{ env.DEPTH }}`.
+            Before: **${{ steps.before.outcome }}**; update: **${{ steps.update.outcome }}**; after: **${{ steps.after.outcome }}**.
+            [Workflow logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) · [Conformance evidence](${{ steps.evidence.outputs.artifact-url }})
+
+            Saved cases in `scripts/dependency-evidence/` are review evidence; replay with `nix develop -c cargo run --locked -p perry-conformance -- replay PATH.json`.
+            Existing PR CI runs the standard suite. This branch is bot-owned; branch off it for combined upgrades and fixes.
+      - name: Set draft state from conformance results
+        if: steps.pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
+          PR: ${{ steps.pr.outputs.pull-request-number }}
+          FAILED: ${{ steps.before.outcome != 'success' || steps.update.outcome != 'success' || steps.after.outcome != 'success' }}
+        run: |
+          args=()
+          if [[ "$FAILED" == true ]]; then args+=(--undo); fi
+          gh pr ready "$PR" "${args[@]}"
+          test "$FAILED" = false
