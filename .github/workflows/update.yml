@@ -1,6 +1,8 @@
 name: Dependency updates
 
 on:
+  push:
+    branches: [feature/auto_bump]
   schedule:
     - cron: '17 4 * * *'
   workflow_dispatch:
@@ -82,7 +84,7 @@ jobs:
         id: branch
         if: steps.settings.outputs.enabled == 'true'
         env:
-          UPDATE_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          UPDATE_DRY_RUN: ${{ github.event_name == 'push' || inputs.dry_run || 'false' }}
         run: bash scripts/dependency_branch.sh prepare
       - name: Update and commit Nix inputs
         id: flake
@@ -346,10 +348,10 @@ jobs:
           path: artifacts/comparison/
           retention-days: 14
       - name: Update the persistent PR
-        if: ${{ !inputs.dry_run }}
+        if: ${{ github.event_name != 'push' && !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
         run: bash scripts/dependency_branch.sh publish
       - name: Check dry-run result
-        if: inputs.dry_run
+        if: ${{ github.event_name == 'push' || inputs.dry_run }}
         run: jq -e .ready artifacts/comparison/comparison.json
