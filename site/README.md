@@ -14,18 +14,6 @@ nix run .#site
 
 Generated browser bindings slice core modules directly from verified byte ranges inside `downloads/perry-wit.wasm`, shipping a single compiler binary alongside the Jco component inspection and transpile engines.
 
-## Worker API
-
-`play/assets/worker.js` also generates TypeScript declarations from the compiler API's WIT input:
-
-```js
-worker.postMessage({ id: 'sdk', action: 'generate-sdk', wit, options: { world: 'app' } });
-```
-
-The reply is `{ kind: 'sdk', id: 'sdk', files }`, where each file has a `name` and `Uint8Array` `contents`.
-SDK errors use the existing `error` reply with diagnostics and `phase: 'generate-sdk'`.
-The `id` is optional and echoed on every reply. Send one request at a time per worker.
-
 ## Verification
 
 ```sh
