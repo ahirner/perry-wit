@@ -314,6 +314,7 @@ impl Visitor for Collect<'_, '_> {
                 object,
                 index,
                 value,
+                ..
             } => {
                 if let Expr::LocalGet(id) = **object
                     && let Some(kind) = self.key_kind(index)
@@ -380,7 +381,7 @@ impl Visitor for Collect<'_, '_> {
                 }
                 return Ok(());
             }
-            Expr::IndexGet { object, index } => {
+            Expr::IndexGet { object, index, .. } => {
                 if let Expr::LocalGet(id) = **object {
                     self.constraints.element_reads.insert(id);
                     if let Some(kind) = self.key_kind(index) {

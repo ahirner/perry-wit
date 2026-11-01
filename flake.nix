@@ -124,6 +124,21 @@
         };
         cargoVendorDir = craneLib.vendorMultipleCargoDeps {
           cargoLockList = [ ./Cargo.lock ./runtime/Cargo.lock ];
+          overrideVendorGitCheckout = packages: drv:
+            if builtins.any (package: package.name == "perry-hir") packages then
+              drv.overrideAttrs (old: {
+                postPatch = (old.postPatch or "") + ''
+                  # Cargo rejects Perry's checked-in packaging backups.
+                  find third_party -name Cargo.toml.orig -delete
+                '';
+                postInstall = (old.postInstall or "") + ''
+                  # Perry includes shared source files through unversioned sibling paths.
+                  for crate in perry-runtime perry-runtime-manifest perry-abi; do
+                    ln -s "$out/$crate-${perryLock.version}" "$out/$crate"
+                  done
+                '';
+              })
+            else drv;
         };
         compilerArgs = {
           inherit src cargoVendorDir;
@@ -460,6 +475,7 @@
             # Headless WPE WebKit still needs an EGL provider on Linux.
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mesa.llvmpipeHook ];
           PLAYWRIGHT_BROWSERS_PATH = pkgs.playwright-driver.browsers;
+          PLAYWRIGHT_DRIVER_PATH = "${pkgs.playwright-driver}/index.mjs";
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
         };
 

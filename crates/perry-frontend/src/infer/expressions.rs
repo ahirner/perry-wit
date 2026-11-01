@@ -388,7 +388,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 _ => fallback(env),
             }
         }
-        Expr::IndexGet { object, index } => match strip_nullish(expression(object, env)).0 {
+        Expr::IndexGet { object, index, .. } => match strip_nullish(expression(object, env)).0 {
             HirType::Tuple(items) => {
                 // Only an array index names a tuple position; `t[1.5]` is a dynamic key.
                 let position = match index.as_ref() {

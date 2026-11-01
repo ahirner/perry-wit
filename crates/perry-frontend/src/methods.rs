@@ -369,6 +369,13 @@ impl<'s> Call<'s> {
             _ => {}
         }
         let (receiver, call): (&Expr, Self) = match expr {
+            Expr::CryptoRandomFillSync {
+                buffer,
+                offset,
+                size,
+            } if matches!((&**offset, &**size), (Expr::Undefined, Expr::Undefined)) => {
+                (buffer, Self::BytesCryptoFillRandom(&[]))
+            }
             Expr::DateGetTime(date) | Expr::DateValueOf(date) => (date, Self::DateGetTime(&[])),
             Expr::DateToISOString(date) => (date, Self::DateToISOString(&[])),
             Expr::DateToJSON(date) => (date, Self::DateToJSON(&[])),

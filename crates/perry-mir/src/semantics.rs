@@ -128,7 +128,7 @@ macro_rules! primitive_semantics {
         }
         #[op_interface_impl]
         impl pliron::opts::dce::SideEffects for $op {
-            fn has_side_effects(&self, $ctx: &Context) -> bool {
+            fn has_self_side_effects(&self, $ctx: &Context) -> bool {
                 let $this = self;
                 $effect
             }
