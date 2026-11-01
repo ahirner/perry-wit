@@ -214,19 +214,25 @@
           CARGO_BUILD_TARGET = "wasm32-wasip2";
           cargoExtraArgs = "--bin perry-wit";
         };
-        perryWitWasm = craneLib.buildPackage (wasmArgs // {
-          nativeBuildInputs = [ pkgs.python3 pkgs.wasm-tools ];
+        perryWitWasmUnstamped = craneLib.buildPackage (wasmArgs // {
           cargoArtifacts = craneLib.buildDepsOnly wasmArgs;
           PERRY_PREBUILT_RUNTIME_DIR = "${runtimeLibraries}/lib";
           installPhaseCommand = ''
-            mkdir -p "$out/lib" "$out/share/perry-wit" scripts
-            cp ${./scripts/compiler-metadata.py} scripts/compiler-metadata.py
-            python3 scripts/compiler-metadata.py target/wasm32-wasip2/release/perry-wit.wasm "$out/lib/perry-wit.wasm" \
-              --revision ${pkgs.lib.escapeShellArg (self.rev or (self.dirtyRev or ("source:" + self.narHash)))} \
-              > "$out/share/perry-wit/metadata.json"
-            cp wit/compiler/world.wit "$out/share/perry-wit/compiler.wit"
+            mkdir -p "$out/lib"
+            cp target/wasm32-wasip2/release/perry-wit.wasm "$out/lib/perry-wit.wasm"
           '';
         });
+        perryWitWasm = pkgs.runCommand "perry-wit-wasm-${cargoManifest.package.version}" {
+          nativeBuildInputs = [ pkgs.python3 pkgs.wasm-tools toolchain ];
+        } ''
+          mkdir -p "$out/lib" "$out/share/perry-wit" scripts
+          cp ${./Cargo.toml} Cargo.toml
+          cp ${./scripts/compiler-metadata.py} scripts/compiler-metadata.py
+          python3 scripts/compiler-metadata.py ${perryWitWasmUnstamped}/lib/perry-wit.wasm "$out/lib/perry-wit.wasm" \
+            --revision ${pkgs.lib.escapeShellArg (self.rev or (self.dirtyRev or ("source:" + self.narHash)))} \
+            > "$out/share/perry-wit/metadata.json"
+          cp ${./wit/compiler/world.wit} "$out/share/perry-wit/compiler.wit"
+        '';
 
         conformanceDoc = pkgs.runCommand "perry-conformance-doc" {
           nativeBuildInputs = [ toolchain ];
@@ -460,7 +466,7 @@
             if [ -d wit ] && [ ! -e wit/deps ]; then
               ln -sfn "${wasiP3Wit}" wit/deps
             fi
-            echo "Perry-WIT compiler development: cargo build, cargo test"
+            echo "Perry-WIT compiler development: cargo build, cargo test" >&2
           '';
         };
 

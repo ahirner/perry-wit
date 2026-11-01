@@ -35,15 +35,23 @@ jobs:
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cmd-format: nix develop -c {0}
+        key: ${{ hashFiles('flake.lock') }}
+        workspaces: |
+          . -> target
+          runtime -> target
+        cache-workspace-crates: true
     - name: Run tests, benchmarks, conformance, and clippy
       run: |
         nix develop -c bash -euo pipefail -c '
           cargo fetch --manifest-path runtime/Cargo.toml --locked
           cargo test --workspace --locked
           cargo test --locked --test benchmark -- --ignored --nocapture
-          cargo test --manifest-path runtime/Cargo.toml --workspace --locked
-          cargo test --manifest-path runtime/Cargo.toml -p perry-runtime --all-features --locked
-          cargo clippy --manifest-path runtime/Cargo.toml --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --manifest-path runtime/Cargo.toml --target-dir runtime/target --workspace --locked
+          cargo test --manifest-path runtime/Cargo.toml --target-dir runtime/target -p perry-runtime --all-features --locked
+          cargo clippy --manifest-path runtime/Cargo.toml --target-dir runtime/target --workspace --all-targets --all-features --locked -- -D warnings
           cargo run --locked -p perry-conformance -- check
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
         '
