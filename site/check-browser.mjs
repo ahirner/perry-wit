@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { readFile, readdir, mkdir, mkdtemp, writeFile, rm, stat } from 'node:fs/promises';
 import { resolve, dirname, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { chromium, webkit } from 'playwright-core';
+const { chromium, webkit } = await import(process.env.PLAYWRIGHT_DRIVER_PATH || 'playwright-core');
 
 const directory = resolve(process.env.SITE_OUTPUT || 'site/dist');
 const wasmFiles = (await readdir(directory, { recursive: true })).filter(name => name.endsWith('.wasm'));

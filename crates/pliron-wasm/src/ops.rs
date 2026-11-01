@@ -72,7 +72,7 @@ macro_rules! effect_free {
     ($($op:ty),*) => {$(
         #[op_interface_impl]
         impl SideEffects for $op {
-            fn has_side_effects(&self, _ctx: &Context) -> bool {
+            fn has_self_side_effects(&self, _ctx: &Context) -> bool {
                 false
             }
         }
@@ -122,7 +122,7 @@ impl Verify for NumOp {
 
 #[op_interface_impl]
 impl SideEffects for NumOp {
-    fn has_side_effects(&self, ctx: &Context) -> bool {
+    fn has_self_side_effects(&self, ctx: &Context) -> bool {
         self.opcode(ctx).effect() == Effect::Traps
     }
 }

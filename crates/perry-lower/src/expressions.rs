@@ -386,6 +386,7 @@ impl<'s> FunctionBuilder<'s> {
                 object,
                 property,
                 byte_offset,
+                ..
             } => self.property_get(ctx, object, property).map_err(|error| {
                 crate::diagnostics::annotate(
                     error,
@@ -396,6 +397,7 @@ impl<'s> FunctionBuilder<'s> {
                 object,
                 property,
                 value,
+                ..
             } => self.set_field(ctx, object, property, value)?,
             Expr::PutValueSet {
                 target, key, value, ..
@@ -501,11 +503,12 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ArrayFromMapped {
                 iterable, map_fn, ..
             } => self.array_from(ctx, iterable, Some(map_fn), expected)?,
-            Expr::IndexGet { object, index } => self.index_get(ctx, object, index)?,
+            Expr::IndexGet { object, index, .. } => self.index_get(ctx, object, index)?,
             Expr::IndexSet {
                 object,
                 index,
                 value,
+                ..
             } => self.set_index(ctx, object, index, value)?,
             other => bail!("MIR backend does not support expression {other:?} yet"),
         };

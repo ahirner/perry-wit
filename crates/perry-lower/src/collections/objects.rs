@@ -239,7 +239,7 @@ impl<'s> FunctionBuilder<'s> {
     /// `delete obj[key]` or `delete obj.prop` on a `Record<K, V>` dictionary or optional record field.
     pub(super) fn delete_operator(&mut self, ctx: &mut Context, inner: &'s Expr) -> Result<Value> {
         let (object, prop_or_idx) = match inner {
-            Expr::IndexGet { object, index } => (object, Ok(index)),
+            Expr::IndexGet { object, index, .. } => (object, Ok(index)),
             Expr::PropertyGet {
                 object, property, ..
             } => (object, Err(property)),
