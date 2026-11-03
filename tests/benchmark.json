@@ -53,11 +53,11 @@
     "helper_functions": 112,
     "optimization": {
       "cleanup_rounds": 5,
-      "constraint_visits": 129,
+      "constraint_visits": 126,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
-      "range_widenings": 2,
+      "range_widenings": 1,
       "specializations": 0,
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
@@ -250,7 +250,7 @@
     "helper_functions": 46,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 99,
+      "constraint_visits": 95,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -320,11 +320,11 @@
     "helper_functions": 43,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 80,
+      "constraint_visits": 76,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
-      "range_widenings": 3,
+      "range_widenings": 2,
       "specializations": 0,
       "summarized_contexts": 0,
       "summarized_heap_sets": 0

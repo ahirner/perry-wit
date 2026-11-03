@@ -725,6 +725,12 @@ impl Solver {
             }
             return facts;
         }
+        if kind == OperationKind::ToNumber {
+            // An absent operand can yield NaN even when every present value is an integer.
+            let input = operation.get_operand(0);
+            let domain = self.analysis.states[id].fact(input).join(Fact::Original);
+            return ValueFacts::numeric(domain, Range::Unknown);
+        }
         if let Some(kind) = integer_arithmetic(ctx, op) {
             let (lhs, rhs) = (operation.get_operand(0), operation.get_operand(1));
             let bigint = result

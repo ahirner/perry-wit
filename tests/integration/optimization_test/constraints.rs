@@ -54,6 +54,13 @@ fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Re
         );
     }
     assert_eq!(program.number("half", 0.25), 0.75);
+    let mut indexed = Program::new(
+        "export function run(i:number):number { \
+         const value = [31, 224, -982][2] + new Uint8Array([7])[i]; \
+         return [0, i | 0, value][2]; }",
+    );
+    assert_eq!(indexed.number("run", 0.0), -975.0);
+    assert!(indexed.number("run", 1.0).is_nan());
     let source = include_str!("../../fixtures/optimization/shared.ts");
     let component = Standard.component(
         "package test:shared; world test { export narrow:func(x:u8,y:u8)->u8; export wide:func(x:u8,y:u8)->u32; export floating:func(x:f64,y:f64)->f64; }",
