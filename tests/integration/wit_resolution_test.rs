@@ -239,12 +239,12 @@ fn source_and_interface_types_resolve_in_their_own_modules() -> anyhow::Result<(
         (
             "package test:local; world run {record options {count:u32} export run:func(value:options)->u32;}",
             main.as_str(),
-            "import type { Options } from './domain.ts'; import type { Options as WitOptions } from './types/world'; function size(value:Options):number{return value.label.length;} export function run(value:WitOptions):number{return size({label:'abc'}) + value.count;}",
+            "import type { Options } from './domain.ts'; import type { Options as WitOptions } from './types/world'; function size(value:Options){return value.label.length;} export function run(value:WitOptions){return size({label:'abc'}) + value.count;}",
         ),
         (
             "package test:scoped; interface left {record options {count:u32}} interface right {record options {label:string}} world run {use left.{options as left-options}; use right.{options as right-options}; export run:func(left:left-options,right:right-options)->u32;}",
             "scoped.ts",
-            "import type { Options as Left } from 'test:scoped/left'; import type { Options as Right } from 'test:scoped/right'; export function run(left:Left,right:Right):number {return left.count + right.label.length;}",
+            "import type { Options as Left } from 'test:scoped/left'; import type { Options as Right } from 'test:scoped/right'; export function run(left:Left,right:Right) {return left.count + right.label.length;}",
         ),
     ] {
         Standard.compile(wit, "run", path, source)?;

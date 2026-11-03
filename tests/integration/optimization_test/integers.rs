@@ -125,10 +125,10 @@ fn wit_integer_addition_uses_typed_arithmetic_without_runtime() -> Result<()> {
 #[test]
 fn integer_comparisons_preserve_literal_ranges() -> Result<()> {
     let compiled = compile(
-        "export function run(value:number):boolean { return value < 256; } \
-         export function gt(value:number):boolean { return value > -1; } \
-         export function sum(value:number):boolean { return value < (128+128); } \
-         export function neq(value:number):boolean { return value !== 511; }",
+        "export function run(value:number) { return value < 256; } \
+         export function gt(value:number) { return value > -1; } \
+         export function sum(value:number) { return value < (128+128); } \
+         export function neq(value:number) { return value !== 511; }",
         "func(value:u8)->bool; \
          export gt: func(value:u8)->bool; \
          export sum: func(value:u8)->bool; \
@@ -155,7 +155,7 @@ fn integer_comparisons_preserve_literal_ranges() -> Result<()> {
 #[test]
 fn mixed_signedness_demands_stay_in_32_bit_registers() -> Result<()> {
     let compiled = compile(
-        "export function run(flag:boolean, limit:number):number { \
+        "export function run(flag:boolean, limit:number) { \
            const value = flag ? 3 : 200; return value < limit ? value : 0; }",
         "func(flag:bool,limit:s8)->u8",
     )?;
@@ -172,14 +172,14 @@ fn mixed_signedness_demands_stay_in_32_bit_registers() -> Result<()> {
 #[test]
 fn mixed_domains_and_unconstrained_integer_results_widen() -> Result<()> {
     let compiled = compile(
-        "function add(a:number,b:number):number { return a+b; } \
-         export function run(a:number,b:number):number { return a+b; } \
-         export function wide(a:number,b:number):number { return a+b; } \
-         export function chained(a:number,b:number):number { return add(a+b,b); } \
-         export function product(a:number,b:number):number { return a*b; } \
-         export function scaled(a:number,b:number):number { return Math.trunc((a*b)/1024); } \
-         export function big(a:bigint,b:bigint):bigint { return a+b; } \
-         export function neg(value:bigint):bigint { return -value; }",
+        "function add(a:number,b:number) { return a+b; } \
+         export function run(a:number,b:number) { return a+b; } \
+         export function wide(a:number,b:number) { return a+b; } \
+         export function chained(a:number,b:number) { return add(a+b,b); } \
+         export function product(a:number,b:number) { return a*b; } \
+         export function scaled(a:number,b:number) { return Math.trunc((a*b)/1024); } \
+         export function big(a:bigint,b:bigint) { return a+b; } \
+         export function neg(value:bigint) { return -value; }",
         "func(a:s8,b:u8)->s16; \
          export wide: func(a:u32,b:u32)->f64; \
          export chained: func(a:u32,b:u32)->f64; \
@@ -232,9 +232,9 @@ fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening()
     let source = r#"
         import type { s8, s32, u64 } from "perry:types";
         import type { Byte } from "wit:test:optimization/math";
-        function widenAfterAdd(a: s8, b: s8): s32 { const sum: s8 = (a + b) as s8; return sum; }
-        export function wrapByte(a: number, b: number): number { const wrapped: Byte = (a + b) as Byte; return wrapped; }
-        export function widenS8(a: s8, b: s8): s32 { return widenAfterAdd(a, b); }
+        function widenAfterAdd(a: s8, b: s8) { const sum: s8 = (a + b) as s8; return sum; }
+        export function wrapByte(a: number, b: number) { const wrapped: Byte = (a + b) as Byte; return wrapped; }
+        export function widenS8(a: s8, b: s8) { return widenAfterAdd(a, b); }
         export function big(a: u64, b: u64): u64 { return a + b; }
     "#;
     let compiled = Standard.compile(wit_src, "test", "optimization.ts", source)?;
@@ -271,16 +271,16 @@ interface Packet { id: u64; delta: s64 }
 type ArithRec = { v: number; opt?: number };
 interface Cell { value: number }
 interface Node { value: number; next?: Node }
-function id(x: u64): u64 { return x; }
+function id(x: u64) { return x; }
 function makeArith(x: number): ArithRec { return { v: x * 2, opt: x * 3 }; }
-function choose(flag: number): string { return flag > 0 ? "9007199254740993" : "7"; }
-function chooseU64Odd(flag: number): string { return flag > 0 ? "18446744073709551615" : "7"; }
-function chooseU64Even(flag: number): string { return flag > 0 ? "18446744073709551614" : "6"; }
-function relation(a: number, b: number): number {
+function choose(flag: number) { return flag > 0 ? "9007199254740993" : "7"; }
+function chooseU64Odd(flag: number) { return flag > 0 ? "18446744073709551615" : "7"; }
+function chooseU64Even(flag: number) { return flag > 0 ? "18446744073709551614" : "6"; }
+function relation(a: number, b: number) {
     return (a === b ? 1 : 0) + (a !== b ? 2 : 0) + (a < b ? 4 : 0) +
         (a <= b ? 8 : 0) + (a > b ? 16 : 0) + (a >= b ? 32 : 0);
 }
-export function run(rawId: u64, delta: s64, u: number): number {
+export function run(rawId: u64, delta: s64, u: number) {
     const input: Packet = { id: id(rawId), delta };
     const parsed = JSON.parse<Packet>(JSON.stringify(input));
     const rec: ArithRec = { v: u * 2, opt: u * 3 };
@@ -297,7 +297,7 @@ export function run(rawId: u64, delta: s64, u: number): number {
         JSON.stringify(parsed.id) === "9007199254740993";
     return ok && parsed.id === rawId && parsed.delta === delta ? 1 : 0;
 }
-export function parse(flag: number): number {
+export function parse(flag: number) {
     const s = choose(flag);
     const a = parseInt("9007199254740993");
     const mul = JSON.stringify(a * 2) === "18014398509481986";
@@ -382,12 +382,12 @@ export function parse(flag: number): number {
         interface Pair { value: number; name: string }
         interface SingleNum { value: number }
         interface SingleS64 { value: s64 }
-        function choose(flag: number): string { return flag > 0 ? "42" : "7"; }
-        export function runPair(flag: number): Pair { return { value: parseInt(choose(flag)), name: "a" }; }
-        export function runF64(flag: number): SingleNum { return { value: parseInt(choose(flag)) }; }
-        export function runS32(flag: number): SingleNum { return { value: parseInt(choose(flag)) }; }
+        function choose(flag: number) { return flag > 0 ? "42" : "7"; }
+        export function runPair(flag: number) { return { value: parseInt(choose(flag)), name: "a" }; }
+        export function runF64(flag: number) { return { value: parseInt(choose(flag)) }; }
+        export function runS32(flag: number) { return { value: parseInt(choose(flag)) }; }
         export function runS64(flag: number): SingleS64 { return { value: 9007199254740993n as s64 }; }
-        export function runList(flag: number): number[] { return [parseInt(choose(flag)), 2.5]; }
+        export function runList(flag: number) { return [parseInt(choose(flag)), 2.5]; }
     "#;
     let component = Standard.component(wit_src, "test", "numeric-boundary.ts", boundary_source)?;
     let engine = wasmtime::Engine::default();
@@ -430,7 +430,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
     ] {
         let core = perry_wit::compile_core(
             &format!(
-                "export function run():number {{ let sum=0; for(let i=0;i<100;i++) sum={expression}; return sum; }}"
+                "export function run() {{ let sum=0; for(let i=0;i<100;i++) sum={expression}; return sum; }}"
             ),
             "unconstrained-bitwise.ts",
         )?;
@@ -445,7 +445,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
     }
 
     let core = perry_wit::compile_core(
-        "export function run(x:number):number { let value=x>>>0; for(let i=0;i<4;i++) value=-value; return value; }",
+        "export function run(x:number) { let value=x>>>0; for(let i=0;i<4;i++) value=-value; return value; }",
         "unsigned-negation.ts",
     )?;
     let mut program = Program::from_wasm(core);
@@ -462,7 +462,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
         ("((x>>>0)*-1)>>>0", 1.0, 4294967295.0),
     ] {
         let core = perry_wit::compile_core(
-            &format!("export function run(x:number):number {{ return {expression}; }}"),
+            &format!("export function run(x:number) {{ return {expression}; }}"),
             "unsigned-number-arithmetic.ts",
         )?;
         let mut program = Program::from_wasm(core);
@@ -472,7 +472,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
     for expression in ["0 | 0", "1 | 0", "-1 >>> 0"] {
         let core = perry_wit::compile_core(
             &format!(
-                "export function run(index:number):number {{
+                "export function run(index:number) {{
                     const values:number[]=[];
                     values.push({expression});
                     const value=values[index];
@@ -490,7 +490,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
     }
 
     let compiled = compile(
-        "export function run(a:number,b:number):number { return (a * b) | 0; }",
+        "export function run(a:number,b:number) { return (a * b) | 0; }",
         "func(a:u32,b:u32)->s32",
     )?;
     let mut program = Program::from_wasm(compiled.core);
@@ -517,7 +517,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
         ("return p > 5 ? p | 0 : 1;", "func(a:s32,b:s32)->f64", 0.0),
     ] {
         let compiled = compile(
-            &format!("export function run(a:number,b:number):number {{ const p = a * b; {body} }}"),
+            &format!("export function run(a:number,b:number) {{ const p = a * b; {body} }}"),
             wit,
         )?;
         let mut program = Program::from_wasm(compiled.core);
@@ -558,7 +558,7 @@ fn bitwise_operands_compute_in_32_bit_registers() -> Result<()> {
     ] {
         let core = perry_wit::compile_core(
             &format!(
-                "function low(v:number):number {{ return v >>> 0; }} export function run(x:number):number {{ {body} }}"
+                "function low(v:number) {{ return v >>> 0; }} export function run(x:number) {{ {body} }}"
             ),
             "observed-high-bits.ts",
         )?;
@@ -593,7 +593,7 @@ fn integer_multiplication_preserves_wrapping_before_bitwise_conversion() -> Resu
         ),
     ] {
         let core = perry_wit::compile_core(
-            &format!("export function run(a:number,b:number):number {{ {body} }}"),
+            &format!("export function run(a:number,b:number) {{ {body} }}"),
             "wrapping-bitwise-product.ts",
         )?;
         let mut program = Program::from_wasm(core);
@@ -611,7 +611,7 @@ fn integer_multiplication_preserves_wrapping_before_bitwise_conversion() -> Resu
 #[test]
 fn wit_integer_results_preserve_intermediate_comparisons() -> Result<()> {
     let compiled = compile(
-        "export function run(a:number,b:number):number { const p = a * b; return p > 5 ? p : 1; }",
+        "export function run(a:number,b:number) { const p = a * b; return p > 5 ? p : 1; }",
         "func(a:s32,b:s32)->s32",
     )?;
     let mut program = Program::from_wasm(compiled.core);

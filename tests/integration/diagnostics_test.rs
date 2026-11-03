@@ -182,9 +182,10 @@ fn unsupported_forms_have_exact_diagnostics() {
         .collect();
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     perry_wit::compile_core(
-        "class Unused { power():number { return 2 ** 3; } } export function run():number { return 0; }",
+        "class Unused { power() { return 2 ** 3; } } export function run() { return 0; }",
         "case.ts",
-    ).expect("unused methods are not lowered to MIR");
+    )
+    .expect("unused methods are not lowered to MIR");
 }
 
 #[test]
@@ -221,10 +222,10 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
     );
     api::compile(&throwing, &stderr_wit, &Options::default()).unwrap();
     for source in [
-        "export async function run():Promise<number> {try{throw new Error('handled');}catch(e){return 7;}}",
-        "async function value(n:number):Promise<number>{return n+1;} export async function run():Promise<number>{return await value(6);}",
-        "async function value():Promise<number>{throw 'handled';} export async function run():Promise<number>{try{return await value();}catch{return 7;}}",
-        "export async function run():Promise<number>{const holder:{jobs:Promise<number>[]}={jobs:[Promise.resolve(7)]};const job:Promise<number>=holder.jobs[0];return await job;}",
+        "export async function run() {try{throw new Error('handled');}catch(e){return 7;}}",
+        "async function value(n:number){return n+1;} export async function run(){return await value(6);}",
+        "async function value():Promise<number>{throw 'handled';} export async function run(){try{return await value();}catch{return 7;}}",
+        "export async function run(){const holder:{jobs:Promise<number>[]}={jobs:[Promise.resolve(7)]};const job:Promise<number>=holder.jobs[0];return await job;}",
     ] {
         api::compile(&program(source), &bare_wit, &Options::default()).unwrap();
     }
@@ -250,7 +251,7 @@ function loop(){for(let value=start();value>0;value--)return value;return 0;}
 function maybe(flag:boolean){if(flag)return 7;}
 function bare(flag:boolean){if(flag)return;return 'value';}
 async function helper(){return maybe(false);}
-export async function run():Promise<number>{
+export async function run(){
     const value=await helper();
     return value===undefined && bare(true)===undefined && joined().length+loop()===9 ? 0 : 1;
 }

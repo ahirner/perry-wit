@@ -37,8 +37,8 @@ world composed {
 "#;
     let source = "
 interface Value { count: number; label: string }
-export function snapshot(count: number): Value { return { count, label: 'snapshot' }; }
-export function double(count: number): number { return count * 2; }
+export function snapshot(count: number) { return { count, label: 'snapshot' }; }
+export function double(count: number) { return count * 2; }
 ";
     let engine = Engine::default();
     for world in ["base", "composed"] {
@@ -71,8 +71,8 @@ fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
         r#"
         function initial(n:number):number { if(n <= 0) return 7; return initial(n - 1) + 1; }
         let count = initial(3);
-        export function run():number { return ++count; }
-        export async function unused():Promise<void> { console.log('not in this world'); }
+        export function run() { return ++count; }
+        export async function unused() { console.log('not in this world'); }
         "#,
     )?;
     component.check("run", (), &Ok::<u32, ()>(11))?;
@@ -87,7 +87,7 @@ fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
     );
     let mut component = Instance::compile(
         WIT,
-        "import type { Input } from './types/world'; export function run(value:Input):string {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);}",
+        "import type { Input } from './types/world'; export function run(value:Input) {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);}",
     )?;
     let value = Input {
         a: "a".into(),
@@ -145,10 +145,10 @@ world boundary {
 const SOURCE: &str = r#"
 interface Point { x: number; yCoord: number }
 interface Summary { count: number; total: number; label: string; positive: boolean[] }
-export function scale(p: Point, factor: number): Point {
+export function scale(p: Point, factor: number) {
   return { x: p.x * factor, yCoord: p.yCoord * factor };
 }
-export function describe(name: string, values: number[]): Summary {
+export function describe(name: string, values: number[]) {
   let total = 0;
   const positive: boolean[] = [];
   for (let i = 0; i < values.length; i++) {
@@ -157,23 +157,23 @@ export function describe(name: string, values: number[]): Summary {
   }
   return { count: values.length, total: total, label: name + "!", positive: positive };
 }
-export function count(items: string[]): number {
+export function count(items: string[]) {
   let n = 0;
   for (let i = 0; i < items.length; i++) {
     n = n + items[i].length;
   }
   return n;
 }
-export function greet(name: string): string {
+export function greet(name: string) {
   return "héllo " + name;
 }
-export function negate(flag: boolean): boolean {
+export function negate(flag: boolean) {
   return !flag;
 }
-export function wide(a: bigint, b: number, c: number): number {
+export function wide(a: bigint, b: number, c: number) {
   return Number(a) + b + c;
 }
-export function nested(rows: number[][]): number[] {
+export function nested(rows: number[][]) {
   const sums: number[] = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -207,14 +207,14 @@ world boundary {
     let source = r#"
 interface Packet { signed: bigint; unsigned: bigint; optional: bigint | undefined }
 type Answer = { ok: true; value: Packet } | { ok: false; error: string };
-export function echo(value: Packet): Answer {
+export function echo(value: Packet) {
   if (value.signed === -9223372036854775808n && value.unsigned === 18446744073709551615n) {
     return { ok: true, value: value };
   }
   return { ok: false, error: 'wrong bits' };
 }
-export function extremes(): bigint[] { return [-9223372036854775808n, -1n, 0n, 9223372036854775807n]; }
-export function describeWide(value: bigint): string { return typeof value + ':' + String(value); }
+export function extremes() { return [-9223372036854775808n, -1n, 0n, 9223372036854775807n]; }
+export function describeWide(value: bigint) { return typeof value + ':' + String(value); }
 export function throwWide(value: bigint): bigint { throw -value; }
 "#;
     let mut instance = Instance::compile(WIT, source)?;
@@ -302,12 +302,12 @@ export function remember(text: string, bytes: Uint8Array): number {
     saved = text.slice(1); data = bytes.subarray(1); data[0] = 255;
     return data.length;
 }
-export function recall(n: number): string {
+export function recall(n: number) {
     let last = "";
     for (let i = 0; i < n; i++) last = "temporary:" + i;
     return saved + ":" + data[0] + ":" + last;
 }
-export function bytes(): Uint8Array { return data; }
+export function bytes() { return data; }
 "#,
     )?;
     component.check("remember", ("!hé🙂", &[1u8, 2, 3][..]), &Ok::<u32, ()>(2))?;
@@ -336,7 +336,7 @@ world boundary {
         WIT,
         r#"
 interface Payload { text: string; parts: string[] }
-export function encode(text: string): Payload { return { text, parts: [text, "é🙂"] }; }
+export function encode(text: string) { return { text, parts: [text, "é🙂"] }; }
 "#,
     )?;
     component.check(
@@ -420,9 +420,9 @@ world boundary {
         WIT,
         r#"
 import type { Answer, Nothing, Packet } from './types/world';
-export function inspect(value: Packet): Packet { return value; }
-export function make(ok: boolean): Answer { if (ok) return { ok: true, value: 42 }; return { ok: false, error: "failed" }; }
-export function finish(ok: boolean): Nothing { if (ok) return { ok: true }; return { ok: false }; }
+export function inspect(value: Packet) { return value; }
+export function make(ok: boolean) { if (ok) return { ok: true, value: 42 }; return { ok: false, error: "failed" }; }
+export function finish(ok: boolean) { if (ok) return { ok: true }; return { ok: false }; }
 "#,
     )?;
     let ok = Ok::<_, String>(42.0);
@@ -454,8 +454,8 @@ world boundary {
 }
 "#,
         r#"
-export function run(fail: boolean): string { if (fail) throw "failed"; return "done"; }
-export function nothing(fail: boolean): void { if (fail) throw 3; }
+export function run(fail: boolean) { if (fail) throw "failed"; return "done"; }
+export function nothing(fail: boolean) { if (fail) throw 3; }
 "#,
     )?;
     component.check("run", (false,), &Ok::<_, String>("done".to_owned()))?;
@@ -483,7 +483,7 @@ world boundary {
 import type { Payload, PayloadInput, WitInput } from './types/world';
 interface Ordinary { text: Uint8Array; parts: Uint8Array[] }
 function ordinary(value: Ordinary): WitInput<Payload> { return value; }
-export function regular(bytes: Uint8Array): PayloadInput {
+export function regular(bytes: Uint8Array) {
     const record: Ordinary = {text: bytes, parts: [bytes]};
     return ordinary(record);
 }
@@ -492,7 +492,7 @@ function make(text: string, bytes: Uint8Array, textFirst: boolean): WitInput<Pay
     if (textFirst) selected = text;
     return { text: selected, parts: [text, bytes] };
 }
-export function encode(text: string, bytes: Uint8Array, textFirst: boolean): PayloadInput {
+export function encode(text: string, bytes: Uint8Array, textFirst: boolean) {
     return make(text, bytes, textFirst);
 }
 "#,
@@ -529,7 +529,7 @@ world boundary { export decode: func(text: string) -> result<string, string>; }
         r#"
 interface Row { count: number; label: string; active: boolean; optional: number | null | undefined }
 interface Document { rows: Row[]; title: string }
-export function decode(text: string): string {
+export function decode(text: string) {
     try {
         const raw = JSON.parse(text);
         const decoded: Document = raw;
@@ -565,10 +565,10 @@ fn recursive_json_schemas_produce_independent_checked_native_graphs() -> Result<
     "#,
         r#"
         interface Node { value: number; children: Node[]; next: Node | null }
-        function perry_json_parse_0(n:number):number {return n;}
-        function perry_json_cursor_1(n:number):number {return n;}
-        function perry_json_decode_3(n:number):number {return n;}
-        function sum(node: Node): number {
+        function perry_json_parse_0(n:number) {return n;}
+        function perry_json_cursor_1(n:number) {return n;}
+        function perry_json_decode_3(n:number) {return n;}
+        function sum(node: Node) {
             let value = node.value;
             for (let i = 0; i < node.children.length; i++) value += sum(node.children[i]);
             if (node.next !== null) value += sum(node.next);
@@ -627,9 +627,9 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
         WIT,
         r#"
         import type { Outer, Packet, Value, WitInput } from './types/world';
-        export function joined(value: Outer): Outer { return value; }
-        export function echo(values: Value[]): Value[] { return values; }
-        export function inspect(value: Packet): Packet { return value; }
+        export function joined(value: Outer) { return value; }
+        export function echo(values: Value[]) { return values; }
+        export function inspect(value: Packet) { return value; }
         export function make(which: number): WitInput<Value> {
             if (which === 0) return { tag: 'empty' };
             if (which === 1) return { tag: 'number', val: 42.5 };
@@ -637,7 +637,7 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
             if (which === 3) return { tag: 'point', val: { x: 7, label: 'seven' } };
             return { tag: 'bytes', val: 'byte text' };
         }
-        export function describe(value: Value): string {
+        export function describe(value: Value) {
             switch (value.tag) {
                 case 'empty': return 'none';
                 case 'number': return String(value.val + 1);
@@ -700,11 +700,11 @@ fn numeric_bigint_conversion_preserves_transport_bits_and_checks_domain() -> Res
     let mut component = Instance::compile(
         "package test:bigint-conversion; world boundary { export signed: func(value: f64) -> result<s64, string>; export unsigned: func(value: f64) -> result<u64, string>; }",
         r#"
-        export function signed(value: number): bigint {
+        export function signed(value: number) {
             try { return BigInt(value); }
             catch (error) { if (error instanceof RangeError) throw 'range'; throw 'unexpected'; }
         }
-        export function unsigned(value: number): bigint { return signed(value); }
+        export function unsigned(value: number) { return signed(value); }
         "#,
     )?;
     for value in [0i64, -1, 9007199254740992, i64::MIN] {
@@ -734,39 +734,39 @@ world boundary {
 }"#;
     let source = r#"
 import type { u64 } from 'perry:types';
-function sum(a: bigint, b: bigint): bigint { return a + b; }
-function difference(a: bigint, b: bigint): bigint { return a - b; }
-export function describe(a: bigint, b: bigint): string {
+function sum(a: bigint, b: bigint) { return a + b; }
+function difference(a: bigint, b: bigint) { return a - b; }
+export function describe(a: bigint, b: bigint) {
     const total = sum(a, b);
     const delta = difference(a, b);
     if (difference(total, b) !== a || sum(delta, b) !== a) throw 'inverse';
     if ((delta < total) !== (b > 0n)) throw 'order';
     return String(total) + ':' + String(delta) + ':' + String(-total) + ':' + String(a) + ':' + String(b);
 }
-export function powers(n: number, seed: bigint): string {
+export function powers(n: number, seed: bigint) {
     let value = seed;
     for (let i = 0; i < n; i++) value = sum(value, value);
     const below = difference(value, 1n);
     if (sum(below, 1n) !== value || difference(value, value) !== 0n) throw 'carry';
     return String(value) + ':' + String(below) + ':' + String(Number(value));
 }
-export function unsigned(a: bigint, b: bigint): bigint { return difference(sum(a, b), b); }
-export function signed(a: bigint, b: bigint): bigint { return sum(difference(a, b), b); }
-export function rounding(offset: bigint): number {
+export function unsigned(a: bigint, b: bigint) { return difference(sum(a, b), b); }
+export function signed(a: bigint, b: bigint) { return sum(difference(a, b), b); }
+export function rounding(offset: bigint) {
     const wide = 18446744073709551616n;
     return Number(sum(wide, offset));
 }
-export function probe(input: string): string {
+export function probe(input: string) {
     const a: bigint = BigInt(input.length);
     const b: bigint = 1n;
     return String(a + b) + ':' + String(a - b);
 }
-export function truncation(value: bigint): string {
+export function truncation(value: bigint) {
     const total = value + 1n;
     const wrapped = total as u64;
     return String(total) + ':' + String(wrapped);
 }
-export function literals(): string {
+export function literals() {
     const wide = 340_282_366_920_938_463_463_374_607_431_768_211_456n;
     if (wide !== 0x100000000000000000000000000000000n) throw 'hex';
     if (18446744073709551616n !== 0o2000000000000000000000n) throw 'octal';
@@ -846,7 +846,7 @@ export function literals(): string {
 fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
     let mut instance = Instance::compile(
         "package test:bigint-overflow; world boundary { export unsigned: func(value: u64) -> u64; export signed: func(value: s64) -> s64; export constant: func() -> u64; export reinterpret: func(value: s64) -> u64; }",
-        "export function unsigned(value: bigint): bigint { return value + 1n; } export function signed(value: bigint): bigint { return value - 1n; } export function constant(): bigint { return 18446744073709551616n; } export function reinterpret(value: bigint): bigint { return value; }",
+        "export function unsigned(value: bigint) { return value + 1n; } export function signed(value: bigint) { return value - 1n; } export function constant() { return 18446744073709551616n; } export function reinterpret(value: bigint) { return value; }",
     )?;
     assert!(instance.call::<_, u64>("unsigned", (u64::MAX,)).is_err());
     assert!(instance.call::<_, i64>("signed", (i64::MIN,)).is_err());
@@ -862,7 +862,7 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
     let package = resolve.push_str("reuse.wit", "package test:reuse; world reuse {export text:func(value:string)->list<u8>;export bytes:func(value:list<u8>)->list<u8>;}")?;
     let world = resolve.select_world(&[package], Some("reuse"))?;
     let compiled = compile_for_world(
-        "export function text(value:string):string {return value;} export function bytes(value:Uint8Array):Uint8Array {if(value.length>0)value[0]=65;return value;}",
+        "export function text(value:string) {return value;} export function bytes(value:Uint8Array) {if(value.length>0)value[0]=65;return value;}",
         "reuse.ts",
         &resolve,
         world,
@@ -918,7 +918,7 @@ interface Page<T> {data:T[];next:string|null}
 type Result<T>={ok:true;value:T}|{ok:false;error:string};
 export function echo(value:Page<number>):Result<Page<number>> {return {ok:true,value};}
 export function parsed():Page<number> {return JSON.parse('{"extra":true,"data":[1,2],"next":null}');}
-export function stringify(value:Page<number>):string {return JSON.stringify(value);}
+export function stringify(value:Page<number>) {return JSON.stringify(value);}
 "#;
     let mut instance = Instance::compile(WIT, source)?;
     let page = Page {
@@ -957,7 +957,7 @@ fn static_modules_resolve_aliases_namespaces_and_reexports() -> Result<()> {
     let entry = directory.path().join("main.ts");
     let entry = entry.to_string_lossy();
     let source = "import { value as left } from './left'; import * as right from './right.js'; \
-                  export function run(x: number): number { return right.value(left(x)); } \
+                  export function run(x: number) { return right.value(left(x)); } \
                   export { value as reexported } from './left.js';";
     let mut program =
         crate::core_program::Program::from_wasm(perry_wit::compile_core(source, &entry)?);

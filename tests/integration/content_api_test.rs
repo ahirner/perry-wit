@@ -21,7 +21,7 @@ const WORLD: &str = "package test:bytes; world example { export run: func(n: f64
 #[test]
 fn raw_core_and_wit_core_have_distinct_boundaries() -> Result<()> {
     let input = program(
-        "export function run(n: number): number { return n; } export function extra(): number { return 7; }",
+        "export function run(n: number) { return n; } export function extra() { return 7; }",
     );
     let raw = api::compile_core(&input)?;
     let full = api::compile(&input, &wit(WORLD), &Options::default())?;
@@ -100,7 +100,7 @@ fn dependency_modules_require_unique_relative_identities_and_utf8() -> Result<()
 
 #[test]
 fn anonymous_content_matches_the_file_adapter() -> Result<()> {
-    let source = "export function run(n: number): number { return n * 2; }";
+    let source = "export function run(n: number) { return n * 2; }";
     let input = program(source);
     let compiled = api::compile(&input, &wit(WORLD), &Options::default())?;
     let core = api::compile_core(&input)?;
@@ -128,11 +128,11 @@ fn anonymous_content_matches_the_file_adapter() -> Result<()> {
 #[test]
 fn explicit_modules_and_packages_resolve_without_paths() -> Result<()> {
     let mut input = program(
-        "import { double } from './math.js'; export function run(n: number): number { return double(n); }",
+        "import { double } from './math.js'; export function run(n: number) { return double(n); }",
     );
     input.modules.push(Module {
         name: "math.ts".into(),
-        contents: b"export function double(n: number): number { return n * 2; }".to_vec(),
+        contents: b"export function double(n: number) { return n * 2; }".to_vec(),
     });
     let mut contract = wit(
         "package test:bytes; world example { use test:types/numbers.{number}; export run: func(n: number) -> number; }",
@@ -189,7 +189,7 @@ fn encoded_wit_and_invalid_bytes_are_reported() -> Result<()> {
         application: Package::Encoded(encoded),
         dependencies: vec![],
     };
-    let input = program("export function run(n: number): number { return n; }");
+    let input = program("export function run(n: number) { return n; }");
     api::compile(&input, &contract, &Options::default())?;
     for (input, contract, expected, code) in [
         (

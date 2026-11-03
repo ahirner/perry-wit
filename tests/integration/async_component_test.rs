@@ -36,7 +36,7 @@ import { setTimeout } from 'node:timers/promises';
 interface Observation { value: number; trace: number[] }
 interface Cell { value: number; next: Cell | null }
 let finalized = 0;
-export async function jsonBody(text:string):Promise<string> {
+export async function jsonBody(text:string) {
   const response=new Response('{"text":'+JSON.stringify(text)+',"escaped":"\\u00e9"}');
   const value=await response.json();
   const view=value.text as string;
@@ -48,17 +48,17 @@ export async function jsonBody(text:string):Promise<string> {
   if(view!==text || value.escaped!=='é')throw 2;
   return JSON.stringify(value);
 }
-async function finishAdopt(label:string, fail:boolean):Promise<string> {
+async function finishAdopt(label:string, fail:boolean) {
   await setTimeout(1);
   if (fail) throw 'failed:' + finalized;
   return label + ':' + finalized;
 }
-export async function adopt(a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:string,fail:boolean):Promise<string> {
+export async function adopt(a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:string,fail:boolean) {
   try { return finishAdopt(a+b+c+d+e+f+g+h+i, fail); }
   catch { return 'caught too early'; }
   finally { finalized++; }
 }
-export async function completion(fail: boolean): Promise<string> {
+export async function completion(fail: boolean) {
   await setTimeout(1);
   if (fail) throw "failed";
   return "done";
@@ -79,14 +79,14 @@ export async function pressure(n: number): Promise<number> {
   }
   return saved.value + retained.next.value;
 }
-async function observe(p:Promise<number>, i:number):Promise<number> {
+async function observe(p:Promise<number>, i:number) {
   const saved:{text:string}=JSON.parse('{"text":"Café 🙂","extra":true}');
   const text=saved.text;
   const result=await p;
   if(text!=='Café 🙂' || JSON.stringify(saved)!=='{"text":"Café 🙂","extra":true}')throw 1;
   return result+i;
 }
-export async function observers(n:number):Promise<number> {
+export async function observers(n:number) {
  const pending=setTimeout(1,7);const jobs:Promise<number>[]=[];
  if(n===0)await pending;
  for(let i=0;i<n;i++)jobs.push(observe(pending,i));
@@ -94,7 +94,7 @@ export async function observers(n:number):Promise<number> {
  for(const value of values)total+=value;
  return total;
 }
-async function link(p:Promise<number>):Promise<number>{return await p+1;}
+async function link(p:Promise<number>){return await p+1;}
 export async function combinatorChains(n:number):Promise<number> {
  let pending=setTimeout(1,3);
  for(let i=0;i<n;i++)pending=Promise.race([pending]);
@@ -105,7 +105,7 @@ async function twice(p:Promise<number>):Promise<number> {
  const repeated=await p;
  return await setTimeout(1,first+repeated);
 }
-async function follow(p:Promise<number>,other:Promise<number>):Promise<number> {
+async function follow(p:Promise<number>,other:Promise<number>) {
  const first=await p;
  return first+await other;
 }
@@ -118,7 +118,7 @@ export async function reobserve():Promise<number> {
  const settled=await Promise.allSettled([] as Promise<number>[]);
  return values[0]+values[1]+values[2]+empty.length+settled.length;
 }
-export async function chains(n:number):Promise<number> {
+export async function chains(n:number) {
  let pending=setTimeout(1,3);
  for(let i=0;i<n;i++)pending=link(pending);
  const value=await pending;
@@ -142,12 +142,12 @@ export async function combinations():Promise<number> {
  return first+winner;
 }
 
-async function later(v: number): Promise<number> {
+async function later(v: number) {
   const a = v + 1;
   await setTimeout(1);
   return a;
 }
-export async function run(x: number): Promise<Observation> {
+export async function run(x: number) {
   const trace: number[] = [];
   const value = await setTimeout(0, x);
   trace.push(value);
@@ -161,7 +161,7 @@ export async function label(name: string): Promise<string> {
   const prefix = "⏱ " + name;
   return await setTimeout(2, prefix + "!");
 }
-export async function rotate(n: number): Promise<number> {
+export async function rotate(n: number) {
   let a = 1; let b = 2; let c = 3;
   const marker = 'é' + String(n) + '😀';
   for (let i = 0; i < n; i++) {
@@ -172,7 +172,7 @@ export async function rotate(n: number): Promise<number> {
   }
   return a * 10000 + b * 100 + c;
 }
-export async function count(n: number): Promise<number> {
+export async function count(n: number) {
   let total = 0;
   for (let i = 0; i < n; i++) {
     total = total + (await setTimeout(1, i));

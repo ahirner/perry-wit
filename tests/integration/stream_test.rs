@@ -53,7 +53,7 @@ async fn pending_reads_acknowledge_cancellation_before_dropping_stream() -> Resu
         "run",
         "detached.ts",
         r#"
-export async function run(input:ReadableStream<Uint8Array>, mode:number):Promise<number> {
+export async function run(input:ReadableStream<Uint8Array>, mode:number) {
   if(mode>=4){
     const reader=input.getReader({mode:"byob"});
     const first=reader.read(new Uint8Array(4));
@@ -123,7 +123,7 @@ world streams {
 "#;
 
 const SOURCE: &str = r#"
-export async function iterated(input: ReadableStream<Uint8Array>, stop: boolean): Promise<number> {
+export async function iterated(input: ReadableStream<Uint8Array>, stop: boolean) {
   let total = 0;
   let index = 0;
   for await (const bytes of input) {
@@ -135,14 +135,14 @@ export async function iterated(input: ReadableStream<Uint8Array>, stop: boolean)
   if (input.locked) throw 9;
   return total;
 }
-export async function interrupted(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function interrupted(input: ReadableStream<Uint8Array>) {
   try {
     for await (const bytes of input) { if (bytes.length > 0) throw "stopped"; }
   } catch (error) { if (input.locked) throw "locked"; throw error; }
   return 0;
 }
 // Every chunk stays reachable: each read needs its own buffer.
-export async function kept(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function kept(input: ReadableStream<Uint8Array>) {
   const reader = input.getReader();
   const chunks: Uint8Array[] = [];
   let result = await reader.read();
@@ -163,7 +163,7 @@ export async function kept(input: ReadableStream<Uint8Array>): Promise<number> {
 }
 
 // Each chunk is dead before the next read: one buffer serves the whole stream.
-export async function leased(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function leased(input: ReadableStream<Uint8Array>) {
   const reader = input.getReader();
   let sum = 0;
   let index = 1;
@@ -261,7 +261,7 @@ async fn kept_and_leased_chunks_read_the_same_bytes() -> Result<()> {
 async fn byob_reads_and_acknowledged_writes_reuse_one_page() -> Result<()> {
     let source = r#"
     import {Writable} from 'node:stream';
-    export async function run(input:ReadableStream<Uint8Array>):Promise<number> {
+    export async function run(input:ReadableStream<Uint8Array>) {
         const reader=input.getReader({mode:"byob"});
         const writer=Writable.toWeb(process.stdout).getWriter();
         let buffer=new Uint8Array(8196);buffer[0]=19;buffer[8195]=23;let count=0;

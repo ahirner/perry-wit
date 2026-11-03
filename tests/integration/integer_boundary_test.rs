@@ -18,22 +18,22 @@ world integers {
 }";
 
 const SOURCE: &str = "
-export function toU8(x: number): number { return x; }
-export function toS8(x: number): number { return x; }
-export function toU32(x: number): number { return x; }
-export function toS32(x: number): number { return x; }
-export function scale8(a: number, b: number): number { return a * b; }
-export function add32(a: number, b: number): number { return a + b; }
-export function literal(flag: boolean): number {
+export function toU8(x: number) { return x; }
+export function toS8(x: number) { return x; }
+export function toU32(x: number) { return x; }
+export function toS32(x: number) { return x; }
+export function scale8(a: number, b: number) { return a * b; }
+export function add32(a: number, b: number) { return a + b; }
+export function literal(flag: boolean) {
   let v = -5;
   if (flag) v = 3000000000;
   return v + 0.5 > 0 ? v : 7;
 }
-export function cap(a: number): number {
+export function cap(a: number) {
   const sum = a + 100;
   return sum > 255 ? 1 : sum;
 }
-export function counter(n: number): number {
+export function counter(n: number) {
   let i = 0;
   while (i < n) i = i + 100;
   return i;

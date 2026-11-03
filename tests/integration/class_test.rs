@@ -6,7 +6,7 @@ fn class_calls_preserve_evaluation_order_and_finite_nesting() -> anyhow::Result<
     assert_numbers(
         r#"
 let step=0;
-function next():number { step+=1; return step; }
+function next() { step+=1; return step; }
 class Counter {
     optional?:number;
     uninitialized:number|undefined;
@@ -14,13 +14,13 @@ class Counter {
     field:number=next();
     arg:number;
     constructor(arg:number=next()) { this.arg=arg; }
-    assign(extra?:string):boolean {
+    assign(extra?:string) {
         const holder:{x?:string} = {};
         holder.x = extra;
         return extra===undefined && ('x' in holder);
     }
 }
-function checkOmitted(a?:string, b?:string):boolean {
+function checkOmitted(a?:string, b?:string) {
     const short:number|undefined = a && 1;
     const holder:{x?:string; y?:number} = {};
     holder.x = a;
@@ -33,7 +33,7 @@ class Rest {
     last:number;
     constructor(...values:number[]) { this.first=values[0]; this.last=values[1]; }
 }
-export function constructorOrder():number {
+export function constructorOrder() {
     step=0;
     const explicit=new Counter(next());
     if(explicit.field!==2 || explicit.arg!==1 || step!==2)return 1;
@@ -60,7 +60,7 @@ export function constructorOrder():number {
 
 function fail():number { throw new Error("argument"); }
 class Implicit { field:number=next(); }
-export function implicitConstructor():number {
+export function implicitConstructor() {
     step=0;
     const counter=new Implicit(next(),next());
     if(counter.field!==3 || step!==3)return 1;
@@ -75,7 +75,7 @@ class Box<T> {
     extra?:string;
     constructor(value:T, extra?:string) { this.value=value; this.extra=extra; }
 }
-export function genericConstruction():number {
+export function genericConstruction() {
     step=0;
     const explicit:Box<number>=new Box<number>(next());
     if(explicit.value!==1 || explicit.field!==2 || step!==2 || explicit.extra!==undefined || !('extra' in explicit))return 1;
@@ -94,12 +94,12 @@ export function genericConstruction():number {
 class Nested {
     count:number;
     constructor(count:number=1) { this.count=count; }
-    add(n:number=this.count):number { return this.count+n; }
-    static identity(n:number):number { return n; }
-    get value():number { return this.count; }
+    add(n:number=this.count) { return this.count+n; }
+    static identity(n:number) { return n; }
+    get value() { return this.count; }
     set value(n:number) { this.count=n; }
 }
-export function finiteNesting():number {
+export function finiteNesting() {
     const counter=new Nested(new Nested().count);
     const another=new Nested(counter.add(counter.add(1)));
     counter.value=another.value;
@@ -122,7 +122,7 @@ fn parameter_properties_declare_and_assign_fields() {
         r#"
 class Holder<T> {
     constructor(public item: T, readonly count: number = 2) {}
-    unwrap(): T { return this.item; }
+    unwrap() { return this.item; }
 }
 export function run(x: number): number {
     const holder = new Holder<number>(x);

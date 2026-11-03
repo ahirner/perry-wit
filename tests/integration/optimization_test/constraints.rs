@@ -8,12 +8,12 @@ use wasmtime::Val;
 #[test]
 fn numeric_constraints_cross_calls_and_loop_carried_values() -> Result<()> {
     let source = r#"
-        function add(a:number,b:number):number { return a+b; }
-        function identity(a:number):number { return a; }
-        export function run(a:number,b:number):number { return a+b; }
-        export function called(a:number,b:number):number { return add(a,b); }
-        export function ident(a:number,b:number):number { return identity(a+b); }
-        export function looped(a:number,b:number):number { let value=a; for(let i=0;i<b;i++) value+=1; return value; }
+        function add(a:number,b:number) { return a+b; }
+        function identity(a:number) { return a; }
+        export function run(a:number,b:number) { return a+b; }
+        export function called(a:number,b:number) { return add(a,b); }
+        export function ident(a:number,b:number) { return identity(a+b); }
+        export function looped(a:number,b:number) { let value=a; for(let i=0;i<b;i++) value+=1; return value; }
         export function recur(n:number):number { if(n<=0)return 0; return n+recur(n-1); }
     "#;
     let compiled = compile(
@@ -42,8 +42,8 @@ fn numeric_constraints_cross_calls_and_loop_carried_values() -> Result<()> {
 #[test]
 fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Result<()> {
     let compiled = compile(
-        "export function run(a:number,b:number):number { return a/b + a%b; } \
-         export function half(x:number):number { return x+0.5; }",
+        "export function run(a:number,b:number) { return a/b + a%b; } \
+         export function half(x:number) { return x+0.5; }",
         "func(a:s32,b:s32)->f64; export half: func(x:f64)->f64",
     )?;
     let mut program = Program::from_wasm(compiled.core);
@@ -94,11 +94,11 @@ fn fractional_operations_and_unconstrained_callers_keep_number_semantics() -> Re
 #[test]
 fn range_queries_follow_actual_wrap_points() -> Result<()> {
     let mut raw = Program::new(
-        "function negative(value:number):number { return 0-value; } export function run():number { const values=[10]; const index=negative(18446744073709549568); if(index<values.length){const item=values[index];return item===undefined?7:item;} return 0; }",
+        "function negative(value:number) { return 0-value; } export function run() { const values=[10]; const index=negative(18446744073709549568); if(index<values.length){const item=values[index];return item===undefined?7:item;} return 0; }",
     );
     assert_eq!(raw.call("run", &[]).0[0].unwrap_f64(), 7.0);
     let compiled = compile(
-        "export function run(flag:boolean):number { try { const values=[10]; const index=200; if(flag && index<values.length){const item=values[index];return item===undefined?7:item;} return index; } catch { return 13; } }",
+        "export function run(flag:boolean) { try { const values=[10]; const index=200; if(flag && index<values.length){const item=values[index];return item===undefined?7:item;} return index; } catch { return 13; } }",
         "func(flag:bool)->s8",
     )?;
     let engine = wasmtime::Engine::default();
@@ -118,7 +118,7 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
                if(index<values.length){{const value=values[index];return value===undefined?-1:value;}} \
                return -2; \
              }} \
-             export function run(supplied:number, again:boolean):number {{ \
+             export function run(supplied:number, again:boolean) {{ \
                const positions=[{initializer}]; const position=positions[0]; \
                if(position===undefined)return -3; return read(position,[11,22,33],again); \
              }}"
@@ -176,26 +176,26 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
 /// regardless of function declaration order.
 #[test]
 fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
-    let other = "export function other(a:number,b:number):number { return helper(a,b); }";
-    let target = "export function run(a:number,b:number):number { let acc = 0; for (let i = 0; i < b; i = i + 1) { acc = acc + i; } return acc < 0 ? 0 : helper(a,b); }";
+    let other = "export function other(a:number,b:number) { return helper(a,b); }";
+    let target = "export function run(a:number,b:number) { let acc = 0; for (let i = 0; i < b; i = i + 1) { acc = acc + i; } return acc < 0 ? 0 : helper(a,b); }";
     for (case_name, helper, run_sig, call_args, expected_val) in [
         (
             "inline_compare",
-            "function helper(a:number,b:number):number { const sum = a+b; return sum > 200 ? sum : -sum; }",
+            "function helper(a:number,b:number) { const sum = a+b; return sum > 200 ? sum : -sum; }",
             "func(a:u8,b:u8)->u8",
             (250, 10),
             4,
         ),
         (
             "mixed_width_wrap",
-            "function helper(a:number,b:number):number { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
+            "function helper(a:number,b:number) { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
             "func(a:u8,b:u16)->u8",
             (250, 0),
             244,
         ),
         (
             "mixed_width_widen_return",
-            "function helper(a:number,b:number):number { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
+            "function helper(a:number,b:number) { const sum = a+a; return b === 0 ? (sum > 250 ? sum : -sum) : b; }",
             "func(a:u8,b:u8)->u16",
             (250, 0),
             500,
@@ -245,15 +245,15 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
     let source = format!(
         "interface I{{a:number;b:number}} interface S{{inner:I;opt?:number}} \
          function f1(n:number|null):number|undefined{{return n===null?undefined:n;}} \
-         function f2(n:number|undefined):number|null{{return n===undefined?null:n;}} \
+         function f2(n:number|undefined){{return n===undefined?null:n;}} \
          function f3(n:number|null):number{{return n===null?0.5:n;}} \
-         function f4(n:number):number|undefined{{return n===0?undefined:n;}} \
-         export function run(x:number):string{{return JSON.stringify(f1({exact})??0.5);}} \
-         export function r2(x:number):string{{return JSON.stringify(f2({exact})??0.5);}} \
-         export function r3(x:number):string{{return JSON.stringify(f3({exact})??0.5);}} \
-         export function r4(x:number):string{{return JSON.stringify(f4({exact})??0.5);}} \
-         export function n1(x:number):string{{const w={exact};{a}{b}return JSON.stringify(a)+','+JSON.stringify(b);}} \
-         export function n2(x:number):string{{const w={exact};{b}{a}return JSON.stringify(a)+','+JSON.stringify(b);}}"
+         function f4(n:number){{return n===0?undefined:n;}} \
+         export function run(x:number){{return JSON.stringify(f1({exact})??0.5);}} \
+         export function r2(x:number){{return JSON.stringify(f2({exact})??0.5);}} \
+         export function r3(x:number){{return JSON.stringify(f3({exact})??0.5);}} \
+         export function r4(x:number){{return JSON.stringify(f4({exact})??0.5);}} \
+         export function n1(x:number){{const w={exact};{a}{b}return JSON.stringify(a)+','+JSON.stringify(b);}} \
+         export function n2(x:number){{const w={exact};{b}{a}return JSON.stringify(a)+','+JSON.stringify(b);}}"
     );
     let sig = "func(x:f64)->string; export r2:func(x:f64)->string; export r3:func(x:f64)->string; export r4:func(x:f64)->string; export n1:func(x:f64)->string; export n2:func(x:f64)->string";
     compile(&source, sig)?;

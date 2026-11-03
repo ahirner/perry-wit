@@ -4,8 +4,8 @@ use crate::node_oracle::assert_numbers;
 fn same_value_evaluates_once_and_preserves_optional_numbers() -> anyhow::Result<()> {
     let source = r#"
 let calls = 0;
-function text(): string { calls++; return 'value'; }
-export function run(x: number): number {
+function text() { calls++; return 'value'; }
+export function run(x: number) {
     calls = 0;
     const equal = Object.is(text(), text());
     if (!equal || calls !== 2) return 1;
@@ -40,8 +40,8 @@ export function run(x: number): number {
 fn surplus_method_arguments_are_evaluated_in_order() -> anyhow::Result<()> {
     let source = r#"
 let trace = 0;
-function step(digit: number): number { trace = trace * 10 + digit; return 0; }
-export function run(): number {
+function step(digit: number) { trace = trace * 10 + digit; return 0; }
+export function run() {
     // @ts-expect-error surplus argument
     const code = 'abc'.charCodeAt(step(1), step(2));
     // @ts-expect-error surplus argument
@@ -62,7 +62,7 @@ export function run(): number {
 fn record_enumeration_preserves_instance_order_and_presence() -> anyhow::Result<()> {
     let source = r#"
 interface Pair { z: number; a: number; missing?: number }
-function check(value: Pair, names: string, values: string): number {
+function check(value: Pair, names: string, values: string) {
     if (Object.keys(value).join(',') !== names) return 1;
     if (Object.values(value).join(',') !== values) return 2;
     const entries = Object.entries(value);
@@ -71,7 +71,7 @@ function check(value: Pair, names: string, values: string): number {
     if (keys !== names + ',' || vals !== values + ',') return 3;
     return 0;
 }
-export function run(): number {
+export function run() {
     const first: Pair = {z: 1, a: 2}; const second: Pair = {a: 2, z: 1};
     if (check(first, 'z,a', '1,2') !== 0) return 1;
     if (check(second, 'a,z', '2,1') !== 0) return 2;

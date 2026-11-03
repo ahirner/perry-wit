@@ -20,10 +20,10 @@ fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<(
     );
     assert_numbers(
         r#"
-function append(a:number[], value:number, result:number):number {a.push(value);return result;}
-function shorten(a:number[]):number {a.pop();return -2;}
+function append(a:number[], value:number, result:number) {a.push(value);return result;}
+function shorten(a:number[]) {a.pop();return -2;}
 function missingEnd(a:number[]):number|undefined {a.push(4);return undefined;}
-export function argumentOrder():number {
+export function argumentOrder() {
  const sliced:number[]=[1,2];
  const alias=sliced;
  const copy=sliced.slice(append(alias,3,-2),append(alias,4,4));
@@ -54,7 +54,7 @@ export function argumentOrder():number {
 }
 
 interface RankedItem { rank:number; label:string }
-export function sortUndefined():number {
+export function sortUndefined() {
  const dense:(number|undefined)[]=[undefined,3,undefined,1];
  const alias=dense;
  let calls=0;
@@ -101,7 +101,7 @@ nullable[3]!==undefined)return 4;
  return 0;
 }
 
-export function canonicalKeys():number {
+export function canonicalKeys() {
  const map=new Map<number,number>([[-0,1],[2,2]]);
  map.set(-0,3);
  let trace='';
@@ -132,8 +132,8 @@ export function canonicalKeys():number {
  return 0;
 }
 
-function grow(set:Set<number>, other:Set<number>):Set<number> {set.add(4);return other;}
-export function intersectionOrder():number {
+function grow(set:Set<number>, other:Set<number>) {set.add(4);return other;}
+export function intersectionOrder() {
  const receiver=new Set<number>([3,1,2]);
  const smaller=new Set<number>([2,3]);
  if(Array.from(receiver.intersection(smaller)).join(',')!=='2,3')return 1;
@@ -153,7 +153,7 @@ export function intersectionOrder():number {
 }
 
 interface Item { value:number }
-export function liveGrouping():number {
+export function liveGrouping() {
  const items:Item[]=[{value:1},{value:2}];
  const alias=items;
  let trace='';
@@ -189,7 +189,7 @@ export function liveGrouping():number {
  return 0;
 }
 
-export function unknownAbsence():number {
+export function unknownAbsence() {
  const values=new Map<string,unknown>();
  values.set('undefined',undefined);
  values.set('null',null);
@@ -204,7 +204,7 @@ export function unknownAbsence():number {
  return 0;
 }
 
-export function tupleCallbacks():number {
+export function tupleCallbacks() {
  const pairs:[string,number][]=[['a',1],['b',2]];
  const found=pairs.find(([key])=>key==='b');
  if(found===undefined || found[1]!==2)return 1;
@@ -215,11 +215,11 @@ export function tupleCallbacks():number {
  return 0;
 }
 
-function mixedPrimitive(flag:number):any {
+function mixedPrimitive(flag:number) {
  if(flag>0)return '雪';
  return 2;
 }
-export function mixedValues(size:number):number {
+export function mixedValues(size:number) {
  const row:Item=JSON.parse('{"value":7,"extra":{"keep":"雪"}}');
  const values:(number|string|boolean|Item|null|undefined)[]=[];
  const alias=values;
@@ -260,7 +260,7 @@ export function mixedValues(size:number):number {
  return 0;
 }
 
-export function dictionaryKeyPrefixes():number {
+export function dictionaryKeyPrefixes() {
  const keys=['','\0','a','a\0','a\0\0','abcdefgh','abcdefgha','abcdefghb','ABCDABCD','EFGHEFGH','é','雪','😀','abcdé雪a','abcdé雪b'];
  for(let n=1;n<12;n++)keys.push('x'.repeat(n));
  const dictionary:Record<string,number>={};

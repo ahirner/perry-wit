@@ -51,8 +51,8 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
         class Step { amount = step; }
         const failures = probe();
         let cell: number | undefined = undefined;
-        function value(): number { effects += new Step().amount; return 3; }
-        function probe(): number {
+        function value() { effects += new Step().amount; return 3; }
+        function probe() {
             let failures = 0;
             try { const observed = cell; } catch { failures++; }
             try { cell = value(); } catch { failures++; }
@@ -62,7 +62,7 @@ fn typed_imports_preserve_results_bytes_and_module_initialization() -> Result<()
             const absent = cell === undefined;
             return (cell = 5, failures * 100 + effects * 10 + (absent ? 1 : 0) + cell);
         }
-        export function run(n: number): string {
+        export function run(n: number) {
             let text = '';
             for (let i = 0; i < n; i++) {
                 const result = exchange({ label: 'hé😀', bytes: 'hé😀', values: [initial, i] });
@@ -139,7 +139,7 @@ async fn asynchronous_imports_overlap_and_can_be_observed_repeatedly() -> Result
         "async-imports.ts",
         r#"
         import { exchange, observe } from 'test:imports/service';
-        export async function run(n: number): Promise<string> {
+        export async function run(n: number) {
             let text = '';
             for (let i = 0; i < n; i++) {
                 const left = exchange({ label: 'left', bytes: 'hé😀', values: [i, 1] });
@@ -241,7 +241,7 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
         "cancel-imports.ts",
         r#"
         import { work } from 'test:cancel/service';
-        export async function run(fail: boolean): Promise<string> {
+        export async function run(fail: boolean) {
             const pending = work(['input', 'hé😀']);
             if (fail) throw new RangeError('original failure');
             return 'unfinished';

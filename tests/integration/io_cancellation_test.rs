@@ -78,8 +78,7 @@ async fn transfer_cancellation_and_late_errors_release_every_native_owner() -> R
                 )
             };
             let source = format!(
-                "import {{readFile,writeFile,readdir}} from 'node:fs/promises';export async function run():Promise<{}>{{{body}}}",
-                if cancel { "void" } else { "number" }
+                "import {{readFile,writeFile,readdir}} from 'node:fs/promises';export async function run(){{{body}}}"
             );
             let worker = compile(
                 &source,
@@ -184,7 +183,7 @@ async fn caller_cancellation_releases_output_buffers_and_completion_futures() ->
     let engine = async_engine()?;
     for (channel, method) in [("stdout", "log"), ("stderr", "error")] {
         let source = format!(
-            "export async function run(): Promise<void> {{ console.{method}('{}'); console.{method}('queued'); }}",
+            "export async function run() {{ console.{method}('{}'); console.{method}('queued'); }}",
             "é🙂".repeat(20000)
         );
         let worker = MemoryChecked.component(
@@ -272,8 +271,7 @@ async fn metadata_results_release_unused_payloads_and_cancelled_borrows() -> Res
             "let failed=false;try{await stat('/sandbox/error');}catch(error){failed=error.message.startsWith('EIO:');}const value=await stat('/sandbox/other');return failed && value.size>0 && !value.isFile() && !value.isDirectory() ? 1 : 0;"
         };
         let source = format!(
-            "import {{stat}} from 'node:fs/promises';export async function run():Promise<{}>{{{body}}}",
-            if cancelled { "void" } else { "number" }
+            "import {{stat}} from 'node:fs/promises';export async function run(){{{body}}}"
         );
         let worker = compile(
             &source,

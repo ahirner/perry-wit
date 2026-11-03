@@ -28,7 +28,7 @@ world run {
 "#;
 
 const SOURCE: &str = r#"
-export async function sumBytes(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function sumBytes(input: ReadableStream<Uint8Array>) {
     const reader: ReadableStreamBYOBReader = input.getReader({mode: "byob"});
     let buffer = new Uint8Array(8196); buffer[0] = 19; buffer[8195] = 23; let total = 0;
     let done = false;
@@ -56,7 +56,7 @@ function openByob(input: ReadableStream<Uint8Array>) {
 
 type ReaderAlias = ReadableStreamDefaultReader;
 
-export async function shortEof(input: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+export async function shortEof(input: ReadableStream<Uint8Array>) {
     const opened = openByob(input) as ReaderAlias;
     const reader = opened as ReadableStreamBYOBReader;
     const result = await reader.read(new Uint8Array(8), {min: 8});
@@ -65,7 +65,7 @@ export async function shortEof(input: ReadableStream<Uint8Array>): Promise<Uint8
     output.set(bytes, 2); await reader.cancel(); reader.releaseLock(); return output;
 }
 
-export async function pendingRelease(input: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+export async function pendingRelease(input: ReadableStream<Uint8Array>) {
     const reader = input.getReader({mode: "byob"});
     const view = new Uint8Array(8); const pending = reader.read(view, {min: 8});
     const queued = reader.read(new Uint8Array(8)); reader.releaseLock();
@@ -81,7 +81,7 @@ export async function pendingRelease(input: ReadableStream<Uint8Array>): Promise
     next.releaseLock(); return output;
 }
 
-export async function cancelPending(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function cancelPending(input: ReadableStream<Uint8Array>) {
     const reader = input.getReader({mode: "byob"}); const bytes = new Uint8Array(8);
     const pending = reader.read(bytes); const queued = reader.read(new Uint8Array(8)); await reader.cancel();
     const result = await pending;
@@ -92,7 +92,7 @@ export async function cancelPending(input: ReadableStream<Uint8Array>): Promise<
     reader.releaseLock(); return 1;
 }
 
-export async function validate(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function validate(input: ReadableStream<Uint8Array>) {
     const reader = input.getReader({mode: "byob"}); const bytes = new Uint8Array(8);
     let failures = 0;
     try { await reader.read(new Uint8Array(0)); } catch { failures++; }
@@ -115,7 +115,7 @@ export async function waitMin(input: ReadableStream<Uint8Array>): Promise<Uint8A
     await reader.cancel(); reader.releaseLock(); return bytes;
 }
 
-export async function bufferedQueue(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function bufferedQueue(input: ReadableStream<Uint8Array>) {
     const body = new Response(new Uint8Array([3, 7, 11, 19, 23])).body;
     if (body === null) throw 90;
     const reader = body.getReader({mode: "byob"});
@@ -136,11 +136,11 @@ export async function bufferedQueue(input: ReadableStream<Uint8Array>): Promise<
     shortReader.releaseLock(); return 1;
 }
 
-async function consume(reader: ReadableStreamBYOBReader, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
+async function consume(reader: ReadableStreamBYOBReader, bytes: Uint8Array<ArrayBuffer>) {
     await reader.read(bytes);
 }
 
-export async function recheckAliases(input: ReadableStream<Uint8Array>): Promise<number> {
+export async function recheckAliases(input: ReadableStream<Uint8Array>) {
     const reader = input.getReader({mode: "byob"});
     const first = new Uint8Array(8);
     const alias = first.subarray(0);
