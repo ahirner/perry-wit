@@ -24,7 +24,7 @@
   },
   {
     "workload": "io (64 KiB)",
-    "bytes": 46424,
+    "bytes": 62070,
     "core_bytes": 39895,
     "defined_functions": 125,
     "helper_functions": 111,
@@ -47,7 +47,7 @@
   },
   {
     "workload": "incoming-stream (4 MiB)",
-    "bytes": 38359,
+    "bytes": 39135,
     "core_bytes": 36511,
     "defined_functions": 126,
     "helper_functions": 112,
@@ -70,7 +70,7 @@
   },
   {
     "workload": "bounded-http-exact (4 MiB)",
-    "bytes": 65577,
+    "bytes": 75129,
     "core_bytes": 59219,
     "defined_functions": 145,
     "helper_functions": 137,
@@ -93,7 +93,7 @@
   },
   {
     "workload": "bounded-http-overflow",
-    "bytes": 65577,
+    "bytes": 75129,
     "core_bytes": 59219,
     "defined_functions": 145,
     "helper_functions": 137,
@@ -116,7 +116,7 @@
   },
   {
     "workload": "unbounded-http-bytes (4 MiB)",
-    "bytes": 64195,
+    "bytes": 74523,
     "core_bytes": 57113,
     "defined_functions": 155,
     "helper_functions": 141,
