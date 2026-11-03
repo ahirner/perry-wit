@@ -171,9 +171,16 @@ fn append_package(
     package: PackageId,
     name: &str,
 ) -> anyhow::Result<()> {
+    let metadata = PackageMetadata::extract(resolve, package);
+    if serde_json::to_value(&metadata)?
+        .as_object()
+        .is_some_and(|object| object.is_empty())
+    {
+        return Ok(());
+    }
     let section = wasm_encoder::CustomSection {
         name: format!("{PREFIX}{name}").into(),
-        data: PackageMetadata::extract(resolve, package).encode()?.into(),
+        data: metadata.encode()?.into(),
     };
     bytes.push(section.id());
     section.encode(bytes);
