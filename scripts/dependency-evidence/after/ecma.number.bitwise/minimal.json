@@ -1,0 +1,478 @@
+{
+  "contract": "ecma.number.bitwise",
+  "case": {
+    "kind": "program",
+    "input": {
+      "expression": {
+        "Imul": [
+          {
+            "ByteAlias": [
+              {
+                "Field": [
+                  "Input",
+                  {
+                    "Binary": [
+                      "BitAnd",
+                      "Input",
+                      {
+                        "Integer": 6
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "Mark": {
+                  "Binary": [
+                    "Div",
+                    "NegativeZero",
+                    {
+                      "Integer": 31
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "BitNot": {
+              "EncodedLength": [
+                {
+                  "Slice": [
+                    {
+                      "Literal": "a"
+                    },
+                    2,
+                    -1
+                  ]
+                },
+                {
+                  "Binary": [
+                    "Mul",
+                    "Input",
+                    "NegativeZero"
+                  ]
+                },
+                "NegativeZero"
+              ]
+            }
+          }
+        ]
+      },
+      "form": "Direct"
+    }
+  },
+  "source": "\nconst sharedJsonCell: { value: number } = { value: 0 };\nfunction clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}\nfunction typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}\nfunction byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}\nfunction closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}\nfunction handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}\n\nfunction mark(trace:number[], value:number):number { trace.push(value); return value; }\nfunction identity(value:number):number { return value; }\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[] = [];\n  const value = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength)));\n  return {value:value, trace:trace};\n}\n",
+  "metamorphic": [
+    {
+      "case": {
+        "kind": "program",
+        "input": {
+          "expression": {
+            "Imul": [
+              {
+                "ByteAlias": [
+                  {
+                    "Field": [
+                      "Input",
+                      {
+                        "Binary": [
+                          "BitAnd",
+                          "Input",
+                          {
+                            "Integer": 6
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Mark": {
+                      "Binary": [
+                        "Div",
+                        "NegativeZero",
+                        {
+                          "Integer": 31
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "BitNot": {
+                  "EncodedLength": [
+                    {
+                      "Slice": [
+                        {
+                          "Literal": "a"
+                        },
+                        2,
+                        -1
+                      ]
+                    },
+                    {
+                      "Binary": [
+                        "Mul",
+                        "Input",
+                        "NegativeZero"
+                      ]
+                    },
+                    "NegativeZero"
+                  ]
+                }
+              }
+            ]
+          },
+          "form": "Local"
+        }
+      },
+      "source": "\nconst sharedJsonCell: { value: number } = { value: 0 };\nfunction clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}\nfunction typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}\nfunction byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}\nfunction closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}\nfunction handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}\n\nfunction mark(trace:number[], value:number):number { trace.push(value); return value; }\nfunction identity(value:number):number { return value; }\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[] = [];\n  const fresh = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength))); const value = fresh;\n  return {value:value, trace:trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "program",
+        "input": {
+          "expression": {
+            "Imul": [
+              {
+                "ByteAlias": [
+                  {
+                    "Field": [
+                      "Input",
+                      {
+                        "Binary": [
+                          "BitAnd",
+                          "Input",
+                          {
+                            "Integer": 6
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Mark": {
+                      "Binary": [
+                        "Div",
+                        "NegativeZero",
+                        {
+                          "Integer": 31
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "BitNot": {
+                  "EncodedLength": [
+                    {
+                      "Slice": [
+                        {
+                          "Literal": "a"
+                        },
+                        2,
+                        -1
+                      ]
+                    },
+                    {
+                      "Binary": [
+                        "Mul",
+                        "Input",
+                        "NegativeZero"
+                      ]
+                    },
+                    "NegativeZero"
+                  ]
+                }
+              }
+            ]
+          },
+          "form": "Permuted"
+        }
+      },
+      "source": "export function run(x:number):{value:number,trace:number[]} {\n  const trace:number[] = [];\n  let value = 0; const fresh = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength))); value = fresh;\n  return {value:value, trace:trace};\n}\nfunction identity(value:number):number { return value; }\nfunction mark(trace:number[], value:number):number { trace.push(value); return value; }\n\nfunction handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}\nfunction closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}\nfunction byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}\nfunction typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}\nfunction clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}\nconst sharedJsonCell: { value: number } = { value: 0 };\n\n"
+    },
+    {
+      "case": {
+        "kind": "program",
+        "input": {
+          "expression": {
+            "Imul": [
+              {
+                "ByteAlias": [
+                  {
+                    "Field": [
+                      "Input",
+                      {
+                        "Binary": [
+                          "BitAnd",
+                          "Input",
+                          {
+                            "Integer": 6
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Mark": {
+                      "Binary": [
+                        "Div",
+                        "NegativeZero",
+                        {
+                          "Integer": 31
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "BitNot": {
+                  "EncodedLength": [
+                    {
+                      "Slice": [
+                        {
+                          "Literal": "a"
+                        },
+                        2,
+                        -1
+                      ]
+                    },
+                    {
+                      "Binary": [
+                        "Mul",
+                        "Input",
+                        "NegativeZero"
+                      ]
+                    },
+                    "NegativeZero"
+                  ]
+                }
+              }
+            ]
+          },
+          "form": "Branch"
+        }
+      },
+      "source": "\nconst sharedJsonCell: { value: number } = { value: 0 };\nfunction clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}\nfunction typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}\nfunction byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}\nfunction closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}\nfunction handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}\n\nfunction mark(trace:number[], value:number):number { trace.push(value); return value; }\nfunction identity(value:number):number { return value; }\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[] = [];\n  let value = 0; if (x === x) { value = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength))); } else { value = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength))); }\n  return {value:value, trace:trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "program",
+        "input": {
+          "expression": {
+            "Imul": [
+              {
+                "ByteAlias": [
+                  {
+                    "Field": [
+                      "Input",
+                      {
+                        "Binary": [
+                          "BitAnd",
+                          "Input",
+                          {
+                            "Integer": 6
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Mark": {
+                      "Binary": [
+                        "Div",
+                        "NegativeZero",
+                        {
+                          "Integer": 31
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "BitNot": {
+                  "EncodedLength": [
+                    {
+                      "Slice": [
+                        {
+                          "Literal": "a"
+                        },
+                        2,
+                        -1
+                      ]
+                    },
+                    {
+                      "Binary": [
+                        "Mul",
+                        "Input",
+                        "NegativeZero"
+                      ]
+                    },
+                    "NegativeZero"
+                  ]
+                }
+              }
+            ]
+          },
+          "form": "Loop"
+        }
+      },
+      "source": "\nconst sharedJsonCell: { value: number } = { value: 0 };\nfunction clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}\nfunction typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}\nfunction byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}\nfunction closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}\nfunction handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}\n\nfunction mark(trace:number[], value:number):number { trace.push(value); return value; }\nfunction identity(value:number):number { return value; }\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[] = [];\n  let value = 0; for (let i = 0; i < 1; i++) { value = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength))); }\n  return {value:value, trace:trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "program",
+        "input": {
+          "expression": {
+            "Imul": [
+              {
+                "ByteAlias": [
+                  {
+                    "Field": [
+                      "Input",
+                      {
+                        "Binary": [
+                          "BitAnd",
+                          "Input",
+                          {
+                            "Integer": 6
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Mark": {
+                      "Binary": [
+                        "Div",
+                        "NegativeZero",
+                        {
+                          "Integer": 31
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "BitNot": {
+                  "EncodedLength": [
+                    {
+                      "Slice": [
+                        {
+                          "Literal": "a"
+                        },
+                        2,
+                        -1
+                      ]
+                    },
+                    {
+                      "Binary": [
+                        "Mul",
+                        "Input",
+                        "NegativeZero"
+                      ]
+                    },
+                    "NegativeZero"
+                  ]
+                }
+              }
+            ]
+          },
+          "form": "LoopCarried"
+        }
+      },
+      "source": "\nconst sharedJsonCell: { value: number } = { value: 0 };\nfunction clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}\nfunction typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}\nfunction byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}\nfunction closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}\nfunction handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}\n\nfunction mark(trace:number[], value:number):number { trace.push(value); return value; }\nfunction identity(value:number):number { return value; }\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[] = [];\n  let value = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength))); for (let i = 0; i < 4; i++) { value = -value; }\n  return {value:value, trace:trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "program",
+        "input": {
+          "expression": {
+            "Imul": [
+              {
+                "ByteAlias": [
+                  {
+                    "Field": [
+                      "Input",
+                      {
+                        "Binary": [
+                          "BitAnd",
+                          "Input",
+                          {
+                            "Integer": 6
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "Mark": {
+                      "Binary": [
+                        "Div",
+                        "NegativeZero",
+                        {
+                          "Integer": 31
+                        }
+                      ]
+                    }
+                  }
+                ]
+              },
+              {
+                "BitNot": {
+                  "EncodedLength": [
+                    {
+                      "Slice": [
+                        {
+                          "Literal": "a"
+                        },
+                        2,
+                        -1
+                      ]
+                    },
+                    {
+                      "Binary": [
+                        "Mul",
+                        "Input",
+                        "NegativeZero"
+                      ]
+                    },
+                    "NegativeZero"
+                  ]
+                }
+              }
+            ]
+          },
+          "form": "InertException"
+        }
+      },
+      "source": "\nconst sharedJsonCell: { value: number } = { value: 0 };\nfunction clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}\nfunction typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}\nfunction byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}\nfunction closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}\nfunction handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}\n\nfunction mark(trace:number[], value:number):number { trace.push(value); return value; }\nfunction identity(value:number):number { return value; }\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[] = [];\n  let value = 0; try { value = Math.imul(byteAlias(({first:x, second:(x & (6))}.first), mark(trace, ((-0) / (31)))), (~(new TextEncoder().encode((\"a\".slice(2, -1))).subarray((x * (-0)), (-0)).byteLength))); } finally { }\n  return {value:value, trace:trace};\n}\n"
+    }
+  ],
+  "settings": {
+    "select": "",
+    "cases": 8,
+    "depth": 3,
+    "seed": 41577849571,
+    "shrink_limit": 100,
+    "limits": {
+      "fuel": 100000000,
+      "memory_bytes": 8388608,
+      "timeout_seconds": 30
+    }
+  },
+  "source_sha256": "231f763785dacccb7870d51df00cb888431c362d93a2b4c7e5bdb6b7c88c5393",
+  "revision": "cd3be84fa8960d09b4fa175f0016525438218f3e",
+  "versions": {
+    "node": "v26.13.0",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "typescript": "Version 7.0.2",
+    "wasmtime": "wasmtime 50.0.0 (ebe5e8df1 2026-10-20)"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "contract": "node.fs.metadata",
+  "case": {
+    "kind": "function",
+    "input": {
+      "source": "\nimport {writeFile,stat,readdir,unlink} from 'node:fs/promises';\nexport async function run(x:number):Promise<{value:number,trace:number[]}> {\n  const input=new Uint8Array([0,1,255,128,42]);\n  const text=\"extra\\u0000é\";\n  const textBytes=new TextEncoder().encode(text);\n  const trace:number[]=[];\n  await writeFile('alpha.bin',input);\n  await writeFile('beta.txt',text);\n  try {\n    const fInfo=await stat('fixture.txt');\n    const aInfo=await stat('alpha.bin');\n    const bInfo=await stat('beta.txt');\n    const names=await readdir('.');\n    if(!fInfo.isFile()||fInfo.isDirectory()||fInfo.size!==6)throw 93;\n    if(!aInfo.isFile()||aInfo.isDirectory()||aInfo.size!==input.length)throw 94;\n    if(!bInfo.isFile()||bInfo.isDirectory()||bInfo.size!==textBytes.length)throw 95;\n    if(names.length!==3)throw 96;\n    trace.push(fInfo.size);\n    trace.push(aInfo.size);\n    trace.push(bInfo.size);\n    trace.push(names.length);\n  } finally {\n    await unlink('alpha.bin');\n    await unlink('beta.txt');\n  }\n  const remaining=await readdir('.');\n  if(remaining.length!==1||remaining[0]!=='fixture.txt')throw 97;\n  return {value:x,trace};\n}\n",
+      "asynchronous": true
+    }
+  },
+  "source": "\nimport {writeFile,stat,readdir,unlink} from 'node:fs/promises';\nexport async function run(x:number):Promise<{value:number,trace:number[]}> {\n  const input=new Uint8Array([0,1,255,128,42]);\n  const text=\"extra\\u0000é\";\n  const textBytes=new TextEncoder().encode(text);\n  const trace:number[]=[];\n  await writeFile('alpha.bin',input);\n  await writeFile('beta.txt',text);\n  try {\n    const fInfo=await stat('fixture.txt');\n    const aInfo=await stat('alpha.bin');\n    const bInfo=await stat('beta.txt');\n    const names=await readdir('.');\n    if(!fInfo.isFile()||fInfo.isDirectory()||fInfo.size!==6)throw 93;\n    if(!aInfo.isFile()||aInfo.isDirectory()||aInfo.size!==input.length)throw 94;\n    if(!bInfo.isFile()||bInfo.isDirectory()||bInfo.size!==textBytes.length)throw 95;\n    if(names.length!==3)throw 96;\n    trace.push(fInfo.size);\n    trace.push(aInfo.size);\n    trace.push(bInfo.size);\n    trace.push(names.length);\n  } finally {\n    await unlink('alpha.bin');\n    await unlink('beta.txt');\n  }\n  const remaining=await readdir('.');\n  if(remaining.length!==1||remaining[0]!=='fixture.txt')throw 97;\n  return {value:x,trace};\n}\n",
+  "metamorphic": [],
+  "settings": {
+    "select": "",
+    "cases": 8,
+    "depth": 3,
+    "seed": 41577849571,
+    "shrink_limit": 100,
+    "limits": {
+      "fuel": 100000000,
+      "memory_bytes": 8388608,
+      "timeout_seconds": 30
+    }
+  },
+  "source_sha256": "231f763785dacccb7870d51df00cb888431c362d93a2b4c7e5bdb6b7c88c5393",
+  "revision": "cd3be84fa8960d09b4fa175f0016525438218f3e",
+  "versions": {
+    "node": "v26.13.0",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "typescript": "Version 7.0.2",
+    "wasmtime": "wasmtime 50.0.0 (ebe5e8df1 2026-10-20)"
+  }
+}

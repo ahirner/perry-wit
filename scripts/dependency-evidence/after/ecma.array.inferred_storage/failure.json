@@ -1,0 +1,68 @@
+{
+  "contract": "ecma.array.inferred_storage",
+  "case": {
+    "kind": "reject",
+    "input": {
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  values.push(mark(trace,0));\n  alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}'));\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n",
+      "diagnostic": "an empty array literal needs a declared element type",
+      "form_sources": [
+        "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  if(x<0){values.push(mark(trace,0));}else{values.push(mark(trace,0));}\n  if(x<0){alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}'));}\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n",
+        "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  for(let step=0;step<2;step++) {\n    switch(step) {\n      case 0: values.push(mark(trace,0)); break;\n      case 1: alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}')); break;\n    }\n  }\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n",
+        "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  const item0=mark(trace,0);values.push(item0);\n  const incompatible=x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}');alias0.push(incompatible);\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n"
+      ]
+    }
+  },
+  "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  values.push(mark(trace,0));\n  alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}'));\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n",
+  "metamorphic": [
+    {
+      "case": {
+        "kind": "reject",
+        "input": {
+          "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  if(x<0){values.push(mark(trace,0));}else{values.push(mark(trace,0));}\n  if(x<0){alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}'));}\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n",
+          "diagnostic": "an empty array literal needs a declared element type"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  if(x<0){values.push(mark(trace,0));}else{values.push(mark(trace,0));}\n  if(x<0){alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}'));}\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "reject",
+        "input": {
+          "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  for(let step=0;step<2;step++) {\n    switch(step) {\n      case 0: values.push(mark(trace,0)); break;\n      case 1: alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}')); break;\n    }\n  }\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n",
+          "diagnostic": "an empty array literal needs a declared element type"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  for(let step=0;step<2;step++) {\n    switch(step) {\n      case 0: values.push(mark(trace,0)); break;\n      case 1: alias0.push(x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}')); break;\n    }\n  }\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "reject",
+        "input": {
+          "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  const item0=mark(trace,0);values.push(item0);\n  const incompatible=x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}');alias0.push(incompatible);\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n",
+          "diagnostic": "an empty array literal needs a declared element type"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:(any)[]=[];\n  const alias0=values;\n  const item0=mark(trace,0);values.push(item0);\n  const incompatible=x<0?mark(trace,0):JSON.parse('{\"incompatible\":true}');alias0.push(incompatible);\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias0));trace.push(values.length);\n  return {value:x,trace};\n}\n"
+    }
+  ],
+  "settings": {
+    "select": "",
+    "cases": 8,
+    "depth": 3,
+    "seed": 41577849571,
+    "shrink_limit": 100,
+    "limits": {
+      "fuel": 100000000,
+      "memory_bytes": 8388608,
+      "timeout_seconds": 30
+    }
+  },
+  "source_sha256": "231f763785dacccb7870d51df00cb888431c362d93a2b4c7e5bdb6b7c88c5393",
+  "revision": "cd3be84fa8960d09b4fa175f0016525438218f3e",
+  "versions": {
+    "node": "v26.13.0",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "typescript": "Version 7.0.2",
+    "wasmtime": "wasmtime 50.0.0 (ebe5e8df1 2026-10-20)"
+  }
+}

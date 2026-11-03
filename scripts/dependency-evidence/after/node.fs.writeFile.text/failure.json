@@ -1,0 +1,32 @@
+{
+  "contract": "node.fs.writeFile.text",
+  "case": {
+    "kind": "function",
+    "input": {
+      "source": "\nimport {readFile,writeFile} from 'node:fs/promises';\nexport async function run(x:number):Promise<{value:number,trace:number[]}> {\n  const first=\"initial-long-payload-é\\u0000漢\";\n  const second=\"short\";\n  const trace:number[]=[];\n  await writeFile('roundtrip.txt',first);\n  const r1=await readFile('roundtrip.txt','utf8');\n  if(r1!==first)throw 90;\n  await writeFile('roundtrip.txt',second);\n  const r2=await readFile('roundtrip.txt','utf8');\n  if(r2!==second)throw 92;\n  const encoded1=new TextEncoder().encode(r1);\n  const encoded2=new TextEncoder().encode(r2);\n  trace.push(encoded1.length);\n  trace.push(encoded2.length);\n  for(let i=0;i<encoded1.length;i++){const byte=encoded1[i];if(byte===undefined)throw 93;trace.push(byte);}\n  for(let i=0;i<encoded2.length;i++){const byte=encoded2[i];if(byte===undefined)throw 93;trace.push(byte);}\n  return {value:x,trace};\n}\n",
+      "asynchronous": true
+    }
+  },
+  "source": "\nimport {readFile,writeFile} from 'node:fs/promises';\nexport async function run(x:number):Promise<{value:number,trace:number[]}> {\n  const first=\"initial-long-payload-é\\u0000漢\";\n  const second=\"short\";\n  const trace:number[]=[];\n  await writeFile('roundtrip.txt',first);\n  const r1=await readFile('roundtrip.txt','utf8');\n  if(r1!==first)throw 90;\n  await writeFile('roundtrip.txt',second);\n  const r2=await readFile('roundtrip.txt','utf8');\n  if(r2!==second)throw 92;\n  const encoded1=new TextEncoder().encode(r1);\n  const encoded2=new TextEncoder().encode(r2);\n  trace.push(encoded1.length);\n  trace.push(encoded2.length);\n  for(let i=0;i<encoded1.length;i++){const byte=encoded1[i];if(byte===undefined)throw 93;trace.push(byte);}\n  for(let i=0;i<encoded2.length;i++){const byte=encoded2[i];if(byte===undefined)throw 93;trace.push(byte);}\n  return {value:x,trace};\n}\n",
+  "metamorphic": [],
+  "settings": {
+    "select": "",
+    "cases": 8,
+    "depth": 3,
+    "seed": 41577849571,
+    "shrink_limit": 100,
+    "limits": {
+      "fuel": 100000000,
+      "memory_bytes": 8388608,
+      "timeout_seconds": 30
+    }
+  },
+  "source_sha256": "231f763785dacccb7870d51df00cb888431c362d93a2b4c7e5bdb6b7c88c5393",
+  "revision": "cd3be84fa8960d09b4fa175f0016525438218f3e",
+  "versions": {
+    "node": "v26.13.0",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "typescript": "Version 7.0.2",
+    "wasmtime": "wasmtime 50.0.0 (ebe5e8df1 2026-10-20)"
+  }
+}

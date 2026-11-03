@@ -1,0 +1,32 @@
+{
+  "contract": "ecma.error.values",
+  "case": {
+    "kind": "function",
+    "input": {
+      "source": "\nasync function fail(message:string):Promise<number> {\n    throw new TypeError(message, {cause:message});\n}\nexport async function run(x:number):Promise<{value:number,trace:number[]}> {\n    const message=\"\";\n    const trace:number[]=[];\n    const pending=fail(message);\n    try {await pending;} catch(original) {\n        if(!(original instanceof TypeError)||!(original instanceof Error))throw 90;\n        if(original.name!=='TypeError'||original.message!==message||original.cause!==message)throw 91;\n        try {await Promise.all([pending,1]);} catch(e) {if(e!==original)throw 92;trace.push(1);}\n        try {await Promise.race([pending]);} catch(e) {if(e!==original)throw 93;trace.push(2);}\n        const settled=await Promise.allSettled([pending]);\n        if(settled[0].status!=='rejected'||settled[0].reason!==original)throw 94;\n        try {try {throw original;} finally {trace.push(3);}}\n        catch(e) {if(e!==original)throw 95;trace.push(4);}\n        if(JSON.stringify(original)!=='{}'||JSON.stringify({...original})!=='{}')throw 96;\n        const encoded=new TextEncoder().encode('message:'+original.message);\n        for(let i=0;i<encoded.length;i++){const byte=encoded[i];if(byte===undefined)throw 97;trace.push(byte);}\n        return {value:x,trace};\n    }\n    throw 98;\n}\n",
+      "asynchronous": true
+    }
+  },
+  "source": "\nasync function fail(message:string):Promise<number> {\n    throw new TypeError(message, {cause:message});\n}\nexport async function run(x:number):Promise<{value:number,trace:number[]}> {\n    const message=\"\";\n    const trace:number[]=[];\n    const pending=fail(message);\n    try {await pending;} catch(original) {\n        if(!(original instanceof TypeError)||!(original instanceof Error))throw 90;\n        if(original.name!=='TypeError'||original.message!==message||original.cause!==message)throw 91;\n        try {await Promise.all([pending,1]);} catch(e) {if(e!==original)throw 92;trace.push(1);}\n        try {await Promise.race([pending]);} catch(e) {if(e!==original)throw 93;trace.push(2);}\n        const settled=await Promise.allSettled([pending]);\n        if(settled[0].status!=='rejected'||settled[0].reason!==original)throw 94;\n        try {try {throw original;} finally {trace.push(3);}}\n        catch(e) {if(e!==original)throw 95;trace.push(4);}\n        if(JSON.stringify(original)!=='{}'||JSON.stringify({...original})!=='{}')throw 96;\n        const encoded=new TextEncoder().encode('message:'+original.message);\n        for(let i=0;i<encoded.length;i++){const byte=encoded[i];if(byte===undefined)throw 97;trace.push(byte);}\n        return {value:x,trace};\n    }\n    throw 98;\n}\n",
+  "metamorphic": [],
+  "settings": {
+    "select": "",
+    "cases": 8,
+    "depth": 3,
+    "seed": 41577849571,
+    "shrink_limit": 100,
+    "limits": {
+      "fuel": 100000000,
+      "memory_bytes": 8388608,
+      "timeout_seconds": 30
+    }
+  },
+  "source_sha256": "231f763785dacccb7870d51df00cb888431c362d93a2b4c7e5bdb6b7c88c5393",
+  "revision": "cd3be84fa8960d09b4fa175f0016525438218f3e",
+  "versions": {
+    "node": "v26.13.0",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "typescript": "Version 7.0.2",
+    "wasmtime": "wasmtime 50.0.0 (ebe5e8df1 2026-10-20)"
+  }
+}

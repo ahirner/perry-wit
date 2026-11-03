@@ -1,0 +1,212 @@
+{
+  "contract": "ecma.object.inferred_storage",
+  "case": {
+    "kind": "inferred_aggregate",
+    "input": {
+      "storage": "dictionary",
+      "element": "Number",
+      "seed": 0,
+      "writes": [
+        {
+          "value": 1,
+          "index": null
+        },
+        {
+          "value": -2,
+          "index": 0
+        },
+        {
+          "value": 3,
+          "index": 1
+        }
+      ],
+      "aliases": 3,
+      "form": "Annotated"
+    }
+  },
+  "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:Record<string,number>={};\n  const alias0=values;\n  const alias1=alias0;\n  const alias2=alias1;\n  values['field_'+0]=mark(trace,0);\n  values['field_'+1]=mark(trace,1);\n  values['field_'+0]=mark(trace,-2);\n  values['field_'+1]=mark(trace,3);\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias2));trace.push(Object.keys(values).length);\n  return {value:x,trace};\n}\n",
+  "metamorphic": [
+    {
+      "case": {
+        "kind": "inferred_aggregate",
+        "input": {
+          "storage": "dictionary",
+          "element": "Number",
+          "seed": 0,
+          "writes": [
+            {
+              "value": 1,
+              "index": null
+            },
+            {
+              "value": -2,
+              "index": 0
+            },
+            {
+              "value": 3,
+              "index": 1
+            }
+          ],
+          "aliases": 3,
+          "form": "Aliased"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:any={};\n  const alias0=values;\n  const alias1=alias0;\n  const alias2=alias1;\n  values['field_'+0]=mark(trace,0);\n  alias0['field_'+1]=mark(trace,1);\n  alias1['field_'+0]=mark(trace,-2);\n  alias2['field_'+1]=mark(trace,3);\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias2));trace.push(Object.keys(values).length);\n  return {value:x,trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "inferred_aggregate",
+        "input": {
+          "storage": "dictionary",
+          "element": "Number",
+          "seed": 0,
+          "writes": [
+            {
+              "value": 1,
+              "index": null
+            },
+            {
+              "value": -2,
+              "index": 0
+            },
+            {
+              "value": 3,
+              "index": 1
+            }
+          ],
+          "aliases": 3,
+          "form": "Branches"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:any={};\n  const alias0=values;\n  const alias1=alias0;\n  const alias2=alias1;\n  if(x<0){values['field_'+0]=mark(trace,0);}else{values['field_'+0]=mark(trace,0);}\n  if(x<0){values['field_'+1]=mark(trace,1);}else{alias0['field_'+1]=mark(trace,1);}\n  if(x<0){values['field_'+0]=mark(trace,-2);}else{alias1['field_'+0]=mark(trace,-2);}\n  if(x<0){values['field_'+1]=mark(trace,3);}else{alias2['field_'+1]=mark(trace,3);}\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias2));trace.push(Object.keys(values).length);\n  return {value:x,trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "inferred_aggregate",
+        "input": {
+          "storage": "dictionary",
+          "element": "Number",
+          "seed": 0,
+          "writes": [
+            {
+              "value": 1,
+              "index": null
+            },
+            {
+              "value": -2,
+              "index": 0
+            },
+            {
+              "value": 3,
+              "index": 1
+            }
+          ],
+          "aliases": 3,
+          "form": "Loop"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:any={};\n  const alias0=values;\n  const alias1=alias0;\n  const alias2=alias1;\n  for(let step=0;step<4;step++) {\n    switch(step) {\n      case 0: values['field_'+0]=mark(trace,0); break;\n      case 1: alias0['field_'+1]=mark(trace,1); break;\n      case 2: alias1['field_'+0]=mark(trace,-2); break;\n      case 3: alias2['field_'+1]=mark(trace,3); break;\n    }\n  }\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias2));trace.push(Object.keys(values).length);\n  return {value:x,trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "inferred_aggregate",
+        "input": {
+          "storage": "dictionary",
+          "element": "Number",
+          "seed": 0,
+          "writes": [
+            {
+              "value": 1,
+              "index": null
+            },
+            {
+              "value": -2,
+              "index": 0
+            },
+            {
+              "value": 3,
+              "index": 1
+            }
+          ],
+          "aliases": 3,
+          "form": "Temporaries"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:any={};\n  const alias0=values;\n  const alias1=alias0;\n  const alias2=alias1;\n  const item0=mark(trace,0);values['field_'+0]=item0;\n  const item1=mark(trace,1);alias0['field_'+1]=item1;\n  const item2=mark(trace,-2);alias1['field_'+0]=item2;\n  const item3=mark(trace,3);alias2['field_'+1]=item3;\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias2));trace.push(Object.keys(values).length);\n  return {value:x,trace};\n}\n"
+    },
+    {
+      "case": {
+        "kind": "inferred_aggregate",
+        "input": {
+          "storage": "dictionary",
+          "element": "Number",
+          "seed": 0,
+          "writes": [
+            {
+              "value": 1,
+              "index": null
+            },
+            {
+              "value": -2,
+              "index": 0
+            },
+            {
+              "value": 3,
+              "index": 1
+            }
+          ],
+          "aliases": 3,
+          "form": "Helper"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:any={};\n  const alias0=values;\n  const alias1=alias0;\n  const alias2=alias1;\n  values['field_'+0]=make(trace,0);\n  alias0['field_'+1]=make(trace,1);\n  alias1['field_'+0]=make(trace,-2);\n  alias2['field_'+1]=make(trace,3);\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias2));trace.push(Object.keys(values).length);\n  return {value:x,trace};\n}\nfunction make(trace:number[],n:number) {const item=forward(trace,n);return item;}\nfunction produce(trace:number[],n:number) {return mark(trace,n);}\nfunction forward(trace:number[],n:number) {return produce(trace,n);}\n"
+    },
+    {
+      "case": {
+        "kind": "inferred_aggregate",
+        "input": {
+          "storage": "dictionary",
+          "element": "Number",
+          "seed": 0,
+          "writes": [
+            {
+              "value": 1,
+              "index": null
+            },
+            {
+              "value": -2,
+              "index": 0
+            },
+            {
+              "value": 3,
+              "index": 1
+            }
+          ],
+          "aliases": 3,
+          "form": "AppendIndex"
+        }
+      },
+      "source": "function mark(trace:number[],n:number):number {trace.push(n);return n;}\nfunction observe(trace:number[],text:string|undefined):void {const bytes=new TextEncoder().encode(text);trace.push(-999,bytes.length);for(let i=0;i<bytes.length;i++){const byte=bytes[i];if(byte===undefined)throw 91;trace.push(byte);}}\nexport function run(x:number):{value:number,trace:number[]} {\n  const trace:number[]=[];\n  const values:any={};\n  const alias0=values;\n  const alias1=alias0;\n  const alias2=alias1;\n  values['field_'+0]=mark(trace,0);\n  alias0['field_'+1]=mark(trace,1);\n  alias1['field_'+0]=mark(trace,-2);\n  alias2['field_'+1]=mark(trace,3);\n  observe(trace,JSON.stringify(values));observe(trace,JSON.stringify(alias2));trace.push(Object.keys(values).length);\n  return {value:x,trace};\n}\n"
+    }
+  ],
+  "settings": {
+    "select": "",
+    "cases": 8,
+    "depth": 3,
+    "seed": 41577849571,
+    "shrink_limit": 100,
+    "limits": {
+      "fuel": 100000000,
+      "memory_bytes": 8388608,
+      "timeout_seconds": 30
+    }
+  },
+  "source_sha256": "231f763785dacccb7870d51df00cb888431c362d93a2b4c7e5bdb6b7c88c5393",
+  "revision": "cd3be84fa8960d09b4fa175f0016525438218f3e",
+  "versions": {
+    "node": "v26.13.0",
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "typescript": "Version 7.0.2",
+    "wasmtime": "wasmtime 50.0.0 (ebe5e8df1 2026-10-20)"
+  }
+}
