@@ -219,7 +219,7 @@ mod tests {
         "#;
         let mut resolve = Resolve::new();
         let package = resolve.push_str("documented.wit", source)?;
-        let mut encoded = wit_component::encode(&resolve, package)?;
+        let mut encoded = wit_component::encode(&resolve, package, false)?;
         append(&mut encoded, &resolve, None)?;
         let (resolve, package) = super::super::wit::resolve_contents(&crate::api::Wit {
             application: crate::api::Package::Encoded(encoded),
