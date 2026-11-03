@@ -141,7 +141,6 @@ macro_rules! method_catalog {
                 AbortAbort "abort" Void Upstream Method [] => optional(abort_controller()), "does not support abort reasons yet";
             }
             Receiver::Value(Kind::Number), "method" {
-                NumberToFixed "toFixed" String Upstream Method [args:rest] => intrinsic(NumberToFixed, args, [Number(0.0)], Value), "accepts fraction digits";
                 NumberToString "toString" String Arguments Method [radix:optional] => optional(number_to_string(radix)), "accepts at most one radix";
             }
             Receiver::Value(Kind::Bytes), "method" {

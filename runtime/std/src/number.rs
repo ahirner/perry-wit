@@ -46,24 +46,19 @@ pub(crate) extern "C" fn std_number_inspect(tag: i32, bits: u64) -> *mut u8 {
     }
 }
 
-/// Unsigned significand and binary exponent of a finite float.
-fn binary_magnitude(abs: f64) -> (u64, i32) {
-    let bits = abs.to_bits();
-    let biased_exp = ((bits >> 52) & 0x7ff) as i32;
-    let frac_bits = bits & ((1u64 << 52) - 1);
-    if biased_exp == 0 {
-        (frac_bits, -1074)
-    } else {
-        (frac_bits | (1u64 << 52), biased_exp - 1075)
-    }
-}
-
 fn format_float_radix(abs: f64, neg: bool, radix: u32) -> *mut u8 {
     // Exact integer fast path strictly below 2^64 (18446744073709551616.0 == 2^64 as f64).
     if libm::trunc(abs) == abs && abs < 18446744073709551616.0 {
         return format_integer_radix(abs as u64, neg, radix);
     }
-    let (mantissa, exp2) = binary_magnitude(abs);
+    let bits = abs.to_bits();
+    let biased_exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac_bits = bits & ((1u64 << 52) - 1);
+    let (mantissa, exp2) = if biased_exp == 0 {
+        (frac_bits, -1074)
+    } else {
+        (frac_bits | (1u64 << 52), biased_exp - 1075)
+    };
     let even = (mantissa & 1) == 0;
 
     let mut out = crate::runtime::Buffer::new();
@@ -179,81 +174,6 @@ pub(crate) extern "C" fn std_number_to_string_radix(tag: i32, bits: u64, radix: 
             format_float_radix(val.abs(), val < 0.0, radix_u32)
         }
     }
-}
-
-/// Round |value| * 10^digits exactly, choosing the larger integer at a tie.
-fn scaled_decimal(mantissa: u64, exponent: i32, digits: u32) -> BigUint {
-    let mut scaled = BigUint::from_u64(mantissa);
-    for _ in 0..digits {
-        scaled.mul_add(5, 0);
-    }
-    let shift = exponent + digits as i32;
-    if shift >= 0 {
-        scaled.shl(shift as u32);
-    } else {
-        let mut bits = shift.unsigned_abs();
-        while bits > 31 {
-            scaled.div_rem_u32(1 << 31);
-            bits -= 31;
-        }
-        let divisor = 1 << bits;
-        let remainder = scaled.div_rem_u32(divisor);
-        scaled.mul_add(1, u32::from(remainder >= divisor / 2));
-    }
-    scaled
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_number_to_fixed(
-    tag: i32,
-    bits: u64,
-    digits: f64,
-    range_message: *mut u8,
-) -> *mut u8 {
-    let digits = crate::text::integer(digits);
-    if !(0..=100).contains(&digits) {
-        crate::runtime::raise_string(crate::runtime::RANGE_ERROR, range_message);
-        return core::ptr::null_mut();
-    }
-    let (negative, mantissa, exponent) = match tag {
-        numeric::SIGNED => {
-            let value = bits as i64;
-            (value < 0, value.unsigned_abs(), 0)
-        }
-        numeric::UNSIGNED => (false, bits, 0),
-        _ => {
-            let value = f64::from_bits(bits);
-            if !value.is_finite() || value.abs() >= 1e21 {
-                return std_number_to_string(tag, bits);
-            }
-            let (mantissa, exponent) = binary_magnitude(value.abs());
-            (value < 0.0, mantissa, exponent)
-        }
-    };
-    let mut scaled = scaled_decimal(mantissa, exponent, digits as u32);
-    // Sign, up to 21 integer digits, point and up to 100 fractional digits.
-    let mut text = [0; 123];
-    let mut at = text.len();
-    for _ in 0..digits {
-        at -= 1;
-        text[at] = b'0' + scaled.div_rem_u32(10) as u8;
-    }
-    if digits > 0 {
-        at -= 1;
-        text[at] = b'.';
-    }
-    loop {
-        at -= 1;
-        text[at] = b'0' + scaled.div_rem_u32(10) as u8;
-        if scaled.is_zero() {
-            break;
-        }
-    }
-    if negative {
-        at -= 1;
-        text[at] = b'-';
-    }
-    crate::runtime::from_bytes(&text[at..])
 }
 
 #[unsafe(no_mangle)]
