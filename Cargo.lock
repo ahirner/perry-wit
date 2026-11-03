@@ -3285,6 +3285,7 @@ dependencies = [
  "wasm-encoder 0.261.0",
  "wasm-metadata 0.261.0",
  "wasmparser 0.261.0",
+ "wat",
  "wit-parser 0.261.0",
 ]
 

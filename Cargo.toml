@@ -88,6 +88,7 @@ wasm-encoder = { workspace = true, features = ["wasmparser"] }
 wasmparser.workspace = true
 wit-parser.workspace = true
 wit-component = "0.261"
+wat.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 
@@ -98,6 +99,7 @@ wit-bindgen = "0.62"
 perry-rt-build = { path = "crates/perry-rt-build" }
 
 [dev-dependencies]
+wit-component = { version = "0.261", features = ["dummy-module"] }
 perry-abi.workspace = true
 serde = { workspace = true, features = ["derive"] }
 wat.workspace = true

@@ -25,9 +25,19 @@ impl Reencode for Strip {
 impl ReencodeComponent for Strip {
     fn parse_component_custom_section(
         &mut self,
-        _component: &mut Component,
-        _section: CustomSectionReader<'_>,
+        component: &mut Component,
+        section: CustomSectionReader<'_>,
     ) -> Result<(), Error<Self::Error>> {
+        if section.name() == wit_parser::PackageMetadata::SECTION_NAME
+            || section
+                .name()
+                .starts_with(crate::component::metadata::PREFIX)
+        {
+            component.section(&wasm_encoder::CustomSection {
+                name: section.name().into(),
+                data: section.data().into(),
+            });
+        }
         Ok(())
     }
 }

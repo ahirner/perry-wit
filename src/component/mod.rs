@@ -1,5 +1,6 @@
 //! In-process WIT embedding and WebAssembly component encoding.
 
+pub(crate) mod metadata;
 pub(crate) mod reactions;
 pub mod wit;
 
@@ -44,11 +45,12 @@ pub(crate) fn encode_resolved(
         .validate(true)
         .encode()
         .context("encoding component")?;
-    let component = if signals {
+    let mut component = if signals {
         reactions::hide(&component)?
     } else {
         component
     };
+    metadata::append(&mut component, &resolve, Some(world))?;
     crate::audit::validate_guest(&component).context("validating stackless component")?;
     Ok(component)
 }

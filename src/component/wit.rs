@@ -155,7 +155,7 @@ pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, Pack
         match package {
             crate::api::Package::Sources(sources) => groups.push(source_package(sources)?),
             crate::api::Package::Encoded(bytes) => {
-                let decoded = wit_parser::decoding::decode(bytes)
+                let decoded = super::metadata::decode(bytes)
                     .map_err(|e| crate::PerryDiagnostic::from(WitError::Other(e)))?;
                 let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) = decoded
                 else {
@@ -222,7 +222,12 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
                         .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?
                 }
                 Some("wasm" | "wat") => {
-                    resolve.push_file(&path)?;
+                    let bytes = wat::parse_file(&path)?;
+                    let decoded = super::metadata::decode(&bytes)?;
+                    let wit_parser::decoding::DecodedWasm::WitPackage(package, _) = decoded else {
+                        anyhow::bail!("expected a WIT package in {}", path.display());
+                    };
+                    resolve.merge(package)?;
                     continue;
                 }
                 _ => continue,
