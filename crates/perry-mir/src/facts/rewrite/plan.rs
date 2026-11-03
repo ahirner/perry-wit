@@ -64,10 +64,8 @@ impl ContextPlan {
                     } else {
                         scalar
                     }
-                } else if !original.deref(ctx).is::<PromiseType>() {
-                    layout.unwrap_or(original)
                 } else {
-                    original
+                    layout.unwrap_or(original)
                 };
                 changed |= ty != original;
                 let integer = (can_specialize || matches!(constraint, Constraint::Edge { .. }))

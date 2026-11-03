@@ -304,11 +304,11 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if Operation::get_op::<MirReturnOp>(op, ctx).is_some() {
-            let mut values = self.flatten_operands(ctx, op, 0)?;
             if self.frame.is_some() {
-                self.settle_return(ctx, values);
-                return Ok(());
+                let value = op.deref(ctx).operands().next();
+                return self.settle_return(ctx, value);
             }
+            let mut values = self.flatten_operands(ctx, op, 0)?;
             if self.throws {
                 values.push(self.i32_const(ctx, 0));
             }
@@ -447,8 +447,8 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if Operation::get_op::<PromiseResolvedOp>(op, ctx).is_some() {
-            let value = self.operand(ctx, op, 0)?;
-            let bits = self.slot_bits(ctx, value);
+            let value = op.deref(ctx).get_operand(0);
+            let bits = self.promise_value_bits(ctx, value)?;
             let payload = TypedHandle::<PromiseType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,

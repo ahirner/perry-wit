@@ -64,6 +64,7 @@ pub(crate) enum OperationKind {
     Stringify,
     JsonDecode,
     NumericCast,
+    ToNumber,
     Unknown,
     None,
 }
@@ -171,7 +172,8 @@ primitive_semantics! { _ctx, _this;
         CatchOp, RecordOrderOp => OperationKind::Unknown;
     }
     (Allocation::None, None, false) {
-        WrapOp, ToNumberOp => OperationKind::Alias;
+        WrapOp => OperationKind::Alias;
+        ToNumberOp => OperationKind::ToNumber;
         FieldGetOp => field_slot(_ctx, _this.get_operation().deref(_ctx).get_operand(0), _this.get_attr_perry_get_field(_ctx).as_deref())
             .map_or(OperationKind::Unknown, |slot| OperationKind::Read { slot });
         ArrayGetOp, ArrayAtOp => OperationKind::Read { slot: 0 };
