@@ -125,6 +125,9 @@ macro_rules! method_catalog {
                 RegexTest "test" Boolean Upstream Method [text] => value(regex_test_text(text)), "requires one string";
                 RegexExec "exec" NullableStrings Always Method [text] => optional(regex_exec(text)), "requires one string";
             }
+            Receiver::Value(Kind::Encoder), "TextEncoder" {
+                EncoderEncode "encode" Native(Kind::Bytes) Upstream Method [args:rest] => value(encode(args)), "accepts a string";
+            }
             Receiver::Value(Kind::Decoder), "method" {
                 DecoderDecode "decode" String Upstream Method [bytes:optional, options:optional] => value(decode(bytes, options)), "takes bytes and stream options";
             }

@@ -253,10 +253,6 @@ impl<'s> FunctionBuilder<'s> {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
                 self.intrinsic(ctx, Intrinsic::BytesLength, vec![bytes])
             }
-            Expr::TextEncoderEncode(text) => {
-                let text = self.string_operand(ctx, text)?;
-                self.intrinsic(ctx, Intrinsic::TextEncode, vec![text])
-            }
             Expr::TextEncoderNew => self.intrinsic(ctx, Intrinsic::EncoderNew, vec![]),
             Expr::TextDecoderNew {
                 label,
@@ -503,12 +499,18 @@ impl<'s> FunctionBuilder<'s> {
             Expr::ArrayFromMapped {
                 iterable, map_fn, ..
             } => self.array_from(ctx, iterable, Some(map_fn), expected)?,
-            Expr::IndexGet { object, index, .. } => self.index_get(ctx, object, index)?,
+            Expr::IndexGet {
+                object,
+                index,
+                byte_offset: _,
+                byte_end: _,
+            } => self.index_get(ctx, object, index)?,
             Expr::IndexSet {
                 object,
                 index,
                 value,
-                ..
+                byte_offset: _,
+                byte_end: _,
             } => self.set_index(ctx, object, index, value)?,
             other => bail!("MIR backend does not support expression {other:?} yet"),
         };

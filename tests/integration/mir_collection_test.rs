@@ -382,6 +382,23 @@ export function run(n: number): number {
 }
 
 #[test]
+fn text_encoder_evaluates_the_receiver_and_arguments_in_order() {
+    let mut program = Program::new(
+        r#"
+let order = 0;
+function encoder(): TextEncoder { order = order * 10 + 1; return new TextEncoder(); }
+function input(n: number): string { order = order * 10 + n; return 'é'; }
+export function run(): number {
+  const bytes = encoder().encode(input(2), input(3));
+  const empty = new TextEncoder().encode();
+  return order * 100 + bytes.length * 10 + empty.length;
+}
+"#,
+    );
+    assert_eq!(program.call("run", &[]).0[0].unwrap_f64(), 12320.0);
+}
+
+#[test]
 fn incremental_decoder_copies_only_pending_bytes_and_survives_collection() {
     let source = r#"
 export async function run(n: number): Promise<number> {
