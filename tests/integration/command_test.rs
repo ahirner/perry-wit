@@ -61,7 +61,7 @@ async fn console_timers_and_exceptions() -> Result<()> {
     let run = execute(
         r#"
 import { setTimeout } from 'node:timers/promises';
-async function later(value: number): Promise<number> {
+async function later(value: number) {
   await setTimeout(1);
   if (value < 0) { throw new RangeError("negative " + value); }
   return value * 2;
@@ -97,7 +97,7 @@ async fn nested_exits_and_uncaught_exceptions_decide_the_command_result() -> Res
     // `process.exitCode` and a top-level `process.exit` are `node.process.exit_status` contracts.
     // `process.exit` unwinds without running `catch` or `finally`.
     let run = execute(r#"
-function stop(): number { process.exit(0); return 1; }
+function stop() { process.exit(0); return 1; }
 try { console.log("a"); stop(); } catch { console.log("caught"); } finally { console.log("finally"); }
 console.log("unreachable");
 "#)
@@ -133,7 +133,7 @@ import { setTimeout } from 'node:timers/promises';
 let calls = 0;
 await setTimeout(1);
 console.log("initialized");
-export async function double(x: number): Promise<number> {
+export async function double(x: number) {
   calls += 1;
   return x * 2 + calls;
 }
@@ -143,7 +143,7 @@ export async function double(x: number): Promise<number> {
         ),
         (
             "func",
-            "let total = [1, 2, 3].reduce((a, b) => a + b, 34); export function double(x: number): number { total += x; return total; }",
+            "let total = [1, 2, 3].reduce((a, b) => a + b, 34); export function double(x: number) { total += x; return total; }",
             (41, 42),
             "",
         ),
@@ -211,14 +211,14 @@ async fn node_fs_reports_node_errors_and_resolves_paths_like_posix() -> Result<(
     let run = execute_in(
         r#"
 import { readFile, writeFile, stat, readdir, mkdir, unlink, rmdir } from 'node:fs/promises';
-async function message(pending: Promise<number>): Promise<void> {
+async function message(pending: Promise<number>) {
   try { await pending; } catch (e) { if (e instanceof Error) console.log(e.message); }
 }
 
 
-async function text(path: string): Promise<number> { await readFile(path, 'utf8'); return 0; }
-async function made(path: string): Promise<number> { await mkdir(path); return 0; }
-async function removed(path: string): Promise<number> { await rmdir(path); return 0; }
+async function text(path: string) { await readFile(path, 'utf8'); return 0; }
+async function made(path: string) { await mkdir(path); return 0; }
+async function removed(path: string) { await rmdir(path); return 0; }
 await message(text('missing.txt'));
 await message(made('.'));
 await message(removed('nope/deeper'));
@@ -252,13 +252,13 @@ console.log((await readdir('.')).length);
 async fn native_nullable_values_preserve_declared_absence_states() -> Result<()> {
     let run = execute(
         r#"
-function numberState(value: number | null | undefined): string {
+function numberState(value: number | null | undefined) {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   const required: number = value;
   return 'number:' + required;
 }
-function textState(value: string | null | undefined): string {
+function textState(value: string | null | undefined) {
   if (value === null) return 'null';
   if (value === undefined) return 'undefined';
   return 'string:' + value;
@@ -373,9 +373,10 @@ setTimeout(60_000);
 
 #[tokio::test(flavor = "current_thread")]
 async fn writer_close_waits_for_queued_writes_and_propagates_failure() -> Result<()> {
-    let run = execute(r#"
+    let run = execute(
+        r#"
 import { Writable } from 'node:stream';
-async function observed(pending: Promise<void>, trace: number[]): Promise<void> { await pending; trace.push(1); }
+async function observed(pending: Promise<void>, trace: number[]) { await pending; trace.push(1); }
 const writer = Writable.toWeb(process.stdout).getWriter();
 const trace: number[] = [];
 const first = writer.write(new Uint8Array(65536));
@@ -384,7 +385,9 @@ await writer.close();
 trace.push(2);
 await observer;
 console.error(JSON.stringify(trace));
-"#).await?;
+"#,
+    )
+    .await?;
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(run.stdout.len(), 65536);
     assert_eq!(run.stderr, "[1,2]\n");

@@ -14,23 +14,23 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
     for (name, source, max_bytes) in [
         (
             "identity",
-            "export function run(input: string): string { return input; }",
+            "export function run(input: string) { return input; }",
             3123,
         ),
         (
             "discarded-code-unit",
-            "export function run(input: string): string { input.charCodeAt(0); return input; }",
+            "export function run(input: string) { input.charCodeAt(0); return input; }",
             3123,
         ),
         (
             "append",
-            "export function run(input: string): string { return \"TASK_PROCESSED: \" + input; }",
+            "export function run(input: string) { return \"TASK_PROCESSED: \" + input; }",
             3522,
         ),
         // The README quotes this bound.
         (
             "trim",
-            "export function run(input: string): string { return input.trim(); }",
+            "export function run(input: string) { return input.trim(); }",
             6 * 1024,
         ),
     ] {
@@ -64,7 +64,7 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
         "package example:add; world adder { export add: func(a: s32, b: s32) -> s32; }",
     )?;
     let world = resolve.select_world(&[package], Some("adder"))?;
-    let source = "export function add(a: number, b: number): number { return a + b; }";
+    let source = "export function add(a: number, b: number) { return a + b; }";
     let compiled = compile_for_world(source, "add", &resolve, world, true)?;
     let bytes = compiled
         .component
@@ -91,12 +91,12 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
     for (name, source, max_core_bytes) in [
         (
             "plain-date",
-            "export function check(): number { const d = Temporal.PlainDate.from('2024-02-29').subtract({ days: 1 }); return d.day; }",
+            "export function check() { const d = Temporal.PlainDate.from('2024-02-29').subtract({ days: 1 }); return d.day; }",
             24_576,
         ),
         (
             "trim",
-            "export function check(s: string): string { return s.trim(); }",
+            "export function check(s: string) { return s.trim(); }",
             6_144,
         ),
     ] {

@@ -9,7 +9,7 @@ fn normalize_json_copy_rewrites_parse_stringify_and_preserves_edge_cases() -> Re
     let compiled = compile(
         r#"
 interface Item { a: number; b?: number; tags: string[] }
-export function run(x: number): number {
+export function run(x: number) {
     const src: Item = { a: x === 0 ? -0 : x, b: undefined, tags: ["ok"] };
     const other: Item = { a: 1, tags: [] };
     const text = JSON.stringify(src);

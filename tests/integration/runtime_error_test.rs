@@ -13,8 +13,8 @@ fn error_classes_causes_rethrows_primitives_and_rejections_preserve_values() {
     let source = r#"
 interface Detail { code:string }
 interface Nested { pair:[Detail,string]; table:Record<string,Detail> }
-async function fail():Promise<number> {const values:number[]=[];return values[0];}
-export async function run():Promise<number> {
+async function fail() {const values:number[]=[];return values[0];}
+export async function run() {
  const original=new ReferenceError('original');
  const detail:Detail={code:'E_TEST'};
  const error=new SyntaxError('outer',{cause:original});
@@ -56,7 +56,7 @@ export async function run():Promise<number> {
  catch(e){if(e===error || !(e instanceof TypeError))return 24;}
  try{try{throw error;}finally{return 0;}}catch(e){return 8;}
 }
-export function json():number {
+export function json() {
  try{JSON.parse('{"é":"🙂",bad}');}catch(e){
   if(!(e instanceof SyntaxError) || e.name!=='SyntaxError')return 1;
   if(e.message!=='Invalid JSON at byte 13 (line 1, column 10)')return 2;
@@ -84,7 +84,7 @@ struct Failure {
 fn initialization_and_native_failures_use_declared_results() -> Result<()> {
     let engine = Engine::default();
     let init_wit = "package test:initialization; world app { record failure {name:string,message:string} export run:func()->result<f64,failure>; }";
-    let init_source = "function setup():number{throw new RangeError('initialization failed');} const state=setup(); export function run():number{return state;}";
+    let init_source = "function setup():number{throw new RangeError('initialization failed');} const state=setup(); export function run(){return state;}";
     let init_component = Standard.component(init_wit, "app", "initialization.ts", init_source)?;
     let (mut store, instance) = crate::world::instantiate(&engine, &init_component)?;
     let run = instance.get_typed_func::<(), (Result<f64, Failure>,)>(&mut store, "run")?;
@@ -101,7 +101,7 @@ fn initialization_and_native_failures_use_declared_results() -> Result<()> {
 
     let native_wit = "package test:errors; world boundary { record failure {name:string,message:string} export run:func(which:f64)->result<string,failure>; }";
     let native_source = r#"
-        export function run(which: number): string {
+        export function run(which: number) {
             if (which === 0) new Date(NaN).toISOString();
             if (which === 1) new TextDecoder('invalid');
             if (which === 2) new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array([255]));
@@ -187,7 +187,7 @@ async fn instantiate_compiled(
 #[tokio::test(flavor = "current_thread")]
 async fn uncaught_values_and_fetch_errors_preserve_boundaries() -> Result<()> {
     let source = r#"
-        async function fail(which: number): Promise<string> {
+        async function fail(which: number) {
             if (which === 0) throw new Error('broken');
             if (which === 1) throw new TypeError('invalid');
             if (which === 2) throw new RangeError('range');
@@ -205,8 +205,8 @@ async fn uncaught_values_and_fetch_errors_preserve_boundaries() -> Result<()> {
             await Promise.all([fetch('http://refused.invalid/doc.json')]);
             return 'unexpected success';
         }
-        export async function uncaught(which: number): Promise<string> { return fail(which); }
-        export async function categories(): Promise<string> {
+        export async function uncaught(which: number) { return fail(which); }
+        export async function categories() {
             const pending = fetch('http://refused.invalid/doc.json');
             try { await pending; } catch (original) {
                 try { await pending; } catch (e) {
@@ -216,7 +216,7 @@ async fn uncaught_values_and_fetch_errors_preserve_boundaries() -> Result<()> {
             }
             return 'unexpected success';
         }
-        export async function reuse(fail: boolean): Promise<string> {
+        export async function reuse(fail: boolean) {
             if (!fail) return 'recovered';
             await Promise.all([fetch('http://refused.invalid/doc.json'), fetch('http://refused.invalid/other.json')]);
             return 'unexpected success';

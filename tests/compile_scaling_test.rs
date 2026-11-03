@@ -17,7 +17,7 @@ fn property_chain(depth: usize) -> String {
     }
     source.push_str(&format!("interface N{depth} {{ v: number }}\n"));
     source.push_str(&format!(
-        "function get(o: N0): number {{ return o{}.v; }}\n",
+        "function get(o: N0) {{ return o{}.v; }}\n",
         ".c".repeat(depth)
     ));
     let mut literal = "{ v: 1 }".to_string();
@@ -25,7 +25,7 @@ fn property_chain(depth: usize) -> String {
         literal = format!("{{ v: {level}, c: {literal} }}");
     }
     source.push_str(&format!(
-        "export function run(n: number): number {{ return get({literal}) + n; }}\n"
+        "export function run(n: number) {{ return get({literal}) + n; }}\n"
     ));
     source
 }

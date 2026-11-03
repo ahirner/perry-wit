@@ -9,10 +9,10 @@ use wasmtime::Val;
 fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
     let engine = wasmtime::Engine::default();
     for source in [
-        "export function run(a:number,b:number):number { return a+b; }",
-        "export function run(a:number,b:number):number { return [a,b].length+a; }",
-        "export function run(a:number,b:number):number { let sum=b; for(let i=0;i<a;i++)sum+=1; return sum; }",
-        "export function run(a:number,b:number):number { return a+b; } export function unused():string { return String(Math.random()); }",
+        "export function run(a:number,b:number) { return a+b; }",
+        "export function run(a:number,b:number) { return [a,b].length+a; }",
+        "export function run(a:number,b:number) { let sum=b; for(let i=0;i<a;i++)sum+=1; return sum; }",
+        "export function run(a:number,b:number) { return a+b; } export function unused() { return String(Math.random()); }",
     ] {
         let compiled = compile(source, "func(a:f64,b:f64)->f64")?;
         let wasm = inspect_wasm(&compiled.core)?;
@@ -33,9 +33,9 @@ fn independent_scalar_boundaries_have_no_runtime_roots() -> Result<()> {
 fn scalar_signatures_do_not_hide_runtime_effects() -> Result<()> {
     let engine = wasmtime::Engine::default();
     for source in [
-        "export function run(a:number):number { return String(a).length; }",
-        "function check(a:number):number { if(a<0)throw new Error('negative'); return a; } export function run(a:number):number { try { return check(a); } catch { return -1; } }",
-        "let count=0; export function run(a:number):number { try { count+=a; return count; } catch { return -1; } }",
+        "export function run(a:number) { return String(a).length; }",
+        "function check(a:number) { if(a<0)throw new Error('negative'); return a; } export function run(a:number) { try { return check(a); } catch { return -1; } }",
+        "let count=0; export function run(a:number) { try { count+=a; return count; } catch { return -1; } }",
     ] {
         let compiled = compile(source, "func(a:f64)->f64")?;
         let wasm = inspect_wasm(&compiled.core)?;
@@ -63,7 +63,7 @@ fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
         "package test:unused; world test { import label: func() -> string; export run: func(a:f64)->f64; }",
         "test",
         "unused.ts",
-        "export function run(a:number):number { return String(a).length; }",
+        "export function run(a:number) { return String(a).length; }",
     )?;
     assert!(
         !inspect_wasm(&compiled.core)?
@@ -79,14 +79,14 @@ fn unused_host_imports_do_not_root_the_allocator() -> Result<()> {
 fn unreachable_functions_do_not_add_code_or_host_requirements() {
     let source = r#"
 function recur(n: number): number { if (n <= 0) return 2; return recur(n - 1) + 1; }
-async function next(n: number): Promise<number> { return recur(n); }
-export async function run(n: number): Promise<number> { return await next(n); }
+async function next(n: number) { return recur(n); }
+export async function run(n: number) { return await next(n); }
 "#;
     let extra = r#"
-function unusedCycle(n: number): number { return unusedOther(n); }
+function unusedCycle(n: number) { return unusedOther(n); }
 function unusedOther(n: number): number { return unusedCycle(n); }
 async function unusedFetch(): Promise<string> { return await (await fetch('https://example.test')).text(); }
-function unusedLog(): void { console.log('unreachable'); }
+function unusedLog() { console.log('unreachable'); }
 "#;
     let build = |source: &str| perry_wit::compile_core(source, "case.ts").expect("source compiles");
     let core = build(source);
@@ -98,7 +98,7 @@ function unusedLog(): void { console.log('unreachable'); }
 #[test]
 fn linked_function_names_identify_executing_frames() {
     let mut program = Program::new(
-        "export function spin(n: number): string { let text = ''; while (n > 0) { text += String(n); n--; } return text; }",
+        "export function spin(n: number) { let text = ''; while (n > 0) { text += String(n); n--; } return text; }",
     );
     program.store.set_fuel(50_000).unwrap();
     let function = program
@@ -131,12 +131,12 @@ fn repeated_leaf_calls_keep_a_bounded_compilation_size() {
         .collect::<String>();
     let source = format!(
         r#"
-function choose(a: number, b: number): number {{
+function choose(a: number, b: number) {{
   if (a < b) return a + b;
   if (a > b) return a - b;
   return a * b;
 }}
-export function run(n: number): number {{ let sum = 0; {calls} return sum; }}
+export function run(n: number) {{ let sum = 0; {calls} return sum; }}
 "#
     );
     let mut program = Program::new(&source);
@@ -173,7 +173,7 @@ interface Entry<T=string> extends Base<T> {}
 type Box<T> = {item:T};
 interface Link<T> {value:T;next:Link<T>|null}
 function size(page:Page<Entry>) {const items = page.items; const first = items[0]; return first.value.length;}
-function unbox(box:Box<number>):number {return box.item;}
+function unbox(box:Box<number>) {return box.item;}
 export function run():number {
  const value:Pair<string,Item> = {a:'x',b:{n:17}};
  const defaults:Pair<string> = {a:'a',b:'bc'};
@@ -182,7 +182,7 @@ export function run():number {
  return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
 }
 
-export function charLoop(s: string): number {
+export function charLoop(s: string) {
  let count = 0;
  for (let i = 0; i < s.length; i++) { if (s[i] === '-') count++; }
  return count;
@@ -228,7 +228,7 @@ fn byte_extents_preserve_subview_and_index_semantics() -> Result<()> {
     ] {
         let source = format!(
             r#"
-export function run(): number {{
+export function run() {{
     const bytes = new Uint8Array(8);
     for (let i = 0; i < 8; i++) bytes[i] = i + 1;
     const view = {view}; const alias = view;
@@ -260,7 +260,7 @@ fn nonfinite_arithmetic_cannot_prove_byte_bounds() -> Result<()> {
     for expression in ["positive-positive", "positive+negative"] {
         let source = format!(
             r#"
-export function run(limit:number):number {{
+export function run(limit:number) {{
     const bytes=new Uint8Array(2); bytes[0]=7;
     let positive=0; let negative=0;
     for(let i=0;i<limit;i++) {{ positive+=1e308; negative-=1e308; }}

@@ -82,7 +82,7 @@ fn graph_round_trips_match_node() {
         r#"
 const inputs:string[]={};
 const outputs:string[]={};
-export function run():number {{
+export function run() {{
 {compiled}
  for(let i=0;i<inputs.length;i++) if(JSON.stringify(JSON.parse(inputs[i]))!==outputs[i]) return i+1;
  try {{JSON.stringify([[JSON.parse(inputs[{deep}])]]);return -1;}}catch(e){{}}
@@ -115,7 +115,7 @@ type Result<T> = {tag:'ok';val:T}|{tag:'err';val:string};
 interface Item {n:number}
 interface Envelope {result:Result<Item>}
 interface Row {name:string; inner:Item; extra?:string}
-export function encoding():number {
+export function encoding() {
  const text = new TextDecoder().decode(new Uint8Array([34,255,34]));
  const typed:string = JSON.parse(text);
  if(typed !== '�') return 1;
@@ -124,7 +124,7 @@ export function encoding():number {
  catch(error) {if(!(error instanceof TypeError))return 4;}
  return 0;
 }
-export function duplicates():number {
+export function duplicates() {
  const tagged:Envelope=JSON.parse('{"result":{"val":{"n":4},"tag":"ok"}}');
  if(tagged.result.tag !== 'ok') return 1;
  if(tagged.result.val.n !== 4) return 1;
@@ -169,7 +169,7 @@ export function duplicates():number {
     let limits = format!(
         r#"
 interface Limits {{n:number;text:string}}
-export function limits():number {{
+export function limits() {{
  const row:Limits=JSON.parse({good});
  if(1/row.n !== -Infinity || row.text.length !== 2) return 1;
  try {{const bad:Limits=JSON.parse({bad});return 2;}}catch(e){{}}
@@ -209,7 +209,7 @@ export function limits():number {{
         })
         .collect();
     let fields = format!(
-        "export function fields():number {{const value:{{{}}}=JSON.parse({input});{checks}return 0;}}",
+        "export function fields() {{const value:{{{}}}=JSON.parse({input});{checks}return 0;}}",
         declared.join(";")
     );
     let source = format!("{DUPLICATES}{limits}{fields}");
@@ -230,7 +230,7 @@ type Result<T>={tag:'ok';val:T}|{tag:'err';val:string};
 interface Part {id:number; values:number[]}
 interface Document {one:Part; two:Part}
 let saved:Document|undefined;
-export function members():number {
+export function members() {
  const row:Row = JSON.parse('{ "extra": {"z":1,"2":2,"1":1,"z":3}, "name":"old", "inner":{"n":2,"other":"\\u0061"}, "values":[1,2], "name":"new", "numeric":-0, "overflow":1e400 }');
  if (JSON.stringify(row) !== '{"extra":{"1":1,"2":2,"z":3},"name":"new","inner":{"n":2,"other":"a"},"values":[1,2],"numeric":0,"overflow":null}') return 1;
  const alias = row.inner;
@@ -253,7 +253,7 @@ export function members():number {
  if(JSON.stringify([-0,Infinity,-Infinity,NaN,1e-7,1e21])!=='[0,null,null,null,1e-7,1e+21]')return 7;
  return 0;
 }
-export function tuples():number {
+export function tuples() {
  const tuple:[number,string|undefined]=JSON.parse('[1]');
  if(JSON.stringify(tuple)!=='[1,null]')return 1;
  tuple[1]='added';
@@ -273,15 +273,15 @@ export function tuples():number {
  if(JSON.stringify(table)!=='{"first":"one"}' || JSON.stringify(tableError.cause)!=='[{"_0":"first","_1":"one"}]')return 9;
  return 0;
 }
-export function warm():number {
+export function warm() {
  saved=JSON.parse('{    "one": {"id":1, "values":[1, 2], "extra":"é🙂"},    "two": {"id":2, "values":[4, 5], "extra":{"2":2,"1":1}}    }');
  return JSON.stringify(saved).length;
 }
-export function read():number {
+export function read() {
  const doc=saved;if(doc===undefined)return -1;
  return JSON.stringify(doc.two)==='{"id":2,"values":[4,5],"extra":{"1":1,"2":2}}'?1:0;
 }
-export function mutate():number {
+export function mutate() {
  const doc=saved;if(doc===undefined)return -1;
  doc.two.values.push(6);const alias=doc.two;alias.id=9;
  return JSON.stringify(doc.two)==='{"id":9,"values":[4,5,6],"extra":{"1":1,"2":2}}'?1:0;
@@ -300,7 +300,7 @@ export function mutate():number {
         r#"
 interface MixedInner { n:number }
 interface Mixed { inner:MixedInner; values:number[]; optional?:number }
-export function mixed(x:number):number {
+export function mixed(x:number) {
  const exact=parseInt('9007199254740993');
  const native:Mixed={inner:{n:exact},values:[exact],optional:exact};
  const parsed:Mixed=JSON.parse('{"inner":{"n":0.5},"values":[0.5],"optional":null,"optional":0.5}');
@@ -326,7 +326,7 @@ export function mixed(x:number):number {
         r#"
 interface Link {next?:Link}
 interface Reflected {missing?:string; nullable:string|null; both?:boolean|null; value?:number}
-export function reflection(n:number):number {
+export function reflection(n:number) {
  const value:Reflected={nullable:null,both:null,value:n};
  const error=new Error('optional',{cause:value});
  if(error.cause.missing!==undefined || error.cause.nullable!==null || error.cause.both!==null || error.cause.value!==n)return 1;
@@ -338,17 +338,17 @@ export function reflection(n:number):number {
  const link:Link={};const recursive=new Error('recursive',{cause:link});link.next=link;
  return recursive.cause.next===link?0:5;
 }
-export function dates():number {
+export function dates() {
  const dates=[new Date(NaN),new Date(253402300800000),new Date(-62198755200000)];
  return JSON.stringify(dates)==='[null,"+010000-01-01T00:00:00.000Z","-000001-01-01T00:00:00.000Z"]'?1:0;
 }
-export function sentinel(n:number, useNull:boolean):number {
+export function sentinel(n:number, useNull:boolean) {
  const value:number|null=useNull?null:n;
  if(JSON.stringify(value)!=='null' || JSON.stringify({value})!=='{"value":null}')return 1;
  const copy:{value:number|null}=JSON.parse(JSON.stringify({value}));
  return copy.value===null?0:2;
 }
-export function depth(n:number):number {
+export function depth(n:number) {
  let value:Link={};
  for(let i=0;i<n;i++)value={next:value};
  try {JSON.stringify(value);return 0;}catch(e){
@@ -385,7 +385,7 @@ let row:Row={name:'initial',n:0};
 let rowView='';
 let saved=JSON.parse('null');
 let view='';
-export async function run(n:number):Promise<number> {
+export async function run(n:number) {
  if(n>0 && (row.name!=='Café 🙂' || rowView!=='escaped 🙂' || saved.text!=='Café 🙂' || view!=='escaped 🙂'))return 1;
  const rows:Row[]=JSON.parse('[{"name":"Café 🙂","n":1,"extra":true},{"name":"escaped \\ud83d\\ude42","n":2}]');
  row=rows[0];
@@ -404,7 +404,7 @@ export async function run(n:number):Promise<number> {
  if(JSON.stringify(row)!=='{"name":"Café 🙂","n":1,"extra":true}' || saved.n!==n)return 3;
  return row.name.length+rowView.length;
 }
-export function scalar(n:number):number {
+export function scalar(n:number) {
  let input='';
  for(let i=0;i<1024;i++)input+='                                ';
  saved=JSON.parse(input+(n===0?'42':n===1?'"\\u00e9"':'""'));
@@ -486,7 +486,7 @@ fn row_benchmark(count: u32) -> String {
     format!(
         r#"
 interface Row {{id:number;name:string;price:number}}
-export function run():number {{
+export function run() {{
   const rows:Row[] = JSON.parse({});
   let sum = 0;
   for (let i=0;i<rows.length;i++) sum += rows[i].id + rows[i].name.length;
@@ -511,7 +511,7 @@ fn serialization_and_field_writes_keep_bounded_allocations() {
 interface Item {{count:number; label:string; added?:string}}
 let label='';
 let saved='';
-export function writes(n:number):number {{
+export function writes(n:number) {{
  const item:Item=JSON.parse('{{ "count": 1, "unknown": {{"2":2,"1":1}}, "label":"é🙂" }}');
  label=item.label;
  const before=JSON.stringify(item);
@@ -520,21 +520,21 @@ export function writes(n:number):number {{
  if(JSON.stringify(item)!=='{{"count":'+String(n+1)+',"unknown":{{"1":1,"2":2}},"label":"é🙂","added":"yes"}}')return -2;
  return item.count;
 }}
-export function churn(n:number):number {{
+export function churn(n:number) {{
  const item:Item=JSON.parse('{{"count":1,"unknown":true,"label":"é🙂","added":"before"}}');
  const copy={{...item}};
  for(let i=0;i<n;i++){{delete item.added;item.added=item.label;}}
  if(JSON.stringify(copy)!=='{{"count":1,"unknown":true,"label":"é🙂","added":"before"}}')return -1;
  return item.count+(item.added===item.label?1:0);
 }}
-export function numbers(n:number):number {{
+export function numbers(n:number) {{
  const values:number[]=[];
  for(let i=0;i<n;i++)values.push(i);
  const text=JSON.stringify(values);
  return text[0]==='[' && text[text.length-1]===']' ? n : -1;
 }}
-export function quote():number {{saved=JSON.stringify({text});return saved==={quoted}?1:0;}}
-export function retained():number {{return saved==={quoted} && label==='é🙂'?1:0;}}
+export function quote() {{saved=JSON.stringify({text});return saved==={quoted}?1:0;}}
+export function retained() {{return saved==={quoted} && label==='é🙂'?1:0;}}
 "#,
         text = serde_json::to_string(&text).unwrap()
     );
@@ -591,7 +591,7 @@ fn graph_serialization_allocations_scale_with_output() {
         let source = format!(
             r#"
 export function parse():number {{ const rows=JSON.parse({input});return rows.length; }}
-export function write():number {{ const rows=JSON.parse({input});let size=0;for(let i=0;i<rows.length;i++)size+=JSON.stringify(rows[i]).length;return size; }}
+export function write() {{ const rows=JSON.parse({input});let size=0;for(let i=0;i<rows.length;i++)size+=JSON.stringify(rows[i]).length;return size; }}
 "#
         );
         // Two instances of one module: the difference is what serialization allocates.
@@ -633,14 +633,14 @@ fn immutable_json_lookup_preserves_duplicates_keys_and_copied_container_owners()
     let source = format!(
         r#"
 let kept=JSON.parse('{{}}');
-export function prepare():number {{
+export function prepare() {{
  const original=JSON.parse({literal});
  const copy={{...original,k0:100}};
  if(original.k0!==99 || original.k1!==88 || copy.k0!==100 || copy.k1!==88)return 1;
  kept=copy;
  return 0;
 }}
-export function read():number {{
+export function read() {{
  if(kept.k0!==100 || kept.k1!==88 || kept['é🙂']!==17 || kept.missing!==undefined)return 1;
  for(let i=2;i<40;i++)if(kept['k'+i]!==i)return 2;
  const values=kept.values;
@@ -668,7 +668,7 @@ interface Link {n:number; next?:Link}
 interface Box {value:unknown}
 type Choice = {tag:"ok";val:{n:number}} | {tag:"err";val:string};
 type MaybeChoice = {tag:"empty"} | {tag:"value";val:number};
-export function run():number {
+export function run() {
  const text = JSON.stringify({a:"value",b:2}, (key,value) => key === "b" ? undefined : value);
  if (text !== '{"a":"value"}') return 1;
  if (JSON.stringify({a:1,b:2}, ["b","a","b"]) !== '{"b":2,"a":1}') return 2;
@@ -718,7 +718,7 @@ export function run():number {
  if(JSON.stringify(choice,(key,value) => value)!=='{"tag":"ok","val":{"n":1}}') return 23;
  return 0;
 }
-export function retained():number {
+export function retained() {
  for(const input of ['{"tag":"ok","val":{"n":1},"extra":true,"extra":7}',
                      '{"extra":7,"val":{"n":1},"tag":"ok"}']) {
    const cursor:Choice = JSON.parse(input);
@@ -757,7 +757,7 @@ export function retained():number {
  }
  return 0;
 }
-export function boxed():number {
+export function boxed() {
  const values:(number|undefined)[] = [undefined,2,undefined];
  let keys = "";
  const text = JSON.stringify(values,(key,value) => {

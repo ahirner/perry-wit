@@ -1,3 +1,3 @@
-export function add(x: bigint, y: bigint): bigint {
+export function add(x: bigint, y: bigint) {
   return x + y;
 }

@@ -37,13 +37,13 @@ async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
     ] {
         let source = format!(
             "import {{ setTimeout }} from 'node:timers/promises'; \
-             function syncAdd(a:{source_type},b:{source_type}):{source_type} {{ return a+b; }} \
-             async function asyncAdd(a:{source_type},b:{source_type}):Promise<{source_type}> {{ await Promise.resolve(1); return a+b; }} \
+             function syncAdd(a:{source_type},b:{source_type}) {{ return a+b; }} \
+             async function asyncAdd(a:{source_type},b:{source_type}) {{ await Promise.resolve(1); return a+b; }} \
              async function timedAdd(a:{source_type},b:{source_type}):Promise<{source_type}> {{ const saved = await setTimeout(1,a); await setTimeout(1); return saved+b; }} \
-             export async function run(a:{source_type},b:{source_type}):Promise<{source_type}> {{ await Promise.resolve(1); return syncAdd(a,b); }} \
-             export async function awaited(a:{source_type},b:{source_type}):Promise<{source_type}> {{ return await asyncAdd(a,b); }} \
+             export async function run(a:{source_type},b:{source_type}) {{ await Promise.resolve(1); return syncAdd(a,b); }} \
+             export async function awaited(a:{source_type},b:{source_type}) {{ return await asyncAdd(a,b); }} \
              export async function resolved(a:{source_type},b:{source_type}):Promise<{source_type}> {{ return await Promise.resolve(a+b); }} \
-             export async function timed(a:{source_type},b:{source_type}):Promise<{source_type}> {{ return await timedAdd(a,b); }}"
+             export async function timed(a:{source_type},b:{source_type}) {{ return await timedAdd(a,b); }}"
         );
         let sig = format!("async func(a:{domain},b:{domain})->{domain}");
         let compiled = compile(
@@ -63,17 +63,17 @@ async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
     let compiled = compile(
         r#"
         import {setTimeout} from 'node:timers/promises';
-        function choose(i:number):number {
+        function choose(i:number) {
             const values = [parseInt("9007199254740993"), 0.5];
             return values[i] ?? 0.25;
         }
-        export async function run(i:number):Promise<string> {
+        export async function run(i:number) {
             const pending = setTimeout(1, choose(i));
             const first = await pending;
             await pending;
             return JSON.stringify(await Promise.resolve(first));
         }
-        export async function all(i:number):Promise<number> {
+        export async function all(i:number) {
             const pending = setTimeout(1, choose(i));
             const values = await Promise.all([pending, pending]);
             return values[1] as number;
@@ -105,18 +105,18 @@ async fn promise_joins_and_escaping_payloads_converge_on_compatible_representati
 {
     use wasmtime::component::Val;
     let source = r#"
-        async function add0(a:number,b:number):Promise<number> { await Promise.resolve(1); return a+b; }
-        async function add1(a:number,b:number):Promise<number> { await Promise.resolve(1); return a+b; }
-        async function add2(a:number,b:number):Promise<number> { await Promise.resolve(1); return a+b; }
-        async function add3(a:number,b:number):Promise<number> { await Promise.resolve(1); return a+b; }
-        async function add4(a:number,b:number):Promise<number> { await Promise.resolve(1); return a+b; }
+        async function add0(a:number,b:number) { await Promise.resolve(1); return a+b; }
+        async function add1(a:number,b:number) { await Promise.resolve(1); return a+b; }
+        async function add2(a:number,b:number) { await Promise.resolve(1); return a+b; }
+        async function add3(a:number,b:number) { await Promise.resolve(1); return a+b; }
+        async function add4(a:number,b:number) { await Promise.resolve(1); return a+b; }
         async function sum(n:number):Promise<number> { if(n<=0)return 0; return n+await sum(n-1); }
-        export async function run(a:number,b:number,flag:boolean):Promise<number> { const pending = flag ? add0(a,b) : Promise.resolve(a+b); return await pending; }
-        export async function joinConst(a:number,b:number,flag:boolean):Promise<number> { const pending = flag ? add1(a,b) : Promise.resolve(0.5); return await pending; }
-        export async function joinCall(a:number,b:number,flag:boolean):Promise<number> { const pending = flag ? add2(a,b) : add2(0.5,b); return await pending; }
+        export async function run(a:number,b:number,flag:boolean) { const pending = flag ? add0(a,b) : Promise.resolve(a+b); return await pending; }
+        export async function joinConst(a:number,b:number,flag:boolean) { const pending = flag ? add1(a,b) : Promise.resolve(0.5); return await pending; }
+        export async function joinCall(a:number,b:number,flag:boolean) { const pending = flag ? add2(a,b) : add2(0.5,b); return await pending; }
         export async function allJoin(a:number,b:number,_flag:boolean):Promise<number> { const values = await Promise.all([add3(a,b), Promise.resolve(0.5)]); return values[0] + values[1]; }
-        export async function loopJoin(a:number,b:number,_flag:boolean):Promise<number> { let pending = Promise.resolve(a); for(let i=0;i<b;i++){ pending=add4(await pending,a); } return await pending; }
-        export async function recurSum(_a:number,b:number,_flag:boolean):Promise<number> { return await sum(b); }
+        export async function loopJoin(a:number,b:number,_flag:boolean) { let pending = Promise.resolve(a); for(let i=0;i<b;i++){ pending=add4(await pending,a); } return await pending; }
+        export async function recurSum(_a:number,b:number,_flag:boolean) { return await sum(b); }
     "#;
     let compiled = compile(
         source,
@@ -162,7 +162,7 @@ async fn async_dispatch_roots_only_constructed_frame_handlers() -> Result<()> {
     ] {
         let compiled = compile(
             &format!(
-                "async function value(n:number):Promise<number> {{ return n+1; }} export async function run(n:number):Promise<number> {{ {body} }}"
+                "async function value(n:number) {{ return n+1; }} export async function run(n:number):Promise<number> {{ {body} }}"
             ),
             "async func(n:f64)->f64",
         )?;

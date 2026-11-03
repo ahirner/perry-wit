@@ -7,7 +7,7 @@ use std::fmt::Write;
 fn normalization_preserves_complete_combining_segments() {
     let mut program = Program::checked(
         r#"
-export function boundaries(n: number): number {
+export function boundaries(n: number) {
   const marks = '\u0315'.repeat(n);
   const source = 'a' + marks + '\u0300';
   if (source.normalize('NFD') !== 'a\u0300' + marks) return -1;
@@ -43,7 +43,7 @@ export function boundaries(n: number): number {
   return n;
 }
 
-export function scaling(n: number): number {
+export function scaling(n: number) {
   const source = 'x' + '\u0315\u0300'.repeat(n);
   const normalized = source.normalize('NFD');
   if (normalized !== 'x' + '\u0300'.repeat(n) + '\u0315'.repeat(n)) return -1;
@@ -88,9 +88,9 @@ fn append_and_builders_reuse_storage_and_preserve_aliases() {
         r#"
 let saved = '';
 let escaped = '';
-function keep(value: string): number { escaped = value; return value.length; }
+function keep(value: string) { escaped = value; return value.length; }
 
-function strip(text: string): string {
+function strip(text: string) {
   let result = '';
   let inSpace = false;
   for (let i = 0; i < text.length; i++) {
@@ -105,7 +105,7 @@ function strip(text: string): string {
   return result;
 }
 
-export function retained_run(n: number): number {
+export function retained_run(n: number) {
   let text = 'é🙂' + String(n);
   saved = text.slice(0, 2);
   for (let i = 0; i < n; i++) text += '漢';
@@ -113,9 +113,9 @@ export function retained_run(n: number): number {
   if (saved.charCodeAt(1) !== 55357 || saved.charCodeAt(2) !== 56898 || !Number.isNaN(saved.charCodeAt(3))) return -2;
   return text.length;
 }
-export function retained(n: number): number { return saved.length + saved.codePointAt(1) + n; }
+export function retained(n: number) { return saved.length + saved.codePointAt(1) + n; }
 
-export function astral(n: number): number {
+export function astral(n: number) {
   let text = '🙂é';
   const prefix = text + '!';
   text = prefix;
@@ -127,7 +127,7 @@ export function astral(n: number): number {
   return text.length + text.indexOf('!') + text.codePointAt(0);
 }
 
-export function owned(n: number): number {
+export function owned(n: number) {
   let text = '';
   const kept: string[] = [];
   for (let i = 0; i < n; i++) {
@@ -163,7 +163,7 @@ export function owned(n: number): number {
   return text.length;
 }
 
-export function exclusive(n: number): number {
+export function exclusive(n: number) {
   let text = '';
   for (let i = 0; i < n; i++) {
     text = text + 'é😀x';
@@ -172,7 +172,7 @@ export function exclusive(n: number): number {
   return text.length;
 }
 
-export function consumed_run(n: number): number {
+export function consumed_run(n: number) {
   const input = 'a- b'.repeat(n / 4);
   let text = '';
   for (let i = 0; i < input.length; i++) {
@@ -182,7 +182,7 @@ export function consumed_run(n: number): number {
   if (text !== 'a__b'.repeat(n / 4)) return -1;
   return JSON.stringify(text).length;
 }
-export function consumed_aliases(n: number): number {
+export function consumed_aliases(n: number) {
   const prefix = 'é' + String(n);
   let left = prefix;
   let right = prefix;
@@ -193,12 +193,12 @@ export function consumed_aliases(n: number): number {
   return 1;
 }
 
-export function returned_run(n: number): number {
+export function returned_run(n: number) {
   const result = strip(' x '.repeat(n));
   if (result.charAt(0) !== 'x' || result.charAt(result.length - 1) !== 'x') return -1;
   return result.length;
 }
-export function returned_aliases(n: number): number {
+export function returned_aliases(n: number) {
   const original = 'é😀' + String(n);
   let text = original;
   if (n > 0) text = text + 'x';
@@ -213,7 +213,7 @@ export function returned_aliases(n: number): number {
   return 1;
 }
 
-export async function async_builders(n: number): Promise<number> {
+export async function async_builders(n: number) {
   const input = 'aé😀\0';
   const prefixes: string[] = [];
   let output = '';
@@ -235,7 +235,7 @@ export async function async_builders(n: number): Promise<number> {
   }
   return sum * 1000 + output.length;
 }
-export function sync_build(n: number): number {
+export function sync_build(n: number) {
   let output = '';
   for (let i = 0; i < n; i++) {
     const c = 'é😀'.charAt(i % 2);
@@ -304,15 +304,15 @@ fn regex_search_replacements_and_named_captures() {
     let mut program = Program::checked(
         r#"
 let calls = 0;
-function replacement(match: string, first: string | undefined, second: string | undefined, offset: number, input: string): string {
+function replacement(match: string, first: string | undefined, second: string | undefined, offset: number, input: string) {
   calls++;
   return '[' + match + ':' + first + ':' + second + ':' + offset + ':' + input.length + ']';
 }
-function probe(text: string): string {
+function probe(text: string) {
   const match = /(?<word>a)/.exec(text);
   return match?.groups?.word ?? 'missing';
 }
-export function search(n: number): number {
+export function search(n: number) {
   const chars = 'a-z';
   const suffix = '\\d{2}';
   const flags = 'u';
@@ -322,7 +322,7 @@ export function search(n: number): number {
   for (let i = 0; i < n; i++) total = total + text.search(expression) + (expression.test(text) ? 1 : 0);
   return total;
 }
-export function replace(n: number): number {
+export function replace(n: number) {
   const map: Record<string, string> = {a: 'A', b: 'B'};
   if ('caba'.replace(/[ab]/g, ch => map[ch]) !== 'cABA') return -1;
   calls = 0;
@@ -349,7 +349,7 @@ export function replace(n: number): number {
   if ('ab'.replace(/[ab]/g, () => 7) !== '77') return -13;
   return n;
 }
-export function named(n: number): number {
+export function named(n: number) {
   if (probe('a') !== 'a' || probe('b') !== 'missing') return -1;
   const result = /(?<word>a)(?<tail>b)?/.exec('xa');
   if (result === null || result.groups === undefined) return -2;
@@ -401,9 +401,9 @@ fn constant_regex_preserves_binding_initialization() -> anyhow::Result<()> {
         r#"
 let caught=0;
 try { probe(); } catch(error) { caught=1; }
-function probe():boolean { return new RegExp(`[${chars}]`).test('a'); }
+function probe() { return new RegExp(`[${chars}]`).test('a'); }
 const chars='ab';
-export function run():number { return caught+(probe()?1:0); }
+export function run() { return caught+(probe()?1:0); }
 "#,
         &[("run", &[], 2.0)],
     )
@@ -413,8 +413,8 @@ export function run():number { return caught+(probe()?1:0); }
 fn string_spread_and_array_from_yield_scalars() -> anyhow::Result<()> {
     crate::node_oracle::assert_numbers(
         r#"
-function first<T>(items: T[]): T { return items[0]; }
-export function run(): number {
+function first<T>(items: T[]) { return items[0]; }
+export function run() {
   const text = 'aé😀';
   const spread = [...text, ...''];
   if (spread.join('|') !== 'a|é|😀') return -1;
@@ -433,12 +433,12 @@ fn ascii_split_and_casing_sharing_avoid_allocations() {
     let mut program = Program::checked(
         r#"
 let codeText = '';
-export function prepare_codes(n: number): number {
+export function prepare_codes(n: number) {
   codeText = n === 0 ? 'é😀z' : 'x'.repeat(n);
   return codeText.length;
 }
-export function read_code(n: number): number { return codeText.charCodeAt(n); }
-export function ascii(n: number): number {
+export function read_code(n: number) { return codeText.charCodeAt(n); }
+export function ascii(n: number) {
   const text = 'é' + 'x'.repeat(n) + '😀';
   let sum = 0;
   for (let i = 1; i <= n; i++) {
@@ -449,7 +449,7 @@ export function ascii(n: number): number {
   if (text.charAt(0) !== 'é' || text.charAt(n + 1) !== '😀') return -2;
   return sum;
 }
-export function split_run(n: number): number {
+export function split_run(n: number) {
   const text = 'x'.repeat(n);
   const pieces = text.split('');
   let total = 0;
@@ -459,7 +459,7 @@ export function split_run(n: number): number {
   }
   return total;
 }
-export function split_aliases(n: number): number {
+export function split_aliases(n: number) {
   let source = 'é😀' + String(n);
   const pieces = source.split(',');
   source += '尾';
@@ -473,13 +473,13 @@ export function split_aliases(n: number): number {
   if (''.split(',').length !== 1 || ''.split('').length !== 0) return -5;
   return piece.length;
 }
-export function casing_run(n: number): number {
+export function casing_run(n: number) {
   const lower = 'ä🙂already lowercase'; const upper = 'Ä🙂ALREADY UPPERCASE';
   let total = 0;
   for (let i = 0; i < n; i++) total += lower.toLowerCase().length + upper.toUpperCase().length;
   return total;
 }
-export function casing_aliases(n: number): number {
+export function casing_aliases(n: number) {
   let source = 'ä🙂' + String(n);
   let lower = source.toLowerCase(); const kept = lower;
   source += 'X'; lower += '!';
@@ -559,14 +559,14 @@ fn short_literal_and_scalar_character_comparisons_preserve_utf8_order() {
     for (index, literal) in literals.iter().enumerate() {
         let literal = serde_json::to_string(literal).unwrap();
         source += &format!(
-            "export function compare{index}(n: number): number {{ const s = samples[n]; if (s === undefined) return -1; return {}; }}\n",
+            "export function compare{index}(n: number) {{ const s = samples[n]; if (s === undefined) return -1; return {}; }}\n",
             comparison_expression("s", &literal)
         );
     }
     for (index, literal) in char_literals.iter().enumerate() {
         let literal = serde_json::to_string(literal).unwrap();
         source += &format!(
-            "export function check{index}(n: number): number {{ const c = {}.charAt(n); return {} + c.length * 4096; }}\n",
+            "export function check{index}(n: number) {{ const c = {}.charAt(n); return {} + c.length * 4096; }}\n",
             serde_json::to_string(text).unwrap(),
             comparison_expression("c", &literal)
         );

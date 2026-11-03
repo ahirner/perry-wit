@@ -31,7 +31,7 @@ world fetch {
 "#;
 
 const SOURCE: &str = r#"
-export async function run(url: string): Promise<string> {
+export async function run(url: string) {
   const posted = await fetch(url + '/echo?x=1', {
     method: 'post',
     headers: { 'X-Token': ' abc ' },
@@ -227,7 +227,7 @@ async fn cancelled_fetches_release_requests_and_partial_bodies() -> Result<()> {
         "package test:fetch-cancel; world run {import wasi:http/client@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func();}",
         "run",
         "cancel.ts",
-        "export async function run():Promise<void>{const response=await fetch('https://example.test/body',{method:'POST',body:new Uint8Array(1024)});try{await response.bytes();}finally{throw new Error('cancelled continuation ran');}}",
+        "export async function run(){const response=await fetch('https://example.test/body',{method:'POST',body:new Uint8Array(1024)});try{await response.bytes();}finally{throw new Error('cancelled continuation ran');}}",
     )?;
     let engine = async_engine()?;
     let component = Component::new(&engine, cancellation::cancellation_caller(&bytes, true)?)?;

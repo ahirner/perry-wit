@@ -401,7 +401,7 @@ fn profiling_names_are_optional_in_cli_components() {
     .unwrap();
     fs::write(
         root.join("entry.ts"),
-        "export function run(input:string):string{return input + '!';}",
+        "export function run(input:string){return input + '!';}",
     )
     .unwrap();
     for keep_names in [false, true] {

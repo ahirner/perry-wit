@@ -8,9 +8,9 @@ fn concat_and_spread_match_node_for_order_nullability_and_shallow_identity() -> 
     let source = r#"
 interface Cell { value:number }
 interface Holder { items:Cell[] }
-function mutate(items:Cell[]):number { items[0].value=9;return 3; }
-function mutateNumbers(a:number[]):number[] { a[0]=9;return [3]; }
-export function run():number {
+function mutate(items:Cell[]) { items[0].value=9;return 3; }
+function mutateNumbers(a:number[]) { a[0]=9;return [3]; }
+export function run() {
  const a:number[]=[1,2];
  const alias=a;
  const spread=[...a,...mutateNumbers(a),10];
@@ -56,10 +56,10 @@ export function run():number {
 fn owned_left_right_and_both_arrays_reuse_capacity_across_joins() {
     let source = r#"
 interface Cell { value: number }
-export function left(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat(borrowed);total+=joined.length+joined[0];}return total;}
-export function right(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=borrowed.concat(owned);total+=joined.length+joined[0];}return total;}
-export function literal(n:number):number{const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat([2,3]);total+=joined.length+joined[0];}return total + borrowed[0] - 2;}
-export function loopJoin(n: number): number {
+export function left(n:number){const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat(borrowed);total+=joined.length+joined[0];}return total;}
+export function right(n:number){const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=borrowed.concat(owned);total+=joined.length+joined[0];}return total;}
+export function literal(n:number){const borrowed:number[]=[2,3];let total=0;for(let i=0;i<n;i++){const owned:number[]=[1];const joined=owned.concat([2,3]);total+=joined.length+joined[0];}return total + borrowed[0] - 2;}
+export function loopJoin(n: number) {
   let numbers: number[] = [];
   let cells: Cell[] = [];
   for (let i = 0; i < n; i++) {
@@ -91,13 +91,13 @@ export function loopJoin(n: number): number {
 fn unchanged_module_graph_does_not_collect_on_every_export() {
     let source = r#"
 interface Cell { value: number; next: Cell | null }
-function build(): Cell {
+function build() {
   let head: Cell = { value: 0, next: null };
   for (let i = 1; i < 5000; i++) head = { value: i, next: head };
   return head;
 }
 const saved: Cell = build();
-export function run(n: number): number { return saved.value + n; }
+export function run(n: number) { return saved.value + n; }
 "#;
     let mut program = Program::checked(source, "retained.ts");
     assert_eq!(program.number("run", 1.0), 5000.0);
@@ -145,7 +145,7 @@ async function advance(cell: Cell): Promise<Cell> {
   const again = await pending;
   return { value: first.value + again.value, next: null };
 }
-export async function run(n: number): Promise<number> {
+export async function run(n: number) {
   let current: Cell = { value: 1, next: null };
   for (let i = 0; i < n; i++) {
     const cell: Cell = { value: i, next: current };
@@ -223,7 +223,7 @@ async function compute(n: number): Promise<number> {
     }
     return cell.value + cell.next.value + alias[0] + payload.value + settled[1];
 }
-export async function run(n: number): Promise<number> { return await compute(n); }
+export async function run(n: number) { return await compute(n); }
 "#;
     let mut program = Program::checked(source, "stress.ts");
     program.stress_collection(true);
@@ -251,13 +251,13 @@ export async function run(n: number): Promise<number> { return await compute(n);
 fn proven_frame_records_reuse_storage_across_calls_and_iterations() {
     let source = r#"
 interface Cell { value: number }
-export function inspect(cell: Cell): number {
+export function inspect(cell: Cell) {
     if (cell.value < 0) throw new RangeError('negative');
     let result = 0;
     for (let i = 0; i < 3; i++) result = result + cell.value;
     return result;
 }
-export function run(n: number): number {
+export function run(n: number) {
     let result = 0;
     for (let i = 0; i < n; i++) {
         const cell: Cell = { value: i };
@@ -287,7 +287,7 @@ export function run(n: number): number {
 fn mutable_dates_survive_calls_suspension_and_collection() {
     let source = r#"
 let saved: Date = new Date(0);
-function set(date: Date, time: number): number { return date.setTime(time); }
+function set(date: Date, time: number) { return date.setTime(time); }
 export async function run(n: number): Promise<number> {
     const alias = saved;
     const dates: Date[] = [saved];
@@ -351,17 +351,17 @@ export async function run(n: number): Promise<number> {
 fn frame_storage_is_released_on_exception_and_finalizer_paths() {
     let source = r#"
 interface Cell { value: number }
-function inspect(cell: Cell): number {
+function inspect(cell: Cell) {
     let result = 0;
     for (let i = 0; i < 3; i++) result = result + cell.value;
     return result;
 }
-function fail(n: number): number {
+function fail(n: number) {
     const cell: Cell = { value: n };
     try { if (n > 0) throw n; return inspect(cell); }
     finally { if (inspect(cell) < 0) throw 77; }
 }
-export function run(n: number): number {
+export function run(n: number) {
     let total = 0;
     for (let i = 0; i < n; i++) {
         try { total = total + fail(i); } catch (error) { total = total + 1; }
@@ -386,8 +386,8 @@ fn text_encoder_evaluates_the_receiver_and_arguments_in_order() {
     let mut program = Program::new(
         r#"
 let order = 0;
-function encoder(): TextEncoder { order = order * 10 + 1; return new TextEncoder(); }
-function input(n: number): string { order = order * 10 + n; return 'é'; }
+function encoder() { order = order * 10 + 1; return new TextEncoder(); }
+function input(n: number) { order = order * 10 + n; return 'é'; }
 export function run(): number {
   const bytes = encoder().encode(input(2), input(3));
   const empty = new TextEncoder().encode();
@@ -441,7 +441,7 @@ function make(n: number): Value {
     if (n % 3 === 1) return { tag: 'text', val: 'value:' + n };
     return { tag: 'point', val: { x: n, label: 'point:' + n } };
 }
-export function run(n: number): number {
+export function run(n: number) {
     let value: Value = { tag: 'empty' };
     for (let i = 0; i < n; i++) value = make(i);
     const parsed: Value = JSON.parse('{"tag":"point","val":{"x":7,"label":"json"}}');
@@ -487,10 +487,10 @@ function size(value: number | string): number {
     if (typeof value === 'number') { return value + 1; }
     else { return value.length; }
 }
-function same(a: number | string, b: number | string): boolean { return a === b; }
-function isSame(a: number | string, b: number | string): boolean { return Object.is(a, b); }
+function same(a: number | string, b: number | string) { return a === b; }
+function isSame(a: number | string, b: number | string) { return Object.is(a, b); }
 let retained: Item = {};
-export function run(n: number): number {
+export function run(n: number) {
     const absent: Item = {};
     const nil: Item = {value: null};
     if (typeof absent.value !== 'undefined' || typeof nil.value !== 'object') return -1;
@@ -531,9 +531,9 @@ export function run(n: number): number {
 fn allocation_free_calls_do_not_collect_or_publish_roots() {
     let mut program = Program::checked(
         r#"
-function leaf(n: number): number { if (n < 0) return -n; return n + 1; }
-function step(n: number): number { return leaf(n) + 2; }
-export function run(n: number): number {
+function leaf(n: number) { if (n < 0) return -n; return n + 1; }
+function step(n: number) { return leaf(n) + 2; }
+export function run(n: number) {
   let sum = 0;
   for (let i = 0; i < n; i++) sum += step(i);
   return sum;
@@ -558,14 +558,14 @@ fn nested_root_stack_growth_preserves_caller_objects_and_unwinds() {
     let mut program = Program::checked(
         r#"
 interface Cell { value: number }
-export function read(cell: Cell): number { if (cell.value < 0) throw new RangeError('negative'); return cell.value; }
+export function read(cell: Cell) { if (cell.value < 0) throw new RangeError('negative'); return cell.value; }
 function descend(n: number, fail: boolean): number {
   const cell = { value: n };
   if (n === 0) { if (fail) throw new RangeError("bottom"); return read(cell); }
   try { return descend(n - 1, fail) + read(cell); }
   catch (e) { return read(cell) + 1000; }
 }
-export function run(n: number): number {
+export function run(n: number) {
   const a = descend(n, false);
   const b = descend(n, true);
   return a + b;
@@ -586,7 +586,7 @@ export function run(n: number): number {
 fn non_error_messages_remain_collectible() {
     let mut program = Program::checked(
         r#"
-export function run(n: number): number {
+export function run(n: number) {
   let sum = 0;
   try { throw 0; } catch (error) {
     for (let i = 0; i < n; i++) sum += error.message.length;
@@ -609,9 +609,9 @@ export function run(n: number): number {
 #[test]
 fn compilation_preserves_root_and_async_frame_order() {
     let source = r#"
-function trimmed(s:string):string { return s.trim(); }
-function upper(s:string):string { return s.toUpperCase(); }
-function lower(s:string):string { return s.toLowerCase(); }
+function trimmed(s:string) { return s.trim(); }
+function upper(s:string) { return s.toUpperCase(); }
+function lower(s:string) { return s.toLowerCase(); }
 export async function run(n:number):Promise<number> {
     const a = trimmed(" A" + n + " ");
     const b = upper("b" + n);
@@ -642,24 +642,24 @@ fn promoted_record_arguments_eliminate_temporaries_and_stay_fresh_when_aliases_m
         r#"
 interface Cell { value: number }
 let saved: Cell = { value: 0 };
-function rounded(n: number): Cell { return { value: Math.floor(n) }; }
-function change(): number { saved.value += 10; return 3; }
-function read(cell: Cell, n: number): number {
+function rounded(n: number) { return { value: Math.floor(n) }; }
+function change() { saved.value += 10; return 3; }
+function read(cell: Cell, n: number) {
   if (n < 0) return cell.value - n;
   return cell.value + n;
 }
-function mutated(cell: Cell): number {
+function mutated(cell: Cell) {
   const before = cell.value;
   const middle = change();
   return before + middle + cell.value;
 }
-function escaped(cell: Cell): Cell { saved = cell; return cell; }
-export function intrinsic(n: number): number {
+function escaped(cell: Cell) { saved = cell; return cell; }
+export function intrinsic(n: number) {
   let sum = 0;
   for (let i = 0; i < n; i++) sum += rounded(i - 0.25).value;
   return sum;
 }
-export function promoted(n: number): number {
+export function promoted(n: number) {
   let sum = 0;
   for (let i = 0; i < n; i++) {
     const cell: Cell = { value: i };
@@ -685,7 +685,7 @@ export function promoted(n: number): number {
 fn atomic_helpers_publish_roots_only_when_collection_is_due() {
     let wasm = perry_wit::compiler::compile_core_with_memory_checks(
         r#"
-export function run(n: number): number {
+export function run(n: number) {
   let text = '';
   let prefix = '';
   for (let i = 0; i < n; i++) {
@@ -720,7 +720,7 @@ export function run(n: number): number {
 fn in_module_awaits_preserve_cyclic_loop_values_under_forced_collection() {
     let source = r#"
 async function step(n: number): Promise<number> { return await Promise.resolve(n + 1); }
-export async function run(n: number): Promise<number> {
+export async function run(n: number) {
   let a = 1; let b = 2; let c = 3;
   const marker = 'é' + String(n) + '😀';
   for (let i = 0; i < n; i++) {
@@ -784,11 +784,11 @@ export function run(n: number): number {
 #[test]
 fn array_callbacks_and_iteration_survive_forced_collection() {
     let source = r#"
-function twice(n:number):number {return n*2;}
-function nothing(n:number):void {}
+function twice(n:number) {return n*2;}
+function nothing(n:number) {}
 function missingDefault():number {throw new Error('missing');}
-function refill(values:number[]):number {values.push(1,2);return 8;}
-export function callbacks():number {
+function refill(values:number[]) {values.push(1,2);return 8;}
+export function callbacks() {
  let calls=0;
  const numbers:number[]=[1,2,3];
  const mapped=numbers.map((n,i,a)=>{calls++;if(i===0)a.push(4);return n+i;});
@@ -821,7 +821,7 @@ export function callbacks():number {
  if(retained[0].label!=='cell0' || retained[1].label!=='cell1')return 10;
  return small.filter(nothing).length;
 }
-export function iteration():number {
+export function iteration() {
  const values:number[]=[1,2];
  let visits=0;
  for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
@@ -891,11 +891,11 @@ interface Fields {
     hour?: number; minute?: number; second?: number;
     millisecond?: number; microsecond?: number; nanosecond?: number;
 }
-function convert(fields: Fields, options: {overflow?: 'constrain'|'reject'}): string {
+function convert(fields: Fields, options: {overflow?: 'constrain'|'reject'}) {
     return Temporal.PlainDateTime.from(fields, options).toString();
 }
-function parse(input: string): number { return Date.parse(input); }
-export function fields(): number {
+function parse(input: string) { return Date.parse(input); }
+export function fields() {
     if (Temporal.PlainDateTime.from({year:2024, month:2, day:29, hour:12}, {overflow:'reject'}).toString() !== '2024-02-29T12:00:00') return 1;
     if (Temporal.PlainDateTime.from({year:2024, month:2, day:29, hour:undefined}).toString() !== '2024-02-29T00:00:00') return 2;
     if (convert({year:2024, month:2, day:29, minute:undefined}, {}) !== '2024-02-29T00:00:00') return 3;
@@ -912,12 +912,12 @@ export function fields(): number {
     if(errors!==7) return 6;
     if(Temporal.PlainDateTime.from('2024-02-29T12:34:56.123456789', {overflow:'reject'}).toString() !== '2024-02-29T12:34:56.123456789') return 7;
     const trace:number[]=[];
-    function mark(n:number):number { trace.push(n); return n; }
+    function mark(n:number) { trace.push(n); return n; }
     const value=Temporal.PlainDateTime.from({year:mark(2024), ignored:mark(9), month:mark(2), day:mark(31), hour:mark(25), hour:mark(23)}, {ignored:mark(8), overflow:'reject', overflow:'constrain'});
     if(value.toString()!=='2024-02-29T23:00:00' || trace.join(',')!=='2024,9,2,31,25,23,8') return 8;
     return 0;
 }
-export function legacy(): number {
+export function legacy() {
     let errors=0;
     try { Date.parse('Sun, 06 Nov 1994 08:49:37 GMT'); } catch(e) {
         if(e instanceof RangeError && e.message.includes('Unsupported legacy Date string format')) errors++;

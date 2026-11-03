@@ -299,7 +299,7 @@ async fn components() -> Result<Vec<Row>> {
 
     // text: a synchronous export appending to its argument.
     let text = component(
-        r#"export function runTask(input: string): string {
+        r#"export function runTask(input: string) {
   let result = input;
   for (let index = 0; index < 64; index++) result = result + "!";
   return result;
@@ -361,7 +361,7 @@ export async function runTask(path: string): Promise<string> {
 
     // incoming-stream: sum 4 MiB of `stream<u8>`, one chunk alive at a time.
     let stream = component(
-        r#"export async function run(input: ReadableStream<Uint8Array>): Promise<number> {
+        r#"export async function run(input: ReadableStream<Uint8Array>) {
   const reader = input.getReader();
   let sum = 0;
   let result = await reader.read();
@@ -460,7 +460,7 @@ fn microbenchmarks() -> Result<Vec<Row>> {
     let workloads = [
         (
             "scalar % loop",
-            r#"export function run(n: number): number {
+            r#"export function run(n: number) {
   let acc = 0;
   for (let i = 0; i < n; i++) acc = (acc + i * 3) % 1000003;
   return acc;
@@ -469,8 +469,8 @@ fn microbenchmarks() -> Result<Vec<Row>> {
         (
             "temporary record per iteration",
             r#"interface Point { x: number; y: number }
-function make(i: number): Point { return { x: i, y: i * 2 }; }
-export function run(n: number): number {
+function make(i: number) { return { x: i, y: i * 2 }; }
+export function run(n: number) {
   let sum = 0;
   for (let i = 0; i < n; i++) { const p = make(i); sum = (sum + p.x + p.y) % 1000003; }
   return sum;
@@ -479,7 +479,7 @@ export function run(n: number): number {
         (
             "push records, then sum",
             r#"interface Point { x: number; y: number }
-export function run(n: number): number {
+export function run(n: number) {
   const items: Point[] = [];
   for (let i = 0; i < n; i++) items.push({ x: i, y: i * 2 });
   let sum = 0;
@@ -489,7 +489,7 @@ export function run(n: number): number {
         ),
         (
             "push numbers, then sum",
-            r#"export function run(n: number): number {
+            r#"export function run(n: number) {
   const items: number[] = [];
   for (let i = 0; i < n; i++) items.push(i * 3);
   let sum = 0;
@@ -499,9 +499,9 @@ export function run(n: number): number {
         ),
         (
             "allocation-free direct calls",
-            r#"export function step(i: number): number { if (i < 0) return 0; return i * 3; }
-export function retain(n: number): number { const a = [n]; return a.length; }
-export function run(n: number): number {
+            r#"export function step(i: number) { if (i < 0) return 0; return i * 3; }
+export function retain(n: number) { const a = [n]; return a.length; }
+export function run(n: number) {
   let sum = 0;
   for (let i = 0; i < n; i++) sum += step(i);
   return sum;
@@ -509,7 +509,7 @@ export function run(n: number): number {
         ),
         (
             "byte indexing",
-            r#"export function run(n: number): number {
+            r#"export function run(n: number) {
   const bytes = new Uint8Array(n);
   for (let i = 0; i < n; i++) bytes[i] = i;
   let sum = 0;
@@ -519,7 +519,7 @@ export function run(n: number): number {
         ),
         (
             "string append",
-            r#"export function run(n: number): number {
+            r#"export function run(n: number) {
   let text = "";
   for (let i = 0; i < n; i++) text = text + "x";
   return text.length;
@@ -650,7 +650,7 @@ fn compile_time() -> Result<Row> {
     for level in 1..=32 {
         source.push_str(&format!("interface N{level} {{ c: N{} }}\n", level - 1));
     }
-    source.push_str("export function run(o: N32): number { return o");
+    source.push_str("export function run(o: N32) { return o");
     for _ in 0..32 {
         source.push_str(".c");
     }
