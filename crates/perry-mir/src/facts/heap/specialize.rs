@@ -62,6 +62,10 @@ impl ProgramFacts {
             || (state.fact(value).needs_lossless_64()
                 && !super::super::rewrite::can_specialize_value(ctx, state, value))
         {
+            if let Some(promise) = ty.deref(ctx).downcast_ref::<PromiseType>() {
+                return Ok(numeric_type_for(ctx, promise.value())
+                    .map(|payload| PromiseType::get(ctx, payload).into()));
+            }
             return Ok(numeric_type_for(ctx, ty));
         }
         Ok(None)

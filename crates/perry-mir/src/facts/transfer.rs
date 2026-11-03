@@ -510,7 +510,7 @@ impl Solver {
                 self.heap_alias(ctx, id, from, id, to, Work::Operation(id, index))?;
                 self.propagate_origins(id, from, to);
                 // Joined promises share one payload representation, and no cast converts a
-                // promise; unequal payload widths keep the original number payload.
+                // promise; incompatible payloads keep the declared representation.
                 let state = &self.analysis.states[id];
                 let (source, target) = (state.fact(from), state.fact(to));
                 if from.get_type(ctx).deref(ctx).is::<PromiseType>()
@@ -518,6 +518,9 @@ impl Solver {
                         || state.preserves_original(to)
                         || source == Fact::Original
                         || target == Fact::Original
+                        || (source != Fact::Bottom
+                            && target != Fact::Bottom
+                            && (source == Fact::Numeric) != (target == Fact::Numeric))
                         || source
                             .integer()
                             .zip(target.integer())
@@ -533,7 +536,6 @@ impl Solver {
             Constraint::Op { op, kind } => (op, kind),
         };
         self.operation_effects(ctx, id, index, op, kind);
-        let heap_facts = self.heap_operation(ctx, id, index, op, kind)?;
         let operation = op.deref(ctx);
         let dynamic = Operation::get_op_dyn(op, ctx);
         if kind != OperationKind::Await && op_cast::<dyn BranchOpInterface>(&*dynamic).is_none() {
@@ -543,6 +545,7 @@ impl Solver {
                 }
             }
         }
+        let heap_facts = self.heap_operation(ctx, id, index, op, kind)?;
         if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
             for (position, input) in operation.operands().enumerate() {
                 if !(0..operation.get_num_successors()).any(|successor| {

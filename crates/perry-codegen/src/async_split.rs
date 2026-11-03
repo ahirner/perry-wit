@@ -16,7 +16,7 @@
 use crate::{
     function::FunctionLowering,
     module::ModuleState,
-    repr::{i32_type, slot_kind},
+    repr::{i32_type, slot_kind, slot_size},
     runtime::Runtime,
     values::{self, Carriers},
 };
@@ -290,6 +290,22 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
+    /// Pack a MIR value into the promise's eight-byte slot, boxing register pairs.
+    pub(crate) fn promise_value_bits(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let ty = value.get_type(ctx);
+        let value = self.mapped_value(ctx, value)?;
+        let slot = match value {
+            Carriers::Scalar(value) => value,
+            Carriers::Numeric { .. } => {
+                let size = self.i32_const(ctx, slot_size(ctx, ty) as i32);
+                let boxed = self.alloc(ctx, size);
+                self.store_slot_value(ctx, boxed, 0, ty, value)?;
+                boxed
+            }
+        };
+        Ok(self.slot_bits(ctx, slot))
+    }
+
     /// `await promise` inside a step function.
     pub(crate) fn lower_await(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
         let Some(frame) = self.frame.as_ref().map(|f| f.frame) else {
@@ -340,8 +356,13 @@ impl FunctionLowering<'_, '_> {
             self.block = fulfilled;
         }
         let ty = op.deref(ctx).get_result(0).get_type(ctx);
-        let value = self.load(ctx, slot_kind(ctx, ty)?, promise, promises::VALUE);
-        self.define(ctx, op, value);
+        let value = if values::is_numeric_type(ctx, ty) {
+            let boxed = self.load(ctx, MemKind::I32, promise, promises::VALUE);
+            self.load_slot_value(ctx, boxed, 0, ty)?
+        } else {
+            self.load_slot_value(ctx, promise, promises::VALUE, ty)?
+        };
+        self.define_value(ctx, op, value);
         Ok(())
     }
 
@@ -356,16 +377,17 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// `return value` in a step function: fulfil the frame's promise.
-    pub(crate) fn settle_return(&mut self, ctx: &mut Context, values: Vec<Value>) {
+    pub(crate) fn settle_return(&mut self, ctx: &mut Context, value: Option<Value>) -> Result<()> {
         let frame = self.step_frame().frame;
         let promise = self.load(ctx, MemKind::I32, frame, PROMISE);
-        let bits = match values.first() {
-            Some(value) => self.slot_bits(ctx, *value),
+        let bits = match value {
+            Some(value) => self.promise_value_bits(ctx, value)?,
             None => self.i64_const(ctx, 0),
         };
         self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
         self.finish_frame(ctx);
         self.ret(ctx, vec![]);
+        Ok(())
     }
 
     fn finish_frame(&mut self, ctx: &mut Context) {
@@ -401,7 +423,7 @@ impl FunctionLowering<'_, '_> {
             crate::MONOTONIC_CLOCK
         );
         let delay = self.operand(ctx, op, 0)?;
-        let value = self.operand(ctx, op, 1)?;
+        let value = op.deref(ctx).get_operand(1);
         // Node waits at least 1 ms; NaN and smaller delays become 1 ms.
         let one = self.f64_const(ctx, 1.0);
         let at_least = self.num(ctx, NumOpcode::F64Ge, vec![delay, one]);
@@ -409,9 +431,9 @@ impl FunctionLowering<'_, '_> {
         let million = self.f64_const(ctx, 1e6);
         let nanos = self.num(ctx, NumOpcode::F64Mul, vec![delay, million]);
         let nanos = self.num(ctx, NumOpcode::I64TruncSatF64S, vec![nanos]);
-        let payload = op.deref(ctx).get_operand(1).get_type(ctx);
+        let payload = value.get_type(ctx);
         let promise = self.new_promise(ctx, payload)?;
-        let bits = self.slot_bits(ctx, value);
+        let bits = self.promise_value_bits(ctx, value)?;
         let joined = self.new_block(ctx, vec![]);
         // With an aborted signal the timer rejects at once and never starts.
         let operands = op.deref(ctx).get_num_operands();

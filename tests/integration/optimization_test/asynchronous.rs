@@ -60,6 +60,43 @@ async fn integer_domains_survive_async_frames_and_result_slots() -> Result<()> {
             assert_eq!(results[0], expected, "{domain} {export}");
         }
     }
+    let compiled = compile(
+        r#"
+        import {setTimeout} from 'node:timers/promises';
+        function choose(i:number):number {
+            const values = [parseInt("9007199254740993"), 0.5];
+            return values[i] ?? 0.25;
+        }
+        export async function run(i:number):Promise<string> {
+            const pending = setTimeout(1, choose(i));
+            const first = await pending;
+            await pending;
+            return JSON.stringify(await Promise.resolve(first));
+        }
+        export async function all(i:number):Promise<number> {
+            const pending = setTimeout(1, choose(i));
+            const values = await Promise.all([pending, pending]);
+            return values[1] as number;
+        }
+        export async function joined(i:number):Promise<number> {
+            const pending = i === 0 ? setTimeout(1, choose(i)) : Promise.resolve(7);
+            return await pending;
+        }"#,
+        "async func(i:u32)->string; export all: async func(i:u32)->f64; export joined: async func(i:u32)->f64",
+    )?;
+    let (mut store, instance) = instantiate_async(&compiled.component.unwrap().stripped).await?;
+    let run = instance.get_typed_func::<(u32,), (String,)>(&mut store, "run")?;
+    let all = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "all")?;
+    let joined = instance.get_typed_func::<(u32,), (f64,)>(&mut store, "joined")?;
+    for (index, expected) in [(0, "9007199254740993"), (1, "0.5"), (2, "0.25")] {
+        assert_eq!(run.call_async(&mut store, (index,)).await?.0, expected);
+        let number = expected.parse::<f64>()?;
+        assert_eq!(all.call_async(&mut store, (index,)).await?.0, number);
+        assert_eq!(
+            joined.call_async(&mut store, (index,)).await?.0,
+            if index == 0 { number } else { 7.0 }
+        );
+    }
     Ok(())
 }
 

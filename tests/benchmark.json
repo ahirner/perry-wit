@@ -24,8 +24,8 @@
   },
   {
     "workload": "io (64 KiB)",
-    "bytes": 46424,
-    "core_bytes": 39895,
+    "bytes": 46420,
+    "core_bytes": 39891,
     "defined_functions": 125,
     "helper_functions": 111,
     "optimization": {
@@ -40,8 +40,8 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 2143,
-    "invocation_fuel": 648040,
-    "warm_fuel": 629344,
+    "invocation_fuel": 648038,
+    "warm_fuel": 629342,
     "initial_memory": 65536,
     "memory": 327680
   },
@@ -70,8 +70,8 @@
   },
   {
     "workload": "bounded-http-exact (4 MiB)",
-    "bytes": 65577,
-    "core_bytes": 59219,
+    "bytes": 65573,
+    "core_bytes": 59215,
     "defined_functions": 145,
     "helper_functions": 137,
     "optimization": {
@@ -86,15 +86,15 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5711,
-    "invocation_fuel": 13672264,
-    "warm_fuel": 13641060,
+    "invocation_fuel": 13672262,
+    "warm_fuel": 13641058,
     "initial_memory": 65536,
     "memory": 4325376
   },
   {
     "workload": "bounded-http-overflow",
-    "bytes": 65577,
-    "core_bytes": 59219,
+    "bytes": 65573,
+    "core_bytes": 59215,
     "defined_functions": 145,
     "helper_functions": 137,
     "optimization": {

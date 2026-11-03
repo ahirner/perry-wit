@@ -530,7 +530,9 @@ impl FunctionLowering<'_, '_> {
 
     pub(super) fn new_promise(&mut self, ctx: &mut Context, payload: TypeHandle) -> Result<Value> {
         if self.state.collectible {
-            let references = self.i32_const(ctx, i32::from(repr(ctx, payload)? == Repr::Ref));
+            let references =
+                crate::values::is_numeric_type(ctx, payload) || repr(ctx, payload)? == Repr::Ref;
+            let references = self.i32_const(ctx, i32::from(references));
             Ok(self.runtime(ctx, Runtime::PromiseNewCollectible, vec![references]))
         } else {
             Ok(self.runtime(ctx, Runtime::PromiseNew, vec![]))
