@@ -288,9 +288,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
+checksum = "375989decec1a0fa424442bed520fa12ede43a48475ce8c7417d2c69b32b5f6b"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -548,9 +548,9 @@ checksum = "6f34b169b8cbbaed2b4995205f1d02d7eac4b2771df5479255fe5483e1334a39"
 
 [[package]]
 name = "crc32fast"
-version = "1.5.3"
+version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
+checksum = "5f97d3416d5337d15c4b0d78c8c91df922ca143f57ec20e2d1c188333047ef04"
 dependencies = [
  "cfg-if",
 ]
@@ -1326,12 +1326,12 @@ version = "0.1.0"
 [[package]]
 name = "perry-abi"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 
 [[package]]
 name = "perry-api-manifest"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 
 [[package]]
 name = "perry-codegen"
@@ -1378,7 +1378,7 @@ dependencies = [
 [[package]]
 name = "perry-diagnostics"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 dependencies = [
  "serde",
  "serde_json",
@@ -1387,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "perry-dispatch"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 
 [[package]]
 name = "perry-frontend"
@@ -1410,7 +1410,7 @@ dependencies = [
 [[package]]
 name = "perry-hir"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 dependencies = [
  "anyhow",
  "perry-api-manifest",
@@ -1462,7 +1462,7 @@ dependencies = [
 [[package]]
 name = "perry-parser"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -1503,7 +1503,7 @@ dependencies = [
 [[package]]
 name = "perry-runtime-manifest"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 dependencies = [
  "perry-abi 0.5.1663",
  "perry-dispatch",
@@ -1512,7 +1512,7 @@ dependencies = [
 [[package]]
 name = "perry-ui-model"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=436ae7e587a7334baa3acfa6231a6c6d440a51c4#436ae7e587a7334baa3acfa6231a6c6d440a51c4"
+source = "git+https://github.com/PerryTS/perry?rev=f134e5b860dd4f2d88f90b514be320ddf0a1b282#f134e5b860dd4f2d88f90b514be320ddf0a1b282"
 
 [[package]]
 name = "perry-wit"
