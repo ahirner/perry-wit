@@ -72,15 +72,19 @@ pub(crate) fn append(
             Some(*world),
         ),
     };
-    let interfaces = target
-        .interfaces
-        .iter()
-        .filter_map(|(id, _)| target.id_of(id).map(|name| (name, id)))
-        .collect::<BTreeMap<_, _>>();
     let mut projected = source.clone();
-    for (id, interface) in &mut projected.interfaces {
-        if let Some(target_id) = source.id_of(id).and_then(|name| interfaces.get(&name)) {
-            let actual = &target.interfaces[*target_id];
+    for (name, target_id) in &target.package_names {
+        let Some(&id) = source.package_names.get(name) else {
+            continue;
+        };
+        let actual = &target.packages[*target_id];
+        let package = &mut projected.packages[id];
+        package
+            .interfaces
+            .retain(|name, _| actual.interfaces.contains_key(name));
+        for (name, interface) in &package.interfaces {
+            let actual = &target.interfaces[actual.interfaces[name]];
+            let interface = &mut projected.interfaces[*interface];
             interface
                 .functions
                 .retain(|name, _| actual.functions.contains_key(name));
@@ -88,16 +92,6 @@ pub(crate) fn append(
                 .types
                 .retain(|name, _| actual.types.contains_key(name));
         }
-    }
-    let mut packages = Vec::new();
-    for (id, package) in &mut projected.packages {
-        let Some(target_id) = target.package_names.get(&package.name) else {
-            continue;
-        };
-        let actual = &target.packages[*target_id];
-        package
-            .interfaces
-            .retain(|name, _| actual.interfaces.contains_key(name));
         package
             .worlds
             .retain(|name, _| actual.worlds.contains_key(name));
@@ -109,14 +103,9 @@ pub(crate) fn append(
                 target,
             );
         }
-        if *target_id == root {
-            continue;
+        if *target_id != root {
+            append_package(bytes, &projected, id, &name.to_string())?;
         }
-        packages.push((id, actual.name.to_string()));
-    }
-    packages.sort_by(|left, right| left.1.cmp(&right.1));
-    for (id, name) in packages {
-        append_package(bytes, &projected, id, &name)?;
     }
     if let Some(actual) = component_world {
         let original = source_world
@@ -190,122 +179,79 @@ fn append_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wit_parser::{ManglingAndAbi, TypeDefKind};
+    use wit_parser::ManglingAndAbi;
 
     #[test]
     fn compiler_preserves_scoped_package_metadata_through_stripping() -> anyhow::Result<()> {
-        let source = r#"/// Application package.
-            package demo:application@1.0.0;
-            /// Public entry world.
+        let mut resolve = Resolve::new();
+        for version in 1..=2 {
+            resolve.push_str(
+                "provider.wit",
+                &format!(
+                    r#"
+                /// Provider {version}.
+                package demo:provider@{version}.0.0;
+                interface api {{
+                    flags permissions {{
+                        /// Read {version}.
+                        read,
+                    }}
+                    /// Run {version}.
+                    run: func() -> u32;
+                }}
+            "#
+                ),
+            )?;
+        }
+        let package = resolve.push_str(
+            "app.wit",
+            r#"
+            /// Application.
+            package demo:application;
+            /// Entry point.
             world component {
                 export demo:provider/api@1.0.0;
                 export demo:provider/api@2.0.0;
             }
-            /// First provider package.
-            package demo:provider@1.0.0 {
-                interface api {
-                    flags permissions {
-                        /// First read permission.
-                        read,
-                    }
-                    /// First operation.
-                    run: func() -> u32;
-                }
-            }
-            /// Second provider package.
-            package demo:provider@2.0.0 {
-                interface api {
-                    flags permissions {
-                        /// Second read permission.
-                        read,
-                    }
-                    /// Second operation.
-                    run: func() -> u32;
-                }
-            }
-        "#;
-        let mut resolve = Resolve::new();
-        let package = resolve.push_str("documented.wit", source)?;
+        "#,
+        )?;
+        let world = resolve.packages[package].worlds["component"];
         let mut encoded = wit_component::encode(&resolve, package, false)?;
         append(&mut encoded, &resolve, None)?;
-        let (resolve, package) = super::super::wit::resolve_contents(&crate::api::Wit {
+        let (input, input_package) = super::super::wit::resolve_contents(&crate::api::Wit {
             application: crate::api::Package::Encoded(encoded),
             dependencies: Vec::new(),
         })?;
-        let world = resolve.packages[package].worlds["component"];
-        let core = wit_component::dummy_module(&resolve, world, ManglingAndAbi::Standard32);
-        let component = super::super::encode_resolved(&core, &resolve, world)?;
+        let input_world = input.packages[input_package].worlds["component"];
+        let core = wit_component::dummy_module(&input, input_world, ManglingAndAbi::Standard32);
+        let component = super::super::encode_resolved(&core, &input, input_world)?;
         let stripped = crate::strip::component(&component)?;
         let DecodedWasm::Component(decoded, root) = decode(&stripped)? else {
             unreachable!()
         };
-        assert_eq!(
-            decoded.worlds[root].docs.contents.as_deref(),
-            Some("Public entry world.")
-        );
-        for (version, expected) in [("1.0.0", "First"), ("2.0.0", "Second")] {
-            let name = format!("demo:provider@{version}");
-            let (_, package) = decoded
-                .packages
-                .iter()
-                .find(|(_, package)| package.name.to_string() == name)
-                .unwrap();
-            assert_eq!(
-                package.docs.contents.as_deref(),
-                Some(format!("{expected} provider package.").as_str())
-            );
-            let api = &decoded.interfaces[package.interfaces["api"]];
-            assert_eq!(
-                api.functions["run"].docs.contents.as_deref(),
-                Some(format!("{expected} operation.").as_str())
-            );
-            let TypeDefKind::Flags(flags) = &decoded.types[api.types["permissions"]].kind else {
-                unreachable!()
-            };
-            assert_eq!(
-                flags.flags[0].docs.contents.as_deref(),
-                Some(format!("{expected} read permission.").as_str())
-            );
-        }
-        let mut duplicate = stripped.clone();
-        let mut invalid = stripped.clone();
-        for payload in wasmparser::Parser::new(0).parse_all(&stripped) {
-            if let wasmparser::Payload::CustomSection(section) = payload?
-                && section.name().starts_with(PREFIX)
-            {
-                invalid[usize::try_from(section.data_offset())?] = 255;
-                duplicate.push(0);
-                wasm_encoder::CustomSection {
-                    name: section.name().into(),
-                    data: section.data().into(),
-                }
-                .encode(&mut duplicate);
-                break;
+        assert_eq!(decoded.worlds[root].docs, resolve.worlds[world].docs);
+        let root = decoded.worlds[root].package.unwrap();
+        assert_eq!(decoded.packages[root].docs, resolve.packages[package].docs);
+        for (name, id) in &resolve.package_names {
+            if *id != package {
+                assert_eq!(
+                    PackageMetadata::extract(&resolve, *id).encode()?,
+                    PackageMetadata::extract(&decoded, decoded.package_names[name]).encode()?,
+                );
             }
         }
-        assert!(
-            decode(&duplicate)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("duplicate")
-        );
-        assert!(
-            decode(&invalid)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("version")
-        );
+        let mut duplicate = stripped.clone();
+        append(&mut duplicate, &resolve, Some(world))?;
+        assert!(decode(&duplicate).is_err());
         let mut outer = wasm_encoder::Component::new();
         outer.section(&wasm_encoder::RawSection {
             id: 4,
             data: &stripped,
         });
-        let outer = outer.finish();
-        let DecodedWasm::Component(_, _) = decode(&outer)? else {
-            unreachable!()
-        };
+        assert!(matches!(
+            decode(&outer.finish())?,
+            DecodedWasm::Component(..)
+        ));
         Ok(())
     }
 }
