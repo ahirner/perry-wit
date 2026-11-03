@@ -315,6 +315,7 @@ export function parse(flag: number) {
         JSON.stringify(Math.abs(parseInt("-9007199254740993")) + 1) === "9007199254740994" &&
         JSON.stringify(Math.max(parseInt(s), 10) + 1) === "9007199254740994";
     const exactVal = parseInt(s);
+    if (exactVal.toFixed(2) !== "9007199254740993.00") return 6;
     const rounded = parseFloat(flag > 0 ? "9007199254740992" : "0.5");
     const minimum = parseInt(flag > 0 ? "-9223372036854775808" : "-7");
     const minimumFloat = parseFloat(flag > 0 ? "-9223372036854775808" : "-7.5");

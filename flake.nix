@@ -433,6 +433,16 @@
 
         checks = {
           wasi-wit = checkP3Wit;
+          perry-batch = pkgs.runCommand "check-perry-batch" {
+            nativeBuildInputs = [ perryWitBin nodejs wasmtimeCli ];
+            WASI_WIT_PATH = wasiP3Wit;
+          } ''
+            entry="${perrySource}/benchmarks/app-patterns/kernels/batch.ts"
+            perry-wit "$entry" --wit ${./wit} --world command -o batch.wasm
+            node "$entry" > expected
+            wasmtime run -C cache=n -S p3=y -W component-model-async=y batch.wasm > "$out"
+            diff -u expected "$out"
+          '';
           perry-wit-fmt = craneLib.cargoFmt {
             inherit src;
             cargoExtraArgs = "--all";

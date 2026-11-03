@@ -12,6 +12,7 @@ macro_rules! intrinsic_catalog {
                 PrintErr = "print_err" (String) -> (), Effectful, Conservative;
                 NumberToString = "number_to_string" (Numeric) -> (String), Pure, Atomic => NumberOnly;
                 NumberInspect = "number_inspect" (Number) -> (String), Pure, Atomic => NumberOnly;
+                NumberToFixed = "number_to_fixed" (Numeric, Number) -> (String), Throws, Atomic => NumberOnly;
                 NumberToStringRadix = "number_to_string_radix" (Numeric, Number) -> (String), Throws, Atomic => NumberOnly;
                 MathFloor = "math_floor" (Number) -> (Number), Pure, None => Round;
                 MathCeil = "math_ceil" (Number) -> (Number), Pure, None => Round;
@@ -286,6 +287,7 @@ macro_rules! intrinsic_catalog {
                 StdMathRandom = "std_math_random" [MathRandom = "math_random" () -> (Number), Effectful, None;];
                 StdNumberToString = "std_number_to_string" (I32, I64) -> I32;
                 StdNumberInspect = "std_number_inspect" (I32, I64) -> I32;
+                StdNumberToFixed = "std_number_to_fixed" (I32, I64, F64, I32) -> I32;
                 StdNumberToStringRadix = "std_number_to_string_radix" (I32, I64, F64) -> I32;
                 StdParseFloat = "std_parse_float" [ParseFloat = "parse_float" (String) -> (Number), Pure, None => NumberOnly;];
                 StdParseInt = "std_parse_int" (I32, I32, I64, I32) -> I32;

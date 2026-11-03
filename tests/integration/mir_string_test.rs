@@ -4,6 +4,57 @@ use crate::core_program::{Counter, Program};
 use std::fmt::Write;
 
 #[test]
+fn fixed_decimal_rounds_the_binary_value_and_checks_precision() -> anyhow::Result<()> {
+    let compiled = crate::world::compile_signature(
+        r#"
+        export function run(value: number, digits: number) {
+            try { return value.toFixed(digits); }
+            catch (error) {
+                return error instanceof RangeError && error.message.includes("toFixed") ? "RangeError" : "unexpected error";
+            }
+        }
+        export function whole(value: number) { return value.toFixed(); }
+        "#,
+        "func(value:f64,digits:f64)->string; export whole: func(value:f64)->string",
+    )?;
+    let (mut store, instance) = crate::world::instantiate(
+        &wasmtime::Engine::default(),
+        &compiled.component.unwrap().stripped,
+    )?;
+    let run = instance.get_typed_func::<(f64, f64), (String,)>(&mut store, "run")?;
+    for (value, digits, expected) in [
+        (1.25, 1.0, "1.3"),
+        (-1.25, 1.9, "-1.3"),
+        (1.005, 2.0, "1.00"),
+        (
+            0.3,
+            50.0,
+            "0.29999999999999998889776975374843459576368331909180",
+        ),
+        (9.99, 1.0, "10.0"),
+        (-0.001, 2.0, "-0.00"),
+        (-0.0, 2.0, "0.00"),
+        (1e21, 4.0, "1e+21"),
+        (f64::NAN, 2.0, "NaN"),
+        (f64::INFINITY, 101.0, "RangeError"),
+        (10.0, -1.0, "RangeError"),
+    ] {
+        assert_eq!(
+            run.call(&mut store, (value, digits))?.0,
+            expected,
+            "{value}.toFixed({digits})"
+        );
+    }
+    assert_eq!(
+        run.call(&mut store, (f64::from_bits(1), 100.0))?.0,
+        format!("0.{}", "0".repeat(100))
+    );
+    let whole = instance.get_typed_func::<(f64,), (String,)>(&mut store, "whole")?;
+    assert_eq!(whole.call(&mut store, (2.5,))?.0, "3");
+    Ok(())
+}
+
+#[test]
 fn normalization_preserves_complete_combining_segments() {
     let mut program = Program::checked(
         r#"

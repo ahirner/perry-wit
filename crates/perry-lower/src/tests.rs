@@ -34,8 +34,8 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
             (1, 21),
         ),
         (
-            "export function run(x: number): string {\n  return x.toFixed(2);\n}",
-            "method toFixed is not supported on number yet",
+            "export function run(x: number): string {\n  return x.toPrecision(2);\n}",
+            "method toPrecision is not supported on number yet",
             (2, 10),
         ),
     ] {

@@ -90,16 +90,31 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, value);
             return Ok(());
         }
-        if intrinsic == Intrinsic::NumberToStringRadix {
+        if matches!(
+            intrinsic,
+            Intrinsic::NumberToStringRadix | Intrinsic::NumberToFixed
+        ) {
             let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
-            let norm_tag = self.canonical_numeric_tag(ctx, tag);
-            let radix_op = op.deref(ctx).get_operand(1);
-            let radix = self.mapped(ctx, radix_op)?;
-            let value = self.runtime(
-                ctx,
-                Runtime::StdNumberToStringRadix,
-                vec![norm_tag, payload, radix],
-            );
+            let tag = self.canonical_numeric_tag(ctx, tag);
+            let argument = self.operand(ctx, op, 1)?;
+            let value = if intrinsic == Intrinsic::NumberToFixed {
+                let message = self
+                    .state
+                    .data
+                    .string("toFixed digits must be between 0 and 100");
+                let message = self.i32_const(ctx, message as i32);
+                self.runtime(
+                    ctx,
+                    Runtime::StdNumberToFixed,
+                    vec![tag, payload, argument, message],
+                )
+            } else {
+                self.runtime(
+                    ctx,
+                    Runtime::StdNumberToStringRadix,
+                    vec![tag, payload, argument],
+                )
+            };
             let status = self.runtime(ctx, Runtime::Status, vec![]);
             self.throw_status_if(ctx, status, status);
             self.define(ctx, op, value);
