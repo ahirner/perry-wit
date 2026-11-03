@@ -177,6 +177,18 @@ impl<'s> FunctionBuilder<'s> {
         self.set_relation_op(ctx, set, other, element, relation)
     }
 
+    fn encode(&mut self, ctx: &mut Context, _encoder: Value, args: &'s [Expr]) -> Result<Value> {
+        let mut args = args.iter();
+        let text = match args.next() {
+            Some(text) => self.string_operand(ctx, text)?,
+            None => self.string(ctx, ""),
+        };
+        for extra in args {
+            self.expression(ctx, extra)?;
+        }
+        Ok(self.intrinsic(ctx, Intrinsic::TextEncode, vec![text]))
+    }
+
     fn string_concat(&mut self, ctx: &mut Context, text: Value, args: &'s [Expr]) -> Result<Value> {
         let mut segments = Vec::with_capacity(args.len());
         for argument in args {
