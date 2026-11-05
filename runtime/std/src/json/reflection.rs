@@ -185,6 +185,20 @@ pub(crate) extern "C" fn std_json_native(origin: *mut u8, descriptor: *mut u8) -
     value
 }
 
+/// The typed object behind a native or view value when `schema` is its own layout descriptor,
+/// so a cast back to the source type keeps the object's identity instead of decoding a copy.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_native_origin(value: *mut u8, schema: u32) -> *mut u8 {
+    let layout = |descriptor: u32| descriptor & descriptor::SCHEMA_MASK as u32;
+    unsafe {
+        if matches!(word(value, 0), NATIVE | VIEW) && layout(word(value, 12)) == layout(schema) {
+            node(word(value, 8))
+        } else {
+            core::ptr::null_mut()
+        }
+    }
+}
+
 pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u8 {
     let flags = address(desc) & descriptor::ABSENCE_MASK;
     let desc = node(address(desc) & descriptor::SCHEMA_MASK as u32);

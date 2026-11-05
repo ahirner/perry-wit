@@ -33,6 +33,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 ## JSON
 
 - `JSON.parse` decodes into the expected static target type (retaining extra object properties for serialization) or into a dynamic JSON value that is validated when assigned to a typed binding. Reviver callbacks are compile errors.
+- A cast (`value as T`) or typed binding of a dynamic value returns the original object when it already has type `T`, such as an `Error` cause or an `unknown` field holding a `T`, so identity and mutations stay shared. Any other dynamic value, including a `JSON.parse` result or an object of a different type, is decoded into a new `T`, and later mutations of either side are not shared.
 - `JSON.stringify` supports synchronous replacer callbacks and property-allowlist arrays. The third indentation argument is a compile error.
 
 ## Dates

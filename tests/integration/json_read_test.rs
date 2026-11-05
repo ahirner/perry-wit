@@ -803,6 +803,42 @@ export function boxed() {
 }
 
 #[test]
+fn casts_return_native_objects_of_the_target_type() {
+    let mut program = Program::checked(
+        r#"
+interface Box {value:unknown}
+type Item = {id:number;list:number[]};
+export function identity() {
+ const numbers:number[] = [1,2];
+ const error = new Error('numbers',{cause:numbers});
+ const first = error.cause as number[];
+ const second = error.cause as number[];
+ if(first!==numbers || first!==second) return 1;
+ first.push(3);
+ let sum = 0;
+ for(let i=0;i<numbers.length;i++) sum += numbers[i];
+ if(numbers.length!==3 || sum!==6) return 2;
+ const item:Item = {id:1,list:[1]};
+ const box:Box = {value:item};
+ const cast = box.value as Item;
+ cast.id = 2;
+ cast.list.push(2);
+ if(cast!==item || item.id!==2 || item.list.length!==2) return 3;
+ const wider = error.cause as (number|undefined)[];
+ numbers.push(4);
+ if(wider.length!==3) return 4;
+ return 0;
+}
+"#,
+        "json-identity.ts",
+    );
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("identity", &[]), (0.0, 0));
+    }
+}
+
+#[test]
 fn dynamic_json_preserves_undefined_members() {
     let mut program = Program::checked(
         r#"

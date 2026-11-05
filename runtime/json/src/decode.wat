@@ -12,6 +12,7 @@
   (import "__perry_helper" "perry_array_grow_typed" (func $array-grow (param i32 i32)))
   (import "__perry_helper" "perry_array_hole" (func $array-hole (param i32 i32 i32)))
   (import "__perry_helper" "std_json_snapshot" (func $graph-snapshot (param i32) (result i32)))
+  (import "__perry_helper" "std_json_native_origin" (func $graph-origin (param i32 i32) (result i32)))
   (import "__perry_helper" "std_json_require_number" (func $graph-number (param i32) (result f64)))
   (import "__perry_helper" "std_json_to_bool" (func $graph-bool (param i32) (result i32)))
   (import "__perry_helper" "std_json_to_string" (func $graph-string (param i32) (result i32)))
@@ -562,7 +563,7 @@
   (func $decode (param $schema i32) (param $bits i64) (param $mode i32) (param $tag i32) (param $position i32)
     (result i64 i32 i32)
     (local $source i32) (local $kind i32) (local $flags i32) (local $null i32) (local $failed i32)
-    (local $done i32) (local $first i32) (local $array i32) (local $open i32)
+    (local $done i32) (local $first i32) (local $array i32) (local $open i32) (local $origin i32)
     (local $count i32) (local $index i32) (local $entry i32) (local $child i32) (local $child-kind i32) (local $byte i32) (local $matches i32)
     (local.set $source (i32.wrap_i64 (local.get $bits)))
     @input.GRAPH@
@@ -573,6 +574,11 @@
         (then
           (local.set $source (i32.const 0))
           (local.set $tag (i32.const @numeric.UNDEFINED@))))))
+    ;; A typed object already in the target layout is the result itself, as in JavaScript.
+    (if (local.get $source)
+      (then
+        (local.set $origin (call $graph-origin (local.get $source) (local.get $schema)))
+        (if (local.get $origin) (then (return (i64.extend_i32_u (local.get $origin)) (i32.const 0) (i32.const 0))))))
     @input.END_GRAPH@
     @input.NATIVE@
     (call $native (local.get $schema) (local.get $bits) (local.get $mode) (local.get $tag) (local.get $position))
