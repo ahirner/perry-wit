@@ -542,8 +542,8 @@ fn record_projection(
     source: TypeHandle,
     wanted: TypeHandle,
 ) -> Option<TypedHandle<RecordType>> {
-    let src_rec = TypedHandle::<RecordType>::from_handle(source, ctx).ok()?;
-    let dst_rec = TypedHandle::<RecordType>::from_handle(wanted, ctx).ok()?;
+    let src_rec = perry_mir::typed::<RecordType>(ctx, source)?;
+    let dst_rec = perry_mir::typed::<RecordType>(ctx, wanted)?;
     let (src, dst) = (src_rec.deref(ctx), dst_rec.deref(ctx));
     if src.is_tuple() || dst.is_tuple() {
         return None;

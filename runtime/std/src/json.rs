@@ -227,7 +227,7 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         return crate::runtime::array(&[]);
     }
     unsafe {
-        if word(value, 0) == VIEW {
+        if word(value, 0) == VIEW || view::array_length(value).is_some() {
             return view::keys(value);
         }
         let value = if word(value, 0) == NATIVE {

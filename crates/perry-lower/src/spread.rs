@@ -1,6 +1,6 @@
 //! Array and string spread and `concat` lowering.
 use super::*;
-use crate::control_flow::{ArrayOutput, Input};
+use crate::control_flow::{ArrayOutput, Holes, Input};
 use perry_mir::{Absence, ArrayExtendOp, ConcatSegmentsOp, OptionalType, StringType};
 
 impl<'s> FunctionBuilder<'s> {
@@ -36,7 +36,8 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(ArrayOutput::Item(item))
             });
         }
-        Ok(val)
+        let val = self.admit_holes(ctx, val, element)?;
+        self.without_holes(ctx, val, Holes::Dense, false)
     }
 
     pub(super) fn concat_values(
@@ -61,9 +62,39 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         element: TypeHandle,
     ) -> Result<Value> {
-        if value.get_type(ctx).deref(ctx).is::<ArrayType>() {
-            let target = ArrayType::get(ctx, element).into();
+        let ty = value.get_type(ctx);
+        let target = ArrayType::get(ctx, element).into();
+        if ty.deref(ctx).is::<ArrayType>() {
             self.fit(ctx, value, target)
+        } else if present_type(ctx, ty).deref(ctx).is::<ArrayType>() {
+            // An absent array argument, such as a spread hole, is appended as one element.
+            let states = absence(ctx, element);
+            let absent = |null: bool| {
+                move |b: &mut Self, ctx: &mut Context| {
+                    let item = match states {
+                        Some(s) if null && s.admits_null() => {
+                            b.emit_value(ctx, |ctx| NullOp::new(ctx, element))
+                        }
+                        Some(s) if !null && s.admits_undefined() => {
+                            b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, element))
+                        }
+                        // The element type excludes it, so `defined` throws `TypeError`.
+                        _ => {
+                            let array = b.defined(ctx, value)?;
+                            return b.fit(ctx, array, target);
+                        }
+                    };
+                    Ok(b.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![item])))
+                }
+            };
+            self.match_optional(
+                ctx,
+                value,
+                target,
+                absent(false),
+                absent(true),
+                |b, ctx, array| b.fit(ctx, array, target),
+            )
         } else {
             let value = self.fit(ctx, value, element)?;
             Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value])))
@@ -77,7 +108,7 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let mut element = expected
-            .and_then(|ty| TypedHandle::<ArrayType>::from_handle(present_type(ctx, ty), ctx).ok())
+            .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, present_type(ctx, ty)))
             .map(|array| array.deref(ctx).element());
         let fixed_element = element.is_some();
         if element.is_none() {
@@ -101,9 +132,8 @@ impl<'s> FunctionBuilder<'s> {
                 let states = items.iter().fold(absence(ctx, base), |states, item| {
                     let state = match item {
                         perry_frontend::hir::ArrayElement::Expr(Expr::Null) => Some(Absence::Null),
-                        perry_frontend::hir::ArrayElement::Expr(Expr::Undefined) => {
-                            Some(Absence::Undefined)
-                        }
+                        perry_frontend::hir::ArrayElement::Expr(Expr::Undefined)
+                        | perry_frontend::hir::ArrayElement::Hole => Some(Absence::Undefined),
                         _ => None,
                     };
                     crate::coerce::merge_absence(states, state)
@@ -114,13 +144,35 @@ impl<'s> FunctionBuilder<'s> {
                 }));
             }
         }
+        if element.is_none()
+            && items.iter().all(|item| match item {
+                perry_frontend::hir::ArrayElement::Hole
+                | perry_frontend::hir::ArrayElement::Expr(Expr::Null | Expr::Undefined) => true,
+                perry_frontend::hir::ArrayElement::Spread(Expr::Array(items, _)) => {
+                    items.is_empty()
+                }
+                _ => false,
+            })
+        {
+            let mut ty = void_type(ctx);
+            if items
+                .iter()
+                .any(|item| matches!(item, perry_frontend::hir::ArrayElement::Expr(Expr::Null)))
+            {
+                ty = crate::coerce::admitting(ctx, ty, Absence::Null);
+            }
+            element = Some(ty);
+        }
         let mut result = None;
+        // Holes evaluate nothing, so each run is appended once the element type is known.
+        let mut holes = 0;
         for item in items {
             let (expression, spread) = match item {
                 perry_frontend::hir::ArrayElement::Expr(expression) => (expression, false),
                 perry_frontend::hir::ArrayElement::Spread(expression) => (expression, true),
                 perry_frontend::hir::ArrayElement::Hole => {
-                    return Err(LowerError::new(LowerErrorKind::UnsupportedSpread).into());
+                    holes += 1;
+                    continue;
                 }
             };
             let value = if spread {
@@ -133,6 +185,16 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 value.get_type(ctx)
             };
+            if element.is_none() {
+                let optional = items
+                    .iter()
+                    .any(|item| matches!(item, perry_frontend::hir::ArrayElement::Hole));
+                element = Some(if optional {
+                    crate::coerce::admitting(ctx, source_element, Absence::Undefined)
+                } else {
+                    source_element
+                });
+            }
             if !fixed_element && let Some(previous) = element {
                 let inner = present_type(ctx, previous);
                 ensure!(
@@ -160,10 +222,36 @@ impl<'s> FunctionBuilder<'s> {
                 let value = self.fit(ctx, value, element)?;
                 self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value]))
             };
+            result = self.append_holes(ctx, result, element, std::mem::take(&mut holes));
             let sources = result.map_or_else(|| vec![source], |prefix| vec![prefix, source]);
             result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
         }
+        if holes > 0 {
+            let element = element.context("array holes need an element type")?;
+            result = self.append_holes(ctx, result, element, holes);
+        }
         result.context("an empty spread array needs an element type")
+    }
+
+    /// `prefix` followed by `count` holes.
+    fn append_holes(
+        &mut self,
+        ctx: &mut Context,
+        prefix: Option<Value>,
+        element: TypeHandle,
+        count: u32,
+    ) -> Option<Value> {
+        if count == 0 {
+            return prefix;
+        }
+        let holes = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+        for index in 0..count {
+            let index = self.number(ctx, f64::from(index));
+            self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, holes, index));
+        }
+        Some(prefix.map_or(holes, |prefix| {
+            self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![prefix, holes]))
+        }))
     }
 
     /// `array.push(…)` with spread arguments: all values are collected before the receiver
@@ -366,7 +454,7 @@ impl<'s> FunctionBuilder<'s> {
                 perry_frontend::hir::CallArg::Spread(expr) => {
                     let src = self.expression(ctx, expr)?;
                     let src = self.defined(ctx, src)?;
-                    if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src.get_type(ctx), ctx)
+                    if let Some(rec) = perry_mir::typed::<RecordType>(ctx, src.get_type(ctx))
                         && rec.deref(ctx).kind() == RecordKind::Tuple
                     {
                         let fields_len = rec.deref(ctx).fields()?.len();

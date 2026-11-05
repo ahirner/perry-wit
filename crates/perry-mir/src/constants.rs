@@ -19,7 +19,7 @@ use pliron::{
     op::{Op, op_cast},
     operation::Operation,
     opts::constants::{BranchOpFoldInterface, ConstFoldInterface},
-    r#type::{Typed, TypedHandle},
+    r#type::Typed,
     utils::apint::{APInt, bw},
 };
 use std::cmp::Ordering::{Equal, Greater, Less};
@@ -116,7 +116,7 @@ impl ConstFoldInterface for NumericCastOp {
                 return crate::attrs::NumericConstant::from_scalar(ctx, input)
                     .map(|number| Box::new(number) as AttrObj);
             }
-            let target_int = TypedHandle::<IntegerType>::from_handle(target, ctx).ok();
+            let target_int = crate::typed::<IntegerType>(ctx, target);
             if let Some(input) = input.downcast_ref::<IntegerAttr>() {
                 let source = input.get_type().deref(ctx);
                 let signed = source.signedness() != Signedness::Unsigned;

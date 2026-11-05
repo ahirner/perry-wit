@@ -85,10 +85,16 @@ impl<'s> FunctionBuilder<'s> {
                             current = b.binary(ctx, BinaryKind::Sub, last, current);
                         }
                         match holes {
-                            Holes::Dense => b.element_at(ctx, value, current)?,
+                            Holes::Dense => b.array_value(ctx, value, current)?,
                             Holes::Skip | Holes::Visit(_) => {
-                                let available = b.array_length(ctx, value);
-                                let present = b.compare(ctx, CompareKind::Lt, current, available);
+                                let present = if b.shapes.metadata.sparse_arrays {
+                                    b.emit_value(ctx, |ctx| {
+                                        perry_mir::ArrayPresentOp::new(ctx, value, current)
+                                    })
+                                } else {
+                                    let length = b.array_length(ctx, value);
+                                    b.compare(ctx, CompareKind::Lt, current, length)
+                                };
                                 if let Holes::Visit(ty) = holes {
                                     b.choose(
                                         ctx,
@@ -164,7 +170,7 @@ pub(crate) enum Projection {
 impl Projection {
     pub(crate) fn collection(ctx: &Context, ty: TypeHandle) -> Result<Self> {
         let ty = present_type(ctx, ty);
-        if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+        if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
             return Ok(Self::Item(array.deref(ctx).element()));
         }
         let (view, box_type) = if let Some((view, record)) = collection_view_record(ctx, ty) {
@@ -211,11 +217,11 @@ impl Projection {
             Self::Pair((_, first), (_, second)) => return Some((first, second)),
             Self::Item(ty) | Self::Field((_, ty)) => ty,
         };
-        if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+        if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
             let element = array.deref(ctx).element();
             return Some((element, element));
         }
-        let record = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
+        let record = perry_mir::typed::<RecordType>(ctx, ty)?;
         let record = record.deref(ctx);
         let fields = record.fields().ok()?;
         (record.is_tuple()

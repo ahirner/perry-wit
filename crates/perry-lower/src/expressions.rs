@@ -28,8 +28,7 @@ impl<'s> FunctionBuilder<'s> {
                 hir_compat::RecordExpr::Length(source) => {
                     let source = self.expression(ctx, source)?;
                     let source = self.defined(ctx, source)?;
-                    if let Ok(record) =
-                        TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
+                    if let Some(record) = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                         && record.deref(ctx).kind() == RecordKind::Tuple
                     {
                         let length = record.deref(ctx).fields()?.len();
@@ -485,8 +484,8 @@ impl<'s> FunctionBuilder<'s> {
             // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
             Expr::Array(items, _)
                 if expected.is_some_and(|ty| {
-                    TypedHandle::<RecordType>::from_handle(present_type(ctx, ty), ctx)
-                        .is_ok_and(|record| record.deref(ctx).kind() == RecordKind::Tuple)
+                    perry_mir::typed::<RecordType>(ctx, present_type(ctx, ty))
+                        .is_some_and(|record| record.deref(ctx).kind() == RecordKind::Tuple)
                 }) =>
             {
                 let names: Vec<String> = (0..items.len()).map(|i| format!("_{i}")).collect();
@@ -722,7 +721,7 @@ impl<'s> FunctionBuilder<'s> {
         ensure!(self.is_async, "await is only valid in async functions");
         let promise = self.expression(ctx, promise)?;
         ensure!(
-            TypedHandle::<PromiseType>::from_handle(promise.get_type(ctx), ctx).is_ok(),
+            perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx)).is_some(),
             "await of a non-promise value is not supported yet"
         );
         let op = AwaitOp::new(ctx, promise).map_err(|e| anyhow!("{}", e.disp(ctx)))?;

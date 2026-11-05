@@ -193,6 +193,29 @@ struct Instance {
 }
 
 #[test]
+fn sparse_lists_lower_holes_to_options_and_reject_required_elements() -> Result<()> {
+    let mut component = Instance::compile(
+        "package test:sparse; world boundary { export optional:func()->list<option<f64>>; export required:func()->list<f64>; export strings:func()->list<option<string>>; }",
+        r#"
+        export function optional() { return [, 3, undefined, , 1]; }
+        export function required():number[] { return [, 3]; }
+        export function strings() { return [, 'a', undefined]; }
+        "#,
+    )?;
+    component.check(
+        "optional",
+        (),
+        &vec![None, Some(3.0f64), None, None, Some(1.0)],
+    )?;
+    component.check("strings", (), &vec![None, Some("a".to_owned()), None])?;
+    let required = component
+        .instance
+        .get_typed_func::<(), (Vec<f64>,)>(&mut component.store, "required")?;
+    assert!(required.call(&mut component.store, ()).is_err());
+    Ok(())
+}
+
+#[test]
 fn exact_integer_transport_in_nested_results_and_options() -> Result<()> {
     boundary!(
         r#"package test:integers;

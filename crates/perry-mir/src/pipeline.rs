@@ -199,7 +199,6 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
         result.ir_changed = crate::lifetimes::assign(root, ctx, &effects);
         result.set_preserved::<crate::facts::ProgramFacts>();
         result.set_preserved::<crate::liveness::LiveValues>();
-        result.set_preserved::<pliron::analyses::liveness::Liveness<pliron::analyses::liveness::LivenessTq>>();
         result.set_preserved::<pliron::graph::dominance::DomInfo>();
         Ok(result)
     }));

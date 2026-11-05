@@ -14,7 +14,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     result::Result,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
     value::Value,
     verify_err,
 };
@@ -63,12 +63,10 @@ pub fn field_order_may_change(ctx: &Context, ty: TypeHandle) -> bool {
 
 /// The value type and absence states of an optional type, in one lookup.
 pub fn optional_parts(ctx: &Context, ty: TypeHandle) -> Option<(TypeHandle, Absence)> {
-    TypedHandle::<OptionalType>::from_handle(ty, ctx)
-        .ok()
-        .map(|optional| {
-            let optional = optional.deref(ctx);
-            (optional.value(), optional.absence())
-        })
+    crate::typed::<OptionalType>(ctx, ty).map(|optional| {
+        let optional = optional.deref(ctx);
+        (optional.value(), optional.absence())
+    })
 }
 
 fn inner(ctx: &Context, value: Value, op: &'static str) -> Result<TypeHandle> {

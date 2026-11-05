@@ -100,9 +100,9 @@ pub use calls::{
     AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported, set_async, set_exported,
 };
 pub use collections::{
-    ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-    ArrayStoreOp, ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp,
-    NativeJsonOp, StringConstOp, StringLenOp,
+    ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayHoleOp, ArrayIsDenseOp, ArrayLenOp, ArrayNewOp,
+    ArrayPresentOp, ArrayPushOp, ArraySetOp, ArrayStoreOp, ArrayTruncateOp, ConcatOp,
+    ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp, StringConstOp, StringLenOp,
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{SourceSpan, set_source_span, source_span};

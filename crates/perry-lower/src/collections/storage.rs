@@ -201,7 +201,11 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let projection = Projection::collection(ctx, val.get_type(ctx))?;
         let entries = self.collection_entries_array(ctx, val)?;
-        let entry = self.element_at(ctx, entries, idx)?;
+        let entry = if val.get_type(ctx).deref(ctx).is::<ArrayType>() {
+            self.array_value(ctx, entries, idx)?
+        } else {
+            self.element_at(ctx, entries, idx)?
+        };
         projection.read(self, ctx, entry)
     }
 
@@ -399,7 +403,7 @@ impl<'s> FunctionBuilder<'s> {
         if ty.deref(ctx).is::<StringType>() {
             return Some(self.string(ctx, ""));
         }
-        if let Ok(arr_ty) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+        if let Some(arr_ty) = perry_mir::typed::<ArrayType>(ctx, ty) {
             let elem_ty = arr_ty.deref(ctx).element();
             return Some(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![])));
         }
@@ -468,8 +472,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         entry: Value,
     ) -> Result<Option<Value>> {
-        let kind = TypedHandle::<RecordType>::from_handle(entry.get_type(ctx), ctx)
-            .ok()
+        let kind = perry_mir::typed::<RecordType>(ctx, entry.get_type(ctx))
             .and_then(|rec| EntryKind::of_entry(ctx, rec));
         let Some(kind) = kind else {
             return Ok(None);

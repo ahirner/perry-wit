@@ -57,10 +57,12 @@ impl SourceSpan {
     }
 }
 
+// In 0.2.0, make this enum non-exhaustive before retiring reserved diagnostic codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticCode {
     ParseError,
     UnsupportedOperator,
+    /// Reserved for compatibility; sparse-array support no longer emits this diagnostic.
     UnsupportedSpread,
     MissingTypeAnnotation,
     UnsupportedType,

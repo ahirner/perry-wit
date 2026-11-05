@@ -295,6 +295,10 @@ pub(super) fn scan(
                         || matches!(init, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::FuncRef(_)))))
                 || (env.metadata.inferred_bindings.contains(id)
                     && matches!(expression(init, env), HirType::Union(_)))
+                // Elisions are `undefined` elements: `[, 1]` is `(number | undefined)[]`.
+                || (env.metadata.inferred_bindings.contains(id)
+                    && matches!(init, Expr::ArraySpread(items)
+                        if items.iter().any(|item| matches!(item, perry_hir::ir::ArrayElement::Hole))))
                 || matches!(
                     ty,
                     HirType::Generic { base, type_args }

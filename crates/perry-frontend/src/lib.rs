@@ -62,6 +62,10 @@ pub fn load_sources<'s>(
     let mut lowered = hir_compat::lower(loaded, identity)?;
     infer::specialize_functions(ctx, &mut lowered.module, &lowered.metadata, foreign)?;
     infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
+    if !lowered.metadata.sparse_arrays {
+        lowered.metadata.sparse_arrays =
+            infer::deletes_array_elements(ctx, &lowered.module, &lowered.metadata, foreign);
+    }
     Ok(Program {
         module: lowered.module,
         metadata: lowered.metadata,

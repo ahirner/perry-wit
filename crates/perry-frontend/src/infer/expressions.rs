@@ -255,6 +255,32 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             }
         }
 
+        Expr::ArraySpread(items) => {
+            let mut types = Vec::new();
+            for item in items {
+                let ty = match item {
+                    perry_hir::ir::ArrayElement::Expr(value) => expression(value, env),
+                    perry_hir::ir::ArrayElement::Hole => HirType::Void,
+                    perry_hir::ir::ArrayElement::Spread(value) => {
+                        shapes::generics::iterated_element(expression(value, env))
+                            .unwrap_or(HirType::Any)
+                    }
+                };
+                for ty in match ty {
+                    HirType::Union(types) => types,
+                    ty => vec![ty],
+                } {
+                    if !types.contains(&ty) {
+                        types.push(ty);
+                    }
+                }
+            }
+            let element = match <[HirType; 1]>::try_from(types) {
+                Ok([element]) => element,
+                Err(types) => HirType::Union(types),
+            };
+            HirType::Array(Box::new(element))
+        }
         Expr::ArrayFrom(source, _) => {
             if let Expr::Object(props) = source.as_ref()
                 && props.iter().any(|(k, _)| k == "length")

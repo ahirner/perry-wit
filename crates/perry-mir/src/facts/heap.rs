@@ -38,6 +38,7 @@ enum Contents {
     Array {
         element: usize,
         length: Range,
+        holes: bool,
         readers: BTreeSet<Work>,
     },
 }
@@ -80,6 +81,39 @@ impl HeapFacts {
 }
 
 impl ProgramFacts {
+    /// Whether the program may create array holes at all.
+    pub fn has_array_holes(&self) -> bool {
+        self.has_array_holes
+    }
+
+    /// Whether every possible allocation stays dense, including mutations through aliases.
+    pub fn array_is_dense(&self, ctx: &Context, array: Value) -> bool {
+        if !self.has_array_holes {
+            return true;
+        }
+        let Some(parent) = array
+            .get_parent_block(ctx)
+            .and_then(|block| block.deref(ctx).get_parent_op(ctx))
+        else {
+            return false;
+        };
+        let Some(&id) = self.generic.get(&parent) else {
+            return false;
+        };
+        let Some(&base) = self.states[id].heap_values.get(&array) else {
+            return false;
+        };
+        let cell = &self.heap.cells[base];
+        !cell.objects.is_empty()
+            && !cell.summarized
+            && cell.objects.iter().all(|&object| {
+                matches!(
+                    self.heap.objects[object].contents,
+                    Contents::Array { holes: false, .. }
+                )
+            })
+    }
+
     pub(crate) fn array_length(&self, function: &FuncOp, array: Value) -> Option<(u32, u32)> {
         let state = &self.states[self.generic[&function.get_operation()]];
         let base = *state.heap_values.get(&array)?;
@@ -158,6 +192,7 @@ impl Solver {
             Contents::Array {
                 element: self.heap_cell(array.deref(ctx).element(), Some(id)),
                 length: Range::Bottom,
+                holes: open,
                 readers: BTreeSet::new(),
             }
         };
@@ -345,6 +380,7 @@ impl Solver {
     }
 
     pub(super) fn open_object(&mut self, ctx: &Context, object: usize) -> Result<()> {
+        self.mark_array_holes(object);
         self.widen_length(object, Range::of(Some(Integer::U32)));
         for position in 0..self.analysis.heap.objects[object].contents.slots().len() {
             let cell = self.analysis.heap.objects[object].contents.slots()[position];
@@ -363,6 +399,18 @@ impl Solver {
             }
         }
         Ok(())
+    }
+
+    fn mark_array_holes(&mut self, object: usize) {
+        if let Contents::Array { holes, readers, .. } =
+            &mut self.analysis.heap.objects[object].contents
+            && !*holes
+        {
+            *holes = true;
+            for &reader in readers.iter() {
+                self.work.insert(reader);
+            }
+        }
     }
 
     fn widen_length(&mut self, object: usize, range: Range) {

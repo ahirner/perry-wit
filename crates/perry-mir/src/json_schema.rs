@@ -120,7 +120,7 @@ impl JsonSchema {
             Self::String
         } else if let Some(optional) = definition.downcast_ref::<OptionalType>() {
             Self::Optional(optional.value())
-        } else if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+        } else if let Some(record) = crate::typed::<RecordType>(ctx, ty)
             && matches!(
                 record.deref(ctx).kind(),
                 RecordKind::Object | RecordKind::Tuple | RecordKind::DictionaryEntry
@@ -141,11 +141,9 @@ impl JsonSchema {
                 _ => Self::Array(element),
             }
         } else if let Some(union) = definition.downcast_ref::<crate::ValueUnionType>() {
-            Self::ValueUnion(TypedHandle::<VariantType>::from_handle(union.variants(), ctx).ok()?)
-        } else if let Ok(variant) = TypedHandle::<VariantType>::from_handle(ty, ctx) {
-            Self::Variant(variant)
+            Self::ValueUnion(crate::typed::<VariantType>(ctx, union.variants())?)
         } else {
-            return None;
+            Self::Variant(crate::typed::<VariantType>(ctx, ty)?)
         })
     }
 

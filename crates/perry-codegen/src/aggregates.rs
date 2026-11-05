@@ -8,10 +8,10 @@ use crate::{
 use anyhow::{Result, anyhow, ensure};
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
-    AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-    ArrayStoreOp, ArrayTruncateOp, ArrayType, ConcatSegmentsOp, ErrorKind, FieldGetOp,
-    FieldPresentOp, FieldSetOp, JsonSchema, RecordOrderOp, RecordType, VariantNewOp,
-    VariantPayloadOp, VariantTagOp,
+    AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayHoleOp, ArrayLenOp, ArrayNewOp,
+    ArrayPresentOp, ArrayPushOp, ArraySetOp, ArrayStoreOp, ArrayTruncateOp, ArrayType,
+    ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema, RecordOrderOp,
+    RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
 use pliron::{
     builtin::types::FP64Type,
@@ -21,6 +21,13 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
+
+/// The byte holding an element's hole bit, and the bit's mask within it.
+struct HoleBit {
+    address: Value,
+    byte: Value,
+    mask: Value,
+}
 
 impl FunctionLowering<'_, '_> {
     /// The runtime's element-kind flag for arrays of `element` (`layout::*_ELEMENTS`).
@@ -311,6 +318,18 @@ impl FunctionLowering<'_, '_> {
             self.define(ctx, op, len);
             return Ok(true);
         }
+        if Operation::is_op::<perry_mir::ArrayIsDenseOp>(op, ctx) {
+            let operand = op.deref(ctx).get_operand(0);
+            let dense = if self.state.program_facts.array_is_dense(ctx, operand) {
+                self.i32_const(ctx, 1)
+            } else {
+                let array = self.mapped(ctx, operand)?;
+                let holes = self.load(ctx, MemKind::I32, array, layout::HOLES);
+                self.num(ctx, NumOpcode::I32Eqz, vec![holes])
+            };
+            self.define(ctx, op, dense);
+            return Ok(true);
+        }
         if Operation::get_op::<ArrayTruncateOp>(op, ctx).is_some() {
             let operands = self.operands(ctx, op)?;
             self.store(ctx, MemKind::I32, operands[0], layout::LEN, operands[1]);
@@ -355,10 +374,23 @@ impl FunctionLowering<'_, '_> {
             let element = Self::element_type(ctx, arr_opd)?;
             let array = self.mapped(ctx, arr_opd)?;
             let value = self.mapped_value(ctx, val_opd)?;
-            self.push(ctx, array, value, element)?;
+            let sparse = !self.state.program_facts.array_is_dense(ctx, arr_opd);
+            self.push(ctx, array, value, element, sparse)?;
             return Ok(true);
         }
-        if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+        if Operation::is_op::<ArrayHoleOp>(op, ctx) {
+            let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
+            let operands = self.operands(ctx, op)?;
+            let index = if operands[1].get_type(ctx).deref(ctx).is::<FP64Type>() {
+                self.num(ctx, NumOpcode::I32TruncSatF64U, vec![operands[1]])
+            } else {
+                operands[1]
+            };
+            let kind = self.i32_const(ctx, Self::array_element_kind(ctx, element)? as i32);
+            self.runtime_void(ctx, Runtime::ArrayHole, vec![operands[0], index, kind]);
+            return Ok(true);
+        }
+        if perry_mir::is_any::<(ArrayGetOp, ArrayPresentOp)>(ctx, op) {
             // Branch-free: read slot 0 when out of range (capacity is never 0), then select.
             let element = Self::element_type(ctx, op.deref(ctx).get_operand(0))?;
             let operands = self.operands(ctx, op)?;
@@ -367,6 +399,20 @@ impl FunctionLowering<'_, '_> {
             let (i, ok, _) = self.element_index(ctx, index, len)?;
             let zero = self.i32_const(ctx, 0);
             let slot = self.select(ctx, ok, i, zero);
+            let ok = if !self
+                .state
+                .program_facts
+                .array_is_dense(ctx, op.deref(ctx).get_operand(0))
+            {
+                let present = self.array_slot_present(ctx, array, slot);
+                self.num(ctx, NumOpcode::I32And, vec![ok, present])
+            } else {
+                ok
+            };
+            if Operation::is_op::<ArrayPresentOp>(op, ctx) {
+                self.define(ctx, op, ok);
+                return Ok(true);
+            }
             let address = self.element_address(ctx, array, slot, element);
             let loaded = self.load_slot_value(ctx, address, 0, element)?;
             let target = op.deref(ctx).get_result(0).get_type(ctx);
@@ -395,8 +441,9 @@ impl FunctionLowering<'_, '_> {
             let array = self.mapped(ctx, arr_opd)?;
             let index = self.mapped(ctx, idx_opd)?;
             let value = self.mapped_value(ctx, val_opd)?;
+            let sparse = !self.state.program_facts.array_is_dense(ctx, arr_opd);
             if store {
-                self.store_element(ctx, array, index, element, value)?;
+                self.store_element(ctx, array, index, element, value, sparse)?;
                 return Ok(true);
             }
             let len = self.load(ctx, MemKind::I32, array, layout::LEN);
@@ -406,7 +453,7 @@ impl FunctionLowering<'_, '_> {
             let done = self.new_block(ctx, vec![]);
             self.cond_br(ctx, ok, (write, vec![]), (outside, vec![]));
             self.block = write;
-            self.store_element(ctx, array, i, element, value)?;
+            self.store_element(ctx, array, i, element, value, sparse)?;
             self.br(ctx, done, vec![]);
             // Writing at `length` appends; any other index would make a hole.
             self.block = outside;
@@ -417,7 +464,7 @@ impl FunctionLowering<'_, '_> {
             };
             let hole = self.num(ctx, NumOpcode::I32Eqz, vec![append]);
             self.throw_if(ctx, hole, ErrorKind::RangeError);
-            self.push(ctx, array, value, element)?;
+            self.push(ctx, array, value, element, sparse)?;
             self.br(ctx, done, vec![]);
             self.block = done;
             return Ok(true);
@@ -433,6 +480,65 @@ impl FunctionLowering<'_, '_> {
         b: Carriers<Value>,
     ) -> Result<Carriers<Value>> {
         Ok(a.zip(b)?.map(|(av, bv)| self.select(ctx, cond, av, bv)))
+    }
+
+    /// Whether slot `index` of `array` holds an element rather than a hole.
+    pub(crate) fn array_slot_present(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Value,
+    ) -> Value {
+        let present = self.i32_const(ctx, 1);
+        self.hole_byte(ctx, array, index, Some(present), |b, ctx, bit| {
+            let hole = b.num(ctx, NumOpcode::I32And, vec![bit.byte, bit.mask]);
+            Some(b.num(ctx, NumOpcode::I32Eqz, vec![hole]))
+        })
+        .unwrap_or(present)
+    }
+
+    /// Run `sparse` on the hole bit of `index` when `array` has a hole bitset
+    /// ([layout::HOLES]). The join receives `dense` without one, and otherwise what `sparse`
+    /// returns.
+    fn hole_byte(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Value,
+        dense: Option<Value>,
+        sparse: impl FnOnce(&mut Self, &mut Context, HoleBit) -> Option<Value>,
+    ) -> Option<Value> {
+        let holes = self.load(ctx, MemKind::I32, array, layout::HOLES);
+        let none = self.num(ctx, NumOpcode::I32Eqz, vec![holes]);
+        let storage = self.new_block(ctx, vec![]);
+        let done = self.new_block(ctx, dense.iter().map(|v| v.get_type(ctx)).collect());
+        self.cond_br(
+            ctx,
+            none,
+            (done, dense.into_iter().collect()),
+            (storage, vec![]),
+        );
+        self.block = storage;
+        let three = self.i32_const(ctx, 3);
+        let offset = self.num(ctx, NumOpcode::I32ShrU, vec![index, three]);
+        let address = self.num(ctx, NumOpcode::I32Add, vec![holes, offset]);
+        let byte = self.load(ctx, MemKind::I32U8, address, 0);
+        let seven = self.i32_const(ctx, 7);
+        let shift = self.num(ctx, NumOpcode::I32And, vec![index, seven]);
+        let one = self.i32_const(ctx, 1);
+        let mask = self.num(ctx, NumOpcode::I32Shl, vec![one, shift]);
+        let result = sparse(
+            self,
+            ctx,
+            HoleBit {
+                address,
+                byte,
+                mask,
+            },
+        );
+        self.br(ctx, done, result.into_iter().collect());
+        self.block = done;
+        dense.map(|_| done.deref(ctx).get_argument(0))
     }
 
     /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
@@ -475,6 +581,7 @@ impl FunctionLowering<'_, '_> {
         array: Value,
         value: Carriers<Value>,
         element: TypeHandle,
+        sparse: bool,
     ) -> Result<()> {
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
@@ -495,7 +602,7 @@ impl FunctionLowering<'_, '_> {
         }
         self.br(ctx, write, vec![]);
         self.block = write;
-        self.store_element(ctx, array, len, element, value)?;
+        self.store_element(ctx, array, len, element, value, sparse)?;
         let one = self.i32_const(ctx, 1);
         let next = self.num(ctx, NumOpcode::I32Add, vec![len, one]);
         self.store(ctx, MemKind::I32, array, layout::LEN, next);
@@ -521,9 +628,20 @@ impl FunctionLowering<'_, '_> {
         index: Value,
         element: TypeHandle,
         value: Carriers<Value>,
+        sparse: bool,
     ) -> Result<()> {
         let address = self.element_address(ctx, array, index, element);
-        self.store_slot_value(ctx, address, 0, element, value)
+        self.store_slot_value(ctx, address, 0, element, value)?;
+        if sparse {
+            self.hole_byte(ctx, array, index, None, |b, ctx, bit| {
+                let all = b.i32_const(ctx, -1);
+                let keep = b.num(ctx, NumOpcode::I32Xor, vec![bit.mask, all]);
+                let present = b.num(ctx, NumOpcode::I32And, vec![bit.byte, keep]);
+                b.store(ctx, MemKind::I32U8, bit.address, 0, present);
+                None
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn element_type(ctx: &Context, array: Value) -> Result<TypeHandle> {

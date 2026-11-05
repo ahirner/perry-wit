@@ -76,7 +76,24 @@ impl<'s> FunctionBuilder<'s> {
         if dict_entry_types(ctx, ty).is_some() {
             return self.collection_iterator(ctx, obj, method);
         }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+        if ty.deref(ctx).is::<ArrayType>() {
+            return self.collect_items(
+                ctx,
+                crate::control_flow::Input::Array(obj, crate::control_flow::Holes::Skip),
+                |b, ctx, item, index, _| {
+                    let value = match method {
+                        IteratorMethod::Keys => b.display(ctx, index)?,
+                        IteratorMethod::Values => item,
+                        IteratorMethod::Entries => {
+                            let key = b.display(ctx, index)?;
+                            b.pair(ctx, key, item)?
+                        }
+                    };
+                    Ok(crate::control_flow::ArrayOutput::Item(value))
+                },
+            );
+        }
+        if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
             && matches!(
                 rec.deref(ctx).kind(),
                 RecordKind::Object | RecordKind::Tuple
@@ -202,7 +219,21 @@ impl<'s> FunctionBuilder<'s> {
             let k = self.expression_with(ctx, prop_expr, Some(k_ty))?;
             return self.kv_has(ctx, obj, k, k_ty);
         }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+        if ty.deref(ctx).is::<ArrayType>() {
+            let (_, present, length) = self.array_property(ctx, obj, prop_expr)?;
+            let Some(length) = length else {
+                return Ok(present);
+            };
+            let predicate = present.get_type(ctx);
+            return self.choose(
+                ctx,
+                predicate,
+                length,
+                |b, ctx| Ok(b.boolean(ctx, true)),
+                |_, _| Ok(present),
+            );
+        }
+        if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
             && rec.deref(ctx).kind() == RecordKind::Object
         {
             let k = self.string_operand(ctx, prop_expr)?;
@@ -256,8 +287,42 @@ impl<'s> FunctionBuilder<'s> {
             self.kv_delete(ctx, obj, k, k_ty)?;
             return Ok(self.boolean(ctx, true));
         }
+        if ty.deref(ctx).is::<ArrayType>() {
+            const LENGTH: &str = "Cannot delete property 'length' of an array";
+            let key = match prop_or_idx {
+                Ok(key) => key,
+                Err(property) if property == "length" => {
+                    self.raise_error(ctx, ErrorKind::TypeError, LENGTH);
+                    return Ok(self.boolean(ctx, false));
+                }
+                // Other named properties are never elements.
+                Err(_) => return Ok(self.boolean(ctx, true)),
+            };
+            // Hole-aware reads are enabled per module, so the frontend must have seen this delete.
+            ensure!(
+                self.shapes.metadata.sparse_arrays,
+                "array element deletion was not detected before lowering"
+            );
+            let (index, present, length) = self.array_property(ctx, obj, key)?;
+            if let Some(length) = length {
+                let error = self.new_block(ctx, "delete_length_error");
+                let indexed = self.new_block(ctx, "delete_index");
+                self.branch(ctx, length, error, indexed);
+                self.switch_to(error);
+                self.raise_error(ctx, ErrorKind::TypeError, LENGTH);
+                self.switch_to(indexed);
+            }
+            let delete = self.new_block(ctx, "delete_element");
+            let done = self.new_block(ctx, "deleted_element");
+            self.branch(ctx, present, delete, done);
+            self.switch_to(delete);
+            self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, obj, index));
+            self.jump(ctx, done);
+            self.switch_to(done);
+            return Ok(self.boolean(ctx, true));
+        }
         if let Err(property) = prop_or_idx
-            && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+            && let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
             && rec.deref(ctx).kind() == RecordKind::Object
         {
             let field_ty = rec.deref(ctx).field(property).map(|(_, t)| t);
@@ -276,5 +341,49 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
         })
+    }
+
+    /// `array[key]` as `(index, present, length)`: `present` holds when `key` is a canonical
+    /// index naming an element, and `length` when a string `key` is `"length"`.
+    fn array_property(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        key: &'s Expr,
+    ) -> Result<(Value, Value, Option<Value>)> {
+        let key = match key {
+            Expr::Null => self.string(ctx, "null"),
+            Expr::Undefined => self.string(ctx, "undefined"),
+            key => self.expression(ctx, key)?,
+        };
+        let (index, canonical) = if kind(ctx, key)? == Kind::Number {
+            (self.arithmetic(ctx, key), None)
+        } else {
+            let name = self.display(ctx, key)?;
+            let index = self.intrinsic(ctx, Intrinsic::StringToNumber, vec![name]);
+            let canonical = self.display(ctx, index)?;
+            (
+                index,
+                Some(self.compare(ctx, CompareKind::Eq, name, canonical)),
+            )
+        };
+        let mut present =
+            self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
+        if let Some(canonical) = canonical {
+            let predicate = present.get_type(ctx);
+            present = self.choose(
+                ctx,
+                predicate,
+                canonical,
+                |_, _| Ok(present),
+                |b, ctx| Ok(b.boolean(ctx, false)),
+            )?;
+        }
+        let string = key.get_type(ctx).deref(ctx).is::<StringType>();
+        let length = string.then(|| {
+            let length = self.string(ctx, "length");
+            self.compare(ctx, CompareKind::Eq, key, length)
+        });
+        Ok((index, present, length))
     }
 }

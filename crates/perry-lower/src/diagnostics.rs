@@ -41,6 +41,7 @@ impl std::fmt::Display for ShapeError {
 }
 
 /// Domain error kinds emitted by the HIR-to-MIR lowerer.
+// In 0.2.0, make this enum non-exhaustive alongside DiagnosticCode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LowerErrorKind {
     ImportSignatureMismatch {
@@ -55,6 +56,7 @@ pub enum LowerErrorKind {
     UnsupportedOperator {
         op: String,
     },
+    /// Reserved for compatibility; sparse-array support no longer emits this error.
     UnsupportedSpread,
     UnsupportedExpression(String),
 }

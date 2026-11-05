@@ -8,8 +8,7 @@ impl AbiType {
         let Self::Result { ok, err } = self else {
             return false;
         };
-        let Some(record) = mir.and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
-        else {
+        let Some(record) = mir.and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty)) else {
             return true;
         };
         let tagged = record_field(ctx, record, "ok")

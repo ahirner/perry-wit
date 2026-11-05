@@ -35,6 +35,7 @@ pub struct Metadata<'s> {
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
+    pub sparse_arrays: bool,
 }
 
 pub(crate) struct LoweredHir<'s> {
@@ -44,6 +45,8 @@ pub(crate) struct LoweredHir<'s> {
 
 pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {
     let mut ast = loaded.module;
+    let mut sparse = SparseArrays(false);
+    swc_ecma_visit::VisitWith::visit_with(&ast, &mut sparse);
     let mut locations = loaded.locations;
     locations.collect(&ast);
     let spans = source::validate(&ast, &locations)?;
@@ -86,8 +89,18 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             locations,
             inferred_bindings,
             constructors,
+            sparse_arrays: sparse.0,
         },
     })
+}
+
+struct SparseArrays(bool);
+
+impl swc_ecma_visit::Visit for SparseArrays {
+    fn visit_array_lit(&mut self, array: &perry_parser::swc_ecma_ast::ArrayLit) {
+        self.0 |= array.elems.iter().any(Option::is_none);
+        swc_ecma_visit::VisitWith::visit_children_with(array, self);
+    }
 }
 
 pub(crate) fn is_object_literal(name: &str) -> bool {

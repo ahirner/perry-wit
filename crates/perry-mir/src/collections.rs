@@ -1,4 +1,4 @@
-//! Dense arrays and UTF-8 strings.
+//! Typed arrays with independent element presence, and UTF-8 strings.
 //!
 //! Lengths are signless `i32`. Reads and writes take ECMAScript numbers as indices: out-of-bounds
 //! reads yield `undefined` and writes past `length` throw `RangeError`.
@@ -125,8 +125,8 @@ op_schema! {
 }
 
 op_schema! {
-    /// Read an element as `T | undefined`: an index in `[0, length)` yields the element, and
-    /// any other index yields `undefined`. Accepts an ECMAScript number (`f64`) or a
+    /// Read an element as `T | undefined`: a present index in `[0, length)` yields the element,
+    /// while holes and other indices yield `undefined`. Accepts an ECMAScript number (`f64`) or a
     /// range-proven `i32`.
     pub ArrayGetOp(array, index) -> fallible;
     name = "perry.array_get";
@@ -143,7 +143,7 @@ op_schema! {
 }
 
 op_schema! {
-    /// Unchecked element read at an `i32` index proven in `[0, length)` by `perry_mir::ranges`.
+    /// Unchecked element read at an `i32` index proven present and in `[0, length)`.
     pub ArrayAtOp(array, index) -> fallible;
     name = "perry.array_at";
     format = "$0 `[` $1 `] : ` type($0)";
@@ -166,6 +166,43 @@ op_schema! {
         => CollectionErr::Element("perry.array_set");
     check Ty::Index.matches(ctx, index.get_type(ctx)) || Ty::Number.matches(ctx, index.get_type(ctx))
         => CollectionErr::NumberIndex("perry.array_set");
+}
+
+op_schema! {
+    /// Whether an array has never allocated hole storage. True permits dense bulk copies.
+    pub ArrayIsDenseOp(array) -> infallible;
+    name = "perry.array_is_dense";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(array: Value) => infer(); }
+    result(ctx): Ty = Ty::Predicate;
+    error = CollectionErr::NotArray("perry.array_is_dense");
+    require element(ctx, array, "perry.array_is_dense")?;
+}
+
+op_schema! {
+    /// Test index bounds and property presence independently of the element value.
+    pub ArrayPresentOp(array, index) -> infallible;
+    name = "perry.array_present";
+    format = "$0 `[` $1 `] : ` type($0)";
+    constructors { pub new(array: Value, index: Value) => infer(); }
+    result(ctx): Ty = Ty::Predicate;
+    error = CollectionErr::Index("perry.array_present");
+    require element(ctx, array, "perry.array_present")?;
+    check Ty::Index.matches(ctx, index.get_type(ctx)) || Ty::Number.matches(ctx, index.get_type(ctx))
+        => CollectionErr::NumberIndex("perry.array_present");
+}
+
+op_schema! {
+    /// Omit an existing slot or append a hole. The caller proves `0 <= index <= length`.
+    pub ArrayHoleOp(array, index) -> infallible;
+    name = "perry.array_hole";
+    format = "$0 `[` $1 `]`";
+    constructors { pub new(array: Value, index: Value) => empty(); }
+    result(ctx): () = ();
+    error = CollectionErr::Index("perry.array_hole");
+    require element(ctx, array, "perry.array_hole")?;
+    check Ty::Index.matches(ctx, index.get_type(ctx)) || Ty::Number.matches(ctx, index.get_type(ctx))
+        => CollectionErr::NumberIndex("perry.array_hole");
 }
 
 op_schema! {

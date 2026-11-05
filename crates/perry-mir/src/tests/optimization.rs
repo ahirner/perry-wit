@@ -415,6 +415,7 @@ fn local_live_intervals_match_pliron_queries_through_loops() -> Result<()> {
         let root = parse(ctx, fixture);
         let mut analyses = AnalysisManager::default();
         analyses.get_analysis::<LiveValues>(root, ctx)?;
+        analyses.get_analysis::<Liveness<LivenessTq>>(root, ctx)?;
         let intervals = analyses.try_get_analysis::<LiveValues>(root).unwrap();
         let mut upstream = analyses
             .try_get_analysis_mut::<Liveness<LivenessTq>>(root)

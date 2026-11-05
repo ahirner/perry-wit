@@ -8,7 +8,7 @@ pub(crate) extern "C" fn std_json_box(bits: u64, tag: i32, schema: *mut u8) -> *
     reflection::box_slot(bits, tag, schema, true)
 }
 
-fn slot(origin: *mut u8, offset: u32, schema: *mut u8) -> *mut u8 {
+pub(super) fn read_slot(origin: *mut u8, offset: u32, schema: *mut u8, view: bool) -> *mut u8 {
     let (bits, tag) = unsafe {
         let at = origin.add(offset as usize);
         let numeric = word(node(address(schema) & d::SCHEMA_MASK as u32), 0) == d::JSON_NUMERIC;
@@ -18,7 +18,7 @@ fn slot(origin: *mut u8, offset: u32, schema: *mut u8) -> *mut u8 {
             (*at.cast::<u64>(), 0)
         }
     };
-    std_json_box(bits, tag, schema)
+    reflection::box_slot(bits, tag, schema, view)
 }
 
 fn field(origin: *mut u8, schema: *mut u8, index: u32) -> *mut u8 {
@@ -29,7 +29,7 @@ fn field(origin: *mut u8, schema: *mut u8, index: u32) -> *mut u8 {
             node(word(entry, d::FIELD_SCHEMA as usize)),
         )
     };
-    slot(origin, offset, field_schema)
+    read_slot(origin, offset, field_schema, true)
 }
 
 pub(super) fn array_length(value: *mut u8) -> Option<u32> {
@@ -39,12 +39,16 @@ pub(super) fn array_length(value: *mut u8) -> Option<u32> {
     unsafe {
         match word(value, 0) {
             ARRAY => Some(word(value, MEMBER_COUNT)),
-            VIEW => {
+            VIEW | NATIVE => {
                 let (origin, schema) = (node(word(value, 8)), node(word(value, 12)));
                 match word(schema, 0) {
                     d::ARRAY => Some(word(origin, array::LEN as usize)),
                     d::JSON_TUPLE => {
-                        let graph = node(word(origin, record::JSON as usize));
+                        let graph = if word(value, 0) == VIEW {
+                            node(word(origin, record::JSON as usize))
+                        } else {
+                            core::ptr::null_mut()
+                        };
                         Some(word(schema, 4).max(if graph.is_null() {
                             0
                         } else {
@@ -122,12 +126,14 @@ pub(super) fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
                                 .map_or(core::ptr::null_mut(), |index| array_element(graph, index))
                         }
                     }
-                } else if index < word(origin, array::LEN as usize) {
+                } else if index < word(origin, array::LEN as usize) && array_present(origin, index)
+                {
                     let stride = array::Elements::decode(word(schema, 8)).stride();
-                    slot(
+                    read_slot(
                         node(word(origin, array::DATA as usize)),
                         index * stride,
                         node(count),
+                        true,
                     )
                 } else {
                     core::ptr::null_mut()
@@ -153,7 +159,7 @@ pub(super) fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
                 match name {
                     b"tag" => std_json_from_string(node(word(case, 0))),
                     b"val" if word(case, 4) != 0 => {
-                        slot(origin, variant::VALUE, node(word(case, 4)))
+                        read_slot(origin, variant::VALUE, node(word(case, 4)), true)
                     }
                     _ => {
                         let graph = variant_graph(origin, schema);
@@ -172,6 +178,24 @@ pub(super) fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
 
 pub(super) fn keys(value: *mut u8) -> *mut u8 {
     if let Some(length) = array_length(value) {
+        unsafe {
+            if matches!(word(value, 0), VIEW | NATIVE) {
+                let origin = node(word(value, 8));
+                let schema = node(word(value, 12));
+                if word(schema, 0) == d::ARRAY && word(origin, array::HOLES as usize) != 0 {
+                    let (result, slots) = crate::runtime::array_storage(length as usize);
+                    let mut count = 0;
+                    for index in 0..length {
+                        if array_present(origin, index) {
+                            slots[count] = std_json_to_string(index_key(index)) as u64;
+                            count += 1;
+                        }
+                    }
+                    set_word(result, array::LEN as usize, count as u32);
+                    return result;
+                }
+            }
+        }
         return super::index_keys(length);
     }
     unsafe {
@@ -249,6 +273,10 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
         }
         keys
     }
+}
+
+pub(super) fn array_present(origin: *mut u8, index: u32) -> bool {
+    unsafe { !array::is_hole(node(word(origin, array::HOLES as usize)), index) }
 }
 
 #[cfg(target_arch = "wasm32")]

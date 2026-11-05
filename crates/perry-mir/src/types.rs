@@ -19,6 +19,16 @@ mod kinds;
 pub use kinds::*;
 mod records;
 
+/// `ty` as a `T` when it is one. Unlike [TypedHandle::from_handle], a mismatch does not print
+/// both types into an error, so this is the type test for hot paths.
+pub fn typed<T: Type>(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<T>> {
+    if ty.deref(ctx).is::<T>() {
+        TypedHandle::from_handle(ty, ctx).ok()
+    } else {
+        None
+    }
+}
+
 macro_rules! record_kinds {
     ($($kind:ident => $name:literal),+ $(,)?) => {
         /// Logical record role, preserved when numeric storage is specialized.

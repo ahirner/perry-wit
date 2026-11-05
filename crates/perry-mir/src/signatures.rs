@@ -8,7 +8,7 @@ use crate::types::{
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::Context,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
 };
 
 pub(super) trait ResultType: Copy {
@@ -105,8 +105,8 @@ type_kinds! {
     PromiseStringArray = PromiseType::get(ctx, Ty::StringArray.get(ctx)).into();
     /// `Promise<void>`: settles `undefined`, admitting any optional-number absence.
     PromiseVoid = PromiseType::get(ctx, Ty::OptNumber.get(ctx)).into(),
-        accepts TypedHandle::<PromiseType>::from_handle(ty, ctx)
-            .is_ok_and(|promise| optional_of(ctx, promise.deref(ctx).value(), Ty::Number));
+        accepts crate::typed::<PromiseType>(ctx, ty)
+            .is_some_and(|promise| optional_of(ctx, promise.deref(ctx).value(), Ty::Number));
     OptBytes = OptionalType::get(ctx, Ty::Bytes.get(ctx)).into(),
         accepts optional_of(ctx, ty, Ty::Bytes);
     Headers = HeadersType::get(ctx).into();

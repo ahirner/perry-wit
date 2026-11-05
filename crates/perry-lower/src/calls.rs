@@ -208,6 +208,11 @@ impl<'s> FunctionBuilder<'s> {
                     Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
                     inputs => self.expression(ctx, inputs)?,
                 };
+                let inputs = if self.shapes.metadata.sparse_arrays {
+                    self.combinator_holes(ctx, inputs)?
+                } else {
+                    inputs
+                };
                 let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
                     .context("Promise combinators take an array of promises of one type")?;
                 return Ok(Some(self.append_value(ctx, &op)));
@@ -439,10 +444,10 @@ impl<'s> FunctionBuilder<'s> {
         val: Value,
     ) -> Result<Value> {
         let ty = val.get_type(ctx);
-        if TypedHandle::<ArrayType>::from_handle(ty, ctx).is_ok() {
+        if perry_mir::typed::<ArrayType>(ctx, ty).is_some() {
             return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![val])));
         }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) {
+        if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty) {
             let fields = rec
                 .deref(ctx)
                 .fields()
@@ -481,6 +486,45 @@ impl<'s> FunctionBuilder<'s> {
         Ok(val)
     }
 
+    /// A combinator's input array with holes read as `undefined` values, so each element is a
+    /// promise of `T | undefined`, or of the plain element value.
+    fn combinator_holes(&mut self, ctx: &mut Context, inputs: Value) -> Result<Value> {
+        use crate::control_flow::{ArrayOutput, Holes, Input};
+        let element = self.array_element(ctx, inputs)?;
+        let promise = perry_mir::typed::<PromiseType>(ctx, present_type(ctx, element));
+        let settled = promise.map(|promise| {
+            let value = promise.deref(ctx).value();
+            let settled = crate::coerce::admitting(ctx, value, perry_mir::Absence::Undefined);
+            (settled, PromiseType::get(ctx, settled).into())
+        });
+        self.collect_items(
+            ctx,
+            Input::Array(inputs, Holes::Dense),
+            |b, ctx, item, _, _| {
+                let Some((settled, promise)) = settled else {
+                    return Ok(ArrayOutput::Item(
+                        b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, item)),
+                    ));
+                };
+                let hole = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
+                let promise = b.choose(
+                    ctx,
+                    promise,
+                    hole,
+                    |b, ctx| {
+                        let value = b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, settled));
+                        Ok(b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)))
+                    },
+                    |b, ctx| {
+                        let item = b.defined(ctx, item)?;
+                        b.fit(ctx, item, promise)
+                    },
+                )?;
+                Ok(ArrayOutput::Item(promise))
+            },
+        )
+    }
+
     /// The array literal given to a promise combinator: plain values among promises of `T`
     /// become promises fulfilled with them, as `Promise.all` treats them.
     fn combinator_inputs(&mut self, ctx: &mut Context, items: &'s [Expr]) -> Result<Value> {
@@ -496,8 +540,7 @@ impl<'s> FunctionBuilder<'s> {
                     let value = self.defined(ctx, value)?;
                     first.get_or_insert(value);
                     if promised.is_none()
-                        && let Ok(p) =
-                            TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx)
+                        && let Some(p) = perry_mir::typed::<PromiseType>(ctx, value.get_type(ctx))
                     {
                         promised = Some(p.deref(ctx).value());
                     }
@@ -540,7 +583,7 @@ impl<'s> FunctionBuilder<'s> {
         let value = self.expression(ctx, value)?;
         let value = self.defined(ctx, value)?;
         if name == "resolve" {
-            if TypedHandle::<PromiseType>::from_handle(value.get_type(ctx), ctx).is_ok() {
+            if perry_mir::typed::<PromiseType>(ctx, value.get_type(ctx)).is_some() {
                 return Ok(value);
             }
             return Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)));

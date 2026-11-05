@@ -262,6 +262,14 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
     },
     CatalogEntry {
+        id: "ecma.command.sparse-arrays",
+        description: "Sparse array presence, traversal, copying and serialization",
+        specification: "https://tc39.es/ecma262/multipage/indexed-collections.html",
+        domain: "Elisions and indexed deletion; explicit undefined; sparse numeric and reference arrays; exact output bytes and successful exit",
+        partitions: &["standard-source"],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
         id: "ecma.command.text",
         description: "CLI UTF-8 string formatting, UTF-16 code units and regular expressions",
         specification: "https://nodejs.org/api/",

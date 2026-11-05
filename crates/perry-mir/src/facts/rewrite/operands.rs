@@ -139,7 +139,7 @@ fn parsed_constant(
     parsed: super::super::domains::ConstParsedInt,
 ) -> Box<dyn pliron::builtin::attr_interfaces::TypedAttrInterface> {
     use super::super::domains::ConstParsedInt;
-    if let Ok(int_ty) = TypedHandle::<IntegerType>::from_handle(res_ty, ctx) {
+    if let Some(int_ty) = crate::typed::<IntegerType>(ctx, res_ty) {
         let bits = match parsed {
             ConstParsedInt::Integer { bits, .. } => bits,
             ConstParsedInt::Float(bits) => f64::from_bits(bits) as i64 as u64,
@@ -289,6 +289,9 @@ fn operand_types(
         ArrayGetOp,
         ArrayAtOp,
         ArrayLenOp,
+        crate::collections::ArrayPresentOp,
+        crate::collections::ArrayIsDenseOp,
+        crate::collections::ArrayHoleOp,
     )>(ctx, original)
         || crate::is_any::<(ArrayTruncateOp, IsUndefinedOp, IsNullOp, NumericCastOp)>(ctx, original)
         || Operation::is_op::<crate::intrinsics::JsonStringifyOp>(original, ctx)

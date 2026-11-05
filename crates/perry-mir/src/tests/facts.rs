@@ -190,6 +190,8 @@ builtin.module @lengths { ^module():
       one = builtin.constant <builtin.double 1.0> : builtin.fp64;
       zero = builtin.constant <builtin.double 0.0> : builtin.fp64;
       items = perry.array_new Unassigned (one, one) : perry.array <builtin.fp64>;
+      sparse = perry.array_new Unassigned (one) : perry.array <builtin.fp64>;
+      perry.array_hole sparse[zero];
       record = perry.alloc Unassigned (items) : perry.record <Holder { items: perry.array <builtin.fp64> }>;
       selected = perry.field_get record."items" : perry.array <builtin.fp64>;
       alias = perry.call identity (selected, flag) : perry.array <builtin.fp64>;
@@ -205,6 +207,7 @@ builtin.module @lengths { ^module():
         ("perry.array_set alias[zero] = zero;", (2, 2)),
         ("perry.array_set alias[index] = zero;", (2, u32::MAX)),
         ("perry.array_push alias <- zero;", (2, u32::MAX)),
+        ("perry.array_hole alias[zero];", (2, 2)),
         ("extend", (2, u32::MAX)),
         (
             "view = perry.json_native alias : perry.json;",
@@ -235,6 +238,11 @@ builtin.module @lengths { ^module():
             let fresh = facts(ctx, module)?;
             for facts in [&*cached, &fresh] {
                 assert_eq!(
+                    facts.array_is_dense(ctx, array),
+                    !mutation.contains("array_hole") && !mutation.contains("json_native"),
+                    "{mutation}"
+                );
+                assert_eq!(
                     facts.array_length(&run, array),
                     Some(expected),
                     "{mutation}"
@@ -247,7 +255,7 @@ builtin.module @lengths { ^module():
             checked |= Operation::is_op::<ArrayGetOp>(op, ctx);
             length |= Operation::is_op::<ArrayLenOp>(op, ctx);
         }
-        assert!(!checked, "{mutation}");
+        assert_eq!(checked, mutation.contains("array_hole"), "{mutation}");
         // An unused native view is eliminated before the fresh facts query.
         assert_eq!(
             length,

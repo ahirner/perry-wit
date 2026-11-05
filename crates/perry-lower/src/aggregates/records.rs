@@ -296,7 +296,7 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         let expected = expected
-            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
+            .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))
             .filter(|record| record.deref(ctx).kind() == kind);
         let expected = matching_record(
             ctx,
@@ -329,12 +329,8 @@ impl<'s> FunctionBuilder<'s> {
         let fallback = expected.or_else(|| {
             first_evaluated
                 .and_then(|value| {
-                    TypedHandle::<RecordType>::from_handle(
-                        present_type(ctx, value.get_type(ctx)),
-                        ctx,
-                    )
-                    .ok()
-                    .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
+                    perry_mir::typed::<RecordType>(ctx, present_type(ctx, value.get_type(ctx)))
+                        .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
                 })
                 .or_else(|| {
                     parts.iter().find_map(|(key, value)| {
@@ -370,8 +366,7 @@ impl<'s> FunctionBuilder<'s> {
                     continue;
                 }
                 let source = self.defined(ctx, raw)?;
-                let record = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
-                    .ok()
+                let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                     .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
                     .context("object spread is supported over typed records or JSON values with static keys")?;
                 sources.push(RecordSource::Spread(source));
@@ -396,13 +391,12 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let source = self.expression(ctx, object)?;
         let source = self.defined(ctx, source)?;
-        let record = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
-            .ok()
+        let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
             .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
             .context("object rest destructuring requires a typed record")?;
         let expected = expected
             .map(|ty| present_type(ctx, ty))
-            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
+            .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))
             .filter(|record| record.deref(ctx).kind() == RecordKind::Object);
         let mut assembly = RecordAssembly {
             expected,

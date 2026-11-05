@@ -198,8 +198,8 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         if ty.deref(ctx).is::<FP64Type>() {
             Ok(self.number(ctx, 0.0))
-        } else if TypedHandle::<IntegerType>::from_handle(ty, ctx)
-            .is_ok_and(|int| int.deref(ctx).width() == 1)
+        } else if perry_mir::typed::<IntegerType>(ctx, ty)
+            .is_some_and(|int| int.deref(ctx).width() == 1)
         {
             Ok(self.boolean(ctx, false))
         } else if let Some(zero) = self.zero_value_for_type(ctx, ty) {
@@ -538,7 +538,7 @@ fn mir_type_to_hir(ctx: &Context, shapes: &Shapes<'_>, ty: TypeHandle) -> Option
             }
         });
     }
-    if let Ok(arr) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+    if let Some(arr) = perry_mir::typed::<ArrayType>(ctx, ty) {
         let elem = mir_type_to_hir(ctx, shapes, arr.deref(ctx).element())?;
         return Some(HirType::Array(Box::new(elem)));
     }
