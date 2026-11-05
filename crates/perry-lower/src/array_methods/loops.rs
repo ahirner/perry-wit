@@ -1,7 +1,129 @@
 use super::*;
 
 impl<'s> FunctionBuilder<'s> {
-    /// `array[index]` for an `f64` index the caller checked against the length.
+    pub(crate) fn compact_array(&mut self, ctx: &mut Context, array: Value) -> Result<Value> {
+        if !self.shapes.metadata.sparse_arrays {
+            return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])));
+        }
+        let dense = self.emit_value(ctx, |ctx| perry_mir::ArrayIsDenseOp::new(ctx, array));
+        self.choose(
+            ctx,
+            array.get_type(ctx),
+            dense,
+            |b, ctx| Ok(b.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]))),
+            |b, ctx| {
+                b.collect_items(ctx, Input::Array(array, Holes::Skip), |_, _, item, _, _| {
+                    Ok(ArrayOutput::Item(item))
+                })
+            },
+        )
+    }
+
+    pub(crate) fn copy_array_slot(
+        &mut self,
+        ctx: &mut Context,
+        target: Value,
+        index: Value,
+        value: Value,
+        present: Value,
+    ) -> Result<()> {
+        let write = self.new_block(ctx, "copy_present");
+        let hole = self.new_block(ctx, "copy_hole");
+        let done = self.new_block(ctx, "copied_slot");
+        self.branch(ctx, present, write, hole);
+        self.switch_to(write);
+        let element = self.array_element(ctx, target)?;
+        let value = self.fit(ctx, value, element)?;
+        self.emit(ctx, |ctx| ArraySetOp::new(ctx, target, index, value));
+        self.jump(ctx, done);
+        self.switch_to(hole);
+        self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, target, index));
+        self.jump(ctx, done);
+        self.switch_to(done);
+        Ok(())
+    }
+    pub(crate) fn array_value(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Value,
+    ) -> Result<Value> {
+        if !self.shapes.metadata.sparse_arrays {
+            return self.element_at(ctx, array, index);
+        }
+        let op = ArrayGetOp::new(ctx, array, index)?;
+        Ok(self.append_value(ctx, &op))
+    }
+
+    pub(crate) fn materialize_array(&mut self, ctx: &mut Context, array: Value) -> Result<Value> {
+        if !self.shapes.metadata.sparse_arrays {
+            return Ok(array);
+        }
+        let element = self.array_element(ctx, array)?;
+        let element = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
+        let target = ArrayType::get(ctx, element).into();
+        let dense = self.emit_value(ctx, |ctx| perry_mir::ArrayIsDenseOp::new(ctx, array));
+        self.choose(
+            ctx,
+            target,
+            dense,
+            |b, ctx| b.fit(ctx, array, target),
+            |b, ctx| {
+                b.collect_items(
+                    ctx,
+                    Input::Array(array, Holes::Dense),
+                    |_, _, item, _, _| Ok(ArrayOutput::Item(item)),
+                )
+            },
+        )
+    }
+
+    pub(crate) fn collect_preserving_holes(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        start: Value,
+        limit: Value,
+        item: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<Value>,
+    ) -> Result<Value> {
+        let prepare = self.block;
+        self.index_loop(
+            ctx,
+            "preserve_holes",
+            start,
+            limit,
+            |b, ctx, index, _, _| {
+                let present =
+                    b.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
+                let read = b.new_block(ctx, "present_element");
+                let hole = b.new_block(ctx, "missing_element");
+                let done = b.new_block(ctx, "collected_element");
+                b.branch(ctx, present, read, hole);
+                b.switch_to(read);
+                let value = b.element_at(ctx, array, index)?;
+                let value = item(b, ctx, value, index)?;
+                let allocation = ArrayNewOp::new(ctx, value.get_type(ctx), vec![]);
+                crate::builder::insert_before_terminator(
+                    ctx,
+                    prepare,
+                    [allocation.get_operation()],
+                )?;
+                let result = allocation.get_result(ctx);
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, value));
+                b.jump(ctx, done);
+                b.switch_to(hole);
+                let position = b.array_length(ctx, result);
+                b.emit(ctx, |ctx| {
+                    perry_mir::ArrayHoleOp::new(ctx, result, position)
+                });
+                b.jump(ctx, done);
+                b.switch_to(done);
+                Ok(result)
+            },
+        )
+    }
+
+    /// `array[index]` for an `f64` index the caller proved present and in bounds.
     pub(crate) fn element_at(
         &mut self,
         ctx: &mut Context,

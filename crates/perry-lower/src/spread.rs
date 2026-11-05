@@ -36,7 +36,7 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(ArrayOutput::Item(item))
             });
         }
-        Ok(val)
+        self.materialize_array(ctx, val)
     }
 
     pub(super) fn concat_values(
@@ -101,9 +101,8 @@ impl<'s> FunctionBuilder<'s> {
                 let states = items.iter().fold(absence(ctx, base), |states, item| {
                     let state = match item {
                         perry_frontend::hir::ArrayElement::Expr(Expr::Null) => Some(Absence::Null),
-                        perry_frontend::hir::ArrayElement::Expr(Expr::Undefined) => {
-                            Some(Absence::Undefined)
-                        }
+                        perry_frontend::hir::ArrayElement::Expr(Expr::Undefined)
+                        | perry_frontend::hir::ArrayElement::Hole => Some(Absence::Undefined),
                         _ => None,
                     };
                     crate::coerce::merge_absence(states, state)
@@ -114,13 +113,43 @@ impl<'s> FunctionBuilder<'s> {
                 }));
             }
         }
+        if element.is_none()
+            && items.iter().all(|item| match item {
+                perry_frontend::hir::ArrayElement::Hole
+                | perry_frontend::hir::ArrayElement::Expr(Expr::Null | Expr::Undefined) => true,
+                perry_frontend::hir::ArrayElement::Spread(Expr::Array(items, _)) => {
+                    items.is_empty()
+                }
+                _ => false,
+            })
+        {
+            let mut ty = void_type(ctx);
+            if items
+                .iter()
+                .any(|item| matches!(item, perry_frontend::hir::ArrayElement::Expr(Expr::Null)))
+            {
+                ty = crate::coerce::admitting(ctx, ty, Absence::Null);
+            }
+            element = Some(ty);
+        }
         let mut result = None;
+        let mut pending_holes = 0;
         for item in items {
             let (expression, spread) = match item {
                 perry_frontend::hir::ArrayElement::Expr(expression) => (expression, false),
                 perry_frontend::hir::ArrayElement::Spread(expression) => (expression, true),
                 perry_frontend::hir::ArrayElement::Hole => {
-                    return Err(LowerError::new(LowerErrorKind::UnsupportedSpread).into());
+                    let Some(element) = element else {
+                        pending_holes += 1;
+                        continue;
+                    };
+                    let source = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+                    let zero = self.number(ctx, 0.0);
+                    self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, source, zero));
+                    let sources =
+                        result.map_or_else(|| vec![source], |prefix| vec![prefix, source]);
+                    result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
+                    continue;
                 }
             };
             let value = if spread {
@@ -133,6 +162,26 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 value.get_type(ctx)
             };
+            if element.is_none() {
+                let optional = items
+                    .iter()
+                    .any(|item| matches!(item, perry_frontend::hir::ArrayElement::Hole));
+                element = Some(if optional {
+                    crate::coerce::admitting(ctx, source_element, Absence::Undefined)
+                } else {
+                    source_element
+                });
+            }
+            if pending_holes > 0 {
+                let prefix =
+                    self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element.unwrap(), vec![]));
+                for index in 0..pending_holes {
+                    let index = self.number(ctx, index as f64);
+                    self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, prefix, index));
+                }
+                result = Some(prefix);
+                pending_holes = 0;
+            }
             if !fixed_element && let Some(previous) = element {
                 let inner = present_type(ctx, previous);
                 ensure!(

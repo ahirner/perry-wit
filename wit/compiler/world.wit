@@ -45,6 +45,7 @@ interface api {
   enum diagnostic-code {
     parse-error,
     unsupported-operator,
+    /// Reserved for compatibility; no longer emitted. Review diagnostic extensibility in 0.2.0.
     unsupported-spread,
     missing-type-annotation,
     unsupported-type,

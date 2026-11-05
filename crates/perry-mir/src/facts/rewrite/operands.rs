@@ -289,6 +289,9 @@ fn operand_types(
         ArrayGetOp,
         ArrayAtOp,
         ArrayLenOp,
+        crate::collections::ArrayPresentOp,
+        crate::collections::ArrayIsDenseOp,
+        crate::collections::ArrayHoleOp,
     )>(ctx, original)
         || crate::is_any::<(ArrayTruncateOp, IsUndefinedOp, IsNullOp, NumericCastOp)>(ctx, original)
         || Operation::is_op::<crate::intrinsics::JsonStringifyOp>(original, ctx)

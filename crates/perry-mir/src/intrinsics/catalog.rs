@@ -101,6 +101,7 @@ macro_rules! intrinsic_catalog {
                 ArrayConcatSegments = "perry_array_concat_segments" (I32, I32) -> I32;
                 ArrayConcatMany = "perry_array_concat_many" (I32, I32, I32, I32, I32) -> I32;
                 ArrayExtend = "perry_array_extend" (I32, I32, I32);
+                ArrayHole = "perry_array_hole" (I32, I32, I32);
                 ArrayConcat = "perry_array_concat" (I32, I32, I32, I32) -> I32;
                 F64Rem = "perry_f64_rem" (F64, F64) -> F64;
                 TaskEnter = "perry_task_enter" () -> I32;

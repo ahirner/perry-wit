@@ -208,6 +208,52 @@ impl<'s> FunctionBuilder<'s> {
                     Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
                     inputs => self.expression(ctx, inputs)?,
                 };
+                let inputs = if self.shapes.metadata.sparse_arrays {
+                    let element = self.array_element(ctx, inputs)?;
+                    let promise =
+                        TypedHandle::<PromiseType>::from_handle(present_type(ctx, element), ctx)
+                            .ok();
+                    let settled = promise.map(|promise| {
+                        let value = promise.deref(ctx).value();
+                        crate::coerce::admitting(ctx, value, perry_mir::Absence::Undefined)
+                    });
+                    self.collect_items(
+                        ctx,
+                        crate::control_flow::Input::Array(
+                            inputs,
+                            crate::control_flow::Holes::Dense,
+                        ),
+                        |b, ctx, item, _, _| {
+                            let promise = if let Some(settled) = settled {
+                                let ty = PromiseType::get(ctx, settled).into();
+                                let missing =
+                                    b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
+                                b.choose(
+                                    ctx,
+                                    ty,
+                                    missing,
+                                    |b, ctx| {
+                                        let value = b.emit_value(ctx, |ctx| {
+                                            UndefinedOp::with_type(ctx, settled)
+                                        });
+                                        Ok(b.emit_value(ctx, |ctx| {
+                                            PromiseResolvedOp::new(ctx, value)
+                                        }))
+                                    },
+                                    |b, ctx| {
+                                        let promise = b.defined(ctx, item)?;
+                                        b.fit(ctx, promise, ty)
+                                    },
+                                )?
+                            } else {
+                                b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, item))
+                            };
+                            Ok(crate::control_flow::ArrayOutput::Item(promise))
+                        },
+                    )?
+                } else {
+                    inputs
+                };
                 let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
                     .context("Promise combinators take an array of promises of one type")?;
                 return Ok(Some(self.append_value(ctx, &op)));

@@ -273,7 +273,7 @@ impl<'s> FunctionBuilder<'s> {
         let len = self.array_length(ctx, arr);
         let zero = self.number(ctx, 0.0);
         self.index_loop(ctx, "math_spread", zero, len, |b, ctx, idx, _, _| {
-            let item = b.element_at(ctx, arr, idx)?;
+            let item = b.array_value(ctx, arr, idx)?;
             let val = b.arithmetic(ctx, item);
             let cur = b.load(ctx, acc_slot)?;
             let next = b.intrinsic(ctx, intrinsic, vec![cur, val]);

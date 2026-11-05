@@ -332,7 +332,7 @@
 
   (func $array (param $schema i32) (param $source i32) (param $mode i32) (param $first i32) (param $dictionary i32)
     (result i64 i32 i32)
-    (local $child i32) (local $elements i32) (local $array i32) (local $keys i32) (local $index i32)
+    (local $child i32) (local $elements i32) (local $array i32) (local $keys i32) (local $index i32) (local $holes i32) (local $hole i32)
     (local $plan i32) (local $source-schema i32) (local $source-elements i32) (local $source-data i32)
     (local $slot i32) (local $key i32) (local $object i32) (local $value-schema i32)
     (local $bits i64) (local $tag i32) (local $failed i32) (local $errors i32) (local $length i32)
@@ -359,6 +359,10 @@
       (loop $head
         @input.NATIVE@
         (br_if $done (i32.ge_u (local.get $index) (i32.load offset=@array.LEN@ (local.get $source))))
+        (local.set $holes (i32.load offset=@array.HOLES@ (local.get $source)))
+        (local.set $hole (i32.const 0))
+        (if (local.get $holes) (then
+          (local.set $hole (i32.load8_u (i32.add (local.get $holes) (local.get $index))))))
         @input.END_NATIVE@
         @input.CURSOR@
         (br_if $done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))
@@ -371,6 +375,12 @@
         (loop $item
           (block $read
             @input.NATIVE@
+            (if (local.get $hole) (then
+              (local.set $tag (i32.const @numeric.NULL@))
+              (local.set $bits (call $absent-bits (local.get $child) (local.get $tag)))
+              (local.set $failed (select (i32.const 0) (i32.const @descriptor.COPY_ABSENT@)
+                (i32.and (local.get $child) (i32.const @descriptor.NULL_ALLOWED@))))
+              (br $read)))
             (local.set $slot (call $slot (local.get $source-data) (local.get $index) (local.get $source-elements)))
             (call $load (local.get $source-schema) (local.get $slot))
             local.set $tag local.set $bits

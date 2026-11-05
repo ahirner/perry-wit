@@ -167,6 +167,7 @@ pub(crate) enum Mutation {
     Field { slot: Option<usize> },
     Element { index: Option<usize> },
     InBoundsElement,
+    Hole,
     Extend,
     Truncate,
     Local,
@@ -176,7 +177,7 @@ impl Mutation {
     pub(crate) fn stored_operand(self) -> Option<usize> {
         match self {
             Self::Element { index: Some(_) } | Self::InBoundsElement => Some(2),
-            Self::Truncate => None,
+            Self::Truncate | Self::Hole => None,
             _ => Some(1),
         }
     }

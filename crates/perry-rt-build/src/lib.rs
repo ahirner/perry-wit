@@ -191,7 +191,7 @@ fn compile_json_codecs(runtime: &Path, output: &Path) -> Result<()> {
         WRITE_EMPTY_OBJECT, WRITE_COLON, WRITE_QUOTE, WRITE_TAG_KEY, WRITE_VALUE_KEY,
         WRITE_TAG_NAME, WRITE_RETAINS_JSON, WRITE_DATE_BUFFER, WRITE_DATE_CAPACITY);
     constants!(numeric: UNDEFINED, NULL, OMITTED, SIGNED, UNSIGNED);
-    constants!(array: NUMERIC_ELEMENTS, SLOT, NUMERIC_SLOT, LEN, CAP, DATA);
+    constants!(array: NUMERIC_ELEMENTS, SLOT, NUMERIC_SLOT, LEN, CAP, DATA, HOLES);
     constants!(json: NEXT);
     constants!(record: JSON, HEADER, ORDER, PACKED_FIELDS);
     constants!(variant: TAG, OWNER, VALUE, JSON, RETAINED_SIZE);

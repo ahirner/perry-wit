@@ -201,7 +201,11 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let projection = Projection::collection(ctx, val.get_type(ctx))?;
         let entries = self.collection_entries_array(ctx, val)?;
-        let entry = self.element_at(ctx, entries, idx)?;
+        let entry = if val.get_type(ctx).deref(ctx).is::<ArrayType>() {
+            self.array_value(ctx, entries, idx)?
+        } else {
+            self.element_at(ctx, entries, idx)?
+        };
         projection.read(self, ctx, entry)
     }
 

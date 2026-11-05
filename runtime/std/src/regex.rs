@@ -557,7 +557,14 @@ pub(crate) unsafe extern "C" fn std_regex_exec_from(
     let result = unsafe {
         runtime::alloc_shaped(
             RESULT_BYTES,
-            &[0, 3, array::DATA, RESULT_GROUPS as u32, RESULT_INPUT as u32],
+            &[
+                0,
+                4,
+                array::DATA,
+                array::HOLES,
+                RESULT_GROUPS as u32,
+                RESULT_INPUT as u32,
+            ],
         )
     };
     let data =
@@ -575,6 +582,7 @@ pub(crate) unsafe extern "C" fn std_regex_exec_from(
             .add(array::DATA as usize)
             .cast::<*mut u8>()
             .write(data);
+        result.add(array::HOLES as usize).cast::<u32>().write(0);
         core::ptr::write_bytes(data, 0, capacity * array::SLOT as usize);
     }
     let slots = unsafe { core::slice::from_raw_parts_mut(data.cast::<u64>(), group_count) };

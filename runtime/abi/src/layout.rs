@@ -24,6 +24,7 @@ pub mod array {
     pub const LEN: u32 = 0;
     pub const CAP: u32 = 4;
     pub const DATA: u32 = 8;
+    pub const HOLES: u32 = 12;
     pub const SLOT: u32 = 8;
     pub const NUMERIC_SLOT: u32 = 16;
     const SCALAR_ELEMENTS: u32 = 0;

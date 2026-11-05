@@ -35,6 +35,7 @@ pub struct Metadata<'s> {
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
+    pub sparse_arrays: bool,
 }
 
 pub(crate) struct LoweredHir<'s> {
@@ -44,6 +45,8 @@ pub(crate) struct LoweredHir<'s> {
 
 pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {
     let mut ast = loaded.module;
+    let mut sparse = SparseArrays(false);
+    swc_ecma_visit::VisitWith::visit_with(&ast, &mut sparse);
     let mut locations = loaded.locations;
     locations.collect(&ast);
     let spans = source::validate(&ast, &locations)?;
@@ -86,7 +89,109 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             locations,
             inferred_bindings,
             constructors,
+            sparse_arrays: sparse.0,
         },
+    })
+}
+
+struct SparseArrays(bool);
+
+impl swc_ecma_visit::Visit for SparseArrays {
+    fn visit_array_lit(&mut self, array: &perry_parser::swc_ecma_ast::ArrayLit) {
+        self.0 |= array.elems.iter().any(Option::is_none);
+        swc_ecma_visit::VisitWith::visit_children_with(array, self);
+    }
+}
+
+pub(crate) fn deletes_array_elements(
+    ctx: &pliron::context::Context,
+    module: &HirModule,
+    foreign: &HashMap<String, crate::hir::Foreign>,
+) -> bool {
+    use perry_hir::{
+        HirTypeEnv, infer_expr_type,
+        walker::{stmt_any_expr, walk_expr_children},
+    };
+    fn expression(
+        expr: &Expr,
+        env: &HirTypeEnv,
+        ctx: &pliron::context::Context,
+        decls: &crate::shapes::Declarations<'_>,
+    ) -> bool {
+        if let Expr::Delete(target) = expr {
+            let object = match target.as_ref() {
+                Expr::IndexGet { object, .. } | Expr::PropertyGet { object, .. } => Some(object),
+                _ => None,
+            };
+            if object.is_some_and(|object| {
+                use crate::shapes::{TypeId, generics::Resolver};
+                let ty = infer_expr_type(object, env);
+                let ty = if let HirType::Named(name) = &ty {
+                    decls.resolve_foreign_type(name).unwrap_or(&ty)
+                } else {
+                    &ty
+                };
+                Resolver::new(ctx, decls)
+                    .flatten(&[TypeId::intern(ctx, ty)], 0)
+                    .iter()
+                    .any(|ty| matches!(ty.hir(ctx), HirType::Array(_)))
+            }) {
+                return true;
+            }
+        }
+        if let Expr::Closure { body, .. } = expr
+            && body
+                .iter()
+                .any(|stmt| stmt_any_expr(stmt, &mut |expr| expression(expr, env, ctx, decls)))
+        {
+            return true;
+        }
+        let mut found = false;
+        walk_expr_children(expr, &mut |child| {
+            found |= expression(child, env, ctx, decls)
+        });
+        found
+    }
+    let decls = crate::shapes::Declarations::new(
+        &module.interfaces,
+        &module.type_aliases,
+        &module.imports,
+        &module.classes,
+        foreign,
+    );
+    let mut env = HirTypeEnv::from_module(module);
+    let function = |f: &perry_hir::ir::Function, env: &HirTypeEnv| {
+        f.body
+            .iter()
+            .any(|stmt| stmt_any_expr(stmt, &mut |expr| expression(expr, env, ctx, &decls)))
+            || f.params.iter().any(|p| {
+                p.default
+                    .as_ref()
+                    .is_some_and(|expr| expression(expr, env, ctx, &decls))
+            })
+    };
+    if module
+        .init
+        .iter()
+        .any(|stmt| stmt_any_expr(stmt, &mut |expr| expression(expr, &env, ctx, &decls)))
+        || module.globals.iter().any(|global| {
+            global
+                .init
+                .as_ref()
+                .is_some_and(|expr| expression(expr, &env, ctx, &decls))
+        })
+        || module.functions.iter().any(|f| function(f, &env))
+    {
+        return true;
+    }
+    module.classes.iter().any(|class| {
+        env.set_current_class(Some(class.name.clone()));
+        crate::shapes::class_functions(class).any(|f| function(f, &env))
+            || class.fields.iter().chain(&class.static_fields).any(|f| {
+                f.init
+                    .as_ref()
+                    .is_some_and(|expr| expression(expr, &env, ctx, &decls))
+            })
     })
 }
 

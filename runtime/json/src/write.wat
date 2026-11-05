@@ -137,7 +137,7 @@
     (local $kind i32) (local $object i32) (local $count i32) (local $index i32)
     (local $child i32) (local $element i32) (local $elements i32) (local $entry i32) (local $slot i32) (local $payload i64) (local $payload-tag i32)
     (local $formatted i64)
-    (local $array i32) (local $dictionary i32) (local $tuple i32) (local $buffer i32)
+    (local $array i32) (local $dictionary i32) (local $tuple i32) (local $buffer i32) (local $holes i32)
     (if (i32.and (local.get $schema) (i32.const @descriptor.ABSENCE_MASK@))
       (then (local.set $absent (call $native-absence (local.get $schema) (local.get $bits) (local.get $tag)))))
     (local.set $schema (i32.and (local.get $schema) (i32.const @descriptor.SCHEMA_MASK@)))
@@ -240,6 +240,15 @@
             (local.set $elements (i32.load offset=8 (local.get $schema)))))
         (block $done (loop $items
           (br_if $done (i32.ge_u (local.get $index) (local.get $count)))
+          (if (i32.eq (local.get $kind) (i32.const @descriptor.ARRAY@))
+            (then
+              (local.set $holes (i32.load offset=@array.HOLES@ (local.get $object)))
+              (if (local.get $holes) (then
+                (if (i32.load8_u (i32.add (local.get $holes) (local.get $index))) (then
+                  (call $write-item (local.get $writer))
+                  (call $write-raw (local.get $writer) (local.get $data) (i32.const 4))
+                  (local.set $index (i32.add (local.get $index) (i32.const 1)))
+                  (br $items)))))))
           (if (local.get $tuple)
             (then
               (local.set $entry (i32.add (local.get $schema) (i32.add (i32.const @descriptor.FIELDS@) (i32.mul (local.get $index) (i32.const @descriptor.FIELD_SIZE@)))))

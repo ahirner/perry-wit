@@ -4,6 +4,59 @@ use crate::core_program::{Counter, Program};
 use crate::node_oracle::assert_numbers;
 
 #[test]
+fn dense_array_fast_paths_are_independent_of_unrelated_holes() {
+    let dense = r#"
+export function run(n:number) {
+ const values:number[]=[1,2,3,4];
+ let sum=0;
+ for(let repeat=0;repeat<n;repeat++) {
+   for(let i=0;i<values.length;i++){values[i]+=1;sum+=values[i];}
+ }
+ return sum;
+}
+export function copies(n:number) {
+ const values:number[]=[1,2,3,4];
+ let sum=0;
+ for(let i=0;i<n;i++) {
+   const spread=[...values];
+   const from=Array.from(values);
+   const flat=values.flat(0);
+   spread[0]+=1;
+   sum+=spread[0]+from[1]+flat[2];
+ }
+ return sum;
+}
+"#;
+    let mixed = dense.replace(
+        "return sum;",
+        "const sparse=[,3];return sum+(sparse[0]??0);",
+    );
+    let separate = format!("{dense}\nexport function sparse() {{return [,3].join(',');}}");
+    let measure = |source: &str, export: &str| {
+        let mut consumed = Vec::new();
+        for n in [250.0f64, 500.0] {
+            let mut program = Program::checked(source, "dense-mixed.ts");
+            let before = program.counter(Counter::Allocations);
+            let (result, fuel) = program.call(export, &[wasmtime::Val::F64(n.to_bits())]);
+            let expected = if export == "run" {
+                2.0 * n * n + 12.0 * n
+            } else {
+                7.0 * n
+            };
+            assert_eq!(result[0].unwrap_f64(), expected);
+            consumed.push((fuel, program.counter(Counter::Allocations) - before));
+        }
+        (consumed[1].0 - consumed[0].0, consumed[1].1 - consumed[0].1)
+    };
+    let baseline = measure(dense, "run").0;
+    assert_eq!(measure(&mixed, "run").0, baseline);
+    assert_eq!(measure(&separate, "run").0, baseline);
+    let allocations = measure(dense, "copies").1;
+    assert_eq!(measure(&mixed, "copies").1, allocations);
+    assert_eq!(measure(&separate, "copies").1, allocations);
+}
+
+#[test]
 fn concat_and_spread_match_node_for_order_nullability_and_shallow_identity() -> anyhow::Result<()> {
     let source = r#"
 interface Cell { value:number }

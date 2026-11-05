@@ -35,15 +35,20 @@ impl<'s> FunctionBuilder<'s> {
                     Search::Index(_, _, direction) => direction,
                     _ => Direction::Forward,
                 };
-                let needle = self.expression_with(ctx, value, Some(element))?;
-                let needle = self.fit(ctx, needle, element)?;
+                let needle_type = if self.shapes.metadata.sparse_arrays {
+                    optional
+                } else {
+                    element
+                };
+                let needle = self.expression_with(ctx, value, Some(needle_type))?;
+                let needle = self.fit(ctx, needle, needle_type)?;
                 let from = from
                     .map(|from| self.number_or(ctx, Some(from), 0.0))
                     .transpose()?;
                 (
                     Predicate::Equal(needle, includes),
                     direction,
-                    Holes::Dense,
+                    if includes { Holes::Dense } else { Holes::Skip },
                     if includes {
                         Outcome::Boolean(true)
                     } else {
@@ -122,6 +127,7 @@ impl<'s> FunctionBuilder<'s> {
                                 crate::operators::Equality::SameValueZero,
                             )?
                         } else {
+                            let item = b.fit(ctx, item, needle.get_type(ctx))?;
                             b.compare(ctx, CompareKind::Eq, item, needle)
                         }
                     }

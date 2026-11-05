@@ -12,6 +12,13 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
+        if matches!(transform, Transform::Map) && self.shapes.metadata.sparse_arrays {
+            let zero = self.number(ctx, 0.0);
+            let len = self.array_length(ctx, array);
+            return self.collect_preserving_holes(ctx, array, zero, len, |b, ctx, item, index| {
+                b.array_callback(ctx, callback, &[item, index, array])
+            });
+        }
         self.collect_items(
             ctx,
             Input::Array(array, Holes::Skip),
@@ -19,7 +26,15 @@ impl<'s> FunctionBuilder<'s> {
                 let mapped = b.array_callback(ctx, callback, &[item, current, array])?;
                 Ok(match transform {
                     Transform::Map => ArrayOutput::Item(mapped),
-                    Transform::FlatMap => ArrayOutput::Items(b.defined(ctx, mapped)?),
+                    Transform::FlatMap => {
+                        let mapped = b.defined(ctx, mapped)?;
+                        let mapped = if b.shapes.metadata.sparse_arrays {
+                            b.compact_array(ctx, mapped)?
+                        } else {
+                            mapped
+                        };
+                        ArrayOutput::Items(mapped)
+                    }
                     Transform::Filter => {
                         let keep = b.truthy(ctx, mapped)?;
                         let push = b.new_block(ctx, "array_keep");
@@ -42,8 +57,13 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
+        let original_len = self.array_length(ctx, array);
+        let sparse = self.shapes.metadata.sparse_arrays;
         let target = if matches!(mutation, Mutation::Copy) {
-            self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]))
+            let values = self.materialize_array(ctx, array)?;
+            self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![values]))
+        } else if sparse {
+            self.compact_array(ctx, array)?
         } else {
             array
         };
@@ -107,7 +127,29 @@ impl<'s> FunctionBuilder<'s> {
             b.emit(ctx, |ctx| ArraySetOp::new(ctx, target, insert_pos, key));
             Ok(())
         })?;
-        Ok(target)
+        if sparse && matches!(mutation, Mutation::InPlace) {
+            let zero = self.number(ctx, 0.0);
+            let element = self.array_element(ctx, array)?;
+            self.index_loop(ctx, "sort_write", zero, limit, |b, ctx, index, _, _| {
+                let value = b.element_at(ctx, target, index)?;
+                let value = b.fit(ctx, value, element)?;
+                b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, index, value));
+                Ok(())
+            })?;
+            self.index_loop(
+                ctx,
+                "sort_holes",
+                limit,
+                original_len,
+                |b, ctx, index, _, _| {
+                    b.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, array, index));
+                    Ok(())
+                },
+            )?;
+            Ok(array)
+        } else {
+            Ok(target)
+        }
     }
 
     /// `array.reduce(callback, initial?)` or `array.reduceRight(callback, initial?)`.
@@ -147,7 +189,32 @@ impl<'s> FunctionBuilder<'s> {
             self.store(ctx, slot, init_val);
             (slot, zero)
         } else {
-            let non_empty = self.compare(ctx, CompareKind::Gt, len, zero);
+            let step = if self.shapes.metadata.sparse_arrays {
+                let first_step = self.entry_slot(ctx, len.get_type(ctx));
+                self.store(ctx, first_step, len);
+                self.index_loop(ctx, "reduce_first", zero, len, |b, ctx, step, _, done| {
+                    let index = if matches!(direction, Direction::Reverse) {
+                        let last = b.binary(ctx, BinaryKind::Sub, len, one);
+                        b.binary(ctx, BinaryKind::Sub, last, step)
+                    } else {
+                        step
+                    };
+                    let present =
+                        b.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
+                    let found = b.new_block(ctx, "reduce_found");
+                    let next = b.new_block(ctx, "reduce_missing");
+                    b.branch(ctx, present, found, next);
+                    b.switch_to(found);
+                    b.store(ctx, first_step, step);
+                    b.jump(ctx, done);
+                    b.switch_to(next);
+                    Ok(())
+                })?;
+                self.load(ctx, first_step)?
+            } else {
+                zero
+            };
+            let non_empty = self.compare(ctx, CompareKind::Lt, step, len);
             let ok_block = self.new_block(ctx, "reduce_non_empty");
             let err_block = self.new_block(ctx, "reduce_empty_err");
             self.branch(ctx, non_empty, ok_block, err_block);
@@ -159,14 +226,15 @@ impl<'s> FunctionBuilder<'s> {
             self.after_terminator(ctx);
             self.switch_to(ok_block);
             let first_idx = if matches!(direction, Direction::Reverse) {
-                self.binary(ctx, BinaryKind::Sub, len, one)
+                let last = self.binary(ctx, BinaryKind::Sub, len, one);
+                self.binary(ctx, BinaryKind::Sub, last, step)
             } else {
-                zero
+                step
             };
             let first_elem = self.element_at(ctx, array, first_idx)?;
             let slot = self.entry_slot(ctx, first_elem.get_type(ctx));
             self.store(ctx, slot, first_elem);
-            (slot, one)
+            (slot, self.binary(ctx, BinaryKind::Add, step, one))
         };
         let acc_ty = self.slot_type(ctx, acc_slot)?;
         self.iterate(
@@ -213,7 +281,7 @@ impl<'s> FunctionBuilder<'s> {
                         limit: len,
                         direction: Direction::Reverse,
                     },
-                    Holes::Skip,
+                    Holes::Dense,
                 ),
                 |_, _, item, _, _| Ok(ArrayOutput::Item(item)),
             )
@@ -224,10 +292,22 @@ impl<'s> FunctionBuilder<'s> {
             self.index_loop(ctx, "reverse", zero, half, |b, ctx, step, _, _| {
                 let last = b.binary(ctx, BinaryKind::Sub, len, one);
                 let other_idx = b.binary(ctx, BinaryKind::Sub, last, step);
-                let left = b.element_at(ctx, array, step)?;
-                let right = b.element_at(ctx, array, other_idx)?;
-                b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, step, right));
-                b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, other_idx, left));
+                if !b.shapes.metadata.sparse_arrays {
+                    let left = b.element_at(ctx, array, step)?;
+                    let right = b.element_at(ctx, array, other_idx)?;
+                    b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, step, right));
+                    b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, other_idx, left));
+                    return Ok(());
+                }
+                let left = b.array_value(ctx, array, step)?;
+                let right = b.array_value(ctx, array, other_idx)?;
+                let left_present =
+                    b.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, step));
+                let right_present = b.emit_value(ctx, |ctx| {
+                    perry_mir::ArrayPresentOp::new(ctx, array, other_idx)
+                });
+                b.copy_array_slot(ctx, array, step, right, right_present)?;
+                b.copy_array_slot(ctx, array, other_idx, left, left_present)?;
                 Ok(())
             })?;
             Ok(array)
@@ -252,16 +332,22 @@ impl<'s> FunctionBuilder<'s> {
             _ => bail!("array.flat requires a constant depth of 0 or 1 in typed arrays"),
         };
         if depth_num == 0 {
-            return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])));
+            return self.compact_array(ctx, array);
         }
-        if outer_elem_ty.deref(ctx).is::<ArrayType>() {
+        if present_type(ctx, outer_elem_ty)
+            .deref(ctx)
+            .is::<ArrayType>()
+        {
             self.collect_items(
                 ctx,
                 Input::Array(array, Holes::Skip),
-                |_, _, array, _, _| Ok(ArrayOutput::Items(array)),
+                |b, ctx, array, _, _| {
+                    let array = b.defined(ctx, array)?;
+                    Ok(ArrayOutput::Items(b.compact_array(ctx, array)?))
+                },
             )
         } else {
-            Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])))
+            self.compact_array(ctx, array)
         }
     }
 
@@ -290,7 +376,8 @@ impl<'s> FunctionBuilder<'s> {
             || TypedHandle::<ArrayType>::from_handle(src_ty, ctx).is_ok()
         {
             if map_fn.is_none() && src_ty.deref(ctx).is::<ArrayType>() {
-                return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![src_val])));
+                let values = self.materialize_array(ctx, src_val)?;
+                return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![values])));
             }
             Input::Collection(src_val)
         } else if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src_ty, ctx)

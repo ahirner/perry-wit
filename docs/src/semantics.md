@@ -12,9 +12,11 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 
 ## Arrays
 
-- Arrays (`T[]`) are dense. Elements share one type or a finite union of numbers, strings, booleans and one plain record shape.
+- Arrays (`T[]`) support missing elements independently of their value type. Elements share one type or a finite union of numbers, strings, booleans and one plain record shape. Dense arrays use contiguous element storage; sparse arrays allocate presence storage when the first hole is created. Proven dense arrays retain their access fast paths in modules that also use sparse arrays. Bulk copies select the dense path once per array when density is unknown at compile time.
+- Array literals preserve elisions, including trailing holes. Index reads expose holes as `undefined`; `in`, enumeration and callback methods distinguish them from present elements containing `undefined`. `map`, `slice`, `concat` and in-place reordering preserve holes, while spread and iterable copies materialize `undefined` values.
 - Reading an index outside the array, or a fractional index, yields `undefined` when the element type admits it.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
+- WIT lists have no missing-index representation. A hole crossing an optional-element boundary becomes `none`; a hole crossing a required-element boundary traps.
 - Fresh empty arrays (`[]`, including `any[]`) infer their element type from `push` calls and numeric-indexed writes across branches, loops, non-reassigned local aliases and helper returns, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, index reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer; other uses, unresolved writes or no writes require an explicit element type.
 
 ## Strings
@@ -74,7 +76,7 @@ Each numeric SSA value carries an optional integer type (width, signedness) and 
 - **Literals**: An integer literal adopts a required width only when its value fits. Larger literals stay in `f64` until converted at the boundary.
 - **Loops**: At a join point, an interval may grow once before widening to the bounds of its register type, or to unbounded endpoints for unrefined numbers. A specialized loop counter wraps at 32 or 64 bits on overflow.
 - **Guarded ranges**: Dominating comparisons of integral operands refine index ranges through the numeric solver’s shared arithmetic and integer bounds. Derived arithmetic and cast ranges must fit the result type. Addition and subtraction preserve one-sided bounds; arithmetic that may produce `NaN` stays unknown.
-- **Bounds checks**: A proof of `0 <= i < length` permits unchecked array reads and stores, and `Uint8Array` reads. Array proofs account for mutations through aliases. Byte-view proofs use length comparisons or constructor, copy and subarray extents, and require the view to stay attached on every path to the access. Calls, awaits, foreign operations and BYOB reads invalidate these byte-view proofs.
+- **Bounds checks**: A proof of `0 <= i < length` permits unchecked array stores and `Uint8Array` reads. Unchecked array reads additionally require proof that the accessed array stays dense. Density follows allocation identities through aliases, helper calls and concatenation; arrays that may acquire holes retain presence checks. Array proofs account for mutations through aliases. Byte-view proofs use length comparisons or constructor, copy and subarray extents, and require the view to stay attached on every path to the access. Calls, awaits, foreign operations and BYOB reads invalidate these byte-view proofs.
 
 #### Type Join
 

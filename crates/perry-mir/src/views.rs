@@ -56,6 +56,12 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
             return compatible(ctx, a.element(), b.element(), seen);
         }
         if let (Some(a), Some(b)) = (
+            a.downcast_ref::<crate::PromiseType>(),
+            b.downcast_ref::<crate::PromiseType>(),
+        ) {
+            return compatible(ctx, a.value(), b.value(), seen);
+        }
+        if let (Some(a), Some(b)) = (
             a.downcast_ref::<RecordType>(),
             b.downcast_ref::<RecordType>(),
         ) {
@@ -89,6 +95,7 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
     }
     let aggregate = source.deref(ctx).is::<RecordType>()
         || source.deref(ctx).is::<ArrayType>()
+        || source.deref(ctx).is::<crate::PromiseType>()
         || source.deref(ctx).is::<VariantType>()
         || source.deref(ctx).is::<crate::ValueUnionType>();
     aggregate && compatible(ctx, source, target, &mut HashSet::new())

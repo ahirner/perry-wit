@@ -25,6 +25,7 @@ node.timers.promises.observers
 node.timers.promises.lifecycle
 ecma.json.command
 ecma.command.arrays
+ecma.command.sparse-arrays
 ecma.command.text
 ecma.command.records
 ecma.command.numbers

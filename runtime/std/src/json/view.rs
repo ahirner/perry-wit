@@ -122,7 +122,8 @@ pub(super) fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
                                 .map_or(core::ptr::null_mut(), |index| array_element(graph, index))
                         }
                     }
-                } else if index < word(origin, array::LEN as usize) {
+                } else if index < word(origin, array::LEN as usize) && array_present(origin, index)
+                {
                     let stride = array::Elements::decode(word(schema, 8)).stride();
                     slot(
                         node(word(origin, array::DATA as usize)),
@@ -172,6 +173,24 @@ pub(super) fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
 
 pub(super) fn keys(value: *mut u8) -> *mut u8 {
     if let Some(length) = array_length(value) {
+        unsafe {
+            if word(value, 0) == VIEW {
+                let origin = node(word(value, 8));
+                let schema = node(word(value, 12));
+                if word(schema, 0) == d::ARRAY && word(origin, array::HOLES as usize) != 0 {
+                    let (result, slots) = crate::runtime::array_storage(length as usize);
+                    let mut count = 0;
+                    for index in 0..length {
+                        if array_present(origin, index) {
+                            slots[count] = std_json_to_string(index_key(index)) as u64;
+                            count += 1;
+                        }
+                    }
+                    set_word(result, array::LEN as usize, count as u32);
+                    return result;
+                }
+            }
+        }
         return super::index_keys(length);
     }
     unsafe {
@@ -248,6 +267,13 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
             member = word(node(member), 4);
         }
         keys
+    }
+}
+
+pub(super) fn array_present(origin: *mut u8, index: u32) -> bool {
+    unsafe {
+        let holes = node(word(origin, array::HOLES as usize));
+        holes.is_null() || *holes.add(index as usize) == 0
     }
 }
 

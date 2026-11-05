@@ -295,6 +295,9 @@ pub(super) fn scan(
                         || matches!(init, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::FuncRef(_)))))
                 || (env.metadata.inferred_bindings.contains(id)
                     && matches!(expression(init, env), HirType::Union(_)))
+                || (env.metadata.sparse_arrays
+                    && env.metadata.inferred_bindings.contains(id)
+                    && matches!(init, Expr::ArrayFrom(..)))
                 || matches!(
                     ty,
                     HirType::Generic { base, type_args }

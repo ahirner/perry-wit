@@ -276,6 +276,9 @@ fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> (*mut u8, *mut u8
 }
 
 fn native_element(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
+    if !super::view::array_present(origin, index) {
+        return core::ptr::null_mut();
+    }
     unsafe {
         let data = node(word(origin, crate::runtime::layout::array::DATA as usize));
         let slot = *data.add(index as usize * 8).cast::<u64>();

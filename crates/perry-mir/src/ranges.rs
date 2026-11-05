@@ -30,7 +30,10 @@
 use crate::{
     aggregates::functions,
     calls::{AsyncCallOp, AwaitOp, CallOp},
-    collections::{ArrayAtOp, ArrayGetOp, ArrayLenOp, ArraySetOp, ArrayStoreOp, StringLenOp},
+    collections::{
+        ArrayAtOp, ArrayGetOp, ArrayIsDenseOp, ArrayLenOp, ArrayPresentOp, ArraySetOp,
+        ArrayStoreOp, StringLenOp,
+    },
     facts::guards::{GuardedRanges, orders},
     intrinsics::{Intrinsic, IntrinsicOp, intrinsic_of as intrinsic},
     optional::WrapOp,
@@ -136,6 +139,7 @@ pub(crate) fn prove_bounds(
         let mut intervals = GuardedRanges::new(ctx, numeric, &function);
         let mut lengths = Vec::new();
         let mut accesses = Vec::new();
+        let mut dense_tests = Vec::new();
         let region = function.get_region(ctx);
         for (block, op) in region
             .deref(ctx)
@@ -146,7 +150,13 @@ pub(crate) fn prove_bounds(
                 lengths.push(op);
                 continue;
             }
-            let kind = if crate::is_any::<(ArrayGetOp, ArraySetOp)>(ctx, op) {
+            if Operation::is_op::<ArrayIsDenseOp>(op, ctx) {
+                if numeric.array_is_dense(ctx, op.deref(ctx).get_operand(0)) {
+                    dense_tests.push(op);
+                }
+                continue;
+            }
+            let kind = if crate::is_any::<(ArrayGetOp, ArrayPresentOp, ArraySetOp)>(ctx, op) {
                 Object::Array
             } else if intrinsic(ctx, op) == Some(Intrinsic::BytesGet) {
                 Object::Bytes
@@ -162,10 +172,15 @@ pub(crate) fn prove_bounds(
                 let operation = op.deref(ctx);
                 (operation.get_operand(0), operation.get_operand(1))
             };
-            if Operation::get_op::<ArrayGetOp>(op, ctx).is_some() {
+            if crate::is_any::<(ArrayGetOp, ArrayPresentOp)>(ctx, op) {
+                if !numeric.array_is_dense(ctx, object) {
+                    continue;
+                }
                 let array = TypedHandle::<ArrayType>::from_handle(object.get_type(ctx), ctx)?;
                 let element = array.deref(ctx).element();
-                if crate::optional::optional_value(ctx, element).is_some() {
+                if Operation::is_op::<ArrayGetOp>(op, ctx)
+                    && crate::optional::optional_value(ctx, element).is_some()
+                {
                     continue;
                 }
             }
@@ -206,7 +221,23 @@ pub(crate) fn prove_bounds(
             }
         }
         for (op, object, index, kind) in accesses {
-            unchecked(ctx, op, object, index, kind)?;
+            if Operation::is_op::<ArrayPresentOp>(op, ctx) {
+                dense_tests.push(op);
+            } else {
+                unchecked(ctx, op, object, index, kind)?;
+            }
+            status = IRStatus::Changed;
+        }
+        for op in dense_tests {
+            let ty = IntegerType::get(ctx, 1, Signedness::Signless);
+            let constant = ConstantOp::new(
+                ctx,
+                Box::new(IntegerAttr::new(ty, APInt::from_u64(1, bw(1)))),
+            );
+            constant.get_operation().insert_before(ctx, op);
+            let result = op.deref(ctx).get_result(0);
+            result.replace_all_uses_with(ctx, &constant.get_result(ctx));
+            Operation::erase(op, ctx);
             status = IRStatus::Changed;
         }
         for op in lengths {

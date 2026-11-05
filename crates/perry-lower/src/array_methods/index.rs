@@ -32,7 +32,7 @@ impl<'s> FunctionBuilder<'s> {
         self.store(ctx, acc_slot, empty);
         self.iterate(
             ctx,
-            Input::Array(array, Holes::Skip),
+            Input::Array(array, Holes::Dense),
             |b, ctx, item, step, _, _| {
                 let elem_str = if optional_value(ctx, item.get_type(ctx)).is_some() {
                     let undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
@@ -133,6 +133,15 @@ impl<'s> FunctionBuilder<'s> {
             }
             Some(end) => self.normalize_slice_bound(ctx, end, len)?,
         };
+        if self.shapes.metadata.sparse_arrays {
+            return self.collect_preserving_holes(
+                ctx,
+                array,
+                norm_start,
+                norm_end,
+                |_, _, item, _| Ok(item),
+            );
+        }
         self.collect_items(
             ctx,
             Input::Slice(
@@ -205,7 +214,7 @@ impl<'s> FunctionBuilder<'s> {
             opt_ty,
             in_bounds,
             |b, ctx| {
-                let item = b.element_at(ctx, array, resolved_idx)?;
+                let item = b.array_value(ctx, array, resolved_idx)?;
                 b.fit(ctx, item, opt_ty)
             },
             |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
@@ -227,7 +236,7 @@ impl<'s> FunctionBuilder<'s> {
             |b, ctx| {
                 let one = b.number(ctx, 1.0);
                 let last_idx = b.binary(ctx, BinaryKind::Sub, len, one);
-                let item = b.element_at(ctx, array, last_idx)?;
+                let item = b.array_value(ctx, array, last_idx)?;
                 let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
                 let new_len = b.emit_value(ctx, |ctx| NumericCastOp::new(ctx, last_idx, u32_ty));
                 b.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, array, new_len));
@@ -258,6 +267,9 @@ impl<'s> FunctionBuilder<'s> {
         self.switch_to(err_b);
         self.raise_range_error(ctx, "Invalid index for Array.prototype.with");
         self.switch_to(ok_b);
+        let array = self.materialize_array(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
+        let val = self.fit(ctx, val, element)?;
         let cloned = self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]));
         self.emit(ctx, |ctx| ArraySetOp::new(ctx, cloned, resolved_idx, val));
         Ok(cloned)

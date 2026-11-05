@@ -3,9 +3,9 @@ use crate::{
     attrs::ErrorKind,
     calls::{AsyncCallOp, AwaitOp, CallOp, TimerOp},
     collections::{
-        ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayLenOp, ArrayNewOp, ArrayPushOp, ArraySetOp,
-        ArrayStoreOp, ArrayTruncateOp, ConcatOp, ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp,
-        NativeJsonOp, StringConstOp, StringLenOp,
+        ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayHoleOp, ArrayIsDenseOp, ArrayLenOp, ArrayNewOp,
+        ArrayPresentOp, ArrayPushOp, ArraySetOp, ArrayStoreOp, ArrayTruncateOp, ConcatOp,
+        ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp, StringConstOp, StringLenOp,
     },
     control::ReturnOp,
     effects::{Allocation, Mutation},
@@ -172,14 +172,14 @@ primitive_semantics! { _ctx, _this;
         CatchOp, RecordOrderOp => OperationKind::Unknown;
     }
     (Allocation::None, None, false) {
-        WrapOp => OperationKind::Alias;
+        WrapOp, AggregateViewOp => OperationKind::Alias;
         ToNumberOp => OperationKind::ToNumber;
         FieldGetOp => field_slot(_ctx, _this.get_operation().deref(_ctx).get_operand(0), _this.get_attr_perry_get_field(_ctx).as_deref())
             .map_or(OperationKind::Unknown, |slot| OperationKind::Read { slot });
         ArrayGetOp, ArrayAtOp => OperationKind::Read { slot: 0 };
         ArrayLenOp, StringLenOp => OperationKind::Length;
-        UndefinedOp, OmittedOp, NullOp, FieldPresentOp, IsNullOp, IsUndefinedOp => OperationKind::None;
-        AggregateViewOp, BigIntConstOp, CompareOp, ExceptionIsOp, GlobalOp,
+        UndefinedOp, OmittedOp, NullOp, FieldPresentOp, ArrayPresentOp, ArrayIsDenseOp, IsNullOp, IsUndefinedOp => OperationKind::None;
+        BigIntConstOp, CompareOp, ExceptionIsOp, GlobalOp,
         LoadOp, RegexConstOp, SettledFieldOp, StringConstOp, ToStringOp, UndefOp,
         VariantTagOp => OperationKind::Unknown;
     }
@@ -204,6 +204,7 @@ primitive_semantics! { _ctx, _this;
         ArraySetOp => OperationKind::Mutate(Mutation::Element { index: Some(1) });
     }
     (Allocation::Atomic, None, true) {
+        ArrayHoleOp => OperationKind::Mutate(Mutation::Hole);
         ArrayPushOp => OperationKind::Mutate(Mutation::Element { index: None });
         ArrayExtendOp => OperationKind::Mutate(Mutation::Extend);
         ConcatReuseOp => OperationKind::Concat { depth: 1 };

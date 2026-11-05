@@ -1,7 +1,8 @@
-//! Dense arrays with 8-byte element slots, or 16-byte slots for tagged numeric alternatives.
+//! Typed arrays with optional hole storage and 8-byte or 16-byte element slots.
 //!
 //! Layout, read and written inline by compiled code: `len: u32` at 0, `cap: u32` at 4,
-//! `data: u32` at 8. Elements are scalars, a 32-bit reference in the low half of a slot, or a
+//! `data: u32` at 8 and a nullable hole-buffer pointer at 12. Elements are scalars,
+//! a 32-bit reference in the low half of a slot, or a
 //! numeric tag and payload (see [`Elements`]).
 //! Every array maintains `cap >= 1`, so compiled code can read slot 0 unconditionally and
 //! select the result with branch-free bounds checks. Growth doubles capacity and preserves
@@ -14,10 +15,11 @@ const MIN_CAPACITY: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
 const _: () = {
-    assert!(core::mem::size_of::<Array>() == 12);
+    assert!(core::mem::size_of::<Array>() == 16);
     assert!(core::mem::offset_of!(Array, len) == LEN as usize);
     assert!(core::mem::offset_of!(Array, cap) == CAP as usize);
     assert!(core::mem::offset_of!(Array, data) == DATA as usize);
+    assert!(core::mem::offset_of!(Array, holes) == HOLES as usize);
 };
 
 #[repr(C)]
@@ -25,12 +27,18 @@ struct Array {
     len: u32,
     cap: u32,
     data: *mut u64,
+    holes: *mut u8,
 }
 
 impl Array {
     /// An empty array over `cap` slots at `data`, with length zero.
     fn empty(cap: u32, data: *mut u64) -> Self {
-        Self { len: 0, cap, data }
+        Self {
+            len: 0,
+            cap,
+            data,
+            holes: core::ptr::null_mut(),
+        }
     }
 }
 
@@ -61,8 +69,92 @@ impl ElementStorage for Elements {
     }
 }
 
-const ARRAY_SHAPE: [u32; 3] = [0, 1, core::mem::offset_of!(Array, data) as u32];
+const ARRAY_SHAPE: [u32; 4] = [
+    0,
+    2,
+    core::mem::offset_of!(Array, data) as u32,
+    core::mem::offset_of!(Array, holes) as u32,
+];
 const REFERENCE_SLOTS: [u32; 3] = [SLOT, 1, 0];
+
+fn hole_storage(capacity: u32) -> *mut u8 {
+    // SAFETY: hole bytes contain no references and start as present slots.
+    unsafe {
+        let holes = crate::region::perry_alloc_shaped(capacity, core::ptr::null());
+        core::ptr::write_bytes(holes, 0, capacity as usize);
+        holes
+    }
+}
+
+unsafe fn resize_holes(array: *mut Array, capacity: u32) {
+    unsafe {
+        if !(*array).holes.is_null() {
+            (*array).holes = crate::region::perry_buffer_resize(
+                (*array).holes,
+                (*array).cap,
+                capacity,
+                (*array).len,
+                core::ptr::null(),
+            );
+            core::ptr::write_bytes(
+                (*array).holes.add((*array).len as usize),
+                0,
+                (capacity - (*array).len) as usize,
+            );
+        }
+    }
+}
+
+unsafe fn concat_holes(
+    sources: impl Iterator<Item = *const Array> + Clone,
+    capacity: u32,
+) -> *mut u8 {
+    unsafe {
+        if sources.clone().all(|source| (*source).holes.is_null()) {
+            return core::ptr::null_mut();
+        }
+        let holes = hole_storage(capacity);
+        let mut offset = 0;
+        for source in sources {
+            if !(*source).holes.is_null() {
+                core::ptr::copy_nonoverlapping(
+                    (*source).holes,
+                    holes.add(offset),
+                    (*source).len as usize,
+                );
+            }
+            offset += (*source).len as usize;
+        }
+        holes
+    }
+}
+
+/// Clear a slot, appending a hole when `index == length`.
+///
+/// # Safety
+/// `array` is live with the given element representation and `index <= length`.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn perry_array_hole(array: *mut u8, index: u32, references: u32) {
+    unsafe {
+        let array = array.cast::<Array>();
+        let elements = Elements::decode(references);
+        assert!(index <= (*array).len);
+        let len = (*array)
+            .len
+            .max(index.checked_add(1).expect("array length overflow"));
+        reserve(array, len, elements);
+        if (*array).holes.is_null() {
+            (*array).holes = hole_storage((*array).cap);
+        }
+        *(*array).holes.add(index as usize) = 1;
+        core::ptr::write_bytes(
+            (*array).data.add(index as usize * elements.words()),
+            0,
+            elements.words(),
+        );
+        (*array).len = len;
+    }
+}
 
 /// A new array with room for at least `capacity` elements and length 0.
 #[unsafe(no_mangle)]
@@ -106,6 +198,7 @@ unsafe fn grow(array: *mut u8, elements: Elements) {
             (*array).len as usize * elements.words(),
         );
         (*array).data = data;
+        resize_holes(array, cap);
         (*array).cap = cap;
     }
 }
@@ -149,6 +242,7 @@ pub(crate) unsafe extern "C" fn perry_array_grow_collectible(array: *mut u8, ref
             elements.shape(),
         ) as *mut u64;
         (*array).data = data;
+        resize_holes(array, cap);
         (*array).cap = cap;
     }
 }
@@ -253,6 +347,10 @@ pub(crate) unsafe extern "C" fn perry_array_concat_many(
             )
             .cast::<Array>();
         reserve(target, len, elements);
+        (*target).holes = concat_holes(
+            sources.iter().map(|&a| a.cast::<Array>().cast_const()),
+            (*target).cap,
+        );
         if let Some((index, _)) = selected {
             let prefix = sources[..index]
                 .iter()
@@ -294,6 +392,7 @@ unsafe fn reserve(array: *mut Array, len: u32, elements: Elements) {
         )
         .cast::<u64>();
         (*array).data = data;
+        resize_holes(array, cap);
         (*array).cap = cap;
     }
 }
@@ -316,6 +415,20 @@ pub(crate) unsafe extern "C" fn perry_array_extend(
         let len = crate::sequence_length(before, added);
         elements.bytes(len);
         reserve(target, len, elements);
+        if !(*source).holes.is_null() && (*target).holes.is_null() {
+            (*target).holes = hole_storage((*target).cap);
+        }
+        if !(*target).holes.is_null() {
+            if (*source).holes.is_null() {
+                core::ptr::write_bytes((*target).holes.add(before as usize), 0, added as usize);
+            } else {
+                core::ptr::copy(
+                    (*source).holes,
+                    (*target).holes.add(before as usize),
+                    added as usize,
+                );
+            }
+        }
         core::ptr::copy(
             (*source).data,
             (*target).data.add(before as usize * words),
@@ -375,6 +488,7 @@ pub(crate) unsafe extern "C" fn perry_array_concat_segments(
             .map(|&source| source as usize as *const Array);
         let len = total_len(sources.clone());
         let result = perry_array_new_typed(len, references).cast::<Array>();
+        (*result).holes = concat_holes(sources.clone(), (*result).cap);
         copy_segments(result, len, words, sources)
     }
 }
@@ -421,6 +535,20 @@ mod tests {
                 assert_eq!(
                     core::slice::from_raw_parts((*result.cast::<Array>()).data, 9),
                     &[1, 2, 3, 4, 5, 6, 7, 8, 9]
+                );
+                assert!((*result.cast::<Array>()).holes.is_null());
+                let sources = [allocate_array(&[10, 11], 4), allocate_array(&[20, 21], 8)];
+                perry_array_hole(sources[0], 0, 0);
+                perry_array_hole(sources[1], 1, 0);
+                let result = perry_array_concat_many(sources.as_ptr(), 2, 0, [1].as_ptr(), 1);
+                assert_eq!(result, sources[1]);
+                assert_eq!(
+                    core::slice::from_raw_parts((*result.cast::<Array>()).holes, 4),
+                    &[1, 0, 0, 1]
+                );
+                assert_eq!(
+                    core::slice::from_raw_parts((*result.cast::<Array>()).data, 4),
+                    &[0, 11, 20, 0]
                 );
             }
             crate::region::perry_task_free();
@@ -469,6 +597,28 @@ mod tests {
                 assert_eq!(
                     core::slice::from_raw_parts((*array.cast::<Array>()).data, 8),
                     &[1, 2, 1, 2, 1, 2, 1, 2]
+                );
+                assert!((*array.cast::<Array>()).holes.is_null());
+                perry_array_hole(array, 1, 0);
+                perry_array_extend(array, array, 0);
+                let array = array.cast::<Array>();
+                assert_eq!((*array).len, 16);
+                assert_eq!(
+                    core::slice::from_raw_parts((*array).holes, 16),
+                    &[0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+                );
+                assert_eq!(*(*array).data.add(1), 0);
+                assert_eq!(*(*array).data.add(9), 0);
+                perry_array_hole(array.cast(), 16, 0);
+                assert_eq!((*array).len, 17);
+                assert_eq!(*(*array).holes.add(16), 1);
+                assert!(
+                    core::slice::from_raw_parts(
+                        (*array).holes.add(17),
+                        ((*array).cap - 17) as usize
+                    )
+                    .iter()
+                    .all(|&hole| hole == 0)
                 );
             }
             crate::region::perry_task_free();

@@ -255,6 +255,33 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             }
         }
 
+        Expr::ArraySpread(items) => {
+            let mut types = Vec::new();
+            for item in items {
+                let ty = match item {
+                    perry_hir::ir::ArrayElement::Expr(value) => expression(value, env),
+                    perry_hir::ir::ArrayElement::Hole => HirType::Void,
+                    perry_hir::ir::ArrayElement::Spread(value) => {
+                        shapes::generics::iterated_element(expression(value, env))
+                            .unwrap_or(HirType::Any)
+                    }
+                };
+                for ty in match ty {
+                    HirType::Union(types) => types,
+                    ty => vec![ty],
+                } {
+                    if !types.contains(&ty) {
+                        types.push(ty);
+                    }
+                }
+            }
+            let element = if types.len() == 1 {
+                types.pop().unwrap()
+            } else {
+                HirType::Union(types)
+            };
+            HirType::Array(Box::new(element))
+        }
         Expr::ArrayFrom(source, _) => {
             if let Expr::Object(props) = source.as_ref()
                 && props.iter().any(|(k, _)| k == "length")
@@ -262,8 +289,13 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 HirType::Array(Box::new(HirType::Any))
             } else {
                 let src_ty = strip_nullish(expression(source, env)).0;
+                let sparse = env.metadata.sparse_arrays && matches!(src_ty, HirType::Array(_));
                 match shapes::generics::iterated_element(src_ty) {
-                    Ok(elem) => HirType::Array(Box::new(elem)),
+                    Ok(elem) => HirType::Array(Box::new(if sparse {
+                        HirType::Union(vec![elem, HirType::Void])
+                    } else {
+                        elem
+                    })),
                     Err(_) => HirType::Any,
                 }
             }

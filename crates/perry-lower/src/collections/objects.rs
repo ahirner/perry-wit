@@ -76,6 +76,23 @@ impl<'s> FunctionBuilder<'s> {
         if dict_entry_types(ctx, ty).is_some() {
             return self.collection_iterator(ctx, obj, method);
         }
+        if ty.deref(ctx).is::<ArrayType>() {
+            return self.collect_items(
+                ctx,
+                crate::control_flow::Input::Array(obj, crate::control_flow::Holes::Skip),
+                |b, ctx, item, index, _| {
+                    let value = match method {
+                        IteratorMethod::Keys => b.display(ctx, index)?,
+                        IteratorMethod::Values => item,
+                        IteratorMethod::Entries => {
+                            let key = b.display(ctx, index)?;
+                            b.pair(ctx, key, item)?
+                        }
+                    };
+                    Ok(crate::control_flow::ArrayOutput::Item(value))
+                },
+            );
+        }
         if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
             && matches!(
                 rec.deref(ctx).kind(),
@@ -202,6 +219,10 @@ impl<'s> FunctionBuilder<'s> {
             let k = self.expression_with(ctx, prop_expr, Some(k_ty))?;
             return self.kv_has(ctx, obj, k, k_ty);
         }
+        if ty.deref(ctx).is::<ArrayType>() {
+            let property = self.array_property_key(ctx, prop_expr)?;
+            return self.array_has_property(ctx, obj, property);
+        }
         if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
             && rec.deref(ctx).kind() == RecordKind::Object
         {
@@ -256,6 +277,45 @@ impl<'s> FunctionBuilder<'s> {
             self.kv_delete(ctx, obj, k, k_ty)?;
             return Ok(self.boolean(ctx, true));
         }
+        if ty.deref(ctx).is::<ArrayType>() {
+            let property = match prop_or_idx {
+                Ok(index) => self.array_property_key(ctx, index)?,
+                Err(property) => self.string(ctx, property),
+            };
+            if property.get_type(ctx).deref(ctx).is::<StringType>() {
+                let length = self.string(ctx, "length");
+                let length = self.compare(ctx, CompareKind::Eq, property, length);
+                let error = self.new_block(ctx, "delete_length_error");
+                let indexed = self.new_block(ctx, "delete_index");
+                self.branch(ctx, length, error, indexed);
+                self.switch_to(error);
+                let message = self.string(ctx, "Cannot delete property 'length' of an array");
+                let error = self.emit_value(ctx, |ctx| {
+                    ErrorNewOp::new(ctx, ErrorKind::TypeError, message)
+                });
+                let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
+                self.propagate(ctx, status);
+                self.switch_to(indexed);
+            }
+            let (index, canonical) = self.array_property_index(ctx, property)?;
+            let present =
+                self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, obj, index));
+            let delete = self.new_block(ctx, "delete_element");
+            let done = self.new_block(ctx, "deleted_element");
+            let valid = self.choose(
+                ctx,
+                present.get_type(ctx),
+                canonical,
+                |_, _| Ok(present),
+                |b, ctx| Ok(b.boolean(ctx, false)),
+            )?;
+            self.branch(ctx, valid, delete, done);
+            self.switch_to(delete);
+            self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, obj, index));
+            self.jump(ctx, done);
+            self.switch_to(done);
+            return Ok(self.boolean(ctx, true));
+        }
         if let Err(property) = prop_or_idx
             && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
             && rec.deref(ctx).kind() == RecordKind::Object
@@ -276,5 +336,59 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
         })
+    }
+
+    fn array_property_key(&mut self, ctx: &mut Context, key: &'s Expr) -> Result<Value> {
+        match key {
+            Expr::Null => Ok(self.string(ctx, "null")),
+            Expr::Undefined => Ok(self.string(ctx, "undefined")),
+            key => self.expression(ctx, key),
+        }
+    }
+
+    fn array_property_index(
+        &mut self,
+        ctx: &mut Context,
+        property: Value,
+    ) -> Result<(Value, Value)> {
+        if kind(ctx, property)? != Kind::Number {
+            let property = self.display(ctx, property)?;
+            let index = self.intrinsic(ctx, Intrinsic::StringToNumber, vec![property]);
+            let name = self.display(ctx, index)?;
+            Ok((index, self.compare(ctx, CompareKind::Eq, property, name)))
+        } else {
+            let index = self.arithmetic(ctx, property);
+            Ok((index, self.boolean(ctx, true)))
+        }
+    }
+
+    fn array_has_property(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        property: Value,
+    ) -> Result<Value> {
+        let (index, canonical) = self.array_property_index(ctx, property)?;
+        let present = self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
+        let present = self.choose(
+            ctx,
+            present.get_type(ctx),
+            canonical,
+            |_, _| Ok(present),
+            |b, ctx| Ok(b.boolean(ctx, false)),
+        )?;
+        if property.get_type(ctx).deref(ctx).is::<StringType>() {
+            let length = self.string(ctx, "length");
+            let length = self.compare(ctx, CompareKind::Eq, property, length);
+            self.choose(
+                ctx,
+                present.get_type(ctx),
+                length,
+                |b, ctx| Ok(b.boolean(ctx, true)),
+                |_, _| Ok(present),
+            )
+        } else {
+            Ok(present)
+        }
     }
 }

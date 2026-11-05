@@ -4,12 +4,6 @@ use crate::node_oracle::assert_numbers;
 #[test]
 fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<()> {
     let error = perry_wit::compile_core(
-        "export function run():number { return [,3,,1].sort()[0]; }",
-        "sparse-sort.ts",
-    )
-    .expect_err("sparse literals remain outside the dense-array profile");
-    assert!(error.to_string().contains("sparse array spreads"));
-    let error = perry_wit::compile_core(
         "export function run():number { const row={value:1,extra:2}; const mixed:(number|{value:number})[]=[row]; return mixed.length; }",
         "union-layout.ts",
     ).expect_err("union boxing cannot copy a record to a different layout");
@@ -52,6 +46,7 @@ export function argumentOrder() {
  if(empty.reduce((acc,n)=>acc+n,append(empty,7,1))!==8)return 6;
  return 0;
 }
+
 
 interface RankedItem { rank:number; label:string }
 export function sortUndefined() {
@@ -291,4 +286,201 @@ export function dictionaryKeyPrefixes() {
             ("mixedValues", &[129.0], 0.0),
         ],
     )
+}
+
+#[test]
+fn sparse_arrays_preserve_presence_and_iteration() -> anyhow::Result<()> {
+    assert_numbers(
+        r#"
+export function presence() {
+ const a = [,3,undefined,,1];
+ if(a.length!==5 || 0 in a || !(2 in a) || 3 in a || !(4 in a))return 1;
+ if(a[0]!==undefined || a.at(3)!==undefined || a[8]!==undefined)return 2;
+ if(Object.keys(a).join(',')!=='1,2,4' || a.join('|')!=='|3|||1')return 3;
+ let calls=0;
+ const mapped=a.map((x,i)=>{calls++;return i;});
+ if(calls!==3 || mapped.length!==5 || 0 in mapped || 3 in mapped || mapped[4]!==4)return 4;
+ if(a.filter(()=>true).length!==3 || a.indexOf(undefined)!==2 || !a.includes(undefined))return 5;
+ const holes = [,,];
+ if(holes.length!==2 || Object.keys(holes).length!==0 || holes.indexOf(undefined)!==-1 || !holes.includes(undefined))return 6;
+ let visited=0;
+ holes.find((v)=>{if(v===undefined)visited++;return false;});
+ if(visited!==2 || holes.some(()=>true) || !holes.every(()=>false))return 7;
+ const nullable=[,null,undefined];
+ if(0 in nullable || nullable[0]!==undefined || nullable[1]!==null || !(2 in nullable))return 8;
+ const nested=[,[,1],[,2,,]];
+ if(nested.flat().join(',')!=='1,2' || nested.flat().length!==2)return 9;
+ return 0;
+}
+
+export function copies() {
+ const a:(number|undefined)[]=[,3,undefined,,1];
+ const sliced=a.slice(0,4);
+ if(sliced.length!==4 || 0 in sliced || 3 in sliced || !(2 in sliced))return 1;
+ const concat=a.concat(a);
+ if(concat.length!==10 || 0 in concat || 5 in concat || !(7 in concat))return 2;
+ const spread=[...a];
+ if(spread.length!==5 || !(0 in spread) || !(3 in spread) || spread[0]!==undefined)return 3;
+ const from=Array.from(a);
+ if(!(0 in from) || !(3 in from))return 4;
+ const pushed:(number|undefined)[]=[];
+ pushed.push(...a);
+ if(!(0 in pushed) || pushed.length!==5)return 5;
+ const flat=a.flat(0);
+ if(flat.length!==3 || flat[0]!==3 || flat[1]!==undefined)return 6;
+ if(a.toReversed().join(',')!=='1,,,3,' || !(4 in a.toReversed()))return 7;
+ return 0;
+}
+export function mutation() {
+ const a:(number|undefined)[]=[,3,undefined,,1];
+ const alias=a;
+ a.sort((a,b)=>a-b);
+ if(a!==alias || a[0]!==1 || a[1]!==3 || !(2 in a) || 3 in a || 4 in a)return 1;
+ a.reverse();
+ if(0 in a || 1 in a || !(2 in a) || a[3]!==3 || a[4]!==1)return 2;
+ a[0]=9;
+ if(!(0 in a) || a[0]!==9)return 3;
+ delete a[3];
+ if(3 in alias || alias.length!==5)return 4;
+ a.push(7);
+ if(!(5 in a) || a.pop()!==7 || a.length!==5)return 5;
+ const b:(number|undefined)[]=[,4,,2];
+ if(b.reduce((a,b)=>a+b)!==6 || b.reduceRight((a,b)=>a-b)!==-2)return 6;
+ let caught=0;
+ try{[,,].reduce((a,b)=>a+b);}catch(e){if(e instanceof TypeError)caught++;}
+ if(caught!==1)return 7;
+ let calls=0;
+ const c:(number|undefined)[]=[1,2,3];
+ const mapped=c.map((v,i)=>{calls++;if(i===0)delete c[1];return v;});
+ if(calls!==2 || mapped.length!==3 || 1 in mapped)return 8;
+ try { delete a['length']; return 9; } catch(e) { if(!(e instanceof TypeError))return 10; }
+ if(false in a || null in a || '01' in a || '-0' in a)return 11;
+ return 0;
+}
+export function materialization() {
+ const mapped=[,1,,2].map(x=>x*2);
+ const spread=[...mapped];
+ const from=Array.from(mapped);
+ const reverse=mapped.toReversed();
+ const sorted=mapped.toSorted((a,b)=>a-b);
+ const replaced=mapped.with(1,9);
+ if(!(0 in spread) || spread[0]!==undefined || !(0 in from))return 1;
+ if(reverse[0]!==4 || reverse[1]!==undefined || !(1 in reverse))return 2;
+ if(sorted[0]!==2 || sorted[1]!==4 || sorted[2]!==undefined || !(2 in sorted))return 3;
+ if(replaced[1]!==9 || replaced[0]!==undefined || !(0 in replaced))return 4;
+ let count=0;
+ for(const item of mapped){if(item===undefined)count++;}
+ if(count!==2)return 5;
+ const entries=Array.from(mapped.entries());
+ if(entries[0][0]!==0 || entries[0][1]!==undefined)return 6;
+ if(Object.values(mapped).join(',')!=='2,4')return 7;
+ return 0;
+}
+function throughAlias(values:number[], erase:boolean) {
+ if(erase)delete values[0];
+ return values;
+}
+export function aliases(flag:number) {
+ const dense:number[]=[11,12];
+ const sparse:number[]=[21,22];
+ delete sparse[0];
+ const chosen=flag===0?dense:sparse;
+ const record={values:chosen};
+ const alias=throughAlias(record.values, flag===2);
+ const copied=alias.concat();
+ const joined=dense.concat(dense,copied);
+ const missing=flag!==0;
+ if((0 in alias)===missing || (0 in copied)===missing || (4 in joined)===missing)return 1;
+ if(missing && (alias[0]!==undefined || copied[0]!==undefined || joined[4]!==undefined))return 2;
+ const materialized=[...copied];
+ if(!(0 in materialized) || materialized.length!==2)return 3;
+ if(dense[0]!==11 || !(0 in dense))return 4;
+ return 0;
+}
+export function references() {
+ const a:(string|undefined)[]=[,'a',,'b'];
+ for(let i=0;i<80;i++)a.push('x'+i);
+ const b=a.concat(a);
+ if(b.length!==168 || 0 in b || 84 in b || b[85]!=='a' || b[167]!=='x79')return 1;
+ b.reverse();
+ if(b[0]!=='x79' || 167 in b || 83 in b)return 2;
+ const c=structuredClone(a);
+ if(c===a || 0 in c || 2 in c || c[1]!=='a' || c.length!==84)return 3;
+ const short:(string|undefined)[]=[,'a',undefined];
+ if(JSON.stringify(short)!=='[null,"a",null]')return 4;
+ const obj={items:short};
+ if(JSON.stringify(obj)!=='{"items":[null,"a",null]}')return 5;
+ if(Object.keys(short).join(',')!=='1,2')return 6;
+ short.pop();short.pop();short.pop();short.push('new');
+ if(short[0]!=='new' || !(0 in short))return 7;
+ const record={name:'record'};
+ const records:({name:string}|undefined)[]=[,record,undefined];
+ const copy=records.slice();
+ if(0 in copy || copy[1]!==record || !(2 in copy))return 8;
+ const mixed:(number|string|undefined)[]=[,1,'word',undefined];
+ if(JSON.stringify(mixed)!=='[null,1,"word",null]' || mixed[0]!==undefined)return 9;
+ const integers:bigint[]=[,1n,2n];
+ if(integers[0]!==undefined || integers.toReversed()[2]!==undefined)return 10;
+ const flags:boolean[]=[,true,false];
+ if(flags[0]!==undefined || flags.includes(undefined)!==true || flags.indexOf(undefined)!==-1)return 11;
+ const json:(string|null)[]=JSON.parse(JSON.stringify([,'a',undefined]));
+ if(!(0 in json) || json[0]!==null || json[2]!==null)return 12;
+ return 0;
+}
+"#,
+        &[
+            ("presence", &[], 0.0),
+            ("copies", &[], 0.0),
+            ("mutation", &[], 0.0),
+            ("materialization", &[], 0.0),
+            ("aliases", &[0.0], 0.0),
+            ("aliases", &[1.0], 0.0),
+            ("aliases", &[2.0], 0.0),
+            ("references", &[], 0.0),
+        ],
+    )
+}
+
+#[test]
+fn indexed_deletion_preserves_length_and_write_bounds() {
+    let source = r#"
+type Values=number[];
+function erase(values:Values) { delete values[1]; }
+export function run() {
+ const values:Values=[10,20,30];
+ const alias=values;
+ erase(values);
+ if(values.length!==3 || 1 in alias || alias[1]!==undefined)return 1;
+ if(values.map(x=>x+1).length!==3 || 1 in values.map(x=>x+1))return 2;
+ if('01' in values || '-0' in values || !(0 in values) || !('length' in values))return 3;
+ delete values['01'];
+ delete values[-1];
+ delete values[9];
+ if(values.length!==3 || values[0]!==10)return 4;
+ let caught=0;
+ for(const index of [-1,1.5,4,Infinity,NaN]) {
+   try{values[index]=99;}catch(e){if(e instanceof RangeError)caught++;}
+ }
+ if(caught!==5 || values.length!==3 || 1 in values)return 5;
+ values[1]=7;
+ values[3]=40;
+ if(!(1 in alias) || values.length!==4 || values[3]!==40)return 6;
+ return 0;
+}
+"#;
+    for checked in [false, true] {
+        let mut program = if checked {
+            crate::core_program::Program::checked(source, "deletion.ts")
+        } else {
+            crate::core_program::Program::new(source)
+        };
+        if checked {
+            program.stress_collection(true);
+        }
+        let (results, _) = program.call("run", &[]);
+        assert_eq!(results[0].unwrap_f64(), 0.0);
+        if let Some(status) = results.get(1) {
+            assert_eq!(status.unwrap_i32(), 0);
+        }
+    }
 }

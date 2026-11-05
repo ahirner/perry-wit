@@ -85,10 +85,16 @@ impl<'s> FunctionBuilder<'s> {
                             current = b.binary(ctx, BinaryKind::Sub, last, current);
                         }
                         match holes {
-                            Holes::Dense => b.element_at(ctx, value, current)?,
+                            Holes::Dense => b.array_value(ctx, value, current)?,
                             Holes::Skip | Holes::Visit(_) => {
-                                let available = b.array_length(ctx, value);
-                                let present = b.compare(ctx, CompareKind::Lt, current, available);
+                                let present = if b.shapes.metadata.sparse_arrays {
+                                    b.emit_value(ctx, |ctx| {
+                                        perry_mir::ArrayPresentOp::new(ctx, value, current)
+                                    })
+                                } else {
+                                    let length = b.array_length(ctx, value);
+                                    b.compare(ctx, CompareKind::Lt, current, length)
+                                };
                                 if let Holes::Visit(ty) = holes {
                                     b.choose(
                                         ctx,

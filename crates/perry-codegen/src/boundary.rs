@@ -710,13 +710,36 @@ impl FunctionLowering<'_, '_> {
             let stride = b.i32_const(ctx, size);
             let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
+            let mut done = None;
+            if b.state.sparse_arrays {
+                let present = b.array_slot_present(ctx, value, i);
+                if matches!(element, AbiType::Option(_)) {
+                    let existing = b.new_block(ctx, vec![]);
+                    let missing = b.new_block(ctx, vec![]);
+                    let next = b.new_block(ctx, vec![]);
+                    b.cond_br(ctx, present, (existing, vec![]), (missing, vec![]));
+                    b.block = missing;
+                    let none = b.i32_const(ctx, 0);
+                    b.store(ctx, MemKind::I32U8, target, 0, none);
+                    b.br(ctx, next, vec![]);
+                    b.block = existing;
+                    done = Some(next);
+                } else {
+                    b.trap_unless(ctx, present, true);
+                }
+            }
             b.lower_abi(
                 ctx,
                 element,
                 element_mir,
                 item,
                 Canonical::Memory(target, 0),
-            )
+            )?;
+            if let Some(done) = done {
+                b.br(ctx, done, vec![]);
+                b.block = done;
+            }
+            Ok(())
         })?;
         Ok((buffer, len))
     }

@@ -407,6 +407,7 @@ pub struct ProgramFacts {
     /// Value or result intervals widened to domain bounds after expanding more than once.
     range_widenings: usize,
     heap: heap::HeapFacts,
+    has_array_holes: bool,
 }
 
 #[derive(Debug)]
@@ -734,6 +735,11 @@ impl Analysis for ProgramFacts {
                 summarized_contexts: 0,
                 range_widenings: 0,
                 heap: heap::HeapFacts::default(),
+                has_array_holes: functions.iter().any(|function| {
+                    crate::operations(ctx, function)
+                        .iter()
+                        .any(|&op| Operation::is_op::<crate::ArrayHoleOp>(op, ctx))
+                }),
             },
             contexts: HashMap::new(),
             precise_counts: HashMap::new(),

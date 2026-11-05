@@ -3,19 +3,33 @@ use super::*;
 use crate::{effects::Mutation, intrinsics::Intrinsic, semantics::OperationKind};
 
 impl Solver {
-    fn array_elements(&mut self, cell: usize, depth: u8, reader: Work, slots: &mut Vec<usize>) {
+    fn array_elements(
+        &mut self,
+        cell: usize,
+        depth: u8,
+        reader: Work,
+        slots: &mut Vec<usize>,
+    ) -> bool {
         self.analysis.heap.cells[cell].readers.insert(reader);
+        let mut sparse = false;
         let mut previous = None;
         while let Some(object) = self.next_object(cell, previous) {
             previous = Some(object);
             let slot = self.analysis.heap.objects[object].contents.slots()[0];
             if depth > 1 {
-                self.array_elements(slot, depth - 1, reader, slots);
+                sparse |= self.array_elements(slot, depth - 1, reader, slots);
             } else {
+                if let Contents::Array { holes, readers, .. } =
+                    &mut self.analysis.heap.objects[object].contents
+                {
+                    readers.insert(reader);
+                    sparse |= *holes;
+                }
                 self.analysis.heap.cells[slot].readers.insert(reader);
                 slots.push(slot);
             }
         }
+        sparse
     }
 
     /// Join slot `from`'s domain, range, settlement and aliases into slot `to`.
@@ -122,6 +136,7 @@ impl Solver {
             | OperationKind::Mutate(
                 Mutation::Field { slot: Some(_) }
                 | Mutation::Element { .. }
+                | Mutation::Hole
                 | Mutation::InBoundsElement,
             ) => {
                 let position = match kind {
@@ -153,6 +168,11 @@ impl Solver {
                             self.analysis.states[id].range(operation.get_operand(index))
                         });
                         self.grow_array(object, range, reader);
+                    }
+                    if kind == OperationKind::Mutate(Mutation::Hole) {
+                        self.mark_array_holes(object);
+                        let range = self.analysis.states[id].range(operation.get_operand(1));
+                        self.grow_array(object, Some(range), reader);
                     }
                     if let OperationKind::Mutate(mutation) = kind
                         && let Some(value) = mutation.stored_operand()
@@ -191,15 +211,19 @@ impl Solver {
                     _ => 1,
                 };
                 let mut slots = Vec::new();
+                let mut sparse = false;
                 for source in operation.operands().skip(usize::from(extends)) {
                     if let Some(source) = self.heap_value(ctx, id, source) {
-                        self.array_elements(source, depth, reader, &mut slots);
+                        sparse |= self.array_elements(source, depth, reader, &mut slots);
                     }
                 }
                 let sources = slots.len();
                 let mut previous = None;
                 while let Some(object) = self.next_object(target, previous) {
                     previous = Some(object);
+                    if sparse {
+                        self.mark_array_holes(object);
+                    }
                     let output = self.analysis.heap.objects[object].contents.slots()[0];
                     self.analysis.heap.cells[output].readers.insert(reader);
                     for &input in &slots[..sources] {
@@ -268,6 +292,7 @@ impl Solver {
                         element,
                         length,
                         readers,
+                        ..
                     } = &mut self.analysis.heap.objects[object].contents
                     else {
                         continue;
