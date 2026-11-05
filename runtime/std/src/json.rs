@@ -162,7 +162,8 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     object_member(value, name)
 }
 
-fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
+/// The last member node named `name`, including absent and `undefined` placeholders.
+fn member_node(value: *mut u8, name: &[u8]) -> *mut u8 {
     unsafe {
         let mut found = core::ptr::null_mut();
         let mut child = word(value, 16);
@@ -173,7 +174,31 @@ fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
             }
             child = word(node(child), 4);
         }
-        member_value(found)
+        found
+    }
+}
+
+fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
+    member_value(member_node(value, name))
+}
+
+/// `std_json_member` for typed decoding: a present `undefined` member stays an `UNDEFINED`
+/// node, so the decoder can tell it from an omitted one.
+///
+/// # Safety
+/// `name` must be a string.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_json_field(value: *mut u8, name: *mut u8) -> *mut u8 {
+    // SAFETY: guaranteed by the caller.
+    let name = unsafe { crate::runtime::bytes(name) };
+    if value.is_null() || unsafe { word(value, 0) } != OBJECT {
+        return property(value, name);
+    }
+    let member = member_node(value, name);
+    if !member.is_null() && unsafe { word(member, 0) } == ABSENT {
+        core::ptr::null_mut()
+    } else {
+        member
     }
 }
 

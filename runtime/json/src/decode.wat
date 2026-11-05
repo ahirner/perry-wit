@@ -21,6 +21,7 @@
   (import "__perry_helper" "std_json_first" (func $graph-first (param i32) (result i32)))
   (import "__perry_helper" "std_json_next" (func $graph-next (param i32) (result i32)))
   (import "__perry_helper" "std_json_member" (func $graph-member (param i32 i32) (result i32)))
+  (import "__perry_helper" "std_json_field" (func $graph-field (param i32 i32) (result i32)))
   (import "__perry_helper" "std_json_keys" (func $graph-keys (param i32) (result i32)))
   (import "__perry_helper" "std_json_type_of" (func $graph-type (param i32) (result i32)))
   (import "__perry_helper" "std_json_record_retain" (func $record-retain (param i32 i32 i32 i32)))
@@ -271,7 +272,7 @@
           @input.GRAPH@
           (local.set $input (local.get $first))
           (if (i32.eqz (local.get $tuple))
-            (then (local.set $input (call $graph-member (local.get $source) (i32.load (local.get $field))))))
+            (then (local.set $input (call $graph-field (local.get $source) (i32.load (local.get $field))))))
           (call $decode (local.get $child) (i64.extend_i32_u (local.get $input)) (local.get $mode) (i32.const 0) (i32.const 0))
           (br $decoded)
           @input.END_GRAPH@
@@ -392,7 +393,7 @@
             (if (local.get $dictionary)
               (then
                 (local.set $key (i32.load (i32.add (i32.load offset=@array.DATA@ (local.get $keys)) (i32.mul (local.get $index) (i32.const 8)))))
-                (call $decode (local.get $value-schema) (i64.extend_i32_u (call $graph-member (local.get $source) (local.get $key)))
+                (call $decode (local.get $value-schema) (i64.extend_i32_u (call $graph-field (local.get $source) (local.get $key)))
                   (local.get $mode) (i32.const 0) (i32.const 0))
                 local.set $tag local.set $failed local.set $bits
                 (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))

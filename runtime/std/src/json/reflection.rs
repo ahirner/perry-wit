@@ -1,8 +1,8 @@
 //! Exception cause nodes, native reference reflection, and dynamic JSON equality/display.
 use super::{
-    address, append, array_index, json_number, member_value, new_node, node, set_word,
-    std_json_from_i64, std_json_from_number, std_json_from_scalar, std_json_from_string,
-    std_json_from_u64, std_json_to_string, string_bytes, word,
+    address, append, array_index, json_number, new_node, node, set_word, std_json_from_i64,
+    std_json_from_number, std_json_from_scalar, std_json_from_string, std_json_from_u64,
+    std_json_to_string, string_bytes, word,
 };
 use crate::runtime::from_static;
 use perry_rt_sys::{
@@ -258,35 +258,29 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
     }
 }
 
-fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> (*mut u8, *mut u8) {
+fn native_key(desc: *mut u8, index: u32) -> *mut u8 {
+    unsafe { node(word(field_descriptor(desc, index), 0)) }
+}
+
+fn field_descriptor(desc: *mut u8, index: u32) -> *mut u8 {
+    unsafe { desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize) }
+}
+
+fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
+    let field = field_descriptor(desc, index);
     unsafe {
-        let field = desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize);
-        let key = node(word(field, 0));
-        let value = super::view::read_slot(
+        super::view::read_slot(
             origin,
             word(field, descriptor::FIELD_OFFSET as usize),
             node(word(field, descriptor::FIELD_SCHEMA as usize)),
             false,
-        );
-        let value = if value.is_null()
-            && word(desc, 0) == descriptor::RECORD
-            && !super::order::field_present(
-                origin,
-                word(desc, 4),
-                index,
-                crate::runtime::bytes(key),
-            ) {
-            new_node(ABSENT)
-        } else {
-            value
-        };
-        (key, value)
+        )
     }
 }
 
 fn native_element(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
     if !super::view::array_present(origin, index) {
-        return new_node(ABSENT);
+        return core::ptr::null_mut();
     }
     unsafe {
         let stride = crate::runtime::layout::array::Elements::decode(word(desc, 8)).stride();
@@ -303,15 +297,11 @@ pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
     unsafe {
         let (origin, desc) = (node(word(value, 8)), node(word(value, 12)));
         match word(desc, 0) {
-            descriptor::RECORD | descriptor::JSON_TUPLE => {
-                for index in 0..word(desc, 4) {
-                    let (key, item) = native_field(origin, desc, index);
-                    if crate::runtime::bytes(key) == name {
-                        return member_value(item);
-                    }
-                }
-                core::ptr::null_mut()
-            }
+            descriptor::RECORD | descriptor::JSON_TUPLE => (0..word(desc, 4))
+                .find(|&index| crate::runtime::bytes(native_key(desc, index)) == name)
+                .map_or(core::ptr::null_mut(), |index| {
+                    native_field(origin, desc, index)
+                }),
             descriptor::ARRAY | descriptor::JSON_DICTIONARY => {
                 let length = word(origin, 0);
                 if name == b"length" {
@@ -320,7 +310,7 @@ pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
                 array_index(name)
                     .filter(|&index| index < length)
                     .map_or(core::ptr::null_mut(), |index| {
-                        member_value(native_element(origin, desc, index))
+                        native_element(origin, desc, index)
                     })
             }
             _ => core::ptr::null_mut(),
@@ -341,15 +331,29 @@ pub(super) fn native_snapshot(value: *mut u8) -> *mut u8 {
         } else {
             word(desc, 4)
         };
+        // Holes and omitted record fields become `ABSENT`, unlike present `undefined` values.
         for index in 0..count {
             if is_array {
-                append(
-                    result,
-                    native_element(origin, desc, index),
-                    core::ptr::null_mut(),
-                );
+                let item = if super::view::array_present(origin, index) {
+                    native_element(origin, desc, index)
+                } else {
+                    new_node(ABSENT)
+                };
+                append(result, item, core::ptr::null_mut());
             } else {
-                let (key, item) = native_field(origin, desc, index);
+                let key = native_key(desc, index);
+                let mut item = native_field(origin, desc, index);
+                if item.is_null()
+                    && word(desc, 0) == descriptor::RECORD
+                    && !super::order::field_present(
+                        origin,
+                        count,
+                        index,
+                        crate::runtime::bytes(key),
+                    )
+                {
+                    item = new_node(ABSENT);
+                }
                 append(result, item, std_json_from_string(key));
             }
         }

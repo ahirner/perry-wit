@@ -828,6 +828,8 @@ export function presence() {
      return item===undefined ? 'undefined' : item;
    });
    if(visited!==':a:b:c:d:' || replaced!=='{"a":1,"b":"undefined","c":"undefined","d":"undefined"}') return 7;
+   const typed:{a:number;b?:number;c?:string;d?:boolean;missing?:number} = spread;
+   if(!('b' in typed) || !('c' in typed) || !('d' in typed) || 'missing' in typed) return 16;
  }
  const sparse:(string|undefined)[] = [, 'a', undefined];
  const arrayError = new Error('array',{cause:sparse});
