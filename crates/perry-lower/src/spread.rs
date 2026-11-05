@@ -1,6 +1,6 @@
 //! Array and string spread and `concat` lowering.
 use super::*;
-use crate::control_flow::{ArrayOutput, Input};
+use crate::control_flow::{ArrayOutput, Holes, Input};
 use perry_mir::{Absence, ArrayExtendOp, ConcatSegmentsOp, OptionalType, StringType};
 
 impl<'s> FunctionBuilder<'s> {
@@ -36,7 +36,8 @@ impl<'s> FunctionBuilder<'s> {
                 Ok(ArrayOutput::Item(item))
             });
         }
-        self.materialize_array(ctx, val)
+        let val = self.admit_holes(ctx, val, element)?;
+        self.without_holes(ctx, val, Holes::Dense, false)
     }
 
     pub(super) fn concat_values(
@@ -133,22 +134,14 @@ impl<'s> FunctionBuilder<'s> {
             element = Some(ty);
         }
         let mut result = None;
-        let mut pending_holes = 0;
+        // Holes evaluate nothing, so each run is appended once the element type is known.
+        let mut holes = 0;
         for item in items {
             let (expression, spread) = match item {
                 perry_frontend::hir::ArrayElement::Expr(expression) => (expression, false),
                 perry_frontend::hir::ArrayElement::Spread(expression) => (expression, true),
                 perry_frontend::hir::ArrayElement::Hole => {
-                    let Some(element) = element else {
-                        pending_holes += 1;
-                        continue;
-                    };
-                    let source = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
-                    let zero = self.number(ctx, 0.0);
-                    self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, source, zero));
-                    let sources =
-                        result.map_or_else(|| vec![source], |prefix| vec![prefix, source]);
-                    result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
+                    holes += 1;
                     continue;
                 }
             };
@@ -171,16 +164,6 @@ impl<'s> FunctionBuilder<'s> {
                 } else {
                     source_element
                 });
-            }
-            if pending_holes > 0 {
-                let prefix =
-                    self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element.unwrap(), vec![]));
-                for index in 0..pending_holes {
-                    let index = self.number(ctx, index as f64);
-                    self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, prefix, index));
-                }
-                result = Some(prefix);
-                pending_holes = 0;
             }
             if !fixed_element && let Some(previous) = element {
                 let inner = present_type(ctx, previous);
@@ -209,10 +192,36 @@ impl<'s> FunctionBuilder<'s> {
                 let value = self.fit(ctx, value, element)?;
                 self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value]))
             };
+            result = self.append_holes(ctx, result, element, std::mem::take(&mut holes));
             let sources = result.map_or_else(|| vec![source], |prefix| vec![prefix, source]);
             result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
         }
+        if holes > 0 {
+            let element = element.context("array holes need an element type")?;
+            result = self.append_holes(ctx, result, element, holes);
+        }
         result.context("an empty spread array needs an element type")
+    }
+
+    /// `prefix` followed by `count` holes.
+    fn append_holes(
+        &mut self,
+        ctx: &mut Context,
+        prefix: Option<Value>,
+        element: TypeHandle,
+        count: u32,
+    ) -> Option<Value> {
+        if count == 0 {
+            return prefix;
+        }
+        let holes = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+        for index in 0..count {
+            let index = self.number(ctx, f64::from(index));
+            self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, holes, index));
+        }
+        Some(prefix.map_or(holes, |prefix| {
+            self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![prefix, holes]))
+        }))
     }
 
     /// `array.push(…)` with spread arguments: all values are collected before the receiver

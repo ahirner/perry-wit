@@ -209,48 +209,7 @@ impl<'s> FunctionBuilder<'s> {
                     inputs => self.expression(ctx, inputs)?,
                 };
                 let inputs = if self.shapes.metadata.sparse_arrays {
-                    let element = self.array_element(ctx, inputs)?;
-                    let promise =
-                        TypedHandle::<PromiseType>::from_handle(present_type(ctx, element), ctx)
-                            .ok();
-                    let settled = promise.map(|promise| {
-                        let value = promise.deref(ctx).value();
-                        crate::coerce::admitting(ctx, value, perry_mir::Absence::Undefined)
-                    });
-                    self.collect_items(
-                        ctx,
-                        crate::control_flow::Input::Array(
-                            inputs,
-                            crate::control_flow::Holes::Dense,
-                        ),
-                        |b, ctx, item, _, _| {
-                            let promise = if let Some(settled) = settled {
-                                let ty = PromiseType::get(ctx, settled).into();
-                                let missing =
-                                    b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
-                                b.choose(
-                                    ctx,
-                                    ty,
-                                    missing,
-                                    |b, ctx| {
-                                        let value = b.emit_value(ctx, |ctx| {
-                                            UndefinedOp::with_type(ctx, settled)
-                                        });
-                                        Ok(b.emit_value(ctx, |ctx| {
-                                            PromiseResolvedOp::new(ctx, value)
-                                        }))
-                                    },
-                                    |b, ctx| {
-                                        let promise = b.defined(ctx, item)?;
-                                        b.fit(ctx, promise, ty)
-                                    },
-                                )?
-                            } else {
-                                b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, item))
-                            };
-                            Ok(crate::control_flow::ArrayOutput::Item(promise))
-                        },
-                    )?
+                    self.combinator_holes(ctx, inputs)?
                 } else {
                     inputs
                 };
@@ -525,6 +484,45 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(allocated);
         }
         Ok(val)
+    }
+
+    /// A combinator's input array with holes read as `undefined` values, so each element is a
+    /// promise of `T | undefined`, or of the plain element value.
+    fn combinator_holes(&mut self, ctx: &mut Context, inputs: Value) -> Result<Value> {
+        use crate::control_flow::{ArrayOutput, Holes, Input};
+        let element = self.array_element(ctx, inputs)?;
+        let promise = TypedHandle::<PromiseType>::from_handle(present_type(ctx, element), ctx);
+        let settled = promise.ok().map(|promise| {
+            let value = promise.deref(ctx).value();
+            let settled = crate::coerce::admitting(ctx, value, perry_mir::Absence::Undefined);
+            (settled, PromiseType::get(ctx, settled).into())
+        });
+        self.collect_items(
+            ctx,
+            Input::Array(inputs, Holes::Dense),
+            |b, ctx, item, _, _| {
+                let Some((settled, promise)) = settled else {
+                    return Ok(ArrayOutput::Item(
+                        b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, item)),
+                    ));
+                };
+                let hole = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
+                let promise = b.choose(
+                    ctx,
+                    promise,
+                    hole,
+                    |b, ctx| {
+                        let value = b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, settled));
+                        Ok(b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)))
+                    },
+                    |b, ctx| {
+                        let item = b.defined(ctx, item)?;
+                        b.fit(ctx, item, promise)
+                    },
+                )?;
+                Ok(ArrayOutput::Item(promise))
+            },
+        )
     }
 
     /// The array literal given to a promise combinator: plain values among promises of `T`

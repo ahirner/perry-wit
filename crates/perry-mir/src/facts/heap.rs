@@ -81,6 +81,11 @@ impl HeapFacts {
 }
 
 impl ProgramFacts {
+    /// Whether the program may create array holes at all.
+    pub fn has_array_holes(&self) -> bool {
+        self.has_array_holes
+    }
+
     /// Whether every possible allocation stays dense, including mutations through aliases.
     pub fn array_is_dense(&self, ctx: &Context, array: Value) -> bool {
         if !self.has_array_holes {

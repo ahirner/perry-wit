@@ -475,6 +475,7 @@ impl FunctionLowering<'_, '_> {
         Ok(a.zip(b)?.map(|(av, bv)| self.select(ctx, cond, av, bv)))
     }
 
+    /// Whether slot `index` of `array` holds an element rather than a hole.
     pub(crate) fn array_slot_present(
         &mut self,
         ctx: &mut Context,
@@ -482,21 +483,39 @@ impl FunctionLowering<'_, '_> {
         index: Value,
     ) -> Value {
         let present = self.i32_const(ctx, 1);
-        if !self.state.sparse_arrays {
-            return present;
-        }
+        self.hole_byte(ctx, array, index, Some(present), |b, ctx, address| {
+            let hole = b.load(ctx, MemKind::I32U8, address, 0);
+            Some(b.num(ctx, NumOpcode::I32Eqz, vec![hole]))
+        })
+        .unwrap_or(present)
+    }
+
+    /// Run `sparse` on the hole byte address of `index` when `array` has hole storage. The
+    /// join receives `dense` without hole storage, and otherwise what `sparse` returns.
+    fn hole_byte(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        index: Value,
+        dense: Option<Value>,
+        sparse: impl FnOnce(&mut Self, &mut Context, Value) -> Option<Value>,
+    ) -> Option<Value> {
         let holes = self.load(ctx, MemKind::I32, array, layout::HOLES);
-        let dense = self.num(ctx, NumOpcode::I32Eqz, vec![holes]);
-        let sparse = self.new_block(ctx, vec![]);
-        let done = self.new_block(ctx, vec![present.get_type(ctx)]);
-        self.cond_br(ctx, dense, (done, vec![present]), (sparse, vec![]));
-        self.block = sparse;
+        let none = self.num(ctx, NumOpcode::I32Eqz, vec![holes]);
+        let storage = self.new_block(ctx, vec![]);
+        let done = self.new_block(ctx, dense.iter().map(|v| v.get_type(ctx)).collect());
+        self.cond_br(
+            ctx,
+            none,
+            (done, dense.into_iter().collect()),
+            (storage, vec![]),
+        );
+        self.block = storage;
         let address = self.num(ctx, NumOpcode::I32Add, vec![holes, index]);
-        let hole = self.load(ctx, MemKind::I32U8, address, 0);
-        let present = self.num(ctx, NumOpcode::I32Eqz, vec![hole]);
-        self.br(ctx, done, vec![present]);
+        let result = sparse(self, ctx, address);
+        self.br(ctx, done, result.into_iter().collect());
         self.block = done;
-        done.deref(ctx).get_argument(0)
+        dense.map(|_| done.deref(ctx).get_argument(0))
     }
 
     /// Element address and validity for `index` (f64 or i32) in an array of length `len`.
@@ -591,17 +610,11 @@ impl FunctionLowering<'_, '_> {
         let address = self.element_address(ctx, array, index, element);
         self.store_slot_value(ctx, address, 0, element, value)?;
         if sparse {
-            let holes = self.load(ctx, MemKind::I32, array, layout::HOLES);
-            let dense = self.num(ctx, NumOpcode::I32Eqz, vec![holes]);
-            let sparse = self.new_block(ctx, vec![]);
-            let done = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, dense, (done, vec![]), (sparse, vec![]));
-            self.block = sparse;
-            let address = self.num(ctx, NumOpcode::I32Add, vec![holes, index]);
-            let zero = self.i32_const(ctx, 0);
-            self.store(ctx, MemKind::I32U8, address, 0, zero);
-            self.br(ctx, done, vec![]);
-            self.block = done;
+            self.hole_byte(ctx, array, index, None, |b, ctx, address| {
+                let present = b.i32_const(ctx, 0);
+                b.store(ctx, MemKind::I32U8, address, 0, present);
+                None
+            });
         }
         Ok(())
     }

@@ -139,7 +139,7 @@ pub(crate) fn prove_bounds(
         let mut intervals = GuardedRanges::new(ctx, numeric, &function);
         let mut lengths = Vec::new();
         let mut accesses = Vec::new();
-        let mut dense_tests = Vec::new();
+        let mut always_true = Vec::new();
         let region = function.get_region(ctx);
         for (block, op) in region
             .deref(ctx)
@@ -152,7 +152,7 @@ pub(crate) fn prove_bounds(
             }
             if Operation::is_op::<ArrayIsDenseOp>(op, ctx) {
                 if numeric.array_is_dense(ctx, op.deref(ctx).get_operand(0)) {
-                    dense_tests.push(op);
+                    always_true.push(op);
                 }
                 continue;
             }
@@ -222,13 +222,13 @@ pub(crate) fn prove_bounds(
         }
         for (op, object, index, kind) in accesses {
             if Operation::is_op::<ArrayPresentOp>(op, ctx) {
-                dense_tests.push(op);
+                always_true.push(op);
             } else {
                 unchecked(ctx, op, object, index, kind)?;
             }
             status = IRStatus::Changed;
         }
-        for op in dense_tests {
+        for op in always_true {
             let ty = IntegerType::get(ctx, 1, Signedness::Signless);
             let constant = ConstantOp::new(
                 ctx,

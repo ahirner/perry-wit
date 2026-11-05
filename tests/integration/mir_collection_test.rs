@@ -18,8 +18,8 @@ export function copies(n:number) {
  const values:number[]=[1,2,3,4];
  let sum=0;
  for(let i=0;i<n;i++) {
-   const spread=[...values];
-   const from=Array.from(values);
+   const spread:number[]=[...values];
+   const from:number[]=Array.from(values);
    const flat=values.flat(0);
    spread[0]+=1;
    sum+=spread[0]+from[1]+flat[2];
@@ -29,7 +29,7 @@ export function copies(n:number) {
 "#;
     let mixed = dense.replace(
         "return sum;",
-        "const sparse=[,3];return sum+(sparse[0]??0);",
+        "const sparse=[,3];return sum+sparse.length-2;",
     );
     let separate = format!("{dense}\nexport function sparse() {{return [,3].join(',');}}");
     let measure = |source: &str, export: &str| {

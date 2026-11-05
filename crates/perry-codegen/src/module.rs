@@ -137,7 +137,6 @@ pub(crate) struct ModuleState<'e> {
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage.
     pub(crate) collectible: bool,
-    pub(crate) sparse_arrays: bool,
     pub(crate) program_facts: &'e perry_mir::ProgramFacts,
     pub(crate) live: &'e perry_mir::LiveValues,
     /// Whether to count compiled roots published at [DATA_BASE] for [Exports::RawChecked].
@@ -196,11 +195,6 @@ pub(crate) fn lower(
         }
     );
     let mut state = ModuleState {
-        sparse_arrays: functions.iter().any(|function| {
-            perry_mir::operations(ctx, function)
-                .iter()
-                .any(|&op| Operation::is_op::<perry_mir::ArrayHoleOp>(op, ctx))
-        }),
         data: Data {
             bytes: if matches!(exports, Exports::RawChecked) {
                 vec![0; 8]

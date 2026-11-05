@@ -220,8 +220,18 @@ impl<'s> FunctionBuilder<'s> {
             return self.kv_has(ctx, obj, k, k_ty);
         }
         if ty.deref(ctx).is::<ArrayType>() {
-            let property = self.array_property_key(ctx, prop_expr)?;
-            return self.array_has_property(ctx, obj, property);
+            let (_, present, length) = self.array_property(ctx, obj, prop_expr)?;
+            let Some(length) = length else {
+                return Ok(present);
+            };
+            let predicate = present.get_type(ctx);
+            return self.choose(
+                ctx,
+                predicate,
+                length,
+                |b, ctx| Ok(b.boolean(ctx, true)),
+                |_, _| Ok(present),
+            );
         }
         if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
             && rec.deref(ctx).kind() == RecordKind::Object
@@ -278,38 +288,33 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(self.boolean(ctx, true));
         }
         if ty.deref(ctx).is::<ArrayType>() {
-            let property = match prop_or_idx {
-                Ok(index) => self.array_property_key(ctx, index)?,
-                Err(property) => self.string(ctx, property),
+            const LENGTH: &str = "Cannot delete property 'length' of an array";
+            let key = match prop_or_idx {
+                Ok(key) => key,
+                Err(property) if property == "length" => {
+                    self.raise_error(ctx, ErrorKind::TypeError, LENGTH);
+                    return Ok(self.boolean(ctx, false));
+                }
+                // Other named properties are never elements.
+                Err(_) => return Ok(self.boolean(ctx, true)),
             };
-            if property.get_type(ctx).deref(ctx).is::<StringType>() {
-                let length = self.string(ctx, "length");
-                let length = self.compare(ctx, CompareKind::Eq, property, length);
+            // Hole-aware reads are enabled per module, so the frontend must have seen this delete.
+            ensure!(
+                self.shapes.metadata.sparse_arrays,
+                "array element deletion was not detected before lowering"
+            );
+            let (index, present, length) = self.array_property(ctx, obj, key)?;
+            if let Some(length) = length {
                 let error = self.new_block(ctx, "delete_length_error");
                 let indexed = self.new_block(ctx, "delete_index");
                 self.branch(ctx, length, error, indexed);
                 self.switch_to(error);
-                let message = self.string(ctx, "Cannot delete property 'length' of an array");
-                let error = self.emit_value(ctx, |ctx| {
-                    ErrorNewOp::new(ctx, ErrorKind::TypeError, message)
-                });
-                let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
-                self.propagate(ctx, status);
+                self.raise_error(ctx, ErrorKind::TypeError, LENGTH);
                 self.switch_to(indexed);
             }
-            let (index, canonical) = self.array_property_index(ctx, property)?;
-            let present =
-                self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, obj, index));
             let delete = self.new_block(ctx, "delete_element");
             let done = self.new_block(ctx, "deleted_element");
-            let valid = self.choose(
-                ctx,
-                present.get_type(ctx),
-                canonical,
-                |_, _| Ok(present),
-                |b, ctx| Ok(b.boolean(ctx, false)),
-            )?;
-            self.branch(ctx, valid, delete, done);
+            self.branch(ctx, present, delete, done);
             self.switch_to(delete);
             self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, obj, index));
             self.jump(ctx, done);
@@ -338,57 +343,47 @@ impl<'s> FunctionBuilder<'s> {
         })
     }
 
-    fn array_property_key(&mut self, ctx: &mut Context, key: &'s Expr) -> Result<Value> {
-        match key {
-            Expr::Null => Ok(self.string(ctx, "null")),
-            Expr::Undefined => Ok(self.string(ctx, "undefined")),
-            key => self.expression(ctx, key),
-        }
-    }
-
-    fn array_property_index(
-        &mut self,
-        ctx: &mut Context,
-        property: Value,
-    ) -> Result<(Value, Value)> {
-        if kind(ctx, property)? != Kind::Number {
-            let property = self.display(ctx, property)?;
-            let index = self.intrinsic(ctx, Intrinsic::StringToNumber, vec![property]);
-            let name = self.display(ctx, index)?;
-            Ok((index, self.compare(ctx, CompareKind::Eq, property, name)))
-        } else {
-            let index = self.arithmetic(ctx, property);
-            Ok((index, self.boolean(ctx, true)))
-        }
-    }
-
-    fn array_has_property(
+    /// `array[key]` as `(index, present, length)`: `present` holds when `key` is a canonical
+    /// index naming an element, and `length` when a string `key` is `"length"`.
+    fn array_property(
         &mut self,
         ctx: &mut Context,
         array: Value,
-        property: Value,
-    ) -> Result<Value> {
-        let (index, canonical) = self.array_property_index(ctx, property)?;
-        let present = self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
-        let present = self.choose(
-            ctx,
-            present.get_type(ctx),
-            canonical,
-            |_, _| Ok(present),
-            |b, ctx| Ok(b.boolean(ctx, false)),
-        )?;
-        if property.get_type(ctx).deref(ctx).is::<StringType>() {
-            let length = self.string(ctx, "length");
-            let length = self.compare(ctx, CompareKind::Eq, property, length);
-            self.choose(
-                ctx,
-                present.get_type(ctx),
-                length,
-                |b, ctx| Ok(b.boolean(ctx, true)),
-                |_, _| Ok(present),
-            )
+        key: &'s Expr,
+    ) -> Result<(Value, Value, Option<Value>)> {
+        let key = match key {
+            Expr::Null => self.string(ctx, "null"),
+            Expr::Undefined => self.string(ctx, "undefined"),
+            key => self.expression(ctx, key)?,
+        };
+        let (index, canonical) = if kind(ctx, key)? == Kind::Number {
+            (self.arithmetic(ctx, key), None)
         } else {
-            Ok(present)
+            let name = self.display(ctx, key)?;
+            let index = self.intrinsic(ctx, Intrinsic::StringToNumber, vec![name]);
+            let canonical = self.display(ctx, index)?;
+            (
+                index,
+                Some(self.compare(ctx, CompareKind::Eq, name, canonical)),
+            )
+        };
+        let mut present =
+            self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
+        if let Some(canonical) = canonical {
+            let predicate = present.get_type(ctx);
+            present = self.choose(
+                ctx,
+                predicate,
+                canonical,
+                |_, _| Ok(present),
+                |b, ctx| Ok(b.boolean(ctx, false)),
+            )?;
         }
+        let string = key.get_type(ctx).deref(ctx).is::<StringType>();
+        let length = string.then(|| {
+            let length = self.string(ctx, "length");
+            self.compare(ctx, CompareKind::Eq, key, length)
+        });
+        Ok((index, present, length))
     }
 }

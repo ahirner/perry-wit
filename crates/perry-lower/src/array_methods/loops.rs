@@ -1,22 +1,68 @@
 use super::*;
 
 impl<'s> FunctionBuilder<'s> {
-    pub(crate) fn compact_array(&mut self, ctx: &mut Context, array: Value) -> Result<Value> {
+    /// `array` without holes, of the same type: [Holes::Skip] drops them and [Holes::Dense]
+    /// reads them through [Self::hole_as_element]. A dense `array` is returned itself unless
+    /// `copy` is set.
+    pub(crate) fn without_holes(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        holes: Holes,
+        copy: bool,
+    ) -> Result<Value> {
+        let dense = |b: &mut Self, ctx: &mut Context| {
+            Ok(if copy {
+                b.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]))
+            } else {
+                array
+            })
+        };
         if !self.shapes.metadata.sparse_arrays {
-            return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array])));
+            return dense(self, ctx);
         }
-        let dense = self.emit_value(ctx, |ctx| perry_mir::ArrayIsDenseOp::new(ctx, array));
-        self.choose(
-            ctx,
-            array.get_type(ctx),
-            dense,
-            |b, ctx| Ok(b.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]))),
-            |b, ctx| {
-                b.collect_items(ctx, Input::Array(array, Holes::Skip), |_, _, item, _, _| {
-                    Ok(ArrayOutput::Item(item))
-                })
-            },
-        )
+        let element = self.array_element(ctx, array)?;
+        let is_dense = self.emit_value(ctx, |ctx| perry_mir::ArrayIsDenseOp::new(ctx, array));
+        self.choose(ctx, array.get_type(ctx), is_dense, dense, |b, ctx| {
+            b.collect_items(ctx, Input::Array(array, holes), |b, ctx, item, _, _| {
+                Ok(ArrayOutput::Item(b.hole_as_element(ctx, item, element)?))
+            })
+        })
+    }
+
+    /// View `array` with `undefined` elements when the `expected` element admits them, so its
+    /// materialized holes read as `undefined` rather than throwing.
+    pub(crate) fn admit_holes(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        if !self.shapes.metadata.sparse_arrays
+            || !expected.is_some_and(|element| perry_mir::admits_undefined(ctx, element))
+        {
+            return Ok(array);
+        }
+        let element = self.array_element(ctx, array)?;
+        let element = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
+        let target = ArrayType::get(ctx, element).into();
+        self.fit(ctx, array, target)
+    }
+
+    /// A [Holes::Dense] item as `element`. A hole is `undefined`, which throws `TypeError` when
+    /// `element` excludes it: a `T[]` copy stays `T[]` even if `delete` or `map` left holes.
+    pub(crate) fn hole_as_element(
+        &mut self,
+        ctx: &mut Context,
+        item: Value,
+        element: TypeHandle,
+    ) -> Result<Value> {
+        let item = if perry_mir::admits_undefined(ctx, element) {
+            item
+        } else {
+            self.defined(ctx, item)?
+        };
+        self.fit(ctx, item, element)
     }
 
     pub(crate) fn copy_array_slot(
@@ -53,29 +99,6 @@ impl<'s> FunctionBuilder<'s> {
         }
         let op = ArrayGetOp::new(ctx, array, index)?;
         Ok(self.append_value(ctx, &op))
-    }
-
-    pub(crate) fn materialize_array(&mut self, ctx: &mut Context, array: Value) -> Result<Value> {
-        if !self.shapes.metadata.sparse_arrays {
-            return Ok(array);
-        }
-        let element = self.array_element(ctx, array)?;
-        let element = crate::coerce::admitting(ctx, element, perry_mir::Absence::Undefined);
-        let target = ArrayType::get(ctx, element).into();
-        let dense = self.emit_value(ctx, |ctx| perry_mir::ArrayIsDenseOp::new(ctx, array));
-        self.choose(
-            ctx,
-            target,
-            dense,
-            |b, ctx| b.fit(ctx, array, target),
-            |b, ctx| {
-                b.collect_items(
-                    ctx,
-                    Input::Array(array, Holes::Dense),
-                    |_, _, item, _, _| Ok(ArrayOutput::Item(item)),
-                )
-            },
-        )
     }
 
     pub(crate) fn collect_preserving_holes(

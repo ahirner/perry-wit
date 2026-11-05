@@ -63,10 +63,6 @@ pub enum DiagnosticCode {
     ParseError,
     UnsupportedOperator,
     /// Reserved for compatibility; sparse-array support no longer emits this diagnostic.
-    #[allow(
-        dead_code,
-        reason = "Compatibility variant scheduled for deprecation in 0.2.0"
-    )]
     UnsupportedSpread,
     MissingTypeAnnotation,
     UnsupportedType,

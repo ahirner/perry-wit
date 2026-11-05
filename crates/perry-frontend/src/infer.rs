@@ -20,6 +20,8 @@ pub(crate) fn contains_type_var(ty: &HirType) -> bool {
 mod absence;
 mod aggregates;
 mod closures;
+mod deletions;
+pub(crate) use deletions::deletes_array_elements;
 mod environment;
 mod functions;
 use absence::*;

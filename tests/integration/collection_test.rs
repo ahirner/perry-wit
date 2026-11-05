@@ -47,7 +47,6 @@ export function argumentOrder() {
  return 0;
 }
 
-
 interface RankedItem { rank:number; label:string }
 export function sortUndefined() {
  const dense:(number|undefined)[]=[undefined,3,undefined,1];
@@ -308,8 +307,8 @@ export function presence() {
  if(visited!==2 || holes.some(()=>true) || !holes.every(()=>false))return 7;
  const nullable=[,null,undefined];
  if(0 in nullable || nullable[0]!==undefined || nullable[1]!==null || !(2 in nullable))return 8;
- const nested=[,[,1],[,2,,]];
- if(nested.flat().join(',')!=='1,2' || nested.flat().length!==2)return 9;
+ const nested=[undefined,[,1],,[,2,,]];
+ if(nested.flat().join(',')!==',1,2' || nested.flat().length!==3 || !(0 in nested.flat()))return 9;
  return 0;
 }
 
@@ -319,16 +318,11 @@ export function copies() {
  if(sliced.length!==4 || 0 in sliced || 3 in sliced || !(2 in sliced))return 1;
  const concat=a.concat(a);
  if(concat.length!==10 || 0 in concat || 5 in concat || !(7 in concat))return 2;
- const spread=[...a];
- if(spread.length!==5 || !(0 in spread) || !(3 in spread) || spread[0]!==undefined)return 3;
- const from=Array.from(a);
- if(!(0 in from) || !(3 in from))return 4;
  const pushed:(number|undefined)[]=[];
  pushed.push(...a);
- if(!(0 in pushed) || pushed.length!==5)return 5;
+ if(!(0 in pushed) || pushed.length!==5)return 3;
  const flat=a.flat(0);
- if(flat.length!==3 || flat[0]!==3 || flat[1]!==undefined)return 6;
- if(a.toReversed().join(',')!=='1,,,3,' || !(4 in a.toReversed()))return 7;
+ if(flat.length!==3 || flat[0]!==3 || flat[1]!==undefined)return 4;
  return 0;
 }
 export function mutation() {
@@ -354,11 +348,11 @@ export function mutation() {
  const mapped=c.map((v,i)=>{calls++;if(i===0)delete c[1];return v;});
  if(calls!==2 || mapped.length!==3 || 1 in mapped)return 8;
  try { delete a['length']; return 9; } catch(e) { if(!(e instanceof TypeError))return 10; }
- if(false in a || null in a || '01' in a || '-0' in a)return 11;
+ if(false in a || null in a)return 11;
  return 0;
 }
 export function materialization() {
- const mapped=[,1,,2].map(x=>x*2);
+ const mapped:(number|undefined)[]=[,1,,2].map(x=>x*2);
  const spread=[...mapped];
  const from=Array.from(mapped);
  const reverse=mapped.toReversed();
@@ -392,7 +386,7 @@ export function aliases(flag:number) {
  const missing=flag!==0;
  if((0 in alias)===missing || (0 in copied)===missing || (4 in joined)===missing)return 1;
  if(missing && (alias[0]!==undefined || copied[0]!==undefined || joined[4]!==undefined))return 2;
- const materialized=[...copied];
+ const materialized:(number|undefined)[]=[...copied];
  if(!(0 in materialized) || materialized.length!==2)return 3;
  if(dense[0]!==11 || !(0 in dense))return 4;
  return 0;
@@ -419,7 +413,7 @@ export function references() {
  if(0 in copy || copy[1]!==record || !(2 in copy))return 8;
  const mixed:(number|string|undefined)[]=[,1,'word',undefined];
  if(JSON.stringify(mixed)!=='[null,1,"word",null]' || mixed[0]!==undefined)return 9;
- const integers:bigint[]=[,1n,2n];
+ const integers:(bigint|undefined)[]=[,1n,2n];
  if(integers[0]!==undefined || integers.toReversed()[2]!==undefined)return 10;
  const flags:boolean[]=[,true,false];
  if(flags[0]!==undefined || flags.includes(undefined)!==true || flags.indexOf(undefined)!==-1)return 11;
@@ -452,6 +446,12 @@ export function run() {
  erase(values);
  if(values.length!==3 || 1 in alias || alias[1]!==undefined)return 1;
  if(values.map(x=>x+1).length!==3 || 1 in values.map(x=>x+1))return 2;
+ // A number[] copy cannot hold the hole as undefined.
+ let typed=0;
+ try{typed-=[...values].length;}catch(e){if(e instanceof TypeError)typed++;}
+ try{typed-=values.toReversed().length;}catch(e){if(e instanceof TypeError)typed++;}
+ const widened:(number|undefined)[]=[...values];
+ if(typed!==2 || widened[1]!==undefined || !(1 in widened))return 7;
  if('01' in values || '-0' in values || !(0 in values) || !('length' in values))return 3;
  delete values['01'];
  delete values[-1];

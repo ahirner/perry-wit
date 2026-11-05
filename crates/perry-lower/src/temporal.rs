@@ -83,11 +83,9 @@ enum FieldValue<'s> {
 }
 
 impl<'s> FunctionBuilder<'s> {
-    pub(super) fn raise_range_error(&mut self, ctx: &mut Context, msg: &str) {
+    pub(super) fn raise_error(&mut self, ctx: &mut Context, kind: ErrorKind, msg: &str) {
         let message = self.string(ctx, msg);
-        let error = self.emit_value(ctx, |ctx| {
-            ErrorNewOp::new(ctx, ErrorKind::RangeError, message)
-        });
+        let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message));
         let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
         self.propagate(ctx, status);
         self.after_terminator(ctx);
@@ -275,7 +273,11 @@ impl<'s> FunctionBuilder<'s> {
         let failed = self.new_block(ctx, "overflow_invalid");
         self.branch(ctx, valid, done, failed);
         self.switch_to(failed);
-        self.raise_range_error(ctx, "Temporal overflow must be constrain or reject");
+        self.raise_error(
+            ctx,
+            ErrorKind::RangeError,
+            "Temporal overflow must be constrain or reject",
+        );
         self.switch_to(done);
         Ok(value)
     }

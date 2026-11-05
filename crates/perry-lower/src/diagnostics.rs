@@ -56,8 +56,7 @@ pub enum LowerErrorKind {
     UnsupportedOperator {
         op: String,
     },
-    /// Reserved for compatibility; scheduled for deprecation in 0.2.0.
-    #[allow(dead_code, reason = "Sparse-array support no longer emits this error")]
+    /// Reserved for compatibility; sparse-array support no longer emits this error.
     UnsupportedSpread,
     UnsupportedExpression(String),
 }

@@ -711,7 +711,7 @@ impl FunctionLowering<'_, '_> {
             let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
             let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
             let mut done = None;
-            if b.state.sparse_arrays {
+            if b.state.program_facts.has_array_holes() {
                 let present = b.array_slot_present(ctx, value, i);
                 if matches!(element, AbiType::Option(_)) {
                     let existing = b.new_block(ctx, vec![]);

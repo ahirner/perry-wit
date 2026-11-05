@@ -139,9 +139,7 @@ pub(crate) unsafe extern "C" fn perry_array_hole(array: *mut u8, index: u32, ref
         let array = array.cast::<Array>();
         let elements = Elements::decode(references);
         assert!(index <= (*array).len);
-        let len = (*array)
-            .len
-            .max(index.checked_add(1).expect("array length overflow"));
+        let len = (*array).len.max(crate::sequence_length(index, 1));
         reserve(array, len, elements);
         if (*array).holes.is_null() {
             (*array).holes = hole_storage((*array).cap);

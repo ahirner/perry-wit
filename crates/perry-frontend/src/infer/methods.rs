@@ -93,10 +93,15 @@ pub(super) fn result<'s>(
             let zero_depth = matches!(argument(0), Some(Expr::Number(n)) if *n <= 0.0)
                 || matches!(argument(0), Some(Expr::Integer(n)) if *n <= 0);
             match strip_nullish(expression(object, env)).0 {
-                HirType::Array(inner) if !zero_depth => match strip_nullish((*inner).clone()).0 {
-                    array @ HirType::Array(_) => array,
-                    _ => HirType::Array(inner),
-                },
+                // Absent elements stay: `(T[] | undefined)[]` flattens to `(T | undefined)[]`.
+                HirType::Array(inner) if !zero_depth => {
+                    let (inner, states) = strip_nullish(*inner);
+                    let element = match inner {
+                        HirType::Array(element) => *element,
+                        other => other,
+                    };
+                    HirType::Array(Box::new(with_absences(element, states)))
+                }
                 other => other,
             }
         }

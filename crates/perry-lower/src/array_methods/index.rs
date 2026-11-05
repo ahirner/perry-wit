@@ -265,12 +265,13 @@ impl<'s> FunctionBuilder<'s> {
         let err_b = self.new_block(ctx, "with_err");
         self.branch(ctx, in_bounds, ok_b, err_b);
         self.switch_to(err_b);
-        self.raise_range_error(ctx, "Invalid index for Array.prototype.with");
+        self.raise_error(
+            ctx,
+            ErrorKind::RangeError,
+            "Invalid index for Array.prototype.with",
+        );
         self.switch_to(ok_b);
-        let array = self.materialize_array(ctx, array)?;
-        let element = self.array_element(ctx, array)?;
-        let val = self.fit(ctx, val, element)?;
-        let cloned = self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]));
+        let cloned = self.without_holes(ctx, array, Holes::Dense, true)?;
         self.emit(ctx, |ctx| ArraySetOp::new(ctx, cloned, resolved_idx, val));
         Ok(cloned)
     }

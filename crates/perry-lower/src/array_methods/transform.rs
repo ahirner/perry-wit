@@ -28,12 +28,7 @@ impl<'s> FunctionBuilder<'s> {
                     Transform::Map => ArrayOutput::Item(mapped),
                     Transform::FlatMap => {
                         let mapped = b.defined(ctx, mapped)?;
-                        let mapped = if b.shapes.metadata.sparse_arrays {
-                            b.compact_array(ctx, mapped)?
-                        } else {
-                            mapped
-                        };
-                        ArrayOutput::Items(mapped)
+                        ArrayOutput::Items(b.without_holes(ctx, mapped, Holes::Skip, false)?)
                     }
                     Transform::Filter => {
                         let keep = b.truthy(ctx, mapped)?;
@@ -58,14 +53,12 @@ impl<'s> FunctionBuilder<'s> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
         let original_len = self.array_length(ctx, array);
-        let sparse = self.shapes.metadata.sparse_arrays;
-        let target = if matches!(mutation, Mutation::Copy) {
-            let values = self.materialize_array(ctx, array)?;
-            self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![values]))
-        } else if sparse {
-            self.compact_array(ctx, array)?
+        let in_place = matches!(mutation, Mutation::InPlace);
+        // In place, holes move to the end: sort the present elements, then write them back.
+        let target = if in_place {
+            self.without_holes(ctx, array, Holes::Skip, false)?
         } else {
-            array
+            self.without_holes(ctx, array, Holes::Dense, true)?
         };
         let limit = self.array_length(ctx, target);
         let one = self.number(ctx, 1.0);
@@ -127,12 +120,13 @@ impl<'s> FunctionBuilder<'s> {
             b.emit(ctx, |ctx| ArraySetOp::new(ctx, target, insert_pos, key));
             Ok(())
         })?;
-        if sparse && matches!(mutation, Mutation::InPlace) {
+        if !in_place {
+            return Ok(target);
+        }
+        if self.shapes.metadata.sparse_arrays {
             let zero = self.number(ctx, 0.0);
-            let element = self.array_element(ctx, array)?;
             self.index_loop(ctx, "sort_write", zero, limit, |b, ctx, index, _, _| {
                 let value = b.element_at(ctx, target, index)?;
-                let value = b.fit(ctx, value, element)?;
                 b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, index, value));
                 Ok(())
             })?;
@@ -146,10 +140,8 @@ impl<'s> FunctionBuilder<'s> {
                     Ok(())
                 },
             )?;
-            Ok(array)
-        } else {
-            Ok(target)
         }
+        Ok(array)
     }
 
     /// `array.reduce(callback, initial?)` or `array.reduceRight(callback, initial?)`.
@@ -267,7 +259,7 @@ impl<'s> FunctionBuilder<'s> {
         mutation: Mutation,
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
-        self.array_element(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
         let len = self.array_length(ctx, array);
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
@@ -283,7 +275,7 @@ impl<'s> FunctionBuilder<'s> {
                     },
                     Holes::Dense,
                 ),
-                |_, _, item, _, _| Ok(ArrayOutput::Item(item)),
+                |b, ctx, item, _, _| Ok(ArrayOutput::Item(b.hole_as_element(ctx, item, element)?)),
             )
         } else {
             let two = self.number(ctx, 2.0);
@@ -331,24 +323,51 @@ impl<'s> FunctionBuilder<'s> {
             Some(Expr::Integer(1)) => 1,
             _ => bail!("array.flat requires a constant depth of 0 or 1 in typed arrays"),
         };
-        if depth_num == 0 {
-            return self.compact_array(ctx, array);
-        }
-        if present_type(ctx, outer_elem_ty)
-            .deref(ctx)
-            .is::<ArrayType>()
-        {
-            self.collect_items(
-                ctx,
-                Input::Array(array, Holes::Skip),
-                |b, ctx, array, _, _| {
-                    let array = b.defined(ctx, array)?;
-                    Ok(ArrayOutput::Items(b.compact_array(ctx, array)?))
-                },
-            )
-        } else {
-            self.compact_array(ctx, array)
-        }
+        let nested = TypedHandle::<ArrayType>::from_handle(present_type(ctx, outer_elem_ty), ctx);
+        let Some(inner) = nested.ok().filter(|_| depth_num == 1) else {
+            return self.without_holes(ctx, array, Holes::Skip, true);
+        };
+        let inner = inner.deref(ctx).element();
+        // Absent elements are kept as items, so `(T[] | undefined)[]` flattens to `(T | undefined)[]`.
+        let states = absence(ctx, outer_elem_ty);
+        let element = states.map_or(inner, |states| crate::coerce::admitting(ctx, inner, states));
+        let target = ArrayType::get(ctx, element).into();
+        self.collect_items(
+            ctx,
+            Input::Array(array, Holes::Skip),
+            |b, ctx, item, _, _| {
+                let Some(states) = states else {
+                    return Ok(ArrayOutput::Items(b.without_holes(
+                        ctx,
+                        item,
+                        Holes::Skip,
+                        false,
+                    )?));
+                };
+                let absent = |null: bool| {
+                    move |b: &mut Self, ctx: &mut Context| {
+                        let value = if null && states.admits_null() {
+                            b.emit_value(ctx, |ctx| NullOp::new(ctx, element))
+                        } else {
+                            b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, element))
+                        };
+                        Ok(b.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value])))
+                    }
+                };
+                let items = b.match_optional(
+                    ctx,
+                    item,
+                    target,
+                    absent(false),
+                    absent(true),
+                    |b, ctx, items| {
+                        let items = b.without_holes(ctx, items, Holes::Skip, false)?;
+                        b.fit(ctx, items, target)
+                    },
+                )?;
+                Ok(ArrayOutput::Items(items))
+            },
+        )
     }
 
     /// `Array.from(source, mapFn?)`.
@@ -372,12 +391,15 @@ impl<'s> FunctionBuilder<'s> {
             src_val
         };
         let src_ty = src_val.get_type(ctx);
+        let expected_elem = expected
+            .and_then(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx).ok())
+            .map(|array| array.deref(ctx).element());
         let input = if crate::collections::is_collection_or_view_record(ctx, src_ty)
             || TypedHandle::<ArrayType>::from_handle(src_ty, ctx).is_ok()
         {
             if map_fn.is_none() && src_ty.deref(ctx).is::<ArrayType>() {
-                let values = self.materialize_array(ctx, src_val)?;
-                return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![values])));
+                let src_val = self.admit_holes(ctx, src_val, expected_elem)?;
+                return self.without_holes(ctx, src_val, Holes::Dense, true);
             }
             Input::Collection(src_val)
         } else if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src_ty, ctx)
@@ -393,13 +415,7 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             bail!("Array.from source must be a string, array, Set, Map, or {{ length }} object");
         };
-        let expected_elem = if matches!(input, Input::UndefinedCount(_)) {
-            expected
-                .and_then(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx).ok())
-                .map(|array| array.deref(ctx).element())
-        } else {
-            None
-        };
+        let expected_elem = expected_elem.filter(|_| matches!(input, Input::UndefinedCount(_)));
         let mapper = map_fn.map(|callback| {
             let zero = self.number(ctx, 0.0);
             let index = self.entry_slot(ctx, zero.get_type(ctx));

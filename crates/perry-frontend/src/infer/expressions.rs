@@ -275,10 +275,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                     }
                 }
             }
-            let element = if types.len() == 1 {
-                types.pop().unwrap()
-            } else {
-                HirType::Union(types)
+            let element = match <[HirType; 1]>::try_from(types) {
+                Ok([element]) => element,
+                Err(types) => HirType::Union(types),
             };
             HirType::Array(Box::new(element))
         }
@@ -289,13 +288,8 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 HirType::Array(Box::new(HirType::Any))
             } else {
                 let src_ty = strip_nullish(expression(source, env)).0;
-                let sparse = env.metadata.sparse_arrays && matches!(src_ty, HirType::Array(_));
                 match shapes::generics::iterated_element(src_ty) {
-                    Ok(elem) => HirType::Array(Box::new(if sparse {
-                        HirType::Union(vec![elem, HirType::Void])
-                    } else {
-                        elem
-                    })),
+                    Ok(elem) => HirType::Array(Box::new(elem)),
                     Err(_) => HirType::Any,
                 }
             }
