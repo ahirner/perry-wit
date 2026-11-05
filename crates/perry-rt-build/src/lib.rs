@@ -196,6 +196,10 @@ fn compile_json_codecs(runtime: &Path, output: &Path) -> Result<()> {
     constants!(record: JSON, HEADER, ORDER, PACKED_FIELDS);
     constants!(variant: TAG, OWNER, VALUE, JSON, RETAINED_SIZE);
     constants!(exception: TAG_STRING, TYPE_ERROR);
+    source = source.replace(
+        "@kind.UNDEFINED@",
+        &perry_abi::json::kind::UNDEFINED.to_string(),
+    );
     for (name, entry) in [
         ("graph", "decode_graph"),
         ("cursor", "decode_cursor"),

@@ -801,3 +801,61 @@ export function boxed() {
     assert_eq!(program.counter(Counter::Roots), 0);
     assert_eq!(program.counter(Counter::Pins), 0);
 }
+
+#[test]
+fn dynamic_json_preserves_undefined_members() {
+    let mut program = Program::checked(
+        r#"
+interface Box {value:unknown}
+export function presence() {
+ const record:{a:number;b?:number;c?:string;d?:boolean;missing?:number} = {
+   a:1,b:undefined,c:undefined,d:undefined
+ };
+ const error = new Error('record',{cause:record});
+ const boxed:Box = {value:record};
+ for(const value of [error.cause,boxed.value]) {
+   if(Object.keys(value).join(',')!=='a,b,c,d') return 1;
+   const spread = {...value};
+   if(Object.keys({...spread}).join(',')!=='a,b,c,d') return 2;
+   if(spread.b!==undefined || spread.c!==undefined || spread.d!==undefined) return 3;
+   if(JSON.stringify(spread)!=='{"a":1}') return 4;
+   const overwritten = {...spread,a:spread.b};
+   if(Object.keys(overwritten).join(',')!=='a,b,c,d' || JSON.stringify(overwritten)!=='{}') return 5;
+   if(JSON.stringify({...spread,b:2})!=='{"a":1,"b":2}') return 6;
+   let visited='';
+   const replaced = JSON.stringify(spread,(key,item) => {
+     visited+=key+':';
+     return item===undefined ? 'undefined' : item;
+   });
+   if(visited!==':a:b:c:d:' || replaced!=='{"a":1,"b":"undefined","c":"undefined","d":"undefined"}') return 7;
+ }
+ const sparse:(string|undefined)[] = [, 'a', undefined];
+ const arrayError = new Error('array',{cause:sparse});
+ const arrayBox:Box = {value:sparse};
+ for(const value of [arrayError.cause,arrayBox.value]) {
+   if(Object.keys(value).join(',')!=='1,2') return 8;
+   const spread = {...value};
+   if(Object.keys({...spread}).join(',')!=='1,2') return 9;
+   if(spread[0]!==undefined || spread[2]!==undefined || spread[1]!=='a') return 10;
+   if(JSON.stringify(spread)!=='{"1":"a"}' || JSON.stringify(value)!=='[null,"a",null]') return 11;
+ }
+ const decoded:(string|undefined)[] = arrayBox.value;
+ if(decoded.length!==3 || decoded[0]!==undefined || decoded[1]!=='a' || decoded[2]!==undefined) return 12;
+ const parsed = JSON.parse('{"a":1}');
+ const dynamic = {...parsed,b:parsed.missing};
+ if(Object.keys(dynamic).join(',')!=='a,b' || JSON.stringify(dynamic)!=='{"a":1}') return 13;
+ const partial:{a:unknown;b:unknown} = JSON.parse('{"b":2}');
+ const partialBox:Box = {value:partial};
+ if(Object.keys({...partialBox.value}).join(',')!=='b') return 14;
+ partial.a = undefined;
+ if(Object.keys({...partialBox.value}).join(',')!=='b,a') return 15;
+ return 0;
+}
+"#,
+        "json-presence.ts",
+    );
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("presence", &[]), (0.0, 0));
+    }
+}

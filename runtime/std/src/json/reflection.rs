@@ -1,8 +1,8 @@
 //! Exception cause nodes, native reference reflection, and dynamic JSON equality/display.
 use super::{
-    address, append, array_index, json_number, new_node, node, set_word, std_json_from_i64,
-    std_json_from_number, std_json_from_scalar, std_json_from_string, std_json_from_u64,
-    std_json_to_string, string_bytes, word,
+    address, append, array_index, json_number, member_value, new_node, node, set_word,
+    std_json_from_i64, std_json_from_number, std_json_from_scalar, std_json_from_string,
+    std_json_from_u64, std_json_to_string, string_bytes, word,
 };
 use crate::runtime::from_static;
 use perry_rt_sys::{
@@ -261,21 +261,32 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
 fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> (*mut u8, *mut u8) {
     unsafe {
         let field = desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize);
-        (
-            node(word(field, 0)),
-            super::view::read_slot(
+        let key = node(word(field, 0));
+        let value = super::view::read_slot(
+            origin,
+            word(field, descriptor::FIELD_OFFSET as usize),
+            node(word(field, descriptor::FIELD_SCHEMA as usize)),
+            false,
+        );
+        let value = if value.is_null()
+            && word(desc, 0) == descriptor::RECORD
+            && !super::order::field_present(
                 origin,
-                word(field, descriptor::FIELD_OFFSET as usize),
-                node(word(field, descriptor::FIELD_SCHEMA as usize)),
-                false,
-            ),
-        )
+                word(desc, 4),
+                index,
+                crate::runtime::bytes(key),
+            ) {
+            new_node(ABSENT)
+        } else {
+            value
+        };
+        (key, value)
     }
 }
 
 fn native_element(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
     if !super::view::array_present(origin, index) {
-        return core::ptr::null_mut();
+        return new_node(ABSENT);
     }
     unsafe {
         let stride = crate::runtime::layout::array::Elements::decode(word(desc, 8)).stride();
@@ -296,7 +307,7 @@ pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
                 for index in 0..word(desc, 4) {
                     let (key, item) = native_field(origin, desc, index);
                     if crate::runtime::bytes(key) == name {
-                        return item;
+                        return member_value(item);
                     }
                 }
                 core::ptr::null_mut()
@@ -309,7 +320,7 @@ pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
                 array_index(name)
                     .filter(|&index| index < length)
                     .map_or(core::ptr::null_mut(), |index| {
-                        native_element(origin, desc, index)
+                        member_value(native_element(origin, desc, index))
                     })
             }
             _ => core::ptr::null_mut(),

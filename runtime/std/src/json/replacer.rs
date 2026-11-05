@@ -46,7 +46,7 @@ fn next_member(value: *mut u8, member: &mut *mut u8, key: &[u8]) -> *mut u8 {
         if !item.is_null() {
             *member = node(unsafe { word(item, 4) });
         }
-        item
+        member_value(item)
     } else {
         property(value, key)
     }
@@ -128,7 +128,7 @@ fn identity(value: *mut u8) -> *mut u8 {
 pub(crate) extern "C" fn std_json_replacer_next(state: *mut u8, value: *mut u8) -> u32 {
     let state = traversal(state);
     unsafe {
-        let absent = value.is_null() || word(value, 0) == UNDEFINED;
+        let absent = member_value(value).is_null();
         let mut emit = !absent;
         if state.frame.is_null() {
             state.omitted = absent;

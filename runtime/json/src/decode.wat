@@ -560,7 +560,8 @@
     @input.GRAPH@
     (local.set $tag (i32.const @numeric.OMITTED@))
     (if (local.get $source)
-      (then (if (i32.eqz (i32.load (local.get $source)))
+      (then (if (i32.or (i32.eqz (i32.load (local.get $source)))
+          (i32.eq (i32.load (local.get $source)) (i32.const @kind.UNDEFINED@)))
         (then
           (local.set $source (i32.const 0))
           (local.set $tag (i32.const @numeric.UNDEFINED@))))))

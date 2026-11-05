@@ -327,6 +327,8 @@ pub(crate) extern "C" fn std_json_snapshot(value: *mut u8) -> *mut u8 {
             keys(value)
         };
         let count = length.unwrap_or_else(|| word(names, array::LEN as usize));
+        let origin = node(word(value, 8));
+        let schema = node(word(value, 12));
         for index in 0..count {
             let key = if length.is_some() {
                 index_key(index)
@@ -334,9 +336,14 @@ pub(crate) extern "C" fn std_json_snapshot(value: *mut u8) -> *mut u8 {
                 let data = node(word(names, array::DATA as usize));
                 std_json_from_string(node(word(data, index as usize * 8)))
             };
+            let member = if word(schema, 0) == d::ARRAY && !array_present(origin, index) {
+                new_node(ABSENT)
+            } else {
+                property(value, string_bytes(key))
+            };
             append(
                 graph,
-                property(value, string_bytes(key)),
+                member,
                 if length.is_some() {
                     core::ptr::null_mut()
                 } else {

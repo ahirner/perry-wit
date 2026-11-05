@@ -173,10 +173,15 @@ fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
             }
             child = word(node(child), 4);
         }
-        if !found.is_null() && word(found, 0) == UNDEFINED {
-            return core::ptr::null_mut();
-        }
-        found
+        member_value(found)
+    }
+}
+
+fn member_value(value: *mut u8) -> *mut u8 {
+    if !value.is_null() && matches!(unsafe { word(value, 0) }, ABSENT | UNDEFINED) {
+        core::ptr::null_mut()
+    } else {
+        value
     }
 }
 
@@ -211,12 +216,7 @@ fn array_element(value: *mut u8, index: u32) -> *mut u8 {
         for _ in 0..index {
             child = word(node(child), 4);
         }
-        let found = node(child);
-        if word(found, 0) == UNDEFINED {
-            core::ptr::null_mut()
-        } else {
-            found
-        }
+        member_value(node(child))
     }
 }
 
@@ -240,14 +240,14 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
             let mut child = word(value, 16);
             let mut count = 0;
             while child != 0 {
-                count += usize::from(word(node(child), 0) != UNDEFINED);
+                count += usize::from(word(node(child), 0) != ABSENT);
                 child = word(node(child), 4);
             }
             let (array, slots) = crate::runtime::array_storage(count);
             child = word(value, 16);
             let mut at = 0;
             while child != 0 {
-                if word(node(child), 0) != UNDEFINED {
+                if word(node(child), 0) != ABSENT {
                     slots[at] = std_json_to_string(node(word(node(child), 24))) as u64;
                     at += 1;
                 }
@@ -416,7 +416,7 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
     }
     unsafe {
         match word(value, 0) {
-            UNDEFINED | NULL => 0,
+            ABSENT | UNDEFINED | NULL => 0,
             BOOLEAN => word(value, 8),
             NUMBER => {
                 let bits = u64::from(word(value, 8)) | (u64::from(word(value, 12)) << 32);
@@ -624,7 +624,9 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
             OBJECT => {
                 let mut child = word(source, 16);
                 while child != 0 {
-                    append(object, node(child), node(word(node(child), 24)));
+                    if word(node(child), 0) != ABSENT {
+                        append(object, node(child), node(word(node(child), 24)));
+                    }
                     child = word(node(child), 4);
                 }
             }
@@ -632,7 +634,9 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
                 let mut child = word(source, 16);
                 let mut index = 0;
                 while child != 0 {
-                    append(object, node(child), index_key(index));
+                    if word(node(child), 0) != ABSENT {
+                        append(object, node(child), index_key(index));
+                    }
                     index += 1;
                     child = word(node(child), 4);
                 }

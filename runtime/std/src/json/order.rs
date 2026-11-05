@@ -28,6 +28,23 @@ unsafe fn native_fields(native: *mut u8, count: u32) -> impl Iterator<Item = u32
     })
 }
 
+pub(super) unsafe fn field_present(native: *mut u8, count: u32, index: u32, key: &[u8]) -> bool {
+    unsafe {
+        let graph = node(word(native, record::JSON as usize));
+        if graph.is_null() {
+            return native_fields(native, count).any(|field| field == index);
+        }
+        let mut member = word(graph, FIRST);
+        while member != 0 {
+            if key_bytes(member) == key {
+                return true;
+            }
+            member = word(node(member), NEXT);
+        }
+        false
+    }
+}
+
 unsafe fn lookup_field(table: *const u32, count: u32, key: &[u8]) -> u32 {
     unsafe { field_index(table, count, |name| key_cmp(key, name)) }
 }

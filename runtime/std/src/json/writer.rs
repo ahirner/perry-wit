@@ -230,7 +230,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                         return true;
                     }
                     EXCEPTION => text.extend_from_slice(b"{}"),
-                    NULL | UNDEFINED => text.extend_from_slice(b"null"),
+                    NULL | ABSENT | UNDEFINED => text.extend_from_slice(b"null"),
                     BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
                         b"true"
                     } else {
@@ -258,7 +258,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                 };
                 let object = word(container.node, 0) == OBJECT;
                 let mut member = container.next;
-                while object && member != 0 && word(node(member), 0) == UNDEFINED {
+                while object && member != 0 && matches!(word(node(member), 0), ABSENT | UNDEFINED) {
                     member = word(node(member), 4);
                 }
                 if member == 0 {
@@ -302,7 +302,7 @@ pub(crate) extern "C" fn std_json_value(w: *mut u8, value: *mut u8) {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_write_member(w: *mut u8, member: *mut u8) {
     let w = writer(w);
-    if w.failed || unsafe { word(member, 0) } == UNDEFINED {
+    if w.failed || matches!(unsafe { word(member, 0) }, ABSENT | UNDEFINED) {
         return;
     }
     separate(w);
@@ -350,7 +350,7 @@ pub(crate) unsafe extern "C" fn std_json_extras(
                     perry_rt_sys::json::key_cmp(crate::runtime::bytes(node(key)), name)
                 })
                 .is_err()
-                    && word(value, 0) != UNDEFINED
+                    && !matches!(word(value, 0), ABSENT | UNDEFINED)
             } else {
                 index >= count
             };

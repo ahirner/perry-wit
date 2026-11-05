@@ -1,6 +1,6 @@
 //! Allocation-free JSON conventions shared by compiler passes and linked standard libraries.
 pub mod kind {
-    pub const UNDEFINED: u32 = 0;
+    pub const ABSENT: u32 = 0;
     pub const NULL: u32 = 1;
     pub const BOOLEAN: u32 = 2;
     pub const NUMBER: u32 = 3;
@@ -13,6 +13,7 @@ pub mod kind {
     pub const UINT64: u32 = 10;
     pub const VIEW: u32 = 11;
     pub const BIGINT: u32 = 12;
+    pub const UNDEFINED: u32 = 13;
 }
 pub const MAX_DEPTH: u32 = 128;
 pub use crate::layout::json::NEXT;
