@@ -842,7 +842,19 @@ export function presence() {
    if(JSON.stringify(spread)!=='{"1":"a"}' || JSON.stringify(value)!=='[null,"a",null]') return 11;
  }
  const decoded:(string|undefined)[] = arrayBox.value;
- if(decoded.length!==3 || decoded[0]!==undefined || decoded[1]!=='a' || decoded[2]!==undefined) return 12;
+ if(decoded.length!==3 || 0 in decoded || !(2 in decoded) || decoded[1]!=='a' || decoded[2]!==undefined) return 12;
+ const native = arrayError.cause as (string|undefined)[];
+ if(native.length!==3 || 0 in native || !(2 in native) || native[1]!=='a' || native[2]!==undefined) return 17;
+ const typedCause = error.cause as {a:number;b?:number;missing?:number};
+ if(typedCause.a!==1 || !('b' in typedCause) || 'missing' in typedCause) return 18;
+ const numbers:number[] = [1,2];
+ delete numbers[0];
+ const numbersError = new Error('numbers',{cause:numbers});
+ const nativeNumbers = numbersError.cause as number[];
+ nativeNumbers.push(3);
+ if(nativeNumbers.length!==3 || 0 in nativeNumbers || JSON.stringify(nativeNumbers)!=='[null,2,3]') return 19;
+ const copied:(number|null)[] = JSON.parse(JSON.stringify(numbers));
+ if(!(0 in copied) || copied[0]!==null) return 20;
  const parsed = JSON.parse('{"a":1}');
  const dynamic = {...parsed,b:parsed.missing};
  if(Object.keys(dynamic).join(',')!=='a,b' || JSON.stringify(dynamic)!=='{"a":1}') return 13;

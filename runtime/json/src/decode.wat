@@ -10,6 +10,7 @@
   (import "__perry_helper" "perry_string_compare" (func $string-compare (param i32 i32) (result i32)))
   (import "__perry_helper" "perry_array_new_typed" (func $array-new (param i32 i32) (result i32)))
   (import "__perry_helper" "perry_array_grow_typed" (func $array-grow (param i32 i32)))
+  (import "__perry_helper" "perry_array_hole" (func $array-hole (param i32 i32 i32)))
   (import "__perry_helper" "std_json_snapshot" (func $graph-snapshot (param i32) (result i32)))
   (import "__perry_helper" "std_json_require_number" (func $graph-number (param i32) (result f64)))
   (import "__perry_helper" "std_json_to_bool" (func $graph-bool (param i32) (result i32)))
@@ -403,6 +404,12 @@
                 (local.set $bits (i64.extend_i32_u (local.get $object)))
                 (local.set $tag (i32.const 0))
                 (br $read)))
+            ;; A snapshot marks holes `ABSENT`; the decoded array keeps them as holes.
+            (if (i32.eqz (i32.load (local.get $index)))
+              (then
+                (call $array-hole (local.get $array) (i32.load offset=@array.LEN@ (local.get $array)) (local.get $elements))
+                (local.set $index (call $graph-next (local.get $index)))
+                (br $head)))
             @input.END_GRAPH@
             @input.PARSED@
             (call $decode (local.get $child) (i64.extend_i32_u (local.get $index)) (local.get $mode) (i32.const 0) (i32.const 0))

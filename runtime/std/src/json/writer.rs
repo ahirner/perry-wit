@@ -1,5 +1,5 @@
 //! Streaming `JSON.stringify` writer for typed values and retained JSON graphs.
-use super::{canonical, json_number, key_bytes, native_snapshot, node, string_bytes, word};
+use super::{canonical, json_number, key_bytes, node, string_bytes, word};
 use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise};
 use perry_rt_sys::json::{MAX_DEPTH, kind::*};
 use perry_rt_sys::{
@@ -215,11 +215,7 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             } else {
                 match word(current, 0) {
                     NATIVE | VIEW => {
-                        current = if word(current, 0) == VIEW {
-                            super::view::std_json_snapshot(super::view::to_json(current))
-                        } else {
-                            native_snapshot(current)
-                        };
+                        current = super::view::std_json_snapshot(super::view::to_json(current));
                         continue;
                     }
                     BIGINT => {

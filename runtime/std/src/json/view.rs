@@ -309,15 +309,17 @@ pub(super) fn to_json(value: *mut u8) -> *mut u8 {
     }
 }
 
-/// Materialize just one level for consumers of an immutable graph.
+/// Materialize just one level of a view or native value for consumers of an immutable graph.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_snapshot(value: *mut u8) -> *mut u8 {
     if value.is_null() {
         return value;
     }
     unsafe {
-        if word(value, 0) != VIEW {
-            return value;
+        match word(value, 0) {
+            VIEW => {}
+            NATIVE => return super::reflection::native_snapshot(value),
+            _ => return value,
         }
         let length = array_length(value);
         let graph = new_node(if length.is_some() { ARRAY } else { OBJECT });

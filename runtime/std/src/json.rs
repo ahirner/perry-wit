@@ -19,8 +19,8 @@ mod view;
 mod writer;
 
 use perry_rt_sys::number::Number;
+use reflection::native_property;
 pub(crate) use reflection::std_json_strict_equal;
-use reflection::{native_property, native_snapshot};
 
 use crate::runtime::{TYPE_ERROR, adopt, from_static, raise, scalars_length};
 
@@ -255,11 +255,7 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         if word(value, 0) == VIEW || view::array_length(value).is_some() {
             return view::keys(value);
         }
-        let value = if word(value, 0) == NATIVE {
-            reflection::native_snapshot(value)
-        } else {
-            value
-        };
+        let value = view::std_json_snapshot(value);
         if word(value, 0) == OBJECT {
             let value = canonical(value);
             let mut child = word(value, 16);
@@ -640,11 +636,7 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
         return;
     }
     unsafe {
-        let source = match word(source, 0) {
-            NATIVE => reflection::native_snapshot(source),
-            VIEW => view::std_json_snapshot(source),
-            _ => source,
-        };
+        let source = view::std_json_snapshot(source);
         match word(source, 0) {
             OBJECT => {
                 let mut child = word(source, 16);

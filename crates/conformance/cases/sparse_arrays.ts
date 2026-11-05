@@ -42,3 +42,7 @@ const recordError = new Error("record", { cause: recordCause });
 const recordSpread = { ...(recordError.cause as object) };
 console.log("undefined-record-cause", JSON.stringify(Object.keys(recordError.cause as object)), JSON.stringify(Object.keys(recordSpread)), JSON.stringify(Object.keys({ ...recordSpread })), JSON.stringify(recordSpread));
 console.log("undefined-spread-overwrite", JSON.stringify(Object.keys({ ...recordSpread, a: (recordError.cause as any).b })), JSON.stringify({ ...recordSpread, a: (recordError.cause as any).b }), JSON.stringify({ ...recordSpread, b: 2 }));
+const typedCause = sparseError.cause as (string | undefined)[];
+const typedRecord = recordError.cause as { a: number; b?: number; missing?: number };
+const typedSpread = recordSpread as { a: number; b?: number; missing?: number };
+console.log("typed-cause", typedCause.length, 0 in typedCause, 2 in typedCause, "b" in typedRecord, "missing" in typedRecord, "b" in typedSpread, "missing" in typedSpread);
