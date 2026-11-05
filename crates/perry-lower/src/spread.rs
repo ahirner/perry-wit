@@ -62,9 +62,39 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         element: TypeHandle,
     ) -> Result<Value> {
-        if value.get_type(ctx).deref(ctx).is::<ArrayType>() {
-            let target = ArrayType::get(ctx, element).into();
+        let ty = value.get_type(ctx);
+        let target = ArrayType::get(ctx, element).into();
+        if ty.deref(ctx).is::<ArrayType>() {
             self.fit(ctx, value, target)
+        } else if present_type(ctx, ty).deref(ctx).is::<ArrayType>() {
+            // An absent array argument, such as a spread hole, is appended as one element.
+            let states = absence(ctx, element);
+            let absent = |null: bool| {
+                move |b: &mut Self, ctx: &mut Context| {
+                    let item = match states {
+                        Some(s) if null && s.admits_null() => {
+                            b.emit_value(ctx, |ctx| NullOp::new(ctx, element))
+                        }
+                        Some(s) if !null && s.admits_undefined() => {
+                            b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, element))
+                        }
+                        // The element type excludes it, so `defined` throws `TypeError`.
+                        _ => {
+                            let array = b.defined(ctx, value)?;
+                            return b.fit(ctx, array, target);
+                        }
+                    };
+                    Ok(b.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![item])))
+                }
+            };
+            self.match_optional(
+                ctx,
+                value,
+                target,
+                absent(false),
+                absent(true),
+                |b, ctx, array| b.fit(ctx, array, target),
+            )
         } else {
             let value = self.fit(ctx, value, element)?;
             Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value])))

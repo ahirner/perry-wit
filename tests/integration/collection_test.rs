@@ -323,6 +323,9 @@ export function copies() {
  if(!(0 in pushed) || pushed.length!==5)return 3;
  const flat=a.flat(0);
  if(flat.length!==3 || flat[0]!==3 || flat[1]!==undefined)return 4;
+ const segments:number[][]=[[4],,[5]];
+ const spreadConcat=a.concat(...segments);
+ if(spreadConcat.length!==8 || !(6 in spreadConcat) || spreadConcat[6]!==undefined || spreadConcat[7]!==5)return 5;
  return 0;
 }
 export function mutation() {
@@ -419,6 +422,9 @@ export function references() {
  if(flags[0]!==undefined || flags.includes(undefined)!==true || flags.indexOf(undefined)!==-1)return 11;
  const json:(string|null)[]=JSON.parse(JSON.stringify([,'a',undefined]));
  if(!(0 in json) || json[0]!==null || json[2]!==null)return 12;
+ const cause:(string|undefined)[]=[,'a',undefined];
+ const err=new Error('sparse',{cause});
+ if(!Array.isArray(err.cause) || Object.keys(err.cause).join(',')!=='1,2')return 13;
  return 0;
 }
 "#,
@@ -450,8 +456,12 @@ export function run() {
  let typed=0;
  try{typed-=[...values].length;}catch(e){if(e instanceof TypeError)typed++;}
  try{typed-=values.toReversed().length;}catch(e){if(e instanceof TypeError)typed++;}
+ const segments:number[][]=[values,values];
+ delete segments[0];
+ try{typed-=[1].concat(...segments).length;}catch(e){if(e instanceof TypeError)typed++;}
+ for(const index of [1,9,0.5]){try{const read:number=values[index];typed-=read;}catch(e){if(e instanceof TypeError)typed++;}}
  const widened:(number|undefined)[]=[...values];
- if(typed!==2 || widened[1]!==undefined || !(1 in widened))return 7;
+ if(typed!==6 || widened[1]!==undefined || !(1 in widened))return 7;
  if('01' in values || '-0' in values || !(0 in values) || !('length' in values))return 3;
  delete values['01'];
  delete values[-1];
@@ -483,4 +493,11 @@ export function run() {
             assert_eq!(status.unwrap_i32(), 0);
         }
     }
+    // The only deletion reaches the array through a tuple element.
+    let tuple = "export function run(){ const pair:[number[],string]=[[4,5,6],'x'];
+ const erase=(target:[number[],string])=>{ delete target[0][0]; };
+ erase(pair);
+ return 0 in pair[0] ? -1 : pair[0].length; }";
+    let (results, _) = crate::core_program::Program::new(tuple).call("run", &[]);
+    assert_eq!(results[0].unwrap_f64(), 3.0);
 }

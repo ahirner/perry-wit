@@ -185,10 +185,6 @@ pub(crate) extern "C" fn std_json_native(origin: *mut u8, descriptor: *mut u8) -
     value
 }
 
-fn native_slot(bits: u64, desc: *mut u8) -> *mut u8 {
-    box_slot(bits, 0, desc, false)
-}
-
 pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u8 {
     let flags = address(desc) & descriptor::ABSENCE_MASK;
     let desc = node(address(desc) & descriptor::SCHEMA_MASK as u32);
@@ -265,12 +261,14 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
 fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> (*mut u8, *mut u8) {
     unsafe {
         let field = desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize);
-        let slot = *origin
-            .add(word(field, descriptor::FIELD_OFFSET as usize) as usize)
-            .cast::<u64>();
         (
             node(word(field, 0)),
-            native_slot(slot, node(word(field, descriptor::FIELD_SCHEMA as usize))),
+            super::view::read_slot(
+                origin,
+                word(field, descriptor::FIELD_OFFSET as usize),
+                node(word(field, descriptor::FIELD_SCHEMA as usize)),
+                false,
+            ),
         )
     }
 }
@@ -280,9 +278,13 @@ fn native_element(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
         return core::ptr::null_mut();
     }
     unsafe {
-        let data = node(word(origin, crate::runtime::layout::array::DATA as usize));
-        let slot = *data.add(index as usize * 8).cast::<u64>();
-        native_slot(slot, node(word(desc, 4)))
+        let stride = crate::runtime::layout::array::Elements::decode(word(desc, 8)).stride();
+        super::view::read_slot(
+            node(word(origin, crate::runtime::layout::array::DATA as usize)),
+            index * stride,
+            node(word(desc, 4)),
+            false,
+        )
     }
 }
 
