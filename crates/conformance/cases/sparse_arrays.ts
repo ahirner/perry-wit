@@ -32,3 +32,17 @@ console.log('race', await Promise.race(promises));
 const settled = await Promise.allSettled(promises);
 console.log('settled', settled.map(item => item.status).join(','), settled.map(item => item.status === 'fulfilled' ? String(item.value) : 'rejected').join(','));
 console.log('plain-promises', JSON.stringify(await Promise.all([, 1, , 2])));
+
+const sparseCause: (string | undefined)[] = [, "a", undefined];
+const sparseError = new Error("sparse", { cause: sparseCause });
+const sparseSpread = { ...(sparseError.cause as object) };
+console.log("undefined-array-cause", JSON.stringify(Object.keys(sparseError.cause as object)), JSON.stringify(Object.keys(sparseSpread)), JSON.stringify(sparseSpread), JSON.stringify(sparseError.cause));
+const recordCause: { a: number; b?: number; missing?: number } = { a: 1, b: undefined };
+const recordError = new Error("record", { cause: recordCause });
+const recordSpread = { ...(recordError.cause as object) };
+console.log("undefined-record-cause", JSON.stringify(Object.keys(recordError.cause as object)), JSON.stringify(Object.keys(recordSpread)), JSON.stringify(Object.keys({ ...recordSpread })), JSON.stringify(recordSpread));
+console.log("undefined-spread-overwrite", JSON.stringify(Object.keys({ ...recordSpread, a: (recordError.cause as any).b })), JSON.stringify({ ...recordSpread, a: (recordError.cause as any).b }), JSON.stringify({ ...recordSpread, b: 2 }));
+const typedCause = sparseError.cause as (string | undefined)[];
+const typedRecord = recordError.cause as { a: number; b?: number; missing?: number };
+const typedSpread = recordSpread as { a: number; b?: number; missing?: number };
+console.log("typed-cause", typedCause.length, 0 in typedCause, 2 in typedCause, "b" in typedRecord, "missing" in typedRecord, "b" in typedSpread, "missing" in typedSpread);

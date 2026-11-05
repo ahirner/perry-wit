@@ -801,3 +801,111 @@ export function boxed() {
     assert_eq!(program.counter(Counter::Roots), 0);
     assert_eq!(program.counter(Counter::Pins), 0);
 }
+
+#[test]
+fn casts_return_native_objects_of_the_target_type() {
+    let mut program = Program::checked(
+        r#"
+interface Box {value:unknown}
+type Item = {id:number;list:number[]};
+export function identity() {
+ const numbers:number[] = [1,2];
+ const error = new Error('numbers',{cause:numbers});
+ const first = error.cause as number[];
+ const second = error.cause as number[];
+ if(first!==numbers || first!==second) return 1;
+ first.push(3);
+ let sum = 0;
+ for(let i=0;i<numbers.length;i++) sum += numbers[i];
+ if(numbers.length!==3 || sum!==6) return 2;
+ const item:Item = {id:1,list:[1]};
+ const box:Box = {value:item};
+ const cast = box.value as Item;
+ cast.id = 2;
+ cast.list.push(2);
+ if(cast!==item || item.id!==2 || item.list.length!==2) return 3;
+ const wider = error.cause as (number|undefined)[];
+ numbers.push(4);
+ if(wider.length!==3) return 4;
+ return 0;
+}
+"#,
+        "json-identity.ts",
+    );
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("identity", &[]), (0.0, 0));
+    }
+}
+
+#[test]
+fn dynamic_json_preserves_undefined_members() {
+    let mut program = Program::checked(
+        r#"
+interface Box {value:unknown}
+export function presence() {
+ const record:{a:number;b?:number;c?:string;d?:boolean;missing?:number} = {
+   a:1,b:undefined,c:undefined,d:undefined
+ };
+ const error = new Error('record',{cause:record});
+ const boxed:Box = {value:record};
+ for(const value of [error.cause,boxed.value]) {
+   if(Object.keys(value).join(',')!=='a,b,c,d') return 1;
+   const spread = {...value};
+   if(Object.keys({...spread}).join(',')!=='a,b,c,d') return 2;
+   if(spread.b!==undefined || spread.c!==undefined || spread.d!==undefined) return 3;
+   if(JSON.stringify(spread)!=='{"a":1}') return 4;
+   const overwritten = {...spread,a:spread.b};
+   if(Object.keys(overwritten).join(',')!=='a,b,c,d' || JSON.stringify(overwritten)!=='{}') return 5;
+   if(JSON.stringify({...spread,b:2})!=='{"a":1,"b":2}') return 6;
+   let visited='';
+   const replaced = JSON.stringify(spread,(key,item) => {
+     visited+=key+':';
+     return item===undefined ? 'undefined' : item;
+   });
+   if(visited!==':a:b:c:d:' || replaced!=='{"a":1,"b":"undefined","c":"undefined","d":"undefined"}') return 7;
+   const typed:{a:number;b?:number;c?:string;d?:boolean;missing?:number} = spread;
+   if(!('b' in typed) || !('c' in typed) || !('d' in typed) || 'missing' in typed) return 16;
+ }
+ const sparse:(string|undefined)[] = [, 'a', undefined];
+ const arrayError = new Error('array',{cause:sparse});
+ const arrayBox:Box = {value:sparse};
+ for(const value of [arrayError.cause,arrayBox.value]) {
+   if(Object.keys(value).join(',')!=='1,2') return 8;
+   const spread = {...value};
+   if(Object.keys({...spread}).join(',')!=='1,2') return 9;
+   if(spread[0]!==undefined || spread[2]!==undefined || spread[1]!=='a') return 10;
+   if(JSON.stringify(spread)!=='{"1":"a"}' || JSON.stringify(value)!=='[null,"a",null]') return 11;
+ }
+ const decoded:(string|undefined)[] = arrayBox.value;
+ if(decoded.length!==3 || 0 in decoded || !(2 in decoded) || decoded[1]!=='a' || decoded[2]!==undefined) return 12;
+ const native = arrayError.cause as (string|undefined)[];
+ if(native.length!==3 || 0 in native || !(2 in native) || native[1]!=='a' || native[2]!==undefined) return 17;
+ const typedCause = error.cause as {a:number;b?:number;missing?:number};
+ if(typedCause.a!==1 || !('b' in typedCause) || 'missing' in typedCause) return 18;
+ const numbers:number[] = [1,2];
+ delete numbers[0];
+ const numbersError = new Error('numbers',{cause:numbers});
+ const nativeNumbers = numbersError.cause as number[];
+ nativeNumbers.push(3);
+ if(nativeNumbers.length!==3 || 0 in nativeNumbers || JSON.stringify(nativeNumbers)!=='[null,2,3]') return 19;
+ const copied:(number|null)[] = JSON.parse(JSON.stringify(numbers));
+ if(!(0 in copied) || copied[0]!==null) return 20;
+ const parsed = JSON.parse('{"a":1}');
+ const dynamic = {...parsed,b:parsed.missing};
+ if(Object.keys(dynamic).join(',')!=='a,b' || JSON.stringify(dynamic)!=='{"a":1}') return 13;
+ const partial:{a:unknown;b:unknown} = JSON.parse('{"b":2}');
+ const partialBox:Box = {value:partial};
+ if(Object.keys({...partialBox.value}).join(',')!=='b') return 14;
+ partial.a = undefined;
+ if(Object.keys({...partialBox.value}).join(',')!=='b,a') return 15;
+ return 0;
+}
+"#,
+        "json-presence.ts",
+    );
+    program.stress_collection(true);
+    for _ in 0..3 {
+        assert_eq!(program.outcome("presence", &[]), (0.0, 0));
+    }
+}

@@ -309,15 +309,17 @@ pub(super) fn to_json(value: *mut u8) -> *mut u8 {
     }
 }
 
-/// Materialize just one level for consumers of an immutable graph.
+/// Materialize just one level of a view or native value for consumers of an immutable graph.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_snapshot(value: *mut u8) -> *mut u8 {
     if value.is_null() {
         return value;
     }
     unsafe {
-        if word(value, 0) != VIEW {
-            return value;
+        match word(value, 0) {
+            VIEW => {}
+            NATIVE => return super::reflection::native_snapshot(value),
+            _ => return value,
         }
         let length = array_length(value);
         let graph = new_node(if length.is_some() { ARRAY } else { OBJECT });
@@ -327,6 +329,8 @@ pub(crate) extern "C" fn std_json_snapshot(value: *mut u8) -> *mut u8 {
             keys(value)
         };
         let count = length.unwrap_or_else(|| word(names, array::LEN as usize));
+        let origin = node(word(value, 8));
+        let schema = node(word(value, 12));
         for index in 0..count {
             let key = if length.is_some() {
                 index_key(index)
@@ -334,9 +338,14 @@ pub(crate) extern "C" fn std_json_snapshot(value: *mut u8) -> *mut u8 {
                 let data = node(word(names, array::DATA as usize));
                 std_json_from_string(node(word(data, index as usize * 8)))
             };
+            let member = if word(schema, 0) == d::ARRAY && !array_present(origin, index) {
+                new_node(ABSENT)
+            } else {
+                property(value, string_bytes(key))
+            };
             append(
                 graph,
-                property(value, string_bytes(key)),
+                member,
                 if length.is_some() {
                     core::ptr::null_mut()
                 } else {

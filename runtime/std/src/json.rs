@@ -19,8 +19,8 @@ mod view;
 mod writer;
 
 use perry_rt_sys::number::Number;
+use reflection::native_property;
 pub(crate) use reflection::std_json_strict_equal;
-use reflection::{native_property, native_snapshot};
 
 use crate::runtime::{TYPE_ERROR, adopt, from_static, raise, scalars_length};
 
@@ -162,7 +162,8 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     object_member(value, name)
 }
 
-fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
+/// The last member node named `name`, including absent and `undefined` placeholders.
+fn member_node(value: *mut u8, name: &[u8]) -> *mut u8 {
     unsafe {
         let mut found = core::ptr::null_mut();
         let mut child = word(value, 16);
@@ -173,10 +174,39 @@ fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
             }
             child = word(node(child), 4);
         }
-        if !found.is_null() && word(found, 0) == UNDEFINED {
-            return core::ptr::null_mut();
-        }
         found
+    }
+}
+
+fn object_member(value: *mut u8, name: &[u8]) -> *mut u8 {
+    member_value(member_node(value, name))
+}
+
+/// `std_json_member` for typed decoding: a present `undefined` member stays an `UNDEFINED`
+/// node, so the decoder can tell it from an omitted one.
+///
+/// # Safety
+/// `name` must be a string.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_json_field(value: *mut u8, name: *mut u8) -> *mut u8 {
+    // SAFETY: guaranteed by the caller.
+    let name = unsafe { crate::runtime::bytes(name) };
+    if value.is_null() || unsafe { word(value, 0) } != OBJECT {
+        return property(value, name);
+    }
+    let member = member_node(value, name);
+    if !member.is_null() && unsafe { word(member, 0) } == ABSENT {
+        core::ptr::null_mut()
+    } else {
+        member
+    }
+}
+
+fn member_value(value: *mut u8) -> *mut u8 {
+    if !value.is_null() && matches!(unsafe { word(value, 0) }, ABSENT | UNDEFINED) {
+        core::ptr::null_mut()
+    } else {
+        value
     }
 }
 
@@ -211,12 +241,7 @@ fn array_element(value: *mut u8, index: u32) -> *mut u8 {
         for _ in 0..index {
             child = word(node(child), 4);
         }
-        let found = node(child);
-        if word(found, 0) == UNDEFINED {
-            core::ptr::null_mut()
-        } else {
-            found
-        }
+        member_value(node(child))
     }
 }
 
@@ -230,24 +255,20 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         if word(value, 0) == VIEW || view::array_length(value).is_some() {
             return view::keys(value);
         }
-        let value = if word(value, 0) == NATIVE {
-            reflection::native_snapshot(value)
-        } else {
-            value
-        };
+        let value = view::std_json_snapshot(value);
         if word(value, 0) == OBJECT {
             let value = canonical(value);
             let mut child = word(value, 16);
             let mut count = 0;
             while child != 0 {
-                count += usize::from(word(node(child), 0) != UNDEFINED);
+                count += usize::from(word(node(child), 0) != ABSENT);
                 child = word(node(child), 4);
             }
             let (array, slots) = crate::runtime::array_storage(count);
             child = word(value, 16);
             let mut at = 0;
             while child != 0 {
-                if word(node(child), 0) != UNDEFINED {
+                if word(node(child), 0) != ABSENT {
                     slots[at] = std_json_to_string(node(word(node(child), 24))) as u64;
                     at += 1;
                 }
@@ -416,7 +437,7 @@ pub(crate) extern "C" fn std_json_truthy(value: *mut u8) -> u32 {
     }
     unsafe {
         match word(value, 0) {
-            UNDEFINED | NULL => 0,
+            ABSENT | UNDEFINED | NULL => 0,
             BOOLEAN => word(value, 8),
             NUMBER => {
                 let bits = u64::from(word(value, 8)) | (u64::from(word(value, 12)) << 32);
@@ -615,16 +636,14 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
         return;
     }
     unsafe {
-        let source = match word(source, 0) {
-            NATIVE => reflection::native_snapshot(source),
-            VIEW => view::std_json_snapshot(source),
-            _ => source,
-        };
+        let source = view::std_json_snapshot(source);
         match word(source, 0) {
             OBJECT => {
                 let mut child = word(source, 16);
                 while child != 0 {
-                    append(object, node(child), node(word(node(child), 24)));
+                    if word(node(child), 0) != ABSENT {
+                        append(object, node(child), node(word(node(child), 24)));
+                    }
                     child = word(node(child), 4);
                 }
             }
@@ -632,7 +651,9 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
                 let mut child = word(source, 16);
                 let mut index = 0;
                 while child != 0 {
-                    append(object, node(child), index_key(index));
+                    if word(node(child), 0) != ABSENT {
+                        append(object, node(child), index_key(index));
+                    }
                     index += 1;
                     child = word(node(child), 4);
                 }

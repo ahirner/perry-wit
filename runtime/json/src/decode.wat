@@ -10,7 +10,9 @@
   (import "__perry_helper" "perry_string_compare" (func $string-compare (param i32 i32) (result i32)))
   (import "__perry_helper" "perry_array_new_typed" (func $array-new (param i32 i32) (result i32)))
   (import "__perry_helper" "perry_array_grow_typed" (func $array-grow (param i32 i32)))
+  (import "__perry_helper" "perry_array_hole" (func $array-hole (param i32 i32 i32)))
   (import "__perry_helper" "std_json_snapshot" (func $graph-snapshot (param i32) (result i32)))
+  (import "__perry_helper" "std_json_native_origin" (func $graph-origin (param i32 i32) (result i32)))
   (import "__perry_helper" "std_json_require_number" (func $graph-number (param i32) (result f64)))
   (import "__perry_helper" "std_json_to_bool" (func $graph-bool (param i32) (result i32)))
   (import "__perry_helper" "std_json_to_string" (func $graph-string (param i32) (result i32)))
@@ -21,6 +23,7 @@
   (import "__perry_helper" "std_json_first" (func $graph-first (param i32) (result i32)))
   (import "__perry_helper" "std_json_next" (func $graph-next (param i32) (result i32)))
   (import "__perry_helper" "std_json_member" (func $graph-member (param i32 i32) (result i32)))
+  (import "__perry_helper" "std_json_field" (func $graph-field (param i32 i32) (result i32)))
   (import "__perry_helper" "std_json_keys" (func $graph-keys (param i32) (result i32)))
   (import "__perry_helper" "std_json_type_of" (func $graph-type (param i32) (result i32)))
   (import "__perry_helper" "std_json_record_retain" (func $record-retain (param i32 i32 i32 i32)))
@@ -271,7 +274,7 @@
           @input.GRAPH@
           (local.set $input (local.get $first))
           (if (i32.eqz (local.get $tuple))
-            (then (local.set $input (call $graph-member (local.get $source) (i32.load (local.get $field))))))
+            (then (local.set $input (call $graph-field (local.get $source) (i32.load (local.get $field))))))
           (call $decode (local.get $child) (i64.extend_i32_u (local.get $input)) (local.get $mode) (i32.const 0) (i32.const 0))
           (br $decoded)
           @input.END_GRAPH@
@@ -392,7 +395,7 @@
             (if (local.get $dictionary)
               (then
                 (local.set $key (i32.load (i32.add (i32.load offset=@array.DATA@ (local.get $keys)) (i32.mul (local.get $index) (i32.const 8)))))
-                (call $decode (local.get $value-schema) (i64.extend_i32_u (call $graph-member (local.get $source) (local.get $key)))
+                (call $decode (local.get $value-schema) (i64.extend_i32_u (call $graph-field (local.get $source) (local.get $key)))
                   (local.get $mode) (i32.const 0) (i32.const 0))
                 local.set $tag local.set $failed local.set $bits
                 (if (local.get $failed) (then (return (i64.const 0) (local.get $failed) (i32.const 0))))
@@ -402,6 +405,12 @@
                 (local.set $bits (i64.extend_i32_u (local.get $object)))
                 (local.set $tag (i32.const 0))
                 (br $read)))
+            ;; A snapshot marks holes `ABSENT`; the decoded array keeps them as holes.
+            (if (i32.eqz (i32.load (local.get $index)))
+              (then
+                (call $array-hole (local.get $array) (i32.load offset=@array.LEN@ (local.get $array)) (local.get $elements))
+                (local.set $index (call $graph-next (local.get $index)))
+                (br $head)))
             @input.END_GRAPH@
             @input.PARSED@
             (call $decode (local.get $child) (i64.extend_i32_u (local.get $index)) (local.get $mode) (i32.const 0) (i32.const 0))
@@ -554,16 +563,22 @@
   (func $decode (param $schema i32) (param $bits i64) (param $mode i32) (param $tag i32) (param $position i32)
     (result i64 i32 i32)
     (local $source i32) (local $kind i32) (local $flags i32) (local $null i32) (local $failed i32)
-    (local $done i32) (local $first i32) (local $array i32) (local $open i32)
+    (local $done i32) (local $first i32) (local $array i32) (local $open i32) (local $origin i32)
     (local $count i32) (local $index i32) (local $entry i32) (local $child i32) (local $child-kind i32) (local $byte i32) (local $matches i32)
     (local.set $source (i32.wrap_i64 (local.get $bits)))
     @input.GRAPH@
     (local.set $tag (i32.const @numeric.OMITTED@))
     (if (local.get $source)
-      (then (if (i32.eqz (i32.load (local.get $source)))
+      (then (if (i32.or (i32.eqz (i32.load (local.get $source)))
+          (i32.eq (i32.load (local.get $source)) (i32.const @kind.UNDEFINED@)))
         (then
           (local.set $source (i32.const 0))
           (local.set $tag (i32.const @numeric.UNDEFINED@))))))
+    ;; A typed object already in the target layout is the result itself, as in JavaScript.
+    (if (local.get $source)
+      (then
+        (local.set $origin (call $graph-origin (local.get $source) (local.get $schema)))
+        (if (local.get $origin) (then (return (i64.extend_i32_u (local.get $origin)) (i32.const 0) (i32.const 0))))))
     @input.END_GRAPH@
     @input.NATIVE@
     (call $native (local.get $schema) (local.get $bits) (local.get $mode) (local.get $tag) (local.get $position))

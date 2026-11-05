@@ -13,7 +13,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 ## Arrays
 
 - Arrays (`T[]`) are growable and track element presence separately from `T`, allocating a hole bitset when the array first gets a hole. Elements share one type or a finite union of numbers, strings, booleans and one plain record shape.
-- Array literals preserve elisions, including trailing holes, and `delete array[i]` turns an in-bounds element into a hole. `in` reports holes as absent, and `Object.keys`, `Object.values`, `Object.entries` and callback methods skip them while visiting present `undefined` elements. `map`, `slice`, `concat` and `reverse` preserve holes, `sort` moves them to the end, and spreads and iterable copies (`[...a]`, `Array.from`, `toReversed`, `toSorted`, `with`) materialize holes as `undefined`. These copies keep the element type, so a hole throws `TypeError` unless `T` or the target element type admits `undefined`.
+- Array literals preserve elisions, including trailing holes, and `delete array[i]` turns an in-bounds element into a hole. `in` reports holes as absent, and `Object.keys`, `Object.values`, `Object.entries` and callback methods skip them while visiting present `undefined` elements. `map`, `slice`, `concat`, `reverse` and casts of dynamic values (`error.cause as T[]`) preserve holes, `sort` moves them to the end, and spreads and iterable copies (`[...a]`, `Array.from`, `toReversed`, `toSorted`, `with`) materialize holes as `undefined`. These copies keep the element type, so a hole throws `TypeError` unless `T` or the target element type admits `undefined`.
 - Reading a hole, an index outside the array, or a fractional index yields `undefined`. Storing or passing it where the declared type excludes `undefined` throws `TypeError`.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
 - At a WIT `list<T>` boundary, holes lower to `none` when `T` is `option<U>` and trap otherwise.
@@ -33,6 +33,7 @@ Names, object layouts and host capabilities are resolved at compile time, and a 
 ## JSON
 
 - `JSON.parse` decodes into the expected static target type (retaining extra object properties for serialization) or into a dynamic JSON value that is validated when assigned to a typed binding. Reviver callbacks are compile errors.
+- A cast (`value as T`) or typed binding of a dynamic value returns the original object when it already has type `T`, such as an `Error` cause or an `unknown` field holding a `T`, so identity and mutations stay shared. Any other dynamic value, including a `JSON.parse` result or an object of a different type, is decoded into a new `T`, and later mutations of either side are not shared.
 - `JSON.stringify` supports synchronous replacer callbacks and property-allowlist arrays. The third indentation argument is a compile error.
 
 ## Dates

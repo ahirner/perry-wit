@@ -315,3 +315,12 @@ for (const text of [`${whitespace}42${whitespace}`, "\u180e42", "\u200b42", ".5"
 const replacementInput = {a:"alpha",b:2,nested:{a:"beta",b:3}};
 console.log("replacer", JSON.stringify(replacementInput, (key,value) => key === "b" ? undefined : value));
 console.log("property-list", JSON.stringify(replacementInput, ["nested","a","a"]));
+
+const causeItems: number[] = [1, 2];
+const causeError = new Error("items", { cause: causeItems });
+const causeCast = causeError.cause as number[];
+causeCast.push(3);
+const causeHolder: { value: unknown } = { value: { id: 1, tags: ["a"] } as { id: number; tags: string[] } };
+const holderCast = causeHolder.value as { id: number; tags: string[] };
+holderCast.tags.push("b");
+console.log("cast-identity", causeCast === causeItems, causeItems.length, causeCast === (causeError.cause as number[]), JSON.stringify(causeHolder.value));

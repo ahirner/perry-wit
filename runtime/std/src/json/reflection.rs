@@ -185,6 +185,20 @@ pub(crate) extern "C" fn std_json_native(origin: *mut u8, descriptor: *mut u8) -
     value
 }
 
+/// The typed object behind a native or view value when `schema` is its own layout descriptor,
+/// so a cast back to the source type keeps the object's identity instead of decoding a copy.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_json_native_origin(value: *mut u8, schema: u32) -> *mut u8 {
+    let layout = |descriptor: u32| descriptor & descriptor::SCHEMA_MASK as u32;
+    unsafe {
+        if matches!(word(value, 0), NATIVE | VIEW) && layout(word(value, 12)) == layout(schema) {
+            node(word(value, 8))
+        } else {
+            core::ptr::null_mut()
+        }
+    }
+}
+
 pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u8 {
     let flags = address(desc) & descriptor::ABSENCE_MASK;
     let desc = node(address(desc) & descriptor::SCHEMA_MASK as u32);
@@ -258,17 +272,22 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
     }
 }
 
-fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> (*mut u8, *mut u8) {
+fn native_key(desc: *mut u8, index: u32) -> *mut u8 {
+    unsafe { node(word(field_descriptor(desc, index), 0)) }
+}
+
+fn field_descriptor(desc: *mut u8, index: u32) -> *mut u8 {
+    unsafe { desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize) }
+}
+
+fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
+    let field = field_descriptor(desc, index);
     unsafe {
-        let field = desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize);
-        (
-            node(word(field, 0)),
-            super::view::read_slot(
-                origin,
-                word(field, descriptor::FIELD_OFFSET as usize),
-                node(word(field, descriptor::FIELD_SCHEMA as usize)),
-                false,
-            ),
+        super::view::read_slot(
+            origin,
+            word(field, descriptor::FIELD_OFFSET as usize),
+            node(word(field, descriptor::FIELD_SCHEMA as usize)),
+            false,
         )
     }
 }
@@ -292,15 +311,11 @@ pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
     unsafe {
         let (origin, desc) = (node(word(value, 8)), node(word(value, 12)));
         match word(desc, 0) {
-            descriptor::RECORD | descriptor::JSON_TUPLE => {
-                for index in 0..word(desc, 4) {
-                    let (key, item) = native_field(origin, desc, index);
-                    if crate::runtime::bytes(key) == name {
-                        return item;
-                    }
-                }
-                core::ptr::null_mut()
-            }
+            descriptor::RECORD | descriptor::JSON_TUPLE => (0..word(desc, 4))
+                .find(|&index| crate::runtime::bytes(native_key(desc, index)) == name)
+                .map_or(core::ptr::null_mut(), |index| {
+                    native_field(origin, desc, index)
+                }),
             descriptor::ARRAY | descriptor::JSON_DICTIONARY => {
                 let length = word(origin, 0);
                 if name == b"length" {
@@ -330,15 +345,29 @@ pub(super) fn native_snapshot(value: *mut u8) -> *mut u8 {
         } else {
             word(desc, 4)
         };
+        // Holes and omitted record fields become `ABSENT`, unlike present `undefined` values.
         for index in 0..count {
             if is_array {
-                append(
-                    result,
-                    native_element(origin, desc, index),
-                    core::ptr::null_mut(),
-                );
+                let item = if super::view::array_present(origin, index) {
+                    native_element(origin, desc, index)
+                } else {
+                    new_node(ABSENT)
+                };
+                append(result, item, core::ptr::null_mut());
             } else {
-                let (key, item) = native_field(origin, desc, index);
+                let key = native_key(desc, index);
+                let mut item = native_field(origin, desc, index);
+                if item.is_null()
+                    && word(desc, 0) == descriptor::RECORD
+                    && !super::order::field_present(
+                        origin,
+                        count,
+                        index,
+                        crate::runtime::bytes(key),
+                    )
+                {
+                    item = new_node(ABSENT);
+                }
                 append(result, item, std_json_from_string(key));
             }
         }
