@@ -22,6 +22,13 @@ use pliron::{
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
+/// The byte holding an element's hole bit, and the bit's mask within it.
+struct HoleBit {
+    address: Value,
+    byte: Value,
+    mask: Value,
+}
+
 impl FunctionLowering<'_, '_> {
     /// The runtime's element-kind flag for arrays of `element` (`layout::*_ELEMENTS`).
     pub(crate) fn array_element_kind(
@@ -483,22 +490,23 @@ impl FunctionLowering<'_, '_> {
         index: Value,
     ) -> Value {
         let present = self.i32_const(ctx, 1);
-        self.hole_byte(ctx, array, index, Some(present), |b, ctx, address| {
-            let hole = b.load(ctx, MemKind::I32U8, address, 0);
+        self.hole_byte(ctx, array, index, Some(present), |b, ctx, bit| {
+            let hole = b.num(ctx, NumOpcode::I32And, vec![bit.byte, bit.mask]);
             Some(b.num(ctx, NumOpcode::I32Eqz, vec![hole]))
         })
         .unwrap_or(present)
     }
 
-    /// Run `sparse` on the hole byte address of `index` when `array` has hole storage. The
-    /// join receives `dense` without hole storage, and otherwise what `sparse` returns.
+    /// Run `sparse` on the hole bit of `index` when `array` has a hole bitset
+    /// ([layout::HOLES]). The join receives `dense` without one, and otherwise what `sparse`
+    /// returns.
     fn hole_byte(
         &mut self,
         ctx: &mut Context,
         array: Value,
         index: Value,
         dense: Option<Value>,
-        sparse: impl FnOnce(&mut Self, &mut Context, Value) -> Option<Value>,
+        sparse: impl FnOnce(&mut Self, &mut Context, HoleBit) -> Option<Value>,
     ) -> Option<Value> {
         let holes = self.load(ctx, MemKind::I32, array, layout::HOLES);
         let none = self.num(ctx, NumOpcode::I32Eqz, vec![holes]);
@@ -511,8 +519,23 @@ impl FunctionLowering<'_, '_> {
             (storage, vec![]),
         );
         self.block = storage;
-        let address = self.num(ctx, NumOpcode::I32Add, vec![holes, index]);
-        let result = sparse(self, ctx, address);
+        let three = self.i32_const(ctx, 3);
+        let offset = self.num(ctx, NumOpcode::I32ShrU, vec![index, three]);
+        let address = self.num(ctx, NumOpcode::I32Add, vec![holes, offset]);
+        let byte = self.load(ctx, MemKind::I32U8, address, 0);
+        let seven = self.i32_const(ctx, 7);
+        let shift = self.num(ctx, NumOpcode::I32And, vec![index, seven]);
+        let one = self.i32_const(ctx, 1);
+        let mask = self.num(ctx, NumOpcode::I32Shl, vec![one, shift]);
+        let result = sparse(
+            self,
+            ctx,
+            HoleBit {
+                address,
+                byte,
+                mask,
+            },
+        );
         self.br(ctx, done, result.into_iter().collect());
         self.block = done;
         dense.map(|_| done.deref(ctx).get_argument(0))
@@ -610,9 +633,11 @@ impl FunctionLowering<'_, '_> {
         let address = self.element_address(ctx, array, index, element);
         self.store_slot_value(ctx, address, 0, element, value)?;
         if sparse {
-            self.hole_byte(ctx, array, index, None, |b, ctx, address| {
-                let present = b.i32_const(ctx, 0);
-                b.store(ctx, MemKind::I32U8, address, 0, present);
+            self.hole_byte(ctx, array, index, None, |b, ctx, bit| {
+                let all = b.i32_const(ctx, -1);
+                let keep = b.num(ctx, NumOpcode::I32Xor, vec![bit.mask, all]);
+                let present = b.num(ctx, NumOpcode::I32And, vec![bit.byte, keep]);
+                b.store(ctx, MemKind::I32U8, bit.address, 0, present);
                 None
             });
         }

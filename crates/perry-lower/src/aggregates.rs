@@ -15,7 +15,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
-        if let Ok(record) = TypedHandle::<RecordType>::from_handle(array.get_type(ctx), ctx)
+        if let Some(record) = perry_mir::typed::<RecordType>(ctx, array.get_type(ctx))
             && record.deref(ctx).kind() == RecordKind::Tuple
         {
             let field = match index {
@@ -94,8 +94,7 @@ impl<'s> FunctionBuilder<'s> {
         {
             return self.class_setter_call(ctx, record, owner_class, &type_args, setter, value);
         }
-        let rec_ty = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
-            .ok()
+        let rec_ty = perry_mir::typed::<RecordType>(ctx, record.get_type(ctx))
             .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object)
             .ok_or_else(|| anyhow!("property writes are only supported on records so far"))?;
         let field_type = rec_ty
@@ -139,12 +138,9 @@ impl<'s> FunctionBuilder<'s> {
         items: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let element = match expected
-            .map(|ty| TypedHandle::<ArrayType>::from_handle(present_type(ctx, ty), ctx))
-        {
-            Some(Ok(array)) => Some(array.deref(ctx).element()),
-            _ => None,
-        };
+        let element = expected
+            .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, present_type(ctx, ty)))
+            .map(|array| array.deref(ctx).element());
         let mut values = Vec::with_capacity(items.len());
         for item in items {
             let value = self.expression_with(ctx, item, element)?;
@@ -231,7 +227,7 @@ impl<'s> FunctionBuilder<'s> {
                 let local = self.locals.get(id)?;
                 let ty = self.slot_type(ctx, local.slot).ok()?;
                 let inner = present_type(ctx, ty);
-                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()?
+                perry_mir::typed::<RecordType>(ctx, inner)?
             }
             Expr::PropertyGet {
                 object, property, ..
@@ -239,7 +235,7 @@ impl<'s> FunctionBuilder<'s> {
                 let rec = self.peek_record_type(ctx, object)?;
                 let (_, field_ty) = rec.deref(ctx).field(property)?;
                 let inner = present_type(ctx, field_ty);
-                TypedHandle::<RecordType>::from_handle(inner, ctx).ok()?
+                perry_mir::typed::<RecordType>(ctx, inner)?
             }
             Expr::Call { callee, .. } => {
                 if let Expr::FuncRef(id) = &**callee
@@ -247,7 +243,7 @@ impl<'s> FunctionBuilder<'s> {
                     && let Some(ret) = sig.result
                 {
                     let inner = present_type(ctx, ret.carrier);
-                    TypedHandle::<RecordType>::from_handle(inner, ctx).ok()?
+                    perry_mir::typed::<RecordType>(ctx, inner)?
                 } else {
                     return None;
                 }

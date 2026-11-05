@@ -170,7 +170,7 @@ pub(crate) enum Projection {
 impl Projection {
     pub(crate) fn collection(ctx: &Context, ty: TypeHandle) -> Result<Self> {
         let ty = present_type(ctx, ty);
-        if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+        if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
             return Ok(Self::Item(array.deref(ctx).element()));
         }
         let (view, box_type) = if let Some((view, record)) = collection_view_record(ctx, ty) {
@@ -217,11 +217,11 @@ impl Projection {
             Self::Pair((_, first), (_, second)) => return Some((first, second)),
             Self::Item(ty) | Self::Field((_, ty)) => ty,
         };
-        if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+        if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
             let element = array.deref(ctx).element();
             return Some((element, element));
         }
-        let record = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
+        let record = perry_mir::typed::<RecordType>(ctx, ty)?;
         let record = record.deref(ctx);
         let fields = record.fields().ok()?;
         (record.is_tuple()

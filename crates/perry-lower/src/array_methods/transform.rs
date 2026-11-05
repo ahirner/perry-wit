@@ -323,8 +323,8 @@ impl<'s> FunctionBuilder<'s> {
             Some(Expr::Integer(1)) => 1,
             _ => bail!("array.flat requires a constant depth of 0 or 1 in typed arrays"),
         };
-        let nested = TypedHandle::<ArrayType>::from_handle(present_type(ctx, outer_elem_ty), ctx);
-        let Some(inner) = nested.ok().filter(|_| depth_num == 1) else {
+        let nested = perry_mir::typed::<ArrayType>(ctx, present_type(ctx, outer_elem_ty));
+        let Some(inner) = nested.filter(|_| depth_num == 1) else {
             return self.without_holes(ctx, array, Holes::Skip, true);
         };
         let inner = inner.deref(ctx).element();
@@ -392,17 +392,17 @@ impl<'s> FunctionBuilder<'s> {
         };
         let src_ty = src_val.get_type(ctx);
         let expected_elem = expected
-            .and_then(|ty| TypedHandle::<ArrayType>::from_handle(ty, ctx).ok())
+            .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, ty))
             .map(|array| array.deref(ctx).element());
         let input = if crate::collections::is_collection_or_view_record(ctx, src_ty)
-            || TypedHandle::<ArrayType>::from_handle(src_ty, ctx).is_ok()
+            || perry_mir::typed::<ArrayType>(ctx, src_ty).is_some()
         {
             if map_fn.is_none() && src_ty.deref(ctx).is::<ArrayType>() {
                 let src_val = self.admit_holes(ctx, src_val, expected_elem)?;
                 return self.without_holes(ctx, src_val, Holes::Dense, true);
             }
             Input::Collection(src_val)
-        } else if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src_ty, ctx)
+        } else if let Some(rec) = perry_mir::typed::<RecordType>(ctx, src_ty)
             && !rec.deref(ctx).is_tuple()
             && rec.deref(ctx).field("length").is_some()
         {

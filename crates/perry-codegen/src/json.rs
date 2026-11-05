@@ -189,7 +189,7 @@ impl FunctionLowering<'_, '_> {
             let table = self.state.data.append(4, &table);
             words.extend([shape, table, u32::from(self.state.retains_json)]);
             words
-        } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, ctx) {
+        } else if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
             let element = array.deref(ctx).element();
             let kind = Self::array_element_kind(ctx, element)? as u32;
             let element = self.layout_descriptor(ctx, element)?;

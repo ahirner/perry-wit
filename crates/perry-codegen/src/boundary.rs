@@ -326,7 +326,7 @@ pub(super) fn scalar_mir_type(ctx: &mut Context, mir_ty: TypeHandle) -> TypeHand
     if mir_ty.deref(ctx).is::<perry_mir::NumericType>() {
         return FP64Type::get(ctx).into();
     }
-    if let Ok(optional) = TypedHandle::<perry_mir::OptionalType>::from_handle(mir_ty, ctx) {
+    if let Some(optional) = perry_mir::typed::<perry_mir::OptionalType>(ctx, mir_ty) {
         let (value, absence) = {
             let opt = optional.deref(ctx);
             (opt.value(), opt.absence())

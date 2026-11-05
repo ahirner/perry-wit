@@ -151,7 +151,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let expected_record = expected
             .map(|ty| present_type(ctx, ty))
-            .and_then(|ty| TypedHandle::<RecordType>::from_handle(ty, ctx).ok())
+            .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))
             .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object);
         let mut remaining = parts;
         let mut initial = None;

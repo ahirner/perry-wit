@@ -244,7 +244,7 @@
             (then
               (local.set $holes (i32.load offset=@array.HOLES@ (local.get $object)))
               (if (local.get $holes) (then
-                (if (i32.load8_u (i32.add (local.get $holes) (local.get $index))) (then
+                (if (i32.and (i32.shr_u (i32.load8_u (i32.add (local.get $holes) (i32.shr_u (local.get $index) (i32.const 3)))) (i32.and (local.get $index) (i32.const 7))) (i32.const 1)) (then
                   (call $write-item (local.get $writer))
                   (call $write-raw (local.get $writer) (local.get $data) (i32.const 4))
                   (local.set $index (i32.add (local.get $index) (i32.const 1)))

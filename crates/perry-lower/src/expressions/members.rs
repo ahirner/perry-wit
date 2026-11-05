@@ -254,7 +254,7 @@ impl<'s> FunctionBuilder<'s> {
                     (Expr::Integer(n), _) if *n >= 0 => format!("_{n}"),
                     (_, Some(position)) => format!("_{position}"),
                     _ => {
-                        let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx) else {
+                        let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty) else {
                             bail!("expected a record for dynamic index");
                         };
                         let key = self.string_operand(ctx, index)?;
@@ -282,8 +282,8 @@ impl<'s> FunctionBuilder<'s> {
 
 /// Return the arity of a tuple record type, or `None` for other types.
 fn tuple_length(ctx: &Context, ty: TypeHandle) -> Result<Option<usize>> {
-    match TypedHandle::<RecordType>::from_handle(ty, ctx) {
-        Ok(record) if record.deref(ctx).kind() == RecordKind::Tuple => Ok(Some(
+    match perry_mir::typed::<RecordType>(ctx, ty) {
+        Some(record) if record.deref(ctx).kind() == RecordKind::Tuple => Ok(Some(
             record
                 .deref(ctx)
                 .fields()

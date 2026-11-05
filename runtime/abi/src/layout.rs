@@ -24,9 +24,23 @@ pub mod array {
     pub const LEN: u32 = 0;
     pub const CAP: u32 = 4;
     pub const DATA: u32 = 8;
+    /// Nullable hole bitset: bit `index % 8` of byte `index / 8` marks a missing element.
     pub const HOLES: u32 = 12;
     pub const SLOT: u32 = 8;
     pub const NUMERIC_SLOT: u32 = 16;
+    /// Bytes of a hole bitset covering `capacity` elements.
+    pub const fn hole_bytes(capacity: u32) -> u32 {
+        capacity.div_ceil(8)
+    }
+
+    /// Whether `index` is marked in the hole bitset `holes`; a null bitset has no holes.
+    ///
+    /// # Safety
+    /// `holes` is null or covers `index`.
+    pub unsafe fn is_hole(holes: *const u8, index: u32) -> bool {
+        !holes.is_null() && unsafe { *holes.add((index / 8) as usize) } & (1 << (index % 8)) != 0
+    }
+
     const SCALAR_ELEMENTS: u32 = 0;
     const REFERENCE_ELEMENTS: u32 = 1;
     pub const NUMERIC_ELEMENTS: u32 = 2;

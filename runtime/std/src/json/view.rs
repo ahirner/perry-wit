@@ -271,10 +271,7 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
 }
 
 pub(super) fn array_present(origin: *mut u8, index: u32) -> bool {
-    unsafe {
-        let holes = node(word(origin, array::HOLES as usize));
-        holes.is_null() || *holes.add(index as usize) == 0
-    }
+    unsafe { !array::is_hole(node(word(origin, array::HOLES as usize)), index) }
 }
 
 #[cfg(target_arch = "wasm32")]

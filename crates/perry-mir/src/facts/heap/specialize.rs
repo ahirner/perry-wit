@@ -396,10 +396,10 @@ impl LayoutPlanner<'_> {
                 absence,
                 inner: self.visit(inner, objects),
             })
-        } else if let Ok(array) = TypedHandle::<ArrayType>::from_handle(ty, self.ctx) {
+        } else if let Some(array) = crate::typed::<ArrayType>(self.ctx, ty) {
             let element = array.deref(self.ctx).element();
             self.child(objects, None, element).map(LayoutNode::Array)
-        } else if let Ok(record) = TypedHandle::<RecordType>::from_handle(ty, self.ctx) {
+        } else if let Some(record) = crate::typed::<RecordType>(self.ctx, ty) {
             record
                 .deref(self.ctx)
                 .fields()

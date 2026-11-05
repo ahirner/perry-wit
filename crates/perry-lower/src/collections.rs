@@ -114,7 +114,7 @@ fn record_of_kind(
     kind: RecordKind,
 ) -> Option<TypedHandle<RecordType>> {
     let ty = present_type(ctx, ty);
-    let rec = TypedHandle::<RecordType>::from_handle(ty, ctx).ok()?;
+    let rec = perry_mir::typed::<RecordType>(ctx, ty)?;
     (rec.deref(ctx).kind() == kind).then_some(rec)
 }
 
@@ -147,9 +147,9 @@ pub(super) fn tuple_kv_types(
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypeHandle, TypedHandle<RecordType>)> {
     let ty = present_type(ctx, ty);
-    let arr = TypedHandle::<ArrayType>::from_handle(ty, ctx).ok()?;
+    let arr = perry_mir::typed::<ArrayType>(ctx, ty)?;
     let elem = arr.deref(ctx).element();
-    let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
+    let rec = perry_mir::typed::<RecordType>(ctx, elem)?;
     let rec_ref = rec.deref(ctx);
     if !rec_ref.is_tuple() {
         return None;
@@ -206,9 +206,9 @@ pub(super) fn set_entry_type(
 ) -> Option<(TypeHandle, TypedHandle<RecordType>)> {
     let box_rec = set_box_record(ctx, ty)?;
     let entries_ty = box_rec.deref(ctx).field(StorageField::BoxEntries.name())?.1;
-    let arr = TypedHandle::<ArrayType>::from_handle(entries_ty, ctx).ok()?;
+    let arr = perry_mir::typed::<ArrayType>(ctx, entries_ty)?;
     let elem = arr.deref(ctx).element();
-    let rec = TypedHandle::<RecordType>::from_handle(elem, ctx).ok()?;
+    let rec = perry_mir::typed::<RecordType>(ctx, elem)?;
     let rec_ref = rec.deref(ctx);
     if rec_ref.kind() != RecordKind::SetEntry {
         return None;

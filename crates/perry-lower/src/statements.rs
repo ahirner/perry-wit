@@ -336,8 +336,8 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(source) = source {
                 let source = self.expression(ctx, source)?;
                 let source = self.defined(ctx, source)?;
-                let tuple = TypedHandle::<RecordType>::from_handle(source.get_type(ctx), ctx)
-                    .is_ok_and(|record| record.deref(ctx).kind() == RecordKind::Tuple);
+                let tuple = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
+                    .is_some_and(|record| record.deref(ctx).kind() == RecordKind::Tuple);
                 ensure!(
                     kind(ctx, source)? == Kind::Array || tuple,
                     "array destructuring is supported for arrays so far"
@@ -364,7 +364,7 @@ impl<'s> FunctionBuilder<'s> {
             && let Some(value) = init
             && let Some(src) = self.integer64_source(ctx, value)
         {
-            integer = TypedHandle::<IntegerType>::from_handle(src.get_type(ctx), ctx).ok();
+            integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
         }
         let is_never = matches!(ty, HirType::Never);
         // Inferred bindings preserve the initializer's absence states.

@@ -136,7 +136,7 @@ impl FunctionLowering<'_, '_> {
         self.state.json_copy_plans.insert((source, target), plan);
         let mut words = Vec::with_capacity(2 + 2 * count);
         words.extend([target_desc, source_desc]);
-        if let Ok(target) = TypedHandle::<RecordType>::from_handle(target_inner, ctx) {
+        if let Some(target) = perry_mir::typed::<RecordType>(ctx, target_inner) {
             let source = TypedHandle::<RecordType>::from_handle(source_inner, ctx)?;
             let source = source.deref(ctx);
             for (name, ty) in target.deref(ctx).fields()? {
@@ -152,7 +152,7 @@ impl FunctionLowering<'_, '_> {
                     words.extend([0, 0]);
                 }
             }
-        } else if let Ok(target) = TypedHandle::<ArrayType>::from_handle(target_inner, ctx) {
+        } else if let Some(target) = perry_mir::typed::<ArrayType>(ctx, target_inner) {
             let source = TypedHandle::<ArrayType>::from_handle(source_inner, ctx)?;
             words.push(self.json_copy_plan(
                 ctx,

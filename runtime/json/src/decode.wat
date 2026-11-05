@@ -362,7 +362,7 @@
         (local.set $holes (i32.load offset=@array.HOLES@ (local.get $source)))
         (local.set $hole (i32.const 0))
         (if (local.get $holes) (then
-          (local.set $hole (i32.load8_u (i32.add (local.get $holes) (local.get $index))))))
+          (local.set $hole (i32.and (i32.shr_u (i32.load8_u (i32.add (local.get $holes) (i32.shr_u (local.get $index) (i32.const 3)))) (i32.and (local.get $index) (i32.const 7))) (i32.const 1)))))
         @input.END_NATIVE@
         @input.CURSOR@
         (br_if $done (i32.eq (call $cursor-byte (local.get $source)) (i32.const 93)))

@@ -3,7 +3,7 @@ use super::*;
 use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OutputContract};
 use crate::types::{PromiseType, SettledType};
-use pliron::r#type::{TypeHandle, TypedHandle};
+use pliron::r#type::TypeHandle;
 
 /// How a [PromiseCombinatorOp] settles.
 #[pliron::derive::pliron_attr(name = "perry.combinator", format, verifier = "succ")]
@@ -30,12 +30,10 @@ op_schema! {
     attribute(combinator: Combinator, get_attr_perry_combinator, set_attr_perry_combinator) = combinator => IntrinsicErr::Combinator;
     prepare(_this) { let combinator = *combinator; }
     result(ctx, promises: Value, combinator: Combinator): TypeHandle = {
-        let element = TypedHandle::<ArrayType>::from_handle(promises.get_type(ctx), ctx)
-            .ok()?
+        let element = crate::typed::<ArrayType>(ctx, promises.get_type(ctx))?
             .deref(ctx)
             .element();
-        let value = TypedHandle::<PromiseType>::from_handle(element, ctx)
-            .ok()?
+        let value = crate::typed::<PromiseType>(ctx, element)?
             .deref(ctx)
             .value();
         let settled = match combinator {
@@ -104,8 +102,7 @@ op_schema! {
     attribute(field: SettledField, get_attr_perry_settled_field, set_attr_perry_settled_field) = field => IntrinsicErr::Settled;
     prepare(_this) { let field = *field; }
     result(ctx, settled: Value, field: SettledField): TypeHandle = {
-        let value = TypedHandle::<SettledType>::from_handle(settled.get_type(ctx), ctx)
-            .ok()?
+        let value = crate::typed::<SettledType>(ctx, settled.get_type(ctx))?
             .deref(ctx)
             .value();
         Some(match field {

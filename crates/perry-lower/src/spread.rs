@@ -78,7 +78,7 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let mut element = expected
-            .and_then(|ty| TypedHandle::<ArrayType>::from_handle(present_type(ctx, ty), ctx).ok())
+            .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, present_type(ctx, ty)))
             .map(|array| array.deref(ctx).element());
         let fixed_element = element.is_some();
         if element.is_none() {
@@ -424,7 +424,7 @@ impl<'s> FunctionBuilder<'s> {
                 perry_frontend::hir::CallArg::Spread(expr) => {
                     let src = self.expression(ctx, expr)?;
                     let src = self.defined(ctx, src)?;
-                    if let Ok(rec) = TypedHandle::<RecordType>::from_handle(src.get_type(ctx), ctx)
+                    if let Some(rec) = perry_mir::typed::<RecordType>(ctx, src.get_type(ctx))
                         && rec.deref(ctx).kind() == RecordKind::Tuple
                     {
                         let fields_len = rec.deref(ctx).fields()?.len();

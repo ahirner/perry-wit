@@ -93,7 +93,7 @@ impl<'s> FunctionBuilder<'s> {
                 },
             );
         }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+        if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
             && matches!(
                 rec.deref(ctx).kind(),
                 RecordKind::Object | RecordKind::Tuple
@@ -233,7 +233,7 @@ impl<'s> FunctionBuilder<'s> {
                 |_, _| Ok(present),
             );
         }
-        if let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+        if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
             && rec.deref(ctx).kind() == RecordKind::Object
         {
             let k = self.string_operand(ctx, prop_expr)?;
@@ -322,7 +322,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(self.boolean(ctx, true));
         }
         if let Err(property) = prop_or_idx
-            && let Ok(rec) = TypedHandle::<RecordType>::from_handle(ty, ctx)
+            && let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
             && rec.deref(ctx).kind() == RecordKind::Object
         {
             let field_ty = rec.deref(ctx).field(property).map(|(_, t)| t);

@@ -209,8 +209,8 @@
   },
   {
     "workload": "push records, then sum (n = 10⁶)",
-    "bytes": 17724,
-    "core_bytes": 17724,
+    "bytes": 17823,
+    "core_bytes": 17823,
     "defined_functions": 49,
     "helper_functions": 47,
     "optimization": {
@@ -244,8 +244,8 @@
   },
   {
     "workload": "push numbers, then sum (n = 10⁶)",
-    "bytes": 17558,
-    "core_bytes": 17558,
+    "bytes": 17657,
+    "core_bytes": 17657,
     "defined_functions": 48,
     "helper_functions": 46,
     "optimization": {
