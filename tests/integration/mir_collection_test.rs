@@ -274,6 +274,7 @@ async function compute(n: number): Promise<number> {
         const text = 'iteration:' + i;
         if (text.length < 2) throw new Error('bad text');
     }
+    if (cell.next === null) throw new Error('missing cell');
     return cell.value + cell.next.value + alias[0] + payload.value + settled[1];
 }
 export async function run(n: number) { return await compute(n); }

@@ -70,13 +70,24 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         object: &'s Expr,
         property: &str,
+        byte_offset: u32,
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
             return self.class_static_field_get(ctx, class_name, property);
         }
         let value = self.expression(ctx, object)?;
-        // Property access on `undefined` throws TypeError, in ECMAScript and here.
+        let nullable = absence(ctx, value.get_type(ctx)).is_some_and(|state| state.admits_null());
         let value = self.defined(ctx, value)?;
+        if nullable {
+            let unwrap =
+                Operation::get_op::<UnwrapOp>(value.defining_op().expect("receiver unwrap"), ctx)
+                    .expect("receiver unwrap");
+            unwrap.require_present(
+                ctx,
+                perry_mir::Absence::Null,
+                self.shapes.metadata.locations.member_span(byte_offset),
+            );
+        }
         let ty = value.get_type(ctx);
         if crate::value_unions::is_value_union(ctx, ty) {
             return self.value_union_member(ctx, value, property);

@@ -23,6 +23,58 @@ use std::collections::HashMap;
 
 type Key = (Value, TypeHandle);
 
+pub(crate) fn check_unwraps(
+    root: Ptr<Operation>,
+    ctx: &mut Context,
+    analyses: &mut AnalysisManager,
+) -> Result<PassResult> {
+    let functions = functions(root, ctx);
+    if !functions.iter().any(|function| {
+        crate::operations(ctx, function).iter().any(|&op| {
+            Operation::get_op::<UnwrapOp>(op, ctx)
+                .is_some_and(|unwrap| unwrap.required_presence(ctx).is_some())
+        })
+    }) {
+        return Ok(PassResult::default());
+    }
+    analyses.get_analysis::<crate::ProgramFacts>(root, ctx)?;
+    analyses.get_analysis::<DomInfo>(root, ctx)?;
+    let facts = analyses
+        .try_get_analysis::<crate::ProgramFacts>(root)
+        .expect("program facts");
+    let mut dominance = analyses
+        .try_get_analysis_mut::<DomInfo>(root)
+        .expect("dominance");
+    for function in functions {
+        let guards = crate::facts::guards::GuardedFacts::new(ctx, &facts, &function);
+        for op in crate::operations(ctx, &function) {
+            let Some(unwrap) = Operation::get_op::<UnwrapOp>(op, ctx) else {
+                continue;
+            };
+            let Some(absence) = unwrap.required_presence(ctx) else {
+                continue;
+            };
+            if guards.may_be_absent_at(&mut dominance, op, op.deref(ctx).get_operand(0), absence) {
+                let message = match absence {
+                    crate::Absence::Null => "property access receiver is possibly null",
+                    crate::Absence::Undefined => "property access receiver is possibly undefined",
+                    crate::Absence::Both => {
+                        "property access receiver is possibly null or undefined"
+                    }
+                };
+                return pliron::input_err_noloc!(perry_wit_diagnostics::PerryDiagnostic::error(
+                    perry_wit_diagnostics::DiagnosticCode::UnsupportedExpression, message,
+                ).with_optional_span(crate::source_span(ctx, &unwrap))
+                    .with_help("Check the receiver before accessing its properties, or use optional chaining."));
+            }
+        }
+    }
+    let mut result = PassResult::default();
+    result.set_preserved::<crate::ProgramFacts>();
+    result.set_preserved::<DomInfo>();
+    Ok(result)
+}
+
 pub(crate) fn reuse_unwraps(
     root: Ptr<Operation>,
     ctx: &mut Context,

@@ -18,6 +18,14 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if let Some(value) = hir_compat::non_null_assertion(expr) {
+            let value = self.expression_with(ctx, value, expected)?;
+            return Ok(if self.is_optional(ctx, value) {
+                self.emit_value(ctx, |ctx| OptionalCastOp::assert_present(ctx, value))
+            } else {
+                value
+            });
+        }
         if let Some(record) = self.iteration.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(value) => self.expression_with(ctx, value, expected),
@@ -382,12 +390,14 @@ impl<'s> FunctionBuilder<'s> {
                 property,
                 byte_offset,
                 ..
-            } => self.property_get(ctx, object, property).map_err(|error| {
-                crate::diagnostics::annotate(
-                    error,
-                    self.shapes.metadata.locations.member_span(*byte_offset),
-                )
-            })?,
+            } => self
+                .property_get(ctx, object, property, *byte_offset)
+                .map_err(|error| {
+                    crate::diagnostics::annotate(
+                        error,
+                        self.shapes.metadata.locations.member_span(*byte_offset),
+                    )
+                })?,
             Expr::PropertySet {
                 object,
                 property,
