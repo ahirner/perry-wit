@@ -59,6 +59,50 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
 }
 
 #[test]
+fn nullable_property_guards_follow_control_flow() {
+    for body in [
+        "if (values === null) return 0; return values.length;",
+        "return values !== null ? values.length : 0;",
+        "if (values === null) values = []; return values.length;",
+        "return values?.length ?? 0;",
+        "const alias = values; if (alias === null) return 0; return alias.length;",
+        "if (values !== null && values.length > 0) return values.length; return 0;",
+        "while (values === null) { values = []; } return values.length;",
+        "if (!values) return 0; return values.length;",
+        "if (Math.random() > 0.5 || values === undefined || values === null) return 0; return values.length;",
+        "if (values === null) throw new Error('missing'); return values.length;",
+        "const alias = values; values = null; if (alias === null) return 0; return alias.length;",
+        "while (values !== null) { const count = values.length; values = null; } return 0;",
+        "const holder: {values: number[] | null} = {values}; if (holder.values === null) return 0; return holder.values.length;",
+    ] {
+        let source = format!("export function count(values: number[] | null): number {{ {body} }}");
+        let ctx = &mut Context::new();
+        let module = lower_without_foreign(ctx, &source, "case.ts").unwrap();
+        perry_mir::canonicalize(module.get_operation(), ctx)
+            .unwrap_or_else(|error| panic!("{source}\n{}\n{}", error.disp(ctx), module.disp(ctx)));
+    }
+    for body in [
+        "if (values === null && false) return 0; return values.length;",
+        "if (values !== null || true) return values.length; return 0;",
+        "const present = values !== null; values = null; if (present) return values.length; return 0;",
+        "while (values !== null) { values = null; return values.length; } return 0;",
+        "const holder: {values: number[] | null} = {values}; if (holder.values === null) return 0; const alias = holder; alias.values = null; return holder.values.length;",
+    ] {
+        let source = format!("export function count(values: number[] | null): number {{ {body} }}");
+        let ctx = &mut Context::new();
+        let module = lower_without_foreign(ctx, &source, "case.ts").unwrap();
+        let error = perry_mir::canonicalize(module.get_operation(), ctx)
+            .err()
+            .expect(&source);
+        assert!(
+            error.err.is::<perry_wit_diagnostics::PerryDiagnostic>(),
+            "{}",
+            error.disp(ctx)
+        );
+    }
+}
+
+#[test]
 fn frame_proofs_follow_reference_escape_through_calls() {
     let ctx = &mut Context::new();
     let source = r#"

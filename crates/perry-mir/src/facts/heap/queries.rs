@@ -108,6 +108,47 @@ impl<'a> Aliases<'a> {
 }
 
 impl ProgramFacts {
+    pub(in crate::facts) fn same_read(&self, ctx: &Context, earlier: Value, later: Value) -> bool {
+        if earlier == later {
+            return true;
+        }
+        let Some((read, repeated)) = earlier.defining_op().zip(later.defining_op()) else {
+            return false;
+        };
+        let Some((field, repeated_field)) = Operation::get_op::<FieldGetOp>(read, ctx)
+            .zip(Operation::get_op::<FieldGetOp>(repeated, ctx))
+        else {
+            return false;
+        };
+        let receiver = read.deref(ctx).get_operand(0);
+        if receiver != repeated.deref(ctx).get_operand(0)
+            || field.field(ctx) != repeated_field.field(ctx)
+        {
+            return false;
+        }
+        let Some(function) = read.deref(ctx).get_parent_op(ctx) else {
+            return false;
+        };
+        let Some(&id) = self.generic.get(&function) else {
+            return false;
+        };
+        let state = &self.states[id];
+        let aliases = Aliases::new(ctx, &self.heap, state, receiver);
+        super::super::paths::preserves(ctx, read, repeated, (), |op, ()| {
+            let invalidates = match OperationKind::classify(ctx, op) {
+                OperationKind::Mutate(Mutation::Field { .. }) => {
+                    aliases.contains(state, op.deref(ctx).get_operand(0))
+                }
+                OperationKind::Call { .. } => crate::calls::callee(ctx, op)
+                    .and_then(|callee| self.effects(&callee))
+                    .is_none_or(|summary| summary.effects.may_mutate_records()),
+                OperationKind::Await | OperationKind::Foreign(_) => true,
+                _ => false,
+            };
+            (!invalidates).then_some(())
+        })
+    }
+
     pub(crate) fn array_length_invalidation<'a>(
         &'a self,
         ctx: &'a Context,

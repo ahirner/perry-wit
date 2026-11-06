@@ -42,7 +42,7 @@ use domains::{
 pub(crate) use rewrite::verify_lossless_module;
 pub(crate) use rewrite::{specialize, verify_lossless_operations};
 mod value;
-use value::{Demand, Representation, ValueFacts, ValueState};
+use value::{Demand, Presence, Representation, ValueFacts, ValueState};
 mod outcomes;
 use outcomes::Outcomes;
 
@@ -460,16 +460,28 @@ impl ProgramFacts {
     }
 
     fn range(&self, ctx: &Context, value: Value) -> Range {
+        self.value_facts(ctx, value)
+            .map_or(Range::Unknown, |facts| facts.range)
+    }
+
+    fn presence(&self, ctx: &Context, value: Value) -> Presence {
+        self.value_facts(ctx, value).map_or_else(
+            || Presence::declared(ctx, value.get_type(ctx)),
+            |facts| facts.presence,
+        )
+    }
+
+    fn value_facts(&self, ctx: &Context, value: Value) -> Option<ValueFacts> {
         let mut parent = value
             .get_parent_block(ctx)
             .and_then(|block| block.deref(ctx).get_parent_op(ctx));
         while let Some(op) = parent {
             if let Some(&context) = self.generic.get(&op) {
-                return self.states[context].range(value);
+                return Some(self.states[context].value(value));
             }
             parent = op.deref(ctx).get_parent_op(ctx);
         }
-        Range::Unknown
+        None
     }
 
     /// Non-negative integral values, including loop-carried counts after range widening.
@@ -645,6 +657,7 @@ impl Solver {
             if body.external {
                 facts.outcome = Outcomes::unknown(ctx, parameter.get_type(ctx));
             }
+            facts.presence = Presence::declared(ctx, parameter.get_type(ctx));
             state.values.insert(parameter, ValueState::new(facts));
         }
         let constraints = body.constraints.len();

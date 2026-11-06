@@ -1,4 +1,39 @@
 use super::{Fact, Integer, Outcomes, Range};
+use crate::Absence;
+use pliron::{context::Context, r#type::TypeHandle};
+
+/// Possible present, null and undefined states; the empty set is an unreachable value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Presence(u8);
+
+impl Presence {
+    pub(super) const PRESENT: Self = Self(1);
+
+    pub(super) fn absent(absence: Absence) -> Self {
+        Self(match absence {
+            Absence::Null => 2,
+            Absence::Undefined => 4,
+            Absence::Both => 6,
+        })
+    }
+
+    pub(super) fn declared(ctx: &Context, ty: TypeHandle) -> Self {
+        Self::PRESENT.join(crate::absence(ctx, ty).map_or(Self::default(), Self::absent))
+    }
+
+    pub(super) fn join(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+    pub(super) fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+    pub(super) fn exclude(self, absence: Absence) -> Self {
+        Self(self.0 & !Self::absent(absence).0)
+    }
+    pub(super) fn admits(self, absence: Absence) -> bool {
+        self.0 & Self::absent(absence).0 != 0
+    }
+}
 
 /// Requirements join by width and observation strength. Retaining the source carrier is
 /// terminal: later integer consumers convert at their uses instead of retyping the value.
@@ -76,12 +111,13 @@ impl ValueState {
     }
 }
 
-/// Numeric representation, interval and promise settlement travel through the same edges.
+/// Numeric representation, interval, absence and promise settlement share the same edges.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct ValueFacts {
     pub(super) domain: Fact,
     pub(super) range: Range,
     pub(super) outcome: Outcomes,
+    pub(super) presence: Presence,
     expanded: bool,
     /// An integer literal outside the demanded width reached this value on an exact (not
     /// widening) join, so narrowing it would change the value rather than wrap an overflow.
@@ -140,14 +176,22 @@ impl ValueFacts {
             self.expanded || matches!(representation, Representation::Storage(_)),
         );
         let outcome = self.outcome.join(other.outcome);
+        let presence = self.presence.join(other.presence);
         let inexact = self.inexact
             || other.inexact
             || (step.clamped && matches!(domain, Fact::Literal { .. }));
-        let changed = (domain, step.range, outcome, inexact)
-            != (self.domain, self.range, self.outcome, self.inexact);
+        let changed = (domain, step.range, outcome, presence, inexact)
+            != (
+                self.domain,
+                self.range,
+                self.outcome,
+                self.presence,
+                self.inexact,
+            );
         self.domain = domain;
         self.range = step.range;
         self.outcome = outcome;
+        self.presence = presence;
         self.expanded |= step.expanded;
         self.inexact = inexact;
         (changed, step.widened)

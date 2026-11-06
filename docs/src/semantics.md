@@ -2,6 +2,7 @@
 
 Perry-WIT accepts a statically typed subset of TypeScript.
 Names, object layouts and host capabilities are resolved at compile time, and a construct outside the subset is a compile error with a source location.
+Property reads through nullable values require narrowing: check for `null`, supply a non-null fallback, or use optional chaining before reading a property such as `.length`.
 
 ## Objects
 

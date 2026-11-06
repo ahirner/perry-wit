@@ -382,12 +382,14 @@ impl<'s> FunctionBuilder<'s> {
                 property,
                 byte_offset,
                 ..
-            } => self.property_get(ctx, object, property).map_err(|error| {
-                crate::diagnostics::annotate(
-                    error,
-                    self.shapes.metadata.locations.member_span(*byte_offset),
-                )
-            })?,
+            } => self
+                .property_get(ctx, object, property, *byte_offset)
+                .map_err(|error| {
+                    crate::diagnostics::annotate(
+                        error,
+                        self.shapes.metadata.locations.member_span(*byte_offset),
+                    )
+                })?,
             Expr::PropertySet {
                 object,
                 property,

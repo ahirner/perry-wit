@@ -8,6 +8,7 @@
 use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OptionalPayload, OutputContract, ResultType, Ty};
 use crate::{attrs::Absence, types::OptionalType};
+pliron::dict_key!(REQUIRE_PRESENT, "perry_require_present");
 use pliron::{
     common_traits::Verify,
     context::Context,
@@ -200,4 +201,29 @@ op_schema! {
     constructors { pub new(value: Value) => infer(value); }
     result(ctx, value: Value): TypeHandle = inner(ctx, value, "perry.unwrap");
     error = OptionalErr::Result("perry.unwrap");
+}
+
+impl UnwrapOp {
+    pub fn require_present(
+        &self,
+        ctx: &mut Context,
+        absence: Absence,
+        span: Option<crate::SourceSpan>,
+    ) {
+        self.get_operation()
+            .deref_mut(ctx)
+            .attributes
+            .set(REQUIRE_PRESENT.clone(), absence);
+        if let Some(span) = span {
+            crate::set_source_span(ctx, self, &span);
+        }
+    }
+
+    pub(crate) fn required_presence(&self, ctx: &Context) -> Option<Absence> {
+        self.get_operation()
+            .deref(ctx)
+            .attributes
+            .get::<Absence>(&REQUIRE_PRESENT)
+            .copied()
+    }
 }

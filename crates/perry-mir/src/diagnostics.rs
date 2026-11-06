@@ -1,17 +1,12 @@
-//! Source coordinates retained on MIR declarations through compiler transformations.
-use pliron::{
-    builtin::{attributes::StringAttr, ops::FuncOp},
-    context::Context,
-    identifier::Identifier,
-    op::Op,
-};
+//! Source coordinates retained on MIR operations through compiler transformations.
+use pliron::{builtin::attributes::StringAttr, context::Context, identifier::Identifier, op::Op};
 use std::path::PathBuf;
 
 const SOURCE: Identifier = Identifier::new("perry_source_span");
 
 pub use perry_wit_diagnostics::SourceSpan;
 
-pub fn set_source_span(ctx: &mut Context, function: &FuncOp, span: &SourceSpan) {
+pub fn set_source_span(ctx: &mut Context, operation: &dyn Op, span: &SourceSpan) {
     let serialized = format!(
         "{}:{}:{}:{}:{}:{}:{}",
         span.start_line,
@@ -22,15 +17,15 @@ pub fn set_source_span(ctx: &mut Context, function: &FuncOp, span: &SourceSpan) 
         span.end_byte,
         span.file.to_string_lossy(),
     );
-    function
+    operation
         .get_operation()
         .deref_mut(ctx)
         .attributes
         .set(SOURCE, StringAttr::new(serialized));
 }
 
-pub fn source_span(ctx: &Context, function: &FuncOp) -> Option<SourceSpan> {
-    let operation = function.get_operation().deref(ctx);
+pub fn source_span(ctx: &Context, operation: &dyn Op) -> Option<SourceSpan> {
+    let operation = operation.get_operation().deref(ctx);
     let value = operation.attributes.get::<StringAttr>(&SOURCE)?;
     let mut parts = value.as_str().splitn(7, ':');
     Some(SourceSpan {

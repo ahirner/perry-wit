@@ -1,5 +1,5 @@
 use super::{
-    ArgumentDomain, Constraint, Demand, Fact, Integer, Interval, Key, Outcomes, Range,
+    ArgumentDomain, Constraint, Demand, Fact, Integer, Interval, Key, Outcomes, Presence, Range,
     Representation, ResultDomain, Solver, ValueFacts, Work, arithmetic_range, comparison_domain,
     constant_range, declared, guards::orders, integer_arithmetic, literal,
 };
@@ -688,7 +688,25 @@ impl Solver {
             }
         }
         for result in operation.results() {
-            let facts = self.result_facts(ctx, id, op, result, (kind, heap_facts));
+            let mut facts = self.result_facts(ctx, id, op, result, (kind, heap_facts));
+            facts.presence = if Operation::is_op::<crate::NullOp>(op, ctx) {
+                Presence::absent(crate::Absence::Null)
+            } else if crate::is_any::<(crate::UndefinedOp, crate::OmittedOp)>(ctx, op) {
+                Presence::absent(crate::Absence::Undefined)
+            } else if Operation::is_op::<crate::WrapOp>(op, ctx) {
+                Presence::PRESENT
+            } else if Operation::is_op::<crate::OptionalCastOp>(op, ctx) {
+                self.analysis.states[id]
+                    .value(operation.get_operand(0))
+                    .presence
+                    .intersect(Presence::declared(ctx, result.get_type(ctx)))
+            } else if Operation::is_op::<crate::FieldGetOp>(op, ctx)
+                && let Some(facts) = heap_facts
+            {
+                facts.presence
+            } else {
+                Presence::declared(ctx, result.get_type(ctx))
+            };
             self.update(id, result, facts);
         }
         Ok(())
