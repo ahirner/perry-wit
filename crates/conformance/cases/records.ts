@@ -17,6 +17,8 @@ const native: Native = { rows: [{ row: null }, { row: { name: "before" } }] };
 const boundary = widen(native);
 const nullBefore = boundary.rows[0].row === null;
 const undefinedBefore = boundary.rows[0].row === undefined;
+const assertedRow = boundary.rows[0].row!;
+console.log("non-null-assertion", assertedRow === null);
 boundary.rows[1].row!.name = "changed";
 const aliasName = native.rows[1].row!.name;
 native.rows[0].row = { name: "new" };

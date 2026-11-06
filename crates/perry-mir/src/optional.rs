@@ -9,6 +9,7 @@ use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OptionalPayload, OutputContract, ResultType, Ty};
 use crate::{attrs::Absence, types::OptionalType};
 pliron::dict_key!(REQUIRE_PRESENT, "perry_require_present");
+pliron::dict_key!(ASSERT_PRESENT, "perry_assert_present");
 use pliron::{
     common_traits::Verify,
     context::Context,
@@ -190,6 +191,26 @@ op_schema! {
     result(ctx, source: TypeHandle): OptionalPayload =
         OptionalPayload(source);
     error = OptionalErr::Result("perry.optional_cast");
+}
+
+impl OptionalCastOp {
+    /// Preserve a source non-null assertion without changing the runtime value.
+    pub fn assert_present(ctx: &mut Context, value: Value) -> Self {
+        let op = Self::new(ctx, value, value.get_type(ctx));
+        op.get_operation().deref_mut(ctx).attributes.set(
+            ASSERT_PRESENT.clone(),
+            pliron::builtin::attributes::UnitAttr::new(),
+        );
+        op
+    }
+
+    pub(crate) fn asserts_presence(&self, ctx: &Context) -> bool {
+        self.get_operation()
+            .deref(ctx)
+            .attributes
+            .get::<pliron::builtin::attributes::UnitAttr>(&ASSERT_PRESENT)
+            .is_some()
+    }
 }
 
 op_schema! {

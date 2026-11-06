@@ -695,11 +695,15 @@ impl Solver {
                 Presence::absent(crate::Absence::Undefined)
             } else if Operation::is_op::<crate::WrapOp>(op, ctx) {
                 Presence::PRESENT
-            } else if Operation::is_op::<crate::OptionalCastOp>(op, ctx) {
-                self.analysis.states[id]
-                    .value(operation.get_operand(0))
-                    .presence
-                    .intersect(Presence::declared(ctx, result.get_type(ctx)))
+            } else if let Some(cast) = Operation::get_op::<crate::OptionalCastOp>(op, ctx) {
+                if cast.asserts_presence(ctx) {
+                    Presence::PRESENT
+                } else {
+                    self.analysis.states[id]
+                        .value(operation.get_operand(0))
+                        .presence
+                        .intersect(Presence::declared(ctx, result.get_type(ctx)))
+                }
             } else if Operation::is_op::<crate::FieldGetOp>(op, ctx)
                 && let Some(facts) = heap_facts
             {

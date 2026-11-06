@@ -18,7 +18,7 @@ pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;
-pub use locations::Locations;
+pub use locations::{Locations, non_null_assertion};
 mod methods;
 mod parser;
 pub(crate) use parser::parse;
@@ -62,7 +62,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     streams::lower(&mut ast)?;
     methods::preserve_arguments(&mut ast);
     classes::preserve_field_types(&mut ast);
-    locations.preserve_operators(&mut ast);
+    locations.preserve_expressions(&mut ast);
     let mut module = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
         let span = error
             .downcast_ref::<perry_hir::error::LowerError>()

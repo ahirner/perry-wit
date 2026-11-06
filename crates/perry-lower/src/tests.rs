@@ -65,6 +65,10 @@ fn nullable_property_guards_follow_control_flow() {
         "return values !== null ? values.length : 0;",
         "if (values === null) values = []; return values.length;",
         "return values?.length ?? 0;",
+        "return values!.length;",
+        "return (values!).length;",
+        "const present = values!; return present.length;",
+        "const holder: {values: number[] | null} = {values}; return holder.values!.length;",
         "const alias = values; if (alias === null) return 0; return alias.length;",
         "if (values !== null && values.length > 0) return values.length; return 0;",
         "while (values === null) { values = []; } return values.length;",
@@ -83,6 +87,8 @@ fn nullable_property_guards_follow_control_flow() {
     }
     for body in [
         "if (values === null && false) return 0; return values.length;",
+        "const asserted = values!; return values.length;",
+        "const holder: {values: number[] | null} = {values}; return holder!.values.length;",
         "if (values !== null || true) return values.length; return 0;",
         "const present = values !== null; values = null; if (present) return values.length; return 0;",
         "while (values !== null) { values = null; return values.length; } return 0;",

@@ -90,14 +90,14 @@ pub(crate) fn orders(ctx: &Context, block: Ptr<BasicBlock>) -> [Option<Order>; 2
 
 pub(crate) struct GuardedFacts<'a> {
     ctx: &'a Context,
-    numeric: &'a ProgramFacts,
+    facts: &'a ProgramFacts,
     cache: HashMap<(Ptr<BasicBlock>, Value), Range>,
     guards: HashMap<Value, Vec<(Ptr<BasicBlock>, Range)>>,
     branches: Vec<(Ptr<BasicBlock>, Value, bool)>,
 }
 
 impl<'a> GuardedFacts<'a> {
-    pub(crate) fn new(ctx: &'a Context, numeric: &'a ProgramFacts, function: &FuncOp) -> Self {
+    pub(crate) fn new(ctx: &'a Context, facts: &'a ProgramFacts, function: &FuncOp) -> Self {
         let mut guards: HashMap<_, Vec<_>> = HashMap::new();
         let mut branches = Vec::new();
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
@@ -112,7 +112,7 @@ impl<'a> GuardedFacts<'a> {
                         if target.num_preds(ctx) == 1 {
                             let (condition, truth) = predicate(
                                 ctx,
-                                numeric,
+                                facts,
                                 branch.get_operand_condition(ctx),
                                 index == 0,
                             );
@@ -124,8 +124,8 @@ impl<'a> GuardedFacts<'a> {
             for order in orders(ctx, block).into_iter().flatten() {
                 // Both operands must exclude NaN before the false edge can order them.
                 let (Range::Bounds(a), Range::Bounds(b)) = (
-                    numeric.range(ctx, order.smaller),
-                    numeric.range(ctx, order.larger),
+                    facts.range(ctx, order.smaller),
+                    facts.range(ctx, order.larger),
                 ) else {
                     continue;
                 };
@@ -139,7 +139,7 @@ impl<'a> GuardedFacts<'a> {
         }
         Self {
             ctx,
-            numeric,
+            facts,
             guards,
             cache: HashMap::new(),
             branches,
@@ -173,7 +173,7 @@ impl<'a> GuardedFacts<'a> {
         depth: u8,
     ) -> Presence {
         let ctx = self.ctx;
-        let mut presence = self.numeric.presence(ctx, value);
+        let mut presence = self.facts.presence(ctx, value);
         if depth == 0 {
             return presence;
         }
@@ -232,8 +232,8 @@ impl<'a> GuardedFacts<'a> {
             return presence;
         }
         let ctx = self.ctx;
-        let (condition, truth) = predicate(ctx, self.numeric, condition, truth);
-        if let Range::Bounds(Interval { lower, upper }) = self.numeric.range(ctx, condition)
+        let (condition, truth) = predicate(ctx, self.facts, condition, truth);
+        if let Range::Bounds(Interval { lower, upper }) = self.facts.range(ctx, condition)
             && lower == upper
         {
             return if (lower != 0) == truth {
@@ -253,13 +253,13 @@ impl<'a> GuardedFacts<'a> {
             };
             if let Some(absence) = absence {
                 let tested = operation.get_operand(0);
-                let possible = self.numeric.presence(ctx, tested);
+                let possible = self.facts.presence(ctx, tested);
                 if (truth && !possible.admits(absence))
                     || (!truth && possible.exclude(absence) == Presence::default())
                 {
                     return Presence::default();
                 }
-                if self.numeric.same_read(ctx, tested, value) {
+                if self.facts.same_read(ctx, tested, value) {
                     return if truth {
                         presence.intersect(Presence::absent(absence))
                     } else {
@@ -277,7 +277,7 @@ impl<'a> GuardedFacts<'a> {
                     .deref(ctx)
                     .get_parent_block()
                     .expect("predecessor");
-                let (tested, required) = predicate(ctx, self.numeric, operand, truth);
+                let (tested, required) = predicate(ctx, self.facts, operand, truth);
                 if self.branches.iter().any(|&(target, guard, truth)| {
                     guard == tested
                         && truth != required
@@ -330,7 +330,7 @@ impl<'a> GuardedFacts<'a> {
             return *range;
         }
         let ctx = self.ctx;
-        let mut range = self.numeric.range(ctx, value);
+        let mut range = self.facts.range(ctx, value);
         if depth > 0
             && let Some(op) = value.defining_op()
         {
@@ -410,29 +410,23 @@ fn incoming(
     block: Ptr<BasicBlock>,
     argument: usize,
 ) -> Vec<(Ptr<Operation>, usize, Value)> {
-    block
-        .preds(ctx)
-        .into_iter()
-        .flat_map(|predecessor| {
-            let terminator = predecessor
-                .deref(ctx)
-                .get_terminator(ctx)
-                .expect("predecessor branch");
-            let operation = Operation::get_op_dyn(terminator, ctx);
-            let branch = op_cast::<dyn BranchOpInterface>(&*operation).expect("branch");
-            terminator
-                .deref(ctx)
-                .successors()
-                .enumerate()
-                .filter(|(_, successor)| *successor == block)
-                .map(|(index, _)| {
-                    (
-                        terminator,
-                        index,
-                        branch.successor_operands(ctx, index)[argument],
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let mut incoming = Vec::new();
+    for predecessor in block.preds(ctx) {
+        let terminator = predecessor
+            .deref(ctx)
+            .get_terminator(ctx)
+            .expect("predecessor branch");
+        let operation = Operation::get_op_dyn(terminator, ctx);
+        let branch = op_cast::<dyn BranchOpInterface>(&*operation).expect("branch");
+        for (index, successor) in terminator.deref(ctx).successors().enumerate() {
+            if successor == block {
+                incoming.push((
+                    terminator,
+                    index,
+                    branch.successor_operands(ctx, index)[argument],
+                ));
+            }
+        }
+    }
+    incoming
 }
