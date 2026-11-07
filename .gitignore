@@ -19,3 +19,10 @@ site/node_modules/
 site/dist/
 site/.generated/
 site/test-results/
+
+# JavaScript workspace dependencies and generated package contents
+js/node_modules/
+js/packages/*/node_modules/
+js/packages/perry-wit/bindings/
+js/packages/perry-wit/dist/
+js/packages/perry-wit/wasm/

@@ -1,0 +1,61 @@
+{
+  "name": "perry-wit",
+  "version": "0.0.1",
+  "description": "Compile TypeScript into WASI 0.3 WebAssembly components from Node.js or the browser",
+  "keywords": [
+    "typescript",
+    "webassembly",
+    "wasm",
+    "wasi",
+    "component-model",
+    "compiler"
+  ],
+  "homepage": "https://ahirner.github.io/perry-wit/docs/embedding.html",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahirner/perry-wit.git",
+    "directory": "js/packages/perry-wit"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "imports": {
+    "#load-core": {
+      "types": "./dist/load-core.node.d.ts",
+      "node": "./dist/load-core.node.js",
+      "default": "./dist/load-core.browser.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bindings"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm run build:wasm && pnpm run build:bindings && pnpm run build:ts",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:bindings": "jco transpile wasm/perry-wit.wasm --name compiler --instantiation async --no-nodejs-compat --quiet --out-dir bindings && node scripts/finish-bindings.mjs",
+    "build:ts": "tsc --project tsconfig.build.json",
+    "typecheck": "tsc --project tsconfig.json",
+    "test": "node --test \"test/*.ts\"",
+    "clean": "node -e \"for (const d of ['dist','bindings','wasm']) require('node:fs').rmSync(d,{recursive:true,force:true})\"",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "@bytecodealliance/preview2-shim": "0.31.0"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.41.0",
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  }
+}

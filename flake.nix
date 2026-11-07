@@ -451,6 +451,7 @@
             wasmtimeCli
             pkgs.wasm-tools
             nodejs
+            pkgs.pnpm
             pkgs.python3
             pkgs.typescript
             pkgs.mdbook
