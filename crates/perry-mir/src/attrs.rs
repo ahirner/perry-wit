@@ -48,6 +48,16 @@ impl Absence {
     pub fn admits_undefined(self) -> bool {
         self != Self::Null
     }
+
+    /// The states admitted by either side: `T | null` joined with `T | undefined` admits both.
+    pub fn join(self, other: Self) -> Self {
+        if self == other { self } else { Self::Both }
+    }
+
+    /// [`Self::join`] where `None` admits no absence.
+    pub fn join_optional(left: Option<Self>, right: Option<Self>) -> Option<Self> {
+        left.into_iter().chain(right).reduce(Self::join)
+    }
 }
 
 /// Arithmetic on IEEE-754 doubles with ECMAScript semantics (`%` is `fmod`).

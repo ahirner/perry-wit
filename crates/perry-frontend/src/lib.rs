@@ -11,11 +11,12 @@ pub mod hir_compat;
 mod infer;
 pub mod methods;
 mod modules;
+pub mod narrowing;
 pub mod sdk;
 pub mod shapes;
 pub mod source_files;
 pub mod wit;
-pub use absence::{Absence, merge_absence};
+pub use absence::Absence;
 /// HIR types and structural foreign (WIT) symbol descriptors.
 pub mod hir {
     pub use perry_hir::types::{FunctionType, ObjectType, PropertyInfo, Type};

@@ -101,8 +101,7 @@ pub(super) struct FunctionBuilder<'s> {
     /// Iterator-protocol guards of array destructuring that are statically false: the
     /// branches they select are not lowered.
     pub(super) iteration: hir_compat::Iteration,
-    /// Active tag guards appended as conditions narrow and truncated when branches exit.
-    pub(super) variant_guards: Vec<variants::Guard<'s>>,
+    pub(super) variant_guards: perry_frontend::narrowing::Guards<'s>,
     pub(super) controls: Vec<Control<'s>>,
     pub(super) inline_returns: Vec<inline::ReturnFrame>,
     pub(super) class_expansions: Vec<crate::classes::ClassExpansion<'s>>,
@@ -242,7 +241,7 @@ impl<'s> FunctionBuilder<'s> {
             never_values: HashSet::new(),
             global_slots: HashSet::new(),
             iteration: hir_compat::Iteration::default(),
-            variant_guards: Vec::new(),
+            variant_guards: perry_frontend::narrowing::Guards::default(),
             controls: Vec::new(),
             inline_returns: Vec::new(),
             class_expansions: Vec::new(),

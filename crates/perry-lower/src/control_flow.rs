@@ -79,16 +79,16 @@ impl<'s> FunctionBuilder<'s> {
             label,
             break_to: done,
         });
-        let guards = self.variant_guards.len();
+        let guards = self.variant_guards.depth();
         let mut fallthrough = false;
         for (index, (case, &block)) in cases.iter().zip(&blocks).enumerate() {
             self.variant_guards.truncate(guards);
             if !fallthrough {
                 if let Some(test) = &case.test {
-                    self.variant_equality(discriminant, test, true);
+                    self.variant_guards.equality(discriminant, test, true);
                 } else {
                     for test in cases.iter().filter_map(|case| case.test.as_ref()) {
-                        self.variant_equality(discriminant, test, false);
+                        self.variant_guards.equality(discriminant, test, false);
                     }
                 }
             }
@@ -178,6 +178,9 @@ impl<'s> FunctionBuilder<'s> {
             block: first,
             status,
         });
+        // The handlers start from any point of the body, before the narrowings that follow it,
+        // and the join is reached from the handlers as well as the body.
+        let guards = self.variant_guards.depth();
         let lowered = self.statements(ctx, body);
         self.handlers.pop();
         if finally.is_some() {
@@ -188,6 +191,7 @@ impl<'s> FunctionBuilder<'s> {
             self.statements(ctx, outer.body)?;
             self.jump(ctx, join);
         }
+        self.variant_guards.truncate(guards);
 
         if let (Some(clause), Some(block)) = (catch, catch_block) {
             self.switch_to(block);
@@ -198,6 +202,7 @@ impl<'s> FunctionBuilder<'s> {
                 let ty = exception.get_type(ctx);
                 let slot = self.entry_slot(ctx, ty);
                 self.store(ctx, slot, exception);
+                self.variant_guards.assign(*id);
                 self.locals.insert(*id, LocalBinding::plain(slot));
             }
             if let Some(rethrow) = rethrow_block {
@@ -217,6 +222,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.statements(ctx, outer.body)?;
                 self.jump(ctx, join);
             }
+            self.variant_guards.truncate(guards);
         }
 
         if let Some(block) = rethrow_block {
@@ -230,6 +236,7 @@ impl<'s> FunctionBuilder<'s> {
                 let again = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, exception));
                 self.propagate(ctx, again);
             }
+            self.variant_guards.truncate(guards);
         }
         self.switch_to(join);
         Ok(())
@@ -268,6 +275,31 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(init) = init {
             self.statement(ctx, init, None)?;
         }
+        let tested = match condition {
+            LoopCondition::Before(condition) => condition,
+            LoopCondition::After(condition) => Some(condition),
+            LoopCondition::Indices(..) => None,
+        };
+        let guards = self.variant_guards.depth();
+        let closures = &self.closures;
+        self.variant_guards
+            .assign_in(body, tested.into_iter().chain(update), |id| {
+                closures.get(&id).copied()
+            });
+        let lowered = self.loop_body(ctx, condition, update, body, label);
+        // The loop exits from its test or a `break`, before narrowings later in its body.
+        self.variant_guards.truncate(guards);
+        lowered
+    }
+
+    fn loop_body(
+        &mut self,
+        ctx: &mut Context,
+        condition: LoopCondition<'s>,
+        update: Option<&'s Expr>,
+        body: &'s [Stmt],
+        label: Option<&'s str>,
+    ) -> Result<()> {
         let collection = match condition {
             LoopCondition::Before(condition) => self.collection_loop(ctx, condition)?,
             LoopCondition::After(_) | LoopCondition::Indices(..) => None,

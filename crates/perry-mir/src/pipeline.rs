@@ -121,6 +121,10 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     let mut preparation = Passes::default();
     preparation.add_pass(Mem2RegPass);
     preparation.add_pass(FnPass(
+        "check-null-receivers",
+        crate::receivers::check_receivers,
+    ));
+    preparation.add_pass(FnPass(
         "normalize-json-copy",
         crate::json_copy::normalize_json_copy,
     ));

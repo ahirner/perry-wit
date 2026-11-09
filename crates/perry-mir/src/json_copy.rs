@@ -59,13 +59,76 @@ pub(crate) fn normalize_json_copy(
     Ok(result)
 }
 
-struct ParseStringifySite {
-    stringify_op: Ptr<Operation>,
-    unwrap_op: Option<Ptr<Operation>>,
-    consumer_op: Ptr<Operation>,
-    intermediate_parse_op: Option<Ptr<Operation>>,
-    source_value: Value,
+/// A `JSON.parse(JSON.stringify(source))` site. The rewrite copies the source at the consumer,
+/// which moves the stringify, and any exception producing the text raises, to the consumer.
+pub(crate) struct ParseStringifySite {
+    pub(crate) stringify_op: Ptr<Operation>,
+    pub(crate) unwrap_op: Option<Ptr<Operation>>,
+    pub(crate) consumer_op: Ptr<Operation>,
+    pub(crate) intermediate_parse_op: Option<Ptr<Operation>>,
+    pub(crate) source_value: Value,
     target_ty: TypeHandle,
+    /// Whether the stringify or its unwrap may throw.
+    pub(crate) text_may_throw: bool,
+}
+
+impl ParseStringifySite {
+    pub(crate) fn new(
+        ctx: &Context,
+        source_value: Value,
+        (stringify_op, unwrap_op): (Ptr<Operation>, Option<Ptr<Operation>>),
+        intermediate_parse_op: Option<Ptr<Operation>>,
+        consumer_op: Ptr<Operation>,
+    ) -> Self {
+        let source_ty = source_value.get_type(ctx);
+        // Stringification throws on a cycle; its result is undefined only for an absent value.
+        let stringify_throws =
+            crate::may_throw(ctx, stringify_op) && may_be_cyclic(ctx, source_ty, &mut Vec::new());
+        let unwrap_throws = unwrap_op.is_some_and(|unwrap| crate::may_throw(ctx, unwrap))
+            && (absence(ctx, source_ty).is_some()
+                || source_ty.deref(ctx).is::<crate::types::JsonType>());
+        Self {
+            stringify_op,
+            unwrap_op,
+            consumer_op,
+            intermediate_parse_op,
+            source_value,
+            target_ty: consumer_op.deref(ctx).get_result(0).get_type(ctx),
+            text_may_throw: stringify_throws || unwrap_throws,
+        }
+    }
+}
+
+/// Whether a `ty` value may reach itself. `path` holds the enclosing types; a JSON value or a
+/// type without a JSON schema may.
+fn may_be_cyclic(ctx: &Context, ty: TypeHandle, path: &mut Vec<TypeHandle>) -> bool {
+    let ty = present_type(ctx, ty);
+    if path.contains(&ty) {
+        return true;
+    }
+    let Some(schema) = JsonSchema::of(ctx, ty) else {
+        return true;
+    };
+    path.push(ty);
+    let cyclic = match schema {
+        JsonSchema::Value => true,
+        JsonSchema::Optional(inner) => may_be_cyclic(ctx, inner, path),
+        JsonSchema::Record(record) => record.deref(ctx).fields().map_or(true, |fields| {
+            fields
+                .iter()
+                .any(|&(_, field)| may_be_cyclic(ctx, field, path))
+        }),
+        JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant) => {
+            variant.deref(ctx).cases().iter().any(|(_, payload)| {
+                payload.is_some_and(|payload| may_be_cyclic(ctx, payload, path))
+            })
+        }
+        _ => schema
+            .storage_element()
+            .is_some_and(|element| may_be_cyclic(ctx, element, path)),
+    };
+    path.pop();
+    cyclic
 }
 
 fn find_parse_stringify_sites(func: FuncOp, ctx: &Context) -> Vec<ParseStringifySite> {
@@ -100,14 +163,13 @@ fn parse_stringify_site(ctx: &Context, op: Ptr<Operation>) -> Option<ParseString
         return None;
     };
     let (stringify_op, unwrap_op, source_value) = match_unwrapped_stringify(ctx, text)?;
-    Some(ParseStringifySite {
-        stringify_op,
-        unwrap_op,
-        consumer_op: op,
-        intermediate_parse_op,
+    Some(ParseStringifySite::new(
+        ctx,
         source_value,
-        target_ty: op.deref(ctx).get_result(0).get_type(ctx),
-    })
+        (stringify_op, unwrap_op),
+        intermediate_parse_op,
+        op,
+    ))
 }
 
 fn is_unary(ctx: &Context, op: Ptr<Operation>) -> bool {
@@ -191,14 +253,7 @@ fn can_rewrite_parse_stringify(
         return false;
     }
 
-    !facts.may_prevent_json_copy_between(
-        ctx,
-        &func,
-        site.source_value,
-        site.stringify_op,
-        (site.unwrap_op, site.intermediate_parse_op),
-        site.consumer_op,
-    )
+    !facts.may_prevent_json_copy_between(ctx, &func, site)
 }
 
 /// Whether a `ty` value may hold a record. `seen` holds the types already visited, so a
@@ -564,6 +619,31 @@ mod tests {
             let pairs = || SchemaPairs::new();
             assert_eq!(schemas_add_fields(ctx, source, target, &mut pairs()), adds);
             assert_eq!(schemas_add_fields(ctx, target, source, &mut pairs()), drops);
+        }
+        Ok(())
+    }
+
+    /// Only a recursive type lets the stringify throw on a cycle.
+    #[test]
+    fn recursive_sources_may_be_cyclic() -> Result<()> {
+        let ctx = &mut Context::new();
+        let number: TypeHandle = FP64Type::get(ctx).into();
+        let leaf: TypeHandle = RecordType::get(
+            ctx,
+            pliron::ident!("Leaf"),
+            Some(vec![("x".into(), number)]),
+        )?
+        .into();
+        let node: TypeHandle = RecordType::get(ctx, pliron::ident!("Node"), None)?.into();
+        let next = OptionalType::get(ctx, ArrayType::get(ctx, node).into()).into();
+        RecordType::get(
+            ctx,
+            pliron::ident!("Node"),
+            Some(vec![("next".into(), next)]),
+        )?;
+        let leaves = ArrayType::get(ctx, leaf).into();
+        for (ty, cyclic) in [(leaf, false), (leaves, false), (node, true), (next, true)] {
+            assert_eq!(may_be_cyclic(ctx, ty, &mut Vec::new()), cyclic);
         }
         Ok(())
     }

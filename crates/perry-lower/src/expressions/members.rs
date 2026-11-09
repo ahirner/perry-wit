@@ -70,13 +70,13 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         object: &'s Expr,
         property: &str,
+        byte_offset: u32,
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
             return self.class_static_field_get(ctx, class_name, property);
         }
         let value = self.expression(ctx, object)?;
-        // Property access on `undefined` throws TypeError, in ECMAScript and here.
-        let value = self.defined(ctx, value)?;
+        let value = self.receiver(ctx, value, byte_offset)?;
         let ty = value.get_type(ctx);
         if crate::value_unions::is_value_union(ctx, ty) {
             return self.value_union_member(ctx, value, property);

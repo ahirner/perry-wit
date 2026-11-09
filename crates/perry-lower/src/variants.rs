@@ -1,111 +1,50 @@
 //! Closed union construction and tag-based payload selection.
+//!
+//! Source guards (`typeof x === "number"`, `x.tag === "a"`, tracked by
+//! [`perry_frontend::narrowing::Guards`]) select the payload type a read lowers to; the payload
+//! read checks the tag at runtime.
 use super::*;
+use perry_frontend::narrowing::{Discriminant, path};
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
-/// Access path through declared fields whose reads re-verify the discriminant tag.
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub(super) struct Path<'s>(LocalId, Vec<&'s str>);
-pub(super) fn path(expr: &Expr) -> Option<Path<'_>> {
-    match expr {
-        Expr::LocalGet(id) => Some(Path(*id, vec![])),
-        Expr::PropertyGet {
-            object, property, ..
-        } => {
-            let mut path = path(object)?;
-            path.1.push(property.as_str());
-            Some(path)
-        }
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Discriminant {
-    TypeOf,
-    Tag,
-}
-
-pub(super) struct Guard<'s> {
-    path: Path<'s>,
-    tag: &'s str,
-    equal: bool,
-    discriminant: Discriminant,
-}
-
 impl<'s> FunctionBuilder<'s> {
-    pub(super) fn variant_condition(&mut self, condition: &'s Expr, truth: bool) {
-        if let Expr::Unary {
-            op: UnaryOp::Not,
-            operand,
-        } = condition
+    /// After `local = expr`, lowered to `assigned`, the local holds the alternative of the
+    /// assigned value's own type or the case of a variant literal, as TypeScript narrows on
+    /// assignment.
+    pub(super) fn assignment_narrowing(
+        &mut self,
+        ctx: &Context,
+        id: LocalId,
+        (expr, assigned): (&'s Expr, Value),
+        carrier: TypeHandle,
+    ) {
+        if crate::value_unions::is_value_union(ctx, present_type(ctx, carrier))
+            && let Some(tag) = perry_mir::value_tag(ctx, assigned.get_type(ctx))
         {
-            self.variant_condition(operand, !truth);
-            return;
-        }
-        if let Expr::Logical { op, left, right } = condition {
-            match (op, truth) {
-                (LogicalOp::And, true) => {
-                    self.variant_condition(left, true);
-                    self.variant_condition(right, true);
-                }
-                (LogicalOp::Or, false) => {
-                    self.variant_condition(left, false);
-                    self.variant_condition(right, false);
-                }
-                _ => {}
-            }
-            return;
-        }
-        let Expr::Compare { op, left, right } = condition else {
-            return;
-        };
-        match op {
-            CompareOp::Eq => self.variant_equality(left, right, truth),
-            CompareOp::Ne => self.variant_equality(left, right, !truth),
-            _ => {}
+            self.variant_guards.assign_as(id, Discriminant::TypeOf, tag);
+        } else if let Some(tag) = self.literal_tag(ctx, expr, assigned) {
+            self.variant_guards.assign_as(id, Discriminant::Tag, tag);
+        } else {
+            self.variant_guards.assign(id);
         }
     }
 
-    /// Record that `left === right` is `equal` when one side is a tag or `typeof` of a
-    /// path and the other a string.
-    pub(super) fn variant_equality(&mut self, left: &'s Expr, right: &'s Expr, equal: bool) {
-        let (object, tag, discriminant) = match (left, right) {
-            (
-                Expr::PropertyGet {
-                    object, property, ..
-                },
-                Expr::String(tag),
-            )
-            | (
-                Expr::String(tag),
-                Expr::PropertyGet {
-                    object, property, ..
-                },
-            ) if property == "tag" => (object, tag, Discriminant::Tag),
-            (Expr::TypeOf(object), Expr::String(tag))
-            | (Expr::String(tag), Expr::TypeOf(object)) => (object, tag, Discriminant::TypeOf),
-            _ => return,
+    /// The tag of `expr` when it is a variant literal, lowered to `value`.
+    fn literal_tag(&self, ctx: &Context, expr: &'s Expr, value: Value) -> Option<&'s str> {
+        value
+            .defining_op()
+            .filter(|&op| Operation::is_op::<VariantNewOp>(op, ctx))?;
+        let Expr::New {
+            class_name, args, ..
+        } = expr
+        else {
+            return None;
         };
-        if let Some(path) = path(object) {
-            self.variant_guards.push(Guard {
-                path,
-                tag: tag.as_str(),
-                equal,
-                discriminant,
-            });
+        let fields = self.shapes.literal_fields(class_name)?;
+        match args.get(fields.iter().position(|&name| name == "tag")?)? {
+            Expr::String(tag) => Some(tag),
+            _ => None,
         }
-    }
-
-    /// The guards in effect for `path`: each tag and whether the value equals it.
-    fn guards<'a>(
-        &'a self,
-        path: &'a Path<'s>,
-        discriminant: Discriminant,
-    ) -> impl Iterator<Item = (&'s str, bool)> + 'a {
-        self.variant_guards
-            .iter()
-            .filter(move |guard| &guard.path == path && guard.discriminant == discriminant)
-            .map(|guard| (guard.tag, guard.equal))
     }
 
     pub(super) fn narrow_value(
@@ -123,7 +62,8 @@ impl<'s> FunctionBuilder<'s> {
         };
         let cases = perry_mir::variant_cases(ctx, ty)?;
         let mut possible = cases.iter().filter(|(tag, _)| {
-            self.guards(&path, Discriminant::TypeOf)
+            self.variant_guards
+                .tags(&path, Discriminant::TypeOf)
                 .all(|(guard, equal)| (tag == guard) == equal)
         });
         let Some((tag, Some(result))) = possible.next() else {
@@ -134,7 +74,8 @@ impl<'s> FunctionBuilder<'s> {
         }
         let result = *result;
         let asserted = self
-            .guards(&path, Discriminant::TypeOf)
+            .variant_guards
+            .tags(&path, Discriminant::TypeOf)
             .any(|(guard, equal)| equal && guard == tag);
         // Negative typeof guards alone do not remove null or undefined.
         if self.is_optional(ctx, value)
@@ -167,7 +108,8 @@ impl<'s> FunctionBuilder<'s> {
         for (tag, ty) in variant.deref(ctx).cases() {
             if let Some(path) = &path
                 && !self
-                    .guards(path, Discriminant::Tag)
+                    .variant_guards
+                    .tags(path, Discriminant::Tag)
                     .all(|(guard, equal)| (tag == guard) == equal)
             {
                 continue;

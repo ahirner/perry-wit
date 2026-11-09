@@ -59,6 +59,87 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
 }
 
 #[test]
+fn nullable_property_guards_follow_control_flow() {
+    for body in [
+        "if (values === null) return 0; return values.length;",
+        "return values !== null ? values.length : 0;",
+        "if (values === null) values = []; return values.length;",
+        "return values?.length ?? 0;",
+        "return values!.length;",
+        "return (values!).length;",
+        "const present = values!; return present.length;",
+        "const holder: {values: number[] | null} = {values}; return holder.values!.length;",
+        "const alias = values; if (alias === null) return 0; return alias.length;",
+        "if (values !== null && values.length > 0) return values.length; return 0;",
+        "while (values === null) { values = []; } return values.length;",
+        "if (!values) return 0; return values.length;",
+        "if (Math.random() > 0.5 || values === undefined || values === null) return 0; return values.length;",
+        "if (values === null) throw new Error('missing'); return values.length;",
+        "const alias = values; values = null; if (alias === null) return 0; return alias.length;",
+        "while (values !== null) { const count = values.length; values = null; } return 0;",
+        "const holder: {values: number[] | null} = {values}; if (holder.values === null) return 0; return holder.values.length;",
+        &format!(
+            "if (values === null) return 0; let n = 0; {} return values.length + n;",
+            "if (Math.random() > 0.5 && n >= 0) n++; ".repeat(64)
+        ),
+    ] {
+        let source = format!("export function count(values: number[] | null): number {{ {body} }}");
+        let ctx = &mut Context::new();
+        let module = lower_without_foreign(ctx, &source, "case.ts").unwrap();
+        perry_mir::canonicalize(module.get_operation(), ctx)
+            .unwrap_or_else(|error| panic!("{source}\n{}\n{}", error.disp(ctx), module.disp(ctx)));
+    }
+    for body in [
+        "if (values === null && false) return 0; return values.length;",
+        "const asserted = values!; return values.length;",
+        "const holder: {values: number[] | null} = {values}; return holder!.values.length;",
+        "if (values !== null || true) return values.length; return 0;",
+        "const present = values !== null; values = null; if (present) return values.length; return 0;",
+        "while (values !== null) { values = null; return values.length; } return 0;",
+        "const holder: {values: number[] | null} = {values}; if (holder.values === null) return 0; const alias = holder; alias.values = null; return holder.values.length;",
+        "const holder: {values: number[] | null} = JSON.parse('{\"values\":null}'); return holder.values.length;",
+        "const pick = (): number[] | null => values; return pick().length;",
+        "const rows: (number[] | null)[] = [values]; const row = rows[0]; if (row === undefined) return 0; return row.length;",
+        "for (let i = 0; i < 3; i++) { if (values === null) return 0; } return values.length;",
+    ] {
+        let source = format!("export function count(values: number[] | null): number {{ {body} }}");
+        let ctx = &mut Context::new();
+        let module = lower_without_foreign(ctx, &source, "case.ts").unwrap();
+        let error = perry_mir::canonicalize(module.get_operation(), ctx)
+            .err()
+            .expect(&source);
+        let diagnostic = error
+            .err
+            .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
+            .unwrap_or_else(|| panic!("{source}\n{}", error.disp(ctx)));
+        assert_eq!(
+            diagnostic.message, "property access receiver is possibly null",
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn variant_narrowing_ends_at_closure_writes() {
+    // The loop reads `local` before `flip` assigns it, so the next iteration may hold case b.
+    let source = r#"type Shape = { tag: "a"; val: number } | { tag: "b"; val: string };
+export function run(): number {
+  let local: Shape = { tag: "a", val: 1 };
+  const flip = (): void => { local = { tag: "b", val: "x" }; };
+  let total = 0;
+  if (local.tag === "a") {
+    for (let i = 0; i < 2; i++) { total += local.val; flip(); }
+  }
+  return total;
+}"#;
+    let diagnostic = rejection(source, "narrowing.ts");
+    assert_eq!(
+        diagnostic.message,
+        "narrow a heterogeneous variant by its tag before reading val"
+    );
+}
+
+#[test]
 fn frame_proofs_follow_reference_escape_through_calls() {
     let ctx = &mut Context::new();
     let source = r#"

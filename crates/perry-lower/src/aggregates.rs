@@ -2,7 +2,6 @@
 mod records;
 
 use super::*;
-use crate::coerce::merge_absence;
 
 impl<'s> FunctionBuilder<'s> {
     /// Lower `array[index] = value` for arrays and tuples.
@@ -163,7 +162,7 @@ impl<'s> FunctionBuilder<'s> {
                         uniform = false;
                         break;
                     }
-                    states = merge_absence(states, absence(ctx, ty));
+                    states = perry_mir::Absence::join_optional(states, absence(ctx, ty));
                 }
                 if !uniform {
                     let fields: Vec<(String, TypeHandle)> = values

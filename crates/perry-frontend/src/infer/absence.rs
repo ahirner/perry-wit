@@ -53,7 +53,7 @@ pub(super) fn strip_nullish(ty: HirType) -> (HirType, Option<Absence>) {
                     HirType::Void => Some(Absence::Undefined),
                     _ => None,
                 };
-                absences = merge_absence(absences, state);
+                absences = Absence::join_optional(absences, state);
                 state.is_none()
             });
             let inner = match items.len() {
@@ -81,7 +81,7 @@ pub(super) fn with_absences(ty: HirType, states: impl Into<Option<Absence>>) -> 
     if matches!(inner, HirType::Any | HirType::Unknown | HirType::Void) {
         return inner;
     }
-    let states = merge_absence(existing, Some(states)).unwrap_or(states);
+    let states = existing.map_or(states, |existing| existing.join(states));
     let mut items = match inner {
         HirType::Union(members) => members,
         other => vec![other],

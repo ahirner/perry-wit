@@ -302,6 +302,14 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
     },
     CatalogEntry {
+        id: "ecma.command.narrowing",
+        description: "CLI typeof, tag and null narrowing across assignments, loops and handlers",
+        specification: "https://tc39.es/ecma262/#sec-typeof-operator",
+        domain: "Standard CLI source; exact output bytes and successful exit",
+        partitions: &["standard-source"],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
         id: "ecma.command.temporal",
         description: "CLI ISO Temporal calendar and instant operations",
         specification: "https://nodejs.org/api/",

@@ -293,7 +293,12 @@ fn map_lower_error(error: anyhow::Error) -> crate::PerryDiagnostic {
 
 fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
     let analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))
+        .map_err(
+            |error| match error.err.downcast_ref::<crate::PerryDiagnostic>() {
+                Some(diagnostic) => anyhow::Error::new(diagnostic.clone()),
+                None => anyhow!("{}", error.disp(ctx)),
+            },
+        )
         .context("optimizing MIR")
         .map_err(|error| {
             crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)

@@ -1,6 +1,6 @@
 //! Operators: arithmetic, comparison, logical, unary and truthiness.
 use super::*;
-use crate::coerce::{expression_hint, merge_absence, merged_type};
+use crate::coerce::{expression_hint, merged_type};
 
 /// Short-circuit truthiness operators `&&` and `||`. Nullish coalescing (`??`) lowers separately.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -336,7 +336,7 @@ impl<'s> FunctionBuilder<'s> {
                 let equal = self.json_scalar_equal(ctx, json, scalar)?;
                 return Ok(self.equality_result(ctx, equality, equal));
             }
-            let states = merge_absence(
+            let states = perry_mir::Absence::join_optional(
                 absence(ctx, lhs.get_type(ctx)),
                 absence(ctx, rhs.get_type(ctx)),
             );
@@ -524,8 +524,8 @@ impl<'s> FunctionBuilder<'s> {
                 i1_ty,
                 evaluate_rhs,
                 |b, ctx| {
-                    let mark = b.variant_guards.len();
-                    b.variant_condition(left, op == ShortCircuit::And);
+                    let mark = b.variant_guards.depth();
+                    b.variant_guards.condition(left, op == ShortCircuit::And);
                     let rhs = b.condition(ctx, right);
                     b.variant_guards.truncate(mark);
                     rhs
@@ -558,8 +558,8 @@ impl<'s> FunctionBuilder<'s> {
                 present_type(ctx, lhs.get_type(ctx)),
             ))
         });
-        let mark = self.variant_guards.len();
-        self.variant_condition(left, op == ShortCircuit::And);
+        let mark = self.variant_guards.depth();
+        self.variant_guards.condition(left, op == ShortCircuit::And);
         let rhs = self.expression_with(ctx, right, rhs_expected);
         self.variant_guards.truncate(mark);
         let rhs = rhs?;

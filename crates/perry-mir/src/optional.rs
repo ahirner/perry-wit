@@ -9,6 +9,7 @@ use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OptionalPayload, OutputContract, ResultType, Ty};
 use crate::{attrs::Absence, types::OptionalType};
 use pliron::{
+    builtin::attributes::UnitAttr,
     common_traits::Verify,
     context::Context,
     op::Op,
@@ -18,6 +19,8 @@ use pliron::{
     value::Value,
     verify_err,
 };
+
+pliron::dict_key!(ASSERT_PRESENT, "perry_assert_present");
 
 #[derive(Debug)]
 pub(crate) enum OptionalErr {
@@ -191,6 +194,22 @@ op_schema! {
     error = OptionalErr::Result("perry.optional_cast");
 }
 
+impl OptionalCastOp {
+    /// Preserve a source non-null assertion without changing the runtime value.
+    pub fn assert_present(ctx: &mut Context, value: Value) -> Self {
+        let op = Self::new(ctx, value, value.get_type(ctx));
+        op.get_operation()
+            .deref_mut(ctx)
+            .attributes
+            .set(ASSERT_PRESENT.clone(), UnitAttr::new());
+        op
+    }
+
+    pub(crate) fn asserts_presence(&self, ctx: &Context) -> bool {
+        crate::receivers::has_marker(ctx, self, &ASSERT_PRESENT)
+    }
+}
+
 op_schema! {
     /// Extract the defined value or throw a catchable `TypeError` on `undefined`. Emitted at
     /// typed boundaries and before property access, matching ECMAScript `TypeError` semantics.
@@ -200,4 +219,20 @@ op_schema! {
     constructors { pub new(value: Value) => infer(value); }
     result(ctx, value: Value): TypeHandle = inner(ctx, value, "perry.unwrap");
     error = OptionalErr::Result("perry.unwrap");
+}
+
+impl UnwrapOp {
+    /// A property receiver: `null` is a compile error unless `check-null-receivers` proves it
+    /// excluded at this use. `undefined` keeps the runtime `TypeError`.
+    pub fn receiver(
+        ctx: &mut Context,
+        value: Value,
+        span: impl FnOnce() -> Option<crate::SourceSpan>,
+    ) -> Result<Self> {
+        let op = Self::new(ctx, value)?;
+        if absence(ctx, value.get_type(ctx)).is_some_and(Absence::admits_null) {
+            crate::receivers::require_non_null(ctx, &op, span());
+        }
+        Ok(op)
+    }
 }

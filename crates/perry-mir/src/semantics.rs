@@ -129,9 +129,10 @@ macro_rules! primitive_semantics {
         }
         #[op_interface_impl]
         impl pliron::opts::dce::SideEffects for $op {
+            /// Throwing is a side effect, so dead-code elimination keeps an op that may throw.
             fn has_self_side_effects(&self, $ctx: &Context) -> bool {
                 let $this = self;
-                $effect
+                $effect || crate::may_throw($ctx, self.get_operation())
             }
         }
     )*)*)*};
@@ -240,4 +241,14 @@ fn field_slot(ctx: &Context, record: Value, field: Option<&StringAttr>) -> Optio
         .downcast_ref::<RecordType>()?
         .field(field?.as_str())
         .map(|(slot, _)| slot)
+}
+
+impl OperationKind {
+    /// The operand whose storage result 0 refers to.
+    pub(crate) fn aliased_operand(self) -> Option<usize> {
+        match self {
+            Self::Alias | Self::Await => Some(0),
+            _ => self.promise_payload(),
+        }
+    }
 }

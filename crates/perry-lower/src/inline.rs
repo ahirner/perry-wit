@@ -27,7 +27,7 @@ impl<'s> FunctionBuilder<'s> {
         let locals = self.locals.scope();
         let closures = self.closures.scope();
         let saved_this = std::mem::replace(&mut self.this_slot, this_slot);
-        let guards = self.variant_guards.len();
+        let guards = self.variant_guards.depth();
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
         let result = lower(self, ctx);
@@ -67,6 +67,10 @@ impl<'s> FunctionBuilder<'s> {
             empty_returns: Vec::new(),
         });
         let body = hir_compat::strip_synthetic_default_guards(body, params.iter());
+        // An inline callback runs once per element.
+        let closures = &self.closures;
+        self.variant_guards
+            .assign_in(body, [], |id| closures.get(&id).copied());
         let mut result = self.statements(ctx, body);
         if result.is_ok() && self.reachable(ctx, self.block) {
             if matches!(result_type, InlineResult::Void) {

@@ -75,14 +75,8 @@ impl Solver {
     ) -> Result<Option<ValueFacts>> {
         let reader = Work::Operation(id, index);
         let operation = op.deref(ctx);
-        if matches!(
-            kind,
-            OperationKind::Alias
-                | OperationKind::Await
-                | OperationKind::Resolved
-                | OperationKind::Timer
-        ) {
-            let input = operation.get_operand(kind.promise_payload().unwrap_or(0));
+        if let Some(input) = kind.aliased_operand() {
+            let input = operation.get_operand(input);
             self.heap_alias(ctx, id, input, id, operation.get_result(0), reader)?;
             return Ok(Some(self.analysis.states[id].value(input)));
         }

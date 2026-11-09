@@ -18,8 +18,9 @@ pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;
-pub use locations::Locations;
+pub use locations::{Locations, non_null_assertion};
 mod methods;
+mod names;
 mod parser;
 pub(crate) use parser::parse;
 mod iteration;
@@ -59,10 +60,11 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, anyhow::Error>(constructors)
     })?;
-    streams::lower(&mut ast)?;
-    methods::preserve_arguments(&mut ast);
+    let mut names = names::FreshNames::new(&ast);
+    streams::lower(&mut ast, &mut names)?;
+    methods::preserve_arguments(&mut ast, &mut names);
     classes::preserve_field_types(&mut ast);
-    locations.preserve_operators(&mut ast);
+    locations.preserve_expressions(&mut ast);
     let mut module = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
         let span = error
             .downcast_ref::<perry_hir::error::LowerError>()
@@ -149,6 +151,42 @@ function builtin() { return new Set<string>(); }
                     [Expr::Number(7.0 | 9.0)] | [Expr::Integer(7 | 9)]
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn generated_bindings_avoid_source_names() {
+        // Each source binds the name the first generated binding would take without a check.
+        for source in [
+            r#"function f(): string {
+                const __perry_arr_rest_1_ = "user";
+                const [first, ...others] = [1, 2].map((x) => x);
+                return __perry_arr_rest_1_;
+            }"#,
+            r#"function f(): string {
+                const __perry_loop_1_items = "user";
+                for (const x of [1, 2]) {}
+                return __perry_loop_1_items;
+            }"#,
+        ] {
+            let modules = std::collections::BTreeMap::new();
+            let loaded = modules::load(source, "names.ts", &modules, &HashMap::new()).unwrap();
+            let lowered = lower(loaded, "names.ts").unwrap();
+            let function = &lowered.module.functions[0];
+            let user = function.body.iter().find_map(|stmt| match stmt {
+                Stmt::Let {
+                    id,
+                    init: Some(Expr::String(value)),
+                    ..
+                } if value == "user" => Some(*id),
+                _ => None,
+            });
+            let returned = function.body.iter().find_map(|stmt| match stmt {
+                Stmt::Return(Some(Expr::LocalGet(id))) => Some(*id),
+                _ => None,
+            });
+            assert!(user.is_some(), "no user binding in {:?}", function.body);
+            assert_eq!(returned, user, "{source}");
         }
     }
 }

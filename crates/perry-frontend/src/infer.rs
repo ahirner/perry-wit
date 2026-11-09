@@ -1,10 +1,10 @@
 //! Conservative completion-aware inference for unresolved local helper returns.
 use crate::methods::Kind;
 use crate::shapes::HirTypeExt;
-use crate::{Absence, hir_compat, merge_absence, shapes};
+use crate::{Absence, hir_compat, shapes};
 use anyhow::{Context as _, Result, ensure};
 use perry_hir::{
-    ir::{CompareOp, Expr, LogicalOp, Module as HirModule, Stmt},
+    ir::{Expr, LogicalOp, Module as HirModule, Stmt},
     types::{FuncId, LocalId, Type as HirType},
 };
 use pliron::context::Context;

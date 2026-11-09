@@ -28,12 +28,11 @@ fn slice_call(obj: Box<ast::Expr>, start: usize) -> Box<ast::Expr> {
 }
 
 /// Keep arguments together before HIR expands a variadic push into separate mutations.
-pub(super) fn preserve_arguments(module: &mut ast::Module) {
-    #[derive(Default)]
-    struct Arguments {
-        rest_counter: usize,
+pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut names::FreshNames) {
+    struct Arguments<'n> {
+        names: &'n mut names::FreshNames,
     }
-    impl VisitMut for Arguments {
+    impl VisitMut for Arguments<'_> {
         fn visit_mut_var_decl(&mut self, var_decl: &mut ast::VarDecl) {
             let mut new_decls = Vec::with_capacity(var_decl.decls.len());
             for mut decl in std::mem::take(&mut var_decl.decls) {
@@ -68,9 +67,8 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
                         let src_ident = match *init {
                             ast::Expr::Ident(src_ident) => src_ident,
                             other => {
-                                self.rest_counter += 1;
                                 let temp_ident = ast::Ident::new(
-                                    format!("__perry_arr_rest_{}", self.rest_counter).into(),
+                                    self.names.prefix("arr_rest").into(),
                                     DUMMY_SP,
                                     SyntaxContext::empty(),
                                 );
@@ -125,7 +123,7 @@ pub(super) fn preserve_arguments(module: &mut ast::Module) {
             }
         }
     }
-    module.visit_mut_with(&mut Arguments::default());
+    module.visit_mut_with(&mut Arguments { names });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
