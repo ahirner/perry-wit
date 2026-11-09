@@ -119,35 +119,22 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             then_expr,
             else_expr,
         } => {
-            let undefined_check = match &**condition {
-                Expr::Compare { op, left, right }
-                    if matches!(**left, Expr::Undefined) || matches!(**right, Expr::Undefined) =>
-                {
-                    Some(op)
-                }
-                _ => None,
-            };
+            let guard = crate::narrowing::DefinedGuard::of(condition);
+            let defined = |truth, expr| guard.as_ref().is_some_and(|g| g.proves(truth, expr));
             let absent_branch = if matches!(**then_expr, Expr::Undefined | Expr::Null) {
-                Some((
-                    then_expr,
-                    else_expr,
-                    matches!(undefined_check, Some(CompareOp::Eq)),
-                ))
+                Some((then_expr, else_expr, false))
             } else if matches!(**else_expr, Expr::Undefined | Expr::Null) {
-                Some((
-                    else_expr,
-                    then_expr,
-                    matches!(undefined_check, Some(CompareOp::Ne)),
-                ))
+                Some((else_expr, then_expr, true))
             } else {
                 None
             };
-            if let Some((absent, other, narrowed)) = absent_branch {
+            if let Some((absent, other, truth)) = absent_branch {
                 let state = if matches!(**absent, Expr::Null) {
                     Absence::Null
                 } else {
                     Absence::Undefined
                 };
+                let narrowed = defined(truth, other);
                 let other = expression(other, env);
                 let (inner, states) = if narrowed {
                     let (inner, states) = strip_nullish(other);
@@ -155,15 +142,15 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 } else {
                     (other, None)
                 };
-                with_absences(inner, merge_absence(states, Some(state)))
+                with_absences(inner, Absence::join_optional(states, Some(state)))
             } else {
                 let mut then_ty = expression(then_expr, env);
-                if matches!(undefined_check, Some(CompareOp::Ne)) {
+                if defined(true, then_expr) {
                     let (inner, states) = strip_nullish(then_ty);
                     then_ty = with_absences(inner, without_undefined(states));
                 }
                 let (_, states) = strip_nullish(expression(else_expr, env));
-                let states = if matches!(undefined_check, Some(CompareOp::Eq)) {
+                let states = if defined(false, else_expr) {
                     without_undefined(states)
                 } else {
                     states
@@ -192,7 +179,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         } => {
             let (left_inner, absences) = strip_nullish(expression(left, env));
             let (right_inner, right_absences) = strip_nullish(expression(right, env));
-            let absences = merge_absence(absences, right_absences);
+            let absences = Absence::join_optional(absences, right_absences);
             let base = if is_resolvable_type(&right_inner) {
                 right_inner
             } else {
@@ -528,7 +515,8 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                                 (ty, Some(existing)) if opt => {
                                     let (inner, prop_abs) = strip_nullish(ty);
                                     let (_, existing_abs) = strip_nullish(existing.ty);
-                                    let existing_abs = merge_absence(existing_abs, prop_abs);
+                                    let existing_abs =
+                                        Absence::join_optional(existing_abs, prop_abs);
                                     (with_absences(inner, existing_abs), existing.optional)
                                 }
                                 (ty, _) => (ty, opt),

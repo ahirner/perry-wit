@@ -8,6 +8,7 @@ pub(super) struct Presence(u8);
 
 impl Presence {
     pub(super) const PRESENT: Self = Self(1);
+    pub(super) const ANY: Self = Self(7);
 
     pub(super) fn absent(absence: Absence) -> Self {
         Self(match absence {
@@ -27,8 +28,11 @@ impl Presence {
     pub(super) fn intersect(self, other: Self) -> Self {
         Self(self.0 & other.0)
     }
-    pub(super) fn exclude(self, absence: Absence) -> Self {
-        Self(self.0 & !Self::absent(absence).0)
+    pub(super) fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+    pub(super) fn is_empty(self) -> bool {
+        self.0 == 0
     }
     pub(super) fn admits(self, absence: Absence) -> bool {
         self.0 & Self::absent(absence).0 != 0

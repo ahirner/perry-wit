@@ -7,7 +7,7 @@ use crate::{
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        op_interfaces::{BranchOpInterface, OneRegionInterface},
+        op_interfaces::{BranchOpInterface, OneOpdInterface, OneRegionInterface},
         ops::FuncOp,
         types::FP64Type,
     },
@@ -88,12 +88,20 @@ pub(crate) fn orders(ctx: &Context, block: Ptr<BasicBlock>) -> [Option<Order>; 2
     })
 }
 
+/// Bounds the walk through loop-carried block arguments. Results are memoized per remaining
+/// depth, so each answer is independent of query order and the walk stays polynomial.
+const PRESENCE_DEPTH: u8 = 32;
+
+/// Solved facts refined by the branch edges that dominate a use.
 pub(crate) struct GuardedFacts<'a> {
     ctx: &'a Context,
     facts: &'a ProgramFacts,
     cache: HashMap<(Ptr<BasicBlock>, Value), Range>,
     guards: HashMap<Value, Vec<(Ptr<BasicBlock>, Range)>>,
+    /// Branch successors with a single predecessor, and the condition truth holding there.
     branches: Vec<(Ptr<BasicBlock>, Value, bool)>,
+    states: HashMap<(Ptr<BasicBlock>, Value, u8), Presence>,
+    restrictions: HashMap<(Value, bool, Value, u8), Presence>,
 }
 
 impl<'a> GuardedFacts<'a> {
@@ -143,167 +151,199 @@ impl<'a> GuardedFacts<'a> {
             guards,
             cache: HashMap::new(),
             branches,
+            states: HashMap::new(),
+            restrictions: HashMap::new(),
         }
     }
 
-    pub(crate) fn may_be_absent_at(
-        &self,
+    /// Whether `value` may be `null` where an operation in `block` reads it.
+    pub(crate) fn may_be_null_at(
+        &mut self,
         dominance: &mut DomInfo,
-        consumer: Ptr<Operation>,
+        block: Ptr<BasicBlock>,
         value: Value,
-        absence: crate::Absence,
     ) -> bool {
-        self.presence(
-            dominance,
-            consumer
-                .deref(self.ctx)
-                .get_parent_block()
-                .expect("consumer block"),
-            value,
-            32,
-        )
-        .admits(absence)
+        self.states(dominance, block, value, PRESENCE_DEPTH)
+            .admits(crate::Absence::Null)
     }
 
-    fn presence(
-        &self,
+    /// The states `value` may hold in `block`: its declared states, narrowed through optional
+    /// casts and unwraps, per-edge block arguments and the branch edges dominating `block`.
+    fn states(
+        &mut self,
         dominance: &mut DomInfo,
         block: Ptr<BasicBlock>,
         value: Value,
         depth: u8,
     ) -> Presence {
         let ctx = self.ctx;
-        let mut presence = self.facts.presence(ctx, value);
+        let mut states = self.facts.presence(ctx, value);
         if depth == 0 {
-            return presence;
+            return states;
         }
-        if let Some(op) = value.defining_op()
-            && Operation::is_op::<crate::OptionalCastOp>(op, ctx)
-        {
-            presence = presence.intersect(self.presence(
-                dominance,
-                block,
-                op.deref(ctx).get_operand(0),
-                depth - 1,
-            ));
+        if let Some(&cached) = self.states.get(&(block, value, depth)) {
+            return cached;
+        }
+        let next = depth - 1;
+        if let Some(source) = passed_through(ctx, value) {
+            states = states.intersect(self.states(dominance, block, source, next));
         }
         if let Some(definition) = value.defining_block()
             && definition.num_preds(ctx) != 0
+            && let Some(edges) = incoming(ctx, definition, value.find_index(ctx))
         {
             let mut joined = Presence::default();
-            for (terminator, index, operand) in incoming(ctx, definition, value.find_index(ctx)) {
-                let predecessor = terminator
-                    .deref(ctx)
-                    .get_parent_block()
-                    .expect("predecessor");
-                let mut incoming = self.presence(dominance, predecessor, operand, depth - 1);
-                if Operation::is_op::<CondBrOp>(terminator, ctx) {
-                    incoming = self.refine(
-                        dominance,
-                        terminator.deref(ctx).get_operand(0),
-                        index == 0,
-                        operand,
-                        incoming,
-                        depth - 1,
-                    );
-                }
-                joined = joined.join(incoming);
+            for (predecessor, terminator, index, operand) in edges {
+                let incoming = self.states(dominance, predecessor, operand, next);
+                let edge = self.edge(dominance, terminator, index, operand, next);
+                joined = joined.join(incoming.intersect(edge));
             }
-            presence = presence.intersect(joined);
+            states = states.intersect(joined);
         }
-        for &(target, condition, truth) in &self.branches {
-            if target == block || dominance.block_strictly_dominates_block(ctx, target, block) {
-                presence = self.refine(dominance, condition, truth, value, presence, depth - 1);
+        for index in 0..self.branches.len() {
+            let (target, condition, truth) = self.branches[index];
+            if dominates(ctx, dominance, target, block) {
+                let allowed = self.restriction(dominance, condition, truth, value, next);
+                states = states.intersect(allowed);
             }
         }
-        presence
+        self.states.insert((block, value, depth), states);
+        states
     }
 
-    fn refine(
-        &self,
+    /// The states `value` may hold after `terminator` takes successor `index`.
+    fn edge(
+        &mut self,
+        dominance: &mut DomInfo,
+        terminator: Ptr<Operation>,
+        index: usize,
+        value: Value,
+        depth: u8,
+    ) -> Presence {
+        if let Some(branch) = Operation::get_op::<CondBrOp>(terminator, self.ctx) {
+            let condition = branch.get_operand_condition(self.ctx);
+            self.restriction(dominance, condition, index == 0, value, depth)
+        } else {
+            Presence::ANY
+        }
+    }
+
+    /// The states `value` may hold where `tested` holds one of `holds`: `holds` when `tested`
+    /// is the same read, empty when `tested` cannot hold any of them, and for a block argument
+    /// the join over the incoming values that may flow into it.
+    fn test(
+        &mut self,
+        dominance: &mut DomInfo,
+        tested: Value,
+        holds: Presence,
+        value: Value,
+        depth: u8,
+    ) -> Presence {
+        let ctx = self.ctx;
+        let tested = through_unwraps(ctx, tested);
+        if self.facts.presence(ctx, tested).intersect(holds).is_empty() {
+            return Presence::default();
+        }
+        if self
+            .facts
+            .same_read(ctx, tested, through_unwraps(ctx, value))
+        {
+            return holds;
+        }
+        self.through_argument(
+            dominance,
+            tested,
+            value,
+            depth,
+            |this, dom, operand, _, next| this.test(dom, operand, holds, value, next),
+        )
+    }
+
+    /// For a block argument, join over its incoming edges the states of `value` at each
+    /// predecessor, narrowed by the edge and by what `allowed` derives from the incoming value;
+    /// [`Presence::ANY`] for any other value or once `depth` is spent.
+    fn through_argument(
+        &mut self,
+        dominance: &mut DomInfo,
+        argument: Value,
+        value: Value,
+        depth: u8,
+        mut allowed: impl FnMut(&mut Self, &mut DomInfo, Value, Ptr<BasicBlock>, u8) -> Presence,
+    ) -> Presence {
+        let ctx = self.ctx;
+        let (Some(edges), Some(next)) = (
+            argument
+                .defining_block()
+                .filter(|b| b.num_preds(ctx) != 0)
+                .and_then(|block| incoming(ctx, block, argument.find_index(ctx))),
+            depth.checked_sub(1),
+        ) else {
+            return Presence::ANY;
+        };
+        let mut joined = Presence::default();
+        for (predecessor, terminator, index, operand) in edges {
+            let allowed = allowed(self, dominance, operand, predecessor, next);
+            if allowed.is_empty() {
+                continue;
+            }
+            let candidate = self.states(dominance, predecessor, value, next);
+            let edge = self.edge(dominance, terminator, index, value, next);
+            joined = joined.join(candidate.intersect(allowed).intersect(edge));
+        }
+        joined
+    }
+
+    /// The states `value` may hold where `condition` is `truth`: [`Presence::ANY`] when the
+    /// condition says nothing about `value`, empty where the condition cannot be `truth`.
+    fn restriction(
+        &mut self,
         dominance: &mut DomInfo,
         condition: Value,
         truth: bool,
         value: Value,
-        presence: Presence,
         depth: u8,
     ) -> Presence {
         if depth == 0 {
-            return presence;
+            return Presence::ANY;
         }
         let ctx = self.ctx;
         let (condition, truth) = predicate(ctx, self.facts, condition, truth);
-        if let Range::Bounds(Interval { lower, upper }) = self.facts.range(ctx, condition)
+        let key = (condition, truth, value, depth);
+        if let Some(&cached) = self.restrictions.get(&key) {
+            return cached;
+        }
+        let allowed = if let Range::Bounds(Interval { lower, upper }) =
+            self.facts.range(ctx, condition)
             && lower == upper
         {
-            return if (lower != 0) == truth {
-                presence
+            if (lower != 0) == truth {
+                Presence::ANY
             } else {
                 Presence::default()
-            };
-        }
-        if let Some(op) = condition.defining_op() {
-            let operation = op.deref(ctx);
-            let absence = if Operation::is_op::<crate::IsNullOp>(op, ctx) {
-                Some(crate::Absence::Null)
-            } else if Operation::is_op::<crate::IsUndefinedOp>(op, ctx) {
-                Some(crate::Absence::Undefined)
+            }
+        } else if let Some((tested, absence)) = absence_test(ctx, condition) {
+            let absent = Presence::absent(absence);
+            let holds = if truth {
+                absent
             } else {
-                None
+                Presence::ANY.without(absent)
             };
-            if let Some(absence) = absence {
-                let tested = operation.get_operand(0);
-                let possible = self.facts.presence(ctx, tested);
-                if (truth && !possible.admits(absence))
-                    || (!truth && possible.exclude(absence) == Presence::default())
-                {
+            self.test(dominance, tested, holds, value, depth - 1)
+        } else {
+            // A boolean block argument (`&&`, `||`): join what each feasible incoming edge allows.
+            let edge = |this: &mut Self, dom: &mut DomInfo, operand, predecessor, next| {
+                let (tested, required) = predicate(ctx, this.facts, operand, truth);
+                if this.branches.iter().any(|&(target, guard, holds)| {
+                    guard == tested && holds != required && dominates(ctx, dom, target, predecessor)
+                }) {
                     return Presence::default();
                 }
-                if self.facts.same_read(ctx, tested, value) {
-                    return if truth {
-                        presence.intersect(Presence::absent(absence))
-                    } else {
-                        presence.exclude(absence)
-                    };
-                }
-            }
-        }
-        if let Some(block) = condition.defining_block()
-            && block.num_preds(ctx) != 0
-        {
-            let mut joined = Presence::default();
-            for (terminator, index, operand) in incoming(ctx, block, condition.find_index(ctx)) {
-                let predecessor = terminator
-                    .deref(ctx)
-                    .get_parent_block()
-                    .expect("predecessor");
-                let (tested, required) = predicate(ctx, self.facts, operand, truth);
-                if self.branches.iter().any(|&(target, guard, truth)| {
-                    guard == tested
-                        && truth != required
-                        && (target == predecessor
-                            || dominance.block_strictly_dominates_block(ctx, target, predecessor))
-                }) {
-                    continue;
-                }
-                let candidate = self.presence(dominance, predecessor, value, depth - 1);
-                let mut candidate =
-                    self.refine(dominance, operand, truth, value, candidate, depth - 1);
-                if Operation::is_op::<CondBrOp>(terminator, ctx) {
-                    candidate = self.refine(
-                        dominance,
-                        terminator.deref(ctx).get_operand(0),
-                        index == 0,
-                        value,
-                        candidate,
-                        depth - 1,
-                    );
-                }
-                joined = joined.join(candidate);
-            }
-            return presence.intersect(joined);
-        }
-        presence
+                this.restriction(dom, operand, truth, value, next)
+            };
+            self.through_argument(dominance, condition, value, depth, edge)
+        };
+        self.restrictions.insert(key, allowed);
+        allowed
     }
 
     pub(crate) fn at(
@@ -381,8 +421,9 @@ fn predicate(
             CompareKind::Ne => !truth,
             _ => break,
         };
-        let operation = compare.get_operation().deref(ctx);
-        let (left, right) = (operation.get_operand(0), operation.get_operand(1));
+        let Some((left, right)) = compared(ctx, &compare) else {
+            break;
+        };
         let Some((tested, constant)) =
             [(left, right), (right, left)]
                 .into_iter()
@@ -405,28 +446,67 @@ fn predicate(
     (condition, truth)
 }
 
-fn incoming(
+fn dominates(
     ctx: &Context,
+    dominance: &mut DomInfo,
+    target: Ptr<BasicBlock>,
     block: Ptr<BasicBlock>,
-    argument: usize,
-) -> Vec<(Ptr<Operation>, usize, Value)> {
+) -> bool {
+    target == block || dominance.block_strictly_dominates_block(ctx, target, block)
+}
+
+/// The two operands of `compare`.
+fn compared(ctx: &Context, compare: &CompareOp) -> Option<(Value, Value)> {
+    let operation = compare.get_operation().deref(ctx);
+    let mut operands = operation.operands();
+    Some((operands.next()?, operands.next()?))
+}
+
+/// The source of `value` when an unwrap or optional cast defines it.
+fn passed_through(ctx: &Context, value: Value) -> Option<Value> {
+    let op = value.defining_op()?;
+    if let Some(unwrap) = Operation::get_op::<crate::UnwrapOp>(op, ctx) {
+        return Some(unwrap.get_operand(ctx));
+    }
+    Operation::get_op::<crate::OptionalCastOp>(op, ctx).map(|cast| cast.get_operand(ctx))
+}
+
+/// The value an unwrap or optional cast passes through unchanged.
+fn through_unwraps(ctx: &Context, mut value: Value) -> Value {
+    while let Some(source) = passed_through(ctx, value) {
+        value = source;
+    }
+    value
+}
+
+/// The operand and absence state an `is_null`/`is_undefined` test checks.
+fn absence_test(ctx: &Context, condition: Value) -> Option<(Value, crate::Absence)> {
+    let op = condition.defining_op()?;
+    if let Some(test) = Operation::get_op::<crate::IsNullOp>(op, ctx) {
+        return Some((test.get_operand(ctx), crate::Absence::Null));
+    }
+    Operation::get_op::<crate::IsUndefinedOp>(op, ctx)
+        .map(|test| (test.get_operand(ctx), crate::Absence::Undefined))
+}
+
+/// An edge into a block: predecessor, its terminator, the successor index, and the operand.
+type Edge = (Ptr<BasicBlock>, Ptr<Operation>, usize, Value);
+
+/// The edges into `block` with the operand each passes to
+/// `argument`; `None` when a predecessor does not end in a branch whose operands can be read,
+/// so the caller proves nothing from the edges.
+fn incoming(ctx: &Context, block: Ptr<BasicBlock>, argument: usize) -> Option<Vec<Edge>> {
     let mut incoming = Vec::new();
     for predecessor in block.preds(ctx) {
-        let terminator = predecessor
-            .deref(ctx)
-            .get_terminator(ctx)
-            .expect("predecessor branch");
+        let terminator = predecessor.deref(ctx).get_terminator(ctx)?;
         let operation = Operation::get_op_dyn(terminator, ctx);
-        let branch = op_cast::<dyn BranchOpInterface>(&*operation).expect("branch");
+        let branch = op_cast::<dyn BranchOpInterface>(&*operation)?;
         for (index, successor) in terminator.deref(ctx).successors().enumerate() {
             if successor == block {
-                incoming.push((
-                    terminator,
-                    index,
-                    branch.successor_operands(ctx, index)[argument],
-                ));
+                let operand = *branch.successor_operands(ctx, index).get(argument)?;
+                incoming.push((predecessor, terminator, index, operand));
             }
         }
     }
-    incoming
+    Some(incoming)
 }

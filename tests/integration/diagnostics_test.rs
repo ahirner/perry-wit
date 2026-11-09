@@ -101,69 +101,45 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     assert_eq!(io_err.diagnostics[0].code, DiagnosticCode::Io);
 }
 
+/// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
+/// and rejected control flow is covered by `perry-lower`'s tests.
 #[test]
 fn nullable_property_access_requires_narrowing() {
     let wit = Wit {
         application: b"package example:nullable; world demo { export count: func(values: option<list<u32>>) -> u32; }".as_slice().into(),
         dependencies: vec![],
     };
-    for body in [
-        "return values.length;",
-        "if (values === null) return 0; values = null; return values.length;",
-        "if (values !== null) { const count = values.length; } return values.length;",
-    ] {
-        let source =
-            format!("export function count(values: number[] | null): number {{\n  {body}\n}}");
-        let program = Program {
-            source: Source {
-                name: Some("main.ts".into()),
-                contents: source.as_bytes().to_vec(),
-            },
-            modules: vec![],
-        };
-        let error = api::compile(
-            &program,
-            &wit,
-            &Options {
-                world: Some("demo".into()),
-                ..Options::default()
-            },
-        )
-        .expect_err("nullable access must be rejected");
-        let diagnostic = &error.diagnostics[0];
-        assert_eq!(
-            diagnostic.code,
-            DiagnosticCode::UnsupportedExpression,
-            "{error}"
-        );
-        assert_eq!(
-            diagnostic.message, "property access receiver is possibly null",
-            "{error}"
-        );
-        let span = diagnostic.span.as_ref().expect("property access span");
-        assert_eq!(span.file.to_string_lossy(), "main.ts");
-        assert_eq!(&source[span.start_byte..span.end_byte], "values.length");
-        assert_eq!(span.start_byte, source.rfind("values.length").unwrap());
-    }
-    for body in [
-        "if (values === null) return 0; return values.length;",
-        "return values?.length ?? 0;",
-    ] {
-        let source = format!("export function count(values: number[] | null): number {{ {body} }}");
-        let program = Program {
-            source: source.as_bytes().into(),
-            modules: vec![],
-        };
-        api::compile(
-            &program,
-            &wit,
-            &Options {
-                world: Some("demo".into()),
-                ..Options::default()
-            },
-        )
-        .unwrap_or_else(|error| panic!("{source}\n{error}"));
-    }
+    let source = "export function count(values: number[] | null): number {\n  if (values !== null) { const count = values.length; } return values.length;\n}";
+    let program = Program {
+        source: Source {
+            name: Some("main.ts".into()),
+            contents: source.as_bytes().to_vec(),
+        },
+        modules: vec![],
+    };
+    let error = api::compile(
+        &program,
+        &wit,
+        &Options {
+            world: Some("demo".into()),
+            ..Options::default()
+        },
+    )
+    .expect_err("nullable access must be rejected");
+    let diagnostic = &error.diagnostics[0];
+    assert_eq!(
+        diagnostic.code,
+        DiagnosticCode::UnsupportedExpression,
+        "{error}"
+    );
+    assert_eq!(
+        diagnostic.message, "property access receiver is possibly null",
+        "{error}"
+    );
+    let span = diagnostic.span.as_ref().expect("property access span");
+    assert_eq!(span.file.to_string_lossy(), "main.ts");
+    assert_eq!(span.start_byte, source.rfind("values.length").unwrap());
+    assert_eq!(&source[span.start_byte..span.end_byte], "values.length");
 }
 
 #[test]

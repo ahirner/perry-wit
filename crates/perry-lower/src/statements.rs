@@ -17,6 +17,7 @@ impl<'s> FunctionBuilder<'s> {
                     )?;
                     let slot = self.entry_slot(ctx, value.get_type(ctx));
                     self.store(ctx, slot, value);
+                    self.variant_guards.assign(element.id);
                     self.locals.insert(element.id, LocalBinding::plain(slot));
                     let done = self.condition(ctx, element.condition)?;
                     let done = self.choose(
@@ -171,7 +172,7 @@ impl<'s> FunctionBuilder<'s> {
                 then_branch,
                 else_branch,
             } => {
-                let guards = self.variant_guards.len();
+                let guards = self.variant_guards.depth();
                 let test = self.condition(ctx, condition)?;
                 let then = self.new_block(ctx, "then");
                 let join = self.new_block(ctx, "join");
@@ -182,25 +183,35 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.branch(ctx, test, then, otherwise);
                 self.switch_to(then);
-                self.variant_condition(condition, true);
+                // Stores in one arm do not reach the other arm, nor the join unless the arm
+                // falls through to it.
+                let arms = self.variant_guards.mark();
+                self.variant_guards.condition(condition, true);
                 self.statements(ctx, then_branch)?;
                 let then_reachable = self.reachable(ctx, self.block);
                 self.jump(ctx, join);
                 self.variant_guards.truncate(guards);
+                let then_stores = self.variant_guards.revive(arms);
                 let mut else_reachable = true;
                 if let Some(else_branch) = else_branch {
                     self.switch_to(otherwise);
-                    self.variant_condition(condition, false);
+                    self.variant_guards.condition(condition, false);
                     self.statements(ctx, else_branch)?;
                     else_reachable = self.reachable(ctx, self.block);
                     self.jump(ctx, join);
                 }
                 self.variant_guards.truncate(guards);
+                if !else_reachable {
+                    self.variant_guards.revive(arms);
+                }
+                if then_reachable {
+                    self.variant_guards.kill(then_stores);
+                }
                 if !then_reachable {
-                    self.variant_condition(condition, false);
+                    self.variant_guards.condition(condition, false);
                 }
                 if !else_reachable {
-                    self.variant_condition(condition, true);
+                    self.variant_guards.condition(condition, true);
                 }
                 self.switch_to(join);
             }
@@ -281,7 +292,10 @@ impl<'s> FunctionBuilder<'s> {
                         label: label.as_str(),
                         break_to: exit,
                     });
+                    // A `break` reaches the exit before the narrowings that follow it.
+                    let guards = self.variant_guards.depth();
                     let res = self.statement(ctx, body, None);
+                    self.variant_guards.truncate(guards);
                     self.controls.pop();
                     res?;
                     self.jump(ctx, exit);
@@ -397,6 +411,8 @@ impl<'s> FunctionBuilder<'s> {
             let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier));
             self.store(ctx, slot, undef);
         }
+        // A declaration lowered again (a `finally` body at each exit) binds a new value.
+        self.variant_guards.assign(id);
         self.locals.insert(
             id,
             LocalBinding {

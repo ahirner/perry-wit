@@ -261,7 +261,7 @@ pub(crate) fn promote_arguments(
             || effects
                 .function_summary(ctx, function)?
                 .effects
-                .may_mutate_records()
+                .may_change(crate::effects::Observed::Fields)
             || async_callees.contains(&name)
         {
             continue;

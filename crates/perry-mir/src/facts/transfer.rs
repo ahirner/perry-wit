@@ -14,7 +14,10 @@ use crate::{
     types::PromiseType,
 };
 use pliron::{
-    builtin::{op_interfaces::BranchOpInterface, types::IntegerType},
+    builtin::{
+        op_interfaces::{BranchOpInterface, OneOpdInterface},
+        types::IntegerType,
+    },
     context::{Context, Ptr},
     identifier::Identifier,
     op::op_cast,
@@ -700,7 +703,7 @@ impl Solver {
                     Presence::PRESENT
                 } else {
                     self.analysis.states[id]
-                        .value(operation.get_operand(0))
+                        .value(cast.get_operand(ctx))
                         .presence
                         .intersect(Presence::declared(ctx, result.get_type(ctx)))
                 }

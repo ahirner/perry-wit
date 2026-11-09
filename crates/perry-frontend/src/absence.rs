@@ -12,11 +12,12 @@ impl Absence {
     pub const fn admits_undefined(self) -> bool {
         matches!(self, Self::Undefined | Self::Both)
     }
-}
-pub fn merge_absence(left: Option<Absence>, right: Option<Absence>) -> Option<Absence> {
-    match (left, right) {
-        (None, other) | (other, None) => other,
-        (Some(left), Some(right)) if left == right => Some(left),
-        (Some(_), Some(_)) => Some(Absence::Both),
+    /// The states admitted by either side.
+    pub fn join(self, other: Self) -> Self {
+        if self == other { self } else { Self::Both }
+    }
+    /// [`Self::join`] where `None` admits no absence.
+    pub fn join_optional(left: Option<Self>, right: Option<Self>) -> Option<Self> {
+        left.into_iter().chain(right).reduce(Self::join)
     }
 }

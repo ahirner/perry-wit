@@ -76,18 +76,7 @@ impl<'s> FunctionBuilder<'s> {
             return self.class_static_field_get(ctx, class_name, property);
         }
         let value = self.expression(ctx, object)?;
-        let nullable = absence(ctx, value.get_type(ctx)).is_some_and(|state| state.admits_null());
-        let value = self.defined(ctx, value)?;
-        if nullable {
-            let unwrap =
-                Operation::get_op::<UnwrapOp>(value.defining_op().expect("receiver unwrap"), ctx)
-                    .expect("receiver unwrap");
-            unwrap.require_present(
-                ctx,
-                perry_mir::Absence::Null,
-                self.shapes.metadata.locations.member_span(byte_offset),
-            );
-        }
+        let value = self.receiver(ctx, value, byte_offset)?;
         let ty = value.get_type(ctx);
         if crate::value_unions::is_value_union(ctx, ty) {
             return self.value_union_member(ctx, value, property);

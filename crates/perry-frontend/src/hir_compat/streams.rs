@@ -1,47 +1,28 @@
 //! Lower array/string iteration and byte-stream async iteration before HIR erases types.
+use super::names::FreshNames;
 use anyhow::{Result, anyhow, bail, ensure};
 use perry_parser::swc_ecma_ast as ast;
 use std::collections::HashSet;
 use swc_common::{DUMMY_SP, Span, SyntaxContext};
-use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 /// The synthetic method a synchronous `for...of` calls on its source: lowering checks that
 /// the receiver is an array or string and yields it unchanged.
 pub(super) const ITERATION: &str = "$$perryIteration";
 
-/// Prefix for synthetic names declared by a rewritten loop, numbered past any colliding source identifier.
-const LOOP_PREFIX: &str = "__perry_loop_";
-
 /// Rewrite every `for...of` and `for await...of` into the indexed or reader loop it means.
-pub(super) fn lower(module: &mut ast::Module) -> Result<()> {
-    #[derive(Default)]
-    struct Names(HashSet<String>);
-    impl Visit for Names {
-        fn visit_ident(&mut self, ident: &ast::Ident) {
-            // Only names that could collide with generated loop names.
-            if ident.sym.starts_with(LOOP_PREFIX) {
-                self.0.insert(ident.sym.to_string());
-            }
-        }
-    }
-    let mut names = Names::default();
-    module.visit_with(&mut names);
-    let mut lower = Loops {
-        names: names.0,
-        next: 0,
-        error: None,
-    };
+pub(super) fn lower(module: &mut ast::Module, names: &mut FreshNames) -> Result<()> {
+    let mut lower = Loops { names, error: None };
     module.visit_mut_with(&mut lower);
     lower.error.map_or(Ok(()), Err)
 }
 
-struct Loops {
-    names: HashSet<String>,
-    next: usize,
+struct Loops<'n> {
+    names: &'n mut FreshNames,
     error: Option<anyhow::Error>,
 }
 
-impl Loops {
+impl Loops<'_> {
     fn rewrite(&mut self, iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
         let asynchronous = iteration.is_await;
         let ast::ForHead::VarDecl(declaration) = iteration.left else {
@@ -54,13 +35,7 @@ impl Loops {
             bail!(ONE_BINDING);
         };
         let binding = declarator.name;
-        let prefix = loop {
-            self.next += 1;
-            let prefix = format!("{LOOP_PREFIX}{}_", self.next);
-            if !self.names.iter().any(|name| name.starts_with(&prefix)) {
-                break prefix;
-            }
-        };
+        let prefix = self.names.prefix("loop");
         let template = if asynchronous {
             format!(
                 r#"{{
@@ -116,7 +91,7 @@ impl Loops {
     }
 }
 
-impl VisitMut for Loops {
+impl VisitMut for Loops<'_> {
     fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
         statement.visit_mut_children_with(self);
         let empty = ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP });

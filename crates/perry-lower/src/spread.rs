@@ -136,7 +136,7 @@ impl<'s> FunctionBuilder<'s> {
                         | perry_frontend::hir::ArrayElement::Hole => Some(Absence::Undefined),
                         _ => None,
                     };
-                    crate::coerce::merge_absence(states, state)
+                    perry_mir::Absence::join_optional(states, state)
                 });
                 let inner = present_type(ctx, base);
                 element = Some(states.map_or(inner, |states| {
@@ -201,7 +201,7 @@ impl<'s> FunctionBuilder<'s> {
                     present_type(ctx, source_element) == inner,
                     "array spreads must have one element type"
                 );
-                let merged = crate::coerce::merge_absence(
+                let merged = perry_mir::Absence::join_optional(
                     absence(ctx, previous),
                     absence(ctx, source_element),
                 )

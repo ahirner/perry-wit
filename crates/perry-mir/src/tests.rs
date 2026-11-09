@@ -729,6 +729,16 @@ fn may_throw_marks_calls_unwraps_and_writes() {
         ],
         "array_get, to_number and the rest are pure reads"
     );
+    // Dead-code elimination keeps a bigint division whose result is unused: it may throw.
+    let ctx = &mut Context::new();
+    let text = single_block("q = perry.binary Div v, v : perry.bigint;")
+        .replacen("(builtin.fp64)", "(perry.bigint)", 1)
+        .replacen("v: builtin.fp64", "v: perry.bigint", 1);
+    let module = parse(ctx, &text);
+    verify_operation(module, ctx).expect("verifies");
+    dce(module, ctx).expect("dce");
+    let f = function(ctx, module, "f");
+    assert!(crate::may_throw(ctx, first::<BinaryOp>(ctx, &f)));
 }
 
 #[test]

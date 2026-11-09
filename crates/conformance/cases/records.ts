@@ -41,6 +41,10 @@ function size(value: Choice): number {
 function presentRecord(value: { n: number } | null | undefined): number {
   return value ? value.n : 10;
 }
+// An `undefined` test narrows only the path it compares, not the other branch's value.
+function guardedOther(guard: number | undefined, value: number | undefined) {
+  return guard !== undefined ? value : 0;
+}
 interface Options {
   query?: { search?: string };
 }
@@ -53,7 +57,7 @@ function checked(options: Options, visits: number[]): Options {
 }
 const visits: number[] = [];
 const chained = checked({ query: { search: " OK " } }, visits).query?.search?.trim().toLowerCase() ?? "";
-console.log("narrowing", size({ tag: "text", val: "abc" }), size({ tag: "number", val: 4 }), presentRecord({ n: 7 }), presentRecord(null), presentRecord(undefined));
+console.log("narrowing", size({ tag: "text", val: "abc" }), size({ tag: "number", val: 4 }), presentRecord({ n: 7 }), presentRecord(null), presentRecord(undefined), guardedOther(1, undefined), guardedOther(1, 2));
 console.log("optional-chain", JSON.stringify(label({})), JSON.stringify(label({ query: {} })), chained, visits.length);
 
 type A = { tag: "a"; val: number };

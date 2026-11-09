@@ -66,7 +66,7 @@ builtin.module @effects {
         );
     }
     let wait = effects.effects(&pliron::ident!("wait")).unwrap();
-    assert!(wait.effects.may_mutate_records());
+    assert!(wait.effects.may_change(crate::effects::Observed::Fields));
     assert_eq!(wait.effects.failure, Failure::Throws { escapes: true });
     let launch = effects.effects(&pliron::ident!("launch")).unwrap();
     assert!(launch.effects.allocates && launch.effects.may_collect && launch.effects.may_suspend);

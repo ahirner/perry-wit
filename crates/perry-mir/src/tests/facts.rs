@@ -406,7 +406,15 @@ builtin.module @paths { ^module():
         ("BEFORE", "perry.call effect () : ;", false),
         ("AFTER", "perry.call effect () : ;", true),
         ("BEFORE", "perry.array_push items <- zero;", true),
-        ("AFTER", "perry.array_push other <- zero;", false),
+        // Another task may mutate the source while this one waits.
+        (
+            "BEFORE",
+            "ready = perry.promise_resolved zero : perry.promise <builtin.fp64>; \
+             waited = perry.await ready : builtin.fp64;",
+            true,
+        ),
+        // The parse may throw, so the write would become visible before its exception.
+        ("AFTER", "perry.array_push other <- zero;", true),
         ("SIDE", "perry.array_push items <- zero;", false),
         ("TAIL", "perry.array_push items <- zero;", true),
     ] {
@@ -441,15 +449,15 @@ builtin.module @paths { ^module():
         };
         let parse_op = intrinsic(crate::Intrinsic::JsonParse);
         let consumer = intrinsic(crate::Intrinsic::JsonToNumber);
+        let site = crate::json_copy::ParseStringifySite::new(
+            ctx,
+            stringify.deref(ctx).get_operand(0),
+            (stringify, None),
+            Some(parse_op),
+            consumer,
+        );
         assert_eq!(
-            facts(ctx, module)?.may_prevent_json_copy_between(
-                ctx,
-                &run,
-                stringify.deref(ctx).get_operand(0),
-                stringify,
-                (None, Some(parse_op)),
-                consumer,
-            ),
+            facts(ctx, module)?.may_prevent_json_copy_between(ctx, &run, &site),
             blocks,
             "{position}: {operation}"
         );

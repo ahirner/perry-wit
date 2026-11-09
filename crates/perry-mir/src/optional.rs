@@ -8,9 +8,8 @@
 use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OptionalPayload, OutputContract, ResultType, Ty};
 use crate::{attrs::Absence, types::OptionalType};
-pliron::dict_key!(REQUIRE_PRESENT, "perry_require_present");
-pliron::dict_key!(ASSERT_PRESENT, "perry_assert_present");
 use pliron::{
+    builtin::attributes::UnitAttr,
     common_traits::Verify,
     context::Context,
     op::Op,
@@ -20,6 +19,8 @@ use pliron::{
     value::Value,
     verify_err,
 };
+
+pliron::dict_key!(ASSERT_PRESENT, "perry_assert_present");
 
 #[derive(Debug)]
 pub(crate) enum OptionalErr {
@@ -197,19 +198,15 @@ impl OptionalCastOp {
     /// Preserve a source non-null assertion without changing the runtime value.
     pub fn assert_present(ctx: &mut Context, value: Value) -> Self {
         let op = Self::new(ctx, value, value.get_type(ctx));
-        op.get_operation().deref_mut(ctx).attributes.set(
-            ASSERT_PRESENT.clone(),
-            pliron::builtin::attributes::UnitAttr::new(),
-        );
+        op.get_operation()
+            .deref_mut(ctx)
+            .attributes
+            .set(ASSERT_PRESENT.clone(), UnitAttr::new());
         op
     }
 
     pub(crate) fn asserts_presence(&self, ctx: &Context) -> bool {
-        self.get_operation()
-            .deref(ctx)
-            .attributes
-            .get::<pliron::builtin::attributes::UnitAttr>(&ASSERT_PRESENT)
-            .is_some()
+        crate::receivers::has_marker(ctx, self, &ASSERT_PRESENT)
     }
 }
 
@@ -225,26 +222,17 @@ op_schema! {
 }
 
 impl UnwrapOp {
-    pub fn require_present(
-        &self,
+    /// A property receiver: `null` is a compile error unless `check-null-receivers` proves it
+    /// excluded at this use. `undefined` keeps the runtime `TypeError`.
+    pub fn receiver(
         ctx: &mut Context,
-        absence: Absence,
-        span: Option<crate::SourceSpan>,
-    ) {
-        self.get_operation()
-            .deref_mut(ctx)
-            .attributes
-            .set(REQUIRE_PRESENT.clone(), absence);
-        if let Some(span) = span {
-            crate::set_source_span(ctx, self, &span);
+        value: Value,
+        span: impl FnOnce() -> Option<crate::SourceSpan>,
+    ) -> Result<Self> {
+        let op = Self::new(ctx, value)?;
+        if absence(ctx, value.get_type(ctx)).is_some_and(Absence::admits_null) {
+            crate::receivers::require_non_null(ctx, &op, span());
         }
-    }
-
-    pub(crate) fn required_presence(&self, ctx: &Context) -> Option<Absence> {
-        self.get_operation()
-            .deref(ctx)
-            .attributes
-            .get::<Absence>(&REQUIRE_PRESENT)
-            .copied()
+        Ok(op)
     }
 }
