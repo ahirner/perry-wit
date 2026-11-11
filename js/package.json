@@ -9,6 +9,7 @@
   "scripts": {
     "build": "pnpm --recursive run build",
     "test": "pnpm --recursive run test",
-    "typecheck": "pnpm --recursive run typecheck"
+    "typecheck": "pnpm --recursive run typecheck",
+    "test:e2e": "node scripts/e2e.mjs"
   }
 }

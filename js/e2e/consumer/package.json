@@ -1,0 +1,16 @@
+{
+  "name": "perry-wit-e2e-consumer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json && tsc --project tsconfig.bundler.json",
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "perry-wit": "file:./perry-wit.tgz"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  }
+}
