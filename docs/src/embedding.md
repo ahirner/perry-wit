@@ -72,6 +72,7 @@ cd js
 pnpm install
 pnpm build
 pnpm test
+pnpm test:e2e
 ```
 
 `build:wasm` needs the development shell's `WASI_WIT_PATH`.
@@ -80,6 +81,22 @@ Setting `PERRY_COMPILER_WASM` to an already built compiler component skips Cargo
 ```sh
 PERRY_COMPILER_WASM="$(nix build .#perry-wit-wasm --print-out-paths)/lib/perry-wit.wasm" pnpm --dir js build
 ```
+
+`pnpm test:e2e` tests the package as users receive it:
+
+1. It packs the package, which runs the complete build.
+2. It installs the tarball into a fresh copy of the project in `js/e2e/consumer`.
+3. It checks which files the package ships.
+4. It type-checks the project with Node.js and bundler module resolution, then runs it.
+
+`js/pnpm-workspace.yaml` sets the supply-chain policy for every install, including the end-to-end test's:
+
+- `minimumReleaseAge` installs only versions published at least a week ago.
+- `blockExoticSubdeps` refuses transitive dependencies from git repositories or tarball URLs.
+- `trustPolicy: no-downgrade` refuses a version published with weaker provenance than an earlier one.
+- `strictDepBuilds` fails the install when a dependency's build script is not approved in `allowBuilds`.
+
+The `JS package` workflow builds, tests and end-to-end tests the package on the oldest and newest supported Node.js releases.
 
 ## WebAssembly Component
 
