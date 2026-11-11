@@ -1,2 +1,14 @@
 packages:
   - packages/*
+
+# Supply-chain policy, after Jco's workspace.
+# Resolve only versions published at least a week ago, so a compromised release has time to be found and pulled.
+minimumReleaseAge: 10080
+# Refuse transitive dependencies from git repositories or tarball URLs instead of the registry.
+blockExoticSubdeps: true
+# Refuse a version published with weaker provenance than an earlier version of the same package.
+trustPolicy: no-downgrade
+# Fail the install when a dependency has a build script that allowBuilds does not approve.
+strictDepBuilds: true
+# Dependencies allowed to run install scripts. None need to.
+allowBuilds: {}
