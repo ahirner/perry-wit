@@ -54,9 +54,9 @@ tokio = "1"
 wasm-encoder = "0.261"
 wasmparser = "0.261"
 wasmprinter = "0.261.0"
-wasmtime = { version = "=50.0.0", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
-wasmtime-wasi = { version = "=50.0.0", default-features = false, features = ["p3"] }
-wasmtime-wasi-http = { version = "=50.0.0", default-features = false, features = ["p3", "default-send-request"] }
+wasmtime = { version = "=50.0.1", default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+wasmtime-wasi = { version = "=50.0.1", default-features = false, features = ["p3"] }
+wasmtime-wasi-http = { version = "=50.0.1", default-features = false, features = ["p3", "default-send-request"] }
 wat = "~1.261.0"
 wit-parser = "0.261"
 
