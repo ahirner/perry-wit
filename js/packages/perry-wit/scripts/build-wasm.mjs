@@ -36,6 +36,7 @@ async function main(args) {
   }
   await mkdir(dirname(output), { recursive: true });
   await copyFile(input, output);
+  await chmod(output, 0o644);
   console.error(`${input} -> ${output}`);
 }
 

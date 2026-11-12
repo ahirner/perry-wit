@@ -19,7 +19,7 @@ The `perry-wit` npm package compiles TypeScript into components from Node.js 22 
 It bundles the compiler, so installing it needs no Rust toolchain:
 
 ```sh
-npm install perry-wit
+npm install perry-wit  # todo: publishing still to come
 ```
 
 This script compiles a module against a WIT world and writes the component:
@@ -80,6 +80,9 @@ Setting `PERRY_COMPILER_WASM` to an already built compiler component skips Cargo
 
 ```sh
 PERRY_COMPILER_WASM="$(nix build .#perry-wit-wasm --print-out-paths)/lib/perry-wit.wasm" pnpm --dir js build
+# for a debug build:
+cargo build --target wasm32-wasip2 --config 'profile.dev.strip="debuginfo"'
+PERRY_COMPILER_WASM=target/wasm32-wasip2/debug/perry-wit.wasm pnpm --dir js build
 ```
 
 `pnpm test:e2e` tests the package as users receive it:

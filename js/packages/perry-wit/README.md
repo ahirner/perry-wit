@@ -6,7 +6,7 @@ Compile TypeScript ahead of time into [WASI 0.3](https://wasi.dev) WebAssembly c
 This package bundles the compiler, so it needs no Rust or LLVM toolchain.
 
 ```sh
-npm install perry-wit
+npm install perry-wit  # todo: publishing still to come
 ```
 
 ```ts
