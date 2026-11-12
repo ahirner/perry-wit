@@ -172,7 +172,7 @@ pub(super) fn build_module(
                 is_async: function.is_async,
                 await_initialization: function.is_exported
                     && function.is_async
-                    && locations.async_init(),
+                    && hir.has_top_level_await,
                 top_level: false,
                 name: identifier(&function.name)?,
                 params,
@@ -194,7 +194,7 @@ pub(super) fn build_module(
         // the body of a command's `wasi:cli/run`. With exported functions they initialize the
         // module once before the first entry point, and `run` only awaits that initialization.
         let persistent = hir.functions.iter().any(|f| f.is_exported);
-        let async_init = locations.async_init();
+        let async_init = hir.has_top_level_await;
         let settled = BindingType::plain(shapes.settled_type(ctx, &HirType::Void)?);
         let mut entries = vec![(
             Signature {

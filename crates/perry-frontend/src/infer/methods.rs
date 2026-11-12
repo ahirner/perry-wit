@@ -24,15 +24,23 @@ pub(super) fn call(
     };
     let method = hir_compat::method(property);
     let name = method.name();
-    if name == "groupBy"
-        && matches!(object.as_ref(),
-        Expr::PropertyGet { object: global, property: class, .. }
-            if matches!(global.as_ref(), Expr::GlobalGet(_)) && class == "Map")
+    if let Expr::PropertyGet {
+        object: global,
+        property: class,
+        ..
+    } = object.as_ref()
+        && matches!(global.as_ref(), Expr::GlobalGet(_))
     {
-        let [items, callback] = args else {
-            return HirType::Any;
-        };
-        return map_group_by(items, callback, env);
+        match (class.as_str(), name) {
+            ("Map", "groupBy") => {
+                let [items, callback] = args else {
+                    return HirType::Any;
+                };
+                return map_group_by(items, callback, env);
+            }
+            ("performance", "now") => return HirType::Number,
+            _ => {}
+        }
     }
     if let Some(result) = env.class_method_return_type(object, name) {
         return result;

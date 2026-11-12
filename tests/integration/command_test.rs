@@ -142,6 +142,25 @@ export async function double(x: number) {
             "initialized\n",
         ),
         (
+            "async func",
+            r#"
+const body = new Response(new Uint8Array([3, 4])).body;
+let boot = 0;
+if (body !== null) {
+  for await (const chunk of body) {
+    for (let i = 0; i < chunk.length; i++) boot += chunk[i];
+  }
+}
+let calls = 0;
+export async function double(x: number) {
+  calls += 1;
+  return x * 2 + boot + calls;
+}
+"#,
+            (10, 11),
+            "",
+        ),
+        (
             "func",
             "let total = [1, 2, 3].reduce((a, b) => a + b, 34); export function double(x: number) { total += x; return total; }",
             (41, 42),
@@ -193,14 +212,16 @@ export async function double(x: number) {
         pending.contains("top-level statements leave asynchronous work pending"),
         "{pending}"
     );
-    let synchronous = error(
-        "func",
+    for source in [
         "import { setTimeout } from 'node:timers/promises'; await setTimeout(1); export function double(x: number): number { return x * 2; }",
-    );
-    assert!(
-        synchronous.contains("double requires asynchronous module initialization"),
-        "{synchronous}"
-    );
+        "const body = new Response(new Uint8Array([1])).body; if (body !== null) { for await (const _ of body) {} } export function double(x: number): number { return x * 2; }",
+    ] {
+        let synchronous = error("func", source);
+        assert!(
+            synchronous.contains("double requires asynchronous module initialization"),
+            "{synchronous}"
+        );
+    }
     Ok(())
 }
 

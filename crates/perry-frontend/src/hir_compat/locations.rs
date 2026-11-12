@@ -34,7 +34,6 @@ pub struct Locations<'s> {
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
-    async_init: bool,
 }
 
 impl<'s> Locations<'s> {
@@ -92,10 +91,6 @@ impl<'s> Locations<'s> {
 
     pub(crate) fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
         self.files.push((file, source, offset));
-    }
-
-    pub fn async_init(&self) -> bool {
-        self.async_init
     }
 
     pub(crate) fn has_explicit_return(&self, name: &str) -> bool {
@@ -168,7 +163,6 @@ impl<'s> Locations<'s> {
     pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
         struct Collector<'a, 's> {
             locations: &'a mut Locations<'s>,
-            in_fn: bool,
             class_name: Option<String>,
         }
         impl Visit for Collector<'_, '_> {
@@ -270,26 +264,9 @@ impl<'s> Locations<'s> {
                     .imports
                     .insert(import.src.value.to_string_lossy().into_owned(), import.span);
             }
-            fn visit_await_expr(&mut self, expr: &ast::AwaitExpr) {
-                if !self.in_fn {
-                    self.locations.async_init = true;
-                }
-                expr.visit_children_with(self);
-            }
-            fn visit_function(&mut self, func: &ast::Function) {
-                let prev = std::mem::replace(&mut self.in_fn, true);
-                func.visit_children_with(self);
-                self.in_fn = prev;
-            }
-            fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
-                let prev = std::mem::replace(&mut self.in_fn, true);
-                arrow.visit_children_with(self);
-                self.in_fn = prev;
-            }
         }
         module.visit_with(&mut Collector {
             locations: self,
-            in_fn: false,
             class_name: None,
         });
     }

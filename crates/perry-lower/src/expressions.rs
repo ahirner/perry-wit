@@ -392,12 +392,7 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self
                 .property_get(ctx, object, property, *byte_offset)
-                .map_err(|error| {
-                    crate::diagnostics::annotate(
-                        error,
-                        self.shapes.metadata.locations.member_span(*byte_offset),
-                    )
-                })?,
+                .map_err(|error| self.shapes.annotate_member(error, *byte_offset))?,
             Expr::PropertySet {
                 object,
                 property,
@@ -405,11 +400,16 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self.set_field(ctx, object, property, value)?,
             Expr::PutValueSet {
-                target, key, value, ..
+                target,
+                key,
+                value,
+                element_offset,
+                ..
             } => match key.as_ref() {
-                Expr::String(field) => self.set_field(ctx, target, field, value)?,
-                index => self.set_index(ctx, target, index, value)?,
-            },
+                Expr::String(field) => self.set_field(ctx, target, field, value),
+                index => self.set_index(ctx, target, index, value),
+            }
+            .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             Expr::New {
                 class_name, args, ..
             } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
@@ -464,6 +464,9 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self.web_method(ctx, object, method, args)?,
             Expr::This => self.class_this(ctx)?,
+            Expr::ThisProvenClass(class_name) => {
+                self.boolean(ctx, self.is_proven_this_class(ctx, class_name))
+            }
             Expr::StaticFieldGet {
                 class_name,
                 field_name,
@@ -511,16 +514,22 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet {
                 object,
                 index,
+                element_offset,
                 byte_offset: _,
                 byte_end: _,
-            } => self.index_get(ctx, object, index)?,
+            } => self
+                .index_get(ctx, object, index)
+                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             Expr::IndexSet {
                 object,
                 index,
                 value,
+                element_offset,
                 byte_offset: _,
                 byte_end: _,
-            } => self.set_index(ctx, object, index, value)?,
+            } => self
+                .set_index(ctx, object, index, value)
+                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             other => bail!("MIR backend does not support expression {other:?} yet"),
         };
         self.narrow_value(ctx, expr, value)

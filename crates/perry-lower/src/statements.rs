@@ -87,6 +87,17 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<()> {
         match statement {
             Stmt::If {
+                condition: Expr::ThisProvenClass(class_name),
+                then_branch,
+                else_branch,
+            } => {
+                if self.is_proven_this_class(ctx, class_name) {
+                    self.statements(ctx, then_branch)?;
+                } else if let Some(else_branch) = else_branch {
+                    self.statements(ctx, else_branch)?;
+                }
+            }
+            Stmt::If {
                 condition,
                 else_branch,
                 ..
@@ -362,7 +373,7 @@ impl<'s> FunctionBuilder<'s> {
         let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
         let declared = type_state
             .resolved()
-            .map(|ty| self.shapes.value_type(ctx, ty))
+            .map(|ty| self.active_value_type(ctx, ty))
             .transpose()?;
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64

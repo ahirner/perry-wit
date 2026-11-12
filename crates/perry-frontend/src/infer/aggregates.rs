@@ -193,12 +193,7 @@ fn element_type(value: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         HirType::StringLiteral(_) => *ty = HirType::String,
         HirType::Int32 => *ty = HirType::Number,
         HirType::Union(members) => {
-            let mut distinct = Vec::with_capacity(members.len());
-            for member in members.drain(..) {
-                if !distinct.contains(&member) {
-                    distinct.push(member);
-                }
-            }
+            let distinct: Vec<_> = members.drain(..).collect_unique();
             *ty = match <[HirType; 1]>::try_from(distinct) {
                 Ok([member]) => member,
                 Err(distinct) => HirType::Union(distinct),

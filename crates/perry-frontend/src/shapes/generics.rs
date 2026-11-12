@@ -1,6 +1,7 @@
 //! Instantiation of generic interfaces, type aliases, and classes.
 use super::*;
 use perry_hir::ir::{Class, Interface, TypeAlias};
+use pliron::utils::vec_exns::VecExtns;
 
 mod resolution;
 pub use resolution::Query;
@@ -247,9 +248,7 @@ pub fn optional_property(ty: HirType, optional: bool) -> HirType {
     }
     match ty {
         HirType::Union(mut items) => {
-            if !items.contains(&HirType::Void) {
-                items.push(HirType::Void);
-            }
+            items.push_unique(HirType::Void);
             HirType::Union(items)
         }
         other => HirType::Union(vec![other, HirType::Void]),

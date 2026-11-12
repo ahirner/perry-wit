@@ -147,7 +147,9 @@ async function later(v: number) {
   await setTimeout(1);
   return a;
 }
+function clockSample() { return performance.now(); }
 export async function run(x: number) {
+  if (!(clockSample() >= 0)) throw 3;
   const trace: number[] = [];
   const value = await setTimeout(0, x);
   trace.push(value);

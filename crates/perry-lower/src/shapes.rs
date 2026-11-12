@@ -188,6 +188,10 @@ impl<'h> Shapes<'h> {
         crate::diagnostics::annotate(error, self.metadata.locations.call_span(byte_offset))
     }
 
+    pub(super) fn annotate_member(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+        crate::diagnostics::annotate(error, self.metadata.locations.member_span(byte_offset))
+    }
+
     pub(super) fn has_function(&self, name: &str) -> bool {
         self.function_names.contains(name)
     }

@@ -41,7 +41,11 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     assert_eq!(&helper[span.start_byte..span.end_byte], "value ** 1");
     assert_eq!((span.start_line, span.start_column), (3, 9));
 
-    for expression in ["(value as any)(1)", "(value as any).byteLength"] {
+    for expression in [
+        "(value as any)(1)",
+        "(value as any).byteLength",
+        "(value as any)[0]",
+    ] {
         let helper = format!(
             "export function helper(value:number):number {{\r\n 'é🙂'; return {expression};\r\n}}"
         );
@@ -210,6 +214,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }".into(), format!("case.ts:1:38: UnsupportedExpression: Temporal.ZonedDateTime.from is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now{IN_F}")),
         ("export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }".into(), format!("case.ts:1:47: UnsupportedExpression: Temporal add duration field hours is not supported; use years, months, weeks, or days{IN_F}")),
         ("export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }".into(), format!("case.ts:1:47: UnsupportedExpression: property hour is not supported on Temporal.PlainDate yet{IN_F}")),
+        ("export function run(): number {\n  return (performance as any).mark();\n}".into(), format!("case.ts:2:10: UnsupportedExpression: performance.mark is not supported yet{IN_RUN}")),
     ];
     let mismatches: Vec<String> = cases
         .iter()
