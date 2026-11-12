@@ -13,16 +13,6 @@ pub(super) fn is_integer64(ctx: &Context, ty: TypeHandle) -> bool {
         .is_some_and(|integer| integer.width() == 64)
 }
 
-pub(super) fn merge_absence(
-    left: Option<perry_mir::Absence>,
-    right: Option<perry_mir::Absence>,
-) -> Option<perry_mir::Absence> {
-    match (left, right) {
-        (None, other) | (other, None) => other,
-        (Some(left), Some(right)) if left == right => Some(left),
-        (Some(_), Some(_)) => Some(perry_mir::Absence::Both),
-    }
-}
 /// `ty` widened to also admit `state`: `T | undefined` from `T`, and `T | null | undefined`
 /// from `T | null`.
 pub(super) fn admitting(
@@ -30,10 +20,7 @@ pub(super) fn admitting(
     ty: TypeHandle,
     state: perry_mir::Absence,
 ) -> TypeHandle {
-    let states = match absence(ctx, ty) {
-        Some(existing) if existing != state => perry_mir::Absence::Both,
-        _ => state,
-    };
+    let states = absence(ctx, ty).map_or(state, |existing| existing.join(state));
     let inner = present_type(ctx, ty);
     perry_mir::OptionalType::get_with(ctx, inner, states).into()
 }
@@ -52,9 +39,10 @@ pub(super) fn merged_type(
     left: TypeHandle,
     right: TypeHandle,
 ) -> TypeHandle {
-    merge_absence(absence(ctx, left), absence(ctx, right)).map_or(base, |states| {
-        perry_mir::OptionalType::get_with(ctx, present_type(ctx, base), states).into()
-    })
+    perry_mir::Absence::join_optional(absence(ctx, left), absence(ctx, right))
+        .map_or(base, |states| {
+            perry_mir::OptionalType::get_with(ctx, present_type(ctx, base), states).into()
+        })
 }
 
 pub(super) use perry_frontend::methods::Kind;
@@ -165,6 +153,21 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(value);
         }
         let op = UnwrapOp::new(ctx, value)?;
+        Ok(self.append_value(ctx, &op))
+    }
+
+    /// [`Self::defined`] for a property receiver; MIR rejects one that may still be `null`.
+    pub(super) fn receiver(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        byte_offset: u32,
+    ) -> Result<Value> {
+        if !self.is_optional(ctx, value) {
+            return Ok(value);
+        }
+        let locations = &self.shapes.metadata.locations;
+        let op = UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset))?;
         Ok(self.append_value(ctx, &op))
     }
 

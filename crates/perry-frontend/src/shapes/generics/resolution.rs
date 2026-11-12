@@ -209,8 +209,8 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
                     return None;
                 }
                 out.push(target);
-            } else if !out.contains(&target) {
-                out.push(target);
+            } else {
+                out.push_unique(target);
             }
         }
         Some(())

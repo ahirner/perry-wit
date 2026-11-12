@@ -1,13 +1,16 @@
 //! Conservative completion-aware inference for unresolved local helper returns.
 use crate::methods::Kind;
 use crate::shapes::HirTypeExt;
-use crate::{Absence, hir_compat, merge_absence, shapes};
+use crate::{Absence, hir_compat, shapes};
 use anyhow::{Context as _, Result, ensure};
 use perry_hir::{
-    ir::{CompareOp, Expr, LogicalOp, Module as HirModule, Stmt},
+    ir::{Expr, LogicalOp, Module as HirModule, Stmt},
     types::{FuncId, LocalId, Type as HirType},
 };
-use pliron::context::Context;
+use pliron::{
+    context::Context,
+    utils::vec_exns::{IterExtns, VecExtns},
+};
 use std::collections::HashSet;
 
 use perry_hir::HirTypeFacts;
@@ -113,8 +116,8 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Decla
             if absence.admits_undefined() {
                 push_return_type(types, HirType::Void, decls);
             }
-        } else if !types.contains(&defined) {
-            types.push(defined);
+        } else {
+            types.push_unique(defined);
         }
         return;
     }
@@ -127,9 +130,7 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Decla
         HirType::StringLiteral(_) => HirType::String,
         ty => ty,
     };
-    if !types.contains(&normalized) {
-        types.push(normalized);
-    }
+    types.push_unique(normalized);
 }
 
 fn substitute_type_vars(ty: &mut HirType, bounds: &HashMap<&str, &HirType>) {

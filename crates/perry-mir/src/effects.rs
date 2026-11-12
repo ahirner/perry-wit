@@ -15,7 +15,7 @@ use pliron::{
     op::{Op, op_cast},
     operation::Operation,
     result::Result,
-    r#type::Typed,
+    r#type::{TypeHandle, Typed},
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -79,6 +79,8 @@ pub struct Effects {
     pub writes_record: bool,
     pub writes_state: bool,
     pub(crate) shrinks_arrays: bool,
+    /// An operation without a [Mutation] may write heap state its operands reach.
+    pub(crate) writes_operands: bool,
     pub failure: Failure,
     /// Runtime-managed values or effectful services whose task independence is unproven.
     pub task_state: bool,
@@ -94,13 +96,43 @@ pub struct Summary {
     pub escapes: BTreeSet<usize>,
 }
 
-impl Effects {
-    pub(crate) fn may_mutate_records(&self) -> bool {
-        self.writes_record || self.may_suspend || self.may_reenter
-    }
+/// The heap state a client reads from the objects it tracks.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Observed {
+    /// Record fields.
+    Fields,
+    /// Array lengths, which only a truncation lowers.
+    Length,
+    /// Any reachable state.
+    Contents,
+    /// A module binding.
+    Binding,
+}
 
-    pub(crate) fn may_mutate_state(&self) -> bool {
-        self.writes_state || self.may_mutate_records()
+impl Observed {
+    pub(crate) fn changed_by(self, mutation: Mutation) -> bool {
+        match self {
+            Self::Fields => matches!(mutation, Mutation::Field { .. }),
+            Self::Length => mutation == Mutation::Truncate,
+            Self::Contents => true,
+            Self::Binding => mutation == Mutation::Local,
+        }
+    }
+}
+
+impl Effects {
+    /// Whether a function with these effects, callees included, may change `observed` state.
+    /// Other tasks and host code run while it suspends or calls out.
+    pub(crate) fn may_change(&self, observed: Observed) -> bool {
+        self.may_suspend
+            || self.may_reenter
+            || self.writes_operands
+            || match observed {
+                Observed::Fields => self.writes_record,
+                Observed::Length => self.shrinks_arrays,
+                Observed::Contents => self.writes_state || self.writes_record,
+                Observed::Binding => self.writes_state,
+            }
     }
 
     pub fn requires_task(&self) -> bool {
@@ -149,6 +181,7 @@ impl LocalEffects {
         current.writes_record |= callee.writes_record;
         current.writes_state |= callee.writes_state;
         current.shrinks_arrays |= callee.shrinks_arrays;
+        current.writes_operands |= callee.writes_operands;
         current.task_state |= callee.task_state;
         if synchronous && callee.failure.throws() {
             current.failure = self.fail(current.failure, call, callee.failure.escapes());
@@ -202,6 +235,60 @@ pub fn allocation(ctx: &Context, op: Ptr<Operation>) -> Allocation {
 
 pub fn allocates(ctx: &Context, op: Ptr<Operation>) -> bool {
     allocation(ctx, op) != Allocation::None
+}
+
+/// Whether a `ty` value may refer to a record, array or JSON object.
+pub(crate) fn may_hold_heap(ctx: &Context, ty: TypeHandle) -> bool {
+    let inner = crate::optional::present_type(ctx, ty);
+    let inner_ref = inner.deref(ctx);
+    if let Some(union) = inner_ref.downcast_ref::<crate::ValueUnionType>() {
+        return may_hold_heap(ctx, union.variants());
+    }
+    if inner_ref.is::<crate::types::RecordType>()
+        || inner_ref.is::<crate::types::ArrayType>()
+        || inner_ref.is::<crate::types::JsonType>()
+    {
+        return true;
+    }
+    if let Some(variant) = inner_ref.downcast_ref::<crate::types::VariantType>() {
+        return variant
+            .cases()
+            .iter()
+            .filter_map(|(_, payload)| *payload)
+            .any(|payload| may_hold_heap(ctx, payload));
+    }
+    false
+}
+
+/// Whether running `op` is observable beyond its results: it may throw or has another side
+/// effect, so dead-code elimination keeps it. A branch only transfers control; any other
+/// operation without a side-effect contract is assumed observable.
+pub(crate) fn observable(ctx: &Context, op: Ptr<Operation>) -> bool {
+    let dynamic = Operation::get_op_dyn(op, ctx);
+    match op_cast::<dyn pliron::opts::dce::SideEffects>(dynamic.as_ref()) {
+        Some(effects) => effects.has_self_side_effects(ctx),
+        None => OperationKind::classify(ctx, op) != OperationKind::None,
+    }
+}
+
+/// Whether `op` of `kind`, neither a call nor a [Mutation], may write heap state reachable from
+/// its operands: an effectful intrinsic, or an observable operation of unknown kind whose
+/// effects go beyond its exception.
+pub(crate) fn writes_operands(ctx: &Context, op: Ptr<Operation>, kind: OperationKind) -> bool {
+    let unmodelled = match kind {
+        OperationKind::Intrinsic(intrinsic) => {
+            intrinsic.policy().effect != crate::intrinsics::ServiceEffect::Pure
+        }
+        OperationKind::Unknown => {
+            crate::semantics::exception(ctx, op).is_none() && observable(ctx, op)
+        }
+        _ => false,
+    };
+    unmodelled
+        && op
+            .deref(ctx)
+            .operands()
+            .any(|value| may_hold_heap(ctx, value.get_type(ctx)))
 }
 
 /// Classify each operation once. Caller-dependent propagation runs in `ProgramFacts`.
@@ -286,6 +373,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                 effects.writes_record |= writes_record;
                 effects.writes_state |= matches!(kind, OperationKind::Mutate(_)) || foreign;
                 effects.shrinks_arrays |= kind == OperationKind::Mutate(Mutation::Truncate);
+                effects.writes_operands |= writes_operands(ctx, op, kind);
                 let operation = op.deref(ctx);
                 effects.task_state |= intrinsic
                     .is_some_and(|i| i.policy().effect != crate::intrinsics::ServiceEffect::Pure)
@@ -338,6 +426,7 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                         writes_record: true,
                         writes_state: true,
                         shrinks_arrays: true,
+                        writes_operands: true,
                         task_state: true,
                         unknown_helper_bound: true,
                         ..effects

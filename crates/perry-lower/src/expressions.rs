@@ -18,6 +18,14 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        if let Some(value) = hir_compat::non_null_assertion(expr) {
+            let value = self.expression_with(ctx, value, expected)?;
+            return Ok(if self.is_optional(ctx, value) {
+                self.emit_value(ctx, |ctx| OptionalCastOp::assert_present(ctx, value))
+            } else {
+                value
+            });
+        }
         if let Some(record) = self.iteration.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(value) => self.expression_with(ctx, value, expected),
@@ -382,12 +390,9 @@ impl<'s> FunctionBuilder<'s> {
                 property,
                 byte_offset,
                 ..
-            } => self.property_get(ctx, object, property).map_err(|error| {
-                crate::diagnostics::annotate(
-                    error,
-                    self.shapes.metadata.locations.member_span(*byte_offset),
-                )
-            })?,
+            } => self
+                .property_get(ctx, object, property, *byte_offset)
+                .map_err(|error| self.shapes.annotate_member(error, *byte_offset))?,
             Expr::PropertySet {
                 object,
                 property,
@@ -395,11 +400,16 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self.set_field(ctx, object, property, value)?,
             Expr::PutValueSet {
-                target, key, value, ..
+                target,
+                key,
+                value,
+                element_offset,
+                ..
             } => match key.as_ref() {
-                Expr::String(field) => self.set_field(ctx, target, field, value)?,
-                index => self.set_index(ctx, target, index, value)?,
-            },
+                Expr::String(field) => self.set_field(ctx, target, field, value),
+                index => self.set_index(ctx, target, index, value),
+            }
+            .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             Expr::New {
                 class_name, args, ..
             } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
@@ -454,6 +464,9 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self.web_method(ctx, object, method, args)?,
             Expr::This => self.class_this(ctx)?,
+            Expr::ThisProvenClass(class_name) => {
+                self.boolean(ctx, self.is_proven_this_class(ctx, class_name))
+            }
             Expr::StaticFieldGet {
                 class_name,
                 field_name,
@@ -501,16 +514,22 @@ impl<'s> FunctionBuilder<'s> {
             Expr::IndexGet {
                 object,
                 index,
+                element_offset,
                 byte_offset: _,
                 byte_end: _,
-            } => self.index_get(ctx, object, index)?,
+            } => self
+                .index_get(ctx, object, index)
+                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             Expr::IndexSet {
                 object,
                 index,
                 value,
+                element_offset,
                 byte_offset: _,
                 byte_end: _,
-            } => self.set_index(ctx, object, index, value)?,
+            } => self
+                .set_index(ctx, object, index, value)
+                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             other => bail!("MIR backend does not support expression {other:?} yet"),
         };
         self.narrow_value(ctx, expr, value)
@@ -604,10 +623,11 @@ impl<'s> FunctionBuilder<'s> {
             carrier: self.slot_type(ctx, local.slot)?,
             integer: local.integer,
         };
-        let value = self.expression_with(ctx, value, Some(binding.expected_type(ctx)))?;
-        let value = self.fit_binding(ctx, value, binding)?;
-        self.store(ctx, local.slot, value);
-        Ok(value)
+        let assigned = self.expression_with(ctx, value, Some(binding.expected_type(ctx)))?;
+        let stored = self.fit_binding(ctx, assigned, binding)?;
+        self.store(ctx, local.slot, stored);
+        self.assignment_narrowing(ctx, id, (value, assigned), binding.carrier);
+        Ok(stored)
     }
 
     /// `++local`, `local--` and their relatives.
@@ -634,6 +654,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let stored = self.fit_binding(ctx, new, binding)?;
         self.store(ctx, local.slot, stored);
+        self.variant_guards.assign(id);
         Ok(if prefix { stored } else { old })
     }
 
@@ -658,25 +679,7 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             [(then, true, then_expr), (otherwise, false, else_expr)]
         };
-        let defined_path = match condition {
-            Expr::Compare {
-                op: op @ (CompareOp::Eq | CompareOp::Ne),
-                left,
-                right,
-            } => {
-                let tested = if matches!(**right, Expr::Undefined) {
-                    Some(&**left)
-                } else if matches!(**left, Expr::Undefined) {
-                    Some(&**right)
-                } else {
-                    None
-                };
-                tested
-                    .and_then(variants::path)
-                    .map(|path| (*op == CompareOp::Ne, path))
-            }
-            _ => None,
-        };
+        let guard = perry_frontend::narrowing::DefinedGuard::of(condition);
         let lower_arm = |b: &mut Self,
                          ctx: &mut Context,
                          (block, truth, expr),
@@ -684,14 +687,15 @@ impl<'s> FunctionBuilder<'s> {
                          hint|
          -> Result<_> {
             b.switch_to(block);
-            let guards = b.variant_guards.len();
-            b.variant_condition(condition, truth);
+            let guards = b.variant_guards.depth();
+            b.variant_guards.condition(condition, truth);
             let value = b.expression_with(ctx, expr, hint);
             b.variant_guards.truncate(guards);
             let value = value?;
-            let value = if defined_path.as_ref().is_some_and(|(defined_truth, path)| {
-                *defined_truth == truth && Some(path) == variants::path(expr).as_ref()
-            }) && !matches!(opposite, Expr::Undefined)
+            let value = if guard
+                .as_ref()
+                .is_some_and(|guard| guard.proves(truth, expr))
+                && !matches!(opposite, Expr::Undefined)
             {
                 b.strip_undefined(ctx, value)?
             } else {

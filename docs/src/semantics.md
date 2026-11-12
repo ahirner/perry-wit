@@ -2,6 +2,9 @@
 
 Perry-WIT accepts a statically typed subset of TypeScript.
 Names, object layouts and host capabilities are resolved at compile time, and a construct outside the subset is a compile error with a source location.
+Property reads through nullable values require narrowing: check for `null`, supply a non-null fallback, or use optional chaining before reading a property such as `.length`.
+A `typeof` or tag check narrows a union until its local is assigned, directly or by a closure; assigning a literal narrows the local to that alternative.
+A narrowed read of a property or global that another reference or call has since changed throws `TypeError`.
 
 ## Objects
 

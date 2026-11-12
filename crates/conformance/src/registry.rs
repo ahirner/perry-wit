@@ -597,6 +597,10 @@ export function run(x: number): {value: number, trace: number[]} {
         ("ecma.command.numbers", include_str!("../cases/numbers.ts")),
         ("ecma.command.web", include_str!("../cases/web.ts")),
         (
+            "ecma.command.narrowing",
+            include_str!("../cases/narrowing.ts"),
+        ),
+        (
             "ecma.command.temporal",
             include_str!("../cases/temporal.ts"),
         ),

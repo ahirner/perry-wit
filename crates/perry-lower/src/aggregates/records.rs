@@ -67,12 +67,15 @@ fn matching_record<'a>(
 }
 
 fn merged_field_type(ctx: &Context, previous: TypeHandle, incoming: TypeHandle) -> TypeHandle {
-    merge_absence(absence(ctx, previous), absence(ctx, incoming)).map_or(incoming, |states| {
-        let inner = optional_value(ctx, incoming)
-            .or_else(|| optional_value(ctx, previous))
-            .unwrap_or(incoming);
-        perry_mir::OptionalType::get_with(ctx, inner, states).into()
-    })
+    perry_mir::Absence::join_optional(absence(ctx, previous), absence(ctx, incoming)).map_or(
+        incoming,
+        |states| {
+            let inner = optional_value(ctx, incoming)
+                .or_else(|| optional_value(ctx, previous))
+                .unwrap_or(incoming);
+            perry_mir::OptionalType::get_with(ctx, inner, states).into()
+        },
+    )
 }
 
 impl<'a> RecordAssembly<'a> {

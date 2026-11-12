@@ -34,7 +34,7 @@ use crate::{
         ArrayAtOp, ArrayGetOp, ArrayIsDenseOp, ArrayLenOp, ArrayPresentOp, ArraySetOp,
         ArrayStoreOp, StringLenOp,
     },
-    facts::guards::{GuardedRanges, orders},
+    facts::guards::{GuardedFacts, orders},
     intrinsics::{Intrinsic, IntrinsicOp, intrinsic_of as intrinsic},
     optional::WrapOp,
     scalar::NumericCastOp,
@@ -136,7 +136,7 @@ pub(crate) fn prove_bounds(
     let mut status = IRStatus::Unchanged;
     for function in functions(root, ctx) {
         let facts = facts(ctx, numeric, &function);
-        let mut intervals = GuardedRanges::new(ctx, numeric, &function);
+        let mut intervals = GuardedFacts::new(ctx, numeric, &function);
         let mut lengths = Vec::new();
         let mut accesses = Vec::new();
         let mut always_true = Vec::new();
