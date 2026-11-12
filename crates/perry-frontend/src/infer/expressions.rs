@@ -187,9 +187,11 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             };
             with_absences(base, absences)
         }
-        Expr::ObjectIs(_, _) | Expr::ArrayIsArray(_) | Expr::In { .. } | Expr::Delete(_) => {
-            HirType::Boolean
-        }
+        Expr::ObjectIs(_, _)
+        | Expr::ArrayIsArray(_)
+        | Expr::In { .. }
+        | Expr::Delete(_)
+        | Expr::ThisProvenClass(_) => HirType::Boolean,
         Expr::MapSize(_) | Expr::SetSize(_) => HirType::Number,
         Expr::ObjectKeys(_) | Expr::ForInKeys(_) => HirType::Array(Box::new(HirType::String)),
         Expr::ObjectValues(object) => {
@@ -257,9 +259,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                     HirType::Union(types) => types,
                     ty => vec![ty],
                 } {
-                    if !types.contains(&ty) {
-                        types.push(ty);
-                    }
+                    types.push_unique(ty);
                 }
             }
             let element = match <[HirType; 1]>::try_from(types) {

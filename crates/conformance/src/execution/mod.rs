@@ -239,7 +239,7 @@ pub(crate) fn check_metamorphic(evidence: &[Evidence]) -> Result<()> {
                     ..
                 },
             ) => a == b && a_out == b_out && a_err == b_err,
-            (Outcome::Command(a), Outcome::Command(b)) => a == b,
+            (Outcome::Command(a), Outcome::Command(b)) => !a.timed_out && !b.timed_out && a == b,
             (Outcome::Compile(_), Outcome::Compile(_)) => true,
             _ => false,
         }

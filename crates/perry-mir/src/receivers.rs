@@ -79,8 +79,14 @@ pub(crate) fn check_receivers(
     if checked.is_empty() {
         return Ok(result);
     }
-    let facts = analyses.get_analysis::<crate::ProgramFacts>(root, ctx)?;
-    let mut dominance = DomInfo::default();
+    analyses.get_analysis::<crate::ProgramFacts>(root, ctx)?;
+    analyses.get_analysis::<DomInfo>(root, ctx)?;
+    let facts = analyses
+        .try_get_analysis::<crate::ProgramFacts>(root)
+        .expect("program facts");
+    let mut dominance = analyses
+        .try_get_analysis_mut::<DomInfo>(root)
+        .expect("dominance");
     for (function, receivers) in checked {
         let mut guards = GuardedFacts::new(ctx, &facts, &function);
         for (block, unwrap) in receivers {

@@ -38,6 +38,11 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
             "method toFixed is not supported on number yet",
             (2, 10),
         ),
+        (
+            "export function run(x: number): void {\n  (x as any)[0] = 1;\n}",
+            "computed property keys are only supported on arrays (subset rule R1)",
+            (2, 3),
+        ),
     ] {
         let diagnostic = rejection(source, "case.ts");
         assert_eq!(diagnostic.message, message);

@@ -2,6 +2,7 @@
 use super::*;
 use crate::inline::InlineResult;
 use perry_frontend::shapes::TypeId;
+use pliron::utils::vec_exns::VecExtns;
 
 enum ClassArguments<'a, 's> {
     Expressions(&'s [Expr]),
@@ -152,9 +153,7 @@ impl<'s> FunctionBuilder<'s> {
                 .deref(ctx)
                 .field(&field.name)
                 .with_context(|| format!("missing field {} on {class_name}", field.name))?;
-            if !order.contains(&(index as u32)) {
-                order.push(index as u32);
-            }
+            order.push_unique(index as u32);
         }
         let instance = self.emit_value(ctx, |ctx| {
             let alloc = AllocOp::new(ctx, rec, init_operands);
@@ -259,6 +258,24 @@ impl<'s> FunctionBuilder<'s> {
             "'this' is only supported inside class constructors, methods, and accessors",
         )?;
         self.load(ctx, slot)
+    }
+
+    pub(super) fn active_class(&self, ctx: &Context) -> Option<(&'s str, Vec<TypeId>)> {
+        let slot = self.this_slot?;
+        let ty = self.slot_type(ctx, slot).ok()?;
+        self.shapes.class_of_type(ctx, ty)
+    }
+
+    pub(super) fn is_proven_this_class(&self, ctx: &Context, class_name: &str) -> bool {
+        self.active_class(ctx)
+            .is_some_and(|(owner, _)| owner == class_name)
+    }
+
+    pub(super) fn active_value_type(&self, ctx: &Context, ty: &HirType) -> Result<TypeHandle> {
+        match self.active_class(ctx) {
+            Some((owner, type_args)) => self.shapes.class_value_type(ctx, owner, &type_args, ty),
+            None => self.shapes.value_type(ctx, ty),
+        }
     }
 
     pub(super) fn class_static_method_call(

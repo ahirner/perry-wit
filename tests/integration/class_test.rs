@@ -72,22 +72,61 @@ export function implicitConstructor() {
 class Box<T> {
     field:number=next();
     value:T;
+    items:T[];
     extra?:string;
-    constructor(value:T, extra?:string) { this.value=value; this.extra=extra; }
+    constructor(value:T, items:T[]=[], extra?:string) { this.value=value; this.items=items; this.extra=extra; }
+    count():number {
+        let total = 0;
+        for (let i = 0; i < this.items.length; i++) {
+            const item = this.items[i];
+            if (item !== undefined) total += 1;
+        }
+        return total;
+    }
 }
 export function genericConstruction() {
     step=0;
-    const explicit:Box<number>=new Box<number>(next());
-    if(explicit.value!==1 || explicit.field!==2 || step!==2 || explicit.extra!==undefined || !('extra' in explicit))return 1;
+    const explicit:Box<number>=new Box<number>(next(), [10, 20]);
+    if(explicit.value!==1 || explicit.field!==2 || step!==2 || explicit.count()!==2 || explicit.extra!==undefined || !('extra' in explicit))return 1;
     step=0;
     const contextual:Box<number>=new Box(next());
-    if(contextual.value!==1 || contextual.field!==2 || step!==2)return 2;
+    if(contextual.value!==1 || contextual.field!==2 || step!==2 || contextual.count()!==0)return 2;
     step=0;
     const inferred:number=new Box(next()).value;
     if(inferred!==1 || step!==2)return 3;
-    const empty:Box<string[]>=new Box([]);
+    const empty:Box<string[]>=new Box([], [["a"], ["b", "c"]]);
     const typed:Box<string[]>=new Box<string[]>([]);
-    if(empty.value.length!==0 || typed.value.length!==0)return 4;
+    if(empty.value.length!==0 || empty.count()!==2 || typed.value.length!==0 || typed.count()!==0)return 4;
+    return 0;
+}
+
+class Series {
+    items:number[];
+    factor:number;
+    constructor(items:number[], factor:number) { this.items=items; this.factor=factor; }
+    scale(x:number):number { return x * this.factor; }
+    sum():number {
+        let total = 0;
+        for (let i = 0; i < this.items.length; i++) {
+            total += this.scale(this.items[i]);
+        }
+        return total;
+    }
+    swapAndSum(replacement:number[]):number {
+        let total = 0;
+        for (let i = 0; i < this.items.length; i++) {
+            total += this.items[i];
+            this.items = replacement;
+        }
+        return total;
+    }
+}
+let retainedSeries:Series|null = null;
+export function loopHoisting() {
+    const series = new Series([1, 2, 4], 3);
+    retainedSeries = series;
+    if (retainedSeries.sum() !== 21) return 1;
+    if (retainedSeries.swapAndSum([10, 20, 30, 40]) !== 91) return 2;
     return 0;
 }
 
@@ -110,6 +149,7 @@ export function finiteNesting() {
             ("constructorOrder", &[], 0.0),
             ("implicitConstructor", &[], 0.0),
             ("genericConstruction", &[], 0.0),
+            ("loopHoisting", &[], 0.0),
             ("finiteNesting", &[], 6.0),
         ],
     )

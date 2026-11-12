@@ -1,7 +1,7 @@
 //! Canonical lowering of statically bound host calls.
 use super::*;
 use perry_abi::layout::foreign as transfer;
-use pliron::{context::Ptr, operation::Operation, r#type::Typed};
+use pliron::{context::Ptr, operation::Operation, r#type::Typed, utils::vec_exns::VecExtns};
 
 impl FunctionLowering<'_, '_> {
     pub(crate) fn foreign_call(
@@ -101,17 +101,12 @@ impl FunctionLowering<'_, '_> {
             let shape = self.pointer_shape(&[transfer::AREA, transfer::OWNERS]);
             let shape = self.i32_const(ctx, shape as i32);
             let transfer = self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
-            let index = if let Some(index) = self
+            let index = self
                 .state
                 .foreign_transfers
                 .iter()
                 .position(|import| import.binding == binding)
-            {
-                index
-            } else {
-                self.state.foreign_transfers.push(import);
-                self.state.foreign_transfers.len() - 1
-            };
+                .unwrap_or_else(|| self.state.foreign_transfers.push_back(import));
             let kind = self.i32_const(ctx, index as i32);
             let area = area.unwrap_or_else(|| self.i32_const(ctx, 0));
             self.store(ctx, MemKind::I32, transfer, transfer::AREA, area);

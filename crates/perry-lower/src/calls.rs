@@ -190,32 +190,44 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } = &**object
                 && matches!(**global, Expr::GlobalGet(_))
-                && class == "Promise"
             {
-                if let ("resolve" | "reject", [value]) = (property.as_str(), args) {
-                    return self.promise_settled(ctx, property, value, None).map(Some);
+                if class == "performance" {
+                    return match property.as_str() {
+                        "now" => {
+                            for arg in args {
+                                self.expression(ctx, arg)?;
+                            }
+                            Ok(Some(self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![])))
+                        }
+                        other => bail!("performance.{other} is not supported yet"),
+                    };
                 }
-                let combinator = match property.as_str() {
-                    "all" => Combinator::All,
-                    "race" => Combinator::Race,
-                    "allSettled" => Combinator::AllSettled,
-                    other => bail!("Promise.{other} is not supported yet"),
-                };
-                let [inputs] = args else {
-                    bail!("Promise.{property} takes one array");
-                };
-                let inputs = match inputs {
-                    Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
-                    inputs => self.expression(ctx, inputs)?,
-                };
-                let inputs = if self.shapes.metadata.sparse_arrays {
-                    self.combinator_holes(ctx, inputs)?
-                } else {
-                    inputs
-                };
-                let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
-                    .context("Promise combinators take an array of promises of one type")?;
-                return Ok(Some(self.append_value(ctx, &op)));
+                if class == "Promise" {
+                    if let ("resolve" | "reject", [value]) = (property.as_str(), args) {
+                        return self.promise_settled(ctx, property, value, None).map(Some);
+                    }
+                    let combinator = match property.as_str() {
+                        "all" => Combinator::All,
+                        "race" => Combinator::Race,
+                        "allSettled" => Combinator::AllSettled,
+                        other => bail!("Promise.{other} is not supported yet"),
+                    };
+                    let [inputs] = args else {
+                        bail!("Promise.{property} takes one array");
+                    };
+                    let inputs = match inputs {
+                        Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
+                        inputs => self.expression(ctx, inputs)?,
+                    };
+                    let inputs = if self.shapes.metadata.sparse_arrays {
+                        self.combinator_holes(ctx, inputs)?
+                    } else {
+                        inputs
+                    };
+                    let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
+                        .context("Promise combinators take an array of promises of one type")?;
+                    return Ok(Some(self.append_value(ctx, &op)));
+                }
             }
             return self.method(ctx, object, property, args);
         }

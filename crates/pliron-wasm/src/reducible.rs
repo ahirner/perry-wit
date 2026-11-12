@@ -34,7 +34,7 @@ use pliron::{
     operation::Operation,
     region::Region,
     r#type::{TypeHandle, Typed},
-    utils::table::ISet,
+    utils::{table::ISet, vec_exns::IterExtns},
     value::Value,
 };
 use std::collections::{HashMap, HashSet};
@@ -245,14 +245,10 @@ fn insert_guard(
     }
 
     // Redirect every edge into an entry.
-    let mut sources: Vec<Ptr<BasicBlock>> = Vec::new();
-    for entry in entries {
-        for pred in preds.get(entry).into_iter().flatten() {
-            if !sources.contains(pred) {
-                sources.push(*pred);
-            }
-        }
-    }
+    let sources: Vec<Ptr<BasicBlock>> = entries
+        .iter()
+        .flat_map(|entry| preds.get(entry).into_iter().flatten().copied())
+        .collect_unique();
     // The edge to `succ` with `args`, through the guard if `succ` is an entry.
     let redirect =
         |ctx: &mut Context, succ: Ptr<BasicBlock>, args: Vec<Value>, terminator: Ptr<Operation>| {

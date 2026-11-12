@@ -32,13 +32,13 @@
 
         # Node.js 26 enables Temporal by default, which the conformance oracle compares against.
         nodejs = pkgs.nodejs_26;
-        wasmtimeVersion = "50.0.0";
+        wasmtimeVersion = "50.0.1";
         cargoManifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
         wasmtimeAsset = {
-          aarch64-darwin = { target = "aarch64-macos"; hash = "sha256-Mj3AmNwEVdYPOWxARifpZ7cDP/z6Kav/+yQxJs+CydY="; };
-          x86_64-darwin = { target = "x86_64-macos"; hash = "sha256-rRTZ+2pR0WMzGEJtbfIXNBJ/rdyB/hijr9cMWWTqvrU="; };
-          aarch64-linux = { target = "aarch64-linux"; hash = "sha256-EPmtH4U50uBOBBzGIt5qJwEJqx5Dpr4faYQ8IIIWaDI="; };
-          x86_64-linux = { target = "x86_64-linux"; hash = "sha256-d8Ge4EN5kfmseDe5wmnZxwdnRPhdrSY/6lIUzCcjx/8="; };
+          aarch64-darwin = { target = "aarch64-macos"; hash = "sha256-lg5SFsfr1+m0XmVh0VghuLgBt9VK7ijHuRkhrrMMZcg="; };
+          x86_64-darwin = { target = "x86_64-macos"; hash = "sha256-6hgY+oy7UVJIR6sq0iGX4AUVlP3JbL0Mwq+2WDLhGSU="; };
+          aarch64-linux = { target = "aarch64-linux"; hash = "sha256-1zfgd0FtePv7CgCCKewn1qD9Wkkkh0uMOLKTyFDPQJQ="; };
+          x86_64-linux = { target = "x86_64-linux"; hash = "sha256-aFRmRV3UKhR3SobDbI8uRcu5vW2SqFATkxXfYKdUmKU="; };
         }.${system};
         wasmtimeCli = assert cargoManifest.workspace.dependencies.wasmtime.version == "=${wasmtimeVersion}";
           pkgs.stdenvNoCC.mkDerivation {
