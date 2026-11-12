@@ -271,6 +271,38 @@
           '';
         };
 
+        # npm package as the tarball `npm pack` writes, with bindings generated from the compiler component
+        npmPackageManifest = builtins.fromJSON (builtins.readFile ./js/packages/perry-wit/package.json);
+        npmPackage = assert pkgs.lib.assertMsg (npmPackageManifest.version == cargoManifest.package.version)
+          "js/packages/perry-wit/package.json must have the version in Cargo.toml (${cargoManifest.package.version})";
+          pkgs.buildNpmPackage {
+            pname = "perry-wit-npm";
+            inherit nodejs;
+            version = cargoManifest.package.version;
+            dontFixup = true;
+            src = repoSource;
+            npmRoot = "js";
+            npmDeps = pkgs.fetchNpmDeps {
+              src = "${repoSource}/js";
+              hash = "sha256-7JbHSZYukRPRYCxkVg7gR/NLpbWKVNmf5hcPOJmN7lw=";
+            };
+            npmFlags = [ "--ignore-scripts" ];
+            PERRY_COMPILER_WASM = "${perryWitWasm}/lib/perry-wit.wasm";
+            buildPhase = ''
+              runHook preBuild
+              npm --prefix js run build
+              npm --prefix js run typecheck
+              npm --prefix js test
+              runHook postBuild
+            '';
+            # npm pack writes temporary files to its cache, and the dependency cache is read-only.
+            installPhase = ''
+              mkdir -p "$out"
+              (cd js/packages/perry-wit && npm_config_cache="$TMPDIR/npm-pack-cache" \
+                npm pack --ignore-scripts --pack-destination "$out")
+            '';
+          };
+
         # Example task component with canonical WIT exports
         exampleMergeTask = pkgs.stdenv.mkDerivation {
           pname = "example-merge-task";
@@ -381,6 +413,7 @@
           perry-wit-release = perryWitRelease;
           perry-wit-wasm = perryWitWasm;
           inherit site;
+          npm-package = npmPackage;
           runtime-libraries = runtimeLibraries;
           example-merge-task = exampleMergeTask;
           template-component = templateComponent;
@@ -441,7 +474,7 @@
             inherit src;
             cargoExtraArgs = "--all --manifest-path runtime/Cargo.toml";
           };
-          inherit runtimeLibraries exampleMergeTask perryWitBin perryWitWasm site templateComponent checkTemplate sdkSyncCheck;
+          inherit runtimeLibraries exampleMergeTask perryWitBin perryWitWasm site npmPackage templateComponent checkTemplate sdkSyncCheck;
         };
 
         devShells.default = pkgs.mkShell {
@@ -451,7 +484,6 @@
             wasmtimeCli
             pkgs.wasm-tools
             nodejs
-            pkgs.pnpm
             pkgs.python3
             pkgs.typescript
             pkgs.mdbook

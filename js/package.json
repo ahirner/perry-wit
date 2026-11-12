@@ -2,14 +2,16 @@
   "name": "perry-wit-js",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.18.0",
+  "workspaces": [
+    "packages/*"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm --recursive run build",
-    "test": "pnpm --recursive run test",
-    "typecheck": "pnpm --recursive run typecheck",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
     "test:e2e": "node scripts/e2e.mjs"
   }
 }

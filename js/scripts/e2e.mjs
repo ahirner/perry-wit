@@ -1,21 +1,23 @@
 // End-to-end test of the published package:
-// pack perry-wit (its prepack script runs the complete build),
-// install the tarball into a fresh copy of e2e/consumer under the workspace's supply-chain policy,
+// pack perry-wit (its prepack script runs the complete build) or take an already packed tarball,
+// install the tarball into a fresh copy of e2e/consumer without running install scripts,
 // check which files the package ships, then type-check and run the consumer.
 //
-// Usage: node scripts/e2e.mjs [--keep]
+// Usage: node scripts/e2e.mjs [--tarball <path>] [--keep]
 // PERRY_COMPILER_WASM and the other build:wasm variables pass through to the build.
 import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
-import { cp, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
+import { copyFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const NAME = 'e2e';
-const PNPM = 'pnpm';
-const USAGE = 'Usage: node scripts/e2e.mjs [--keep]';
+const NPM = 'npm';
+// Dependencies need no install scripts, so none run.
+const INSTALL_ARGS = ['install', '--ignore-scripts', '--no-audit', '--no-fund'];
+const USAGE = 'Usage: node scripts/e2e.mjs [--tarball <path>] [--keep]';
 const WORKSPACE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PACKAGE_DIR = join(WORKSPACE_DIR, 'packages/perry-wit');
 const CONSUMER_DIR = join(WORKSPACE_DIR, 'e2e/consumer');
@@ -41,38 +43,37 @@ class ScriptError extends Error {}
 
 /**
  * @typedef {object} E2eArgs
+ * @property {string | undefined} tarball an already packed package to test instead of packing one (`--tarball`)
  * @property {boolean} keep keep the temporary consumer project for inspection (`--keep`)
  */
 
 /** @param {E2eArgs} args */
 async function main(args) {
-  const { keep } = args;
+  const { tarball, keep } = args;
+  if (tarball && !existsSync(tarball)) throw new ScriptError(`${tarball} does not exist`);
   const directory = await mkdtemp(join(tmpdir(), 'perry-wit-e2e-'));
   try {
-    const packDir = join(directory, 'pack');
-    run(PNPM, ['pack', '--pack-destination', packDir], PACKAGE_DIR);
-    const [tarball] = (await readdir(packDir)).filter(name => name.endsWith('.tgz'));
-    if (!tarball) throw new ScriptError(`pnpm pack wrote no tarball to ${packDir}`);
-
     const consumer = join(directory, 'consumer');
     await cp(CONSUMER_DIR, consumer, { recursive: true, filter: source => !/[\\/]node_modules$/.test(source) });
-    await rename(join(packDir, tarball), join(consumer, 'perry-wit.tgz'));
-    await writeFile(join(consumer, 'pnpm-workspace.yaml'), await supplyChainPolicy());
+    await copyFile(tarball ?? (await pack(join(directory, 'pack'))), join(consumer, 'perry-wit.tgz'));
 
-    run(PNPM, ['install'], consumer);
+    run(NPM, INSTALL_ARGS, consumer);
     await checkPackageFiles(join(consumer, 'node_modules/perry-wit'));
-    run(PNPM, ['run', 'typecheck'], consumer);
-    run(PNPM, ['run', 'start'], consumer);
+    run(NPM, ['run', 'typecheck'], consumer);
+    run(NPM, ['run', 'start'], consumer);
   } finally {
     if (keep) console.error(`${NAME}: kept ${directory}`);
     else await rm(directory, { recursive: true, force: true });
   }
 }
 
-/** The workspace's pnpm settings without its package list, so the consumer installs under the same policy. */
-async function supplyChainPolicy() {
-  const workspace = await readFile(join(WORKSPACE_DIR, 'pnpm-workspace.yaml'), 'utf8');
-  return workspace.replace(/^packages:\n(?:[ \t]+-.*\n)+/m, '');
+/** Pack the package into `packDir`, which runs its complete build, and return the tarball's path. */
+async function pack(packDir) {
+  await mkdir(packDir, { recursive: true });
+  run(NPM, ['pack', '--pack-destination', packDir], PACKAGE_DIR);
+  const [tarball] = (await readdir(packDir)).filter(name => name.endsWith('.tgz'));
+  if (!tarball) throw new ScriptError(`npm pack wrote no tarball to ${packDir}`);
+  return join(packDir, tarball);
 }
 
 /** Check that the installed package holds what it needs and nothing it should not ship. */
@@ -110,8 +111,13 @@ function isMain() {
 /** @returns {E2eArgs | undefined} */
 function parseCommandLine() {
   try {
-    const { values } = parseArgs({ options: { keep: { type: 'boolean', default: false } }, strict: true });
-    return { keep: values.keep };
+    const { values } = parseArgs({
+      options: { tarball: { type: 'string' }, keep: { type: 'boolean', default: false } },
+      strict: true,
+    });
+    // npm runs this script from the workspace directory, so a relative path is relative to where npm was started.
+    const tarball = values.tarball === undefined ? undefined : resolve(process.env.INIT_CWD ?? '.', values.tarball);
+    return { tarball, keep: values.keep };
   } catch (error) {
     console.error(`${NAME}: ${error.message}\n${USAGE}`);
     process.exitCode = 2;

@@ -60,7 +60,7 @@ Browsers fetch it through static `new URL(…, import.meta.url)` references, whi
 
 ### Building the Package
 
-The package lives in the pnpm workspace under `js/`.
+The package lives in the npm workspace under `js/`.
 Its build has three steps:
 
 1. `build:wasm` builds the [WebAssembly component](#webassembly-component) below with Cargo.
@@ -69,37 +69,38 @@ Its build has three steps:
 
 ```sh
 cd js
-pnpm install
-pnpm build
-pnpm test
-pnpm test:e2e
+npm ci --ignore-scripts
+npm run build
+npm test
+npm run test:e2e
 ```
 
 `build:wasm` needs the development shell's `WASI_WIT_PATH`.
-Setting `PERRY_COMPILER_WASM` to an already built compiler component skips Cargo:
+Setting `PERRY_COMPILER_WASM` to an already built compiler component skips Cargo.
+A relative path resolves against the repository root:
 
 ```sh
-PERRY_COMPILER_WASM="$(nix build .#perry-wit-wasm --print-out-paths)/lib/perry-wit.wasm" pnpm --dir js build
+PERRY_COMPILER_WASM="$(nix build .#perry-wit-wasm --print-out-paths)/lib/perry-wit.wasm" npm --prefix js run build
 # for a debug build:
 cargo build --target wasm32-wasip2 --config 'profile.dev.strip="debuginfo"'
-PERRY_COMPILER_WASM=target/wasm32-wasip2/debug/perry-wit.wasm pnpm --dir js build
+PERRY_COMPILER_WASM=target/wasm32-wasip2/debug/perry-wit.wasm npm --prefix js run build
 ```
 
-`pnpm test:e2e` tests the package as users receive it:
+`npm run test:e2e` tests the package as users receive it:
 
 1. It packs the package, which runs the complete build.
+   `--tarball <path>` tests an already packed package instead.
 2. It installs the tarball into a fresh copy of the project in `js/e2e/consumer`.
 3. It checks which files the package ships.
 4. It type-checks the project with Node.js and bundler module resolution, then runs it.
 
-`js/pnpm-workspace.yaml` sets the supply-chain policy for every install, including the end-to-end test's:
+No dependency needs an install script, so every install passes `--ignore-scripts`.
 
-- `minimumReleaseAge` installs only versions published at least a week ago.
-- `blockExoticSubdeps` refuses transitive dependencies from git repositories or tarball URLs.
-- `trustPolicy: no-downgrade` refuses a version published with weaker provenance than an earlier one.
-- `strictDepBuilds` fails the install when a dependency's build script is not approved in `allowBuilds`.
+`nix build .#npm-package` builds, type-checks and tests the package against the `perry-wit-wasm` compiler component, then writes the tarball that `npm pack` produces to `result/`.
+It fails when the version in `js/packages/perry-wit/package.json` differs from the one in `Cargo.toml`.
+After changing `js/package-lock.json`, update the `npmDeps` hash of `npmPackage` in `flake.nix` to the one the failed build reports.
 
-The `JS package` workflow builds, tests and end-to-end tests the package on the oldest and newest supported Node.js releases.
+The `JS package` workflow builds that tarball, builds and tests the package from source, and end-to-end tests the tarball, on the oldest and newest supported Node.js releases.
 
 ## WebAssembly Component
 

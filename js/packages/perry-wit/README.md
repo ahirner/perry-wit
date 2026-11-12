@@ -35,7 +35,7 @@ The package builds from the [perry-wit repository](https://github.com/ahirner/pe
 
 ```sh
 cd js
-pnpm install
-pnpm build   # cargo build, jco transpile, tsc
-pnpm test
+npm ci --ignore-scripts
+npm run build   # cargo build, jco transpile, tsc
+npm test
 ```
