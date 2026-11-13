@@ -35,6 +35,7 @@ for (const file of ['index.html', 'style.css', 'highlight.js', 'play/index.html'
 const bookDir = join(generated, 'book');
 await cp(join(repository, 'docs'), bookDir, { recursive: true });
 await cp(join(repository, 'template'), join(generated, 'template'), { recursive: true });
+await cp(join(repository, 'js/packages/perry-wit/examples'), join(generated, 'js/packages/perry-wit/examples'), { recursive: true });
 for (const wit of ['compiler', 'http-handler']) await cp(join(repository, 'wit', wit), join(generated, 'wit', wit), { recursive: true });
 const conformanceDoc = await readFile(conformanceDocPath, 'utf8');
 const contractCount = conformanceDoc.match(/\*\*(\d+)\*\* capability contracts/)?.[1];
