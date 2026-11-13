@@ -94,7 +94,7 @@ jobs:
         name: perry-wit-${{ matrix.target }}
         path: dist/perry-wit-${{ matrix.target }}.tar.gz
         if-no-files-found: error
-    - name: Package runtime libraries and Wasm compiler
+    - name: Package runtime libraries, Wasm compiler, and npm tarball
       if: matrix.os == 'ubuntu-latest'
       run: |
         nix build -L .#runtime-libraries --out-link result-runtime-libraries
@@ -104,6 +104,8 @@ jobs:
         cp result-compiler/lib/perry-wit.wasm dist/compiler/
         cp result-compiler/share/perry-wit/compiler.wit dist/compiler/
         cp result-compiler/share/perry-wit/metadata.json dist/compiler/compiler.metadata.json
+        nix build -L .#npm-package --out-link result-npm-package
+        cp result-npm-package/perry-wit-*.tgz dist/
     - uses: actions/upload-artifact@v7
       if: matrix.os == 'ubuntu-latest'
       with:
@@ -115,6 +117,12 @@ jobs:
       with:
         name: perry-wit-compiler
         path: dist/compiler/
+        if-no-files-found: error
+    - uses: actions/upload-artifact@v7
+      if: matrix.os == 'ubuntu-latest'
+      with:
+        name: perry-wit-npm-package
+        path: dist/perry-wit-*.tgz
         if-no-files-found: error
 
   bench-perry:
@@ -184,29 +192,36 @@ jobs:
       with:
         name: cybertreiber
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - uses: actions/download-artifact@v8
+      with:
+        name: perry-wit-npm-package
+        path: dist/npm-package
     - run: nix run -L .#site
     - run: |
         nix develop .#browser -c bash -euo pipefail -c '
-          npm ci --prefix site --ignore-scripts --no-audit --no-fund
-          node site/check-browser.mjs
+          tarball=(dist/npm-package/perry-wit-*.tgz)
+          tar -xzf "${tarball[0]}" -C js/packages/perry-wit --strip-components=1
+          npm ci --prefix js --ignore-scripts --no-audit --no-fund
+          npm --prefix js run test:e2e -- --tarball "${tarball[0]}"
+          node js/site/check-browser.mjs
         '
       env:
         DEBUG: pw:browser
     - uses: actions/upload-artifact@v7
       with:
         name: static-site
-        path: site/dist/
+        path: js/site/dist/
         include-hidden-files: true
         if-no-files-found: error
     - uses: actions/upload-artifact@v7
       if: failure()
       with:
         name: browser-results
-        path: site/test-results
+        path: js/site/test-results
     - uses: actions/upload-pages-artifact@v4
       if: github.ref == 'refs/heads/main'
       with:
-        path: site/dist
+        path: js/site/dist
 
   deploy-pages:
     needs: [site, conformance-and-tests]
