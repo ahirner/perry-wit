@@ -47,6 +47,19 @@ export interface WitOptions {
   world?: string;
 }
 
+/** Options for {@link Compiler.load}. */
+export interface LoadOptions {
+  /**
+   * Load a core WebAssembly module of the compiler by its bindings-relative name,
+   * such as `compiler.core.wasm`. Defaults to reading or fetching from the package.
+   */
+  loadCoreModule?: (path: string) => WebAssembly.Module | Promise<WebAssembly.Module>;
+  /** Receive bytes the compiler writes to standard error, instead of forwarding them to the host's stderr. */
+  stderr?: (bytes: Uint8Array) => void;
+  /** Receive bytes the compiler writes to standard output, instead of forwarding them to the host's stdout. */
+  stdout?: (bytes: Uint8Array) => void;
+}
+
 /** Options for {@link compile}. */
 export interface CompileOptions extends ProgramOptions, WitOptions {
   /** Emit only the core WebAssembly module, which keeps the world's canonical ABI. */

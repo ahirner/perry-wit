@@ -26,6 +26,8 @@ const CONSUMER_DIR = join(WORKSPACE_DIR, 'e2e/consumer');
 const REQUIRED_FILES = [
   'package.json',
   'README.md',
+  'LICENSE',
+  'THIRD-PARTY-NOTICES.txt',
   'dist/index.js',
   'dist/index.d.ts',
   'dist/load-core.node.js',
@@ -38,8 +40,16 @@ const REQUIRED_FILES = [
   'bindings/compiler.core.wasm',
 ];
 
-/** Top-level entries the tarball must not contain. */
-const FORBIDDEN_ENTRIES = ['test', 'examples', 'scripts', 'wasm', 'node_modules', 'tsconfig.json', 'tsconfig.build.json'];
+/** Top-level files and directories the tarball may contain; anything else (such as `site` or `test`) is rejected. */
+const ALLOWED_ENTRIES = new Set([
+  'package.json',
+  'README.md',
+  'LICENSE',
+  'THIRD-PARTY-NOTICES.txt',
+  'dist',
+  'src',
+  'bindings',
+]);
 
 /** A failure with a message that says everything, printed without a stack trace. */
 class ScriptError extends Error {}
@@ -86,9 +96,12 @@ async function checkPackageFiles(installed) {
     .filter(entry => entry.isFile())
     .map(entry => relative(root, join(entry.parentPath, entry.name)).split('\\').join('/'));
   const missing = REQUIRED_FILES.filter(file => !files.includes(file));
-  const unexpected = files.filter(file => FORBIDDEN_ENTRIES.includes(file.split('/')[0]));
+  const unexpected = files.filter(file => !ALLOWED_ENTRIES.has(file.split('/')[0]));
   if (missing.length > 0) throw new ScriptError(`the package is missing ${missing.join(', ')}`);
   if (unexpected.length > 0) throw new ScriptError(`the package ships ${unexpected.join(', ')}`);
+  const { dependencies = {} } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+  const unexpectedDeps = Object.keys(dependencies).filter(name => name !== '@bytecodealliance/preview2-shim');
+  if (unexpectedDeps.length > 0) throw new ScriptError(`the package declares unexpected runtime dependencies: ${unexpectedDeps.join(', ')}`);
   const dangling = await danglingSourceMaps(root, files);
   if (dangling.length > 0) throw new ScriptError(`source maps name files the package does not ship: ${dangling.join(', ')}`);
   console.error(`${NAME}: the package ships ${files.length} files`);

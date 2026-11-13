@@ -12,6 +12,7 @@ import type {
   DiagnosticCode,
   DiagnosticSeverity,
   FileContents,
+  LoadOptions,
   ProgramOptions,
   SourceFile,
   SourceSpan,
@@ -41,8 +42,8 @@ export class Compiler {
   }
 
   /** Load a compiler instance, independent of every other instance. */
-  static async load(): Promise<Compiler> {
-    const { api } = await instantiate(loadCoreModule, wasiImports());
+  static async load(options: LoadOptions = {}): Promise<Compiler> {
+    const { api } = await instantiate(options.loadCoreModule ?? loadCoreModule, wasiImports(options));
     return new Compiler(api);
   }
 
@@ -113,7 +114,7 @@ async function withShared<T>(use: (compiler: Compiler) => T): Promise<T> {
   try {
     return use(compiler);
   } catch (error) {
-    if (!(error instanceof CompileError) && shared === loading) shared = undefined;
+    if (error instanceof WebAssembly.RuntimeError && shared === loading) shared = undefined;
     throw error;
   }
 }
