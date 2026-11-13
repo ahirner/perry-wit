@@ -5,11 +5,14 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { transpileBytes } from '@bytecodealliance/jco-transpile';
+import { Compiler } from 'perry-wit';
+import { bundledPackageNotices, compilerNotices } from '../scripts/notices.mjs';
 import { compileRequest, decode, packagePrograms } from './play/workspace.js';
 import { checkHomepage, codeHighlighter, highlightBook, highlightHomepage, prepareBook } from './docs.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const repository = dirname(root);
+const workspace = dirname(root);
+const repository = dirname(workspace);
 const compiler = process.env.PERRY_COMPILER_WASM;
 if (!compiler) throw new Error('Run nix run .#site from the repository root to build the complete site, including its compiler.');
 const rustdoc = process.env.PERRY_RUSTDOC;
@@ -54,20 +57,17 @@ await cp(rustdoc, join(output, 'rust'), { recursive: true });
 await writeFile(join(output, '.nojekyll'), '');
 
 const compilerBytes = await readFile(compiler);
-const bindings = await transpileBytes(compilerBytes, { name: 'compiler', instantiation: 'async', base64Cutoff: 0, nodejsCompat: false, noComponentErrorWrapping: false });
-const coreModules = {};
-for (const [name, contents] of Object.entries(bindings.files)) {
-  if (name.endsWith('.wasm')) {
-    const start = compilerBytes.indexOf(contents);
-    if (start < 0) throw new Error(`Generated ${name} is not embedded in the compiler component; review the Jco module loader.`);
-    coreModules[name] = { start, end: start + contents.length };
-    continue;
-  }
-  const target = join(generated, 'compiler', name);
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, contents);
+const bindingsDir = join(workspace, 'packages/perry-wit/bindings');
+const bindingWasmFiles = (await readdir(bindingsDir)).filter(name => name.endsWith('.wasm')).sort();
+if (bindingWasmFiles.length === 0) throw new Error(`${bindingsDir} has no core modules; build perry-wit before building the site.`);
+const coreSlices = {};
+for (const name of bindingWasmFiles) {
+  const contents = await readFile(join(bindingsDir, name));
+  const start = compilerBytes.indexOf(contents);
+  if (start < 0) throw new Error(`Generated ${name} is not embedded in the compiler component; rebuild perry-wit against PERRY_COMPILER_WASM.`);
+  coreSlices[name] = { start, end: start + contents.length };
 }
-await writeFile(join(generated, 'compiler-manifest.js'), `export const imports = ${JSON.stringify(bindings.imports)};\nexport const coreModules = ${JSON.stringify(coreModules)};\n`);
+await writeFile(join(generated, 'compiler-slices.js'), `export const coreSlices = ${JSON.stringify(coreSlices)};\n`);
 
 const vendor = dirname(fileURLToPath(import.meta.resolve('@bytecodealliance/jco-transpile/component')));
 for (const name of await readdir(vendor)) if (name.endsWith('.wasm')) await cp(join(vendor, name), join(output, 'play/assets/engine', name));
@@ -89,11 +89,16 @@ await build({
   } }],
 });
 
-const { instantiateCompiler } = await import('./play/compiler-host.js');
-const { api } = await instantiateCompiler(compilerBytes);
+const loadedCompiler = await Compiler.load({
+  loadCoreModule: name => {
+    const slice = coreSlices[name];
+    if (!slice) throw new Error(`Missing compiler slice for ${name}`);
+    return WebAssembly.compile(compilerBytes.subarray(slice.start, slice.end));
+  },
+});
 
-await prepareBook({ repository, bookDir, generated, api, conformanceDoc });
-await checkHomepage({ html: await readFile(join(root, 'index.html'), 'utf8'), generated, api });
+await prepareBook({ repository, bookDir, generated, compiler: loadedCompiler, conformanceDoc });
+await checkHomepage({ html: await readFile(join(root, 'index.html'), 'utf8'), generated, compiler: loadedCompiler });
 execFileSync('mdbook', ['build', bookDir, '-d', join(output, 'docs')], { stdio: 'inherit' });
 await highlightBook(join(output, 'docs'), highlight);
 
@@ -105,8 +110,8 @@ const examples = [];
 for (const program of packagePrograms(exampleFiles)) {
   const files = new Map([...exampleFiles].filter(([name]) => name.startsWith(program.root + '/')));
   const request = compileRequest(files, program.entry, program.wit, program.world);
-  const compiled = api.compile(request.program, request.wit, request.options);
-  const generated = await transpileBytes(compiled.component.stripped, { name: 'example', instantiation: 'async', emitTypescriptDeclarations: false, nodejsCompat: false, noComponentErrorWrapping: false });
+  const compiled = loadedCompiler.compile(request);
+  const generated = await transpileBytes(compiled.component, { name: 'example', instantiation: 'async', emitTypescriptDeclarations: false, nodejsCompat: false, noComponentErrorWrapping: false });
   const exports = generated.exports.filter(([, type]) => type === 'function').map(([name]) => name).sort();
   if (program.export && !exports.includes(program.export)) throw new Error(`${program.id}: default function ${program.export} is not exported`);
   examples.push({ ...program, exports, files: [...files].map(([name, bytes]) => [name, name.endsWith('.wasm') ? [...bytes] : decode(bytes)]) });
@@ -119,18 +124,8 @@ for (const program of packagePrograms(exampleFiles)) {
 await writeFile(join(output, 'play/examples.json'), JSON.stringify(examples));
 
 const packages = ['@bytecodealliance/jco-transpile', '@bytecodealliance/preview2-shim', '@bytecodealliance/preview3-shim'];
-let notices = 'Perry-WIT Wasm compiler and browser runtime distribution\n\n';
-notices += await readFile(join(repository, 'LICENSE'), 'utf8');
-notices += '\nPerry HIR (upstream revision pinned in Cargo.toml)\n';
-notices += await readFile(join(repository, 'licenses/Perry-MIT.txt'), 'utf8');
-notices += '\nanyhow (version pinned in Cargo.lock)\n';
-notices += await readFile(join(repository, 'licenses/anyhow-MIT.txt'), 'utf8');
-for (const name of packages) {
-  const directory = join(root, 'node_modules', name);
-  const pkg = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
-  notices += `${name} ${pkg.version}\n${pkg.license}\n${pkg.repository?.url || ''}\n\n`;
-  for (const file of await readdir(directory)) if (/^(LICENSE|NOTICE)/i.test(file)) notices += `${file}\n${await readFile(join(directory, file), 'utf8')}\n\n`;
-}
+const notices = await compilerNotices(repository, 'Perry-WIT Wasm compiler and browser runtime distribution')
+  + await bundledPackageNotices(root, packages);
 await writeFile(join(output, 'downloads/THIRD-PARTY-NOTICES.txt'), notices);
 const revision = createHash('sha256');
 revision.update(compilerBytes);

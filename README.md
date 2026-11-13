@@ -57,7 +57,7 @@ cargo test --test integration stream                       # integration tests m
 cargo test --manifest-path runtime/Cargo.toml --workspace  # runtime unit tests
 cargo run -p perry-conformance -- check --select node.fs   # conformance contracts with an ID prefix
 cargo test --test benchmark -- --ignored                   # sizes, fuel and memory against tests/benchmark.json
-nix flake check   # rustfmt (both workspaces), WASI WIT, CLI, Wasm compiler, site, SDK sync, template and example runs
+nix flake check   # rustfmt (both workspaces), WASI WIT, CLI, Wasm compiler, npm package, site, SDK sync, template and example runs
 ```
 
 Benchmark sizes exclude custom sections such as debug names. Initialization fuel includes explicit data copying, with Wasmtime's platform-specific copy-on-write initialization disabled. When a change moves benchmark numbers on purpose, run the benchmark with `PERRY_EXPECT_BENCH=1` and commit the rewritten `tests/benchmark.json` together with the change.
@@ -67,6 +67,7 @@ CI additionally runs the collectible runtime tests (`--all-features`), Clippy fo
 
 ```sh
 nix build .#perry-wit           # compiler CLI
+nix build .#npm-package         # perry-wit npm tarball
 nix build .#site                # homepage, handbook and playground
 nix build .#template-component  # starter template component
 nix build .#example-merge-task  # reference component

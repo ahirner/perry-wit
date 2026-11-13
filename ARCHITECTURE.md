@@ -57,7 +57,7 @@ The frontend infers the contents of empty arrays and objects from the writes it 
 
 A dictionary is an array of key-value entries, so the MIR heap analysis treats its values like array elements. That analysis also tracks which parsed JSON records carry undeclared fields, and storing such a record in a dictionary keeps them.
 
-A value union holds a number, string, boolean or one plain record shape, with `number | string` as the common case. Each value stores a tag, an eight-byte payload and a traced reference, and operators, property reads and `typeof` checks branch on the tag. Mixed arrays box every element, because packed numeric storage with type transitions is not implemented.
+A value union holds a number, string, boolean or one plain record shape, with `number | string` as the common case. Each value stores a tag, an eight-byte payload and a traced reference, and operators, property reads and `typeof` checks branch on the tag. Mixed arrays represent every element with this tagged layout.
 
 ## Memory
 

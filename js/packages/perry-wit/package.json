@@ -36,7 +36,8 @@
   "files": [
     "dist",
     "src",
-    "bindings"
+    "bindings",
+    "THIRD-PARTY-NOTICES.txt"
   ],
   "engines": {
     "node": ">=22"
@@ -48,7 +49,7 @@
     "build:ts": "tsc --project tsconfig.build.json",
     "typecheck": "tsc --project tsconfig.json",
     "test": "node --test \"test/*.ts\"",
-    "clean": "node -e \"for (const d of ['dist','bindings','wasm']) require('node:fs').rmSync(d,{recursive:true,force:true})\"",
+    "clean": "node -e \"for (const d of ['dist','bindings','wasm','LICENSE','THIRD-PARTY-NOTICES.txt']) require('node:fs').rmSync(d,{recursive:true,force:true})\"",
     "prepack": "npm run build"
   },
   "dependencies": {

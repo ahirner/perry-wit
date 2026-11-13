@@ -38,24 +38,26 @@ export function compileRequest(files, entry, witFile, world) {
   const dependencyRoot = root ? `${root}/deps/` : 'deps/';
   const packages = new Map();
   const encoded = [];
-  const application = [];
-  const modules = [];
+  const wit = [];
+  const modules = new Map();
   for (const [name, contents] of [...files].sort(([a], [b]) => a.localeCompare(b))) {
-    if (name.endsWith('.ts') && name !== entry) modules.push({ name, contents });
+    if (name.endsWith('.ts') && name !== entry) modules.set(name, contents);
     if (name.endsWith('.wit')) {
-      const source = { name, contents };
-      if (directory(name) === root) application.push(source);
+      const source = { path: name, contents };
+      if (directory(name) === root) wit.push(source);
       else if (name.startsWith(dependencyRoot)) {
         const group = directory(name);
         if (!packages.has(group)) packages.set(group, []);
         packages.get(group).push(source);
       }
-    } else if (name.startsWith(dependencyRoot) && name.endsWith('.wasm')) encoded.push({ tag: 'encoded', val: contents });
+    } else if (name.startsWith(dependencyRoot) && name.endsWith('.wasm')) encoded.push(contents);
   }
   return {
-    program: { source: { name: entry, contents: files.get(entry) }, modules },
-    wit: { application: { tag: 'sources', val: application }, dependencies: [...packages.values()].map(val => ({ tag: 'sources', val })).concat(encoded) },
-    options: { world: world || undefined, coreOnly: false },
+    source: { path: entry, contents: files.get(entry) },
+    modules,
+    wit,
+    witDependencies: [...packages.values(), ...encoded],
+    world: world || undefined,
   };
 }
 

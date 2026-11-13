@@ -104,10 +104,7 @@
             source;
         };
         repoSource = cleanSource ./.;
-        jsSource = pkgs.lib.cleanSourceWith {
-          src = ./js;
-          inherit (repoSource) filter;
-        };
+        repoFiles = pkgs.lib.fileset.fromSource repoSource;
 
         # Common source filter for Rust crate builds
         commonFilter = path: type:
@@ -246,34 +243,18 @@
           ./conformance-doc > "$out"
         '';
 
-        site = pkgs.buildNpmPackage {
-          pname = "perry-wit-site";
-          inherit nodejs;
-          version = cargoManifest.package.version;
-          dontFixup = true;
-          src = repoSource;
-          npmRoot = "site";
-          npmDeps = pkgs.fetchNpmDeps {
-            src = "${repoSource}/site";
-            hash = "sha256-HVyTUkc1wePoDWyDEgC34ozTNiFK/mJJWBqPXVPTDzs=";
+        jsDeps = pkgs.fetchNpmDeps {
+          name = "perry-wit-js-deps";
+          src = pkgs.lib.fileset.toSource {
+            root = ./js;
+            fileset = pkgs.lib.fileset.unions [
+              ./js/package.json
+              ./js/package-lock.json
+              ./js/packages/perry-wit/package.json
+              ./js/site/package.json
+            ];
           };
-          npmFlags = [ "--ignore-scripts" ];
-          nativeBuildInputs = [ wasmtimeCli pkgs.python3 pkgs.wasm-tools pkgs.mdbook ];
-          PERRY_COMPILER_WASM = "${perryWitWasm}/lib/perry-wit.wasm";
-          PERRY_NATIVE_COMPILER = "${perryWitBin}/bin/perry-wit";
-          PERRY_RUSTDOC = "${perryWitBin}/share/doc/perry-wit";
-          PERRY_CONFORMANCE_DOC = conformanceDoc;
-          buildPhase = ''
-            runHook preBuild
-            node site/build.mjs
-            node --test site/test/*.test.mjs
-            node site/check-api.mjs
-            runHook postBuild
-          '';
-          installPhase = ''
-            mkdir -p "$out"
-            cp -r site/dist/. "$out/"
-          '';
+          hash = "sha256-nrhTkHYGTFWQJp4uevshASdUClyn3dN7Xtm26FIHjvo=";
         };
 
         # npm package as the tarball `npm pack` writes, with bindings generated from the compiler component
@@ -285,26 +266,69 @@
             inherit nodejs;
             version = cargoManifest.package.version;
             dontFixup = true;
-            src = jsSource;
-            npmDepsHash = "sha256-7JbHSZYukRPRYCxkVg7gR/NLpbWKVNmf5hcPOJmN7lw=";
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.intersection repoFiles (pkgs.lib.fileset.unions [
+                ./LICENSE
+                ./licenses
+                ./js/site/package.json
+                (pkgs.lib.fileset.difference ./js ./js/site)
+              ]);
+            };
+            npmRoot = "js";
+            npmDeps = jsDeps;
             npmFlags = [ "--ignore-scripts" ];
             PERRY_COMPILER_WASM = "${perryWitWasm}/lib/perry-wit.wasm";
+            buildPhase = ''
+              runHook preBuild
+              npm --prefix js run build
+              runHook postBuild
+            '';
             doCheck = true;
             checkPhase = ''
               runHook preCheck
-              npm run typecheck
-              npm test
-              (cd packages/perry-wit && "${pkgs.nodejs_22}/bin/node" --test "test/*.ts")
+              npm --prefix js run typecheck
+              npm --prefix js run test --workspace=perry-wit
+              (cd js/packages/perry-wit && "${pkgs.nodejs_22}/bin/node" --test "test/*.ts")
               runHook postCheck
             '';
             # npm pack writes temporary files to its cache, and the dependency cache is read-only.
             installPhase = ''
               runHook preInstall
               mkdir -p "$out"
-              npm pack --workspace=perry-wit --ignore-scripts --cache "$TMPDIR/npm-cache" --pack-destination "$out"
+              npm --prefix js pack --workspace=perry-wit --ignore-scripts --cache "$TMPDIR/npm-cache" --pack-destination "$out"
               runHook postInstall
             '';
           };
+
+        site = pkgs.buildNpmPackage {
+          pname = "perry-wit-site";
+          inherit nodejs;
+          version = cargoManifest.package.version;
+          dontFixup = true;
+          src = repoSource;
+          npmRoot = "js";
+          npmDeps = jsDeps;
+          npmFlags = [ "--ignore-scripts" ];
+          nativeBuildInputs = [ wasmtimeCli pkgs.python3 pkgs.wasm-tools pkgs.mdbook ];
+          PERRY_COMPILER_WASM = "${perryWitWasm}/lib/perry-wit.wasm";
+          PERRY_NATIVE_COMPILER = "${perryWitBin}/bin/perry-wit";
+          PERRY_RUSTDOC = "${perryWitBin}/share/doc/perry-wit";
+          PERRY_CONFORMANCE_DOC = conformanceDoc;
+          buildPhase = ''
+            runHook preBuild
+            tar -xzf "${npmPackage}/perry-wit-${cargoManifest.package.version}.tgz" \
+              -C js/packages/perry-wit --strip-components=1 package/bindings package/dist
+            node js/site/build.mjs
+            node --test js/site/test/*.test.mjs
+            node js/site/check-api.mjs
+            runHook postBuild
+          '';
+          installPhase = ''
+            mkdir -p "$out"
+            cp -r js/site/dist/. "$out/"
+          '';
+        };
 
         # Example task component with canonical WIT exports
         exampleMergeTask = pkgs.stdenv.mkDerivation {
@@ -428,22 +452,22 @@
 
         apps.site = {
           type = "app";
-          meta.description = "Build the site and update site/dist for the local preview";
+          meta.description = "Build the site and update js/site/dist for the local preview";
           program = "${pkgs.writeShellApplication {
             name = "build-site";
             runtimeInputs = [ pkgs.rsync ];
             text = ''
-              if [[ ! -f site/build.mjs || ! -f Cargo.toml ]]; then
+              if [[ ! -f js/site/build.mjs || ! -f Cargo.toml ]]; then
                 echo "Run nix run .#site from the Perry-WIT repository root." >&2
                 exit 1
               fi
-              if [[ -L site/dist ]]; then
-                echo "site/dist must be a directory, not a symlink." >&2
+              if [[ -L js/site/dist ]]; then
+                echo "js/site/dist must be a directory, not a symlink." >&2
                 exit 1
               fi
-              mkdir -p site/dist
-              rsync -r --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r ${site}/ site/dist/
-              echo "Built site/dist. Refresh the existing preview to load it."
+              mkdir -p js/site/dist
+              rsync -r --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r ${site}/ js/site/dist/
+              echo "Built js/site/dist. Refresh the existing preview to load it."
             '';
           }}/bin/build-site";
         };
