@@ -12,7 +12,7 @@ const LANGUAGES = { ts: 'typescript', typescript: 'typescript', wit: 'wit', wat:
 const THEMES = { light: 'github-light-high-contrast', dark: 'github-dark-high-contrast' };
 
 /** Write generated pages into `bookDir/src` and check snippets, listings and tables. */
-export async function prepareBook({ repository, bookDir, generated, api, conformanceDoc }) {
+export async function prepareBook({ repository, bookDir, generated, compiler, conformanceDoc }) {
   const pages = [join(repository, 'README.md')];
   for (const name of await readdir(join(repository, 'docs/src'))) if (name.endsWith('.md')) pages.push(join(repository, 'docs/src', name));
   const groups = new Map();
@@ -30,7 +30,7 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
   const compiled = new Map();
   for (const [id, { page, files }] of groups) {
     if (!files.wit || !files.ts) throw new Error(`${page}: check=${id} needs both a wit and a ts block`);
-    compiled.set(id, compile(api, `${page}#${id}`, files.ts, files.wit));
+    compiled.set(id, compile(compiler, `${page}#${id}`, files.ts, files.wit));
   }
 
   // A page including `ID-wat.md` gets the core module of check group ID, and every instruction
@@ -42,7 +42,7 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
     for (const id of listings) {
       const group = groups.get(id);
       if (!group) throw new Error(`${page}: no check=${id} snippets for ${id}-wat.md`);
-      const core = compile(api, `${page}#${id}`, group.files.ts, group.files.wit, true).core;
+      const core = compile(compiler, `${page}#${id}`, group.files.ts, group.files.wit, true).core;
       const wat = execFileSync('wasm-tools', ['print', '-'], { input: Buffer.from(core), encoding: 'utf8' }).trim();
       await writeFile(join(bookDir, 'src', `${id}-wat.md`), `\`\`\`wat\n${wat}\n\`\`\`\n`);
       printed += wat;
@@ -55,7 +55,7 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
   // A table after `<!-- invoke: ID -->` lists calls into check group ID and their printed results.
   for (const [page, text] of sources) {
     for (const [, id, table] of text.matchAll(/<!-- invoke: ([\w-]+) -->\n((?:\|.*\n)+)/g)) {
-      const component = compiled.get(id)?.component?.stripped;
+      const component = compiled.get(id)?.component;
       if (!component) throw new Error(`${page}: invoke table needs check=${id} snippets`);
       const file = join(generated, `${id}.wasm`);
       await writeFile(file, component);
@@ -69,20 +69,20 @@ export async function prepareBook({ repository, bookDir, generated, api, conform
 
   await writeFile(join(generated, 'ARCHITECTURE.md'), await readFile(join(repository, 'ARCHITECTURE.md'), 'utf8'));
   await writeFile(join(bookDir, 'src/conformance-catalog.md'), conformanceDoc);
-  await writeFile(join(bookDir, 'src/stdlib-inventory.md'), await inventory(repository, api));
+  await writeFile(join(bookDir, 'src/stdlib-inventory.md'), await inventory(repository, compiler));
   await writeFile(join(bookDir, 'src/embedding-example.rs'), doctest(await readFile(join(repository, 'src/api.rs'), 'utf8'), 'compile'));
 }
 
 /** Compile the homepage's TypeScript and WIT example and run its export once with Wasmtime. */
-export async function checkHomepage({ html, generated, api }) {
+export async function checkHomepage({ html, generated, compiler }) {
   const section = html.match(/<section class="editors"[\s\S]*?<\/section>/)?.[0] ?? '';
   const [ts, wit] = [...section.matchAll(/<pre><code>([\s\S]*?)<\/code><\/pre>/g)].map(match => decodeHtml(match[1]));
-  if (!ts || !wit) throw new Error('site/index.html needs a TypeScript and a WIT block in .editors');
-  const component = compile(api, 'site/index.html', ts, wit).component.stripped;
+  if (!ts || !wit) throw new Error('js/site/index.html needs a TypeScript and a WIT block in .editors');
+  const component = compile(compiler, 'js/site/index.html', ts, wit).component;
   const file = join(generated, 'homepage.wasm');
   await writeFile(file, component);
   const greeting = invoke(file, 'greet("World")');
-  if (greeting !== '"Hello, World"') throw new Error(`site/index.html example printed ${greeting}`);
+  if (greeting !== '"Hello, World"') throw new Error(`js/site/index.html example printed ${greeting}`);
 }
 
 /**
@@ -167,15 +167,15 @@ async function expandIncludes(body, base) {
 }
 
 /** Compile one snippet pair through the compiler component, naming the snippet on failure. */
-function compile(api, label, ts, wit, coreOnly = false) {
+function compile(compiler, label, ts, wit, coreOnly = false) {
   const worlds = [...wit.matchAll(/^world ([\w-]+)/gm)].map(match => match[1]);
   if (worlds.length !== 1) throw new Error(`${label}: expected one world, found ${worlds.length}`);
   const files = new Map([['src/index.ts', encode(ts)], ['wit/world.wit', encode(wit)]]);
   const request = compileRequest(files, 'src/index.ts', 'wit/world.wit', worlds[0]);
   try {
-    return api.compile(request.program, request.wit, { ...request.options, coreOnly });
+    return compiler.compile({ ...request, coreOnly });
   } catch (error) {
-    throw new Error(`${label} failed to compile: ${error.message || JSON.stringify(error.payload || error)}`);
+    throw new Error(`${label} failed to compile: ${error.message || String(error)}`);
   }
 }
 
@@ -281,12 +281,12 @@ const RECEIVERS = new Map([
 ]);
 
 /** The inventory: probed globals, then methods and module functions read from compiler tables. */
-async function inventory(repository, api) {
+async function inventory(repository, compiler) {
   const lines = GLOBALS.map(([, , statement], index) => /^(console\.|process\.)/.test(statement) ? `${statement};` : `const probe${index} = ${statement};`);
   try {
-    compile(api, 'inventory probe', lines.join('\n') + '\n', PROBE_WIT);
+    compile(compiler, 'inventory probe', lines.join('\n') + '\n', PROBE_WIT);
   } catch {
-    const failing = GLOBALS.filter((_, index) => { try { compile(api, 'probe', lines[index] + '\n', PROBE_WIT); return false; } catch { return true; } });
+    const failing = GLOBALS.filter((_, index) => { try { compile(compiler, 'probe', lines[index] + '\n', PROBE_WIT); return false; } catch { return true; } });
     throw new Error(`Inventory globals no longer compile: ${failing.map(([, label]) => label).join(', ')}`);
   }
   const globals = new Map();

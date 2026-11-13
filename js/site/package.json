@@ -8,9 +8,9 @@
     "test:browser": "node check-browser.mjs"
   },
   "dependencies": {
-    "@bytecodealliance/jco-transpile": "0.18.0",
-    "@bytecodealliance/preview2-shim": "0.28.0",
-    "@bytecodealliance/preview3-shim": "0.9.0"
+    "@bytecodealliance/jco-transpile": "0.23.0",
+    "@bytecodealliance/preview3-shim": "0.13.0",
+    "perry-wit": "*"
   },
   "devDependencies": {
     "@shikijs/engine-oniguruma": "4.5.0",

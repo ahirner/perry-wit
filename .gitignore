@@ -14,15 +14,15 @@ wit/deps/
 # Perry SDK generated types
 .perry/
 
-# Static playground build dependencies and generated compiler bindings
-site/node_modules/
-site/dist/
-site/.generated/
-site/test-results/
-
-# JavaScript workspace dependencies and generated package contents
+# JavaScript workspace dependencies, static site and generated package contents
 js/node_modules/
 js/packages/*/node_modules/
 js/packages/perry-wit/bindings/
 js/packages/perry-wit/dist/
 js/packages/perry-wit/wasm/
+js/packages/perry-wit/LICENSE
+js/packages/perry-wit/THIRD-PARTY-NOTICES.txt
+js/site/node_modules/
+js/site/dist/
+js/site/.generated/
+js/site/test-results/

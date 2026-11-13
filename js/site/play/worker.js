@@ -1,6 +1,5 @@
-import { formatDiagnostics } from './diagnostics.js';
-import { instantiateCompiler } from './compiler-host.js';
-import * as compilerCli from '@bytecodealliance/preview2-shim/cli';
+import { Compiler, CompileError } from 'perry-wit';
+import { coreSlices } from '../.generated/compiler-slices.js';
 import { $init as bindgenReady, generate } from '@bytecodealliance/jco-transpile/component';
 import { $init as toolsReady, tools } from '@perry/wasm-tools';
 import * as cli from '@bytecodealliance/preview3-shim/cli';
@@ -52,26 +51,33 @@ self.onmessage = async ({ data }) => {
   let log = '';
   let phase = 'load';
   const decoder = new TextDecoder();
-  const output = { write(bytes) { log += decoder.decode(bytes, { stream: true }); }, flush() {}, blockingFlush() {} };
+  const writeLog = bytes => { log += decoder.decode(bytes, { stream: true }); };
+  const output = { write: writeLog, flush() {}, blockingFlush() {} };
   cli._setStdout(output);
   cli._setStderr(output);
-  compilerCli._setStdout(output);
-  compilerCli._setStderr(output);
   try {
     const response = await fetch(new URL(`../../downloads/perry-wit.wasm${new URL(import.meta.url).search}`, import.meta.url));
     if (!response.ok) throw new Error(`Could not load compiler: HTTP ${response.status}`);
-    const compiler = await instantiateCompiler(new Uint8Array(await response.arrayBuffer()));
+    const compilerBytes = new Uint8Array(await response.arrayBuffer());
+    const compiler = await Compiler.load({
+      loadCoreModule: name => {
+        const slice = coreSlices[name];
+        if (!slice) throw new Error(`Missing compiler slice for ${name}`);
+        return WebAssembly.compile(compilerBytes.subarray(slice.start, slice.end));
+      },
+      stdout: writeLog,
+      stderr: writeLog,
+    });
     if (data.action === 'generate-sdk') {
       phase = 'generate-sdk';
-      send('sdk', { files: compiler.api.generateSdk(data.wit, data.options?.world) });
+      send('sdk', { files: compiler.generateTypes(data) });
       return;
     }
     progress('Compiling…');
     phase = 'compile';
     const started = performance.now();
-    const api = compiler.api;
-    const compiled = api.compile(data.program, data.wit, data.options);
-    const bytes = compiled.component.stripped;
+    const compiled = compiler.compile(data);
+    const bytes = compiled.component;
     send('compiled', { bytes, coreSize: compiled.core.length, allocationReport: compiled.allocationReport, elapsed: performance.now() - started });
     progress('Inspecting component…');
     phase = 'inspect';
@@ -100,7 +106,16 @@ self.onmessage = async ({ data }) => {
     }
     send('complete', { result, needsExport, log: log + decoder.decode() });
   } catch (error) {
+    log += decoder.decode();
+    const diagnostics = error instanceof CompileError ? error.diagnostics : [];
     const payload = error?.payload;
-    send('error', { phase, log, diagnostics: Array.isArray(payload) ? payload : [], message: Array.isArray(payload) ? formatDiagnostics(payload) : typeof payload === 'string' ? payload : payload ? JSON.stringify(payload, null, 2) : error?.message || String(error) });
+    const message = error instanceof CompileError
+      ? error.message
+      : typeof payload === 'string'
+        ? payload
+        : payload !== undefined
+          ? JSON.stringify(payload, null, 2)
+          : error?.message || String(error);
+    send('error', { phase, log, diagnostics, message });
   }
 };
