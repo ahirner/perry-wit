@@ -104,10 +104,15 @@
             source;
         };
         repoSource = cleanSource ./.;
+        jsSource = pkgs.lib.cleanSourceWith {
+          src = ./js;
+          inherit (repoSource) filter;
+        };
 
         # Common source filter for Rust crate builds
         commonFilter = path: type:
-          path != toString ./scripts && (
+          path != toString ./scripts &&
+          path != toString ./js && (
           (pkgs.lib.hasSuffix ".wat" path) ||
           (pkgs.lib.hasSuffix ".wit" path) ||
           (pkgs.lib.hasSuffix ".ts" path) ||
@@ -280,26 +285,24 @@
             inherit nodejs;
             version = cargoManifest.package.version;
             dontFixup = true;
-            src = repoSource;
-            npmRoot = "js";
-            npmDeps = pkgs.fetchNpmDeps {
-              src = "${repoSource}/js";
-              hash = "sha256-7JbHSZYukRPRYCxkVg7gR/NLpbWKVNmf5hcPOJmN7lw=";
-            };
+            src = jsSource;
+            npmDepsHash = "sha256-7JbHSZYukRPRYCxkVg7gR/NLpbWKVNmf5hcPOJmN7lw=";
             npmFlags = [ "--ignore-scripts" ];
             PERRY_COMPILER_WASM = "${perryWitWasm}/lib/perry-wit.wasm";
-            buildPhase = ''
-              runHook preBuild
-              npm --prefix js run build
-              npm --prefix js run typecheck
-              npm --prefix js test
-              runHook postBuild
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              npm run typecheck
+              npm test
+              (cd packages/perry-wit && "${pkgs.nodejs_22}/bin/node" --test "test/*.ts")
+              runHook postCheck
             '';
             # npm pack writes temporary files to its cache, and the dependency cache is read-only.
             installPhase = ''
+              runHook preInstall
               mkdir -p "$out"
-              (cd js/packages/perry-wit && npm_config_cache="$TMPDIR/npm-pack-cache" \
-                npm pack --ignore-scripts --pack-destination "$out")
+              npm pack --workspace=perry-wit --ignore-scripts --cache "$TMPDIR/npm-cache" --pack-destination "$out"
+              runHook postInstall
             '';
           };
 

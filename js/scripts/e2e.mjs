@@ -7,9 +7,9 @@
 // PERRY_COMPILER_WASM and the other build:wasm variables pass through to the build.
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
-import { copyFile, cp, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, posix, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
@@ -30,13 +30,16 @@ const REQUIRED_FILES = [
   'dist/index.d.ts',
   'dist/load-core.node.js',
   'dist/load-core.browser.js',
+  'dist/index.js.map',
+  'dist/index.d.ts.map',
+  'src/index.ts',
   'bindings/compiler.js',
   'bindings/core-modules.js',
   'bindings/compiler.core.wasm',
 ];
 
 /** Top-level entries the tarball must not contain. */
-const FORBIDDEN_ENTRIES = ['src', 'test', 'examples', 'scripts', 'wasm', 'node_modules', 'tsconfig.json', 'tsconfig.build.json'];
+const FORBIDDEN_ENTRIES = ['test', 'examples', 'scripts', 'wasm', 'node_modules', 'tsconfig.json', 'tsconfig.build.json'];
 
 /** A failure with a message that says everything, printed without a stack trace. */
 class ScriptError extends Error {}
@@ -86,7 +89,27 @@ async function checkPackageFiles(installed) {
   const unexpected = files.filter(file => FORBIDDEN_ENTRIES.includes(file.split('/')[0]));
   if (missing.length > 0) throw new ScriptError(`the package is missing ${missing.join(', ')}`);
   if (unexpected.length > 0) throw new ScriptError(`the package ships ${unexpected.join(', ')}`);
+  const dangling = await danglingSourceMaps(root, files);
+  if (dangling.length > 0) throw new ScriptError(`source maps name files the package does not ship: ${dangling.join(', ')}`);
   console.error(`${NAME}: the package ships ${files.length} files`);
+}
+
+/**
+ * List the sources that shipped source maps and declaration maps name but the package does not ship,
+ * as `map -> source` strings.
+ *
+ * @param {string} root the installed package
+ * @param {string[]} files the files it ships, relative to `root` with `/` separators
+ */
+async function danglingSourceMaps(root, files) {
+  const dangling = [];
+  for (const file of files.filter(name => name.endsWith('.map'))) {
+    const { sourceRoot = '', sources = [] } = JSON.parse(await readFile(join(root, file), 'utf8'));
+    for (const source of sources) {
+      if (!files.includes(posix.join(posix.dirname(file), sourceRoot, source))) dangling.push(`${file} -> ${source}`);
+    }
+  }
+  return dangling;
 }
 
 /** Run a command, inheriting stdio, and throw when it fails. */

@@ -91,14 +91,14 @@ PERRY_COMPILER_WASM=target/wasm32-wasip2/debug/perry-wit.wasm npm --prefix js ru
 1. It packs the package, which runs the complete build.
    `--tarball <path>` tests an already packed package instead.
 2. It installs the tarball into a fresh copy of the project in `js/e2e/consumer`.
-3. It checks which files the package ships.
+3. It checks which files the package ships, and that its source maps name only files it ships.
 4. It type-checks the project with Node.js and bundler module resolution, then runs it.
 
 No dependency needs an install script, so every install passes `--ignore-scripts`.
 
-`nix build .#npm-package` builds, type-checks and tests the package against the `perry-wit-wasm` compiler component, then writes the tarball that `npm pack` produces to `result/`.
+`nix build .#npm-package` builds and type-checks the package against the `perry-wit-wasm` compiler component, tests it on Node.js 26 and Node.js 22, then writes the tarball that `npm pack` produces to `result/`.
 It fails when the version in `js/packages/perry-wit/package.json` differs from the one in `Cargo.toml`.
-After changing `js/package-lock.json`, update the `npmDeps` hash of `npmPackage` in `flake.nix` to the one the failed build reports.
+After changing `js/package-lock.json`, update the `npmDepsHash` of `npmPackage` in `flake.nix` to the one the failed build reports.
 
 The `JS package` workflow builds that tarball, builds and tests the package from source, and end-to-end tests the tarball, on the oldest and newest supported Node.js releases.
 
