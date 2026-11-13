@@ -17,7 +17,7 @@ nix build .#npm-package   # build, type-check, test on Node 26 & 22, and pack pe
 nix run .#site            # build the full site and sync it to js/site/dist/
 ```
 
-Serve `js/site/dist` over HTTP to preview the site locally (Web Workers and `.wasm` assets cannot load from `file:` URLs):
+Serve `js/site/dist` over HTTP to preview the site locally:
 
 ```sh
 python3 -m http.server --directory js/site/dist 8000

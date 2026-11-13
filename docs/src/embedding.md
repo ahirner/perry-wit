@@ -1,6 +1,6 @@
 # Embedding
 
-The compiler ships as the `perry_wit` Rust crate and as a standalone WASI 0.2 component.
+The compiler ships as the `perry_wit` Rust crate, the `perry-wit` npm package and a standalone WASI 0.2 component.
 The runtime and standard libraries are precompiled and embedded in the compiler binary, so compilation runs entirely in memory.
 
 ## Rust
@@ -13,10 +13,10 @@ The runtime and standard libraries are precompiled and embedded in the compiler 
 
 Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`PerryDiagnostic`](../rust/perry_wit/struct.PerryDiagnostic.html) records with a source span and a [`DiagnosticCode`](../rust/perry_wit/enum.DiagnosticCode.html).
 
-## JavaScript and TypeScript
+## JavaScript
 
 The `perry-wit` npm package compiles TypeScript into components from Node.js 22 or later and from browsers.
-It bundles the compiler, so installing it needs no Rust toolchain:
+It bundles the compiler for standalone installation:
 
 ```sh
 npm install perry-wit  # todo: publishing still to come
@@ -34,7 +34,7 @@ The package exports three functions:
   - `coreOnly: true` returns only `core` and `allocationReport`, like `--core-only`.
   - `keepNames: true` keeps function names in the component, like `--keep-names`.
 - `compileCore({ source, modules })` compiles raw TypeScript exports into a core module without a WIT world.
-- `generateTypes({ wit, world })` returns the declaration files that `perry-wit gen-types` writes, as `{ path, contents }` records.
+- `generateTypes({ wit, witDependencies, world })` returns the declaration files that `perry-wit gen-types` writes, as `{ path, contents }` records.
 
 Each function takes its inputs from memory:
 
@@ -49,12 +49,13 @@ Each function takes its inputs from memory:
 
 A rejected program throws a `CompileError`.
 Its `diagnostics` hold the same codes, spans, notes and help as the Rust API.
-Its `message` formats them as `file:line:column: severity[code]: message` lines.
+Its `message` (and `formatDiagnostics`) formats them as `file:line:column: severity[code]: message` lines.
 
 The functions are asynchronous because the compiler loads on first use.
-`await Compiler.load(options)` returns a compiler whose `compile`, `compileCore` and `generateTypes` methods run synchronously, for example inside a bundler's synchronous transform hook; `options` can also supply a custom `loadCoreModule` loader or per-instance `stdout` and `stderr` callbacks.
+`await Compiler.load(options)` returns a compiler whose `compile`, `compileCore` and `generateTypes` methods run synchronously, for example inside a bundler's synchronous transform hook.
+`options` accepts a custom `loadCoreModule` loader and per-instance `stdout` and `stderr` callbacks.
 
-The compiler gets no directories, arguments or environment variables.
+The WASI host isolates the compiler with empty preopens, arguments and environment.
 Node.js reads the compiler from the installed package.
 Browsers fetch it through static `new URL(…, import.meta.url)` references, which bundlers such as Vite copy into their output.
 
