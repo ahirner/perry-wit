@@ -248,9 +248,9 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.20.3"
+version = "3.20.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+checksum = "87a0cf66fd1eb2fb7b822cb78370d82303750809bc6ba855f3f58e517d3238db"
 dependencies = [
  "allocator-api2 0.2.21",
 ]
@@ -288,9 +288,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.1"
+version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
+checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -644,9 +644,9 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -1211,9 +1211,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+checksum = "20521a903f02b0a573cd6840e9d0a5a0cc043d361fe924092cd70f8556cc9c4a"
 dependencies = [
  "libc",
  "wasi",
@@ -1326,12 +1326,12 @@ version = "0.1.0"
 [[package]]
 name = "perry-abi"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 
 [[package]]
 name = "perry-api-manifest"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 
 [[package]]
 name = "perry-codegen"
@@ -1378,7 +1378,7 @@ dependencies = [
 [[package]]
 name = "perry-diagnostics"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 dependencies = [
  "serde",
  "serde_json",
@@ -1387,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "perry-dispatch"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 
 [[package]]
 name = "perry-frontend"
@@ -1410,7 +1410,7 @@ dependencies = [
 [[package]]
 name = "perry-hir"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 dependencies = [
  "anyhow",
  "perry-api-manifest",
@@ -1462,7 +1462,7 @@ dependencies = [
 [[package]]
 name = "perry-parser"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -1503,7 +1503,7 @@ dependencies = [
 [[package]]
 name = "perry-runtime-manifest"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 dependencies = [
  "perry-abi 0.5.1663",
  "perry-dispatch",
@@ -1512,7 +1512,7 @@ dependencies = [
 [[package]]
 name = "perry-ui-model"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=908ecffa899769ddd4c0c9c160a1e92da621566c#908ecffa899769ddd4c0c9c160a1e92da621566c"
 
 [[package]]
 name = "perry-wit"
@@ -1607,7 +1607,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pliron"
 version = "0.20.0"
-source = "git+https://github.com/pliron-org/pliron?rev=0a5e07b46607fd9b5740474581753aa927cadfc7#0a5e07b46607fd9b5740474581753aa927cadfc7"
+source = "git+https://github.com/pliron-org/pliron?rev=d576e31300bd00fe16b7b8c93261857d777680f9#d576e31300bd00fe16b7b8c93261857d777680f9"
 dependencies = [
  "awint",
  "combine",
@@ -1621,7 +1621,6 @@ dependencies = [
  "log",
  "once_vec",
  "pliron-derive",
- "regex",
  "rustc-hash",
  "rustc_apfloat",
  "slotmap",
@@ -1637,7 +1636,7 @@ version = "0.1.0"
 [[package]]
 name = "pliron-derive"
 version = "0.20.0"
-source = "git+https://github.com/pliron-org/pliron?rev=0a5e07b46607fd9b5740474581753aa927cadfc7#0a5e07b46607fd9b5740474581753aa927cadfc7"
+source = "git+https://github.com/pliron-org/pliron?rev=d576e31300bd00fe16b7b8c93261857d777680f9#d576e31300bd00fe16b7b8c93261857d777680f9"
 dependencies = [
  "combine",
  "convert_case",
@@ -1968,9 +1967,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -2415,9 +2414,9 @@ dependencies = [
 
 [[package]]
 name = "target-lexicon"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+checksum = "8c447be3a2abfa84b2d91680c56600bd6b2873866de27b36ec911be705e291da"
 
 [[package]]
 name = "tempfile"
