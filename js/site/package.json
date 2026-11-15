@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@bytecodealliance/jco-transpile": "0.23.0",
+    "@bytecodealliance/preview2-shim": "0.31.0",
     "@bytecodealliance/preview3-shim": "0.13.0",
     "perry-wit": "*"
   },

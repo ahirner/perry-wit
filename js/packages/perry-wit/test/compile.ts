@@ -86,21 +86,10 @@ test("generates declarations for a world", async () => {
   assert.match(files[0]!.contents, /run/);
 });
 
-test("a loaded compiler runs synchronously and captures stderr per instance", async () => {
-  const decoder = new TextDecoder();
-  let captured = "";
-  const compiler = await Compiler.load({
-    stderr: (bytes) => {
-      captured += decoder.decode(bytes, { stream: true });
-    },
-  });
+test("a loaded compiler runs synchronously", async () => {
+  const compiler = await Compiler.load();
   assert.ok(isComponent(compiler.compile({ source, wit }).component));
-  assert.throws(
-    () => compiler.compile({ source: "export function run(): number { return new Missing(); }", wit }),
-    CompileError,
-  );
-  captured += decoder.decode();
-  assert.match(captured, /Warning: unknown identifier 'Missing'/);
+  assert.throws(() => compiler.compile({ source, wit: "package test:bad; world app { export missing: func(); }" }), CompileError);
 });
 
 test("the documented example compiles a component", async () => {

@@ -76,6 +76,7 @@ await build({
   bundle: true, format: 'esm', platform: 'browser', target: 'es2022', minify: true,
   alias: { '@perry/wasm-tools': join(vendor, 'wasm-tools.js') },
   plugins: [{ name: 'engine-assets', setup(build) {
+    build.onResolve({ filter: /^#load-core$/ }, () => ({ path: join(root, 'play/load-core.js') }));
     build.onLoad({ filter: /preview3-shim\/dist\/browser\/streams\.js$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8');
       const perByte = /for \(const byte of bytes\) \{\s*controller\.enqueue\(byte\);\s*\}/;
@@ -89,13 +90,7 @@ await build({
   } }],
 });
 
-const loadedCompiler = await Compiler.load({
-  loadCoreModule: name => {
-    const slice = coreSlices[name];
-    if (!slice) throw new Error(`Missing compiler slice for ${name}`);
-    return WebAssembly.compile(compilerBytes.subarray(slice.start, slice.end));
-  },
-});
+const loadedCompiler = await Compiler.load();
 
 await prepareBook({ repository, bookDir, generated, compiler: loadedCompiler, conformanceDoc });
 await checkHomepage({ html: await readFile(join(root, 'index.html'), 'utf8'), generated, compiler: loadedCompiler });

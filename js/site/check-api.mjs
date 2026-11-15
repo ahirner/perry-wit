@@ -3,19 +3,9 @@ import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { Compiler, CompileError } from 'perry-wit';
-import { coreSlices } from './.generated/compiler-slices.js';
 
-const defaultOutput = fileURLToPath(new URL('./dist', import.meta.url));
-const compilerBytes = await readFile(resolve(process.env.SITE_OUTPUT || defaultOutput, 'downloads/perry-wit.wasm'));
-const compiler = await Compiler.load({
-  loadCoreModule: name => {
-    const slice = coreSlices[name];
-    if (!slice) throw new Error(`Missing compiler slice for ${name}`);
-    return WebAssembly.compile(compilerBytes.subarray(slice.start, slice.end));
-  },
-});
+const compiler = await Compiler.load();
 
 function diagnosticsMatch(pattern) {
   return error => error instanceof CompileError
@@ -104,7 +94,7 @@ for (const [domain, result, args, expected] of [
   }
   parityCases.push({ name: `${domain} → ${result}`, source, contract, compiled, sdk: compiler.generateTypes({ wit: contract }) });
 }
-console.log('Wasm library: embedded slice loader, invalid UTF-8, Unicode/CRLF spans, built-in WASI WIT, all integer widths, exact 64-bit arithmetic, and raw/core output');
+console.log('Wasm library: invalid UTF-8, Unicode/CRLF spans, built-in WASI WIT, all integer widths, exact 64-bit arithmetic, and raw/core output');
 
 if (process.env.PERRY_NATIVE_COMPILER && process.env.PERRY_COMPILER_WASM) {
   const directory = await mkdtemp(join(tmpdir(), 'perry-parity-'));

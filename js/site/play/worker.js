@@ -1,5 +1,5 @@
 import { Compiler, CompileError } from 'perry-wit';
-import { coreSlices } from '../.generated/compiler-slices.js';
+import * as compilerCli from '@bytecodealliance/preview2-shim/cli';
 import { $init as bindgenReady, generate } from '@bytecodealliance/jco-transpile/component';
 import { $init as toolsReady, tools } from '@perry/wasm-tools';
 import * as cli from '@bytecodealliance/preview3-shim/cli';
@@ -51,23 +51,13 @@ self.onmessage = async ({ data }) => {
   let log = '';
   let phase = 'load';
   const decoder = new TextDecoder();
-  const writeLog = bytes => { log += decoder.decode(bytes, { stream: true }); };
-  const output = { write: writeLog, flush() {}, blockingFlush() {} };
+  const output = { write(bytes) { log += decoder.decode(bytes, { stream: true }); }, flush() {}, blockingFlush() {} };
   cli._setStdout(output);
   cli._setStderr(output);
+  compilerCli._setStdout(output);
+  compilerCli._setStderr(output);
   try {
-    const response = await fetch(new URL(`../../downloads/perry-wit.wasm${new URL(import.meta.url).search}`, import.meta.url));
-    if (!response.ok) throw new Error(`Could not load compiler: HTTP ${response.status}`);
-    const compilerBytes = new Uint8Array(await response.arrayBuffer());
-    const compiler = await Compiler.load({
-      loadCoreModule: name => {
-        const slice = coreSlices[name];
-        if (!slice) throw new Error(`Missing compiler slice for ${name}`);
-        return WebAssembly.compile(compilerBytes.subarray(slice.start, slice.end));
-      },
-      stdout: writeLog,
-      stderr: writeLog,
-    });
+    const compiler = await Compiler.load();
     if (data.action === 'generate-sdk') {
       phase = 'generate-sdk';
       send('sdk', { files: compiler.generateTypes(data) });

@@ -12,7 +12,6 @@ import type {
   DiagnosticCode,
   DiagnosticSeverity,
   FileContents,
-  LoadOptions,
   ProgramOptions,
   SourceFile,
   SourceSpan,
@@ -42,8 +41,8 @@ export class Compiler {
   }
 
   /** Load a compiler instance, independent of every other instance. */
-  static async load(options: LoadOptions = {}): Promise<Compiler> {
-    const { api } = await instantiate(options.loadCoreModule ?? loadCoreModule, wasiImports(options));
+  static async load(): Promise<Compiler> {
+    const { api } = await instantiate(loadCoreModule, wasiImports());
     return new Compiler(api);
   }
 

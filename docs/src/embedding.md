@@ -52,8 +52,7 @@ Its `diagnostics` hold the same codes, spans, notes and help as the Rust API.
 Its `message` (and `formatDiagnostics`) formats them as `file:line:column: severity[code]: message` lines.
 
 The functions are asynchronous because the compiler loads on first use.
-`await Compiler.load(options)` returns a compiler whose `compile`, `compileCore` and `generateTypes` methods run synchronously, for example inside a bundler's synchronous transform hook.
-`options` accepts a custom `loadCoreModule` loader and per-instance `stdout` and `stderr` callbacks.
+`await Compiler.load()` returns a compiler whose `compile`, `compileCore` and `generateTypes` methods run synchronously, for example inside a bundler's synchronous transform hook.
 
 The WASI host isolates the compiler with empty preopens, arguments and environment.
 Node.js reads the compiler from the installed package.
