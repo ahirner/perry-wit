@@ -13,10 +13,11 @@ The runtime and standard libraries are precompiled and embedded in the compiler 
 
 Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`PerryDiagnostic`](../rust/perry_wit/struct.PerryDiagnostic.html) records with a source span and a [`DiagnosticCode`](../rust/perry_wit/enum.DiagnosticCode.html).
 
-## JavaScript
 
-The `perry-wit` npm package compiles TypeScript into components from Node.js 22 or later and from browsers.
-It bundles the compiler for standalone installation:
+## JavaScript API
+
+perry-wit compiles a statically typed subset of TypeScript into WebAssembly components.
+The npm package bundles the compiler for use in browsers and in Node.js 22 or later.
 
 ```sh
 npm install perry-wit  # todo: publishing still to come
