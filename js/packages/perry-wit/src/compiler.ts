@@ -113,7 +113,7 @@ async function withShared<T>(use: (compiler: Compiler) => T): Promise<T> {
   try {
     return use(compiler);
   } catch (error) {
-    if (!(error instanceof CompileError) && shared === loading) shared = undefined;
+    if (error instanceof WebAssembly.RuntimeError && shared === loading) shared = undefined;
     throw error;
   }
 }

@@ -1,19 +1,26 @@
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
-import { readFile, readdir, mkdir, mkdtemp, writeFile, rm, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { copyFile, readFile, readdir, mkdir, mkdtemp, writeFile, rm, stat } from 'node:fs/promises';
 import { resolve, dirname, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_DRIVER_PATH || 'playwright-core');
 
-const directory = resolve(process.env.SITE_OUTPUT || 'site/dist');
+const siteRoot = dirname(fileURLToPath(import.meta.url));
+const workspaceRoot = dirname(siteRoot);
+const repoRoot = dirname(workspaceRoot);
+const directory = resolve(process.env.SITE_OUTPUT || join(siteRoot, 'dist'));
+const resultsDir = join(siteRoot, 'test-results');
 const wasmFiles = (await readdir(directory, { recursive: true })).filter(name => name.endsWith('.wasm'));
 assert.deepEqual(wasmFiles.filter(name => !name.startsWith('play/assets/engine/')), ['downloads/perry-wit.wasm'], 'The distribution must contain only one compiler binary');
 const compilerVersion = JSON.parse(await readFile(join(directory, 'downloads/compiler.metadata.json'), 'utf8')).version;
 const origin = 'https://playground.test';
 const prefix = '/perry-wit/';
-const mergedDocuments = { ...JSON.parse(await readFile('examples/merge_docs/doc1.json', 'utf8')), ...JSON.parse(await readFile('examples/merge_docs/doc2.json', 'utf8')) };
+const mergedDocuments = { ...JSON.parse(await readFile(join(repoRoot, 'examples/merge_docs/doc1.json'), 'utf8')), ...JSON.parse(await readFile(join(repoRoot, 'examples/merge_docs/doc2.json'), 'utf8')) };
 const markdownExample = { markdown: '# Field notes 🍄\n\nFound chanterelles under the birch trees.\n\nCafé stop on the way home. ☕', codePoints: 88 };
-const documentPackage = JSON.parse(await readFile('examples/merge_docs/package.json', 'utf8'));
+const documentPackage = JSON.parse(await readFile(join(repoRoot, 'examples/merge_docs/package.json'), 'utf8'));
 const documentUrls = documentPackage.perryWit.functions.mergeDocs.urls;
 const mime = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm' };
 const fixtures = await mkdtemp(join(tmpdir(), 'perry-folder-'));
@@ -24,13 +31,60 @@ await writeFile(join(fixtures, 'src/math.ts'), 'export function twice(n: number)
 await mkdir(join(fixtures, 'source-only'));
 await writeFile(join(fixtures, 'source-only/index.ts'), 'export function run(n: number): number { return n * 2; }');
 await writeFile(join(fixtures, 'wit/world.wit'), 'package test:folder; world app { export run: func(n: f64) -> f64; } world other { export missing: func() -> u32; }');
-await mkdir('site/test-results', { recursive: true });
+const packageConsumer = resolve(process.env.PERRY_PACKAGE_CONSUMER || workspaceRoot);
+if (!existsSync(join(packageConsumer, 'node_modules/perry-wit/dist/index.js'))) {
+  throw new Error('Build perry-wit first (npm --prefix js run build) or set PERRY_PACKAGE_CONSUMER.');
+}
+const packageBundleDir = join(fixtures, 'package-browser');
+await mkdir(packageBundleDir);
+await build({
+  stdin: { contents: "export { compile } from 'perry-wit';", resolveDir: packageConsumer, loader: 'js' },
+  outfile: join(packageBundleDir, 'bundle.js'),
+  bundle: true, format: 'esm', platform: 'browser', target: 'es2022',
+});
+const packageBindingsDir = join(packageConsumer, 'node_modules/perry-wit/bindings');
+for (const file of await readdir(packageBindingsDir)) {
+  if (file.endsWith('.wasm')) await copyFile(join(packageBindingsDir, file), join(packageBundleDir, file));
+}
+await mkdir(resultsDir, { recursive: true });
 
 try {
   for (const [name, engine] of [['chromium', chromium], ['webkit', webkit]]) {
     const browser = await engine.launch({ executablePath: process.env[`${name.toUpperCase()}_EXECUTABLE`] });
     try {
       const context = await browser.newContext({ viewport: { width: 1280, height: 1000 }, acceptDownloads: true, serviceWorkers: 'block' });
+      let packageWasmType = 'application/wasm';
+      const packageRequests = [];
+      await context.route('https://package.test/**', async route => {
+        const pathname = new URL(route.request().url()).pathname;
+        packageRequests.push(pathname);
+        if (pathname === '/') return route.fulfill({ contentType: 'text/html', body: '<!doctype html>' });
+        const file = pathname.slice(1);
+        if (file.includes('/')) return route.abort();
+        try {
+          await route.fulfill({
+            body: await readFile(join(packageBundleDir, file)),
+            contentType: file.endsWith('.wasm') ? packageWasmType : 'text/javascript',
+          });
+        } catch { await route.fulfill({ status: 404 }); }
+      });
+      const pkgPage = await context.newPage();
+      for (const contentType of name === 'chromium' ? ['application/wasm', 'application/octet-stream'] : ['application/wasm']) {
+        packageWasmType = contentType;
+        packageRequests.length = 0;
+        await pkgPage.goto('https://package.test/');
+        const header = await pkgPage.evaluate(async () => {
+          const { compile } = await import('./bundle.js');
+          const { component } = await compile({
+            source: 'export function add(a: number, b: number): number { return a + b; }',
+            wit: 'package test:pkg; world w { export add: func(a: s32, b: s32) -> s32; }',
+          });
+          return [...component.slice(0, 8)];
+        });
+        assert.deepEqual(header, [0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00], `${name}: bundled perry-wit (${contentType})`);
+        assert(packageRequests.some(path => path.endsWith('.wasm')), `${name}: default browser loader must fetch core Wasm modules`);
+      }
+      await pkgPage.close();
       const requests = [];
       const assetVersions = [];
       let compilerFailure = false;
@@ -58,7 +112,7 @@ try {
             status: documentFailure === 'http' ? 503 : 200,
             contentType: 'application/json',
             headers: { 'access-control-allow-origin': '*' },
-            body: documentFailure === 'json' && index === 0 ? 'invalid JSON' : largeResponse && index === 1 ? JSON.stringify({ streamedText }) : await readFile(`examples/merge_docs/doc${index + 1}.json`),
+            body: documentFailure === 'json' && index === 0 ? 'invalid JSON' : largeResponse && index === 1 ? JSON.stringify({ streamedText }) : await readFile(join(repoRoot, `examples/merge_docs/doc${index + 1}.json`)),
           });
         });
       }
@@ -123,7 +177,7 @@ try {
       assert.equal(await page.locator('footer span').innerText(), `Perry-WIT v${compilerVersion}`);
       const footerText = await page.locator('footer').innerText();
       const footerLinks = await page.locator('footer a').evaluateAll(links => links.map(link => link.href));
-      await page.screenshot({ path: `site/test-results/${name}-home.png`, fullPage: true });
+      await page.screenshot({ path: join(resultsDir, `${name}-home.png`), fullPage: true });
       const codeStyle = await page.locator('.editors pre').first().evaluate(element => { const style = getComputedStyle(element); return [style.backgroundColor, style.border, style.borderRadius, style.padding, style.font]; });
       await page.getByRole('link', { name: 'Try the playground' }).click();
       await page.waitForURL(`${origin}${prefix}play/`, { waitUntil: 'load' });
@@ -163,26 +217,23 @@ try {
           worker.postMessage(data);
         });
         try {
-          const wit = { application: { tag: 'sources', val: [{ contents: new TextEncoder().encode(
-            'package test:worker; world other { export unused: func(); } world selected { export run: func() -> u32; }',
-          ) }] }, dependencies: [] };
-          const sdk = await request({ id: 'sdk', action: 'generate-sdk', wit, options: { world: 'selected' } });
-          wit.application.val[0].contents = new Uint8Array([255]);
-          const error = await request({ id: 'invalid', action: 'generate-sdk', wit });
-          return [{ ...sdk, files: sdk.files.map(file => ({ name: file.name, text: new TextDecoder().decode(file.contents) })) }, error];
+          const wit = 'package test:worker; world other { export unused: func(); } world selected { export run: func() -> u32; }';
+          const sdk = await request({ id: 'sdk', action: 'generate-sdk', wit, world: 'selected' });
+          const error = await request({ id: 'invalid', action: 'generate-sdk', wit: new Uint8Array([255]) });
+          return [sdk, error];
         } finally { worker.terminate(); }
       }, assetVersions[0]);
       assert.equal(sdk.kind, 'sdk');
       assert.equal(sdk.id, 'sdk');
-      assert.deepEqual(sdk.files.map(file => file.name), ['world.d.ts', 'imports.d.ts', 'runtime.d.ts']);
-      assert.match(sdk.files[0].text, /\brun\b/);
-      assert.doesNotMatch(sdk.files[0].text, /\bunused\b/);
+      assert.deepEqual(sdk.files.map(file => file.path), ['world.d.ts', 'imports.d.ts', 'runtime.d.ts']);
+      assert.match(sdk.files[0].contents, /\brun\b/);
+      assert.doesNotMatch(sdk.files[0].contents, /\bunused\b/);
       assert.equal(sdkError.kind, 'error');
       assert.equal(sdkError.id, 'invalid');
       assert.equal(sdkError.phase, 'generate-sdk');
       assert(sdkError.diagnostics.length > 0);
       assert.match(sdkError.message, /UTF-8/);
-      await page.screenshot({ path: `site/test-results/${name}-example.png`, fullPage: true });
+      await page.screenshot({ path: join(resultsDir, `${name}-example.png`), fullPage: true });
       compilerFailure = true;
       await page.locator('#compile').click();
       await page.waitForFunction(() => document.getElementById('status').dataset.state === 'error');
@@ -202,7 +253,7 @@ try {
       await page.waitForFunction(() => document.getElementById('status').dataset.state === 'error');
       assert.match(await page.locator('#output').textContent(), /World “other” requires an exported missing function/);
       assert.equal(await page.locator('#output').getAttribute('data-state'), 'error');
-      await page.screenshot({ path: `site/test-results/${name}-error.png`, fullPage: true });
+      await page.screenshot({ path: join(resultsDir, `${name}-error.png`), fullPage: true });
       await page.locator('#reset').click();
       assert.equal(await page.locator('#world-picker').isVisible(), false);
       assert.equal(await page.locator('#world').inputValue(), 'merge-task');
@@ -254,17 +305,17 @@ try {
       assert.match(await page.locator('#output').textContent(), /Warning: unknown identifier 'Missing'/, 'Upstream compiler stderr reaches diagnostics through WASI');
       await page.locator('#tab-result').click();
       await page.locator('#reset').click();
-      await page.locator('#folder-input').setInputFiles(resolve('examples'));
+      await page.locator('#folder-input').setInputFiles(join(repoRoot, 'examples'));
       await page.waitForFunction(() => document.getElementById('status').textContent === 'Folder loaded');
       assert.equal(await page.locator('#entry').inputValue(), 'merge_task/index.ts');
-      const taskPackage = JSON.parse(await readFile('examples/merge_task/package.json', 'utf8'));
+      const taskPackage = JSON.parse(await readFile(join(repoRoot, 'examples/merge_task/package.json'), 'utf8'));
       assert.equal(await page.locator('#folder-description').textContent(), taskPackage.description);
       assert.equal(await page.locator('#function').isDisabled(), true, 'Imported callable choices must be verified by compilation');
       assert.deepEqual(JSON.parse(await run()), markdownExample);
       await page.locator('#entry').selectOption('merge_docs/index.ts');
       assert.equal(await page.locator('#world').inputValue(), 'merge-docs');
       assert.deepEqual(JSON.parse(await run()), mergedDocuments);
-      await page.locator('#folder-input').setInputFiles(resolve('examples/merge_task'));
+      await page.locator('#folder-input').setInputFiles(join(repoRoot, 'examples/merge_task'));
       await page.waitForFunction(() => document.getElementById('status').textContent === 'Folder loaded');
       assert.equal(await page.locator('#entry-picker').isVisible(), false);
       assert.deepEqual(JSON.parse(await run()), markdownExample);
@@ -338,7 +389,7 @@ try {
       await page.locator('#args').focus();
       await page.keyboard.press('ControlOrMeta+Enter');
       await page.waitForFunction(() => document.getElementById('status').dataset.state === 'complete');
-      await page.screenshot({ path: `site/test-results/${name}-desktop.png`, fullPage: true });
+      await page.screenshot({ path: join(resultsDir, `${name}-desktop.png`), fullPage: true });
       await page.setViewportSize({ width: 800, height: 1000 });
       assert(await page.locator('#status').evaluate(element => element.clientWidth >= element.scrollWidth), 'The split layout must leave room to read the run status');
       await page.setViewportSize({ width: 390, height: 844 });
@@ -348,13 +399,13 @@ try {
       const mobilePosition = await page.locator('#run').evaluate(element => { const box = element.getBoundingClientRect(); return { x: box.x, y: box.y, scroll: scrollY }; });
       await run();
       assert.deepEqual(await page.locator('#run').evaluate(element => { const box = element.getBoundingClientRect(); return { x: box.x, y: box.y, scroll: scrollY }; }), mobilePosition, 'Mobile run controls must stay in place');
-      await page.screenshot({ path: `site/test-results/${name}-mobile.png`, fullPage: true });
+      await page.screenshot({ path: join(resultsDir, `${name}-mobile.png`), fullPage: true });
       await page.emulateMedia({ colorScheme: 'dark' });
-      await page.screenshot({ path: `site/test-results/${name}-dark.png`, fullPage: true });
+      await page.screenshot({ path: join(resultsDir, `${name}-dark.png`), fullPage: true });
       await page.goto(`${origin}${prefix}`);
       assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile homepage overflows');
-      await page.screenshot({ path: `site/test-results/${name}-home-mobile.png`, fullPage: true });
-      console.log(`${name}: examples, world choices, actionable errors, argument presets, reset, keyboard, folder imports, cancellation, downloads, mobile/dark layouts and repository path passed`);
+      await page.screenshot({ path: join(resultsDir, `${name}-home-mobile.png`), fullPage: true });
+      console.log(`${name}: bundled perry-wit loader, examples, world choices, actionable errors, argument presets, reset, keyboard, folder imports, cancellation, downloads, mobile/dark layouts and repository path passed`);
     } finally { await browser.close(); }
   }
 } finally { await rm(fixtures, { recursive: true, force: true }); }

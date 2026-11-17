@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { countCodePoints, renderMarkdown } from '../../examples/merge_task/index.ts';
+import { countCodePoints, renderMarkdown } from '../../../examples/merge_task/index.ts';
 
 test('Markdown counts match JavaScript string iteration across Unicode sequences', () => {
   for (const [text, expected] of [['', 0], ['Café 🙂', 6], ['e\u0301', 2], ['👩‍💻', 3]]) {

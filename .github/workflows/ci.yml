@@ -9,8 +9,8 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: read
+# Jobs request only the permissions they need.
+permissions: {}
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -19,23 +19,27 @@ concurrency:
 jobs:
   conformance-and-tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-    - uses: endersonmenezes/free-disk-space@v4
+    - uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4.0.1
       with:
         rm_cmd: "rmz"
         remove_android: true
         remove_dotnet: true
         remove_haskell: true
         remove_tool_cache: true
-    - uses: actions/checkout@v7
-    - uses: cachix/install-nix-action@v31
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       with:
         nix_path: nixpkgs=channel:nixos-unstable
-    - uses: cachix/cachix-action@v17
+    - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         cmd-format: nix develop -c {0}
         key: ${{ hashFiles('flake.lock') }}
@@ -66,8 +70,10 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
-    - uses: endersonmenezes/free-disk-space@v4
+    - uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4.0.1
       if: matrix.os == 'ubuntu-latest'
       with:
         rm_cmd: "rmz"
@@ -75,26 +81,30 @@ jobs:
         remove_dotnet: true
         remove_haskell: true
         remove_tool_cache: true
-    - uses: actions/checkout@v7
-    - uses: cachix/install-nix-action@v31
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       with:
         nix_path: nixpkgs=channel:nixos-unstable
-    - uses: cachix/cachix-action@v17
+    - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - run: nix flake check -L --keep-going
       if: matrix.os == 'ubuntu-latest'
-    - run: |
+    - env:
+        TARGET: ${{ matrix.target }}
+      run: |
         nix build -L .#perry-wit-release
         mkdir -p dist
-        tar -czf "dist/perry-wit-${{ matrix.target }}.tar.gz" -C result/bin perry-wit
-    - uses: actions/upload-artifact@v7
+        tar -czf "dist/perry-wit-${TARGET}.tar.gz" -C result/bin perry-wit
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: perry-wit-${{ matrix.target }}
         path: dist/perry-wit-${{ matrix.target }}.tar.gz
         if-no-files-found: error
-    - name: Package runtime libraries and Wasm compiler
+    - name: Package runtime libraries, Wasm compiler, and npm tarball
       if: matrix.os == 'ubuntu-latest'
       run: |
         nix build -L .#runtime-libraries --out-link result-runtime-libraries
@@ -104,17 +114,25 @@ jobs:
         cp result-compiler/lib/perry-wit.wasm dist/compiler/
         cp result-compiler/share/perry-wit/compiler.wit dist/compiler/
         cp result-compiler/share/perry-wit/metadata.json dist/compiler/compiler.metadata.json
-    - uses: actions/upload-artifact@v7
+        nix build -L .#npm-package --out-link result-npm-package
+        cp result-npm-package/perry-wit-*.tgz dist/
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: matrix.os == 'ubuntu-latest'
       with:
         name: perry-wit-runtime-libraries
         path: dist/perry-wit-runtime-libraries.tar.gz
         if-no-files-found: error
-    - uses: actions/upload-artifact@v7
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: matrix.os == 'ubuntu-latest'
       with:
         name: perry-wit-compiler
         path: dist/compiler/
+        if-no-files-found: error
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: matrix.os == 'ubuntu-latest'
+      with:
+        name: perry-wit-npm-package
+        path: dist/perry-wit-*.tgz
         if-no-files-found: error
 
   bench-perry:
@@ -127,12 +145,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
-    - uses: actions/checkout@v7
-    - uses: cachix/install-nix-action@v31
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       with:
         nix_path: nixpkgs=channel:nixos-unstable
-    - uses: cachix/cachix-action@v17
+    - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
         name: 'cybertreiber'
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
@@ -144,7 +166,7 @@ jobs:
     - name: Upload benchmark report
       id: bench-perry-artifact
       if: ${{ !cancelled() && steps.bench-perry.outcome != 'skipped' }}
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: bench-perry-${{ matrix.os }}
         path: artifacts/bench-perry/
@@ -164,12 +186,12 @@ jobs:
     permissions:
       contents: write
     steps:
-    - uses: actions/download-artifact@v8
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         pattern: perry-wit-*
         merge-multiple: true
         path: dist
-    - uses: softprops/action-gh-release@v3
+    - uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
       with:
         files: dist/*
         generate_release_notes: true
@@ -177,36 +199,47 @@ jobs:
   site:
     needs: flake-build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-    - uses: actions/checkout@v7
-    - uses: cachix/install-nix-action@v31
-    - uses: cachix/cachix-action@v17
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+    - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+    - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
       with:
         name: cybertreiber
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: perry-wit-npm-package
+        path: dist/npm-package
     - run: nix run -L .#site
     - run: |
-        nix develop .#browser -c bash -euo pipefail -c '
-          npm ci --prefix site --ignore-scripts --no-audit --no-fund
-          node site/check-browser.mjs
-        '
+        nix develop .#browser -c bash -euo pipefail <<'EOF'
+          tarball=(dist/npm-package/perry-wit-*.tgz)
+          tar -xzf "${tarball[0]}" -C js/packages/perry-wit --strip-components=1
+          npm ci --prefix js --ignore-scripts --no-audit --no-fund
+          npm --prefix js run test:e2e -- --tarball "${tarball[0]}"
+          node js/site/check-browser.mjs
+        EOF
       env:
         DEBUG: pw:browser
-    - uses: actions/upload-artifact@v7
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: static-site
-        path: site/dist/
+        path: js/site/dist/
         include-hidden-files: true
         if-no-files-found: error
-    - uses: actions/upload-artifact@v7
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       if: failure()
       with:
         name: browser-results
-        path: site/test-results
-    - uses: actions/upload-pages-artifact@v4
+        path: js/site/test-results
+    - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
       if: github.ref == 'refs/heads/main'
       with:
-        path: site/dist
+        path: js/site/dist
 
   deploy-pages:
     needs: [site, conformance-and-tests]
@@ -222,8 +255,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-    - uses: actions/configure-pages@v5
-    - uses: actions/deploy-pages@v4
+    - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+    - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
       id: deployment
     - name: Smoke check public assets
       env:

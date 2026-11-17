@@ -80,8 +80,8 @@ fn small_components_preserve_size_and_initial_memory() -> Result<()> {
             ),
         ),
         (
-            "site/index.html",
-            include_str!("../../site/index.html"),
+            "js/site/index.html",
+            include_str!("../../js/site/index.html"),
             format!("fits in {bytes} bytes"),
         ),
     ] {

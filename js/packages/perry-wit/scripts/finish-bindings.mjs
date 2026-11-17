@@ -6,14 +6,16 @@
 //
 // Usage: node scripts/finish-bindings.mjs [--bindings <dir>]
 import { realpathSync } from 'node:fs';
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { compilerNotices } from '../../../scripts/notices.mjs';
 
 const NAME = 'finish-bindings';
 const USAGE = `Usage: node scripts/${NAME}.mjs [--bindings <dir>]`;
 const PACKAGE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const REPOSITORY_DIR = resolve(PACKAGE_DIR, '../../..');
 const DEFAULT_LOADER = /^if \(!getCoreModule\) getCoreModule = .*import\.meta\.url\)\);\n/m;
 const DEFAULT_LOADER_REMOVED = `// ${NAME}: removed Jco's default core module loader; callers pass getCoreModule.\n`;
 
@@ -49,6 +51,13 @@ async function main(args) {
   } else {
     throw new ScriptError(`${compiler} has no default core module loader to remove; review the Jco output after updating Jco.`);
   }
+
+  const licenseTarget = join(PACKAGE_DIR, 'LICENSE');
+  await rm(licenseTarget, { force: true });
+  await copyFile(join(REPOSITORY_DIR, 'LICENSE'), licenseTarget);
+  await chmod(licenseTarget, 0o644);
+  const notices = await compilerNotices(REPOSITORY_DIR, 'perry-wit npm package and embedded Wasm compiler distribution');
+  await writeFile(join(PACKAGE_DIR, 'THIRD-PARTY-NOTICES.txt'), notices);
 }
 
 /** Whether this module is the entry point, on runtimes with and without `import.meta.main`. */

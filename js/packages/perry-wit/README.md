@@ -28,14 +28,3 @@ Invalid programs throw a `CompileError` holding the compiler's `diagnostics`.
 
 The [Embedding](https://ahirner.github.io/perry-wit/docs/embedding.html) chapter of the handbook describes every option.
 The [Authoring](https://ahirner.github.io/perry-wit/docs/authoring.html) chapter describes the TypeScript the compiler accepts.
-
-## Development
-
-The package builds from the [perry-wit repository](https://github.com/ahirner/perry-wit) inside its `nix develop` shell:
-
-```sh
-cd js
-npm ci --ignore-scripts
-npm run build   # cargo build, jco transpile, tsc
-npm test
-```
