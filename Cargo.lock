@@ -1514,7 +1514,7 @@ source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac
 
 [[package]]
 name = "perry-wit"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
