@@ -196,7 +196,7 @@ fn encoded_wit_and_invalid_bytes_are_reported() -> Result<()> {
             program("export function {"),
             wit(WORLD),
             "Parsing",
-            perry_wit::DiagnosticCode::ParseError,
+            perry_wit::codes::PARSE_ERROR,
         ),
         (
             Program {
@@ -205,7 +205,7 @@ fn encoded_wit_and_invalid_bytes_are_reported() -> Result<()> {
             },
             wit(WORLD),
             "UTF-8",
-            perry_wit::DiagnosticCode::InvalidInput,
+            perry_wit::codes::INVALID_UTF8,
         ),
         (
             input.clone(),
@@ -214,17 +214,17 @@ fn encoded_wit_and_invalid_bytes_are_reported() -> Result<()> {
                 dependencies: vec![],
             },
             "UTF-8",
-            perry_wit::DiagnosticCode::WitResolution,
+            perry_wit::codes::INVALID_UTF8,
         ),
         (
             input,
             wit("invalid WIT"),
             "expected",
-            perry_wit::DiagnosticCode::WitResolution,
+            perry_wit::codes::WIT_PARSE,
         ),
     ] {
         let error = api::compile(&input, &contract, &Options::default()).unwrap_err();
-        assert_eq!(error.diagnostics[0].code, code, "{error:#}");
+        assert_eq!(error.primary().code(), code, "{error:#}");
         assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
     Ok(())

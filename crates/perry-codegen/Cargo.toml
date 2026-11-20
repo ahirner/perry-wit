@@ -9,6 +9,7 @@ description = "Lowers perry MIR to the pliron `wasm` dialect and core Wasm"
 anyhow.workspace = true
 perry-abi.workspace = true
 perry-mir.workspace = true
+perry-wit-diagnostics.workspace = true
 pliron.workspace = true
 pliron-wasm = { path = "../pliron-wasm" }
 

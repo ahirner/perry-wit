@@ -8,6 +8,7 @@ mod resources;
 use crate::{audit, component, link, strip};
 use anyhow::{Context as _, Result, anyhow};
 use perry_codegen::Exports;
+use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
 use pliron::{context::Context, op::Op, pass::AnalysisManager, printable::Printable};
 use std::{
     collections::BTreeMap,
@@ -149,8 +150,12 @@ pub(crate) fn compile_sources(
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
     let program = perry_frontend::load_sources(ctx, source, identity, modules, foreign.foreign())
-        .map_err(map_lower_error)?;
-    let mir = perry_lower::lower_program(ctx, &program).map_err(map_lower_error)?;
+        .map_err(|error| {
+        crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
+    })?;
+    let mir = perry_lower::lower_program(ctx, &program).map_err(|error| {
+        crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
+    })?;
     let mut exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::constrain_numbers(ctx, &mir, &exports)?;
     let mut analyses = optimize(ctx, &mir)?;
@@ -169,9 +174,7 @@ pub(crate) fn compile_sources(
         resources,
         true,
     )
-    .map_err(|error| {
-        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
-    })?)
+    .map_err(|error| crate::Diagnostic::from_error_with_fallback(error, crate::codes::INTERNAL))?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -204,7 +207,7 @@ pub(super) fn emit_component(
         resources,
     };
     let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &exports, analyses)?;
-    let core = perry_codegen::compile(ctx, mir, &exports, analyses).map_err(map_codegen_error)?;
+    let core = perry_codegen::compile(ctx, mir, &exports, analyses)?;
     let (mut core, helpers) = finish(
         core,
         streams.as_ref(),
@@ -257,14 +260,13 @@ pub(crate) fn compile_core_sources(
     } else {
         Exports::Raw
     };
-    let core =
-        perry_codegen::compile(ctx, &mir, &exports, &mut analyses).map_err(map_codegen_error)?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
     let (core, _) =
         finish(core, None, &link::canonical::Requirements::default()).map_err(|error| {
-            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+            crate::Diagnostic::from_error_with_fallback(error, crate::codes::INTERNAL)
         })?;
     Ok(link::raw::without_p3(core).map_err(|error| {
-        crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        crate::Diagnostic::from_error_with_fallback(error, crate::codes::INTERNAL)
     })?)
 }
 
@@ -276,79 +278,27 @@ fn lower(
     foreign: &perry_frontend::wit::WorldTypes,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
     let program = perry_frontend::load_sources(ctx, source, file_name, modules, foreign.foreign())
-        .map_err(map_lower_error)?;
-    let mir = perry_lower::lower_program(ctx, &program).map_err(map_lower_error)?;
+        .map_err(|error| {
+            crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
+        })?;
+    let mir = perry_lower::lower_program(ctx, &program).map_err(|error| {
+        crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
+    })?;
     let analyses = optimize(ctx, &mir)?;
     Ok((mir, analyses))
-}
-
-fn map_lower_error(error: anyhow::Error) -> crate::PerryDiagnostic {
-    match perry_lower::LowerError::try_from_anyhow(error) {
-        Ok(lower) => lower.into(),
-        Err(error) => {
-            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::UnsupportedExpression)
-        }
-    }
 }
 
 fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
     let analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
         .map_err(
-            |error| match error.err.downcast_ref::<crate::PerryDiagnostic>() {
+            |error| match error.err.downcast_ref::<crate::Diagnostic>() {
                 Some(diagnostic) => anyhow::Error::new(diagnostic.clone()),
                 None => anyhow!("{}", error.disp(ctx)),
             },
         )
         .context("optimizing MIR")
-        .map_err(|error| {
-            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
-        })?;
+        .map_err(crate::Diagnostic::from_error)?;
     Ok(analyses)
-}
-
-fn map_codegen_error(error: anyhow::Error) -> crate::PerryDiagnostic {
-    match error.downcast::<perry_codegen::CodegenError>() {
-        Ok(codegen_err) => {
-            let message = codegen_err.to_string();
-            match codegen_err {
-                perry_codegen::CodegenError::PendingInitialization { span } => {
-                    crate::PerryDiagnostic::error(crate::DiagnosticCode::CodegenFailure, message)
-                        .with_optional_span(span)
-                        .with_help(
-                            "Await the asynchronous work in the top-level statements, so every entry point waits for it.",
-                        )
-                }
-                perry_codegen::CodegenError::AsyncInitializerRequiresAsyncExport {
-                    span, ..
-                } => crate::PerryDiagnostic::error(
-                    crate::DiagnosticCode::MissingErrorChannel,
-                    message,
-                )
-                .with_optional_span(span)
-                .with_help(
-                    "Declare this WIT export async so it can await module initialization and its error channel.",
-                ),
-                perry_codegen::CodegenError::MissingErrorChannel { span, .. } => {
-                    crate::PerryDiagnostic::error(
-                        crate::DiagnosticCode::MissingErrorChannel,
-                        message,
-                    )
-                    .with_optional_span(span)
-                    .with_help(
-                        "Declare a WIT result error, or use an async export with wasi:cli/stderr support.",
-                    )
-                }
-                perry_codegen::CodegenError::ExportBinding { span, source, .. } => {
-                    crate::PerryDiagnostic::error(crate::DiagnosticCode::ExportMismatch, message)
-                        .with_optional_span(span)
-                        .with_source_notes(source.as_ref())
-                }
-            }
-        }
-        Err(error) => {
-            crate::PerryDiagnostic::from_error(error, crate::DiagnosticCode::CodegenFailure)
-        }
-    }
 }
 
 fn finish(
@@ -382,7 +332,7 @@ pub fn compile_file(
     options: &CompileOptions,
 ) -> std::result::Result<Compiled, crate::CompileError> {
     compile_file_impl(input_file, options)
-        .map_err(|error| crate::CompileError::from_error(error, crate::DiagnosticCode::Io))
+        .map_err(|error| crate::CompileError::from_error_with_fallback(error, crate::codes::IO))
 }
 
 pub fn compile_typescript(
@@ -391,7 +341,7 @@ pub fn compile_typescript(
     options: &CompileOptions,
 ) -> std::result::Result<Compiled, crate::CompileError> {
     compile_typescript_impl(source, file_name, options).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::WIT_DEPENDENCY)
     })
 }
 
@@ -403,7 +353,7 @@ pub fn compile_for_world(
     componentize: bool,
 ) -> std::result::Result<Compiled, crate::CompileError> {
     compile_for_world_impl(source, file_name, resolve, world, componentize).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
     })
 }
 
@@ -414,7 +364,7 @@ pub fn compile_for_world_with_memory_checks(
     world: wit_parser::WorldId,
 ) -> std::result::Result<Compiled, crate::CompileError> {
     compile_for_world_with_memory_checks_impl(source, file_name, resolve, world).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
     })
 }
 
@@ -423,7 +373,7 @@ pub fn compile_core(
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
     compile_core_impl(source, file_name).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
     })
 }
 
@@ -432,6 +382,6 @@ pub fn compile_core_with_memory_checks(
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
     compile_core_with_memory_checks_impl(source, file_name).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::CodegenFailure)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
     })
 }

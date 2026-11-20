@@ -5,7 +5,7 @@ use perry_hir::{
     ir::{CompareOp, Expr, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
 };
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
+use perry_wit_diagnostics::{Diagnostic, codes};
 use std::collections::{HashMap, HashSet};
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
@@ -66,13 +66,14 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     classes::preserve_field_types(&mut ast);
     locations.preserve_expressions(&mut ast);
     let mut module = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
-        let span = error
-            .downcast_ref::<perry_hir::error::LowerError>()
-            .and_then(|error| error.span);
-        let diagnostic = PerryDiagnostic::error(
-            DiagnosticCode::UnsupportedExpression,
-            format!("failed to lower {identity}: {error:#}"),
-        );
+        let lower_error = error.downcast_ref::<perry_hir::error::LowerError>();
+        let span = lower_error.and_then(|error| error.span);
+        let code = if lower_error.is_some() {
+            codes::UNSUPPORTED_CONSTRUCT
+        } else {
+            codes::INTERNAL
+        };
+        let diagnostic = Diagnostic::new(code, format!("failed to lower {identity}: {error:#}"));
         let error = diagnostic.into();
         match span {
             Some(span) => locations.annotate(error, span),

@@ -72,6 +72,28 @@ impl fmt::Display for LinkError {
     }
 }
 
+impl LinkError {
+    fn code(&self) -> crate::Code {
+        match self {
+            Self::MissingStreamAnchor => crate::codes::BYTE_STREAM_NEEDS_WIT_STREAM,
+            Self::UnknownCanonicalPlaceholder(_)
+            | Self::MalformedCanonicalPlaceholder(_)
+            | Self::UnsupportedCoreImports
+            | Self::TableOverflow(_)
+            | Self::MissingHelperExport(_)
+            | Self::MissingHelperIndex(_)
+            | Self::Reencode(_)
+            | Self::Validation(_) => crate::codes::INTERNAL,
+        }
+    }
+}
+
+impl From<LinkError> for crate::Diagnostic {
+    fn from(error: LinkError) -> Self {
+        Self::new(error.code(), error.to_string())
+    }
+}
+
 impl std::error::Error for LinkError {}
 
 struct CoreRelocations<'a> {
@@ -130,6 +152,19 @@ fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
 
 /// Link runtime and standard-library calls and rewrite canonical stream placeholders for `core_wasm`.
 pub(crate) fn link_helpers_with(
+    core_wasm: Vec<u8>,
+    streams: Option<&StreamAnchor>,
+    canonical: &canonical::Requirements,
+) -> Result<(Vec<u8>, u32)> {
+    link_helpers_inner(core_wasm, streams, canonical).map_err(|error| {
+        match error.downcast::<LinkError>() {
+            Ok(link_error) => crate::Diagnostic::from(link_error).into(),
+            Err(error) => error,
+        }
+    })
+}
+
+fn link_helpers_inner(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
     canonical: &canonical::Requirements,

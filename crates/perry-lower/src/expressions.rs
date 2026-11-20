@@ -530,7 +530,7 @@ impl<'s> FunctionBuilder<'s> {
             } => self
                 .set_index(ctx, object, index, value)
                 .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
-            other => bail!("MIR backend does not support expression {other:?} yet"),
+            other => bail!("expression {other:?} is not supported yet"),
         };
         self.narrow_value(ctx, expr, value)
     }

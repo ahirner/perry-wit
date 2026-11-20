@@ -193,8 +193,8 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
         .into_iter()
         .find(|path| sources.contains_key(path.to_string_lossy().as_ref()))
         .ok_or_else(|| {
-            perry_wit_diagnostics::PerryDiagnostic::error(
-                perry_wit_diagnostics::DiagnosticCode::ModuleResolution,
+            perry_wit_diagnostics::Diagnostic::new(
+                perry_wit_diagnostics::codes::UNRESOLVED_MODULE,
                 format!("Cannot resolve '{name}' from {}", parent.display()),
             )
             .into()

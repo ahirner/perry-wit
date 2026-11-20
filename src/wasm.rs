@@ -51,53 +51,25 @@ impl From<WitInput> for api::Wit {
     }
 }
 
-impl From<perry_wit::PerryDiagnostic> for Diagnostic {
-    fn from(diagnostic: perry_wit::PerryDiagnostic) -> Self {
+impl From<perry_wit::Diagnostic> for Diagnostic {
+    fn from(diagnostic: perry_wit::Diagnostic) -> Self {
+        // Temporary 0.1.2 WIT projection until Commit 4 updates `world.wit`.
+        let code = match diagnostic.kind() {
+            perry_wit::ErrorKind::InvalidInput => DiagnosticCode::InvalidInput,
+            perry_wit::ErrorKind::Io => DiagnosticCode::Io,
+            perry_wit::ErrorKind::Wit => DiagnosticCode::WitResolution,
+            perry_wit::ErrorKind::Syntax => DiagnosticCode::ParseError,
+            perry_wit::ErrorKind::Module => DiagnosticCode::ModuleResolution,
+            perry_wit::ErrorKind::TypeCheck => DiagnosticCode::MissingTypeAnnotation,
+            perry_wit::ErrorKind::Unsupported => DiagnosticCode::UnsupportedExpression,
+            perry_wit::ErrorKind::Contract => DiagnosticCode::ExportMismatch,
+            perry_wit::ErrorKind::Internal => DiagnosticCode::InternalCompilerError,
+        };
         Self {
-            code: match diagnostic.code {
-                perry_wit::DiagnosticCode::ParseError => DiagnosticCode::ParseError,
-                perry_wit::DiagnosticCode::UnsupportedOperator => {
-                    DiagnosticCode::UnsupportedOperator
-                }
-                perry_wit::DiagnosticCode::UnsupportedSpread => DiagnosticCode::UnsupportedSpread,
-                perry_wit::DiagnosticCode::MissingTypeAnnotation => {
-                    DiagnosticCode::MissingTypeAnnotation
-                }
-                perry_wit::DiagnosticCode::UnsupportedType => DiagnosticCode::UnsupportedType,
-                perry_wit::DiagnosticCode::UnsupportedExpression => {
-                    DiagnosticCode::UnsupportedExpression
-                }
-                perry_wit::DiagnosticCode::IncompatibleRecordLayout => {
-                    DiagnosticCode::IncompatibleRecordLayout
-                }
-                perry_wit::DiagnosticCode::MissingRequiredField => {
-                    DiagnosticCode::MissingRequiredField
-                }
-                perry_wit::DiagnosticCode::AbsenceMismatch => DiagnosticCode::AbsenceMismatch,
-                perry_wit::DiagnosticCode::InterfaceMismatch => DiagnosticCode::InterfaceMismatch,
-                perry_wit::DiagnosticCode::ExportMismatch => DiagnosticCode::ExportMismatch,
-                perry_wit::DiagnosticCode::ImportSignatureMismatch => {
-                    DiagnosticCode::ImportSignatureMismatch
-                }
-                perry_wit::DiagnosticCode::ModuleResolution => DiagnosticCode::ModuleResolution,
-                perry_wit::DiagnosticCode::InvalidInput => DiagnosticCode::InvalidInput,
-                perry_wit::DiagnosticCode::WitResolution => DiagnosticCode::WitResolution,
-                perry_wit::DiagnosticCode::CodegenFailure => DiagnosticCode::CodegenFailure,
-                perry_wit::DiagnosticCode::MissingErrorChannel => {
-                    DiagnosticCode::MissingErrorChannel
-                }
-                perry_wit::DiagnosticCode::Io => DiagnosticCode::Io,
-                perry_wit::DiagnosticCode::InternalCompilerError => {
-                    DiagnosticCode::InternalCompilerError
-                }
-            },
-            severity: match diagnostic.severity {
-                perry_wit::DiagnosticSeverity::Error => DiagnosticSeverity::Error,
-                perry_wit::DiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
-                perry_wit::DiagnosticSeverity::Info => DiagnosticSeverity::Info,
-            },
-            message: diagnostic.message,
-            span: diagnostic.span.map(|span| SourceSpan {
+            code,
+            severity: DiagnosticSeverity::Error,
+            message: diagnostic.message().to_owned(),
+            span: diagnostic.span().map(|span| SourceSpan {
                 file: span.file.to_string_lossy().into_owned(),
                 start_line: span.start_line,
                 start_column: span.start_column,
@@ -106,8 +78,12 @@ impl From<perry_wit::PerryDiagnostic> for Diagnostic {
                 start_byte: span.start_byte as u64,
                 end_byte: span.end_byte as u64,
             }),
-            notes: diagnostic.notes,
-            help: diagnostic.help,
+            notes: diagnostic
+                .notes()
+                .iter()
+                .map(|note| note.message().to_owned())
+                .collect(),
+            help: diagnostic.help().map(str::to_owned),
         }
     }
 }
@@ -135,11 +111,22 @@ impl Guest for Compiler {
             }),
             allocation_report: compiled.allocation_report,
         })
-        .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
+        .map_err(|error| {
+            error
+                .into_diagnostics()
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        })
     }
     fn compile_core(program: Program) -> Result<Vec<u8>, Vec<Diagnostic>> {
-        api::compile_core(&program.into())
-            .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
+        api::compile_core(&program.into()).map_err(|error| {
+            error
+                .into_diagnostics()
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        })
     }
     fn generate_sdk(
         wit: WitInput,
@@ -155,7 +142,13 @@ impl Guest for Compiler {
                     })
                     .collect()
             })
-            .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
+            .map_err(|error| {
+                error
+                    .into_diagnostics()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect()
+            })
     }
 }
 

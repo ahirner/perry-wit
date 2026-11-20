@@ -55,9 +55,9 @@ impl<'s> Shapes<'s> {
         let arg_ids = TypeId::intern_slice(ctx, arguments);
         if !self.is_user_type(base) {
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
-                let expanded = resolver.utility_type(base, &arg_ids, 0).with_context(|| {
-                    format!("MIR backend could not resolve utility type {base}")
-                })?;
+                let expanded = resolver
+                    .utility_type(base, &arg_ids, 0)
+                    .with_context(|| format!("could not resolve utility type {base}"))?;
                 return self.value_type(ctx, expanded.hir(ctx));
             }
             if let Some(utility) = Utility::from_name(base) {
@@ -68,9 +68,7 @@ impl<'s> Shapes<'s> {
                 let properties = resolver
                     .named(base, &key.1, false, Query::Record, 0)
                     .and_then(|(view, _)| view.properties(ctx))
-                    .with_context(|| {
-                        format!("MIR backend could not resolve utility type {base}")
-                    })?;
+                    .with_context(|| format!("could not resolve utility type {base}"))?;
                 let ty: TypeHandle = self
                     .source_record(
                         ctx,
@@ -87,9 +85,8 @@ impl<'s> Shapes<'s> {
                 return Ok(ty);
             }
         }
-        let (identity, declaration) = Declaration::find(self, base).with_context(|| {
-            format!("MIR backend does not support unresolved generic type {base}")
-        })?;
+        let (identity, declaration) = Declaration::find(self, base)
+            .with_context(|| format!("unresolved generic type {base} is not supported yet"))?;
         let mut key = (identity, arg_ids);
         if key.1.len() == declaration.parameters().len()
             && let Some(ty) = self.named.borrow().get(&key)

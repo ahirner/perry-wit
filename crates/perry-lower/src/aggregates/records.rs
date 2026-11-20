@@ -52,9 +52,9 @@ fn matching_record<'a>(
         MissingFields::Diagnose => {
             let missing: Vec<_> = required.map(|(name, _)| name.clone()).collect();
             if !missing.is_empty() {
-                return Err(LowerError::new(LowerErrorKind::MissingRequiredField {
-                    fields: missing,
-                })
+                return Err(perry_wit_diagnostics::Diagnostic::from(
+                    LowerErrorKind::MissingRequiredField { fields: missing },
+                )
                 .into());
             }
         }
@@ -241,9 +241,11 @@ impl<'a> RecordAssembly<'a> {
                 None => {
                     let ty = record.deref(ctx).fields()?[index].1;
                     if !admits_undefined(ctx, ty) {
-                        return Err(LowerError::new(LowerErrorKind::MissingRequiredField {
-                            fields: vec![record.deref(ctx).fields()?[index].0.clone()],
-                        })
+                        return Err(perry_wit_diagnostics::Diagnostic::from(
+                            LowerErrorKind::MissingRequiredField {
+                                fields: vec![record.deref(ctx).fields()?[index].0.clone()],
+                            },
+                        )
                         .into());
                     }
                     Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)))

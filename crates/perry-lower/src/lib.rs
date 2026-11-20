@@ -92,7 +92,7 @@ use program::{Builtin, Signature};
 /// functions, otherwise an entry point awaiting module initialization.
 pub const MAIN: &str = "perry_main";
 
-pub use diagnostics::{LowerError, LowerErrorKind, ShapeError};
+use diagnostics::{LowerErrorKind, ShapeError};
 pub use perry_frontend::hir;
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with

@@ -339,7 +339,7 @@ impl<'s> FunctionBuilder<'s> {
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
             Stmt::PreallocateBoxes { .. } | Stmt::PreallocateTdzBoxes(_) => {}
-            other => bail!("MIR backend does not support statement {other:?} yet"),
+            other => bail!("statement {other:?} is not supported yet"),
         }
         Ok(())
     }
@@ -404,7 +404,10 @@ impl<'s> FunctionBuilder<'s> {
             (None, Some(value)) => value.get_type(ctx),
             (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
             (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
-                return Err(LowerError::new(ShapeError::MissingTypeAnnotation).into());
+                return Err(perry_wit_diagnostics::Diagnostic::from(
+                    ShapeError::MissingTypeAnnotation,
+                )
+                .into());
             }
             (None, None) => bail!("an untyped binding needs an initializer"),
         };

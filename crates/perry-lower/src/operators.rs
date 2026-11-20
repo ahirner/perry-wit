@@ -211,9 +211,11 @@ impl<'s> FunctionBuilder<'s> {
                     BinaryOp::Div => BinaryKind::Div,
                     BinaryOp::Mod => BinaryKind::Rem,
                     other => {
-                        return Err(LowerError::new(LowerErrorKind::UnsupportedOperator {
-                            op: format!("{other:?}"),
-                        })
+                        return Err(perry_wit_diagnostics::Diagnostic::from(
+                            LowerErrorKind::UnsupportedOperator {
+                                op: format!("{other:?}"),
+                            },
+                        )
                         .into());
                     }
                 };

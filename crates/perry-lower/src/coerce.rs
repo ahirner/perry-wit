@@ -389,7 +389,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 ShapeError::TypeMismatch { actual, expected }
             };
-            Err(LowerError::new(shape_error).into())
+            Err(perry_wit_diagnostics::Diagnostic::from(shape_error).into())
         }
     }
 

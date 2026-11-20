@@ -469,7 +469,7 @@ fn cli_help_and_diagnostics_are_aligned_and_deduplicated() {
         "{missing_wit}"
     );
     assert_eq!(
-        missing_wit.matches("WitResolution:").count(),
+        missing_wit.matches("error[missing-wit-directory]:").count(),
         1,
         "{missing_wit}"
     );
@@ -489,7 +489,7 @@ fn cli_help_and_diagnostics_are_aligned_and_deduplicated() {
         "{missing_pkg}"
     );
     assert_eq!(
-        missing_pkg.matches("WitResolution:").count(),
+        missing_pkg.matches("error[wit-parse]:").count(),
         1,
         "{missing_pkg}"
     );

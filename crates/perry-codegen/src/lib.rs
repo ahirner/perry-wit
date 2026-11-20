@@ -68,7 +68,11 @@ pub use memory::explain_tiers;
 
 /// Structured boundary errors emitted during Wasm lowering.
 #[derive(Debug)]
-pub enum CodegenError {
+pub(crate) enum CodegenError {
+    SyncExportUsesConsole {
+        core_name: String,
+        span: Option<perry_mir::SourceSpan>,
+    },
     PendingInitialization {
         span: Option<perry_mir::SourceSpan>,
     },
@@ -87,35 +91,68 @@ pub enum CodegenError {
     },
 }
 
-impl std::fmt::Display for CodegenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl CodegenError {
+    fn code(&self) -> perry_wit_diagnostics::Code {
+        use perry_wit_diagnostics::codes;
         match self {
-            Self::PendingInitialization { .. } => {
-                write!(f, "top-level statements leave asynchronous work pending")
+            Self::SyncExportUsesConsole { .. } => codes::SYNC_EXPORT_CONSOLE,
+            Self::PendingInitialization { .. } => codes::PENDING_INITIALIZATION,
+            Self::AsyncInitializerRequiresAsyncExport { .. } => {
+                codes::ASYNC_INITIALIZER_REQUIRES_ASYNC_EXPORT
             }
-            Self::AsyncInitializerRequiresAsyncExport { core_name, .. } => {
-                write!(f, "{core_name} requires asynchronous module initialization")
-            }
-            Self::MissingErrorChannel { core_name, .. } => {
-                write!(
-                    f,
-                    "{core_name} can throw without a compatible WIT error channel"
-                )
-            }
-            Self::ExportBinding { core_name, .. } => {
-                write!(f, "binding WIT export {core_name}")
-            }
+            Self::MissingErrorChannel { .. } => codes::MISSING_ERROR_CHANNEL,
+            Self::ExportBinding { .. } => codes::INTERNAL,
         }
     }
 }
 
-impl std::error::Error for CodegenError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ExportBinding { source, .. } => Some(source.as_ref()),
-            Self::PendingInitialization { .. }
-            | Self::AsyncInitializerRequiresAsyncExport { .. }
-            | Self::MissingErrorChannel { .. } => None,
+impl From<CodegenError> for perry_wit_diagnostics::Diagnostic {
+    fn from(error: CodegenError) -> Self {
+        use perry_wit_diagnostics::{Diagnostic, anyhow_ext};
+        let code = error.code();
+        match error {
+            CodegenError::SyncExportUsesConsole { core_name, span } => Diagnostic::new(
+                code,
+                format!(
+                    "console output needs async exports: WASI P3 output streams are asynchronous, but {core_name} is a synchronous export"
+                ),
+            )
+            .with_optional_span(span)
+            .with_help("Declare the WIT export async or remove console output from this component."),
+            CodegenError::PendingInitialization { span } => Diagnostic::new(
+                code,
+                "top-level statements leave asynchronous work pending",
+            )
+            .with_optional_span(span)
+            .with_help(
+                "Await the asynchronous work in the top-level statements, so every entry point waits for it.",
+            ),
+            CodegenError::AsyncInitializerRequiresAsyncExport { core_name, span } => Diagnostic::new(
+                code,
+                format!("{core_name} requires asynchronous module initialization"),
+            )
+            .with_optional_span(span)
+            .with_help(
+                "Declare this WIT export async so it can await module initialization and its error channel.",
+            ),
+            CodegenError::MissingErrorChannel { core_name, span } => Diagnostic::new(
+                code,
+                format!("{core_name} can throw without a compatible WIT error channel"),
+            )
+            .with_optional_span(span)
+            .with_help(
+                "Declare a WIT result error, or use an async export with wasi:cli/stderr support.",
+            ),
+            CodegenError::ExportBinding {
+                core_name,
+                span,
+                source,
+            } => anyhow_ext::wrap_source(
+                source,
+                span,
+                format!("while binding WIT export {core_name}"),
+                format!("binding WIT export {core_name}"),
+            ),
         }
     }
 }

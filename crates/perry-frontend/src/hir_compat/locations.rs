@@ -1,7 +1,7 @@
 //! Original source coordinates for merged AST and HIR declarations.
 use perry_hir::ir::Expr;
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
+use perry_wit_diagnostics::{SourceSpan, anyhow_ext, codes};
 use std::{collections::HashMap, path::PathBuf};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -152,12 +152,7 @@ impl<'s> Locations<'s> {
     }
 
     fn attach(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-        let mut diagnostic =
-            PerryDiagnostic::from_error(error, DiagnosticCode::UnsupportedExpression);
-        if diagnostic.span.is_none() {
-            diagnostic.span = span;
-        }
-        diagnostic.into()
+        anyhow_ext::annotate_with_fallback(error, span, codes::UNSUPPORTED_CONSTRUCT)
     }
 
     pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {

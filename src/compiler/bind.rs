@@ -47,6 +47,17 @@ enum BindError {
 }
 
 impl BindError {
+    fn code(&self) -> crate::Code {
+        match self {
+            Self::ArityMismatch { .. } => crate::codes::EXPORT_ARITY,
+            Self::WideIntegerRequiresBigInt { .. } => crate::codes::WIDE_INTEGER_REQUIRES_BIGINT,
+            Self::MissingExport { .. } => crate::codes::MISSING_EXPORT,
+            Self::AsyncMismatch { .. } => crate::codes::ASYNC_MISMATCH,
+            Self::TopLevelRequiresCommandWorld => crate::codes::TOP_LEVEL_REQUIRES_COMMAND_WORLD,
+            Self::UnsupportedAbiType(_) => crate::codes::UNSUPPORTED_ABI_TYPE,
+        }
+    }
+
     fn into_span(self) -> Option<crate::SourceSpan> {
         match self {
             Self::ArityMismatch { span, .. }
@@ -158,12 +169,12 @@ impl fmt::Display for BindError {
 
 impl std::error::Error for BindError {}
 
-impl From<BindError> for crate::PerryDiagnostic {
+impl From<BindError> for crate::Diagnostic {
     fn from(error: BindError) -> Self {
+        let code = error.code();
         let message = error.to_string();
         let help = error.help();
-        let mut diagnostic = Self::error(crate::DiagnosticCode::ExportMismatch, message)
-            .with_optional_span(error.into_span());
+        let mut diagnostic = Self::new(code, message).with_optional_span(error.into_span());
         if let Some(help) = help {
             diagnostic = diagnostic.with_help(help);
         }
@@ -197,7 +208,7 @@ pub(crate) fn constrain_numbers(
         let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
         if !export.is_command() && args.len() != export.params.len() {
-            return Err(crate::PerryDiagnostic::from(BindError::ArityMismatch {
+            return Err(crate::Diagnostic::from(BindError::ArityMismatch {
                 span: perry_mir::source_span(ctx, function),
                 function: export.function.clone(),
                 actual: args.len(),
@@ -227,7 +238,7 @@ pub(crate) fn constrain_numbers(
                 .is_some_and(|int| int.width() == 64);
             if wide && !source.deref(ctx).is::<perry_mir::BigIntType>() && !is_wide_int {
                 return Err(
-                    crate::PerryDiagnostic::from(BindError::WideIntegerRequiresBigInt {
+                    crate::Diagnostic::from(BindError::WideIntegerRequiresBigInt {
                         span: perry_mir::source_span(ctx, function),
                         function: export.function.clone(),
                         core_name: export.core_name.clone(),
@@ -274,9 +285,8 @@ pub(crate) fn exports(
     world_id: WorldId,
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
-    perry_contract::export_names::validate_implementation_names(resolve, world).map_err(|e| {
-        crate::PerryDiagnostic::error(crate::DiagnosticCode::ExportMismatch, e.to_string())
-    })?;
+    perry_contract::export_names::validate_implementation_names(resolve, world)
+        .map_err(|e| crate::Diagnostic::new(crate::codes::INVALID_EXPORT_NAME, e.to_string()))?;
     let mut exported = std::collections::HashMap::new();
     let mut main_present = false;
     for function in module_functions(ctx, mir) {
@@ -324,7 +334,7 @@ pub(crate) fn exports(
                 let span = unexported
                     .as_ref()
                     .and_then(|candidate| perry_mir::source_span(ctx, candidate));
-                return Err(crate::PerryDiagnostic::from(BindError::MissingExport {
+                return Err(crate::Diagnostic::from(BindError::MissingExport {
                     span,
                     core_name,
                     implementation,
@@ -334,7 +344,7 @@ pub(crate) fn exports(
             };
             let is_async = perry_mir::is_async(ctx, &mir_function);
             if is_async != function.kind.is_async() {
-                return Err(crate::PerryDiagnostic::from(BindError::AsyncMismatch {
+                return Err(crate::Diagnostic::from(BindError::AsyncMismatch {
                     span: perry_mir::source_span(ctx, &mir_function),
                     implementation,
                     core_name,
@@ -402,7 +412,7 @@ fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {
 /// Require a command world (`wasi:cli/run`) when top-level statements are present.
 pub(crate) fn check_main(ctx: &Context, mir: &ModuleOp, exports: &[Export]) -> Result<()> {
     if has_main(ctx, mir) && !exports.iter().any(Export::is_command) {
-        return Err(crate::PerryDiagnostic::from(BindError::TopLevelRequiresCommandWorld).into());
+        return Err(crate::Diagnostic::from(BindError::TopLevelRequiresCommandWorld).into());
     }
     Ok(())
 }
@@ -460,7 +470,7 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
     convert(resolve, Input::Reference(*ty), &|_| None, &|contract| {
         Ok(match contract {
             Contract::Scalar(ty) => scalar_type(ty).ok_or_else(|| {
-                crate::PerryDiagnostic::from(BindError::UnsupportedAbiType(format!("{ty:?}")))
+                crate::Diagnostic::from(BindError::UnsupportedAbiType(format!("{ty:?}")))
             })?,
             Contract::Resource { id, owned } => AbiType::Resource {
                 key: perry_contract::names::canonical_type(resolve, id).index() as u32,
@@ -492,7 +502,7 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
                     .collect::<Result<_>>()?,
             ),
             Contract::Unsupported(kind) => {
-                return Err(crate::PerryDiagnostic::from(BindError::UnsupportedAbiType(
+                return Err(crate::Diagnostic::from(BindError::UnsupportedAbiType(
                     kind.to_owned(),
                 ))
                 .into());

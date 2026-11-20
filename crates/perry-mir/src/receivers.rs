@@ -1,7 +1,7 @@
 //! Compile-time proof that property receivers lowering marked are not `null`. The unwrap keeps
 //! its runtime check; a read the dominating branches do not prove is a located compile error.
 use crate::{SourceSpan, aggregates::functions, facts::guards::GuardedFacts, optional::UnwrapOp};
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
+use perry_wit_diagnostics::{Diagnostic, codes};
 use pliron::{
     builtin::{
         attributes::UnitAttr,
@@ -39,13 +39,13 @@ pub(crate) fn has_marker(ctx: &Context, op: &dyn Op, key: &pliron::identifier::I
         .is_some()
 }
 
-fn violation(ctx: &Context, unwrap: &UnwrapOp) -> PerryDiagnostic {
+fn violation(ctx: &Context, unwrap: &UnwrapOp) -> Diagnostic {
     let span = crate::source_span(ctx, unwrap).or_else(|| {
         let function = unwrap.get_operation().deref(ctx).get_parent_op(ctx)?;
         crate::source_span(ctx, &Operation::get_op::<FuncOp>(function, ctx)?)
     });
-    PerryDiagnostic::error(
-        DiagnosticCode::UnsupportedExpression,
+    Diagnostic::new(
+        codes::POSSIBLY_NULL_RECEIVER,
         "property access receiver is possibly null",
     )
     .with_optional_span(span)

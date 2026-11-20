@@ -1,7 +1,7 @@
 //! Map frontend declarations and record identities to MIR representations.
 //!
 //! Frontend record identities map to carriers; object construction evaluates fields in source order.
-use crate::{LowerError, ShapeError};
+use crate::ShapeError;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
@@ -373,7 +373,7 @@ impl<'h> Shapes<'h> {
         if user {
             return self.generic(ctx, name, &[]);
         }
-        bail!("type {name} is not supported by the MIR backend yet")
+        bail!("type {name} is not supported yet")
     }
 
     /// Reserve recursive identity before resolving source fields.

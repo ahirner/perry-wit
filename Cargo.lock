@@ -1340,6 +1340,7 @@ dependencies = [
  "anyhow",
  "perry-abi 0.1.0",
  "perry-mir",
+ "perry-wit-diagnostics",
  "pliron",
  "pliron-wasm",
  "regex-automata",

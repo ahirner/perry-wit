@@ -18,7 +18,8 @@
 //! # }
 //! ```
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
+use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
@@ -82,8 +83,14 @@ pub struct Artifact {
 }
 
 pub(crate) fn text<'a>(contents: &'a [u8], name: Option<&str>) -> Result<&'a str> {
-    std::str::from_utf8(contents)
-        .with_context(|| format!("{} is not UTF-8", name.unwrap_or("input")))
+    std::str::from_utf8(contents).map_err(|error| {
+        crate::Diagnostic::new(
+            crate::codes::INVALID_UTF8,
+            format!("{} is not UTF-8", name.unwrap_or("input")),
+        )
+        .with_source_notes(&error)
+        .into()
+    })
 }
 
 fn module_name(name: &str) -> Result<&str> {
@@ -190,13 +197,13 @@ pub fn compile(
     options: &Options,
 ) -> std::result::Result<crate::Compiled, crate::CompileError> {
     compile_impl(input, wit, options).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::InvalidInput)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::INVALID_MODULE_PATH)
     })
 }
 
 pub fn compile_core(input: &Program) -> std::result::Result<Vec<u8>, crate::CompileError> {
     compile_core_impl(input).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::InvalidInput)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::INVALID_MODULE_PATH)
     })
 }
 
@@ -205,6 +212,6 @@ pub fn generate_sdk(
     world: Option<&str>,
 ) -> std::result::Result<Vec<Artifact>, crate::CompileError> {
     generate_sdk_impl(wit, world).map_err(|error| {
-        crate::CompileError::from_error(error, crate::DiagnosticCode::WitResolution)
+        crate::CompileError::from_error_with_fallback(error, crate::codes::WIT_DEPENDENCY)
     })
 }

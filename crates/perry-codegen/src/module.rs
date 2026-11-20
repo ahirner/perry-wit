@@ -362,13 +362,22 @@ fn bind_exports(
     functions: &[FuncOp],
     exports: &[boundary::Export],
 ) -> Result<()> {
+    let mir_functions: HashMap<String, FuncOp> = functions
+        .iter()
+        .map(|f| (f.get_symbol_name(ctx).into(), *f))
+        .collect();
     if state.uses_io
         && let Some(export) = exports.iter().find(|e| !e.is_async())
     {
-        bail!(
-            "console output needs async exports: WASI P3 output streams are asynchronous, but {} is a synchronous export",
-            export.core_name
-        );
+        return Err(perry_wit_diagnostics::Diagnostic::from(
+            crate::CodegenError::SyncExportUsesConsole {
+                core_name: export.core_name.clone(),
+                span: mir_functions
+                    .get(&export.function)
+                    .and_then(|function| perry_mir::source_span(ctx, function)),
+            },
+        )
+        .into());
     }
     // A command reports uncaught exceptions on stderr.
     if exports.iter().any(boundary::Export::is_command) {
@@ -381,10 +390,6 @@ fn bind_exports(
     }) {
         state.uses_streams = true;
     }
-    let mir_functions: HashMap<String, FuncOp> = functions
-        .iter()
-        .map(|f| (f.get_symbol_name(ctx).into(), *f))
-        .collect();
     let initialization = state
         .program_facts
         .effects(&Identifier::new(perry_mir::INITIALIZER));
@@ -395,11 +400,13 @@ fn bind_exports(
         && initialization
             .is_some_and(|summary| summary.effects.may_suspend || summary.effects.host_work)
     {
-        return Err(crate::CodegenError::PendingInitialization {
-            span: mir_functions
-                .get(perry_mir::INITIALIZER)
-                .and_then(|function| perry_mir::source_span(ctx, function)),
-        }
+        return Err(perry_wit_diagnostics::Diagnostic::from(
+            crate::CodegenError::PendingInitialization {
+                span: mir_functions
+                    .get(perry_mir::INITIALIZER)
+                    .and_then(|function| perry_mir::source_span(ctx, function)),
+            },
+        )
         .into());
     }
     let stderr = state.imports.as_ref().is_some_and(|imports| {
@@ -430,10 +437,12 @@ fn bind_exports(
             state.reports_rejection = true;
         }
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
-            return Err(crate::CodegenError::AsyncInitializerRequiresAsyncExport {
-                core_name: export.core_name.clone(),
-                span: perry_mir::source_span(ctx, function),
-            }
+            return Err(perry_wit_diagnostics::Diagnostic::from(
+                crate::CodegenError::AsyncInitializerRequiresAsyncExport {
+                    core_name: export.core_name.clone(),
+                    span: perry_mir::source_span(ctx, function),
+                },
+            )
             .into());
         }
         if !export.is_command()
@@ -444,10 +453,12 @@ fn bind_exports(
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
             if export.is_async() && !stderr {
-                return Err(crate::CodegenError::MissingErrorChannel {
-                    core_name: export.core_name.clone(),
-                    span: perry_mir::source_span(ctx, function),
-                }
+                return Err(perry_wit_diagnostics::Diagnostic::from(
+                    crate::CodegenError::MissingErrorChannel {
+                        core_name: export.core_name.clone(),
+                        span: perry_mir::source_span(ctx, function),
+                    },
+                )
                 .into());
             }
             if export.is_async() {
@@ -474,10 +485,12 @@ fn bind_exports(
             &lowered[&function.get_symbol_name(ctx)],
             export,
         )
-        .map_err(|source| crate::CodegenError::ExportBinding {
-            core_name: export.core_name.clone(),
-            span: perry_mir::source_span(ctx, function),
-            source,
+        .map_err(|source| {
+            perry_wit_diagnostics::Diagnostic::from(crate::CodegenError::ExportBinding {
+                core_name: export.core_name.clone(),
+                span: perry_mir::source_span(ctx, function),
+                source,
+            })
         })?;
     }
     Ok(())
