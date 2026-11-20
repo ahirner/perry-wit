@@ -1,7 +1,10 @@
 //! Lower array/string iteration and byte-stream async iteration before HIR erases types.
 use super::names::FreshNames;
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::Result;
 use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::{
+    bail_internal, bail_unsupported, ensure_internal, ensure_unsupported, internal,
+};
 use std::collections::HashSet;
 use swc_common::{DUMMY_SP, Span, SyntaxContext};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
@@ -26,13 +29,13 @@ impl Loops<'_> {
     fn rewrite(&mut self, iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
         let asynchronous = iteration.is_await;
         let ast::ForHead::VarDecl(declaration) = iteration.left else {
-            bail!("iteration requires a const or let binding");
+            bail_unsupported!("iteration requires a const or let binding");
         };
         const ONE_BINDING: &str = "iteration requires one const or let binding";
         let kind = declaration.kind;
-        ensure!(kind != ast::VarDeclKind::Var, ONE_BINDING);
+        ensure_unsupported!(kind != ast::VarDeclKind::Var, "{ONE_BINDING}");
         let Ok([declarator]) = <[ast::VarDeclarator; 1]>::try_from(declaration.decls) else {
-            bail!(ONE_BINDING);
+            bail_unsupported!("{ONE_BINDING}");
         };
         let binding = declarator.name;
         let prefix = self.names.prefix("loop");
@@ -66,7 +69,7 @@ impl Loops<'_> {
             )
         };
         let mut parsed = perry_parser::parse_typescript(&template, "iteration.ts")
-            .map_err(|e| anyhow!("{e:?}"))?;
+            .map_err(|e| internal!("{e:?}"))?;
         struct SyntheticSpans;
         impl VisitMut for SyntheticSpans {
             fn visit_mut_span(&mut self, span: &mut Span) {
@@ -75,7 +78,7 @@ impl Loops<'_> {
         }
         parsed.visit_mut_with(&mut SyntheticSpans);
         let Some(ast::ModuleItem::Stmt(mut statement)) = parsed.body.pop() else {
-            bail!("the iteration template is one block statement");
+            bail_internal!("the iteration template is one block statement");
         };
         let mut fill = Fill {
             prefix,
@@ -126,7 +129,7 @@ impl Fill {
 
     /// Every part was placed exactly once.
     fn check(&self) -> Result<()> {
-        ensure!(
+        ensure_internal!(
             !self.repeated
                 && self.source.is_none()
                 && self.body.is_none()
@@ -225,7 +228,7 @@ fn normalize_decoder_constructor(new: &mut ast::NewExpr) -> Result<()> {
     let Some(args) = new.args.as_mut() else {
         return Ok(());
     };
-    ensure!(
+    ensure_unsupported!(
         args.len() <= 2 && args.iter().all(|a| a.spread.is_none()),
         "TextDecoder takes a literal UTF-8 label and inline options"
     );
@@ -236,12 +239,12 @@ fn normalize_decoder_constructor(new: &mut ast::NewExpr) -> Result<()> {
         return Ok(());
     }
     let ast::Expr::Object(options) = &mut *options.expr else {
-        bail!("TextDecoder options must be an inline object");
+        bail_unsupported!("TextDecoder options must be an inline object");
     };
     let mut names = HashSet::new();
     for property in &mut options.props {
         let ast::PropOrSpread::Prop(property) = property else {
-            bail!("TextDecoder option spreads are unsupported");
+            bail_unsupported!("TextDecoder option spreads are unsupported");
         };
         if let ast::Prop::Shorthand(id) = &**property {
             **property = ast::Prop::KeyValue(ast::KeyValueProp {
@@ -250,18 +253,18 @@ fn normalize_decoder_constructor(new: &mut ast::NewExpr) -> Result<()> {
             });
         }
         let ast::Prop::KeyValue(field) = &**property else {
-            bail!("TextDecoder options need ordinary fields");
+            bail_unsupported!("TextDecoder options need ordinary fields");
         };
         let name = match &field.key {
             ast::PropName::Ident(id) => id.sym.as_ref(),
             ast::PropName::Str(text) => text.value.as_str().unwrap_or(""),
-            _ => bail!("TextDecoder option keys must be literal"),
+            _ => bail_unsupported!("TextDecoder option keys must be literal"),
         };
-        ensure!(
+        ensure_unsupported!(
             matches!(name, "fatal" | "ignoreBOM") && names.insert(name.to_owned()),
             "unknown or repeated TextDecoder option {name}"
         );
-        ensure!(
+        ensure_unsupported!(
             matches!(
                 &*field.value,
                 ast::Expr::Ident(_) | ast::Expr::Lit(ast::Lit::Bool(_))

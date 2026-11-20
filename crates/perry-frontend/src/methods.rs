@@ -1,9 +1,10 @@
 //! Built-in method signatures and HIR call normalization.
-use anyhow::{Result, bail};
+use anyhow::Result;
 use perry_hir::{
     ir::Expr,
     types::{LocalId, Type as HirType},
 };
+use perry_wit_diagnostics::bail_unsupported;
 /// Source-level families used by built-in method signatures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -327,7 +328,7 @@ macro_rules! registry {
                 Ok(Some(match method {
                     $($(Method::$variant => {
                         let Some(($($argument,)*)) = arguments!(args; $($argument $(:$mode)?),*) else {
-                            bail!("{}.{} {}", $class, name, $requirement);
+                            bail_unsupported!("{}.{} {}", $class, name, $requirement);
                         };
                         Self::$variant($($argument),*)
                     },)*)*

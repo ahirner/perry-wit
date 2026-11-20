@@ -1,5 +1,5 @@
 //! Resolved source declarations and canonical HIR type identities.
-use anyhow::{Context as _, Result, anyhow, ensure};
+use anyhow::Result;
 use perry_hir::types::Type as HirType;
 use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};

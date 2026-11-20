@@ -1,6 +1,7 @@
 //! Instantiation of generic interfaces, type aliases, and classes.
 use super::*;
 use perry_hir::ir::{Class, Interface, TypeAlias};
+use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported, unsupported};
 use pliron::utils::vec_exns::VecExtns;
 
 mod resolution;
@@ -76,7 +77,7 @@ fn charge_budget(ty: &HirType, remaining: &mut usize) -> Result<()> {
             false
         }
     });
-    ensure!(!exceeded, "generic type arguments expand indefinitely");
+    ensure_unsupported!(!exceeded, "generic type arguments expand indefinitely");
     Ok(())
 }
 
@@ -90,7 +91,7 @@ fn check_subst(
     let mut err = None;
     let _ = ty.any(&mut |node| {
         if *remaining <= 1 {
-            err = Some(anyhow!("generic type arguments expand indefinitely"));
+            err = Some(unsupported!("generic type arguments expand indefinitely"));
             return true;
         }
         *remaining -= 1;
@@ -104,7 +105,10 @@ fn check_subst(
                     subst = true;
                 }
                 None if matches!(node, HirType::TypeVar(_)) => {
-                    err = Some(anyhow!("unresolved type argument {name}"));
+                    err = Some(diag!(
+                        codes::TYPE_MISMATCH,
+                        "unresolved type argument {name}"
+                    ));
                     return true;
                 }
                 None => {}
@@ -176,8 +180,9 @@ impl<'a> Declaration<'a> {
         arguments: &[TypeId],
     ) -> Result<HashMap<&'a str, TypeId>> {
         let parameters = self.parameters();
-        ensure!(
+        ensure_diag!(
             arguments.len() <= parameters.len(),
+            codes::TYPE_MISMATCH,
             "too many type arguments for {base}"
         );
         let mut bindings = HashMap::with_capacity(parameters.len());
@@ -191,8 +196,12 @@ impl<'a> Declaration<'a> {
                         .default
                         .as_deref()
                         .or(parameter.constraint.as_deref())
-                        .with_context(|| {
-                            format!("missing type argument {} of {base}", parameter.name)
+                        .ok_or_else(|| {
+                            diag!(
+                                codes::MISSING_TYPE_ANNOTATION,
+                                "missing type argument {} of {base}",
+                                parameter.name
+                            )
                         })?,
                     &bindings,
                     &mut remaining,

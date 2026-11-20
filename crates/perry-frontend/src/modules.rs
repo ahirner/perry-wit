@@ -1,8 +1,12 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
 use crate::hir_compat::parse;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::Result;
 use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::{
+    Diagnostic, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_unsupported,
+    unsupported,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -76,8 +80,8 @@ pub(crate) fn load<'s>(
             if graph.types.contains(binding) {
                 continue;
             }
-            let index = *graph.functions.get(binding).with_context(|| {
-                format!("Component export '{name}' requires a named function declaration")
+            let index = *graph.functions.get(binding).ok_or_else(|| {
+                unsupported!("Component export '{name}' requires a named function declaration")
             })?;
             let ident = ast::Ident::new(name.as_str().into(), DUMMY_SP, SyntaxContext::empty());
             if uses.0.get(binding) == Some(&1) && exported[binding.as_str()] == 1 {
@@ -97,7 +101,7 @@ pub(crate) fn load<'s>(
                 ast::ModuleItem::Stmt(ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP })),
             );
             let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(mut function))) = item else {
-                bail!("module item {index} is not a function declaration");
+                bail_internal!("module item {index} is not a function declaration");
             };
             function.ident = ident;
             graph.body[index] = export_function(function);
@@ -156,7 +160,7 @@ fn local(name: &str) -> bool {
 }
 
 pub(crate) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
-    ensure!(local(name), "Re-exports require a local TypeScript module");
+    ensure_unsupported!(local(name), "Re-exports require a local TypeScript module");
     let path = normalize(&parent.parent().unwrap_or(Path::new("")).join(name));
     let mut candidates = vec![path.clone()];
     if path.extension().is_none() {
@@ -193,8 +197,8 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
         .into_iter()
         .find(|path| sources.contains_key(path.to_string_lossy().as_ref()))
         .ok_or_else(|| {
-            perry_wit_diagnostics::Diagnostic::new(
-                perry_wit_diagnostics::codes::UNRESOLVED_MODULE,
+            Diagnostic::new(
+                codes::UNRESOLVED_MODULE,
                 format!("Cannot resolve '{name}' from {}", parent.display()),
             )
             .into()
@@ -236,7 +240,7 @@ impl Graph<'_, '_> {
     fn function(&self, index: usize) -> Result<&ast::FnDecl> {
         match &self.body[index] {
             ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) => Ok(function),
-            _ => bail!("module item {index} is not a function declaration"),
+            _ => bail_internal!("module item {index} is not a function declaration"),
         }
     }
 
@@ -246,11 +250,16 @@ impl Graph<'_, '_> {
         if self.loaded.contains_key(&path) {
             return Ok(path);
         }
-        ensure!(
-            !self.active.contains(&path),
-            "Cyclic local module imports are unsupported: {}",
-            path.display()
-        );
+        if self.active.contains(&path) {
+            return Err(self.locations.annotate(
+                diag!(
+                    codes::CYCLIC_IMPORT,
+                    "Cyclic local module imports are unsupported: {}",
+                    path.display()
+                ),
+                source.span,
+            ));
+        }
         let source = &self.sources[path.to_string_lossy().as_ref()];
         let module = parse(source, &path.to_string_lossy())?;
         let exports = self.module(&path, module)?;
@@ -387,7 +396,7 @@ fn bind_module<'a>(
         match item {
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
                 for id in declared(&export.decl)? {
-                    ensure!(
+                    ensure_unsupported!(
                         !id.sym.starts_with("__perry_"),
                         "Reserved compiler name in source"
                     );
@@ -396,7 +405,7 @@ fn bind_module<'a>(
             }
             ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
                 for id in declared(decl)? {
-                    ensure!(
+                    ensure_unsupported!(
                         !id.sym.starts_with("__perry_"),
                         "Reserved compiler name in source"
                     );
@@ -417,8 +426,9 @@ fn bind_module<'a>(
                                     named.local.to_id(),
                                     dependency
                                         .get(original)
-                                        .with_context(|| {
-                                            format!(
+                                        .ok_or_else(|| {
+                                            diag!(
+                                                codes::UNKNOWN_EXPORT,
                                                 "Module '{}' has no export '{original}'",
                                                 import.src.value.to_string_lossy()
                                             )
@@ -429,7 +439,7 @@ fn bind_module<'a>(
                             ast::ImportSpecifier::Namespace(namespace) => {
                                 namespaces.insert(namespace.local.to_id(), dependency);
                             }
-                            _ => bail!("Local modules require named imports"),
+                            _ => bail_unsupported!("Local modules require named imports"),
                         }
                     }
                 } else {
@@ -456,7 +466,7 @@ fn bind_module<'a>(
                 let dependency = export.src.as_ref().map(|source| dependency_exports(source));
                 for specifier in &export.specifiers {
                     let ast::ExportSpecifier::Named(named) = specifier else {
-                        bail!("Only named local re-exports are supported");
+                        bail_unsupported!("Only named local re-exports are supported");
                     };
                     let original = named.orig.atom();
                     let original_str: &str = original.as_ref();
@@ -467,7 +477,9 @@ fn bind_module<'a>(
                     } else {
                         None
                     }
-                    .with_context(|| format!("Unknown export '{original_str}'"))?;
+                    .ok_or_else(|| {
+                        diag!(codes::UNKNOWN_EXPORT, "Unknown export '{original_str}'")
+                    })?;
                     let exported = named
                         .exported
                         .as_ref()
@@ -482,7 +494,9 @@ fn bind_module<'a>(
             }
             ast::ModuleItem::ModuleDecl(
                 ast::ModuleDecl::ExportDefaultDecl(_) | ast::ModuleDecl::ExportDefaultExpr(_),
-            ) => bail!("Component modules use named function exports, not default exports"),
+            ) => bail_unsupported!(
+                "Component modules use named function exports, not default exports"
+            ),
             _ => {}
         }
     }
@@ -503,7 +517,13 @@ fn insert_export(exports: &mut Exports, name: String, binding: String) -> Result
             entry.insert(binding);
             Ok(())
         }
-        Entry::Occupied(entry) => bail!("Ambiguous export '{}'", entry.key()),
+        Entry::Occupied(entry) => {
+            bail_diag!(
+                codes::AMBIGUOUS_EXPORT,
+                "Ambiguous export '{}'",
+                entry.key()
+            )
+        }
     }
 }
 fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
@@ -517,12 +537,14 @@ fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
             .iter()
             .map(|decl| {
                 let ast::Pat::Ident(id) = &decl.name else {
-                    bail!("Module bindings require named identifiers");
+                    bail_unsupported!("Module bindings require named identifiers");
                 };
                 Ok(&id.id)
             })
             .collect::<Result<Vec<_>>>()?,
-        _ => bail!("Static modules support functions, type declarations, and constant bindings"),
+        _ => bail_unsupported!(
+            "Static modules support functions, type declarations, and constant bindings"
+        ),
     })
 }
 struct Rename<'a> {
@@ -567,7 +589,7 @@ impl VisitMut for Rename<'_> {
                 ));
             } else {
                 self.error.get_or_insert_with(|| {
-                    anyhow::anyhow!("Local namespaces require a declared static member")
+                    unsupported!("Local namespaces require a declared static member")
                 });
             }
             return;
@@ -579,7 +601,7 @@ impl VisitMut for Rename<'_> {
             id.sym = name.clone().into();
         } else if self.namespaces.contains_key(&id.to_id()) {
             self.error.get_or_insert_with(|| {
-                anyhow::anyhow!("Local namespaces may only be used for static member access")
+                unsupported!("Local namespaces may only be used for static member access")
             });
         }
     }

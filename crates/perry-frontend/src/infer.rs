@@ -2,7 +2,7 @@
 use crate::methods::Kind;
 use crate::shapes::HirTypeExt;
 use crate::{Absence, hir_compat, shapes};
-use anyhow::{Context as _, Result, ensure};
+use anyhow::Result;
 use perry_hir::{
     ir::{Expr, LogicalOp, Module as HirModule, Stmt},
     types::{FuncId, LocalId, Type as HirType},

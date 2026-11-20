@@ -1,11 +1,11 @@
 //! The boundary for source facts and compiler-generated forms that Perry HIR erases.
 use crate::modules;
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::Result;
 use perry_hir::{
     ir::{CompareOp, Expr, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
 };
-use perry_wit_diagnostics::{Diagnostic, codes};
+use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
 use std::collections::{HashMap, HashSet};
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
@@ -235,7 +235,7 @@ pub fn error_class(code: u32) -> Result<ErrorClass> {
         2 => ErrorClass::Range,
         3 => ErrorClass::Reference,
         4 => ErrorClass::Syntax,
-        _ => bail!("unsupported Error constructor kind {code}"),
+        _ => bail_internal!("unsupported Error constructor kind {code}"),
     })
 }
 

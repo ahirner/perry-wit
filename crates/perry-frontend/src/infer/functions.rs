@@ -2,6 +2,7 @@
 use super::walk::Node;
 use super::*;
 use perry_hir::ir::Function;
+use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported, internal};
 
 pub(super) fn arguments(
     function: &Function,
@@ -9,8 +10,9 @@ pub(super) fn arguments(
     explicit: &[HirType],
     env: &mut FunctionEnv<'_>,
 ) -> Result<Vec<HirType>> {
-    ensure!(
+    ensure_diag!(
         explicit.len() <= function.type_params.len(),
+        codes::TYPE_MISMATCH,
         "too many type arguments for {}",
         function.name
     );
@@ -34,10 +36,12 @@ pub(super) fn arguments(
                 .remove(param.name.as_str())
                 .or_else(|| param.default.as_deref().cloned())
                 .filter(|ty| !contains_type_var(ty) && !matches!(ty, HirType::Any | HirType::Never))
-                .with_context(|| {
-                    format!(
+                .ok_or_else(|| {
+                    diag!(
+                        codes::MISSING_TYPE_ANNOTATION,
                         "cannot infer type argument {} of {}",
-                        param.name, function.name
+                        param.name,
+                        function.name
                     )
                 })
         })
@@ -159,13 +163,15 @@ impl Instances<'_> {
         if let Some(id) = self.keys.get(&key) {
             return Ok(*id);
         }
-        ensure!(
+        ensure_unsupported!(
             self.keys.len() < 256,
             "generic function instantiation expands indefinitely: {}",
             function.name
         );
         let id = self.next_function;
-        self.next_function = id.checked_add(1).context("function identifier limit")?;
+        self.next_function = id
+            .checked_add(1)
+            .ok_or_else(|| internal!("function identifier limit"))?;
         self.keys.insert(key, id);
         let bindings = function
             .type_params
@@ -229,7 +235,9 @@ impl Instances<'_> {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let next = self.next_local;
-                self.next_local = next.checked_add(1).context("local identifier limit")?;
+                self.next_local = next
+                    .checked_add(1)
+                    .ok_or_else(|| internal!("local identifier limit"))?;
                 *entry.insert(next)
             }
         };
@@ -424,10 +432,10 @@ pub(crate) fn specialize_functions(
         pending: Vec::new(),
         next_function: next_function
             .checked_add(1)
-            .context("function identifier limit")?,
+            .ok_or_else(|| internal!("function identifier limit"))?,
         next_local: next_local
             .checked_add(1)
-            .context("local identifier limit")?,
+            .ok_or_else(|| internal!("local identifier limit"))?,
     };
     let mut locals = HashMap::new();
     {

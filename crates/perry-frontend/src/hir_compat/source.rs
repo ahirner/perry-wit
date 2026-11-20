@@ -1,6 +1,7 @@
 //! Parse TypeScript with diagnostics before HIR lowering.
 use super::*;
 use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::unsupported;
 use std::collections::HashSet;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
@@ -50,7 +51,7 @@ pub(crate) fn validate(
     module.visit_with(&mut analyzer);
     if let Some(span) = analyzer.invalid {
         return Err(locations.annotate(
-            anyhow!(
+            unsupported!(
                 "lone UTF-16 surrogate in a string literal; Perry strings contain Unicode scalars only"
             ),
             span,
@@ -58,7 +59,7 @@ pub(crate) fn validate(
     }
     if let Some(span) = analyzer.code_point_arity {
         return Err(locations.annotate(
-            anyhow!("String.fromCodePoint currently requires exactly one scalar argument"),
+            unsupported!("String.fromCodePoint currently requires exactly one scalar argument"),
             span,
         ));
     }
