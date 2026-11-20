@@ -100,11 +100,7 @@ impl From<perry_wit::Diagnostic> for Diagnostic {
 }
 
 fn into_wit_errors(error: perry_wit::CompileError) -> Vec<Diagnostic> {
-    error
-        .into_diagnostics()
-        .into_iter()
-        .map(Into::into)
-        .collect()
+    vec![error.into_primary().into()]
 }
 
 struct Compiler;

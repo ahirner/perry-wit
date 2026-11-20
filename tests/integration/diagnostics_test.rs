@@ -72,8 +72,8 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     assert_eq!(
         perry_wit::compile_core(parse_source, "parse.ts")
             .unwrap_err()
-            .diagnostics(),
-        parse_error.diagnostics()
+            .primary(),
+        parse_error.primary()
     );
     let span = parse_error.primary().span().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");

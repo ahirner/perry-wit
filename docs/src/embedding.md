@@ -11,7 +11,7 @@ The runtime and standard libraries are precompiled and embedded in the compiler 
 {{#include embedding-example.rs}}
 ```
 
-Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`Diagnostic`](../rust/perry_wit/struct.Diagnostic.html) records, each with an [`ErrorKind`](../rust/perry_wit/enum.ErrorKind.html), a stable [`Code`](../rust/perry_wit/struct.Code.html), optional [`SourceSpan`](../rust/perry_wit/struct.SourceSpan.html), optional spanned [`Note`](../rust/perry_wit/struct.Note.html) entries, and optional help text.
+Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding the [`Diagnostic`](../rust/perry_wit/struct.Diagnostic.html) that stopped compilation, with an [`ErrorKind`](../rust/perry_wit/enum.ErrorKind.html), a stable [`Code`](../rust/perry_wit/struct.Code.html), optional [`SourceSpan`](../rust/perry_wit/struct.SourceSpan.html), optional spanned [`Note`](../rust/perry_wit/struct.Note.html) entries, and optional help text.
 
 
 ## JavaScript API

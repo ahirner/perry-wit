@@ -388,49 +388,40 @@ impl fmt::Display for Diagnostic {
 
 impl std::error::Error for Diagnostic {}
 
-/// A compiler failure holding one or more [`Diagnostic`]s.
+/// A compiler failure, identified by the [`Diagnostic`] that stopped compilation.
 #[derive(Debug)]
 pub struct CompileError {
-    diagnostics: Vec<Diagnostic>,
+    primary: Diagnostic,
+    // Extension point: the compiler stops at its first error. Recovering and reporting
+    // further diagnostics would add `rest: Vec<Diagnostic>` here (or a verbosity option
+    // selecting it); the WIT and JavaScript APIs already carry a diagnostic list.
 }
 
 impl From<Diagnostic> for CompileError {
-    fn from(diagnostic: Diagnostic) -> Self {
-        Self {
-            diagnostics: vec![diagnostic],
-        }
+    fn from(primary: Diagnostic) -> Self {
+        Self { primary }
     }
 }
 
 impl CompileError {
-    pub fn diagnostics(&self) -> &[Diagnostic] {
-        &self.diagnostics
-    }
-
     pub fn primary(&self) -> &Diagnostic {
-        &self.diagnostics[0]
+        &self.primary
     }
 
-    pub fn into_diagnostics(self) -> Vec<Diagnostic> {
-        self.diagnostics
+    pub fn into_primary(self) -> Diagnostic {
+        self.primary
     }
 }
 
 impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, diagnostic) in self.diagnostics.iter().enumerate() {
-            if index != 0 {
-                writeln!(f)?;
-            }
-            write!(f, "{diagnostic}")?;
-        }
-        Ok(())
+        self.primary.fmt(f)
     }
 }
 
 impl std::error::Error for CompileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.primary())
+        Some(&self.primary)
     }
 }
 
@@ -586,12 +577,14 @@ mod tests {
             .with_note("Record fields are mandatory")
             .with_help("Add value: null");
         let second = Diagnostic::new(codes::PARSE_ERROR, "Unexpected token");
-        let error = CompileError {
-            diagnostics: vec![first, second],
-        };
+        // JavaScript `formatDiagnostics` joins a diagnostic list with newlines.
         assert_eq!(
-            error.to_string(),
+            format!("{first}\n{second}"),
             "src/é.ts:2:3: error[missing-required-field]: Missing value\n  Record fields are mandatory\n  help: Add value: null\nerror[parse-error]: Unexpected token"
+        );
+        assert_eq!(
+            CompileError::from(second.clone()).to_string(),
+            second.to_string()
         );
 
         let spanned = Diagnostic::new(codes::CONTRACT_MISMATCH, "type mismatch")
