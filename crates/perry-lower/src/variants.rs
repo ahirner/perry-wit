@@ -60,7 +60,7 @@ impl<'s> FunctionBuilder<'s> {
         let Some(path) = path(expr) else {
             return Ok(value);
         };
-        let cases = perry_mir::variant_cases(ctx, ty)?;
+        let cases = perry_mir::variant_cases(ctx, ty).to_diag(ctx)?;
         let mut possible = cases.iter().filter(|(tag, _)| {
             self.variant_guards
                 .tags(&path, Discriminant::TypeOf)
@@ -104,7 +104,8 @@ impl<'s> FunctionBuilder<'s> {
             codes::TYPE_MISMATCH,
             "variants have tag and val only"
         );
-        let variant = TypedHandle::<VariantType>::from_handle(value.get_type(ctx), ctx)?;
+        let variant =
+            TypedHandle::<VariantType>::from_handle(value.get_type(ctx), ctx).to_diag(ctx)?;
         let path = path(object);
         let mut reachable = false;
         let mut payload = None;
@@ -163,7 +164,7 @@ impl<'s> FunctionBuilder<'s> {
         let Expr::String(tag) = &args[tag] else {
             bail_unsupported!("variant construction needs a literal tag");
         };
-        let variant = TypedHandle::<VariantType>::from_handle(ty, ctx)?;
+        let variant = TypedHandle::<VariantType>::from_handle(ty, ctx).to_diag(ctx)?;
         let payload = variant
             .deref(ctx)
             .cases()

@@ -4,44 +4,25 @@ use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use perry_wit_diagnostics::anyhow_ext::{FromAnyhow as _, wrap_source};
+use perry_wit_diagnostics::{Diagnostic, Result, internal};
 use wit_parser::{PackageId, Resolve, SourceMap, UnresolvedPackageGroup};
 
-#[derive(Debug)]
-enum WitError {
-    MissingDirectory {
-        dir: PathBuf,
-    },
-    ParsePackage {
-        dir: PathBuf,
-        missing_package_header: bool,
-        source: anyhow::Error,
-    },
-    ParseSource {
-        source: anyhow::Error,
-    },
-    ResolveDependencies {
-        target: String,
-        source: anyhow::Error,
-    },
+enum WitError<'a> {
+    MissingDirectory(&'a Path),
     SelectWorld {
         package_name: String,
         has_requested_world: bool,
         available: Vec<String>,
-        source: anyhow::Error,
+        source: &'a (dyn std::error::Error + 'static),
     },
     EmptySources,
-    InvalidPackageEncoding(Option<anyhow::Error>),
-    Resolve(anyhow::Error),
+    InvalidPackageEncoding(Option<&'a (dyn std::error::Error + 'static)>),
 }
 
-impl WitError {
+impl WitError<'_> {
     fn code(&self) -> crate::Code {
         match self {
-            Self::MissingDirectory { .. } => crate::codes::MISSING_WIT_DIRECTORY,
-            Self::ParsePackage { .. } | Self::ParseSource { .. } => crate::codes::WIT_PARSE,
-            Self::ResolveDependencies { .. } | Self::Resolve(_) => crate::codes::WIT_DEPENDENCY,
+            Self::MissingDirectory(_) => crate::codes::MISSING_WIT_DIRECTORY,
             Self::SelectWorld { .. } => crate::codes::WIT_WORLD_SELECTION,
             Self::EmptySources => crate::codes::EMPTY_WIT_SOURCES,
             Self::InvalidPackageEncoding(_) => crate::codes::WIT_PACKAGE_ENCODING,
@@ -50,16 +31,10 @@ impl WitError {
 
     fn help(&self) -> Option<String> {
         match self {
-            Self::MissingDirectory { dir } => Some(format!(
+            Self::MissingDirectory(dir) => Some(format!(
                 "Create '{}/world.wit' or pass '--wit <PATH>' to specify your WIT directory.",
                 dir.display()
             )),
-            Self::ParsePackage {
-                missing_package_header: true,
-                ..
-            } => Some(
-                "Add a package header such as 'package local:app;' at the top of your .wit file, or ensure the directory contains at least one .wit file.".to_owned(),
-            ),
             Self::SelectWorld {
                 package_name,
                 has_requested_world,
@@ -82,26 +57,28 @@ impl WitError {
                     )
                 }
             }),
-            _ => None,
+            Self::EmptySources | Self::InvalidPackageEncoding(_) => None,
+        }
+    }
+
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::SelectWorld { source, .. } => source.source(),
+            Self::InvalidPackageEncoding(Some(source)) => source.source(),
+            Self::MissingDirectory(_) | Self::EmptySources | Self::InvalidPackageEncoding(None) => {
+                None
+            }
         }
     }
 }
 
-impl fmt::Display for WitError {
+impl fmt::Display for WitError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingDirectory { dir } => {
+            Self::MissingDirectory(dir) => {
                 write!(f, "WIT directory '{}' does not exist", dir.display())
             }
-            Self::ParsePackage { dir, .. } => {
-                write!(f, "loading WIT package from {}", dir.display())
-            }
-            Self::ResolveDependencies { target, .. } => {
-                write!(f, "resolving WIT dependencies for {target}")
-            }
-            Self::ParseSource { source }
-            | Self::SelectWorld { source, .. }
-            | Self::Resolve(source) => write!(f, "{source}"),
+            Self::SelectWorld { source, .. } => write!(f, "{source}"),
             Self::EmptySources => f.write_str("WIT package has no sources"),
             Self::InvalidPackageEncoding(Some(source)) => write!(f, "{source}"),
             Self::InvalidPackageEncoding(None) => {
@@ -111,54 +88,33 @@ impl fmt::Display for WitError {
     }
 }
 
-impl WitError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ParsePackage { source, .. } | Self::ResolveDependencies { source, .. } => {
-                Some(source.as_ref())
-            }
-            Self::ParseSource { source }
-            | Self::SelectWorld { source, .. }
-            | Self::Resolve(source) => source.source(),
-            Self::InvalidPackageEncoding(Some(source)) => source.source(),
-            Self::MissingDirectory { .. }
-            | Self::EmptySources
-            | Self::InvalidPackageEncoding(None) => None,
+impl From<WitError<'_>> for Diagnostic {
+    fn from(error: WitError<'_>) -> Self {
+        let mut diagnostic = Self::new(error.code(), error.to_string());
+        if let Some(help) = error.help() {
+            diagnostic = diagnostic.with_help(help);
         }
+        if let Some(source) = error.source() {
+            diagnostic = diagnostic.with_source_notes(source);
+        }
+        diagnostic
     }
 }
 
-impl From<WitError> for crate::Diagnostic {
-    fn from(error: WitError) -> Self {
-        match error {
-            WitError::ParsePackage { dir, source, .. }
-                if source.chain().any(|c| c.is::<Self>()) =>
-            {
-                let label = format!("loading WIT package from {}", dir.display());
-                wrap_source(source, None, format!("while {label}"), label)
-            }
-            WitError::ResolveDependencies { target, source }
-                if source.chain().any(|c| c.is::<Self>()) =>
-            {
-                let label = format!("resolving WIT dependencies for {target}");
-                wrap_source(source, None, format!("while {label}"), label)
-            }
-            WitError::Resolve(source) if source.chain().any(|c| c.is::<Self>()) => {
-                Self::from_error(source)
-            }
-            error => {
-                let code = error.code();
-                let help = error.help();
-                let mut diagnostic = Self::new(code, error.to_string());
-                if let Some(help) = help {
-                    diagnostic = diagnostic.with_help(help);
-                }
-                if let Some(source) = error.source() {
-                    diagnostic = diagnostic.with_source_notes(source);
-                }
-                diagnostic
-            }
+fn wit_diagnostic(code: crate::Code, source: &(dyn std::error::Error + 'static)) -> Diagnostic {
+    let mut diagnostic = Diagnostic::new(code, source.to_string());
+    if let Some(cause) = source.source() {
+        diagnostic = diagnostic.with_source_notes(cause);
+    }
+    diagnostic
+}
+
+fn find_io_error<'a>(mut err: &'a (dyn std::error::Error + 'static)) -> Option<&'a std::io::Error> {
+    loop {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return Some(io);
         }
+        err = err.source()?;
     }
 }
 
@@ -168,7 +124,7 @@ mod embedded {
 
 fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGroup> {
     if sources.is_empty() {
-        return Err(crate::Diagnostic::from(WitError::EmptySources).into());
+        return Err(Diagnostic::from(WitError::EmptySources));
     }
     let mut map = SourceMap::new();
     for (index, source) in sources.iter().enumerate() {
@@ -178,12 +134,8 @@ fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGro
             None => map.push_str(&format!("source-{index}.wit"), text),
         }
     }
-    map.parse().map_err(|(map, error)| {
-        crate::Diagnostic::from(WitError::ParseSource {
-            source: anyhow::anyhow!(error.render(&map)),
-        })
-        .into()
-    })
+    map.parse()
+        .map_err(|(map, error)| Diagnostic::new(crate::codes::WIT_PARSE, error.render(&map)))
 }
 
 /// Resolve only supplied package contents and the compiler's pinned standard packages.
@@ -199,17 +151,15 @@ pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, Pack
             crate::api::Package::Sources(sources) => groups.push(source_package(sources)?),
             crate::api::Package::Encoded(bytes) => {
                 let decoded = wit_parser::decoding::decode(bytes).map_err(|e| {
-                    crate::Diagnostic::from(WitError::InvalidPackageEncoding(Some(e)))
+                    Diagnostic::from(WitError::InvalidPackageEncoding(Some(e.as_ref())))
                 })?;
                 let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) = decoded
                 else {
-                    return Err(
-                        crate::Diagnostic::from(WitError::InvalidPackageEncoding(None)).into(),
-                    );
+                    return Err(Diagnostic::from(WitError::InvalidPackageEncoding(None)));
                 };
                 let remap = resolve
                     .merge(decoded)
-                    .map_err(|e| crate::Diagnostic::from(WitError::Resolve(e)))?;
+                    .map_err(|e| wit_diagnostic(crate::codes::WIT_DEPENDENCY, e.as_ref()))?;
                 if index == 0 {
                     application = Some(remap.packages[package.index()]);
                 }
@@ -222,11 +172,10 @@ pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, Pack
         // push_groups needs a main package; the marker only anchors explicit dependencies.
         UnresolvedPackageGroup::parse("dependencies.wit", "package perry:compiler-dependencies;")
             .map_err(|(map, error)| {
-                crate::Diagnostic::from(WitError::Resolve(anyhow::anyhow!(error.render(&map))))
+                internal!("parsing dependency anchor WIT: {}", error.render(&map))
             })?
     };
-    let package = resolve_with(main, &mut resolve, groups, false)
-        .map_err(|e| crate::Diagnostic::from(WitError::Resolve(e)))?;
+    let package = resolve_with(main, &mut resolve, groups, false)?;
     Ok((resolve, application.unwrap_or(package)))
 }
 
@@ -243,17 +192,23 @@ pub(crate) fn resolve_embedded_source(name: &str, source: &str) -> Result<(Resol
 fn parse_dir(path: &Path) -> Result<UnresolvedPackageGroup> {
     let mut map = SourceMap::default();
     map.push_dir(path).map_err(|err| {
-        if let Some(io) = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-        {
-            crate::Diagnostic::io(format!("reading WIT directory {}", path.display()), io).into()
+        let err: &(dyn std::error::Error + 'static) = err.as_ref();
+        if let Some(io) = find_io_error(err) {
+            Diagnostic::io(format!("reading WIT directory {}", path.display()), io)
         } else {
-            err
+            wit_diagnostic(crate::codes::WIT_PARSE, err)
         }
     })?;
-    map.parse()
-        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))
+    map.parse().map_err(|(map, error)| {
+        let detail = error.render(&map);
+        let mut diagnostic = Diagnostic::new(crate::codes::WIT_PARSE, &detail);
+        if detail.contains("no `package` header was found") {
+            diagnostic = diagnostic.with_help(
+                "Add a package header such as 'package local:app;' at the top of your .wit file, or ensure the directory contains at least one .wit file.",
+            );
+        }
+        diagnostic
+    })
 }
 
 fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<UnresolvedPackageGroup>> {
@@ -261,7 +216,7 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
         return Ok(Vec::new());
     }
     let io_dir = |err: std::io::Error| {
-        crate::Diagnostic::io(
+        Diagnostic::io(
             format!("reading WIT dependency directory {}", dir.display()),
             &err,
         )
@@ -280,26 +235,19 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
             match path.extension().and_then(|ext| ext.to_str()) {
                 Some("wit") => {
                     let source = std::fs::read_to_string(&path).map_err(|err| {
-                        crate::Diagnostic::io(format!("reading WIT file {}", path.display()), &err)
+                        Diagnostic::io(format!("reading WIT file {}", path.display()), &err)
                     })?;
                     UnresolvedPackageGroup::parse(&path, &source).map_err(|(map, error)| {
-                        crate::Diagnostic::from(WitError::ParseSource {
-                            source: anyhow::anyhow!(error.render(&map)),
-                        })
+                        Diagnostic::new(crate::codes::WIT_PARSE, error.render(&map))
                     })?
                 }
                 Some("wasm" | "wat") => {
                     resolve.push_file(&path).map_err(|err| {
-                        if let Some(io) = err
-                            .chain()
-                            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-                        {
-                            crate::Diagnostic::io(
-                                format!("reading WIT package {}", path.display()),
-                                io,
-                            )
+                        let err: &(dyn std::error::Error + 'static) = err.as_ref();
+                        if let Some(io) = find_io_error(err) {
+                            Diagnostic::io(format!("reading WIT package {}", path.display()), io)
                         } else {
-                            crate::Diagnostic::from(WitError::InvalidPackageEncoding(Some(err)))
+                            Diagnostic::from(WitError::InvalidPackageEncoding(Some(err)))
                         }
                     })?;
                     continue;
@@ -312,35 +260,27 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
     Ok(groups)
 }
 
-pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
+pub(crate) fn resolve_wit_inner(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
     if !wit_dir.exists() {
-        return Err(crate::Diagnostic::from(WitError::MissingDirectory {
-            dir: wit_dir.to_path_buf(),
-        })
-        .into());
+        return Err(Diagnostic::from(WitError::MissingDirectory(wit_dir)));
     }
     let mut resolve = Resolve::new();
-    let main = parse_dir(wit_dir).map_err(|source| {
-        let missing_package_header = source
-            .chain()
-            .any(|c| c.to_string().contains("no `package` header was found"));
-        crate::Diagnostic::from(WitError::ParsePackage {
-            dir: wit_dir.to_path_buf(),
-            missing_package_header,
-            source,
-        })
+    let main = parse_dir(wit_dir).map_err(|err| {
+        let label = format!("loading WIT package from {}", wit_dir.display());
+        err.wrap_boundary(None, format!("while {label}"), label)
     })?;
-    let deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)
-        .map_err(|e| crate::Diagnostic::from(WitError::Resolve(e)))?;
-    resolve_with(main, &mut resolve, deps, true)
-        .map_err(|source| {
-            crate::Diagnostic::from(WitError::ResolveDependencies {
-                target: wit_dir.display().to_string(),
-                source,
-            })
-            .into()
-        })
-        .map(|package| (resolve, package))
+    let deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)?;
+    let package = resolve_with(main, &mut resolve, deps, true).map_err(|err| {
+        let label = format!("resolving WIT dependencies for {}", wit_dir.display());
+        err.wrap_boundary(None, format!("while {label}"), label)
+    })?;
+    Ok((resolve, package))
+}
+
+pub fn resolve_wit(
+    wit_dir: &Path,
+) -> std::result::Result<(Resolve, PackageId), crate::CompileError> {
+    resolve_wit_inner(wit_dir).map_err(crate::CompileError::from)
 }
 
 pub(crate) fn select_world(
@@ -350,33 +290,32 @@ pub(crate) fn select_world(
 ) -> Result<wit_parser::WorldId> {
     resolve.select_world(&[package], world).map_err(|source| {
         let available = resolve.packages[package].worlds.keys().cloned().collect();
-        crate::Diagnostic::from(WitError::SelectWorld {
+        Diagnostic::from(WitError::SelectWorld {
             package_name: resolve.packages[package].name.to_string(),
             has_requested_world: world.is_some(),
             available,
-            source,
+            source: source.as_ref(),
         })
-        .into()
     })
 }
 
 /// Resolve a WIT package given as source, with the ambient WASI packages.
-pub fn resolve_source(name: &str, source: &str) -> Result<(Resolve, PackageId)> {
+pub fn resolve_source(
+    name: &str,
+    source: &str,
+) -> std::result::Result<(Resolve, PackageId), crate::CompileError> {
+    resolve_source_inner(name, source).map_err(crate::CompileError::from)
+}
+
+fn resolve_source_inner(name: &str, source: &str) -> Result<(Resolve, PackageId)> {
     let mut resolve = Resolve::new();
-    let main = UnresolvedPackageGroup::parse(name, source).map_err(|(map, error)| {
-        crate::Diagnostic::from(WitError::ParseSource {
-            source: anyhow::anyhow!(error.render(&map)),
-        })
+    let main = UnresolvedPackageGroup::parse(name, source)
+        .map_err(|(map, error)| Diagnostic::new(crate::codes::WIT_PARSE, error.render(&map)))?;
+    let package = resolve_with(main, &mut resolve, Vec::new(), true).map_err(|err| {
+        let label = format!("resolving WIT dependencies for {name}");
+        err.wrap_boundary(None, format!("while {label}"), label)
     })?;
-    resolve_with(main, &mut resolve, Vec::new(), true)
-        .map_err(|source| {
-            crate::Diagnostic::from(WitError::ResolveDependencies {
-                target: name.to_owned(),
-                source,
-            })
-            .into()
-        })
-        .map(|package| (resolve, package))
+    Ok((resolve, package))
 }
 
 fn resolve_with(
@@ -403,10 +342,9 @@ fn resolve_with(
         for (name, source) in *files {
             map.push_str(name, *source);
         }
-        candidates.push(
-            map.parse()
-                .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?,
-        );
+        candidates.push(map.parse().map_err(|(map, error)| {
+            internal!("parsing embedded WIT package: {}", error.render(&map))
+        })?);
     }
     let mut selected = HashSet::new();
     while let Some(name) = required.pop() {
@@ -437,5 +375,7 @@ fn resolve_with(
         }
         deps.push(group);
     }
-    Ok(resolve.push_groups(main, deps)?)
+    resolve
+        .push_groups(main, deps)
+        .map_err(|err| wit_diagnostic(crate::codes::WIT_DEPENDENCY, &err))
 }

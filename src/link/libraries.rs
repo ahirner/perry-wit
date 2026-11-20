@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::parsed::ParsedModule;
-use anyhow::{Context, Result, bail, ensure};
+use super::{parsed::ParsedModule, wasm_err};
+use perry_wit_diagnostics::{Result, bail_internal, ensure_internal, internal};
 use pliron::graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order};
 use wasm_encoder::Instruction;
 use wasm_encoder::reencode::{self, Reencode};
@@ -67,7 +67,7 @@ impl LibraryId {
             entry if entry.starts_with("json_") => Self::Json,
             // The time library exports every `time_` entry, so new ones cannot drift out of a list.
             entry if entry.starts_with("time_") => Self::Time,
-            _ => bail!("unknown helper entry {entry}"),
+            _ => bail_internal!("unknown helper entry {entry}"),
         })
     }
 
@@ -124,7 +124,7 @@ impl HelperMemory {
         let base = align_to(self.end, library.data_alignment)?;
         self.end = base
             .checked_add(library.data_size)
-            .context("helper data exceeds memory32")?;
+            .ok_or_else(|| internal!("helper data exceeds memory32"))?;
         self.needs_stack |= library.globals.contains(&Global::Stack);
         if library.globals.contains(&Global::Stack) {
             // Guest libraries share the shadow stack and call one another. Each library's
@@ -132,7 +132,7 @@ impl HelperMemory {
             self.stack_bytes = self
                 .stack_bytes
                 .checked_add(library.fixed_stack_bound(reachable).unwrap_or(65_536))
-                .context("combined helper stack exceeds memory32")?;
+                .ok_or_else(|| internal!("combined helper stack exceeds memory32"))?;
         }
         Ok(base)
     }
@@ -146,18 +146,18 @@ impl HelperMemory {
     pub(crate) fn stack_top(&self) -> Result<u32> {
         align_to(self.end, 16)?
             .checked_add(self.stack_bytes)
-            .context("helper stack exceeds memory32")
+            .ok_or_else(|| internal!("helper stack exceeds memory32"))
     }
 }
 
 pub(crate) fn align_to(value: u32, alignment: u32) -> Result<u32> {
-    ensure!(
+    ensure_internal!(
         alignment.is_power_of_two(),
         "helper alignment must be a power of two"
     );
     Ok(value
         .checked_add(alignment - 1)
-        .context("helper alignment exceeds memory32")?
+        .ok_or_else(|| internal!("helper alignment exceeds memory32"))?
         & !(alignment - 1))
 }
 
@@ -441,7 +441,7 @@ impl<'a> Library<'a> {
             table_size: 0,
             table_alignment: 1,
         };
-        ensure!(
+        ensure_internal!(
             library
                 .module
                 .tables
@@ -449,7 +449,7 @@ impl<'a> Library<'a> {
                 .is_none_or(|s| s.count() == 0),
             "internal helpers do not own tables"
         );
-        ensure!(
+        ensure_internal!(
             library
                 .module
                 .memories
@@ -457,23 +457,23 @@ impl<'a> Library<'a> {
                 .is_none_or(|s| s.count() == 0),
             "internal helpers borrow application memory"
         );
-        ensure!(
+        ensure_internal!(
             library.module.tags.is_none(),
             "unsupported stateful internal helper section"
         );
         for &(module, name, _) in &library.module.imports {
-            ensure!(module != "env", "unsupported helper import {module}.{name}");
+            ensure_internal!(module != "env", "unsupported helper import {module}.{name}");
         }
         for import in library.module.other_imports.drain(..) {
             match (import.module, import.name, import.ty) {
                 ("env", "memory", TypeRef::Memory(memory)) => {
-                    ensure!(
+                    ensure_internal!(
                         !memory.memory64 && !memory.shared,
                         "internal helpers use ordinary 32-bit application memory"
                     );
                 }
                 ("env", "__indirect_function_table", TypeRef::Table(table)) => {
-                    ensure!(
+                    ensure_internal!(
                         !table.table64
                             && !table.shared
                             && table.element_type == wasmparser::RefType::FUNCREF,
@@ -481,7 +481,7 @@ impl<'a> Library<'a> {
                     );
                 }
                 ("env", name, TypeRef::Global(global)) => {
-                    ensure!(
+                    ensure_internal!(
                         global.content_type == wasmparser::ValType::I32,
                         "internal helper globals must be i32"
                     );
@@ -489,13 +489,13 @@ impl<'a> Library<'a> {
                         "__stack_pointer" if global.mutable => Global::Stack,
                         "__memory_base" if !global.mutable => Global::MemoryBase,
                         "__table_base" if !global.mutable => Global::TableBase,
-                        _ => bail!("unsupported internal helper global {name}"),
+                        _ => bail_internal!("unsupported internal helper global {name}"),
                     });
                 }
                 ("GOT.mem", "__heap_base", TypeRef::Global(_)) => {
                     library.globals.push(Global::HeapBase);
                 }
-                _ => bail!(
+                _ => bail_internal!(
                     "unsupported helper import {}.{}",
                     import.module,
                     import.name
@@ -504,17 +504,18 @@ impl<'a> Library<'a> {
         }
         if let Some(section) = library.module.globals.take() {
             for global in section {
-                let global = global?;
-                ensure!(
+                let global = global.map_err(wasm_err)?;
+                ensure_internal!(
                     !global.ty.mutable && global.ty.content_type == wasmparser::ValType::I32,
                     "internal helpers cannot own mutable global state"
                 );
                 let mut initializer = global.init_expr.get_operators_reader();
-                let Operator::I32Const { value } = initializer.read()? else {
-                    bail!("internal helper globals must be literal i32 constants");
+                let Operator::I32Const { value } = initializer.read().map_err(wasm_err)? else {
+                    bail_internal!("internal helper globals must be literal i32 constants");
                 };
-                ensure!(
-                    matches!(initializer.read()?, Operator::End) && initializer.eof(),
+                ensure_internal!(
+                    matches!(initializer.read().map_err(wasm_err)?, Operator::End)
+                        && initializer.eof(),
                     "invalid internal helper constant initializer"
                 );
                 library.globals.push(Global::Constant(value));
@@ -522,7 +523,7 @@ impl<'a> Library<'a> {
         }
         if let Some(exports) = library.module.exports.take() {
             for export in exports {
-                let export = export?;
+                let export = export.map_err(wasm_err)?;
                 if export.kind == ExternalKind::Func {
                     library.exports.insert(export.name, export.index);
                 }
@@ -530,18 +531,18 @@ impl<'a> Library<'a> {
         }
         if let Some(data) = library.module.data.take() {
             for segment in data {
-                let segment = segment?;
+                let segment = segment.map_err(wasm_err)?;
                 let wasmparser::DataKind::Active {
                     memory_index: 0,
                     offset_expr,
                 } = segment.kind
                 else {
-                    bail!("internal helpers require active data in application memory");
+                    bail_internal!("internal helpers require active data in application memory");
                 };
                 let mut reader = offset_expr.get_operators_reader();
                 let mut stack = Vec::<u32>::new();
                 while !reader.eof() {
-                    match reader.read()? {
+                    match reader.read().map_err(wasm_err)? {
                         Operator::GlobalGet { global_index }
                             if matches!(
                                 library.globals.get(global_index as usize),
@@ -552,30 +553,41 @@ impl<'a> Library<'a> {
                         }
                         Operator::I32Const { value } if value >= 0 => stack.push(value as u32),
                         Operator::I32Add => {
-                            let right = stack.pop().context("data offset operand")?;
-                            let left = stack.pop().context("data offset operand")?;
-                            stack.push(left.checked_add(right).context("data offset overflow")?);
+                            let right = stack
+                                .pop()
+                                .ok_or_else(|| internal!("data offset operand"))?;
+                            let left = stack
+                                .pop()
+                                .ok_or_else(|| internal!("data offset operand"))?;
+                            stack.push(
+                                left.checked_add(right)
+                                    .ok_or_else(|| internal!("data offset overflow"))?,
+                            );
                         }
                         Operator::End => (),
-                        _ => bail!("internal helper data must be relative to its memory base"),
+                        _ => bail_internal!(
+                            "internal helper data must be relative to its memory base"
+                        ),
                     }
                 }
-                ensure!(stack.len() == 1, "invalid internal helper data offset");
+                ensure_internal!(stack.len() == 1, "invalid internal helper data offset");
                 library.data.push((stack[0], segment.data));
             }
         }
         if let Some(elements) = library.module.elements.take() {
             for element in elements {
-                let element = element?;
+                let element = element.map_err(wasm_err)?;
                 let ElementKind::Active {
                     table_index: None | Some(0),
                     offset_expr,
                 } = element.kind
                 else {
-                    bail!("internal helpers require active elements in their borrowed table");
+                    bail_internal!(
+                        "internal helpers require active elements in their borrowed table"
+                    );
                 };
                 let mut reader = offset_expr.get_operators_reader();
-                let offset = match reader.read()? {
+                let offset = match reader.read().map_err(wasm_err)? {
                     Operator::GlobalGet { global_index }
                         if matches!(
                             library.globals.get(global_index as usize),
@@ -584,17 +596,19 @@ impl<'a> Library<'a> {
                     {
                         0
                     }
-                    _ => bail!("helper elements must start at their table base"),
+                    _ => bail_internal!("helper elements must start at their table base"),
                 };
-                ensure!(
-                    matches!(reader.read()?, Operator::End) && reader.eof(),
+                ensure_internal!(
+                    matches!(reader.read().map_err(wasm_err)?, Operator::End) && reader.eof(),
                     "invalid helper table offset"
                 );
                 let ElementItems::Functions(functions) = element.items else {
-                    bail!("internal helper elements must be function indices");
+                    bail_internal!("internal helper elements must be function indices");
                 };
                 for (index, function) in functions.into_iter().enumerate() {
-                    library.elements.push((offset + index as u32, function?));
+                    library
+                        .elements
+                        .push((offset + index as u32, function.map_err(wasm_err)?));
                 }
             }
         }
@@ -603,19 +617,19 @@ impl<'a> Library<'a> {
                 for subsection in wasmparser::Dylink0SectionReader::new(
                     wasmparser::BinaryReader::new(section.data(), section.data_offset()),
                 ) {
-                    match subsection? {
+                    match subsection.map_err(wasm_err)? {
                         Dylink0Subsection::MemInfo(info) => {
                             library.table_size = info.table_size;
                             library.table_alignment = 1u32
                                 .checked_shl(info.table_alignment)
-                                .context("helper table alignment overflow")?;
+                                .ok_or_else(|| internal!("helper table alignment overflow"))?;
                             library.data_size = info.memory_size;
                             library.data_alignment = 1u32
                                 .checked_shl(info.memory_alignment)
-                                .context("helper data alignment overflow")?;
+                                .ok_or_else(|| internal!("helper data alignment overflow"))?;
                         }
                         Dylink0Subsection::Needed(_) => {
-                            bail!("internal helpers cannot load dynamic dependencies")
+                            bail_internal!("internal helpers cannot load dynamic dependencies")
                         }
                         _ => (),
                     }
@@ -637,7 +651,7 @@ impl<'a> Library<'a> {
                 self.exports
                     .get(entry)
                     .copied()
-                    .with_context(|| format!("missing internal helper export {entry}"))
+                    .ok_or_else(|| internal!("missing internal helper export {entry}"))
             })
             .collect::<Result<Vec<_>>>()?;
         pending.extend(
@@ -656,9 +670,9 @@ impl<'a> Library<'a> {
                 .module
                 .bodies
                 .get(function as usize - self.module.imports.len())
-                .context("internal helper function reference out of range")?;
-            for operator in body.get_operators_reader()? {
-                match operator? {
+                .ok_or_else(|| internal!("internal helper function reference out of range"))?;
+            for operator in body.get_operators_reader().map_err(wasm_err)? {
+                match operator.map_err(wasm_err)? {
                     Operator::Call { function_index }
                     | Operator::ReturnCall { function_index }
                     | Operator::RefFunc { function_index } => {

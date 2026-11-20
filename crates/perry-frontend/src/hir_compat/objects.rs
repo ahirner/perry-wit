@@ -1,5 +1,5 @@
-use anyhow::Result;
 use perry_hir::ir::Expr;
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{bail_unsupported, ensure_internal, unsupported};
 
 pub fn init_fields<'h, 'e>(

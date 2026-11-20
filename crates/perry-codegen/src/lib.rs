@@ -25,9 +25,8 @@
 //! `module` drives the lowering of a whole module and `function` lowers individual functions,
 //! dispatching operations through `ops` to the topical modules. `async_split` transforms async
 //! functions into state machines, and [boundary] binds them to the canonical ABI.
-use anyhow::Result;
 use perry_abi::layout::descriptor::{OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL};
-use perry_wit_diagnostics::{anyhow_ext::internal_context, internal};
+use perry_wit_diagnostics::{Result, internal};
 use pliron::{
     builtin::ops::ModuleOp,
     context::Context,
@@ -121,10 +120,7 @@ pub fn compile(
         pliron_wasm::reducible::make_reducible(ctx, &function);
     }
     verify_operation(wasm.get_operation(), ctx).map_err(|error| {
-        internal_context(
-            internal!("{}", error.disp(ctx)),
-            "verifying the lowered wasm module",
-        )
+        internal!("{}", error.disp(ctx)).with_internal_context("verifying the lowered wasm module")
     })?;
     let end = DATA_BASE as usize + data.len();
     let options = EmitOptions {
@@ -146,5 +142,5 @@ pub fn compile(
         },
         names: true,
     };
-    Ok(emit_module(ctx, &wasm, &options)?)
+    emit_module(ctx, &wasm, &options).map_err(|err| internal!("{err}"))
 }

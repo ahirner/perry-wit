@@ -42,8 +42,7 @@ impl Shapes<'_> {
             HirType::Unknown => Ok(perry_mir::JsonType::get(ctx).into()),
             HirType::Any => Err(perry_wit_diagnostics::Diagnostic::from(
                 ShapeError::MissingTypeAnnotation,
-            )
-            .into()),
+            )),
             HirType::Generic { base, type_args } => {
                 if base == "WitInput" {
                     let [inner] = type_args.as_slice() else {
@@ -147,8 +146,7 @@ impl Shapes<'_> {
             HirType::Function(_) | HirType::Symbol | HirType::TypeVar(_) => Err(
                 perry_wit_diagnostics::Diagnostic::from(ShapeError::UnsupportedType {
                     ty: format!("{ty:?}"),
-                })
-                .into(),
+                }),
             ),
         }
     }

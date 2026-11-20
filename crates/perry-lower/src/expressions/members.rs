@@ -290,7 +290,7 @@ impl<'s> FunctionBuilder<'s> {
                     return self.kv_get(ctx, array, key, k_ty, v_ty);
                 }
                 let index = self.index(ctx, index)?;
-                let op = ArrayGetOp::new(ctx, array, index)?;
+                let op = ArrayGetOp::new(ctx, array, index).to_diag(ctx)?;
                 let val = self.append_value(ctx, &op);
                 Ok(val)
             }

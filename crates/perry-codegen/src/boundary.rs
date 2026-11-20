@@ -12,9 +12,9 @@ use crate::{
     runtime::Runtime,
     values::is_numeric_type,
 };
-use anyhow::Result;
 use perry_abi::layout::{array as layout, string as strings};
 use perry_mir::{ArrayType, RecordType};
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{
     bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag, ensure_internal, internal,
 };

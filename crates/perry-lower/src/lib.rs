@@ -38,7 +38,6 @@ mod temporal;
 mod url;
 mod value_unions;
 mod variants;
-use anyhow::Result;
 use perry_frontend::hir::{
     ir::{
         BinaryOp, CompareOp, Expr, Function, LogicalOp, Module as HirModule, Stmt, UnaryOp,
@@ -53,14 +52,16 @@ use perry_mir::{
     ConcatOp, CondBrOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
     ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, Intrinsic, IsNullOp, IsUndefinedOp,
     JsonStringifyOp, JsonType, LoadOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp,
-    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType, RaiseOp, RecordKind,
-    RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp, StringLenOp,
-    StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp, WrapOp, absence,
-    admits_undefined, may_throw, optional_parts, optional_value, present_type, set_async,
+    PlironResultExt as _, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType,
+    RaiseOp, RecordKind, RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp,
+    StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
+    WrapOp, absence, admits_undefined, may_throw, optional_parts, optional_value, present_type,
+    set_async,
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{
-    anyhow_ext::internal_context, bail_diag, bail_internal, bail_unsupported, codes, diag,
-    ensure_diag, ensure_internal, ensure_unsupported, internal, unsupported,
+    Diagnostic, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag,
+    ensure_internal, ensure_unsupported, internal, unsupported,
 };
 use pliron::printable::Printable as _;
 use pliron::{

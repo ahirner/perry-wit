@@ -50,13 +50,13 @@ impl<'s> FunctionBuilder<'s> {
                 "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>"
             )
         })?;
-        let fields = rec_handle.deref(ctx).fields()?.to_vec();
+        let fields = rec_handle.deref(ctx).fields().to_diag(ctx)?.to_vec();
         let opt_ty = crate::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
         let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
         for (name, _) in fields.into_iter().rev() {
             let name_str = self.string(ctx, &name);
             let eq = self.compare(ctx, CompareKind::Eq, key, name_str);
-            let op = FieldGetOp::new(ctx, rec, name)?;
+            let op = FieldGetOp::new(ctx, rec, name).to_diag(ctx)?;
             let field_val = self.append_value(ctx, &op);
             let normalized = self.normalize_optional_read(ctx, field_val)?;
             let field_opt = self.fit(ctx, normalized, opt_ty)?;
@@ -119,7 +119,7 @@ impl<'s> FunctionBuilder<'s> {
             };
             let output_ty = pair.map_or(elem_ty, Into::into);
             let tuple = rec.deref(ctx).kind() == RecordKind::Tuple;
-            let fields = rec.deref(ctx).fields()?.to_vec();
+            let fields = rec.deref(ctx).fields().to_diag(ctx)?.to_vec();
             let mut values = Vec::with_capacity(fields.len());
             for (index, (name, field_ty)) in fields.into_iter().enumerate() {
                 let position = tuple.then(|| index.to_string());
@@ -128,7 +128,7 @@ impl<'s> FunctionBuilder<'s> {
                     self.string(ctx, key)
                 } else {
                     let entry = pair.map(|pair| (pair, self.string(ctx, key)));
-                    let op = FieldGetOp::new(ctx, obj, name)?;
+                    let op = FieldGetOp::new(ctx, obj, name).to_diag(ctx)?;
                     let value = self.append_value(ctx, &op);
                     let value = if admits_undefined(ctx, field_ty) {
                         self.normalize_optional_read(ctx, value)?
@@ -264,7 +264,7 @@ impl<'s> FunctionBuilder<'s> {
                     eq,
                     |b, ctx| {
                         if admits_undefined(ctx, field_ty) {
-                            let op = FieldPresentOp::new(ctx, obj, name)?;
+                            let op = FieldPresentOp::new(ctx, obj, name).to_diag(ctx)?;
                             Ok(b.append_value(ctx, &op))
                         } else {
                             Ok(b.boolean(ctx, true))

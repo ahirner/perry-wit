@@ -4,9 +4,9 @@ use crate::{
     repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
-use anyhow::Result;
 use perry_abi::layout::variant;
-use perry_mir::admits_payload;
+use perry_mir::{PlironResultExt as _, admits_payload};
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::internal;
 use pliron::{context::Context, r#type::TypeHandle, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
@@ -38,7 +38,7 @@ impl FunctionLowering<'_, '_> {
         self.cond_br(ctx, same_tag, (same, vec![]), (done, vec![no]));
         self.block = same;
         let inner = optional_inner(ctx, ty).unwrap_or(ty);
-        let cases = perry_mir::variant_cases(ctx, inner)?;
+        let cases = perry_mir::variant_cases(ctx, inner).to_diag(ctx)?;
         for (index, (tag, payload)) in cases.iter().enumerate() {
             let payload = payload.ok_or_else(|| internal!("value union without a payload"))?;
             let next = if index + 1 < cases.len() {
@@ -119,7 +119,7 @@ impl FunctionLowering<'_, '_> {
         object: Value,
         result: TypeHandle,
     ) -> Result<Value> {
-        let cases = perry_mir::variant_cases(ctx, ty)?;
+        let cases = perry_mir::variant_cases(ctx, ty).to_diag(ctx)?;
         let tag = self.load(ctx, MemKind::I32, object, variant::TAG);
         let mut admitted = self.i32_const(ctx, 0);
         let mut present = self.i32_const(ctx, 0);

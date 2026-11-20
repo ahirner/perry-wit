@@ -6,12 +6,12 @@ use crate::{
     repr::{Carriers, Repr, repr},
     values::is_numeric_type,
 };
-use anyhow::Result;
 use perry_abi::{OMITTED_BITS, UNDEFINED_BITS, layout::numeric};
 use perry_mir::{
     AggregateViewOp, ErrorKind, IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp,
     ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, absence,
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{bail_internal, internal};
 use pliron::{
     context::{Context, Ptr},

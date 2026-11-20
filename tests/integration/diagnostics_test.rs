@@ -3,7 +3,6 @@ use perry_wit::{
     api::{self, Module, Options, Program, Source, Wit},
     codes, generate_sdk_files,
 };
-use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
 
 #[test]
 fn diagnostics_locate_imported_modules_and_multibyte_columns() {
@@ -429,7 +428,10 @@ fn every_kind_has_a_fixture() {
         ),
         (
             ErrorKind::Internal,
-            perry_wit::CompileError::from_error(anyhow::anyhow!("synthetic internal error")),
+            perry_wit::CompileError::from(perry_wit::Diagnostic::new(
+                codes::INTERNAL,
+                "synthetic internal error",
+            )),
         ),
     ];
 

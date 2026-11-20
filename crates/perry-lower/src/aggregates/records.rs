@@ -54,8 +54,7 @@ fn matching_record<'a>(
             if !missing.is_empty() {
                 return Err(perry_wit_diagnostics::Diagnostic::from(
                     LowerErrorKind::MissingRequiredField { fields: missing },
-                )
-                .into());
+                ));
             }
         }
         MissingFields::Infer if required.count() != 0 => return Ok(None),
@@ -124,7 +123,7 @@ impl<'a> RecordAssembly<'a> {
                 )
             }
             RecordInput::Field(source, mode) => {
-                let op = FieldGetOp::new(ctx, source, name.to_string())?;
+                let op = FieldGetOp::new(ctx, source, name.to_string()).to_diag(ctx)?;
                 let value = b.field_read(ctx, &op)?;
                 let presence = admits_undefined(ctx, value.get_type(ctx)).then_some((source, mode));
                 (value, presence, presence.is_some())
@@ -143,7 +142,7 @@ impl<'a> RecordAssembly<'a> {
         let optional = admits_undefined(ctx, target);
         let value = if let Some((source, _)) = source.filter(|_| previous.is_some() || optional) {
             let present = if optional {
-                let op = FieldPresentOp::new(ctx, source, name.to_string())?;
+                let op = FieldPresentOp::new(ctx, source, name.to_string()).to_diag(ctx)?;
                 b.emit_value(ctx, |_| op)
             } else {
                 let undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, loaded));
@@ -170,10 +169,10 @@ impl<'a> RecordAssembly<'a> {
             b.fit(ctx, loaded, target)
         }
         .map_err(|err| {
-            internal_context(
-                err,
-                format!("record field {name} cannot become {}", target.disp(ctx)),
-            )
+            err.with_internal_context(format!(
+                "record field {name} cannot become {}",
+                target.disp(ctx)
+            ))
         })?;
         match position {
             Some(index) => self.fields[index].1 = value,
@@ -191,11 +190,11 @@ impl<'a> RecordAssembly<'a> {
         excluded: &[String],
         mode: CopyMode,
     ) -> Result<()> {
-        let count = record.deref(ctx).fields()?.len();
+        let count = record.deref(ctx).fields().to_diag(ctx)?.len();
         for index in 0..count {
             let name = {
                 let definition = record.deref(ctx);
-                let field = &definition.fields()?[index];
+                let field = &definition.fields().to_diag(ctx)?[index];
                 if excluded.contains(&field.0) {
                     continue;
                 }
@@ -225,7 +224,7 @@ impl<'a> RecordAssembly<'a> {
                     .collect(),
             )?,
         };
-        let count = record.deref(ctx).fields()?.len();
+        let count = record.deref(ctx).fields().to_diag(ctx)?.len();
         let mut slots = vec![None; count];
         let mut order = Vec::with_capacity(if literal { self.fields.len() } else { 0 });
         for (name, value) in self.fields {
@@ -244,14 +243,15 @@ impl<'a> RecordAssembly<'a> {
             .map(|(index, value)| match value {
                 Some(value) => Ok(value),
                 None => {
-                    let ty = record.deref(ctx).fields()?[index].1;
+                    let ty = record.deref(ctx).fields().to_diag(ctx)?[index].1;
                     if !admits_undefined(ctx, ty) {
                         return Err(perry_wit_diagnostics::Diagnostic::from(
                             LowerErrorKind::MissingRequiredField {
-                                fields: vec![record.deref(ctx).fields()?[index].0.clone()],
+                                fields: vec![
+                                    record.deref(ctx).fields().to_diag(ctx)?[index].0.clone(),
+                                ],
                             },
-                        )
-                        .into());
+                        ));
                     }
                     Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)))
                 }
@@ -287,7 +287,8 @@ impl<'s> FunctionBuilder<'s> {
         let expected = if let Some(ty) =
             expected.filter(|ty| ty.deref(ctx).is::<perry_mir::ValueUnionType>())
         {
-            perry_mir::variant_cases(ctx, ty)?
+            perry_mir::variant_cases(ctx, ty)
+                .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
         } else {

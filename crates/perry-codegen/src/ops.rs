@@ -6,14 +6,15 @@ use crate::{
     repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
-use anyhow::Result;
 use perry_mir::{
     ArrayType, AsyncCallOp, AwaitOp, BinaryOp as MirBinaryOp, BrOp as MirBrOp, CallOp as MirCallOp,
     Combinator, CompareKind, CompareOp as MirCompareOp, ConcatOp, CondBrOp as MirCondBrOp,
-    ErrorKind, IntrinsicOp, JsonStringifyOp, NumericCastOp, PromiseCombinatorOp, PromiseRejectedOp,
-    PromiseResolvedOp, PromiseType, ReturnOp as MirReturnOp, SettledField, SettledFieldOp,
-    SettledType, StringConstOp, StringLenOp, StringType, TimerOp, UndefOp,
+    ErrorKind, IntrinsicOp, JsonStringifyOp, NumericCastOp, PlironResultExt as _,
+    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType,
+    ReturnOp as MirReturnOp, SettledField, SettledFieldOp, SettledType, StringConstOp, StringLenOp,
+    StringType, TimerOp, UndefOp,
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{bail_internal, bail_unsupported, ensure_internal, internal};
 use pliron::{
     builtin::{
@@ -45,7 +46,8 @@ impl FunctionLowering<'_, '_> {
             let ty = TypedHandle::<perry_mir::SlotType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
-            )?
+            )
+            .to_diag(ctx)?
             .deref(ctx)
             .value();
             let name = global.name(ctx);
@@ -113,7 +115,8 @@ impl FunctionLowering<'_, '_> {
             // The runtime header holds low 64 bits, sign, then high-limb count.
             bytes.copy_within(8..16, 0);
             bytes[8..12].fill(0);
-            let extra_len = u32::try_from((bytes.len() - 16) / 4)?;
+            let extra_len = u32::try_from((bytes.len() - 16) / 4)
+                .map_err(|_| internal!("BigInt literal exceeds maximum length"))?;
             bytes[12..16].copy_from_slice(&extra_len.to_le_bytes());
             let address = self.state.data.append(8, &bytes);
             let value = self.i32_const(ctx, address as i32);
@@ -422,9 +425,11 @@ impl FunctionLowering<'_, '_> {
                 let array = TypedHandle::<ArrayType>::from_handle(
                     op.deref(ctx).get_operand(0).get_type(ctx),
                     ctx,
-                )?;
+                )
+                .to_diag(ctx)?;
                 let element = array.deref(ctx).element();
-                let payload = TypedHandle::<PromiseType>::from_handle(element, ctx)?
+                let payload = TypedHandle::<PromiseType>::from_handle(element, ctx)
+                    .to_diag(ctx)?
                     .deref(ctx)
                     .value();
                 let references = self.i32_const(ctx, i32::from(repr(ctx, payload)? == Repr::Ref));
@@ -453,7 +458,8 @@ impl FunctionLowering<'_, '_> {
             let payload = TypedHandle::<PromiseType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
-            )?
+            )
+            .to_diag(ctx)?
             .deref(ctx)
             .value();
             let promise = self.new_promise(ctx, payload)?;
@@ -486,7 +492,8 @@ impl FunctionLowering<'_, '_> {
                         let source = TypedHandle::<SettledType>::from_handle(
                             op.deref(ctx).get_operand(0).get_type(ctx),
                             ctx,
-                        )?
+                        )
+                        .to_diag(ctx)?
                         .deref(ctx)
                         .value();
                         if optional_inner(ctx, source).is_some() {
@@ -520,7 +527,8 @@ impl FunctionLowering<'_, '_> {
             let payload = TypedHandle::<PromiseType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
-            )?
+            )
+            .to_diag(ctx)?
             .deref(ctx)
             .value();
             let promise = self.new_promise(ctx, payload)?;

@@ -1,9 +1,9 @@
 //! How MIR types are represented in Wasm values and memory slots.
 pub(crate) use crate::values::Carriers;
-use anyhow::Result;
 use perry_mir::{
     ByteInputType, OptionalType, PromiseType, SlotType, TransferType, is_reference_type,
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_internal;
 use pliron::{
     builtin::{

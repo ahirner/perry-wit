@@ -7,9 +7,8 @@ use crate::{
     repr::i32_type,
     values::{self, Carriers},
 };
-use anyhow::Result;
-use perry_mir::CaughtOp;
-use perry_wit_diagnostics::anyhow_ext::{annotate_existing, internal_context};
+use perry_mir::{CaughtOp, PlironResultExt as _};
+use perry_wit_diagnostics::Result;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -103,7 +102,11 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
     ) -> Result<FuncOp> {
         let symbol = mir.get_symbol_name(ctx);
         let throws = state.may_throw(&symbol);
-        let effects = state.program_facts.function_summary(ctx, mir)?.effects;
+        let effects = state
+            .program_facts
+            .function_summary(ctx, mir)
+            .to_diag(ctx)?
+            .effects;
         let (mir_params, mir_results) = crate::analysis::function_signature(ctx, mir)?;
         let params = values::signature(ctx, mir_params)?;
         let results = values::signature(ctx, mir_results)?;
@@ -196,8 +199,8 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
                 }
                 let lowered = self.op(ctx, op).map_err(|err| {
                     let op_dyn = Operation::get_op_dyn(op, ctx);
-                    let err = annotate_existing(err, perry_mir::source_span(ctx, op_dyn.as_ref()));
-                    internal_context(err, format!("lowering {}", op_dyn.get_opid()))
+                    err.with_fallback_span(perry_mir::source_span(ctx, op_dyn.as_ref()))
+                        .with_internal_context(format!("lowering {}", op_dyn.get_opid()))
                 });
                 let landing = self.landing.take();
                 lowered?;

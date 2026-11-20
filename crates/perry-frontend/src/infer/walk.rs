@@ -161,7 +161,7 @@ pub(super) trait Visitor: Sized {
 }
 
 impl<F: FnMut(Node<'_>) -> Result<()>> Visitor for F {
-    type Error = anyhow::Error;
+    type Error = perry_wit_diagnostics::Diagnostic;
 
     fn node(&mut self, node: Node<'_>) -> Result<()> {
         self(node)

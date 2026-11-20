@@ -1,9 +1,9 @@
 //! Binding WIT world exports to exported TypeScript functions.
-use anyhow::Result;
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_contract::export_names::core_export_name;
 use perry_contract::types::{Contract, Input, convert};
 use perry_mir::is_exported;
+use perry_wit_diagnostics::Result;
 use pliron::{
     builtin::{
         op_interfaces::SymbolOpInterface,
@@ -210,8 +210,7 @@ pub(crate) fn constrain_numbers(
                 actual: args.len(),
                 core_name: &export.core_name,
                 expected: export.params.len(),
-            })
-            .into());
+            }));
         }
         if args.len() != export.params.len()
             || results.len() != usize::from(export.result.is_some())
@@ -233,14 +232,13 @@ pub(crate) fn constrain_numbers(
                 .downcast_ref::<pliron::builtin::types::IntegerType>()
                 .is_some_and(|int| int.width() == 64);
             if wide && !source.deref(ctx).is::<perry_mir::BigIntType>() && !is_wide_int {
-                return Err(
-                    crate::Diagnostic::from(BindError::WideIntegerRequiresBigInt {
+                return Err(crate::Diagnostic::from(
+                    BindError::WideIntegerRequiresBigInt {
                         span: perry_mir::source_span(ctx, function),
                         function: &export.function,
                         core_name: &export.core_name,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             if (wide && (source.deref(ctx).is::<perry_mir::BigIntType>() || is_wide_int))
                 || (!wide
@@ -334,8 +332,7 @@ pub(crate) fn exports(
                 core_name: &core_name,
                 implementation: &implementation,
                 is_unexported: unexported.is_some(),
-            })
-            .into());
+            }));
         };
         let is_async = perry_mir::is_async(ctx, &mir_function);
         if is_async != function.kind.is_async() {
@@ -344,8 +341,7 @@ pub(crate) fn exports(
                 implementation: &implementation,
                 core_name: &core_name,
                 expected_async: function.kind.is_async(),
-            })
-            .into());
+            }));
         }
         let params = function
             .params
@@ -405,7 +401,9 @@ fn module_functions(ctx: &Context, mir: &ModuleOp) -> Vec<FuncOp> {
 /// Require a command world (`wasi:cli/run`) when top-level statements are present.
 pub(crate) fn check_main(ctx: &Context, mir: &ModuleOp, exports: &[Export]) -> Result<()> {
     if has_main(ctx, mir) && !exports.iter().any(Export::is_command) {
-        return Err(crate::Diagnostic::from(BindError::TopLevelRequiresCommandWorld).into());
+        return Err(crate::Diagnostic::from(
+            BindError::TopLevelRequiresCommandWorld,
+        ));
     }
     Ok(())
 }
@@ -495,7 +493,7 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
                     .collect::<Result<_>>()?,
             ),
             Contract::Unsupported(kind) => {
-                return Err(crate::Diagnostic::from(BindError::UnsupportedAbiType(kind)).into());
+                return Err(crate::Diagnostic::from(BindError::UnsupportedAbiType(kind)));
             }
         })
     })

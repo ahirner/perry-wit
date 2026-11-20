@@ -1,7 +1,7 @@
 //! Original source coordinates for merged AST and HIR declarations.
 use perry_hir::ir::Expr;
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{SourceSpan, anyhow_ext};
+use perry_wit_diagnostics::{Diagnostic, SourceSpan};
 use std::{collections::HashMap, path::PathBuf};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -134,7 +134,7 @@ impl<'s> Locations<'s> {
         self.imports.get(source).and_then(|span| self.span(*span))
     }
 
-    pub(crate) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
+    pub(crate) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
         Self::attach(error, self.call_span(byte_offset))
     }
 
@@ -147,12 +147,12 @@ impl<'s> Locations<'s> {
         })
     }
 
-    pub(crate) fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
+    pub(crate) fn annotate(&self, error: Diagnostic, span: Span) -> Diagnostic {
         Self::attach(error, self.span(span))
     }
 
-    fn attach(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-        anyhow_ext::annotate(error, span)
+    fn attach(error: Diagnostic, span: Option<SourceSpan>) -> Diagnostic {
+        error.with_fallback_span(span)
     }
 
     pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {

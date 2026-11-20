@@ -1,8 +1,8 @@
 //! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use anyhow::Result;
 use perry_mir::{AsyncCallOp, CallOp, LiveValues, ProgramFacts, is_exported};
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::internal;
 use pliron::{
     builtin::{

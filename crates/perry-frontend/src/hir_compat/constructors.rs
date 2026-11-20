@@ -138,7 +138,7 @@ pub(super) fn preserve(
     struct Preserver {
         registry: Constructors,
         unresolved: SyntaxContext,
-        error: Option<anyhow::Error>,
+        error: Option<perry_wit_diagnostics::Diagnostic>,
         aliases: Vec<ast::ModuleItem>,
     }
     impl VisitMut for Preserver {

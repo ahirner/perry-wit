@@ -1,5 +1,4 @@
 //! Structured lowering diagnostics mapped directly into [`perry_wit_diagnostics::Diagnostic`].
-pub(crate) use perry_wit_diagnostics::anyhow_ext::annotate;
 use perry_wit_diagnostics::{Code, Diagnostic, codes};
 
 /// Type-shape and coercion errors during HIR-to-MIR lowering.

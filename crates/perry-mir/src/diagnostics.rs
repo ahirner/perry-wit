@@ -1,10 +1,36 @@
-//! Source coordinates retained on MIR operations through compiler transformations.
-use pliron::{builtin::attributes::StringAttr, context::Context, identifier::Identifier, op::Op};
+//! Source coordinates and diagnostic conversion for MIR operations and passes.
+use perry_wit_diagnostics::{Diagnostic, Result as DiagResult, codes};
+use pliron::{
+    builtin::attributes::StringAttr, context::Context, identifier::Identifier, op::Op,
+    printable::Printable,
+};
 use std::path::PathBuf;
 
 const SOURCE: Identifier = Identifier::new("perry_source_span");
 
 pub use perry_wit_diagnostics::SourceSpan;
+
+/// Convert a pliron error into a [`Diagnostic`], preserving any embedded diagnostic (such as
+/// narrowing errors from MIR passes) and turning IR invariants into [`codes::INTERNAL`].
+pub fn pliron_to_diagnostic(ctx: &Context, error: pliron::result::Error) -> Diagnostic {
+    match error.err.downcast::<Diagnostic>() {
+        Ok(diagnostic) => *diagnostic,
+        Err(err) => {
+            let error = pliron::result::Error { err, ..error };
+            Diagnostic::new(codes::INTERNAL, error.disp(ctx).to_string())
+        }
+    }
+}
+
+pub trait PlironResultExt<T> {
+    fn to_diag(self, ctx: &Context) -> DiagResult<T>;
+}
+
+impl<T> PlironResultExt<T> for pliron::result::Result<T> {
+    fn to_diag(self, ctx: &Context) -> DiagResult<T> {
+        self.map_err(|error| pliron_to_diagnostic(ctx, error))
+    }
+}
 
 pub fn set_source_span(ctx: &mut Context, operation: &dyn Op, span: &SourceSpan) {
     let serialized = format!(

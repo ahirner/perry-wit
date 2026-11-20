@@ -1,6 +1,6 @@
 //! Maps the supported ECMAScript literal syntax to Rust regex syntax.
 
-use anyhow::Result;
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{bail_diag, codes, diag, ensure_diag};
 
 const SPACE: &str =

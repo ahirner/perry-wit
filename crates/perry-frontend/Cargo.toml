@@ -12,7 +12,6 @@ perry-wit-diagnostics.workspace = true
 perry-contract.workspace = true
 wit-parser.workspace = true
 pliron.workspace = true
-anyhow.workspace = true
 serde_json.workspace = true
 swc_ecma_visit = "29.0"
 swc_ecma_parser = "45.1"

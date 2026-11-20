@@ -409,7 +409,7 @@ impl<'s> FunctionBuilder<'s> {
             && !rec.deref(ctx).is_tuple()
             && rec.deref(ctx).field("length").is_some()
         {
-            let op = FieldGetOp::new(ctx, src_val, "length".to_string())?;
+            let op = FieldGetOp::new(ctx, src_val, "length".to_string()).to_diag(ctx)?;
             let raw_len = self.field_read(ctx, &op)?;
             let raw_len = self.arithmetic(ctx, raw_len);
             let len_trunc = self.integer_or_infinity(ctx, raw_len)?;

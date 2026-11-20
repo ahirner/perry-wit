@@ -1,6 +1,7 @@
 //! Stub canonical observer imports for raw inspection modules. Component exports provide
 //! full suspension and native completion callbacks.
-use anyhow::Result;
+use super::wasm_err;
+use perry_wit_diagnostics::Result;
 use std::convert::Infallible;
 use wasm_encoder::{
     reencode::{self, Reencode},
@@ -40,10 +41,10 @@ fn stub_imports(core: Vec<u8>, replace: impl Fn(&str, &str) -> bool) -> Result<V
     // Function index and type of each replaced import, in import order.
     let mut stubs = Vec::new();
     for payload in Parser::new(0).parse_all(&core) {
-        match payload? {
+        match payload.map_err(wasm_err)? {
             Payload::ImportSection(section) => {
                 for import in section.into_imports() {
-                    let import = import?;
+                    let import = import.map_err(wasm_err)?;
                     if let TypeRef::Func(ty) = import.ty {
                         if replace(import.module, import.name) {
                             stubs.push((imported, ty));
@@ -79,7 +80,8 @@ fn stub_imports(core: Vec<u8>, replace: impl Fn(&str, &str) -> bool) -> Result<V
         first_stub,
         types: stubs.into_iter().map(|(_, ty)| ty).collect(),
     }
-    .parse_core_module(&mut module, Parser::new(0), &core)?;
+    .parse_core_module(&mut module, Parser::new(0), &core)
+    .map_err(wasm_err)?;
     Ok(module.finish())
 }
 

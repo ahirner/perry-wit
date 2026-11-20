@@ -1,7 +1,7 @@
 //! TypeScript declarations for a resolved component contract.
 mod codegen;
 
-use anyhow::Result;
+use perry_wit_diagnostics::Result;
 use wit_parser::{Resolve, WorldId};
 
 pub const RUNTIME_DECLARATIONS: &str = include_str!("runtime.d.ts");

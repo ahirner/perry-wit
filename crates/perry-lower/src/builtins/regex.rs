@@ -107,7 +107,7 @@ impl<'s> FunctionBuilder<'s> {
         let matched = if let Some(matched) = matched {
             matched
         } else {
-            let op = ArrayGetOp::new(ctx, found, zero)?;
+            let op = ArrayGetOp::new(ctx, found, zero).to_diag(ctx)?;
             let value = self.append_value(ctx, &op);
             self.defined(ctx, value)?
         };
@@ -117,7 +117,7 @@ impl<'s> FunctionBuilder<'s> {
         arguments.push(matched);
         for index in 1..=captures {
             let index = self.number(ctx, index as f64);
-            let op = ArrayGetOp::new(ctx, found, index)?;
+            let op = ArrayGetOp::new(ctx, found, index).to_diag(ctx)?;
             arguments.push(self.append_value(ctx, &op));
         }
         arguments.extend([offset, text]);

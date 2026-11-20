@@ -197,7 +197,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);
-            let await_ = AwaitOp::new(ctx, promise)?;
+            let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
             builder.append_value(ctx, &await_);
         }
         if signature.top_level && !shapes.static_fields.is_empty() {
@@ -378,10 +378,10 @@ impl<'s> FunctionBuilder<'s> {
 
     pub(super) fn load(&mut self, ctx: &mut Context, slot: Value) -> Result<Value> {
         if self.global_slots.contains(&slot) {
-            let op = perry_mir::GlobalLoadOp::new(ctx, slot)?;
+            let op = perry_mir::GlobalLoadOp::new(ctx, slot).to_diag(ctx)?;
             return Ok(self.append_value(ctx, &op));
         }
-        let op = LoadOp::new(ctx, slot)?;
+        let op = LoadOp::new(ctx, slot).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 

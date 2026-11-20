@@ -34,7 +34,7 @@ impl<'s> FunctionBuilder<'s> {
         if !is_value_union(ctx, value.get_type(ctx)) {
             return action(self, ctx, value);
         }
-        let cases = perry_mir::variant_cases(ctx, value.get_type(ctx))?;
+        let cases = perry_mir::variant_cases(ctx, value.get_type(ctx)).to_diag(ctx)?;
         let tag = self.emit_value(ctx, |ctx| VariantTagOp::new(ctx, value));
         let output = self.entry_slot(ctx, result);
         let done = self.new_block(ctx, "union_join");
@@ -68,7 +68,8 @@ impl<'s> FunctionBuilder<'s> {
         if Kind::of(ctx, present_type(ctx, value.get_type(ctx))) != Some(Kind::Record) {
             return Ok(value);
         }
-        let record = TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)?;
+        let record =
+            TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx).to_diag(ctx)?;
         ensure_unsupported!(
             self.shapes
                 .class_of_type(ctx, value.get_type(ctx))
@@ -86,7 +87,7 @@ impl<'s> FunctionBuilder<'s> {
         value: Value,
         field: &str,
     ) -> Result<Value> {
-        let cases = perry_mir::variant_cases(ctx, value.get_type(ctx))?;
+        let cases = perry_mir::variant_cases(ctx, value.get_type(ctx)).to_diag(ctx)?;
         let mut result = None;
         for (_, payload) in &cases {
             let field_type = payload.and_then(|ty| {
@@ -121,7 +122,7 @@ impl<'s> FunctionBuilder<'s> {
                 .downcast_ref::<RecordType>()
                 .is_some_and(|record| record.field(field).is_some());
             if has_field {
-                let op = FieldGetOp::new(ctx, payload, field.to_owned())?;
+                let op = FieldGetOp::new(ctx, payload, field.to_owned()).to_diag(ctx)?;
                 b.field_read(ctx, &op)
             } else if payload.get_type(ctx).deref(ctx).is::<StringType>() && field == "length" {
                 let len = b.emit_value(ctx, |ctx| StringLenOp::new(ctx, payload));

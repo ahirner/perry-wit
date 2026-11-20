@@ -467,13 +467,14 @@ impl<'s> FunctionBuilder<'s> {
                     if let Some(rec) = perry_mir::typed::<RecordType>(ctx, src.get_type(ctx))
                         && rec.deref(ctx).kind() == RecordKind::Tuple
                     {
-                        let fields_len = rec.deref(ctx).fields()?.len();
+                        let fields_len = rec.deref(ctx).fields().to_diag(ctx)?.len();
                         for tuple_idx in 0..fields_len {
                             if values.len() >= fixed_len {
                                 break;
                             }
                             let p = &params[values.len()];
-                            let op = FieldGetOp::new(ctx, src, format!("_{tuple_idx}"))?;
+                            let op =
+                                FieldGetOp::new(ctx, src, format!("_{tuple_idx}")).to_diag(ctx)?;
                             let loaded = self.field_read(ctx, &op)?;
                             values.push(self.fit(ctx, loaded, p.binding.carrier)?);
                         }
@@ -487,13 +488,10 @@ impl<'s> FunctionBuilder<'s> {
         while values.len() < fixed_len {
             let param = &params[values.len()];
             values.push(self.bind_fixed_arg(ctx, param, None).map_err(|err| {
-                internal_context(
-                    err,
-                    format!(
-                        "missing required argument in spread call to {}",
-                        signature.name
-                    ),
-                )
+                err.with_internal_context(format!(
+                    "missing required argument in spread call to {}",
+                    signature.name
+                ))
             })?);
         }
         if let Some(rest_param) = rest {

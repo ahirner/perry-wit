@@ -1,7 +1,8 @@
 use super::*;
 
 #[test]
-fn unproductive_alias_expansion_is_bounded() -> Result<()> {
+fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn std::error::Error>>
+{
     let mut source = String::from("type Cycle = Cycle; type Fields = {a:number};");
     for index in 0..64 {
         let next = if index == 63 {

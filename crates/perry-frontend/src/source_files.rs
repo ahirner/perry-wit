@@ -1,6 +1,6 @@
 //! Filesystem acquisition for the native and WASI command adapters.
 
-use anyhow::Result;
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, codes, ensure_diag, internal};
 use std::{
     collections::{BTreeMap, BTreeSet},

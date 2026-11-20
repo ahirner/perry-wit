@@ -3,11 +3,11 @@
 //! Generates idiomatic, strongly-typed TypeScript definitions for WIT worlds,
 //! exported functions, records, variants, enums, and imported interfaces.
 
-use anyhow::Result;
 use perry_contract::names::{
     TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children,
 };
 use perry_contract::types::{Contract, Input, convert};
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, codes};
 use std::{collections::HashSet, fmt::Write as _};
 use wit_parser::{Function, Resolve, Type, TypeDefKind, World, WorldItem, WorldKey};

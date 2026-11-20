@@ -6,10 +6,10 @@ mod imports;
 mod resources;
 
 use crate::{audit, component, link, strip};
-use anyhow::{Context as _, Result, anyhow};
 use perry_codegen::Exports;
-use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
-use pliron::{context::Context, op::Op, pass::AnalysisManager, printable::Printable};
+use perry_mir::PlironResultExt as _;
+use perry_wit_diagnostics::Result;
+use pliron::{context::Context, op::Op, pass::AnalysisManager};
 use std::{
     collections::BTreeMap,
     fs,
@@ -75,7 +75,7 @@ fn compile_typescript_impl(
     file_name: &str,
     options: &CompileOptions,
 ) -> Result<Compiled> {
-    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
+    let (resolve, package) = component::wit::resolve_wit_inner(&options.wit_dir)?;
     let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
     compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
 }
@@ -137,7 +137,7 @@ pub(crate) fn compile_sources(
     memory_checks: bool,
 ) -> Result<Compiled> {
     audit::audit_no_llvm(include_str!("../../Cargo.lock"))
-        .context("LLVM audit verification failed")?;
+        .map_err(|err| err.with_internal_context("LLVM audit verification failed"))?;
     if http::is_handler_world(resolve, world) {
         return http::compile(
             source,
@@ -277,16 +277,9 @@ fn lower(
 }
 
 fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
-    let analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
-        .map_err(
-            |error| match error.err.downcast_ref::<crate::Diagnostic>() {
-                Some(diagnostic) => anyhow::Error::new(diagnostic.clone()),
-                None => anyhow!("{}", error.disp(ctx)),
-            },
-        )
-        .context("optimizing MIR")
-        .map_err(crate::Diagnostic::from_error)?;
-    Ok(analyses)
+    perry_mir::canonicalize(mir.get_operation(), ctx)
+        .to_diag(ctx)
+        .map_err(|err| err.with_internal_context("optimizing MIR"))
 }
 
 fn finish(
@@ -295,9 +288,11 @@ fn finish(
     canonical: &link::canonical::Requirements,
 ) -> Result<(Vec<u8>, u32)> {
     let (core, helpers) = link::link_helpers_with(core, streams, canonical)
-        .context("linking perry-runtime and helpers")?;
-    let core = link::compact(&core).context("interning core function signatures")?;
-    audit::validate_guest(&core).context("validating stackless core Wasm")?;
+        .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
+    let core = link::compact(&core)
+        .map_err(|err| err.with_internal_context("interning core function signatures"))?;
+    audit::validate_guest(&core)
+        .map_err(|err| err.with_internal_context("validating stackless core Wasm"))?;
     Ok((core, helpers))
 }
 
@@ -319,7 +314,7 @@ pub fn compile_file(
     input_file: &Path,
     options: &CompileOptions,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_file_impl(input_file, options).map_err(crate::CompileError::from_error)
+    compile_file_impl(input_file, options).map_err(crate::CompileError::from)
 }
 
 pub fn compile_typescript(
@@ -327,7 +322,7 @@ pub fn compile_typescript(
     file_name: &str,
     options: &CompileOptions,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_typescript_impl(source, file_name, options).map_err(crate::CompileError::from_error)
+    compile_typescript_impl(source, file_name, options).map_err(crate::CompileError::from)
 }
 
 pub fn compile_for_world(
@@ -338,7 +333,7 @@ pub fn compile_for_world(
     componentize: bool,
 ) -> std::result::Result<Compiled, crate::CompileError> {
     compile_for_world_impl(source, file_name, resolve, world, componentize)
-        .map_err(crate::CompileError::from_error)
+        .map_err(crate::CompileError::from)
 }
 
 pub fn compile_for_world_with_memory_checks(
@@ -348,19 +343,19 @@ pub fn compile_for_world_with_memory_checks(
     world: wit_parser::WorldId,
 ) -> std::result::Result<Compiled, crate::CompileError> {
     compile_for_world_with_memory_checks_impl(source, file_name, resolve, world)
-        .map_err(crate::CompileError::from_error)
+        .map_err(crate::CompileError::from)
 }
 
 pub fn compile_core(
     source: &str,
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_impl(source, file_name).map_err(crate::CompileError::from_error)
+    compile_core_impl(source, file_name).map_err(crate::CompileError::from)
 }
 
 pub fn compile_core_with_memory_checks(
     source: &str,
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_with_memory_checks_impl(source, file_name).map_err(crate::CompileError::from_error)
+    compile_core_with_memory_checks_impl(source, file_name).map_err(crate::CompileError::from)
 }

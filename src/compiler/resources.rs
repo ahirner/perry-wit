@@ -1,9 +1,8 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
-use anyhow::Result;
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
 use perry_contract::names::canonical_type;
 use perry_frontend::wit::{ResourceOperation as SourceResourceOperation, WorldTypes};
-use perry_wit_diagnostics::ensure_diag;
+use perry_wit_diagnostics::{Result, ensure_diag};
 use std::collections::BTreeMap;
 use wit_parser::{Resolve, TypeDefKind, WorldId, WorldItem};
 

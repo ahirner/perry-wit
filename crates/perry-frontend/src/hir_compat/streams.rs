@@ -1,7 +1,7 @@
 //! Lower array/string iteration and byte-stream async iteration before HIR erases types.
 use super::names::FreshNames;
-use anyhow::Result;
 use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::{Diagnostic, Result};
 use perry_wit_diagnostics::{
     bail_internal, bail_unsupported, ensure_internal, ensure_unsupported, internal,
 };
@@ -22,7 +22,7 @@ pub(super) fn lower(module: &mut ast::Module, names: &mut FreshNames) -> Result<
 
 struct Loops<'n> {
     names: &'n mut FreshNames,
-    error: Option<anyhow::Error>,
+    error: Option<Diagnostic>,
 }
 
 impl Loops<'_> {
@@ -191,7 +191,7 @@ pub(super) const DECODE: &str = "$$perryDecodeOptions";
 
 pub(super) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxContext) -> Result<()> {
     struct Options {
-        error: Option<anyhow::Error>,
+        error: Option<Diagnostic>,
         unresolved: SyntaxContext,
     }
     impl VisitMut for Options {

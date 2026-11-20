@@ -12,9 +12,9 @@ use std::{
     fmt,
 };
 
-use anyhow::Result;
 use parsed::ParsedModule;
 use perry_codegen::HELPER_MODULE;
+use perry_wit_diagnostics::{Diagnostic, Result, internal};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
@@ -88,13 +88,15 @@ impl LinkError {
     }
 }
 
-impl From<LinkError> for crate::Diagnostic {
+impl From<LinkError> for Diagnostic {
     fn from(error: LinkError) -> Self {
         Self::new(error.code(), error.to_string())
     }
 }
 
-impl std::error::Error for LinkError {}
+pub(super) fn wasm_err(err: impl fmt::Display) -> Diagnostic {
+    internal!("{err}")
+}
 
 struct CoreRelocations<'a> {
     functions: &'a BTreeMap<u32, u32>,
@@ -152,19 +154,6 @@ fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
 
 /// Link runtime and standard-library calls and rewrite canonical stream placeholders for `core_wasm`.
 pub(crate) fn link_helpers_with(
-    core_wasm: Vec<u8>,
-    streams: Option<&StreamAnchor>,
-    canonical: &canonical::Requirements,
-) -> Result<(Vec<u8>, u32)> {
-    link_helpers_inner(core_wasm, streams, canonical).map_err(|error| {
-        match error.downcast::<LinkError>() {
-            Ok(link_error) => crate::Diagnostic::from(link_error).into(),
-            Err(error) => error,
-        }
-    })
-}
-
-fn link_helpers_inner(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
     canonical: &canonical::Requirements,
@@ -289,7 +278,7 @@ fn link_helpers_inner(
     // Determine existing static data extent from core module
     let mut existing_data_end = 1024u32;
     for seg in core.data.iter().cloned().flatten() {
-        let seg = seg?;
+        let seg = seg.map_err(wasm_err)?;
         if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
             let mut reader = offset_expr.get_operators_reader();
             if let Ok(wasmparser::Operator::I32Const { value }) = reader.read() {
@@ -311,7 +300,8 @@ fn link_helpers_inner(
         .into_iter()
         .flatten()
         .next()
-        .transpose()?
+        .transpose()
+        .map_err(wasm_err)?
         .map_or(0, |table| table.ty.initial);
     let mut current_table_size = u32::try_from(original_table_size)
         .map_err(|_| LinkError::TableOverflow("core table exceeds table32"))?;
@@ -500,7 +490,7 @@ fn link_helpers_inner(
 
     let mut new_tables = wasm_encoder::TableSection::new();
     for (index, table) in core.tables.iter().cloned().flatten().enumerate() {
-        let mut table = table?;
+        let mut table = table.map_err(wasm_err)?;
         if index == 0 {
             let initial = table.ty.initial.max(u64::from(current_table_size));
             table.ty.maximum = table
@@ -537,7 +527,7 @@ fn link_helpers_inner(
     if let Some(memories) = core.memories.take() {
         let mut new_mems = wasm_encoder::MemorySection::new();
         for (index, memory) in memories.into_iter().enumerate() {
-            let mut memory = memory?;
+            let mut memory = memory.map_err(wasm_err)?;
             if index == 0 && needs_stack {
                 memory.initial = memory.initial.max(u64::from(stack_top.div_ceil(65_536)));
             }
@@ -673,9 +663,9 @@ fn link_helpers_inner(
     for section in &core.custom {
         if section.name() == "name" {
             for subsection in wasmparser::NameSectionReader::new(section.data_reader()) {
-                if let wasmparser::Name::Function(names) = subsection? {
+                if let wasmparser::Name::Function(names) = subsection.map_err(wasm_err)? {
                     for name in names {
-                        let name = name?;
+                        let name = name.map_err(wasm_err)?;
                         if let Some(&index) = old_to_new_func_index.get(&name.index) {
                             functions.insert(index, Cow::Borrowed(name.name));
                         }

@@ -3,12 +3,46 @@
 #[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
 mod wasm;
 
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, bail};
 use perry_wit::compiler::{CompileOptions, compile_file};
+
+enum CliError {
+    Message(String),
+    Compile(perry_wit::CompileError),
+}
+
+impl fmt::Display for CliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(message) => f.write_str(message),
+            Self::Compile(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl From<perry_wit::CompileError> for CliError {
+    fn from(error: perry_wit::CompileError) -> Self {
+        Self::Compile(error)
+    }
+}
+
+impl From<std::io::Error> for CliError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Message(error.to_string())
+    }
+}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+type Result<T> = std::result::Result<T, CliError>;
 
 const HELP: &str = "\
 Usage: perry-wit [OPTIONS] <input.ts>
@@ -45,11 +79,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            if let Some(compile_error) = error.downcast_ref::<perry_wit::CompileError>() {
-                eprintln!("perry-wit: {compile_error}");
-            } else {
-                eprintln!("perry-wit: {error:#}");
-            }
+            eprintln!("perry-wit: {error}");
             ExitCode::FAILURE
         }
     }
@@ -65,9 +95,10 @@ fn take_value(
     let flag = arg.split_once('=').map_or(arg, |(f, _)| f);
     match inline.or_else(|| iter.next().map(String::as_str)) {
         Some(v) if !v.is_empty() && (inline.is_some() || !v.starts_with('-')) => Ok(v.to_owned()),
-        _ => bail!(
+        _ => Err(format!(
             "Option '{flag}' requires a value ({flag} {placeholder})\nTry '{help_cmd}' for usage."
-        ),
+        )
+        .into()),
     }
 }
 
@@ -111,19 +142,26 @@ fn run() -> Result<()> {
             }
             _ if !arg.starts_with('-') => {
                 if let Some(existing) = ts_file_path {
-                    bail!(
+                    return Err(format!(
                         "Unexpected argument '{arg}' (input file already set to '{existing}')\nTry 'perry-wit --help' for usage."
-                    );
+                    )
+                    .into());
                 }
                 ts_file_path = Some(arg);
             }
-            _ => bail!("Unknown argument: {arg}\nTry 'perry-wit --help' for usage."),
+            _ => {
+                return Err(
+                    format!("Unknown argument: {arg}\nTry 'perry-wit --help' for usage.").into(),
+                );
+            }
         }
     }
 
     let Some(ts_file_path) = ts_file_path else {
-        bail!(
+        return Err(
             "missing input TypeScript file\nUsage: perry-wit [OPTIONS] <input.ts>\nTry 'perry-wit --help' for more information."
+                .to_owned()
+                .into(),
         );
     };
 
@@ -162,7 +200,7 @@ fn run() -> Result<()> {
     let component = compiled
         .component
         .as_ref()
-        .context("Missing component output")?;
+        .ok_or_else(|| CliError::Message("Missing component output".to_owned()))?;
     let output = if keep_names {
         &component.bytes
     } else {
@@ -180,7 +218,7 @@ fn run() -> Result<()> {
     let mut validator = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
     validator
         .validate_all(output)
-        .context("Validating component")?;
+        .map_err(|err| CliError::Message(format!("Validating component: {err}")))?;
 
     Ok(())
 }
@@ -201,9 +239,12 @@ fn run_gen_types(args: &[String]) -> Result<()> {
                 print!("{GEN_TYPES_HELP}");
                 return Ok(());
             }
-            _ => bail!(
-                "Unknown argument to gen-types: {arg}\nTry 'perry-wit gen-types --help' for usage."
-            ),
+            _ => {
+                return Err(format!(
+                    "Unknown argument to gen-types: {arg}\nTry 'perry-wit gen-types --help' for usage."
+                )
+                .into());
+            }
         }
     }
 

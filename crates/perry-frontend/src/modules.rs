@@ -1,8 +1,8 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
 use crate::hir_compat::parse;
-use anyhow::Result;
 use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{
     Diagnostic, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_unsupported,
     unsupported,
@@ -201,7 +201,6 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
                 codes::UNRESOLVED_MODULE,
                 format!("Cannot resolve '{name}' from {}", parent.display()),
             )
-            .into()
         })
 }
 
@@ -550,7 +549,7 @@ fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
 struct Rename<'a> {
     names: HashMap<ast::Id, String>,
     namespaces: HashMap<ast::Id, &'a Exports>,
-    error: Option<anyhow::Error>,
+    error: Option<Diagnostic>,
 }
 impl VisitMut for Rename<'_> {
     fn visit_mut_import_named_specifier(&mut self, import: &mut ast::ImportNamedSpecifier) {

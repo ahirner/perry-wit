@@ -167,7 +167,7 @@ impl<'s> FunctionBuilder<'s> {
                     // Returning a promise runs finalizers before adoption; its later rejection
                     // does not enter a catch surrounding the return expression.
                     let handlers = std::mem::take(&mut self.handlers);
-                    let await_ = AwaitOp::new(ctx, promise)?;
+                    let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
                     let value = self.append_value(ctx, &await_);
                     values.push(self.fit(ctx, value, expected)?);
                     self.handlers = handlers;
@@ -412,8 +412,7 @@ impl<'s> FunctionBuilder<'s> {
             (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
                 return Err(perry_wit_diagnostics::Diagnostic::from(
                     ShapeError::MissingTypeAnnotation,
-                )
-                .into());
+                ));
             }
             (None, None) => bail_diag!(
                 codes::MISSING_TYPE_ANNOTATION,

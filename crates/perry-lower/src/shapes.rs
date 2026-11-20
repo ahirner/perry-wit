@@ -2,10 +2,9 @@
 //!
 //! Frontend record identities map to carriers; object construction evaluates fields in source order.
 use crate::{
-    ShapeError, bail_diag, codes, diag, ensure_diag, ensure_unsupported, internal,
-    internal_context, unsupported,
+    Diagnostic, Result, ShapeError, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
+    internal, unsupported,
 };
-use anyhow::Result;
 use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
 use pliron::printable::Printable as _;
@@ -165,12 +164,11 @@ impl<'h> Shapes<'h> {
 
     pub(super) fn annotate_local(
         &self,
-        error: anyhow::Error,
+        error: Diagnostic,
         id: perry_frontend::hir::types::LocalId,
-    ) -> anyhow::Error {
+    ) -> Diagnostic {
         match self.local_source_spans.get(&id) {
-            Some(span) => crate::diagnostics::annotate(
-                error,
+            Some(span) => error.with_fallback_span(
                 self.metadata
                     .locations
                     .offset_span(span.start, span.end.saturating_sub(span.start)),
@@ -181,19 +179,19 @@ impl<'h> Shapes<'h> {
 
     pub(super) fn annotate_byte_offset(
         &self,
-        error: anyhow::Error,
+        error: Diagnostic,
         byte_offset: u32,
         len: u32,
-    ) -> anyhow::Error {
-        crate::diagnostics::annotate(error, self.metadata.locations.offset_span(byte_offset, len))
+    ) -> Diagnostic {
+        error.with_fallback_span(self.metadata.locations.offset_span(byte_offset, len))
     }
 
-    pub(super) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        crate::diagnostics::annotate(error, self.metadata.locations.call_span(byte_offset))
+    pub(super) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
+        error.with_fallback_span(self.metadata.locations.call_span(byte_offset))
     }
 
-    pub(super) fn annotate_member(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        crate::diagnostics::annotate(error, self.metadata.locations.member_span(byte_offset))
+    pub(super) fn annotate_member(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
+        error.with_fallback_span(self.metadata.locations.member_span(byte_offset))
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {
@@ -346,9 +344,8 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        self.resolve_named(ctx, name).map_err(|error| {
-            crate::diagnostics::annotate(error, self.metadata.locations.type_span(name))
-        })
+        self.resolve_named(ctx, name)
+            .map_err(|error| error.with_fallback_span(self.metadata.locations.type_span(name)))
     }
 
     fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
@@ -425,7 +422,7 @@ impl<'h> Shapes<'h> {
                     int_ty.into()
                 } else {
                     self.value_type(ctx, ty)
-                        .map_err(|err| internal_context(err, format!("field {field}")))?
+                        .map_err(|err| err.with_internal_context(format!("field {field}")))?
                 };
                 let ty = if *optional {
                     OptionalType::get(ctx, ty).into()

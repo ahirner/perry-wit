@@ -153,7 +153,7 @@ impl<'s> FunctionBuilder<'s> {
         if !self.is_optional(ctx, value) {
             return Ok(value);
         }
-        let op = UnwrapOp::new(ctx, value)?;
+        let op = UnwrapOp::new(ctx, value).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
@@ -168,7 +168,8 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(value);
         }
         let locations = &self.shapes.metadata.locations;
-        let op = UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset))?;
+        let op =
+            UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset)).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
@@ -271,7 +272,8 @@ impl<'s> FunctionBuilder<'s> {
             && crate::value_unions::is_value_union(ctx, wanted)
             && let Some(tag) = perry_mir::value_tag(ctx, ty)
         {
-            let payload = perry_mir::variant_cases(ctx, wanted)?
+            let payload = perry_mir::variant_cases(ctx, wanted)
+                .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(name, payload)| (name == tag).then_some(payload).flatten())
                 .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "value is outside the finite union"))?;
@@ -288,7 +290,8 @@ impl<'s> FunctionBuilder<'s> {
         }
         if !crate::value_unions::is_value_union(ctx, wanted)
             && crate::value_unions::is_value_union(ctx, ty)
-            && perry_mir::variant_cases(ctx, present_type(ctx, ty))?
+            && perry_mir::variant_cases(ctx, present_type(ctx, ty))
+                .to_diag(ctx)?
                 .iter()
                 .any(|(_, payload)| *payload == Some(wanted))
         {
@@ -370,7 +373,7 @@ impl<'s> FunctionBuilder<'s> {
             let wanted = present_type(ctx, target);
             if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
                 && let Some(dst_rec) = record_projection(ctx, source, wanted)
-                && (!dst_rec.deref(ctx).fields()?.is_empty()
+                && (!dst_rec.deref(ctx).fields().to_diag(ctx)?.is_empty()
                     || self.shapes.class_of_type(ctx, wanted).is_some())
             {
                 return self.project_record(ctx, value, ty == source, dst_rec, target);
@@ -391,7 +394,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 ShapeError::TypeMismatch { actual, expected }
             };
-            Err(perry_wit_diagnostics::Diagnostic::from(shape_error).into())
+            Err(perry_wit_diagnostics::Diagnostic::from(shape_error))
         }
     }
 

@@ -275,8 +275,7 @@ impl<'s> FunctionBuilder<'s> {
                         expected: signature.params.len(),
                         actual: args.len(),
                     },
-                )
-                .into();
+                );
                 return Err(self.shapes.annotate_call(error, byte_offset));
             }
             let mut values = Vec::new();
@@ -385,7 +384,11 @@ impl<'s> FunctionBuilder<'s> {
             values.push(
                 self.bind_fixed_arg(ctx, param, args.get(i))
                     .map_err(|err| {
-                        internal_context(err, format!("argument {} of {}", i + 1, signature.name))
+                        err.with_internal_context(format!(
+                            "argument {} of {}",
+                            i + 1,
+                            signature.name
+                        ))
                     })?,
             );
         }
@@ -489,12 +492,12 @@ impl<'s> FunctionBuilder<'s> {
             let mut field_vals = Vec::with_capacity(fields.len());
             for (field_name, field_ty) in fields {
                 let can_omit = admits_undefined(ctx, field_ty);
-                let op = FieldGetOp::new(ctx, val, field_name.clone())?;
+                let op = FieldGetOp::new(ctx, val, field_name.clone()).to_diag(ctx)?;
                 let raw = self.field_read(ctx, &op)?;
                 let cloned = self.clone_structured_value(ctx, raw)?;
                 let cloned_ty = cloned.get_type(ctx);
                 let field_val = if can_omit && admits_undefined(ctx, cloned_ty) {
-                    let op = FieldPresentOp::new(ctx, val, field_name)?;
+                    let op = FieldPresentOp::new(ctx, val, field_name).to_diag(ctx)?;
                     let is_present = self.emit_value(ctx, |_| op);
                     self.choose(
                         ctx,

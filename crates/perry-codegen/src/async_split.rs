@@ -20,9 +20,9 @@ use crate::{
     runtime::Runtime,
     values::{self, Carriers},
 };
-use anyhow::Result;
 use perry_abi::layout::promise as promises;
 use perry_mir::AwaitOp;
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{bail_internal, internal};
 use pliron::{
     basic_block::BasicBlock,

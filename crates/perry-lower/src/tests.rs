@@ -2,16 +2,18 @@ use pliron::{builtin::ops::ModuleOp, context::Context, op::Op, printable::Printa
 use std::collections::HashMap;
 
 /// Lower a source without foreign (WIT) types.
-fn lower_without_foreign(ctx: &mut Context, source: &str, file: &str) -> anyhow::Result<ModuleOp> {
+fn lower_without_foreign(
+    ctx: &mut Context,
+    source: &str,
+    file: &str,
+) -> perry_wit_diagnostics::Result<ModuleOp> {
     crate::lower_source(ctx, source, file, &HashMap::new())
 }
 
 fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::Diagnostic {
-    use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
-    let error = lower_without_foreign(&mut Context::new(), source, file)
+    lower_without_foreign(&mut Context::new(), source, file)
         .err()
-        .expect("rejection");
-    perry_wit_diagnostics::Diagnostic::from_error(error)
+        .expect("rejection")
 }
 
 /// Verify diagnostic source spans alongside the message table in `diagnostics_test`.
@@ -161,7 +163,8 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
 }
 
 #[test]
-fn generic_collections_keep_concrete_payloads() -> anyhow::Result<()> {
+fn generic_collections_keep_concrete_payloads()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     use pliron::{
         builtin::{
             op_interfaces::SymbolOpInterface, type_interfaces::FunctionTypeInterface,

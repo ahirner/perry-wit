@@ -5,13 +5,16 @@ use crate::{
     repr::{Carriers, optional_inner, slot_size},
     runtime::Runtime,
 };
-use anyhow::Result;
 use perry_abi::layout::descriptor::{
     JSON_DATE, JSON_DICTIONARY, JSON_NUMERIC, JSON_TUPLE, JSON_VALUE, JSON_VARIANT, NULL_ALLOWED,
     UNDEFINED_ALLOWED,
 };
 use perry_abi::layout::{descriptor, record};
-use perry_mir::{ArrayType, DateType, ExceptionType, JsonSchema, JsonType, RecordType, StringType};
+use perry_mir::{
+    ArrayType, DateType, ExceptionType, JsonSchema, JsonType, PlironResultExt as _, RecordType,
+    StringType,
+};
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{ensure_internal, internal, unsupported};
 use pliron::{
     builtin::types::{FP64Type, IntegerType},
@@ -50,9 +53,14 @@ impl FunctionLowering<'_, '_> {
         if let Some(&table) = self.state.json_fields.get(&ty) {
             return Ok(table);
         }
-        let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
+        let record = TypedHandle::<RecordType>::from_handle(ty, ctx).to_diag(ctx)?;
         let record = record.deref(ctx);
-        let mut names = record.fields()?.iter().enumerate().collect::<Vec<_>>();
+        let mut names = record
+            .fields()
+            .to_diag(ctx)?
+            .iter()
+            .enumerate()
+            .collect::<Vec<_>>();
         names.sort_unstable_by(|(_, (a, _)), (_, (b, _))| {
             a.len()
                 .cmp(&b.len())
@@ -99,7 +107,7 @@ impl FunctionLowering<'_, '_> {
         };
         let record = definition.downcast_ref::<RecordType>();
         let record_fields = record
-            .map(|r| Ok::<_, anyhow::Error>((r.is_tuple(), r.fields()?)))
+            .map(|r| r.fields().map(|fields| (r.is_tuple(), fields)))
             .transpose()
             .map_err(|_| internal!("unresolved native record"))?;
         let count = record_fields.map_or(0, |(_, fields)| fields.len());

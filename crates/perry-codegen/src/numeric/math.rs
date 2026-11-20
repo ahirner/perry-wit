@@ -1,9 +1,9 @@
 //! Scalar and tagged Math share operation selection and integer interpretation.
 use super::integer;
 use crate::{function::FunctionLowering, repr::Carriers};
-use anyhow::Result;
 use perry_abi::layout::numeric::{FLOAT, SIGNED, UNSIGNED};
 use perry_mir::{CompareKind, Intrinsic};
+use perry_wit_diagnostics::Result;
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::{Context, Ptr},

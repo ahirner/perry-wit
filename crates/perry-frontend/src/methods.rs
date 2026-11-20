@@ -1,9 +1,9 @@
 //! Built-in method signatures and HIR call normalization.
-use anyhow::Result;
 use perry_hir::{
     ir::Expr,
     types::{LocalId, Type as HirType},
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_unsupported;
 /// Source-level families used by built-in method signatures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

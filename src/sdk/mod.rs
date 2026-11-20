@@ -1,7 +1,6 @@
 //! Zero-Config SDK generation and TypeScript developer experience.
 
-use anyhow::Result;
-use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
+use perry_wit_diagnostics::{Diagnostic, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,11 +40,11 @@ pub struct SdkResult {
 pub fn generate_sdk_files(
     options: &SdkOptions,
 ) -> std::result::Result<SdkResult, crate::CompileError> {
-    generate_sdk_files_impl(options).map_err(crate::CompileError::from_error)
+    generate_sdk_files_impl(options).map_err(crate::CompileError::from)
 }
 
 fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
-    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
+    let (resolve, package) = crate::component::wit::resolve_wit_inner(&options.wit_dir)?;
     let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
     let artifacts = declarations(&resolve, world)?;
     fs::create_dir_all(&options.out_dir).map_err(|err| {
@@ -90,7 +89,10 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let check_path = options.out_dir.join("implementation-check.ts");
     let check = format!(
         "import * as implementation from {};\nimport type {{ ComponentImplementation }} from './world';\nconst checked: ComponentImplementation = implementation;\nexport {{ checked }};\n",
-        serde_json::to_string(&entry_import)?
+        serde_json::to_string(&entry_import).map_err(|err| Diagnostic::internal_from(
+            "serializing implementation import path",
+            &err
+        ))?
     );
     fs::write(&check_path, check).map_err(|err| {
         crate::Diagnostic::io(
@@ -121,7 +123,9 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
             "include": ["src/**/*", "examples/**/*", "*.ts", ".perry/types/**/*"],
             "files": [relative_path(&project_root, &check_path)?]
         });
-        fs::write(&tsconfig_path, serde_json::to_string_pretty(&config)?).map_err(|err| {
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|err| Diagnostic::internal_from("serializing tsconfig.json", &err))?;
+        fs::write(&tsconfig_path, config_json).map_err(|err| {
             crate::Diagnostic::io(
                 format!(
                     "Failed to write tsconfig.json at {}",
@@ -147,11 +151,9 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
         check_config["extends"] = serde_json::json!(relative_path(&options.out_dir, path)?);
     }
     let check_tsconfig_path = options.out_dir.join("tsconfig.json");
-    fs::write(
-        &check_tsconfig_path,
-        serde_json::to_string_pretty(&check_config)?,
-    )
-    .map_err(|err| {
+    let check_config_json = serde_json::to_string_pretty(&check_config)
+        .map_err(|err| Diagnostic::internal_from("serializing SDK tsconfig.json", &err))?;
+    fs::write(&check_tsconfig_path, check_config_json).map_err(|err| {
         crate::Diagnostic::io(
             format!(
                 "Failed to write tsconfig.json at {}",
@@ -183,7 +185,11 @@ pub(crate) fn declarations(
 }
 
 /// Emits the compiler's supported ambient runtime surface for editors and `tsc`.
-pub fn write_runtime_declarations(out_dir: &Path) -> Result<()> {
+pub fn write_runtime_declarations(out_dir: &Path) -> std::result::Result<(), crate::CompileError> {
+    write_runtime_declarations_impl(out_dir).map_err(crate::CompileError::from)
+}
+
+fn write_runtime_declarations_impl(out_dir: &Path) -> Result<()> {
     fs::create_dir_all(out_dir).map_err(|err| {
         crate::Diagnostic::io(
             format!(

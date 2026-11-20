@@ -5,12 +5,12 @@ use crate::{
     repr::{Repr, i32_type, repr, val_type_is_i64},
     runtime::Runtime,
 };
-use anyhow::Result;
 use perry_abi::layout::exception::{KIND, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
 use perry_mir::{
     BigIntType, CatchOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
     ExitOp, RaiseOp, RethrowOp, StringType,
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_unsupported;
 use pliron::{
     basic_block::BasicBlock,

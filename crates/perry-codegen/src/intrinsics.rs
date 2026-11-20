@@ -6,8 +6,8 @@ use crate::{
     repr::{Carriers, Repr, repr},
     runtime::{Runtime, W},
 };
-use anyhow::Result;
-use perry_mir::{Intrinsic, NumericType, absence};
+use perry_mir::{Intrinsic, NumericType, PlironResultExt as _, absence};
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{bail_unsupported, codes, ensure_diag, internal};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
@@ -274,8 +274,9 @@ impl FunctionLowering<'_, '_> {
                     vec![args[0], args[1], table, count, source_table, source_count],
                 );
                 if intrinsic == Intrinsic::JsonOrderCopy {
-                    let record = TypedHandle::<perry_mir::RecordType>::from_handle(target_ty, ctx)?;
-                    let fields = record.deref(ctx).fields()?.to_vec();
+                    let record = TypedHandle::<perry_mir::RecordType>::from_handle(target_ty, ctx)
+                        .to_diag(ctx)?;
+                    let fields = record.deref(ctx).fields().to_diag(ctx)?.to_vec();
                     for (name, ty) in fields {
                         if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
                             let (offset, _) = Self::record_type_field_slot(ctx, record, &name)?;

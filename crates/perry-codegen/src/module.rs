@@ -10,12 +10,9 @@ use crate::{
     repr::{Repr, i32_type, repr, slot_kind, wasm_type},
     runtime::Runtime,
 };
-use anyhow::Result;
-use perry_mir::is_exported;
+use perry_mir::{PlironResultExt as _, is_exported};
 use perry_wit_diagnostics::{
-    Diagnostic,
-    anyhow_ext::{annotate_existing, internal_context, wrap_source},
-    bail_internal, codes, diag, ensure_unsupported, internal,
+    Diagnostic, Result, bail_internal, codes, diag, ensure_unsupported, internal,
 };
 use pliron::{
     builtin::{
@@ -304,8 +301,8 @@ pub(crate) fn lower(
         let symbol = function.get_symbol_name(ctx);
         if let Some(kind) = state.async_functions.iter().position(|f| *f == symbol) {
             async_split::lower(ctx, &mut state, function, kind as i32).map_err(|err| {
-                let err = annotate_existing(err, perry_mir::source_span(ctx, function));
-                internal_context(err, format!("lowering async function {symbol} to wasm"))
+                err.with_fallback_span(perry_mir::source_span(ctx, function))
+                    .with_internal_context(format!("lowering async function {symbol} to wasm"))
             })?;
             if raw && is_exported(ctx, function) {
                 let wrapper = async_export_wrapper(ctx, &mut state, function, &symbol)?;
@@ -314,8 +311,8 @@ pub(crate) fn lower(
             continue;
         }
         let lowered = FunctionLowering::lower(ctx, &mut state, function).map_err(|err| {
-            let err = annotate_existing(err, perry_mir::source_span(ctx, function));
-            internal_context(err, format!("lowering function {symbol} to wasm"))
+            err.with_fallback_span(perry_mir::source_span(ctx, function))
+                .with_internal_context(format!("lowering function {symbol} to wasm"))
         })?;
         state.wasm.append_operation(ctx, lowered.get_operation(), 0);
         if raw && is_exported(ctx, function) {
@@ -384,7 +381,7 @@ enum CodegenError<'a> {
     ExportBinding {
         core_name: &'a str,
         span: Option<perry_mir::SourceSpan>,
-        source: anyhow::Error,
+        source: Diagnostic,
     },
 }
 
@@ -429,8 +426,7 @@ impl From<CodegenError<'_>> for Diagnostic {
                 core_name,
                 span,
                 source,
-            } => wrap_source(
-                source,
+            } => source.wrap_boundary(
                 span,
                 format!("while binding WIT export {core_name}"),
                 format!("binding WIT export {core_name}"),
@@ -458,8 +454,7 @@ fn bind_exports(
             span: mir_functions
                 .get(&export.function)
                 .and_then(|function| perry_mir::source_span(ctx, function)),
-        })
-        .into());
+        }));
     }
     // A command reports uncaught exceptions on stderr.
     if exports.iter().any(boundary::Export::is_command) {
@@ -486,8 +481,7 @@ fn bind_exports(
             span: mir_functions
                 .get(perry_mir::INITIALIZER)
                 .and_then(|function| perry_mir::source_span(ctx, function)),
-        })
-        .into());
+        }));
     }
     let stderr = state.imports.as_ref().is_some_and(|imports| {
         imports
@@ -503,7 +497,11 @@ fn bind_exports(
                 export.function
             )
         })?;
-        let effects = &state.program_facts.function_summary(ctx, function)?.effects;
+        let effects = &state
+            .program_facts
+            .function_summary(ctx, function)
+            .to_diag(ctx)?
+            .effects;
         if export.is_async()
             && stderr
             && ((effects.host_work
@@ -518,13 +516,12 @@ fn bind_exports(
             state.reports_rejection = true;
         }
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
-            return Err(
-                Diagnostic::from(CodegenError::AsyncInitializerRequiresAsyncExport {
+            return Err(Diagnostic::from(
+                CodegenError::AsyncInitializerRequiresAsyncExport {
                     core_name: &export.core_name,
                     span: perry_mir::source_span(ctx, function),
-                })
-                .into(),
-            );
+                },
+            ));
         }
         if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
@@ -537,8 +534,7 @@ fn bind_exports(
                 return Err(Diagnostic::from(CodegenError::MissingErrorChannel {
                     core_name: &export.core_name,
                     span: perry_mir::source_span(ctx, function),
-                })
-                .into());
+                }));
             }
             if export.is_async() {
                 state.reports_rejection = true;

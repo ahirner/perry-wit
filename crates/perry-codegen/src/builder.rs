@@ -7,7 +7,7 @@ use crate::{
     runtime::Runtime,
     values::Carriers,
 };
-use anyhow::Result;
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::internal;
 use pliron::{
     basic_block::BasicBlock,

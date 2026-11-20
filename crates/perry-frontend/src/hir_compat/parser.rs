@@ -1,6 +1,6 @@
 //! Parse TypeScript source into SWC AST modules with spanned syntax diagnostics.
-use anyhow::Result;
 use perry_parser::{Spanned, parse_typescript_with_cache, swc_ecma_ast as ast};
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, SourceSpan, codes};
 use swc_ecma_parser::{Parser, Syntax, TsSyntax, lexer::Lexer};
 
@@ -43,8 +43,7 @@ pub(crate) fn parse(source: &str, identity: &str) -> Result<ast::Module> {
             source,
             diagnostic.span.start.saturating_sub(1) as usize,
             diagnostic.span.end.saturating_sub(1) as usize,
-        ))
-        .into());
+        )));
     }
     Ok(parsed.module)
 }

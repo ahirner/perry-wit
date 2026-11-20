@@ -39,7 +39,7 @@ impl<'s> FunctionBuilder<'s> {
                     if let Some(record) = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                         && record.deref(ctx).kind() == RecordKind::Tuple
                     {
-                        let length = record.deref(ctx).fields()?.len();
+                        let length = record.deref(ctx).fields().to_diag(ctx)?.len();
                         Ok(self.number(ctx, length as f64))
                     } else {
                         Ok(self.array_length(ctx, source))
@@ -55,7 +55,7 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
                 return self
                     .expression_with(ctx, last, expected)
-                    .map_err(|error| crate::diagnostics::annotate(error, Some(span)));
+                    .map_err(|error| error.with_fallback_span(Some(span)));
             }
             for effect in effects {
                 self.effect(ctx, effect)?;

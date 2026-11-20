@@ -1,10 +1,10 @@
 //! The boundary for source facts and compiler-generated forms that Perry HIR erases.
 use crate::modules;
-use anyhow::Result;
 use perry_hir::{
     ir::{CompareOp, Expr, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
 use std::collections::{HashMap, HashSet};
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
@@ -58,7 +58,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         regex::fold(&mut ast, unresolved);
         let constructors = constructors::preserve(&mut ast, unresolved)?;
         streams::preserve_options(&mut ast, unresolved)?;
-        Ok::<_, anyhow::Error>(constructors)
+        Ok::<_, Diagnostic>(constructors)
     })?;
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
@@ -74,10 +74,9 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             codes::INTERNAL
         };
         let diagnostic = Diagnostic::new(code, format!("failed to lower {identity}: {error:#}"));
-        let error = diagnostic.into();
         match span {
-            Some(span) => locations.annotate(error, span),
-            None => error,
+            Some(span) => locations.annotate(diagnostic, span),
+            None => diagnostic,
         }
     })?;
     constructors.collect_types(&mut module)?;

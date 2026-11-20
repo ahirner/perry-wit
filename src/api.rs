@@ -6,7 +6,7 @@
 //! functions with core signatures.
 //!
 //! ```
-//! # fn main() -> anyhow::Result<()> {
+//! # fn main() -> Result<(), perry_wit::CompileError> {
 //! use perry_wit::api::{compile_core, Program};
 //! let program = Program {
 //!     source: b"export function twice(n: number): number { return n * 2; }".as_slice().into(),
@@ -18,8 +18,7 @@
 //! # }
 //! ```
 
-use anyhow::Result;
-use perry_wit_diagnostics::{anyhow_ext::FromAnyhow as _, ensure_diag};
+use perry_wit_diagnostics::{Result, ensure_diag};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
@@ -89,7 +88,6 @@ pub(crate) fn text<'a>(contents: &'a [u8], name: Option<&str>) -> Result<&'a str
             format!("{} is not UTF-8", name.unwrap_or("input")),
         )
         .with_source_notes(&error)
-        .into()
     })
 }
 
@@ -198,16 +196,16 @@ pub fn compile(
     wit: &Wit,
     options: &Options,
 ) -> std::result::Result<crate::Compiled, crate::CompileError> {
-    compile_impl(input, wit, options).map_err(crate::CompileError::from_error)
+    compile_impl(input, wit, options).map_err(crate::CompileError::from)
 }
 
 pub fn compile_core(input: &Program) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_impl(input).map_err(crate::CompileError::from_error)
+    compile_core_impl(input).map_err(crate::CompileError::from)
 }
 
 pub fn generate_sdk(
     wit: &Wit,
     world: Option<&str>,
 ) -> std::result::Result<Vec<Artifact>, crate::CompileError> {
-    generate_sdk_impl(wit, world).map_err(crate::CompileError::from_error)
+    generate_sdk_impl(wit, world).map_err(crate::CompileError::from)
 }

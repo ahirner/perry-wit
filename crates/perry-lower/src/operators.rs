@@ -215,8 +215,7 @@ impl<'s> FunctionBuilder<'s> {
                             LowerErrorKind::UnsupportedOperator {
                                 op: format!("{other:?}"),
                             },
-                        )
-                        .into());
+                        ));
                     }
                 };
                 self.binary(ctx, kind, lhs, rhs)

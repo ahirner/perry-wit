@@ -28,7 +28,8 @@ impl<'s> FunctionBuilder<'s> {
         let ty = key.get_type(ctx);
         let numeric = match Kind::of(ctx, present_type(ctx, ty)) {
             Some(Kind::Number) => true,
-            Some(Kind::ValueUnion) => perry_mir::variant_cases(ctx, present_type(ctx, ty))?
+            Some(Kind::ValueUnion) => perry_mir::variant_cases(ctx, present_type(ctx, ty))
+                .to_diag(ctx)?
                 .iter()
                 .any(|(tag, _)| tag == "number"),
             _ => false,
@@ -56,7 +57,7 @@ impl<'s> FunctionBuilder<'s> {
             ctx,
             Input::Collection(entries),
             |b, ctx, entry, idx, next, done| {
-                let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+                let k_op = FieldGetOp::new(ctx, entry, "_0".to_string()).to_diag(ctx)?;
                 let cand_k = b.append_value(ctx, &k_op);
                 let matched =
                     b.same_value(ctx, cand_k, key, crate::operators::Equality::SameValueZero)?;
@@ -108,7 +109,7 @@ impl<'s> FunctionBuilder<'s> {
         let result = self.entry_slot(ctx, opt_v_ty);
         self.store(ctx, result, miss);
         self.on_live_match(ctx, "kv_get", arr, key, |b, ctx, _, entry| {
-            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string()).to_diag(ctx)?;
             let cand_v = b.append_value(ctx, &v_op);
             let wrapped = b.fit(ctx, cand_v, opt_v_ty)?;
             b.store(ctx, result, wrapped);
@@ -161,7 +162,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<()> {
         let record = TypedHandle::<RecordType>::from_handle(self.array_element(ctx, entries)?, ctx)
             .map_err(|_| internal!("collection entries must be records"))?;
-        let mut fields = Vec::with_capacity(record.deref(ctx).fields()?.len());
+        let mut fields = Vec::with_capacity(record.deref(ctx).fields().to_diag(ctx)?.len());
         fields.extend_from_slice(payload);
         let append_bb = self.new_block(ctx, &format!("{label}_append"));
         let after_bb = self.new_block(ctx, &format!("{label}_after"));
@@ -211,7 +212,7 @@ impl<'s> FunctionBuilder<'s> {
             });
         }
         self.retain_array(ctx, coll, |b, ctx, entry| {
-            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string()).to_diag(ctx)?;
             let candidate = b.append_value(ctx, &k_op);
             let matched = b.same_value(
                 ctx,

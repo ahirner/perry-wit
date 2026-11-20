@@ -2,11 +2,11 @@
 mod types;
 
 use crate::hir::{Foreign, FunctionType, Type as HirType};
-use anyhow::Result;
 use perry_contract::{
     names::{NamedType, canonical_type, to_camel_case, to_pascal_case},
     types::Input,
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::internal;
 use std::collections::HashMap;
 use wit_parser::{Function, Resolve, TypeId, WorldId};

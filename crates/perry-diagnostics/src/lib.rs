@@ -241,9 +241,11 @@ impl Note {
     }
 }
 
-/// A structured compiler error diagnostic.
+/// Convenient `Result` alias using [`Diagnostic`] as its default error type.
+pub type Result<T, E = Diagnostic> = std::result::Result<T, E>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Diagnostic {
+struct DiagnosticInner {
     code: Code,
     message: String,
     span: Option<SourceSpan>,
@@ -251,96 +253,127 @@ pub struct Diagnostic {
     help: Option<String>,
 }
 
+/// A structured compiler error diagnostic (boxed internally so `Result<T, Diagnostic>` stays pointer-sized).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic(Box<DiagnosticInner>);
+
 impl Diagnostic {
     pub fn new(code: Code, message: impl Into<String>) -> Self {
-        Self {
+        Self(Box::new(DiagnosticInner {
             code,
             message: message.into(),
             span: None,
             notes: Vec::new(),
             help: None,
-        }
+        }))
     }
 
     pub fn io(message: impl Into<String>, source: &(dyn std::error::Error + 'static)) -> Self {
         Self::new(codes::IO, message).with_source_notes(source)
     }
 
+    pub fn internal_from(
+        message: impl Into<String>,
+        source: &(dyn std::error::Error + 'static),
+    ) -> Self {
+        Self::new(codes::INTERNAL, message).with_source_notes(source)
+    }
+
     pub fn with_span(mut self, span: SourceSpan) -> Self {
-        self.span = Some(span);
+        self.0.span = Some(span);
         self
     }
 
     pub fn with_optional_span(mut self, span: Option<SourceSpan>) -> Self {
-        self.span = span;
+        self.0.span = span;
         self
     }
 
-    pub(crate) fn set_span_if_missing(&mut self, span: Option<SourceSpan>) {
-        if self.span.is_none() {
-            self.span = span;
+    /// Attach `span` only when this diagnostic does not already have one.
+    pub fn with_fallback_span(mut self, span: Option<SourceSpan>) -> Self {
+        if self.0.span.is_none() {
+            self.0.span = span;
         }
+        self
     }
 
     pub fn with_note(mut self, message: impl Into<String>) -> Self {
-        self.notes.push(Note::new(message));
+        self.0.notes.push(Note::new(message));
         self
     }
 
     pub fn with_spanned_note(mut self, span: SourceSpan, message: impl Into<String>) -> Self {
-        self.notes.push(Note::spanned(span, message));
+        self.0.notes.push(Note::spanned(span, message));
         self
     }
 
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
-        self.help = Some(help.into());
+        self.0.help = Some(help.into());
         self
     }
 
     pub fn with_source_notes(mut self, source: &(dyn std::error::Error + 'static)) -> Self {
         let mut current = Some(source);
         while let Some(cause) = current {
-            self.notes.push(Note::new(cause.to_string()));
+            self.0.notes.push(Note::new(cause.to_string()));
             current = cause.source();
         }
         self
     }
 
-    pub(crate) fn prepend_notes(&mut self, mut prefix: Vec<Note>) {
-        if !prefix.is_empty() {
-            prefix.append(&mut self.notes);
-            self.notes = prefix;
+    /// Prepend an internal breadcrumb note when this diagnostic is [`ErrorKind::Internal`];
+    /// non-`Internal` diagnostics pass through unchanged so internal phase names never leak to users.
+    pub fn with_internal_context(mut self, context: impl Into<String>) -> Self {
+        if self.kind() == ErrorKind::Internal {
+            self.0.notes.insert(0, Note::new(context));
+        }
+        self
+    }
+
+    /// Apply the shared boundary-wrapping rule: fill in `span` if missing, append `user_note`
+    /// for user-facing diagnostics, or prepend `internal_context` for [`ErrorKind::Internal`].
+    pub fn wrap_boundary(
+        self,
+        span: Option<SourceSpan>,
+        user_note: impl Into<String>,
+        internal_context: impl Into<String>,
+    ) -> Self {
+        let diagnostic = self.with_fallback_span(span);
+        if diagnostic.kind() == ErrorKind::Internal {
+            diagnostic.with_internal_context(internal_context)
+        } else {
+            diagnostic.with_note(user_note)
         }
     }
 
     pub fn code(&self) -> Code {
-        self.code
+        self.0.code
     }
 
     pub fn kind(&self) -> ErrorKind {
-        self.code.kind()
+        self.0.code.kind()
     }
 
     pub fn message(&self) -> &str {
-        &self.message
+        &self.0.message
     }
 
     pub fn span(&self) -> Option<&SourceSpan> {
-        self.span.as_ref()
+        self.0.span.as_ref()
     }
 
     pub fn notes(&self) -> &[Note] {
-        &self.notes
+        &self.0.notes
     }
 
     pub fn help(&self) -> Option<&str> {
-        self.help.as_deref()
+        self.0.help.as_deref()
     }
 }
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(span) = &self.span {
+        if let Some(span) = &self.0.span {
             write!(
                 f,
                 "{}:{}:{}: ",
@@ -349,8 +382,8 @@ impl fmt::Display for Diagnostic {
                 span.start_column
             )?;
         }
-        write!(f, "error[{}]: {}", self.code, self.message)?;
-        for note in &self.notes {
+        write!(f, "error[{}]: {}", self.0.code, self.0.message)?;
+        for note in &self.0.notes {
             if let Some(span) = &note.span {
                 write!(
                     f,
@@ -364,7 +397,7 @@ impl fmt::Display for Diagnostic {
                 write!(f, "\n  {}", note.message)?;
             }
         }
-        if let Some(help) = &self.help {
+        if let Some(help) = &self.0.help {
             write!(f, "\n  help: {help}")?;
         }
         Ok(())
@@ -419,159 +452,17 @@ impl std::error::Error for CompileError {
     }
 }
 
-/// Internal `anyhow` adapters used by compiler crates; not re-exported by `perry-wit`.
-pub mod anyhow_ext {
-    use crate::{CompileError, Diagnostic, ErrorKind, Note, SourceSpan, codes};
-
-    pub fn into_error(diagnostic: Diagnostic) -> anyhow::Error {
-        anyhow::Error::new(diagnostic)
-    }
-
-    fn extract_diagnostic(error: anyhow::Error) -> Result<(Diagnostic, Vec<Note>), anyhow::Error> {
-        let mut chain = error.chain();
-        let prefix = if chain.next().is_some_and(|top| top.is::<Diagnostic>()) {
-            Vec::new()
-        } else {
-            match chain.find_map(|cause| cause.downcast_ref::<Diagnostic>()) {
-                Some(inner) if inner.kind() == ErrorKind::Internal => error
-                    .chain()
-                    .take_while(|cause| cause.downcast_ref::<Diagnostic>().is_none())
-                    .map(|cause| Note::new(cause.to_string()))
-                    .collect(),
-                Some(_) => Vec::new(),
-                None => return Err(error),
-            }
-        };
-        match error.downcast::<Diagnostic>() {
-            Ok(diagnostic) => Ok((diagnostic, prefix)),
-            Err(error) => match error
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<Diagnostic>())
-                .cloned()
-            {
-                Some(diagnostic) => Ok((diagnostic, prefix)),
-                None => Err(error),
-            },
-        }
-    }
-
-    pub trait FromAnyhow: Sized {
-        fn from_error(error: anyhow::Error) -> Self;
-    }
-
-    impl FromAnyhow for Diagnostic {
-        fn from_error(error: anyhow::Error) -> Self {
-            match extract_diagnostic(error) {
-                Ok((mut diagnostic, prefix)) => {
-                    diagnostic.prepend_notes(prefix);
-                    diagnostic
-                }
-                Err(error) => {
-                    let mut diagnostic = Diagnostic::new(codes::INTERNAL, error.to_string());
-                    if let Some(source) = error.source() {
-                        diagnostic = diagnostic.with_source_notes(source);
-                    }
-                    diagnostic
-                }
-            }
-        }
-    }
-
-    impl FromAnyhow for CompileError {
-        fn from_error(error: anyhow::Error) -> Self {
-            match error.downcast::<Self>() {
-                Ok(inner) => inner,
-                Err(error) => Self::from(Diagnostic::from_error(error)),
-            }
-        }
-    }
-
-    /// Attach `span` to an existing [`Diagnostic`] in `error`, or convert an untyped error
-    /// to `codes::INTERNAL` and attach `span` when missing.
-    pub fn annotate(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-        let mut diagnostic = Diagnostic::from_error(error);
-        diagnostic.set_span_if_missing(span);
-        diagnostic.into()
-    }
-
-    /// Attach `span` only when `error` already carries a [`Diagnostic`]; untyped errors pass through.
-    pub fn annotate_existing(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-        match extract_diagnostic(error) {
-            Ok((mut diagnostic, prefix)) => {
-                diagnostic.prepend_notes(prefix);
-                diagnostic.set_span_if_missing(span);
-                diagnostic.into()
-            }
-            Err(error) => error,
-        }
-    }
-
-    /// Apply the shared propagation rule when a boundary wrapper adds context around `source`.
-    ///
-    /// - If `source` contains a non-`Internal` [`Diagnostic`], returns it with `span` as a fallback
-    ///   location and `user_note` appended explicitly, dropping outer `anyhow` context layers.
-    /// - If `source` contains an `Internal` [`Diagnostic`], preserves outer context plus
-    ///   `internal_context` as notes.
-    /// - Otherwise builds `codes::INTERNAL` with `internal_context`, `span`, and `source` notes.
-    pub fn wrap_source(
-        source: anyhow::Error,
-        span: Option<SourceSpan>,
-        user_note: impl Into<String>,
-        internal_context: impl Into<String>,
-    ) -> Diagnostic {
-        match extract_diagnostic(source) {
-            Ok((mut inner, prefix)) => {
-                inner.set_span_if_missing(span);
-                if inner.kind() == ErrorKind::Internal {
-                    let mut notes = Vec::with_capacity(prefix.len() + 1);
-                    notes.push(Note::new(internal_context));
-                    notes.extend(prefix);
-                    inner.prepend_notes(notes);
-                    inner
-                } else {
-                    inner.with_note(user_note)
-                }
-            }
-            Err(source) => Diagnostic::new(codes::INTERNAL, internal_context)
-                .with_optional_span(span)
-                .with_source_notes(source.as_ref()),
-        }
-    }
-
-    /// Add an internal breadcrumb note around `source` while passing non-`Internal` diagnostics
-    /// through unchanged.
-    pub fn internal_context(
-        source: impl Into<anyhow::Error>,
-        context: impl Into<String>,
-    ) -> anyhow::Error {
-        match extract_diagnostic(source.into()) {
-            Ok((mut inner, prefix)) => {
-                if inner.kind() == ErrorKind::Internal {
-                    let mut notes = Vec::with_capacity(prefix.len() + 1);
-                    notes.push(Note::new(context));
-                    notes.extend(prefix);
-                    inner.prepend_notes(notes);
-                }
-                inner.into()
-            }
-            Err(source) => Diagnostic::new(codes::INTERNAL, context)
-                .with_source_notes(source.as_ref())
-                .into(),
-        }
-    }
-}
-
 #[macro_export]
 macro_rules! diag {
     ($code:expr, $($arg:tt)+) => {
-        $crate::anyhow_ext::into_error($crate::Diagnostic::new($code, ::std::format!($($arg)+)))
+        $crate::Diagnostic::new($code, ::std::format!($($arg)+))
     };
 }
 
 #[macro_export]
 macro_rules! bail_diag {
     ($code:expr, $($arg:tt)+) => {
-        return ::std::result::Result::Err($crate::diag!($code, $($arg)+))
+        return ::std::result::Result::Err(::core::convert::Into::into($crate::diag!($code, $($arg)+)))
     };
 }
 
@@ -628,11 +519,7 @@ macro_rules! ensure_internal {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CompileError, Diagnostic, ErrorKind, SourceSpan,
-        anyhow_ext::{FromAnyhow as _, wrap_source},
-        codes,
-    };
+    use super::{CompileError, Diagnostic, ErrorKind, SourceSpan, codes};
     use std::collections::HashSet;
 
     fn is_kebab_case(s: &str) -> bool {
@@ -646,6 +533,10 @@ mod tests {
 
     #[test]
     fn codes_are_unique_and_kebab_case() {
+        assert_eq!(
+            std::mem::size_of::<Diagnostic>(),
+            std::mem::size_of::<usize>()
+        );
         assert!(!codes::ALL.is_empty());
         let mut names = HashSet::new();
         for code in codes::ALL {
@@ -721,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn from_error_context_retention_and_nested_extraction() {
+    fn context_and_boundary_wrapping_follow_error_kind() {
         let user_span = SourceSpan {
             file: "src/app.ts".into(),
             start_line: 3,
@@ -731,28 +622,21 @@ mod tests {
             start_byte: 12,
             end_byte: 17,
         };
-        let user_err: anyhow::Error =
-            Diagnostic::new(codes::POSSIBLY_NULL_RECEIVER, "receiver is possibly null")
-                .with_span(user_span.clone())
-                .into();
-        let wrapped_user = user_err
-            .context("optimizing MIR")
-            .context("compiling module");
-        let extracted = Diagnostic::from_error(wrapped_user);
-        assert_eq!(extracted.code(), codes::POSSIBLY_NULL_RECEIVER);
-        assert_eq!(extracted.span(), Some(&user_span));
-        assert!(extracted.notes().is_empty());
+        let user = Diagnostic::new(codes::POSSIBLY_NULL_RECEIVER, "receiver is possibly null")
+            .with_span(user_span.clone())
+            .with_internal_context("optimizing MIR")
+            .with_internal_context("compiling module");
+        assert_eq!(user.code(), codes::POSSIBLY_NULL_RECEIVER);
+        assert_eq!(user.span(), Some(&user_span));
+        assert!(user.notes().is_empty());
 
-        let internal_err: anyhow::Error =
-            Diagnostic::new(codes::INTERNAL, "invariant violated").into();
-        let wrapped_internal = internal_err
-            .context("lowering function run")
-            .context("compiling module");
-        let extracted_internal = Diagnostic::from_error(wrapped_internal);
-        assert_eq!(extracted_internal.kind(), ErrorKind::Internal);
-        assert_eq!(extracted_internal.message(), "invariant violated");
+        let internal = Diagnostic::new(codes::INTERNAL, "invariant violated")
+            .with_internal_context("lowering function run")
+            .with_internal_context("compiling module");
+        assert_eq!(internal.kind(), ErrorKind::Internal);
+        assert_eq!(internal.message(), "invariant violated");
         assert_eq!(
-            extracted_internal
+            internal
                 .notes()
                 .iter()
                 .map(|note| note.message())
@@ -760,29 +644,14 @@ mod tests {
             vec!["compiling module", "lowering function run"]
         );
 
-        let untyped = anyhow::anyhow!("root cause").context("outer phase");
-        let extracted_untyped = Diagnostic::from_error(untyped);
-        assert_eq!(extracted_untyped.code(), codes::INTERNAL);
-        assert_eq!(extracted_untyped.message(), "outer phase");
-        assert_eq!(
-            extracted_untyped
-                .notes()
-                .iter()
-                .map(|note| note.message())
-                .collect::<Vec<_>>(),
-            vec!["root cause"]
-        );
-
-        let inner_user: anyhow::Error =
-            Diagnostic::new(codes::EXPORT_ARITY, "expected 2 arguments")
-                .with_help("pass 2 arguments")
-                .into();
-        let wrapped = wrap_source(
-            inner_user.context("dropped internal layer"),
-            Some(user_span.clone()),
-            "while binding WIT export run",
-            "binding WIT export run",
-        );
+        let wrapped = Diagnostic::new(codes::EXPORT_ARITY, "expected 2 arguments")
+            .with_help("pass 2 arguments")
+            .with_internal_context("dropped internal layer")
+            .wrap_boundary(
+                Some(user_span.clone()),
+                "while binding WIT export run",
+                "binding WIT export run",
+            );
         assert_eq!(wrapped.code(), codes::EXPORT_ARITY);
         assert_eq!(wrapped.message(), "expected 2 arguments");
         assert_eq!(wrapped.span(), Some(&user_span));
@@ -796,13 +665,13 @@ mod tests {
             vec!["while binding WIT export run"]
         );
 
-        let inner_bug: anyhow::Error = Diagnostic::new(codes::INTERNAL, "bad carrier").into();
-        let wrapped_bug = wrap_source(
-            inner_bug.context("lowering op"),
-            Some(user_span.clone()),
-            "while binding WIT export run",
-            "binding WIT export run",
-        );
+        let wrapped_bug = Diagnostic::new(codes::INTERNAL, "bad carrier")
+            .with_internal_context("lowering op")
+            .wrap_boundary(
+                Some(user_span.clone()),
+                "while binding WIT export run",
+                "binding WIT export run",
+            );
         assert_eq!(wrapped_bug.code(), codes::INTERNAL);
         assert_eq!(wrapped_bug.span(), Some(&user_span));
         assert_eq!(
@@ -812,6 +681,19 @@ mod tests {
                 .map(|note| note.message())
                 .collect::<Vec<_>>(),
             vec!["binding WIT export run", "lowering op"]
+        );
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let internal_source = Diagnostic::internal_from("outer phase", &io_err);
+        assert_eq!(internal_source.code(), codes::INTERNAL);
+        assert_eq!(internal_source.message(), "outer phase");
+        assert_eq!(
+            internal_source
+                .notes()
+                .iter()
+                .map(|note| note.message())
+                .collect::<Vec<_>>(),
+            vec!["no such file"]
         );
     }
 }

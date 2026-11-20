@@ -74,7 +74,8 @@ impl<'s> FunctionBuilder<'s> {
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
         let record = if crate::value_unions::is_value_union(ctx, record.get_type(ctx)) {
-            let payload = perry_mir::variant_cases(ctx, record.get_type(ctx))?
+            let payload = perry_mir::variant_cases(ctx, record.get_type(ctx))
+                .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
                 .ok_or_else(|| {

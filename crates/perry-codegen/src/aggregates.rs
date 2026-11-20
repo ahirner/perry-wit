@@ -5,14 +5,14 @@ use crate::{
     runtime::Runtime,
     values::is_numeric_type,
 };
-use anyhow::Result;
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayHoleOp, ArrayLenOp, ArrayNewOp,
     ArrayPresentOp, ArrayPushOp, ArraySetOp, ArrayStoreOp, ArrayTruncateOp, ArrayType,
-    ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema, RecordOrderOp,
-    RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
+    ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema,
+    PlironResultExt as _, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
+use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{codes, diag, ensure_unsupported, internal};
 use pliron::{
     builtin::types::FP64Type,
@@ -687,7 +687,7 @@ impl FunctionLowering<'_, '_> {
         record: TypedHandle<RecordType>,
         order: Option<&[u32]>,
     ) -> Result<u32> {
-        let count = record.deref(ctx).fields()?.len();
+        let count = record.deref(ctx).fields().to_diag(ctx)?.len();
         let length = order.map_or(count, <[_]>::len);
         let fields = (0..length).map(|index| order.map_or(index as u32, |order| order[index]));
         Ok(if count <= perry_abi::json::PACKED_FIELDS {

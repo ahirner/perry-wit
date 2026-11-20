@@ -155,7 +155,7 @@ impl<'s> FunctionBuilder<'s> {
                     .map_err(|_| diag!(codes::TYPE_MISMATCH, "{}", schema.object_error()))?;
                 for (slot, &(name, _)) in fields.iter_mut().zip(names) {
                     if record.deref(ctx).field(name).is_some() {
-                        let op = FieldGetOp::new(ctx, value, name.into())?;
+                        let op = FieldGetOp::new(ctx, value, name.into()).to_diag(ctx)?;
                         *slot = Some(FieldValue::Loaded(self.field_read(ctx, &op)?));
                     }
                 }

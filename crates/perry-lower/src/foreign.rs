@@ -99,7 +99,7 @@ pub(super) fn wrapper<'h>(
     let start = ForeignOp::new(ctx, Phase::Start, binding, args, vec![promise]);
     inserter.append_op(ctx, &start);
     let pending = start.get_operation().deref(ctx).get_result(0);
-    let await_op = AwaitOp::new(ctx, pending)?;
+    let await_op = AwaitOp::new(ctx, pending).to_diag(ctx)?;
     inserter.append_op(ctx, &await_op);
     let finish = ForeignOp::new(
         ctx,

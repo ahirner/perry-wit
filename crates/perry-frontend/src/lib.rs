@@ -1,5 +1,5 @@
 //! TypeScript parsing, Perry HIR compatibility, specialization and source metadata.
-use anyhow::Result;
+use perry_wit_diagnostics::Result;
 use pliron::context::Context;
 use std::collections::{BTreeMap, HashMap};
 mod open_types;

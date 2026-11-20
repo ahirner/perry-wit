@@ -106,7 +106,9 @@ pub use collections::{
     ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp, StringConstOp, StringLenOp,
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
-pub use diagnostics::{SourceSpan, set_source_span, source_span};
+pub use diagnostics::{
+    PlironResultExt, SourceSpan, pliron_to_diagnostic, set_source_span, source_span,
+};
 pub use effects::{Allocation, Effects, Failure, Summary, allocates, allocation};
 pub use exceptions::{
     CatchOp, CaughtOp, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExitOp, RaiseOp, RethrowOp,

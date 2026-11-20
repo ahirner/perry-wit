@@ -244,8 +244,8 @@ impl Projection {
         entry: Value,
     ) -> Result<Value> {
         let field = |b: &mut FunctionBuilder<'_>, ctx: &mut Context, name: &str| {
-            let op = FieldGetOp::new(ctx, entry, name.to_owned())?;
-            Ok::<_, anyhow::Error>(b.append_value(ctx, &op))
+            let op = FieldGetOp::new(ctx, entry, name.to_owned()).to_diag(ctx)?;
+            Ok::<_, crate::Diagnostic>(b.append_value(ctx, &op))
         };
         match self {
             Self::Item(_) => Ok(entry),
