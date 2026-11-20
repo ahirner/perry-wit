@@ -1,8 +1,9 @@
 use perry_wit::{
-    SdkOptions,
+    CompileOptions, ErrorKind, SdkOptions,
     api::{self, Module, Options, Program, Source, Wit},
     codes, generate_sdk_files,
 };
+use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
 
 #[test]
 fn diagnostics_locate_imported_modules_and_multibyte_columns() {
@@ -48,6 +49,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         );
         program.modules[0].contents = helper.as_bytes().to_vec();
         let error = api::compile_core(&program).unwrap_err();
+        assert_ne!(error.primary().kind(), ErrorKind::Internal, "{error}");
         let span = error.primary().span().unwrap();
         assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
         assert_eq!(&helper[span.start_byte..span.end_byte], expression);
@@ -212,7 +214,14 @@ fn unsupported_forms_have_exact_diagnostics() {
         .filter_map(|(source, expected)| {
             let actual = match perry_wit::compile_core(source, "case.ts") {
                 Ok(_) => "<compiled>".to_owned(),
-                Err(error) => format!("{error:#}"),
+                Err(error) => {
+                    assert_ne!(
+                        error.primary().kind(),
+                        ErrorKind::Internal,
+                        "{source}\n  => {error:#}"
+                    );
+                    format!("{error:#}")
+                }
             };
             (actual != *expected).then(|| format!("{source}\n  => {actual:?}"))
         })
@@ -343,4 +352,122 @@ world app {
         3,
         "expects 2 arguments, got 1",
     );
+}
+
+#[test]
+fn every_kind_has_a_fixture() {
+    let temp = tempfile::tempdir().unwrap();
+    let wit = Wit {
+        application: b"package test:kinds; world app { export run: func() -> f64; }"
+            .as_slice()
+            .into(),
+        dependencies: vec![],
+    };
+    let program = |source: &str| Program {
+        source: source.as_bytes().into(),
+        modules: vec![],
+    };
+
+    let fixtures: [(ErrorKind, perry_wit::Diagnostic); 9] = [
+        (
+            ErrorKind::InvalidInput,
+            api::compile_core(&Program {
+                source: b"export function run(): number { return 1; }"
+                    .as_slice()
+                    .into(),
+                modules: vec![Module {
+                    name: "../escape.ts".into(),
+                    contents: vec![],
+                }],
+            })
+            .unwrap_err()
+            .primary()
+            .clone(),
+        ),
+        (
+            ErrorKind::Io,
+            perry_wit::compile_file(&temp.path().join("missing.ts"), &CompileOptions::default())
+                .unwrap_err()
+                .primary()
+                .clone(),
+        ),
+        (
+            ErrorKind::Wit,
+            api::compile(
+                &program("export function run(): number { return 1; }"),
+                &Wit {
+                    application: b"not valid wit".as_slice().into(),
+                    dependencies: vec![],
+                },
+                &Options::default(),
+            )
+            .unwrap_err()
+            .primary()
+            .clone(),
+        ),
+        (
+            ErrorKind::Syntax,
+            api::compile_core(&program("export function {"))
+                .unwrap_err()
+                .primary()
+                .clone(),
+        ),
+        (
+            ErrorKind::Module,
+            api::compile_core(&program("export { run } from './missing';"))
+                .unwrap_err()
+                .primary()
+                .clone(),
+        ),
+        (
+            ErrorKind::TypeCheck,
+            api::compile_core(&program("export function run(x) { return x; }"))
+                .unwrap_err()
+                .primary()
+                .clone(),
+        ),
+        (
+            ErrorKind::Unsupported,
+            api::compile_core(&program(
+                "export function run(x: number): number { return x ** (2 ** x); }",
+            ))
+            .unwrap_err()
+            .primary()
+            .clone(),
+        ),
+        (
+            ErrorKind::Contract,
+            api::compile(
+                &program("export function other(): number { return 1; }"),
+                &wit,
+                &Options::default(),
+            )
+            .unwrap_err()
+            .primary()
+            .clone(),
+        ),
+        (
+            ErrorKind::Internal,
+            perry_wit::Diagnostic::from_error(anyhow::anyhow!("synthetic internal error")),
+        ),
+    ];
+
+    let mut covered = [false; 9];
+    for (expected, diagnostic) in fixtures {
+        assert_eq!(diagnostic.kind(), expected, "{diagnostic}");
+        let slot = match diagnostic.kind() {
+            ErrorKind::InvalidInput => 0,
+            ErrorKind::Io => 1,
+            ErrorKind::Wit => 2,
+            ErrorKind::Syntax => 3,
+            ErrorKind::Module => 4,
+            ErrorKind::TypeCheck => 5,
+            ErrorKind::Unsupported => 6,
+            ErrorKind::Contract => 7,
+            ErrorKind::Internal => 8,
+        };
+        assert!(!covered[slot], "duplicate fixture for {expected}");
+        covered[slot] = true;
+    }
+    assert!(covered.into_iter().all(|seen| seen));
 }

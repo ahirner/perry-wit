@@ -198,22 +198,16 @@ pub fn compile(
     wit: &Wit,
     options: &Options,
 ) -> std::result::Result<crate::Compiled, crate::CompileError> {
-    compile_impl(input, wit, options).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::INVALID_MODULE_PATH)
-    })
+    compile_impl(input, wit, options).map_err(crate::CompileError::from_error)
 }
 
 pub fn compile_core(input: &Program) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_impl(input).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::INVALID_MODULE_PATH)
-    })
+    compile_core_impl(input).map_err(crate::CompileError::from_error)
 }
 
 pub fn generate_sdk(
     wit: &Wit,
     world: Option<&str>,
 ) -> std::result::Result<Vec<Artifact>, crate::CompileError> {
-    generate_sdk_impl(wit, world).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::WIT_DEPENDENCY)
-    })
+    generate_sdk_impl(wit, world).map_err(crate::CompileError::from_error)
 }

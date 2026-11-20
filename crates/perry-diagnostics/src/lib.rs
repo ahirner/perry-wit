@@ -421,7 +421,7 @@ impl std::error::Error for CompileError {
 
 /// Internal `anyhow` adapters used by compiler crates; not re-exported by `perry-wit`.
 pub mod anyhow_ext {
-    use crate::{Code, CompileError, Diagnostic, ErrorKind, Note, SourceSpan, codes};
+    use crate::{CompileError, Diagnostic, ErrorKind, Note, SourceSpan, codes};
 
     pub fn into_error(diagnostic: Diagnostic) -> anyhow::Error {
         anyhow::Error::new(diagnostic)
@@ -444,22 +444,17 @@ pub mod anyhow_ext {
 
     pub trait FromAnyhow: Sized {
         fn from_error(error: anyhow::Error) -> Self;
-        fn from_error_with_fallback(error: anyhow::Error, fallback: Code) -> Self;
     }
 
     impl FromAnyhow for Diagnostic {
         fn from_error(error: anyhow::Error) -> Self {
-            Self::from_error_with_fallback(error, codes::INTERNAL)
-        }
-
-        fn from_error_with_fallback(error: anyhow::Error, fallback: Code) -> Self {
             if let Some(mut diagnostic) = find_diagnostic(&error) {
                 if diagnostic.kind() == ErrorKind::Internal {
                     diagnostic.prepend_notes(context_prefix(&error));
                 }
                 return diagnostic;
             }
-            let mut diagnostic = Diagnostic::new(fallback, error.to_string());
+            let mut diagnostic = Diagnostic::new(codes::INTERNAL, error.to_string());
             if let Some(source) = error.source() {
                 diagnostic = diagnostic.with_source_notes(source);
             }
@@ -469,31 +464,15 @@ pub mod anyhow_ext {
 
     impl FromAnyhow for CompileError {
         fn from_error(error: anyhow::Error) -> Self {
-            Self::from_error_with_fallback(error, codes::INTERNAL)
-        }
-
-        fn from_error_with_fallback(error: anyhow::Error, fallback: Code) -> Self {
             match error.downcast::<Self>() {
                 Ok(inner) => inner,
-                Err(error) => Self::from(Diagnostic::from_error_with_fallback(error, fallback)),
+                Err(error) => Self::from(Diagnostic::from_error(error)),
             }
         }
     }
 
-    /// Attach `span` to an existing [`Diagnostic`] in `error`, or convert `error` using `fallback`
-    /// and attach `span` when missing.
-    pub fn annotate_with_fallback(
-        error: anyhow::Error,
-        span: Option<SourceSpan>,
-        fallback: Code,
-    ) -> anyhow::Error {
-        let mut diagnostic = Diagnostic::from_error_with_fallback(error, fallback);
-        diagnostic.set_span_if_missing(span);
-        diagnostic.into()
-    }
-
-    /// Attach `span` to an existing [`Diagnostic`] in `error`, leaving non-diagnostic errors untouched
-    /// when `span` is `None`, or wrapping them as `codes::INTERNAL` with `span`.
+    /// Attach `span` to an existing [`Diagnostic`] in `error`, or convert an untyped error
+    /// to `codes::INTERNAL` and attach `span` when missing.
     pub fn annotate(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
         let mut diagnostic = Diagnostic::from_error(error);
         diagnostic.set_span_if_missing(span);
@@ -626,4 +605,194 @@ macro_rules! ensure_internal {
     ($cond:expr, $($arg:tt)+) => {
         $crate::ensure_diag!($cond, $crate::codes::INTERNAL, $($arg)+)
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CompileError, Diagnostic, ErrorKind, SourceSpan,
+        anyhow_ext::{FromAnyhow as _, wrap_source},
+        codes,
+    };
+    use std::collections::HashSet;
+
+    fn is_kebab_case(s: &str) -> bool {
+        !s.is_empty()
+            && !s.starts_with('-')
+            && !s.ends_with('-')
+            && !s.contains("--")
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    }
+
+    #[test]
+    fn codes_are_unique_and_kebab_case() {
+        assert!(!codes::ALL.is_empty());
+        let mut names = HashSet::new();
+        for code in codes::ALL {
+            assert!(
+                names.insert(code.name()),
+                "duplicate diagnostic code: {}",
+                code.name()
+            );
+            assert!(
+                is_kebab_case(code.name()),
+                "code name must be kebab-case: {}",
+                code.name()
+            );
+            assert!(
+                is_kebab_case(code.kind().as_str()),
+                "kind name must be kebab-case: {}",
+                code.kind().as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn display_matches_js_format_and_renders_spanned_notes() {
+        let first = Diagnostic::new(codes::MISSING_REQUIRED_FIELD, "Missing value")
+            .with_span(SourceSpan {
+                file: "src/é.ts".into(),
+                start_line: 2,
+                start_column: 3,
+                end_line: 2,
+                end_column: 8,
+                start_byte: 10,
+                end_byte: 15,
+            })
+            .with_note("Record fields are mandatory")
+            .with_help("Add value: null");
+        let second = Diagnostic::new(codes::PARSE_ERROR, "Unexpected token");
+        let error = CompileError {
+            diagnostics: vec![first, second],
+        };
+        assert_eq!(
+            error.to_string(),
+            "src/é.ts:2:3: error[missing-required-field]: Missing value\n  Record fields are mandatory\n  help: Add value: null\nerror[parse-error]: Unexpected token"
+        );
+
+        let spanned = Diagnostic::new(codes::EXPORT_TYPE_MISMATCH, "type mismatch")
+            .with_span(SourceSpan {
+                file: "src/main.ts".into(),
+                start_line: 4,
+                start_column: 1,
+                end_line: 4,
+                end_column: 12,
+                start_byte: 20,
+                end_byte: 31,
+            })
+            .with_note("while binding WIT export run")
+            .with_spanned_note(
+                SourceSpan {
+                    file: "src/types.ts".into(),
+                    start_line: 1,
+                    start_column: 10,
+                    end_line: 1,
+                    end_column: 16,
+                    start_byte: 9,
+                    end_byte: 15,
+                },
+                "expected here",
+            )
+            .with_help("update signature");
+        assert_eq!(
+            spanned.to_string(),
+            "src/main.ts:4:1: error[export-type-mismatch]: type mismatch\n  while binding WIT export run\n  src/types.ts:1:10: expected here\n  help: update signature"
+        );
+    }
+
+    #[test]
+    fn from_error_context_retention_and_nested_extraction() {
+        let user_span = SourceSpan {
+            file: "src/app.ts".into(),
+            start_line: 3,
+            start_column: 5,
+            end_line: 3,
+            end_column: 10,
+            start_byte: 12,
+            end_byte: 17,
+        };
+        let user_err: anyhow::Error =
+            Diagnostic::new(codes::POSSIBLY_NULL_RECEIVER, "receiver is possibly null")
+                .with_span(user_span.clone())
+                .into();
+        let wrapped_user = user_err
+            .context("optimizing MIR")
+            .context("compiling module");
+        let extracted = Diagnostic::from_error(wrapped_user);
+        assert_eq!(extracted.code(), codes::POSSIBLY_NULL_RECEIVER);
+        assert_eq!(extracted.span(), Some(&user_span));
+        assert!(extracted.notes().is_empty());
+
+        let internal_err: anyhow::Error =
+            Diagnostic::new(codes::INTERNAL, "invariant violated").into();
+        let wrapped_internal = internal_err
+            .context("lowering function run")
+            .context("compiling module");
+        let extracted_internal = Diagnostic::from_error(wrapped_internal);
+        assert_eq!(extracted_internal.kind(), ErrorKind::Internal);
+        assert_eq!(extracted_internal.message(), "invariant violated");
+        assert_eq!(
+            extracted_internal
+                .notes()
+                .iter()
+                .map(|note| note.message())
+                .collect::<Vec<_>>(),
+            vec!["compiling module", "lowering function run"]
+        );
+
+        let untyped = anyhow::anyhow!("root cause").context("outer phase");
+        let extracted_untyped = Diagnostic::from_error(untyped);
+        assert_eq!(extracted_untyped.code(), codes::INTERNAL);
+        assert_eq!(extracted_untyped.message(), "outer phase");
+        assert_eq!(
+            extracted_untyped
+                .notes()
+                .iter()
+                .map(|note| note.message())
+                .collect::<Vec<_>>(),
+            vec!["root cause"]
+        );
+
+        let inner_user: anyhow::Error =
+            Diagnostic::new(codes::EXPORT_ARITY, "expected 2 arguments")
+                .with_help("pass 2 arguments")
+                .into();
+        let wrapped = wrap_source(
+            inner_user.context("dropped internal layer"),
+            Some(user_span.clone()),
+            "while binding WIT export run",
+            "binding WIT export run",
+        );
+        assert_eq!(wrapped.code(), codes::EXPORT_ARITY);
+        assert_eq!(wrapped.message(), "expected 2 arguments");
+        assert_eq!(wrapped.span(), Some(&user_span));
+        assert_eq!(wrapped.help(), Some("pass 2 arguments"));
+        assert_eq!(
+            wrapped
+                .notes()
+                .iter()
+                .map(|note| note.message())
+                .collect::<Vec<_>>(),
+            vec!["while binding WIT export run"]
+        );
+
+        let inner_bug: anyhow::Error = Diagnostic::new(codes::INTERNAL, "bad carrier").into();
+        let wrapped_bug = wrap_source(
+            inner_bug.context("lowering op"),
+            Some(user_span.clone()),
+            "while binding WIT export run",
+            "binding WIT export run",
+        );
+        assert_eq!(wrapped_bug.code(), codes::INTERNAL);
+        assert_eq!(wrapped_bug.span(), Some(&user_span));
+        assert_eq!(
+            wrapped_bug
+                .notes()
+                .iter()
+                .map(|note| note.message())
+                .collect::<Vec<_>>(),
+            vec!["binding WIT export run", "lowering op"]
+        );
+    }
 }

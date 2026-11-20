@@ -135,5 +135,5 @@ impl From<LowerErrorKind> for Diagnostic {
 }
 
 pub(crate) fn annotate(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-    anyhow_ext::annotate_with_fallback(error, span, codes::UNSUPPORTED_CONSTRUCT)
+    anyhow_ext::annotate(error, span)
 }

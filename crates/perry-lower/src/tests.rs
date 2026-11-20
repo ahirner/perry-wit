@@ -11,10 +11,7 @@ fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::Diagnostic {
     let error = lower_without_foreign(&mut Context::new(), source, file)
         .err()
         .expect("rejection");
-    perry_wit_diagnostics::Diagnostic::from_error_with_fallback(
-        error,
-        perry_wit_diagnostics::codes::UNSUPPORTED_CONSTRUCT,
-    )
+    perry_wit_diagnostics::Diagnostic::from_error(error)
 }
 
 /// Verify diagnostic source spans alongside the message table in `diagnostics_test`.

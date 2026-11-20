@@ -41,16 +41,13 @@ pub struct SdkResult {
 pub fn generate_sdk_files(
     options: &SdkOptions,
 ) -> std::result::Result<SdkResult, crate::CompileError> {
-    generate_sdk_files_impl(options)
-        .map_err(|error| crate::CompileError::from_error_with_fallback(error, crate::codes::IO))
+    generate_sdk_files_impl(options).map_err(crate::CompileError::from_error)
 }
 
 fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
     let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    let artifacts = declarations(&resolve, world).map_err(|error| {
-        crate::Diagnostic::from_error_with_fallback(error, crate::codes::WIT_DEPENDENCY)
-    })?;
+    let artifacts = declarations(&resolve, world)?;
     fs::create_dir_all(&options.out_dir).map_err(|err| {
         crate::Diagnostic::io(
             format!(

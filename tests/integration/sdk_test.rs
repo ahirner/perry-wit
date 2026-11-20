@@ -350,6 +350,7 @@ fn cli_and_sdk_reject_invalid_worlds_before_writing_files() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!output.status.success());
             assert!(stderr.contains(message), "{stderr}");
+            assert!(!stderr.contains("error[internal]:"), "{stderr}");
             for written in [".perry", "out.wasm", "tsconfig.json"] {
                 assert!(!root.join(written).exists(), "{written}");
             }

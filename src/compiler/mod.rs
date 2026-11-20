@@ -153,19 +153,14 @@ pub(crate) fn compile_sources(
     let mut foreign = perry_frontend::wit::WorldTypes::new(resolve, Some(world));
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let program = perry_frontend::load_sources(ctx, source, identity, modules, foreign.foreign())
-        .map_err(|error| {
-        crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
-    })?;
-    let mir = perry_lower::lower_program(ctx, &program).map_err(|error| {
-        crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
-    })?;
+    let program = perry_frontend::load_sources(ctx, source, identity, modules, foreign.foreign())?;
+    let mir = perry_lower::lower_program(ctx, &program)?;
     let mut exports = bind::exports(ctx, &mir, resolve, world)?;
     bind::constrain_numbers(ctx, &mir, &exports)?;
     let mut analyses = optimize(ctx, &mir)?;
     bind::specialized_implementations(ctx, &mir, &mut exports);
     bind::check_main(ctx, &mir, &exports)?;
-    Ok(emit_component(
+    emit_component(
         ctx,
         &mir,
         &mut analyses,
@@ -178,7 +173,6 @@ pub(crate) fn compile_sources(
         resources,
         true,
     )
-    .map_err(|error| crate::Diagnostic::from_error_with_fallback(error, crate::codes::INTERNAL))?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -265,13 +259,8 @@ pub(crate) fn compile_core_sources(
         Exports::Raw
     };
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
-    let (core, _) =
-        finish(core, None, &link::canonical::Requirements::default()).map_err(|error| {
-            crate::Diagnostic::from_error_with_fallback(error, crate::codes::INTERNAL)
-        })?;
-    Ok(link::raw::without_p3(core).map_err(|error| {
-        crate::Diagnostic::from_error_with_fallback(error, crate::codes::INTERNAL)
-    })?)
+    let (core, _) = finish(core, None, &link::canonical::Requirements::default())?;
+    link::raw::without_p3(core)
 }
 
 fn lower(
@@ -281,13 +270,8 @@ fn lower(
     modules: &BTreeMap<String, String>,
     foreign: &perry_frontend::wit::WorldTypes,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
-    let program = perry_frontend::load_sources(ctx, source, file_name, modules, foreign.foreign())
-        .map_err(|error| {
-            crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
-        })?;
-    let mir = perry_lower::lower_program(ctx, &program).map_err(|error| {
-        crate::Diagnostic::from_error_with_fallback(error, crate::codes::UNSUPPORTED_CONSTRUCT)
-    })?;
+    let program = perry_frontend::load_sources(ctx, source, file_name, modules, foreign.foreign())?;
+    let mir = perry_lower::lower_program(ctx, &program)?;
     let analyses = optimize(ctx, &mir)?;
     Ok((mir, analyses))
 }
@@ -335,8 +319,7 @@ pub fn compile_file(
     input_file: &Path,
     options: &CompileOptions,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_file_impl(input_file, options)
-        .map_err(|error| crate::CompileError::from_error_with_fallback(error, crate::codes::IO))
+    compile_file_impl(input_file, options).map_err(crate::CompileError::from_error)
 }
 
 pub fn compile_typescript(
@@ -344,9 +327,7 @@ pub fn compile_typescript(
     file_name: &str,
     options: &CompileOptions,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_typescript_impl(source, file_name, options).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::WIT_DEPENDENCY)
-    })
+    compile_typescript_impl(source, file_name, options).map_err(crate::CompileError::from_error)
 }
 
 pub fn compile_for_world(
@@ -356,9 +337,8 @@ pub fn compile_for_world(
     world: wit_parser::WorldId,
     componentize: bool,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_for_world_impl(source, file_name, resolve, world, componentize).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
-    })
+    compile_for_world_impl(source, file_name, resolve, world, componentize)
+        .map_err(crate::CompileError::from_error)
 }
 
 pub fn compile_for_world_with_memory_checks(
@@ -367,25 +347,20 @@ pub fn compile_for_world_with_memory_checks(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_for_world_with_memory_checks_impl(source, file_name, resolve, world).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
-    })
+    compile_for_world_with_memory_checks_impl(source, file_name, resolve, world)
+        .map_err(crate::CompileError::from_error)
 }
 
 pub fn compile_core(
     source: &str,
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_impl(source, file_name).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
-    })
+    compile_core_impl(source, file_name).map_err(crate::CompileError::from_error)
 }
 
 pub fn compile_core_with_memory_checks(
     source: &str,
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_with_memory_checks_impl(source, file_name).map_err(|error| {
-        crate::CompileError::from_error_with_fallback(error, crate::codes::INTERNAL)
-    })
+    compile_core_with_memory_checks_impl(source, file_name).map_err(crate::CompileError::from_error)
 }
