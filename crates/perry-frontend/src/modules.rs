@@ -376,8 +376,8 @@ impl Graph<'_, '_> {
             }
             self.body.push(item);
         }
-        if let Some(error) = renamer.error {
-            return Err(error);
+        if let Some((error, span)) = renamer.error {
+            return Err(self.locations.annotate(error, span));
         }
         self.active.remove(path);
         Ok(exports)
@@ -436,7 +436,10 @@ fn bind_module<'a>(
                                 );
                             }
                             ast::ImportSpecifier::Namespace(namespace) => {
-                                namespaces.insert(namespace.local.to_id(), dependency);
+                                namespaces.insert(
+                                    namespace.local.to_id(),
+                                    (import.src.value.to_string_lossy().into_owned(), dependency),
+                                );
                             }
                             _ => bail_unsupported!("Local modules require named imports"),
                         }
@@ -548,8 +551,8 @@ fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
 }
 struct Rename<'a> {
     names: HashMap<ast::Id, String>,
-    namespaces: HashMap<ast::Id, &'a Exports>,
-    error: Option<Diagnostic>,
+    namespaces: HashMap<ast::Id, (String, &'a Exports)>,
+    error: Option<(Diagnostic, swc_common::Span)>,
 }
 impl VisitMut for Rename<'_> {
     fn visit_mut_import_named_specifier(&mut self, import: &mut ast::ImportNamedSpecifier) {
@@ -574,22 +577,37 @@ impl VisitMut for Rename<'_> {
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
         if let ast::Expr::Member(member) = expression
             && let ast::Expr::Ident(namespace) = member.obj.as_ref()
-            && let Some(exports) = self.namespaces.get(&namespace.to_id())
+            && let Some((specifier, exports)) = self.namespaces.get(&namespace.to_id())
         {
-            let name = match &member.prop {
-                ast::MemberProp::Ident(id) => Some(id.sym.as_ref()),
-                _ => None,
-            };
-            if let Some(binding) = name.and_then(|name| exports.get(name)) {
-                *expression = ast::Expr::Ident(ast::Ident::new(
-                    binding.clone().into(),
-                    DUMMY_SP,
-                    SyntaxContext::empty(),
-                ));
-            } else {
-                self.error.get_or_insert_with(|| {
-                    unsupported!("Local namespaces require a declared static member")
-                });
+            match &member.prop {
+                ast::MemberProp::Ident(id) => {
+                    let name: &str = id.sym.as_ref();
+                    if let Some(binding) = exports.get(name) {
+                        *expression = ast::Expr::Ident(ast::Ident::new(
+                            binding.clone().into(),
+                            DUMMY_SP,
+                            SyntaxContext::empty(),
+                        ));
+                    } else {
+                        self.error.get_or_insert_with(|| {
+                            (
+                                diag!(
+                                    codes::UNKNOWN_EXPORT,
+                                    "Module '{specifier}' has no export '{name}'"
+                                ),
+                                member.span,
+                            )
+                        });
+                    }
+                }
+                _ => {
+                    self.error.get_or_insert_with(|| {
+                        (
+                            unsupported!("Local namespaces require a declared static member"),
+                            member.span,
+                        )
+                    });
+                }
             }
             return;
         }
@@ -600,7 +618,10 @@ impl VisitMut for Rename<'_> {
             id.sym = name.clone().into();
         } else if self.namespaces.contains_key(&id.to_id()) {
             self.error.get_or_insert_with(|| {
-                unsupported!("Local namespaces may only be used for static member access")
+                (
+                    unsupported!("Local namespaces may only be used for static member access"),
+                    id.span,
+                )
             });
         }
     }

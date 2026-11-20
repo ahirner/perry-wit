@@ -135,9 +135,10 @@ impl<'a> RecordAssembly<'a> {
                 merged_field_type(ctx, value.get_type(ctx), loaded_ty)
             })
         });
+        let field_note = |err: Diagnostic| err.with_note(format!("in record field '{name}'"));
         // Spread fits first copies eagerly; projection converts only present fields.
         if previous.is_none() && !matches!(source, Some((_, CopyMode::Projection))) {
-            loaded = b.fit(ctx, loaded, target)?;
+            loaded = b.fit(ctx, loaded, target).map_err(field_note)?;
         }
         let optional = admits_undefined(ctx, target);
         let value = if let Some((source, _)) = source.filter(|_| previous.is_some() || optional) {
@@ -168,12 +169,7 @@ impl<'a> RecordAssembly<'a> {
         } else {
             b.fit(ctx, loaded, target)
         }
-        .map_err(|err| {
-            err.with_internal_context(format!(
-                "record field {name} cannot become {}",
-                target.disp(ctx)
-            ))
-        })?;
+        .map_err(field_note)?;
         match position {
             Some(index) => self.fields[index].1 = value,
             None => self.fields.push((name, value)),
@@ -232,7 +228,10 @@ impl<'a> RecordAssembly<'a> {
                 .deref(ctx)
                 .field(&name)
                 .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "record has no field {name}"))?;
-            slots[index] = Some(b.fit(ctx, value, ty)?);
+            slots[index] = Some(
+                b.fit(ctx, value, ty)
+                    .map_err(|err| err.with_note(format!("in record field '{name}'")))?,
+            );
             if literal {
                 order.push(index as u32);
             }

@@ -66,6 +66,14 @@ test("reports diagnostics as a CompileError", async () => {
   assert.equal(first.span?.file, "src/main.ts");
   assert.equal(typeof first.span?.startByte, "number");
   assert.match(error.message, /^src\/main\.ts:1:\d+: error\[missing-type-annotation\]:/);
+
+  const mutable = [first];
+  const snapshotError = new CompileError(mutable);
+  mutable.shift();
+  assert.equal(snapshotError.diagnostics.length, 1);
+  assert.equal(snapshotError.primary, snapshotError.diagnostics[0]);
+  assert.equal(snapshotError.primary, first);
+  assert.ok(Object.isFrozen(snapshotError.diagnostics));
   assert.equal(
     formatDiagnostics([
       {

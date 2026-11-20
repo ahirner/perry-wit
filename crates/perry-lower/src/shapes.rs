@@ -422,7 +422,7 @@ impl<'h> Shapes<'h> {
                     int_ty.into()
                 } else {
                     self.value_type(ctx, ty)
-                        .map_err(|err| err.with_internal_context(format!("field {field}")))?
+                        .map_err(|err| err.with_note(format!("in field '{field}'")))?
                 };
                 let ty = if *optional {
                     OptionalType::get(ctx, ty).into()

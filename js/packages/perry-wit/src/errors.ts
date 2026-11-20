@@ -4,15 +4,18 @@ import type { Diagnostic, SourceSpan } from "./types.js";
 export class CompileError extends Error {
   override readonly name = "CompileError";
   readonly diagnostics: readonly Diagnostic[];
-  readonly primary: Diagnostic;
 
   constructor(diagnostics: readonly Diagnostic[]) {
     if (diagnostics.length === 0) {
       throw new RangeError("CompileError requires at least one diagnostic");
     }
-    super(formatDiagnostics(diagnostics));
-    this.diagnostics = diagnostics;
-    this.primary = diagnostics[0]!;
+    const snapshot = Object.freeze([...diagnostics]);
+    super(formatDiagnostics(snapshot));
+    this.diagnostics = snapshot;
+  }
+
+  get primary(): Diagnostic {
+    return this.diagnostics[0]!;
   }
 }
 

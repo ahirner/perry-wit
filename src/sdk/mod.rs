@@ -43,28 +43,25 @@ pub fn generate_sdk_files(
     generate_sdk_files_impl(options).map_err(crate::CompileError::from)
 }
 
+fn create_dir(path: &Path, what: &str) -> Result<()> {
+    fs::create_dir_all(path)
+        .map_err(|err| Diagnostic::io(format!("Failed to create {what} at {}", path.display()), &err))
+}
+
+fn write_file(path: &Path, contents: impl AsRef<[u8]>, what: &str) -> Result<()> {
+    fs::write(path, contents)
+        .map_err(|err| Diagnostic::io(format!("Failed to write {what} at {}", path.display()), &err))
+}
+
 fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let (resolve, package) = crate::component::wit::resolve_wit_inner(&options.wit_dir)?;
     let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
     let artifacts = declarations(&resolve, world)?;
-    fs::create_dir_all(&options.out_dir).map_err(|err| {
-        crate::Diagnostic::io(
-            format!(
-                "Failed to create SDK output directory at {}",
-                options.out_dir.display()
-            ),
-            &err,
-        )
-    })?;
+    create_dir(&options.out_dir, "SDK output directory")?;
 
     for artifact in artifacts {
         let path = options.out_dir.join(artifact.name);
-        fs::write(&path, artifact.contents).map_err(|err| {
-            crate::Diagnostic::io(
-                format!("Failed to write declaration file at {}", path.display()),
-                &err,
-            )
-        })?;
+        write_file(&path, artifact.contents, "declaration file")?;
     }
     let dts_path = options.out_dir.join("world.d.ts");
 
@@ -94,15 +91,7 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
             &err
         ))?
     );
-    fs::write(&check_path, check).map_err(|err| {
-        crate::Diagnostic::io(
-            format!(
-                "Failed to write implementation check at {}",
-                check_path.display()
-            ),
-            &err,
-        )
-    })?;
+    write_file(&check_path, check, "implementation check")?;
     let compiler_options = || {
         serde_json::json!({
             "target": "ES2022",
@@ -125,15 +114,7 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
         });
         let config_json = serde_json::to_string_pretty(&config)
             .map_err(|err| Diagnostic::internal_from("serializing tsconfig.json", &err))?;
-        fs::write(&tsconfig_path, config_json).map_err(|err| {
-            crate::Diagnostic::io(
-                format!(
-                    "Failed to write tsconfig.json at {}",
-                    tsconfig_path.display()
-                ),
-                &err,
-            )
-        })?;
+        write_file(&tsconfig_path, config_json, "tsconfig.json")?;
         Some(tsconfig_path)
     } else if tsconfig_path.exists() {
         Some(tsconfig_path)
@@ -153,15 +134,7 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let check_tsconfig_path = options.out_dir.join("tsconfig.json");
     let check_config_json = serde_json::to_string_pretty(&check_config)
         .map_err(|err| Diagnostic::internal_from("serializing SDK tsconfig.json", &err))?;
-    fs::write(&check_tsconfig_path, check_config_json).map_err(|err| {
-        crate::Diagnostic::io(
-            format!(
-                "Failed to write tsconfig.json at {}",
-                check_tsconfig_path.display()
-            ),
-            &err,
-        )
-    })?;
+    write_file(&check_tsconfig_path, check_config_json, "tsconfig.json")?;
 
     Ok(SdkResult {
         types_path: dts_path,
@@ -190,23 +163,13 @@ pub fn write_runtime_declarations(out_dir: &Path) -> std::result::Result<(), cra
 }
 
 fn write_runtime_declarations_impl(out_dir: &Path) -> Result<()> {
-    fs::create_dir_all(out_dir).map_err(|err| {
-        crate::Diagnostic::io(
-            format!(
-                "Failed to create runtime declarations directory at {}",
-                out_dir.display()
-            ),
-            &err,
-        )
-    })?;
+    create_dir(out_dir, "runtime declarations directory")?;
     let path = out_dir.join("runtime.d.ts");
-    fs::write(&path, perry_frontend::sdk::RUNTIME_DECLARATIONS).map_err(|err| {
-        crate::Diagnostic::io(
-            format!("Failed to write runtime declarations at {}", path.display()),
-            &err,
-        )
-    })?;
-    Ok(())
+    write_file(
+        &path,
+        perry_frontend::sdk::RUNTIME_DECLARATIONS,
+        "runtime declarations",
+    )
 }
 
 fn relative_path(from: &Path, to: &Path) -> Result<String> {

@@ -384,11 +384,7 @@ impl<'s> FunctionBuilder<'s> {
             values.push(
                 self.bind_fixed_arg(ctx, param, args.get(i))
                     .map_err(|err| {
-                        err.with_internal_context(format!(
-                            "argument {} of {}",
-                            i + 1,
-                            signature.name
-                        ))
+                        err.with_note(format!("in argument {} of '{}'", i + 1, signature.name))
                     })?,
             );
         }
@@ -402,9 +398,15 @@ impl<'s> FunctionBuilder<'s> {
                 })?;
             let element = array.deref(ctx).element();
             let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
-            for arg in args.iter().skip(fixed.len()) {
+            for (offset, arg) in args.iter().skip(fixed.len()).enumerate() {
                 let value = self.expression_with(ctx, arg, Some(element))?;
-                items.push(self.fit(ctx, value, element)?);
+                items.push(self.fit(ctx, value, element).map_err(|err| {
+                    err.with_note(format!(
+                        "in argument {} of '{}'",
+                        fixed.len() + offset + 1,
+                        signature.name
+                    ))
+                })?);
             }
             values.push(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)));
         }

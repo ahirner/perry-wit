@@ -101,6 +101,22 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     })
     .unwrap_err();
     assert_eq!(io_err.primary().code(), codes::IO);
+
+    // Multi-file WIT directory with one invalid-UTF-8 file preserves the failing filename in notes.
+    let bad_wit_dir = temp.path().join("bad-wit");
+    std::fs::create_dir_all(&bad_wit_dir).unwrap();
+    std::fs::write(
+        bad_wit_dir.join("good.wit"),
+        "package test:multi; world app { export run: func() -> f64; }",
+    )
+    .unwrap();
+    std::fs::write(bad_wit_dir.join("corrupt.wit"), [0xffu8, 0xfe]).unwrap();
+    let bad_utf8_err = perry_wit::component::wit::resolve_wit(&bad_wit_dir).unwrap_err();
+    assert_eq!(bad_utf8_err.primary().code(), codes::IO, "{bad_utf8_err}");
+    assert!(
+        bad_utf8_err.to_string().contains("corrupt.wit"),
+        "{bad_utf8_err}"
+    );
 }
 
 /// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
@@ -168,6 +184,84 @@ fn parse_and_required_field_errors_have_typed_codes() {
         assert!(error.primary().span().is_some(), "{error}");
         assert!(!error.primary().message().contains("_0"), "{error}");
     }
+
+    // Plain anyhow rejections from HIR lowering for missing required arguments are TypeCheck, not Internal.
+    for source in [
+        "export function run(): string { return atob(); }",
+        "export function run(): string { return new URL().href; }",
+    ] {
+        let error = perry_wit::compile_core(source, "args.ts").unwrap_err();
+        assert_eq!(error.primary().kind(), ErrorKind::TypeCheck, "{error}");
+        assert_eq!(error.primary().code(), codes::TYPE_MISMATCH, "{error}");
+    }
+
+    // Argument index, record field, and shape field details survive on user-facing diagnostics.
+    let call_err = perry_wit::compile_core(
+        "function check(a: number, b: number): number { return a + b; }\nexport function run(): number { return check(1, 'x' as any as string); }",
+        "call.ts",
+    )
+    .unwrap_err();
+    assert_eq!(call_err.primary().code(), codes::TYPE_MISMATCH, "{call_err}");
+    assert!(call_err.to_string().contains("argument 2 of 'check'"), "{call_err}");
+
+    let record_err = perry_wit::compile_core(
+        "interface Pair { a: number; b: number }\nexport function run(): number { const p: Pair = { a: 1, b: 'x' }; return p.a; }",
+        "record.ts",
+    )
+    .unwrap_err();
+    assert_eq!(record_err.primary().code(), codes::TYPE_MISMATCH, "{record_err}");
+    assert!(record_err.to_string().contains("record field 'b'"), "{record_err}");
+
+    let shape_err = perry_wit::compile_core(
+        "interface Bad { count: WeakMap<object, number> }\nexport function run(x: Bad): number { return 0; }",
+        "shape.ts",
+    )
+    .unwrap_err();
+    assert_eq!(shape_err.primary().code(), codes::UNSUPPORTED_TYPE, "{shape_err}");
+    assert!(shape_err.to_string().contains("field 'count'"), "{shape_err}");
+
+    // Invalid regex syntax preserves the builder's underlying cause as a note.
+    let regex_err = perry_wit::compile_core(
+        "export function run(input: string): boolean { return /(/.test(input); }",
+        "regex.ts",
+    )
+    .unwrap_err();
+    assert_eq!(regex_err.primary().code(), codes::UNSUPPORTED_REGEX, "{regex_err}");
+    assert!(
+        regex_err.primary().notes().iter().any(|note| note.message().contains("unclosed group")),
+        "{regex_err}"
+    );
+
+    // Static missing namespace member reports unknown-export; computed access remains unsupported.
+    let ns_missing = api::compile_core(&Program {
+        source: Source {
+            name: Some("src/main.ts".into()),
+            contents: b"import * as helper from './helper'; export function run(): number { return helper.missing(); }".to_vec(),
+        },
+        modules: vec![Module {
+            name: "src/helper.ts".into(),
+            contents: b"export function present(): number { return 1; }".to_vec(),
+        }],
+    })
+    .unwrap_err();
+    assert_eq!(ns_missing.primary().kind(), ErrorKind::Module, "{ns_missing}");
+    assert_eq!(ns_missing.primary().code(), codes::UNKNOWN_EXPORT, "{ns_missing}");
+    assert!(ns_missing.primary().message().contains("missing"), "{ns_missing}");
+    assert!(ns_missing.primary().span().is_some(), "{ns_missing}");
+
+    let ns_computed = api::compile_core(&Program {
+        source: Source {
+            name: Some("src/main.ts".into()),
+            contents: b"import * as helper from './helper'; export function run(k: string): number { return (helper as any)[k](); }".to_vec(),
+        },
+        modules: vec![Module {
+            name: "src/helper.ts".into(),
+            contents: b"export function present(): number { return 1; }".to_vec(),
+        }],
+    })
+    .unwrap_err();
+    assert_eq!(ns_computed.primary().kind(), ErrorKind::Unsupported, "{ns_computed}");
+    assert_eq!(ns_computed.primary().code(), codes::UNSUPPORTED_CONSTRUCT, "{ns_computed}");
 }
 
 /// Unsupported source forms are rejected with their exact message.
@@ -207,6 +301,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }".into(), "case.ts:1:47: error[unsupported-construct]: Temporal add duration field hours is not supported; use years, months, weeks, or days".into()),
         ("export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }".into(), "case.ts:1:47: error[unsupported-construct]: property hour is not supported on Temporal.PlainDate yet".into()),
         ("export function run(): number {\n  return (performance as any).mark();\n}".into(), "case.ts:2:10: error[unsupported-construct]: performance.mark is not supported yet".into()),
+        ("enum Color { A }\nexport function run(): number { return 0; }".into(), "case.ts:1:1: error[unsupported-construct]: TypeScript enum declarations are not supported yet; use a union of string or number literals instead".into()),
     ];
     let mismatches: Vec<String> = cases
         .iter()

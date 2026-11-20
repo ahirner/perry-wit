@@ -77,34 +77,7 @@ fn compile_typescript_impl(
 ) -> Result<Compiled> {
     let (resolve, package) = component::wit::resolve_wit_inner(&options.wit_dir)?;
     let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    compile_for_world_impl(source, file_name, &resolve, world, !options.core_only)
-}
-
-/// Compile against a resolved world, wrapping the output in a component when `componentize`
-/// is true.
-fn compile_for_world_impl(
-    source: &str,
-    file_name: &str,
-    resolve: &wit_parser::Resolve,
-    world: wit_parser::WorldId,
-    componentize: bool,
-) -> Result<Compiled> {
-    compile_world(source, file_name, resolve, world, componentize, false)
-}
-
-/// Compile a component test with forced safe-point collection and reclaimed-memory poisoning.
-/// Production compilation omits the instrumentation.
-fn compile_for_world_with_memory_checks_impl(
-    source: &str,
-    file_name: &str,
-    resolve: &wit_parser::Resolve,
-    world: wit_parser::WorldId,
-) -> Result<Compiled> {
-    compile_world(source, file_name, resolve, world, true, true)
-}
-
-fn load_source_files(source: &str, file_name: &str) -> Result<BTreeMap<String, String>> {
-    perry_frontend::source_files::load(source, file_name)
+    compile_world(source, file_name, &resolve, world, !options.core_only, false)
 }
 
 fn compile_world(
@@ -115,7 +88,7 @@ fn compile_world(
     componentize: bool,
     memory_checks: bool,
 ) -> Result<Compiled> {
-    let modules = load_source_files(source, file_name)?;
+    let modules = perry_frontend::source_files::load(source, file_name)?;
     compile_sources(
         source,
         file_name,
@@ -226,23 +199,9 @@ pub(super) fn emit_component(
     })
 }
 
-/// Build a linked core module exporting every exported TypeScript function with its raw core
-/// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
-/// functions that may throw). Components use [compile_for_world].
-fn compile_core_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
-    let modules = load_source_files(source, file_name)?;
-    compile_core_sources(source, file_name, &modules, false)
-}
-
-/// Compile a raw test module with `__perry_gc_debug(flags)` and
-/// `__perry_gc_counter(index)`. Flags enable forced safe-point collection (1) and poisoning
-/// (2), plus buffer-growth counters (4). Counter indices are allocations (0), collections (1),
-/// live bytes (2), reserved bytes (3), transfer-copy bytes (4), active pins (5), active roots (6),
-/// compiled root publications (7), in-place growths (8), copy fallbacks (9), and growth-copy
-/// bytes (10). Canonical production components omit these exports.
-fn compile_core_with_memory_checks_impl(source: &str, file_name: &str) -> Result<Vec<u8>> {
-    let modules = load_source_files(source, file_name)?;
-    compile_core_sources(source, file_name, &modules, true)
+fn compile_core_with(source: &str, file_name: &str, memory_checks: bool) -> Result<Vec<u8>> {
+    let modules = perry_frontend::source_files::load(source, file_name)?;
+    compile_core_sources(source, file_name, &modules, memory_checks)
 }
 
 pub(crate) fn compile_core_sources(
@@ -325,6 +284,8 @@ pub fn compile_typescript(
     compile_typescript_impl(source, file_name, options).map_err(crate::CompileError::from)
 }
 
+/// Compile against a resolved world, wrapping the output in a component when `componentize`
+/// is true.
 pub fn compile_for_world(
     source: &str,
     file_name: &str,
@@ -332,30 +293,41 @@ pub fn compile_for_world(
     world: wit_parser::WorldId,
     componentize: bool,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_for_world_impl(source, file_name, resolve, world, componentize)
+    compile_world(source, file_name, resolve, world, componentize, false)
         .map_err(crate::CompileError::from)
 }
 
+/// Compile a component test with forced safe-point collection and reclaimed-memory poisoning.
+/// Production compilation omits the instrumentation.
 pub fn compile_for_world_with_memory_checks(
     source: &str,
     file_name: &str,
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_for_world_with_memory_checks_impl(source, file_name, resolve, world)
+    compile_world(source, file_name, resolve, world, true, true)
         .map_err(crate::CompileError::from)
 }
 
+/// Build a linked core module exporting every exported TypeScript function with its raw core
+/// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
+/// functions that may throw). Components use [compile_for_world].
 pub fn compile_core(
     source: &str,
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_impl(source, file_name).map_err(crate::CompileError::from)
+    compile_core_with(source, file_name, false).map_err(crate::CompileError::from)
 }
 
+/// Compile a raw test module with `__perry_gc_debug(flags)` and
+/// `__perry_gc_counter(index)`. Flags enable forced safe-point collection (1) and poisoning
+/// (2), plus buffer-growth counters (4). Counter indices are allocations (0), collections (1),
+/// live bytes (2), reserved bytes (3), transfer-copy bytes (4), active pins (5), active roots (6),
+/// compiled root publications (7), in-place growths (8), copy fallbacks (9), and growth-copy
+/// bytes (10). Canonical production components omit these exports.
 pub fn compile_core_with_memory_checks(
     source: &str,
     file_name: &str,
 ) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_with_memory_checks_impl(source, file_name).map_err(crate::CompileError::from)
+    compile_core_with(source, file_name, true).map_err(crate::CompileError::from)
 }

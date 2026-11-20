@@ -458,7 +458,10 @@ impl<'s> FunctionBuilder<'s> {
             let param = &params[values.len()];
             match &args[arg_idx] {
                 perry_frontend::hir::CallArg::Expr(expr) => {
-                    values.push(self.bind_fixed_arg(ctx, param, Some(expr))?);
+                    let arg_num = values.len() + 1;
+                    values.push(self.bind_fixed_arg(ctx, param, Some(expr)).map_err(|err| {
+                        err.with_note(format!("in argument {arg_num} of '{}'", signature.name))
+                    })?);
                     arg_idx += 1;
                 }
                 perry_frontend::hir::CallArg::Spread(expr) => {
@@ -486,12 +489,10 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         while values.len() < fixed_len {
+            let arg_num = values.len() + 1;
             let param = &params[values.len()];
             values.push(self.bind_fixed_arg(ctx, param, None).map_err(|err| {
-                err.with_internal_context(format!(
-                    "missing required argument in spread call to {}",
-                    signature.name
-                ))
+                err.with_note(format!("in argument {arg_num} of '{}'", signature.name))
             })?);
         }
         if let Some(rest_param) = rest {

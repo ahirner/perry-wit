@@ -15,9 +15,15 @@ pub(crate) fn validate(
     struct Analyzer {
         invalid: Option<Span>,
         code_point_arity: Option<Span>,
+        enum_decl: Option<Span>,
         bindings: HashSet<(u32, u32)>,
     }
     impl Visit for Analyzer {
+        fn visit_ts_enum_decl(&mut self, decl: &ast::TsEnumDecl) {
+            if !decl.declare {
+                self.enum_decl.get_or_insert(decl.span);
+            }
+        }
         fn visit_str(&mut self, string: &ast::Str) {
             if string.value.as_str().is_none() {
                 self.invalid.get_or_insert(string.span);
@@ -60,6 +66,14 @@ pub(crate) fn validate(
     if let Some(span) = analyzer.code_point_arity {
         return Err(locations.annotate(
             unsupported!("String.fromCodePoint currently requires exactly one scalar argument"),
+            span,
+        ));
+    }
+    if let Some(span) = analyzer.enum_decl {
+        return Err(locations.annotate(
+            unsupported!(
+                "TypeScript enum declarations are not supported yet; use a union of string or number literals instead"
+            ),
             span,
         ));
     }

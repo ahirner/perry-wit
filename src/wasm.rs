@@ -99,6 +99,14 @@ impl From<perry_wit::Diagnostic> for Diagnostic {
     }
 }
 
+fn into_wit_errors(error: perry_wit::CompileError) -> Vec<Diagnostic> {
+    error
+        .into_diagnostics()
+        .into_iter()
+        .map(Into::into)
+        .collect()
+}
+
 struct Compiler;
 impl Guest for Compiler {
     fn compile(
@@ -122,22 +130,10 @@ impl Guest for Compiler {
             }),
             allocation_report: compiled.allocation_report,
         })
-        .map_err(|error| {
-            error
-                .into_diagnostics()
-                .into_iter()
-                .map(Into::into)
-                .collect()
-        })
+        .map_err(into_wit_errors)
     }
     fn compile_core(program: Program) -> Result<Vec<u8>, Vec<Diagnostic>> {
-        api::compile_core(&program.into()).map_err(|error| {
-            error
-                .into_diagnostics()
-                .into_iter()
-                .map(Into::into)
-                .collect()
-        })
+        api::compile_core(&program.into()).map_err(into_wit_errors)
     }
     fn generate_sdk(
         wit: WitInput,
@@ -153,13 +149,7 @@ impl Guest for Compiler {
                     })
                     .collect()
             })
-            .map_err(|error| {
-                error
-                    .into_diagnostics()
-                    .into_iter()
-                    .map(Into::into)
-                    .collect()
-            })
+            .map_err(into_wit_errors)
     }
 }
 

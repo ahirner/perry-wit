@@ -545,7 +545,8 @@ impl<'s> FunctionBuilder<'s> {
             } => self
                 .set_index(ctx, object, index, value)
                 .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
-            other => bail_unsupported!("expression {other:?} is not supported yet"),
+            Expr::Object(_) => bail_unsupported!("this object literal form is not supported yet"),
+            _ => bail_unsupported!("this expression form is not supported yet"),
         };
         self.narrow_value(ctx, expr, value)
     }

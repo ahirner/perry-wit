@@ -134,7 +134,7 @@ pub(super) fn build_module(
             let base_carrier = shapes.value_type(ctx, &param.ty).map_err(|error| {
                 shapes
                     .annotate_local(error, param.id)
-                    .with_internal_context(format!("parameter {} of {}", param.name, function.name))
+                    .with_note(format!("in parameter '{}' of '{}'", param.name, function.name))
             })?;
             let integer = shapes.integer_type(ctx, &param.ty);
             let carrier = if param.default.is_some() && !function.is_exported {
@@ -161,7 +161,7 @@ pub(super) fn build_module(
         .map_err(|error| {
             error
                 .with_fallback_span(locations.function_span(&function.name))
-                .with_internal_context(format!("result of {}", function.name))
+                .with_note(format!("in return type of '{}'", function.name))
         })?;
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
