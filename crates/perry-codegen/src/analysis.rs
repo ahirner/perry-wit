@@ -1,9 +1,8 @@
 //! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use perry_mir::{AsyncCallOp, CallOp, LiveValues, ProgramFacts, is_exported};
-use perry_wit_diagnostics::Result;
-use perry_wit_diagnostics::internal;
+use perry_mir::{AsyncCallOp, CallOp, LiveValues, PlironResultExt as _, ProgramFacts, is_exported};
+use perry_wit_diagnostics::{OptionExt as _, Result};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SymbolOpInterface},
@@ -14,7 +13,6 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    printable::Printable,
     value::Value,
 };
 use std::{
@@ -34,19 +32,15 @@ pub(super) fn module_analyses<'a>(
     analyses: &'a mut AnalysisManager,
 ) -> Result<ModuleAnalyses<'a>> {
     let op = module.get_operation();
-    analyses
-        .get_analysis::<ProgramFacts>(op, ctx)
-        .map_err(|error| internal!("{}", error.disp(ctx)))?;
-    analyses
-        .get_analysis::<LiveValues>(op, ctx)
-        .map_err(|error| internal!("{}", error.disp(ctx)))?;
+    analyses.get_analysis::<ProgramFacts>(op, ctx).to_diag(ctx)?;
+    analyses.get_analysis::<LiveValues>(op, ctx).to_diag(ctx)?;
     Ok(ModuleAnalyses {
         facts: analyses
             .try_get_analysis::<ProgramFacts>(op)
-            .ok_or_else(|| internal!("computed program facts are missing"))?,
+            .ok_or_internal("computed program facts are missing")?,
         live: analyses
             .try_get_analysis::<LiveValues>(op)
-            .ok_or_else(|| internal!("computed liveness is missing"))?,
+            .ok_or_internal("computed liveness is missing")?,
     })
 }
 

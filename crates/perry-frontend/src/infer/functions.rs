@@ -2,7 +2,7 @@
 use super::walk::Node;
 use super::*;
 use perry_hir::ir::Function;
-use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported, internal};
+use perry_wit_diagnostics::{OptionExt as _, codes, diag, ensure_diag, ensure_unsupported};
 
 pub(super) fn arguments(
     function: &Function,
@@ -173,9 +173,7 @@ impl Instances<'_> {
             hir_compat::display_name(&function.name)
         );
         let id = self.next_function;
-        self.next_function = id
-            .checked_add(1)
-            .ok_or_else(|| internal!("function identifier limit"))?;
+        self.next_function = id.checked_add(1).ok_or_internal("function identifier limit")?;
         self.keys.insert(key, id);
         let bindings = function
             .type_params
@@ -247,9 +245,7 @@ impl Instances<'_> {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let next = self.next_local;
-                self.next_local = next
-                    .checked_add(1)
-                    .ok_or_else(|| internal!("local identifier limit"))?;
+                self.next_local = next.checked_add(1).ok_or_internal("local identifier limit")?;
                 *entry.insert(next)
             }
         };
@@ -447,10 +443,10 @@ pub(crate) fn specialize_functions(
             pending: Vec::new(),
             next_function: next_function
                 .checked_add(1)
-                .ok_or_else(|| internal!("function identifier limit"))?,
+                .ok_or_internal("function identifier limit")?,
             next_local: next_local
                 .checked_add(1)
-                .ok_or_else(|| internal!("local identifier limit"))?,
+                .ok_or_internal("local identifier limit")?,
             current_caller: None,
             instantiations: Vec::new(),
             remapped_locals: Vec::new(),
@@ -540,12 +536,17 @@ pub(crate) fn record_call_origins(hir: &mut HirModule, locations: &mut hir_compa
         .iter()
         .map(|function| (function.id, function.name.clone()))
         .collect();
-    let record_expr = |expr: &Expr, caller: Option<&str>, locations: &mut hir_compat::Locations<'_>| {
-        if let Expr::Call {
+    fn record(
+        node: Node<'_>,
+        caller: Option<&str>,
+        func_names: &HashMap<FuncId, String>,
+        locations: &mut hir_compat::Locations<'_>,
+    ) -> Result<()> {
+        if let Node::Expression(Expr::Call {
             callee,
             byte_offset,
             ..
-        } = expr
+        }) = node
             && let Expr::FuncRef(id) = callee.as_ref()
             && let Some(callee_name) = func_names.get(id)
         {
@@ -555,42 +556,30 @@ pub(crate) fn record_call_origins(hir: &mut HirModule, locations: &mut hir_compa
                 caller.map(str::to_owned),
             );
         }
-    };
-    let _ = walk::visit_body(&mut hir.init, &mut |node: Node<'_>| {
-        if let Node::Expression(expr) = node {
-            record_expr(expr, None, locations);
-        }
         Ok(())
+    }
+    let _ = walk::visit_body(&mut hir.init, &mut |n: Node<'_>| {
+        record(n, None, &func_names, locations)
     });
     for exported_first in [true, false] {
         for function in &mut hir.functions {
-            if function.is_exported != exported_first {
-                continue;
+            if function.is_exported == exported_first {
+                let caller = function.name.clone();
+                let _ = walk::function(function, &mut |n: Node<'_>| {
+                    record(n, Some(&caller), &func_names, locations)
+                });
             }
-            let caller = function.name.clone();
-            let _ = walk::function(function, &mut |node: Node<'_>| {
-                if let Node::Expression(expr) = node {
-                    record_expr(expr, Some(&caller), locations);
-                }
-                Ok(())
-            });
         }
     }
     for class in &mut hir.classes {
         for initializer in class_initializers(class) {
-            let _ = walk::visit_expr(initializer, &mut |node: Node<'_>| {
-                if let Node::Expression(expr) = node {
-                    record_expr(expr, None, locations);
-                }
-                Ok(())
+            let _ = walk::visit_expr(initializer, &mut |n: Node<'_>| {
+                record(n, None, &func_names, locations)
             });
         }
         for function in shapes::class_functions_mut(class) {
-            let _ = walk::function(function, &mut |node: Node<'_>| {
-                if let Node::Expression(expr) = node {
-                    record_expr(expr, None, locations);
-                }
-                Ok(())
+            let _ = walk::function(function, &mut |n: Node<'_>| {
+                record(n, None, &func_names, locations)
             });
         }
     }

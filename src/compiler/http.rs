@@ -10,7 +10,7 @@
 use super::{Compiled, emit_component, lower};
 use crate::component;
 use perry_codegen::boundary::{AbiType, Export, ExportKind, Flat};
-use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, internal};
+use perry_wit_diagnostics::{Diagnostic, OptionExt as _, Result, bail_internal};
 use pliron::context::Context;
 use wit_parser::{
     Resolve, Type, TypeDefKind, WorldId, WorldItem,
@@ -128,12 +128,12 @@ pub(crate) fn compile(
             WorldItem::Interface { id, .. } => Some((key, *id)),
             _ => None,
         })
-        .ok_or_else(|| internal!("the handler world exports wasi:http/handler"))?;
+        .ok_or_internal("the handler world exports wasi:http/handler")?;
     let name = resolve.name_world_key(key);
     let handle = &resolve.interfaces[interface].functions["handle"];
     let result = handle
         .result
-        .ok_or_else(|| internal!("handle returns a result"))?;
+        .ok_or_internal("handle returns a result")?;
     let exports = vec![Export {
         core_name: format!("{name}#handle"),
         function: "__perryHttpHandle".into(),
@@ -189,7 +189,7 @@ fn internal_error(resolve: &Resolve, result: &Type) -> Result<u32> {
             TypeDefKind::Result(result) if !in_error => {
                 ty = result
                     .err
-                    .ok_or_else(|| internal!("handle's result has an error type"))?;
+                    .ok_or_internal("handle's result has an error type")?;
                 in_error = true;
             }
             TypeDefKind::Variant(variant) => {
@@ -198,7 +198,7 @@ fn internal_error(resolve: &Resolve, result: &Type) -> Result<u32> {
                     .iter()
                     .position(|case| case.name == "internal-error")
                     .map(|index| index as u32)
-                    .ok_or_else(|| internal!("error-code has internal-error"));
+                    .ok_or_internal("error-code has internal-error");
             }
             _ => break,
         }

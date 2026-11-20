@@ -25,14 +25,9 @@ pub fn display_name(name: &str) -> &str {
 }
 
 #[derive(Clone)]
-enum CallerKind {
-    Instantiation { template: String },
-    ImportedCall,
-}
-
-#[derive(Clone)]
 struct CallerOrigin {
-    kind: CallerKind,
+    /// `Some(template)` for generic instantiations; `None` for cross-file imported calls.
+    template: Option<String>,
     call_span: Option<SourceSpan>,
     caller: Option<String>,
 }
@@ -129,10 +124,7 @@ impl<'s> Locations<'s> {
     fn template_name<'a>(&'a self, mut name: &'a str) -> &'a str {
         let mut seen = HashSet::new();
         while seen.insert(name)
-            && let Some(CallerOrigin {
-                kind: CallerKind::Instantiation { template },
-                ..
-            }) = self.origins.get(name)
+            && let Some(template) = self.origins.get(name).and_then(|o| o.template.as_deref())
         {
             name = template;
         }
@@ -154,7 +146,7 @@ impl<'s> Locations<'s> {
         self.origins.insert(
             instance,
             CallerOrigin {
-                kind: CallerKind::Instantiation { template },
+                template: Some(template),
                 call_span,
                 caller,
             },
@@ -170,23 +162,21 @@ impl<'s> Locations<'s> {
         if self.origins.contains_key(&callee) {
             return;
         }
-        let Some(call_span) = self.call_span(call_byte_offset) else {
+        let (Some(call_span), Some(callee_span)) =
+            (self.call_span(call_byte_offset), self.function_span(&callee))
+        else {
             return;
         };
-        let Some(callee_span) = self.function_span(&callee) else {
-            return;
-        };
-        if call_span.file == callee_span.file {
-            return;
+        if call_span.file != callee_span.file {
+            self.origins.insert(
+                callee,
+                CallerOrigin {
+                    template: None,
+                    call_span: Some(call_span),
+                    caller,
+                },
+            );
         }
-        self.origins.insert(
-            callee,
-            CallerOrigin {
-                kind: CallerKind::ImportedCall,
-                call_span: Some(call_span),
-                caller,
-            },
-        );
     }
 
     pub fn caller_notes(&self, function_name: &str) -> Vec<Note> {
@@ -197,13 +187,9 @@ impl<'s> Locations<'s> {
             && let Some(origin) = self.origins.get(current)
         {
             if let Some(span) = &origin.call_span {
-                let message = match &origin.kind {
-                    CallerKind::Instantiation { template } => {
-                        format!("while instantiating '{}'", display_name(template))
-                    }
-                    CallerKind::ImportedCall => {
-                        format!("called from here ('{}')", display_name(current))
-                    }
+                let message = match &origin.template {
+                    Some(template) => format!("while instantiating '{}'", display_name(template)),
+                    None => format!("called from here ('{}')", display_name(current)),
                 };
                 notes.push(Note::spanned(span.clone(), message));
             }
@@ -261,7 +247,7 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
-        Self::attach(error, self.call_span(byte_offset))
+        error.with_fallback_span(self.call_span(byte_offset))
     }
 
     fn span(&self, span: Span) -> Option<SourceSpan> {
@@ -274,11 +260,7 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn annotate(&self, error: Diagnostic, span: Span) -> Diagnostic {
-        Self::attach(error, self.span(span))
-    }
-
-    fn attach(error: Diagnostic, span: Option<SourceSpan>) -> Diagnostic {
-        error.with_fallback_span(span)
+        error.with_fallback_span(self.span(span))
     }
 
     pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {

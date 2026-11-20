@@ -6,8 +6,7 @@ use perry_contract::{
     names::{NamedType, canonical_type, to_camel_case, to_pascal_case},
     types::Input,
 };
-use perry_wit_diagnostics::Result;
-use perry_wit_diagnostics::internal;
+use perry_wit_diagnostics::{OptionExt as _, Result};
 use std::collections::HashMap;
 use wit_parser::{Function, Resolve, TypeId, WorldId};
 
@@ -85,7 +84,7 @@ impl WorldTypes {
         exported: bool,
     ) -> Result<Vec<ResourceHelper>> {
         let resource = source_type(resolve, id)
-            .ok_or_else(|| internal!("resource has no WIT declaration name"))?;
+            .ok_or_internal("resource has no WIT declaration name")?;
         let suffix = to_pascal_case(name);
         let mut helpers = vec![(
             format!("drop{suffix}"),

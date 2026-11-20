@@ -592,18 +592,22 @@ mod tests {
         }
     }
 
+    fn span(file: &str, start_line: u32, start_column: u32, start_byte: usize, end_byte: usize) -> SourceSpan {
+        SourceSpan {
+            file: file.into(),
+            start_line,
+            start_column,
+            end_line: start_line,
+            end_column: start_column + (end_byte - start_byte) as u32,
+            start_byte,
+            end_byte,
+        }
+    }
+
     #[test]
     fn display_matches_js_format_and_renders_spanned_notes() {
         let first = Diagnostic::new(codes::MISSING_REQUIRED_FIELD, "Missing value")
-            .with_span(SourceSpan {
-                file: "src/é.ts".into(),
-                start_line: 2,
-                start_column: 3,
-                end_line: 2,
-                end_column: 8,
-                start_byte: 10,
-                end_byte: 15,
-            })
+            .with_span(span("src/é.ts", 2, 3, 10, 15))
             .with_note("Record fields are mandatory")
             .with_help("Add value: null");
         let second = Diagnostic::new(codes::PARSE_ERROR, "Unexpected token");
@@ -616,28 +620,9 @@ mod tests {
         );
 
         let spanned = Diagnostic::new(codes::CONTRACT_MISMATCH, "type mismatch")
-            .with_span(SourceSpan {
-                file: "src/main.ts".into(),
-                start_line: 4,
-                start_column: 1,
-                end_line: 4,
-                end_column: 12,
-                start_byte: 20,
-                end_byte: 31,
-            })
+            .with_span(span("src/main.ts", 4, 1, 20, 31))
             .with_note("while binding WIT export run")
-            .with_spanned_note(
-                SourceSpan {
-                    file: "src/types.ts".into(),
-                    start_line: 1,
-                    start_column: 10,
-                    end_line: 1,
-                    end_column: 16,
-                    start_byte: 9,
-                    end_byte: 15,
-                },
-                "expected here",
-            )
+            .with_spanned_note(span("src/types.ts", 1, 10, 9, 15), "expected here")
             .with_help("update signature");
         assert_eq!(
             spanned.to_string(),
@@ -647,15 +632,10 @@ mod tests {
 
     #[test]
     fn context_and_boundary_wrapping_follow_error_kind() {
-        let user_span = SourceSpan {
-            file: "src/app.ts".into(),
-            start_line: 3,
-            start_column: 5,
-            end_line: 3,
-            end_column: 10,
-            start_byte: 12,
-            end_byte: 17,
-        };
+        let user_span = span("src/app.ts", 3, 5, 12, 17);
+        fn note_msgs(d: &Diagnostic) -> Vec<&str> {
+            d.notes().iter().map(super::Note::message).collect()
+        }
         let user = Diagnostic::new(codes::POSSIBLY_NULL_RECEIVER, "receiver is possibly null")
             .with_span(user_span.clone())
             .with_internal_context("optimizing MIR")
@@ -669,14 +649,7 @@ mod tests {
             .with_internal_context("compiling module");
         assert_eq!(internal.kind(), ErrorKind::Internal);
         assert_eq!(internal.message(), "invariant violated");
-        assert_eq!(
-            internal
-                .notes()
-                .iter()
-                .map(|note| note.message())
-                .collect::<Vec<_>>(),
-            vec!["compiling module", "lowering function run"]
-        );
+        assert_eq!(note_msgs(&internal), vec!["compiling module", "lowering function run"]);
 
         let wrapped = Diagnostic::new(codes::CONTRACT_MISMATCH, "expected 2 arguments")
             .with_help("pass 2 arguments")
@@ -690,14 +663,7 @@ mod tests {
         assert_eq!(wrapped.message(), "expected 2 arguments");
         assert_eq!(wrapped.span(), Some(&user_span));
         assert_eq!(wrapped.help(), Some("pass 2 arguments"));
-        assert_eq!(
-            wrapped
-                .notes()
-                .iter()
-                .map(|note| note.message())
-                .collect::<Vec<_>>(),
-            vec!["while binding WIT export run"]
-        );
+        assert_eq!(note_msgs(&wrapped), vec!["while binding WIT export run"]);
 
         let wrapped_bug = Diagnostic::new(codes::INTERNAL, "bad carrier")
             .with_internal_context("lowering op")
@@ -708,26 +674,12 @@ mod tests {
             );
         assert_eq!(wrapped_bug.code(), codes::INTERNAL);
         assert_eq!(wrapped_bug.span(), Some(&user_span));
-        assert_eq!(
-            wrapped_bug
-                .notes()
-                .iter()
-                .map(|note| note.message())
-                .collect::<Vec<_>>(),
-            vec!["binding WIT export run", "lowering op"]
-        );
+        assert_eq!(note_msgs(&wrapped_bug), vec!["binding WIT export run", "lowering op"]);
 
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let internal_source = Diagnostic::internal_from("outer phase", &io_err);
         assert_eq!(internal_source.code(), codes::INTERNAL);
         assert_eq!(internal_source.message(), "outer phase");
-        assert_eq!(
-            internal_source
-                .notes()
-                .iter()
-                .map(|note| note.message())
-                .collect::<Vec<_>>(),
-            vec!["no such file"]
-        );
+        assert_eq!(note_msgs(&internal_source), vec!["no such file"]);
     }
 }

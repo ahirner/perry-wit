@@ -227,20 +227,10 @@ impl<'s> FunctionBuilder<'s> {
             result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
         }
         if holes > 0 {
-            let element = element.ok_or_else(|| {
-                diag!(
-                    codes::MISSING_TYPE_ANNOTATION,
-                    "array holes need an element type"
-                )
-            })?;
+            let element = element.ok_or_diag(codes::MISSING_TYPE_ANNOTATION, "array holes need an element type")?;
             result = self.append_holes(ctx, result, element, holes);
         }
-        result.ok_or_else(|| {
-            diag!(
-                codes::MISSING_TYPE_ANNOTATION,
-                "an empty spread array needs an element type"
-            )
-        })
+        result.ok_or_diag(codes::MISSING_TYPE_ANNOTATION, "an empty spread array needs an element type")
     }
 
     /// `prefix` followed by `count` holes.

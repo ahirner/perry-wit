@@ -39,7 +39,7 @@ impl<'s> FunctionBuilder<'s> {
         let output = self.entry_slot(ctx, result);
         let done = self.new_block(ctx, "union_join");
         for (index, (name, payload)) in cases.iter().enumerate() {
-            let payload = payload.ok_or_else(|| internal!("value union without a payload"))?;
+            let payload = payload.ok_or_internal("value union without a payload")?;
             let next = if index + 1 < cases.len() {
                 let expected = self.string(ctx, name);
                 let matches = self.compare(ctx, CompareKind::Eq, tag, expected);
@@ -108,12 +108,7 @@ impl<'s> FunctionBuilder<'s> {
                 result = Some(ty);
             }
         }
-        let result = result.ok_or_else(|| {
-            diag!(
-                codes::TYPE_MISMATCH,
-                "property does not exist on any union member"
-            )
-        })?;
+        let result = result.ok_or_diag(codes::TYPE_MISMATCH, "property does not exist on any union member")?;
         let result = crate::coerce::admitting(ctx, result, perry_mir::Absence::Undefined);
         self.dispatch_value(ctx, value, result, &|b, ctx, payload| {
             let has_field = payload

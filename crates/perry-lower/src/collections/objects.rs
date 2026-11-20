@@ -45,11 +45,7 @@ impl<'s> FunctionBuilder<'s> {
         key: Value,
         rec_handle: TypedHandle<RecordType>,
     ) -> Result<Value> {
-        let uniform_ty = record_uniform_field_type(ctx, rec_handle).ok_or_else(|| {
-            unsupported!(
-                "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>"
-            )
-        })?;
+        let uniform_ty = record_uniform_field_type(ctx, rec_handle).ok_or_unsupported("dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>")?;
         let fields = rec_handle.deref(ctx).fields().to_diag(ctx)?.to_vec();
         let opt_ty = crate::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
         let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
@@ -175,12 +171,7 @@ impl<'s> FunctionBuilder<'s> {
         let entries_val = self.defined(ctx, entries_val)?;
         let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
             .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
-            .ok_or_else(|| {
-                diag!(
-                    codes::TYPE_MISMATCH,
-                    "Object.fromEntries requires an iterable of [key, value] pairs"
-                )
-            })?;
+            .ok_or_diag(codes::TYPE_MISMATCH, "Object.fromEntries requires an iterable of [key, value] pairs")?;
         let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
             None => self.shapes.dict_tuple_type(ctx, k_ty, v_ty)?,
@@ -251,7 +242,7 @@ impl<'s> FunctionBuilder<'s> {
             let fields = rec
                 .deref(ctx)
                 .fields()
-                .map_err(|_| internal!("record without fields"))?
+                .map_internal("record without fields")?
                 .to_vec();
             let mut acc = self.boolean(ctx, false);
             let bool_ty = acc.get_type(ctx);

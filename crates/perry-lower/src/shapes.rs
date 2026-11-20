@@ -2,13 +2,14 @@
 //!
 //! Frontend record identities map to carriers; object construction evaluates fields in source order.
 use crate::{
-    Diagnostic, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported, internal,
+    Diagnostic, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
     missing_type_annotation, unsupported,
 };
-use perry_wit_diagnostics::OptionExt as _;
 use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
-use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
-use pliron::printable::Printable as _;
+use perry_mir::{
+    ArrayType, OptionalType, PlironResultExt as _, PromiseType, RecordKind, RecordType, StringType,
+};
+use perry_wit_diagnostics::{OptionExt as _, ResultExt as _};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::Context,
@@ -34,7 +35,7 @@ fn fresh_record(
     kind: RecordKind,
     fields: Option<Vec<(String, TypeHandle)>>,
 ) -> Result<TypedHandle<RecordType>> {
-    RecordType::fresh(ctx, kind, fields).map_err(|error| internal!("{}", error.disp(ctx)))
+    RecordType::fresh(ctx, kind, fields).to_diag(ctx)
 }
 
 /// The runtime carrier type of a binding, paired with its declared WIT integer domain when
@@ -259,7 +260,7 @@ impl<'h> Shapes<'h> {
             let kind = record.kind();
             let fields = record
                 .fields()
-                .map_err(|_| internal!("opaque input record"))?
+                .map_internal("opaque input record")?
                 .to_vec();
             drop(deref);
             let mapped = fresh_record(ctx, kind, None)?;
@@ -270,7 +271,7 @@ impl<'h> Shapes<'h> {
                 .collect::<Result<_>>()?;
             let name = mapped.deref(ctx).name().clone();
             RecordType::get_kind(ctx, name, Some(fields), kind)
-                .map_err(|e| internal!("{}", e.disp(ctx)))?
+                .to_diag(ctx)?
                 .into()
         } else {
             ty
@@ -462,7 +463,7 @@ impl<'h> Shapes<'h> {
         let record = match reserved {
             Some(record) => {
                 let name = record.deref(ctx).name().clone();
-                RecordType::get(ctx, name, Some(typed)).map_err(|e| internal!("{}", e.disp(ctx)))
+                RecordType::get(ctx, name, Some(typed)).to_diag(ctx)
             }
             None if let Some(record) = self.records.borrow().get(&identity) => Ok(*record),
             None if identity.is_nominal() => fresh_record(ctx, RecordKind::Object, Some(typed)),
@@ -495,7 +496,7 @@ impl<'h> Shapes<'h> {
         kind: RecordKind,
         fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        RecordType::structural(ctx, kind, fields).map_err(|error| internal!("{}", error.disp(ctx)))
+        RecordType::structural(ctx, kind, fields).to_diag(ctx)
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.

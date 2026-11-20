@@ -28,7 +28,7 @@ impl<'s> FunctionBuilder<'s> {
             let signature = self
                 .signatures
                 .get(id)
-                .ok_or_else(|| unsupported!("unknown callback"))?;
+                .ok_or_unsupported("unknown callback")?;
             ensure_unsupported!(
                 !signature.is_async && signature.params.iter().all(|p| !p.source.is_rest),
                 "array callbacks require synchronous functions without rest parameters"

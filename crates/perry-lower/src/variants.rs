@@ -171,12 +171,7 @@ impl<'s> FunctionBuilder<'s> {
             .iter()
             .find(|(name, _)| name == tag)
             .map(|(_, payload)| *payload)
-            .ok_or_else(|| {
-                diag!(
-                    codes::TYPE_MISMATCH,
-                    "literal tag is not a case of this variant"
-                )
-            })?;
+            .ok_or_diag(codes::TYPE_MISMATCH, "literal tag is not a case of this variant")?;
         let argument = names.iter().position(|&n| n == "val");
         let value = match (argument, payload) {
             (Some(index), Some(payload)) => {

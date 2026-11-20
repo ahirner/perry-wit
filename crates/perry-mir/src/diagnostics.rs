@@ -79,17 +79,17 @@ pub fn set_caller_notes(ctx: &mut Context, operation: &dyn Op, notes: &[Note]) {
     if notes.is_empty() {
         return;
     }
-    let mut encoded = String::new();
-    for (index, note) in notes.iter().enumerate() {
-        if index != 0 {
-            encoded.push(NOTE_SEP);
-        }
-        if let Some(span) = note.span() {
-            encoded.push_str(&encode_span(span));
-        }
-        encoded.push(FIELD_SEP);
-        encoded.push_str(note.message());
-    }
+    let encoded: String = notes
+        .iter()
+        .map(|note| {
+            format!(
+                "{}{FIELD_SEP}{}",
+                note.span().map(encode_span).unwrap_or_default(),
+                note.message()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(&NOTE_SEP.to_string());
     operation
         .get_operation()
         .deref_mut(ctx)

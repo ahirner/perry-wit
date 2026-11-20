@@ -1,6 +1,6 @@
 //! Private unit futures for promise observers. The anchor exists while the component
 //! encoder resolves canonical future builtins, and its synthetic export is removed afterwards.
-use perry_wit_diagnostics::{Diagnostic, Result, ensure_diag, internal};
+use perry_wit_diagnostics::{Diagnostic, OptionExt as _, Result, ensure_diag};
 use std::convert::Infallible;
 use wasm_encoder::{
     reencode::{self, Reencode, ReencodeComponent},
@@ -193,7 +193,7 @@ pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
         {
             let mut index = validator
                 .types(0)
-                .ok_or_else(|| internal!("component exports precede the component's types"))?
+                .ok_or_internal("component exports precede the component's types")?
                 .component_function_count();
             for export in section.clone() {
                 let export = export.map_err(wasm_err)?;
@@ -211,7 +211,7 @@ pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
     let mut out = Component::new();
     Hide {
         removed: removed
-            .ok_or_else(|| internal!("component lacks the synthetic promise export"))?,
+            .ok_or_internal("component lacks the synthetic promise export")?,
         depth: 0,
     }
     .parse_component(&mut out, Parser::new(0), component)

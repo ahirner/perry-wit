@@ -299,26 +299,23 @@ pub(crate) fn lower(
     let mut lowered_functions = HashMap::with_capacity(functions.len());
     for function in functions {
         let symbol = function.get_symbol_name(ctx);
+        let wrap_err = |ctx: &Context, err: Diagnostic, phase: &str| {
+            let err = err
+                .with_fallback_span(perry_mir::source_span(ctx, &function))
+                .with_internal_context(format!("lowering {phase} {symbol} to wasm"));
+            perry_mir::attach_caller_notes(ctx, &function, err)
+        };
         let wasm = if let Some(kind) = state.async_functions.iter().position(|f| *f == symbol) {
-            let ramp =
-                async_split::lower(ctx, &mut state, &function, kind as i32).map_err(|err| {
-                    let err = err
-                        .with_fallback_span(perry_mir::source_span(ctx, &function))
-                        .with_internal_context(format!("lowering async function {symbol} to wasm"));
-                    perry_mir::attach_caller_notes(ctx, &function, err)
-                })?;
+            let ramp = async_split::lower(ctx, &mut state, &function, kind as i32)
+                .map_err(|err| wrap_err(ctx, err, "async function"))?;
             if raw && is_exported(ctx, &function) {
                 let wrapper = async_export_wrapper(ctx, &mut state, &function, &symbol)?;
                 state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
             }
             ramp
         } else {
-            let lowered = FunctionLowering::lower(ctx, &mut state, &function).map_err(|err| {
-                let err = err
-                    .with_fallback_span(perry_mir::source_span(ctx, &function))
-                    .with_internal_context(format!("lowering function {symbol} to wasm"));
-                perry_mir::attach_caller_notes(ctx, &function, err)
-            })?;
+            let lowered = FunctionLowering::lower(ctx, &mut state, &function)
+                .map_err(|err| wrap_err(ctx, err, "function"))?;
             state.wasm.append_operation(ctx, lowered.get_operation(), 0);
             if raw && is_exported(ctx, &function) {
                 let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;

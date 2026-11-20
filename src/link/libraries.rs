@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{parsed::ParsedModule, wasm_err};
-use perry_wit_diagnostics::{Result, bail_internal, ensure_internal, internal};
+use perry_wit_diagnostics::{OptionExt as _, Result, bail_internal, ensure_internal, internal};
 use pliron::graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order};
 use wasm_encoder::Instruction;
 use wasm_encoder::reencode::{self, Reencode};
@@ -124,7 +124,7 @@ impl HelperMemory {
         let base = align_to(self.end, library.data_alignment)?;
         self.end = base
             .checked_add(library.data_size)
-            .ok_or_else(|| internal!("helper data exceeds memory32"))?;
+            .ok_or_internal("helper data exceeds memory32")?;
         self.needs_stack |= library.globals.contains(&Global::Stack);
         if library.globals.contains(&Global::Stack) {
             // Guest libraries share the shadow stack and call one another. Each library's
@@ -132,7 +132,7 @@ impl HelperMemory {
             self.stack_bytes = self
                 .stack_bytes
                 .checked_add(library.fixed_stack_bound(reachable).unwrap_or(65_536))
-                .ok_or_else(|| internal!("combined helper stack exceeds memory32"))?;
+                .ok_or_internal("combined helper stack exceeds memory32")?;
         }
         Ok(base)
     }
@@ -146,7 +146,7 @@ impl HelperMemory {
     pub(crate) fn stack_top(&self) -> Result<u32> {
         align_to(self.end, 16)?
             .checked_add(self.stack_bytes)
-            .ok_or_else(|| internal!("helper stack exceeds memory32"))
+            .ok_or_internal("helper stack exceeds memory32")
     }
 }
 
@@ -157,7 +157,7 @@ pub(crate) fn align_to(value: u32, alignment: u32) -> Result<u32> {
     );
     Ok(value
         .checked_add(alignment - 1)
-        .ok_or_else(|| internal!("helper alignment exceeds memory32"))?
+        .ok_or_internal("helper alignment exceeds memory32")?
         & !(alignment - 1))
 }
 
@@ -555,13 +555,13 @@ impl<'a> Library<'a> {
                         Operator::I32Add => {
                             let right = stack
                                 .pop()
-                                .ok_or_else(|| internal!("data offset operand"))?;
+                                .ok_or_internal("data offset operand")?;
                             let left = stack
                                 .pop()
-                                .ok_or_else(|| internal!("data offset operand"))?;
+                                .ok_or_internal("data offset operand")?;
                             stack.push(
                                 left.checked_add(right)
-                                    .ok_or_else(|| internal!("data offset overflow"))?,
+                                    .ok_or_internal("data offset overflow")?,
                             );
                         }
                         Operator::End => (),
@@ -622,11 +622,11 @@ impl<'a> Library<'a> {
                             library.table_size = info.table_size;
                             library.table_alignment = 1u32
                                 .checked_shl(info.table_alignment)
-                                .ok_or_else(|| internal!("helper table alignment overflow"))?;
+                                .ok_or_internal("helper table alignment overflow")?;
                             library.data_size = info.memory_size;
                             library.data_alignment = 1u32
                                 .checked_shl(info.memory_alignment)
-                                .ok_or_else(|| internal!("helper data alignment overflow"))?;
+                                .ok_or_internal("helper data alignment overflow")?;
                         }
                         Dylink0Subsection::Needed(_) => {
                             bail_internal!("internal helpers cannot load dynamic dependencies")
@@ -670,7 +670,7 @@ impl<'a> Library<'a> {
                 .module
                 .bodies
                 .get(function as usize - self.module.imports.len())
-                .ok_or_else(|| internal!("internal helper function reference out of range"))?;
+                .ok_or_internal("internal helper function reference out of range")?;
             for operator in body.get_operators_reader().map_err(wasm_err)? {
                 match operator.map_err(wasm_err)? {
                     Operator::Call { function_index }

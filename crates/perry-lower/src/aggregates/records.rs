@@ -376,11 +376,7 @@ impl<'s> FunctionBuilder<'s> {
                 let source = self.defined(ctx, raw)?;
                 let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                     .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
-                    .ok_or_else(|| {
-                        unsupported!(
-                            "object spread is supported over typed records or JSON values with static keys"
-                        )
-                    })?;
+                    .ok_or_unsupported("object spread is supported over typed records or JSON values with static keys")?;
                 sources.push(RecordSource::Spread(source));
                 assembly.copy(self, ctx, source, record, &[], CopyMode::Spread)?;
             }
@@ -405,7 +401,7 @@ impl<'s> FunctionBuilder<'s> {
         let source = self.defined(ctx, source)?;
         let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
             .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
-            .ok_or_else(|| unsupported!("object rest destructuring requires a typed record"))?;
+            .ok_or_unsupported("object rest destructuring requires a typed record")?;
         let expected = expected
             .map(|ty| present_type(ctx, ty))
             .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))

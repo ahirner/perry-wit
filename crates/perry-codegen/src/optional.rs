@@ -11,8 +11,7 @@ use perry_mir::{
     AggregateViewOp, ErrorKind, IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp,
     ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, absence,
 };
-use perry_wit_diagnostics::Result;
-use perry_wit_diagnostics::{bail_internal, internal};
+use perry_wit_diagnostics::{OptionExt as _, Result, bail_internal};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
@@ -251,9 +250,9 @@ impl FunctionLowering<'_, '_> {
         target: TypeHandle,
     ) -> Result<()> {
         let from = absence(ctx, source)
-            .ok_or_else(|| internal!("optional cast from a non-optional type"))?;
+            .ok_or_internal("optional cast from a non-optional type")?;
         let to = absence(ctx, target)
-            .ok_or_else(|| internal!("optional cast to a non-optional type"))?;
+            .ok_or_internal("optional cast to a non-optional type")?;
         if from == to {
             return Ok(());
         }

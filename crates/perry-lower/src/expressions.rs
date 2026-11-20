@@ -745,7 +745,7 @@ impl<'s> FunctionBuilder<'s> {
             perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx)).is_some(),
             "await of a non-promise value is not supported yet"
         );
-        let op = AwaitOp::new(ctx, promise).map_err(|e| internal!("{}", e.disp(ctx)))?;
+        let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 }

@@ -12,8 +12,9 @@ use perry_mir::{
     ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema,
     PlironResultExt as _, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
-use perry_wit_diagnostics::Result;
-use perry_wit_diagnostics::{codes, diag, ensure_unsupported, internal};
+use perry_wit_diagnostics::{
+    OptionExt as _, Result, ResultExt as _, codes, diag, ensure_unsupported, internal,
+};
 use pliron::{
     builtin::types::FP64Type,
     context::{Context, Ptr},
@@ -50,7 +51,7 @@ impl FunctionLowering<'_, '_> {
         let record = record.deref(ctx);
         let fields = record
             .fields()
-            .map_err(|_| internal!("record without fields"))?;
+            .map_internal("record without fields")?;
         Ok(record_offset(ctx, fields))
     }
 
@@ -183,11 +184,11 @@ impl FunctionLowering<'_, '_> {
         if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
             let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
-                .map_err(|_| internal!("expected a record"))?;
+                .map_internal("expected a record")?;
             let fields: Vec<_> = record
                 .deref(ctx)
                 .fields()
-                .map_err(|_| internal!("record without fields"))?
+                .map_internal("record without fields")?
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect();
@@ -196,7 +197,7 @@ impl FunctionLowering<'_, '_> {
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
                 let base = self
                     .local_frame
-                    .ok_or_else(|| internal!("frame-resident record without frame storage"))?;
+                    .ok_or_internal("frame-resident record without frame storage")?;
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
@@ -647,7 +648,7 @@ impl FunctionLowering<'_, '_> {
 
     pub(crate) fn element_type(ctx: &Context, array: Value) -> Result<TypeHandle> {
         let ty = TypedHandle::<ArrayType>::from_handle(array.get_type(ctx), ctx)
-            .map_err(|_| internal!("expected an array"))?;
+            .map_internal("expected an array")?;
         Ok(ty.deref(ctx).element())
     }
 
@@ -676,7 +677,7 @@ impl FunctionLowering<'_, '_> {
 
     fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
         let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
-            .map_err(|_| internal!("expected a record"))?;
+            .map_internal("expected a record")?;
         Self::record_type_field_slot(ctx, record, field)
     }
 

@@ -27,12 +27,12 @@ impl Canonical<'_> {
         offset: u32,
     ) -> Result<Value> {
         match self {
-            Self::Flat(values) => values.pop().ok_or_else(|| internal!("too few flat values")),
+            Self::Flat(values) => values.pop().ok_or_internal("too few flat values"),
             Self::JoinedInput(values, index) => {
                 let (value, from) = values
                     .get(**index)
                     .copied()
-                    .ok_or_else(|| internal!("too few joined flat values"))?;
+                    .ok_or_internal("too few joined flat values")?;
                 **index += 1;
                 Ok(builder.coerce_flat(ctx, value, from, Flat::for_memory(kind)))
             }
@@ -55,7 +55,7 @@ impl Canonical<'_> {
                 let to = layout
                     .get(values.len())
                     .copied()
-                    .ok_or_else(|| internal!("too many joined flat values"))?;
+                    .ok_or_internal("too many joined flat values")?;
                 values.push(builder.coerce_flat(ctx, value, Flat::for_memory(kind), to));
             }
             Self::JoinedInput(..) => bail_internal!("cannot write an input payload"),

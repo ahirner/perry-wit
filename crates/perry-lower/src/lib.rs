@@ -21,7 +21,6 @@ mod coerce;
 mod collections;
 mod control_flow;
 mod dates;
-mod diagnostics;
 mod expressions;
 mod foreign;
 mod host;
@@ -96,8 +95,15 @@ use program::{Builtin, Signature};
 /// functions, otherwise an entry point awaiting module initialization.
 pub const MAIN: &str = "perry_main";
 
-use diagnostics::missing_type_annotation;
 pub use perry_frontend::hir;
+
+fn missing_type_annotation() -> Diagnostic {
+    Diagnostic::new(
+        codes::MISSING_TYPE_ANNOTATION,
+        "the value type cannot be inferred",
+    )
+    .with_help("Add a concrete type annotation to this binding, parameter, or function return.")
+}
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with
 /// `foreign` symbols by SDK name: WIT types and functions the program imports.

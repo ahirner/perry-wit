@@ -4,19 +4,30 @@ use perry_wit::{
     codes, generate_sdk_files,
 };
 
+fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
+    Program {
+        source: Source {
+            name: Some(name.into()),
+            contents: source.as_bytes().to_vec(),
+        },
+        modules: modules
+            .iter()
+            .map(|(name, contents)| Module {
+                name: (*name).into(),
+                contents: contents.as_bytes().to_vec(),
+            })
+            .collect(),
+    }
+}
+
 #[test]
 fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let helper = "// é🙂\r\nexport function helper(value) { return value; }";
-    let program = Program {
-        source: Source {
-            name: Some("src/main.ts".into()),
-            contents: b"import { helper } from './helper'; export function run():number{return helper(1);}".to_vec(),
-        },
-        modules: vec![Module {
-            name: "src/helper.ts".into(),
-            contents: helper.as_bytes().to_vec(),
-        }],
-    };
+    let mut program = program_with(
+        "src/main.ts",
+        "import { helper } from './helper'; export function run():number{return helper(1);}",
+        &[("src/helper.ts", helper)],
+    );
     let error = api::compile_core(&program).unwrap_err();
     let diagnostic = error.primary();
     assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION);
@@ -29,7 +40,6 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
 
     let helper =
         "// é🙂\r\nexport function helper(value:number):number {\r\n return value ** 1;\r\n}";
-    let mut program = program;
     program.modules[0].contents = helper.as_bytes().to_vec();
     let error = api::compile_core(&program).unwrap_err();
     assert_eq!(error.primary().code(), codes::UNSUPPORTED_OPERATOR);
@@ -56,14 +66,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     }
 
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
-    let parse_error = api::compile_core(&Program {
-        source: Source {
-            name: Some("parse.ts".into()),
-            contents: parse_source.as_bytes().to_vec(),
-        },
-        modules: vec![],
-    })
-    .unwrap_err();
+    let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
     assert_eq!(parse_error.primary().code(), codes::PARSE_ERROR);
     assert_eq!(
         perry_wit::compile_core(parse_source, "parse.ts")
@@ -124,14 +127,8 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         let diag = error.primary();
         let primary = diag.span().expect("primary span in library");
         assert_eq!(primary.file.to_string_lossy(), expected_file, "{diag}");
-        assert!(
-            !diag.to_string().contains("__perry_module_"),
-            "leaked internal module prefix: {diag}"
-        );
-        assert!(
-            !diag.to_string().contains("_instance_"),
-            "leaked internal instance suffix: {diag}"
-        );
+        assert!(!diag.to_string().contains("__perry_module_"), "{diag}");
+        assert!(!diag.to_string().contains("_instance_"), "{diag}");
         let note = diag
             .notes()
             .iter()
@@ -143,71 +140,63 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         assert!(note.message().contains(needle), "{diag}");
     };
 
-    // 1. Imported helper failing during lowering (unsupported op) and MIR narrowing (possibly-null receiver) and codegen (invalid regex).
-    for (lib_source, workflow_source, expected_code) in [
+    for (lib_source, workflow_source, expected_code, needle) in [
         (
             "export function helper(n: number): number {\n  return n ** 2;\n}",
             "import { helper } from './lib';\nexport function run(n: number): number {\n  return helper(n);\n}",
             codes::UNSUPPORTED_OPERATOR,
+            "helper",
         ),
         (
             "export function helper(values: number[] | null): number {\n  return values.length;\n}",
             "import { helper } from './lib';\nexport function run(values: number[] | null): number {\n  return helper(values);\n}",
             codes::POSSIBLY_NULL_RECEIVER,
+            "helper",
         ),
         (
             "export function helper(input: string, n: number): boolean {\n  if (n > 0) return helper(input, n - 1);\n  return /(/.test(input);\n}",
             "import { helper } from './lib';\nexport function run(input: string): boolean {\n  return helper(input, 1);\n}",
             codes::UNSUPPORTED_REGEX,
+            "helper",
+        ),
+        (
+            "export function wrap<T>(value: T): number {\n  return value;\n}",
+            "import { wrap } from './lib';\nexport function run(): number {\n  return wrap('bad');\n}",
+            codes::TYPE_MISMATCH,
+            "while instantiating 'wrap'",
+        ),
+        (
+            "export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}",
+            "import { Box } from './lib';\nexport function run(): number {\n  return new Box('bad').asNumber();\n}",
+            codes::TYPE_MISMATCH,
+            "called from here",
         ),
     ] {
-        let err = api::compile_core(&Program {
-            source: Source {
-                name: Some("src/workflow.ts".into()),
-                contents: workflow_source.as_bytes().to_vec(),
-            },
-            modules: vec![Module {
-                name: "src/lib.ts".into(),
-                contents: lib_source.as_bytes().to_vec(),
-            }],
-        })
+        let err = api::compile_core(&program_with(
+            "src/workflow.ts",
+            workflow_source,
+            &[("src/lib.ts", lib_source)],
+        ))
         .unwrap_err();
         assert_eq!(err.primary().code(), expected_code, "{err}");
-        assert_caller_note(&err, "src/lib.ts", "helper");
+        assert_caller_note(&err, "src/lib.ts", needle);
     }
 
-    // 2. Monomorphized generic function failing inside lib.ts points back to instantiation site in workflow.ts.
-    let generic_err = api::compile_core(&Program {
-        source: Source {
-            name: Some("src/workflow.ts".into()),
-            contents: b"import { wrap } from './lib';\nexport function run(): number {\n  return wrap('bad');\n}".to_vec(),
-        },
-        modules: vec![Module {
-            name: "src/lib.ts".into(),
-            contents: b"export function wrap<T>(value: T): number {\n  return value;\n}".to_vec(),
-        }],
-    })
-    .unwrap_err();
-    assert_eq!(generic_err.primary().code(), codes::TYPE_MISMATCH, "{generic_err}");
-    assert_caller_note(&generic_err, "src/lib.ts", "while instantiating 'wrap'");
-
-    // 3. Nested chain: workflow.ts -> generic mid<T> in mid.ts -> helper leaf in leaf.ts.
-    let chain_err = api::compile_core(&Program {
-        source: Source {
-            name: Some("src/workflow.ts".into()),
-            contents: b"import { mid } from './mid';\nexport function run(): number {\n  return mid(1);\n}".to_vec(),
-        },
-        modules: vec![
-            Module {
-                name: "src/mid.ts".into(),
-                contents: b"import { leaf } from './leaf';\nexport function mid<T>(x: T): number {\n  return leaf(1);\n}".to_vec(),
-            },
-            Module {
-                name: "src/leaf.ts".into(),
-                contents: b"export function leaf(n: number): number {\n  return n ** 2;\n}".to_vec(),
-            },
+    // Nested chain: workflow.ts -> generic mid<T> in mid.ts -> helper leaf in leaf.ts.
+    let chain_err = api::compile_core(&program_with(
+        "src/workflow.ts",
+        "import { mid } from './mid';\nexport function run(): number {\n  return mid(1);\n}",
+        &[
+            (
+                "src/mid.ts",
+                "import { leaf } from './leaf';\nexport function mid<T>(x: T): number {\n  return leaf(1);\n}",
+            ),
+            (
+                "src/leaf.ts",
+                "export function leaf(n: number): number {\n  return n ** 2;\n}",
+            ),
         ],
-    })
+    ))
     .unwrap_err();
     assert_eq!(chain_err.primary().code(), codes::UNSUPPORTED_OPERATOR, "{chain_err}");
     assert_caller_note(&chain_err, "src/leaf.ts", "while instantiating 'mid'");
@@ -218,21 +207,6 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         }),
         "expected intermediate note in src/mid.ts:\n{chain_err}"
     );
-
-    // 4. Imported generic class method failing inside lib.ts points back to call site in workflow.ts.
-    let class_err = api::compile_core(&Program {
-        source: Source {
-            name: Some("src/workflow.ts".into()),
-            contents: b"import { Box } from './lib';\nexport function run(): number {\n  return new Box('bad').asNumber();\n}".to_vec(),
-        },
-        modules: vec![Module {
-            name: "src/lib.ts".into(),
-            contents: b"export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}".to_vec(),
-        }],
-    })
-    .unwrap_err();
-    assert_eq!(class_err.primary().code(), codes::TYPE_MISMATCH, "{class_err}");
-    assert_caller_note(&class_err, "src/lib.ts", "called from here");
 }
 
 /// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
@@ -244,15 +218,8 @@ fn nullable_property_access_requires_narrowing() {
         dependencies: vec![],
     };
     let source = "export function count(values: number[] | null): number {\n  if (values !== null) { const count = values.length; } return values.length;\n}";
-    let program = Program {
-        source: Source {
-            name: Some("main.ts".into()),
-            contents: source.as_bytes().to_vec(),
-        },
-        modules: vec![],
-    };
     let error = api::compile(
-        &program,
+        &program_with("main.ts", source, &[]),
         &wit,
         &Options {
             world: Some("demo".into()),
@@ -349,32 +316,23 @@ fn parse_and_required_field_errors_have_typed_codes() {
     );
 
     // Static missing namespace member reports unknown-export; computed access remains unsupported.
-    let ns_missing = api::compile_core(&Program {
-        source: Source {
-            name: Some("src/main.ts".into()),
-            contents: b"import * as helper from './helper'; export function run(): number { return helper.missing(); }".to_vec(),
-        },
-        modules: vec![Module {
-            name: "src/helper.ts".into(),
-            contents: b"export function present(): number { return 1; }".to_vec(),
-        }],
-    })
+    let helper = &[("src/helper.ts", "export function present(): number { return 1; }")];
+    let ns_missing = api::compile_core(&program_with(
+        "src/main.ts",
+        "import * as helper from './helper'; export function run(): number { return helper.missing(); }",
+        helper,
+    ))
     .unwrap_err();
     assert_eq!(ns_missing.primary().kind(), ErrorKind::Module, "{ns_missing}");
     assert_eq!(ns_missing.primary().code(), codes::UNKNOWN_EXPORT, "{ns_missing}");
     assert!(ns_missing.primary().message().contains("missing"), "{ns_missing}");
     assert!(ns_missing.primary().span().is_some(), "{ns_missing}");
 
-    let ns_computed = api::compile_core(&Program {
-        source: Source {
-            name: Some("src/main.ts".into()),
-            contents: b"import * as helper from './helper'; export function run(k: string): number { return (helper as any)[k](); }".to_vec(),
-        },
-        modules: vec![Module {
-            name: "src/helper.ts".into(),
-            contents: b"export function present(): number { return 1; }".to_vec(),
-        }],
-    })
+    let ns_computed = api::compile_core(&program_with(
+        "src/main.ts",
+        "import * as helper from './helper'; export function run(k: string): number { return (helper as any)[k](); }",
+        helper,
+    ))
     .unwrap_err();
     assert_eq!(ns_computed.primary().kind(), ErrorKind::Unsupported, "{ns_computed}");
     assert_eq!(ns_computed.primary().code(), codes::UNSUPPORTED_CONSTRUCT, "{ns_computed}");
@@ -520,18 +478,8 @@ world app {
         dependencies: vec![],
     };
     let check = |source: &str, code, line, needle: &str| {
-        let err = api::compile(
-            &Program {
-                source: Source {
-                    name: Some("src/main.ts".into()),
-                    contents: source.as_bytes().to_vec(),
-                },
-                modules: vec![],
-            },
-            &wit,
-            &Options::default(),
-        )
-        .unwrap_err();
+        let err = api::compile(&program_with("src/main.ts", source, &[]), &wit, &Options::default())
+            .unwrap_err();
         let diag = err.primary();
         assert_eq!(diag.code(), code, "{diag}");
         assert_eq!(diag.span().unwrap().start_line, line, "{diag}");

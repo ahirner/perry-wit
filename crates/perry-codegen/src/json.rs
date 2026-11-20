@@ -14,8 +14,7 @@ use perry_mir::{
     ArrayType, DateType, ExceptionType, JsonSchema, JsonType, PlironResultExt as _, RecordType,
     StringType,
 };
-use perry_wit_diagnostics::Result;
-use perry_wit_diagnostics::{ensure_internal, internal, unsupported};
+use perry_wit_diagnostics::{OptionExt as _, Result, ResultExt as _, ensure_internal, unsupported};
 use pliron::{
     builtin::types::{FP64Type, IntegerType},
     context::{Context, Ptr},
@@ -93,7 +92,7 @@ impl FunctionLowering<'_, '_> {
                 "optional integer lacks sentinel representation"
             );
             let absence = perry_mir::absence(ctx, ty)
-                .ok_or_else(|| internal!("optional descriptor without absence states"))?;
+                .ok_or_internal("optional descriptor without absence states")?;
             let address = self.layout_descriptor(ctx, inner)?
                 | (u32::from(absence.admits_undefined()) * UNDEFINED_ALLOWED)
                 | (u32::from(absence.admits_null()) * NULL_ALLOWED);
@@ -109,7 +108,7 @@ impl FunctionLowering<'_, '_> {
         let record_fields = record
             .map(|r| r.fields().map(|fields| (r.is_tuple(), fields)))
             .transpose()
-            .map_err(|_| internal!("unresolved native record"))?;
+            .map_internal("unresolved native record")?;
         let count = record_fields.map_or(0, |(_, fields)| fields.len());
         let bytes = if record_fields.is_some() {
             28 + 20 * count

@@ -226,11 +226,7 @@ impl<'s> FunctionBuilder<'s> {
                         inputs
                     };
                     let op =
-                        PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_else(|| {
-                            unsupported!(
-                                "Promise combinators take an array of promises of one type"
-                            )
-                        })?;
+                        PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_unsupported("Promise combinators take an array of promises of one type")?;
                     return Ok(Some(self.append_value(ctx, &op)));
                 }
             }
@@ -486,7 +482,7 @@ impl<'s> FunctionBuilder<'s> {
             let fields = rec
                 .deref(ctx)
                 .fields()
-                .map_err(|_| internal!("record without fields"))?
+                .map_internal("record without fields")?
                 .to_vec();
             let mut field_vals = Vec::with_capacity(fields.len());
             for (field_name, field_ty) in fields {

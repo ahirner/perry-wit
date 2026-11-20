@@ -26,6 +26,7 @@
 //! dispatching operations through `ops` to the topical modules. `async_split` transforms async
 //! functions into state machines, and [boundary] binds them to the canonical ABI.
 use perry_abi::layout::descriptor::{OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL};
+use perry_mir::PlironResultExt as _;
 use perry_wit_diagnostics::{Result, internal};
 use pliron::{
     builtin::ops::ModuleOp,
@@ -34,7 +35,6 @@ use pliron::{
     operation::verify_operation,
     opts::{dce::DCEPass, simplify_cfg::SimplifyCFGPass},
     pass::{AnalysisManager, PMConfig, Pass, Passes},
-    printable::Printable,
 };
 use pliron_wasm::emit::{DataSegment, EmitOptions, Memory, emit_module};
 
@@ -111,7 +111,7 @@ pub fn compile(
     });
     while cleanup
         .run(wasm.get_operation(), ctx, &mut lowered_analyses)
-        .map_err(|error| internal!("{}", error.disp(ctx)))?
+        .to_diag(ctx)?
         .ir_changed
         == pliron::irbuild::IRStatus::Changed
     {}
@@ -119,9 +119,9 @@ pub fn compile(
     for function in analysis::module_functions(ctx, &wasm) {
         pliron_wasm::reducible::make_reducible(ctx, &function);
     }
-    verify_operation(wasm.get_operation(), ctx).map_err(|error| {
-        internal!("{}", error.disp(ctx)).with_internal_context("verifying the lowered wasm module")
-    })?;
+    verify_operation(wasm.get_operation(), ctx)
+        .to_diag(ctx)
+        .map_err(|err| err.with_internal_context("verifying the lowered wasm module"))?;
     let end = DATA_BASE as usize + data.len();
     let options = EmitOptions {
         memory: if memory {
