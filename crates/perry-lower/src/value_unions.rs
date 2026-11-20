@@ -108,7 +108,10 @@ impl<'s> FunctionBuilder<'s> {
                 result = Some(ty);
             }
         }
-        let result = result.ok_or_diag(codes::TYPE_MISMATCH, "property does not exist on any union member")?;
+        let result = result.ok_or_diag(
+            codes::TYPE_MISMATCH,
+            "property does not exist on any union member",
+        )?;
         let result = crate::coerce::admitting(ctx, result, perry_mir::Absence::Undefined);
         self.dispatch_value(ctx, value, result, &|b, ctx, payload| {
             let has_field = payload

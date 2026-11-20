@@ -97,7 +97,11 @@ pub fn set_caller_notes(ctx: &mut Context, operation: &dyn Op, notes: &[Note]) {
         .set(CALLER_NOTES, StringAttr::new(encoded));
 }
 
-pub fn attach_caller_notes(ctx: &Context, operation: &dyn Op, diagnostic: Diagnostic) -> Diagnostic {
+pub fn attach_caller_notes(
+    ctx: &Context,
+    operation: &dyn Op,
+    diagnostic: Diagnostic,
+) -> Diagnostic {
     let operation = operation.get_operation().deref(ctx);
     let Some(value) = operation.attributes.get::<StringAttr>(&CALLER_NOTES) else {
         return diagnostic;

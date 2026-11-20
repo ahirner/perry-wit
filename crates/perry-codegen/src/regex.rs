@@ -160,8 +160,8 @@ impl<const N: usize> DfaTable<N> {
         for (byte, &class) in classes.iter().enumerate() {
             representatives[usize::from(class)] = byte as u8;
         }
-        let stride = u16::try_from((class_count + 2) * 2)
-            .map_internal("Regex state stride overflow")?;
+        let stride =
+            u16::try_from((class_count + 2) * 2).map_internal("Regex state stride overflow")?;
         let mut ids = BTreeMap::new();
         let mut pending = VecDeque::new();
         let mut offsets = [0; N];

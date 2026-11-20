@@ -83,8 +83,8 @@ impl WorldTypes {
         name: &str,
         exported: bool,
     ) -> Result<Vec<ResourceHelper>> {
-        let resource = source_type(resolve, id)
-            .ok_or_internal("resource has no WIT declaration name")?;
+        let resource =
+            source_type(resolve, id).ok_or_internal("resource has no WIT declaration name")?;
         let suffix = to_pascal_case(name);
         let mut helpers = vec![(
             format!("drop{suffix}"),

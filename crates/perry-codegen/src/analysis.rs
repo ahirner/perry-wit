@@ -32,7 +32,9 @@ pub(super) fn module_analyses<'a>(
     analyses: &'a mut AnalysisManager,
 ) -> Result<ModuleAnalyses<'a>> {
     let op = module.get_operation();
-    analyses.get_analysis::<ProgramFacts>(op, ctx).to_diag(ctx)?;
+    analyses
+        .get_analysis::<ProgramFacts>(op, ctx)
+        .to_diag(ctx)?;
     analyses.get_analysis::<LiveValues>(op, ctx).to_diag(ctx)?;
     Ok(ModuleAnalyses {
         facts: analyses

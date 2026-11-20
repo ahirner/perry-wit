@@ -1,7 +1,7 @@
 //! Built-in methods whose arguments feed one intrinsic in source order.
-use perry_wit_diagnostics::OptionExt as _;
 use super::super::*;
 use Argument::{Number, Padding, SearchString};
+use perry_wit_diagnostics::OptionExt as _;
 
 pub(super) enum Argument {
     Number(f64),

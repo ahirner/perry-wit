@@ -210,8 +210,7 @@ pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
     }
     let mut out = Component::new();
     Hide {
-        removed: removed
-            .ok_or_internal("component lacks the synthetic promise export")?,
+        removed: removed.ok_or_internal("component lacks the synthetic promise export")?,
         depth: 0,
     }
     .parse_component(&mut out, Parser::new(0), component)

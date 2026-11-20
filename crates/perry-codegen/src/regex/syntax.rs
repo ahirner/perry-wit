@@ -132,8 +132,10 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
                                 }
                                 hex.push(digit);
                             }
-                            u32::from_str_radix(&hex, 16)
-                                .map_diag(codes::UNSUPPORTED_REGEX, "Invalid regex Unicode escape")?
+                            u32::from_str_radix(&hex, 16).map_diag(
+                                codes::UNSUPPORTED_REGEX,
+                                "Invalid regex Unicode escape",
+                            )?
                         } else {
                             read_hex(&mut chars, 4)?
                         };

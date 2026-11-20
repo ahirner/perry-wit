@@ -49,9 +49,7 @@ impl FunctionLowering<'_, '_> {
     /// Byte size of `record`: its header and every field slot.
     pub(crate) fn record_size(ctx: &Context, record: TypedHandle<RecordType>) -> Result<u32> {
         let record = record.deref(ctx);
-        let fields = record
-            .fields()
-            .map_internal("record without fields")?;
+        let fields = record.fields().map_internal("record without fields")?;
         Ok(record_offset(ctx, fields))
     }
 

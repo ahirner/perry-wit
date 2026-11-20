@@ -225,8 +225,9 @@ impl<'s> FunctionBuilder<'s> {
                     } else {
                         inputs
                     };
-                    let op =
-                        PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_unsupported("Promise combinators take an array of promises of one type")?;
+                    let op = PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_unsupported(
+                        "Promise combinators take an array of promises of one type",
+                    )?;
                     return Ok(Some(self.append_value(ctx, &op)));
                 }
             }
@@ -388,8 +389,10 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         if let Some(rest) = rest {
-            let array = TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx)
-                .map_diag(codes::TYPE_MISMATCH, "rest parameter must have an array type")?;
+            let array = TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx).map_diag(
+                codes::TYPE_MISMATCH,
+                "rest parameter must have an array type",
+            )?;
             let element = array.deref(ctx).element();
             let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
             for (offset, arg) in args.iter().skip(fixed.len()).enumerate() {

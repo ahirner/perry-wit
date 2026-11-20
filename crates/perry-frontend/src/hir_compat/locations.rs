@@ -162,9 +162,10 @@ impl<'s> Locations<'s> {
         if self.origins.contains_key(&callee) {
             return;
         }
-        let (Some(call_span), Some(callee_span)) =
-            (self.call_span(call_byte_offset), self.function_span(&callee))
-        else {
+        let (Some(call_span), Some(callee_span)) = (
+            self.call_span(call_byte_offset),
+            self.function_span(&callee),
+        ) else {
             return;
         };
         if call_span.file != callee_span.file {

@@ -126,9 +126,7 @@ impl FunctionLowering<'_, '_> {
         let mut physical = physical.into_iter();
         for value in logical {
             let parts = carriers(ctx, value.get_type(ctx))?.try_map(|ty| {
-                let carrier = physical
-                    .next()
-                    .ok_or_internal("missing value carrier")?;
+                let carrier = physical.next().ok_or_internal("missing value carrier")?;
                 ensure_internal!(carrier.get_type(ctx) == ty, "value carrier type mismatch");
                 Ok(carrier)
             })?;

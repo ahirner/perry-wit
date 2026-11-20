@@ -249,10 +249,8 @@ impl FunctionLowering<'_, '_> {
         source: TypeHandle,
         target: TypeHandle,
     ) -> Result<()> {
-        let from = absence(ctx, source)
-            .ok_or_internal("optional cast from a non-optional type")?;
-        let to = absence(ctx, target)
-            .ok_or_internal("optional cast to a non-optional type")?;
+        let from = absence(ctx, source).ok_or_internal("optional cast from a non-optional type")?;
+        let to = absence(ctx, target).ok_or_internal("optional cast to a non-optional type")?;
         if from == to {
             return Ok(());
         }

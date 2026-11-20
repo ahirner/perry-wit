@@ -123,22 +123,25 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
 
     // Errors inside imported helpers, monomorphized generics, and imported classes
     // attach spanned notes pointing back to the caller in workflow.ts across lowering, MIR, and codegen.
-    let assert_caller_note = |error: &perry_wit::CompileError, expected_file: &str, needle: &str| {
-        let diag = error.primary();
-        let primary = diag.span().expect("primary span in library");
-        assert_eq!(primary.file.to_string_lossy(), expected_file, "{diag}");
-        assert!(!diag.to_string().contains("__perry_module_"), "{diag}");
-        assert!(!diag.to_string().contains("_instance_"), "{diag}");
-        let note = diag
-            .notes()
-            .iter()
-            .find(|note| {
-                note.span()
-                    .is_some_and(|span| span.file.to_string_lossy() == "src/workflow.ts")
-            })
-            .unwrap_or_else(|| panic!("expected spanned note pointing to src/workflow.ts in:\n{diag}"));
-        assert!(note.message().contains(needle), "{diag}");
-    };
+    let assert_caller_note =
+        |error: &perry_wit::CompileError, expected_file: &str, needle: &str| {
+            let diag = error.primary();
+            let primary = diag.span().expect("primary span in library");
+            assert_eq!(primary.file.to_string_lossy(), expected_file, "{diag}");
+            assert!(!diag.to_string().contains("__perry_module_"), "{diag}");
+            assert!(!diag.to_string().contains("_instance_"), "{diag}");
+            let note = diag
+                .notes()
+                .iter()
+                .find(|note| {
+                    note.span()
+                        .is_some_and(|span| span.file.to_string_lossy() == "src/workflow.ts")
+                })
+                .unwrap_or_else(|| {
+                    panic!("expected spanned note pointing to src/workflow.ts in:\n{diag}")
+                });
+            assert!(note.message().contains(needle), "{diag}");
+        };
 
     for (lib_source, workflow_source, expected_code, needle) in [
         (
@@ -198,7 +201,11 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         ],
     ))
     .unwrap_err();
-    assert_eq!(chain_err.primary().code(), codes::UNSUPPORTED_OPERATOR, "{chain_err}");
+    assert_eq!(
+        chain_err.primary().code(),
+        codes::UNSUPPORTED_OPERATOR,
+        "{chain_err}"
+    );
     assert_caller_note(&chain_err, "src/leaf.ts", "while instantiating 'mid'");
     assert!(
         chain_err.primary().notes().iter().any(|note| {
@@ -284,24 +291,45 @@ fn parse_and_required_field_errors_have_typed_codes() {
         "call.ts",
     )
     .unwrap_err();
-    assert_eq!(call_err.primary().code(), codes::TYPE_MISMATCH, "{call_err}");
-    assert!(call_err.to_string().contains("argument 2 of 'check'"), "{call_err}");
+    assert_eq!(
+        call_err.primary().code(),
+        codes::TYPE_MISMATCH,
+        "{call_err}"
+    );
+    assert!(
+        call_err.to_string().contains("argument 2 of 'check'"),
+        "{call_err}"
+    );
 
     let record_err = perry_wit::compile_core(
         "interface Pair { a: number; b: number }\nexport function run(): number { const p: Pair = { a: 1, b: 'x' }; return p.a; }",
         "record.ts",
     )
     .unwrap_err();
-    assert_eq!(record_err.primary().code(), codes::TYPE_MISMATCH, "{record_err}");
-    assert!(record_err.to_string().contains("record field 'b'"), "{record_err}");
+    assert_eq!(
+        record_err.primary().code(),
+        codes::TYPE_MISMATCH,
+        "{record_err}"
+    );
+    assert!(
+        record_err.to_string().contains("record field 'b'"),
+        "{record_err}"
+    );
 
     let shape_err = perry_wit::compile_core(
         "interface Bad { count: WeakMap<object, number> }\nexport function run(x: Bad): number { return 0; }",
         "shape.ts",
     )
     .unwrap_err();
-    assert_eq!(shape_err.primary().code(), codes::UNSUPPORTED_TYPE, "{shape_err}");
-    assert!(shape_err.to_string().contains("field 'count'"), "{shape_err}");
+    assert_eq!(
+        shape_err.primary().code(),
+        codes::UNSUPPORTED_TYPE,
+        "{shape_err}"
+    );
+    assert!(
+        shape_err.to_string().contains("field 'count'"),
+        "{shape_err}"
+    );
 
     // Invalid regex syntax preserves the builder's underlying cause as a note.
     let regex_err = perry_wit::compile_core(
@@ -309,23 +337,45 @@ fn parse_and_required_field_errors_have_typed_codes() {
         "regex.ts",
     )
     .unwrap_err();
-    assert_eq!(regex_err.primary().code(), codes::UNSUPPORTED_REGEX, "{regex_err}");
+    assert_eq!(
+        regex_err.primary().code(),
+        codes::UNSUPPORTED_REGEX,
+        "{regex_err}"
+    );
     assert!(
-        regex_err.primary().notes().iter().any(|note| note.message().contains("unclosed group")),
+        regex_err
+            .primary()
+            .notes()
+            .iter()
+            .any(|note| note.message().contains("unclosed group")),
         "{regex_err}"
     );
 
     // Static missing namespace member reports unknown-export; computed access remains unsupported.
-    let helper = &[("src/helper.ts", "export function present(): number { return 1; }")];
+    let helper = &[(
+        "src/helper.ts",
+        "export function present(): number { return 1; }",
+    )];
     let ns_missing = api::compile_core(&program_with(
         "src/main.ts",
         "import * as helper from './helper'; export function run(): number { return helper.missing(); }",
         helper,
     ))
     .unwrap_err();
-    assert_eq!(ns_missing.primary().kind(), ErrorKind::Module, "{ns_missing}");
-    assert_eq!(ns_missing.primary().code(), codes::UNKNOWN_EXPORT, "{ns_missing}");
-    assert!(ns_missing.primary().message().contains("missing"), "{ns_missing}");
+    assert_eq!(
+        ns_missing.primary().kind(),
+        ErrorKind::Module,
+        "{ns_missing}"
+    );
+    assert_eq!(
+        ns_missing.primary().code(),
+        codes::UNKNOWN_EXPORT,
+        "{ns_missing}"
+    );
+    assert!(
+        ns_missing.primary().message().contains("missing"),
+        "{ns_missing}"
+    );
     assert!(ns_missing.primary().span().is_some(), "{ns_missing}");
 
     let ns_computed = api::compile_core(&program_with(
@@ -334,8 +384,16 @@ fn parse_and_required_field_errors_have_typed_codes() {
         helper,
     ))
     .unwrap_err();
-    assert_eq!(ns_computed.primary().kind(), ErrorKind::Unsupported, "{ns_computed}");
-    assert_eq!(ns_computed.primary().code(), codes::UNSUPPORTED_CONSTRUCT, "{ns_computed}");
+    assert_eq!(
+        ns_computed.primary().kind(),
+        ErrorKind::Unsupported,
+        "{ns_computed}"
+    );
+    assert_eq!(
+        ns_computed.primary().code(),
+        codes::UNSUPPORTED_CONSTRUCT,
+        "{ns_computed}"
+    );
 }
 
 /// Unsupported source forms are rejected with their exact message.
@@ -478,8 +536,12 @@ world app {
         dependencies: vec![],
     };
     let check = |source: &str, code, line, needle: &str| {
-        let err = api::compile(&program_with("src/main.ts", source, &[]), &wit, &Options::default())
-            .unwrap_err();
+        let err = api::compile(
+            &program_with("src/main.ts", source, &[]),
+            &wit,
+            &Options::default(),
+        )
+        .unwrap_err();
         let diag = err.primary();
         assert_eq!(diag.code(), code, "{diag}");
         assert_eq!(diag.span().unwrap().start_line, line, "{diag}");

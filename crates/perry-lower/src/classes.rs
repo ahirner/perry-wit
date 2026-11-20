@@ -483,8 +483,8 @@ impl<'s> FunctionBuilder<'s> {
                 )
             };
             let value = if param.is_rest {
-                let rest_ty =
-                    param_ty.ok_or_diag(codes::TYPE_MISMATCH, "rest parameter must have array type")?;
+                let rest_ty = param_ty
+                    .ok_or_diag(codes::TYPE_MISMATCH, "rest parameter must have array type")?;
                 let element = TypedHandle::<ArrayType>::from_handle(rest_ty, ctx)
                     .map_diag(codes::TYPE_MISMATCH, "rest parameter must have array type")?
                     .deref(ctx)

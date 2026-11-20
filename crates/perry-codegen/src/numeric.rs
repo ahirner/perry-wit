@@ -9,7 +9,9 @@ use crate::{
 };
 use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, U64, UNDEFINED, UNSIGNED};
 use perry_mir::{BinaryKind, CompareKind, NumericConstant, NumericType};
-use perry_wit_diagnostics::{OptionExt as _, Result, bail_diag, bail_internal, codes, ensure_internal};
+use perry_wit_diagnostics::{
+    OptionExt as _, Result, bail_diag, bail_internal, codes, ensure_internal,
+};
 use pliron::{
     builtin::{
         attributes::IntegerAttr,

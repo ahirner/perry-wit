@@ -77,7 +77,14 @@ fn compile_typescript_impl(
 ) -> Result<Compiled> {
     let (resolve, package) = component::wit::resolve_wit_inner(&options.wit_dir)?;
     let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    compile_world(source, file_name, &resolve, world, !options.core_only, false)
+    compile_world(
+        source,
+        file_name,
+        &resolve,
+        world,
+        !options.core_only,
+        false,
+    )
 }
 
 fn compile_world(
@@ -305,8 +312,7 @@ pub fn compile_for_world_with_memory_checks(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
 ) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_world(source, file_name, resolve, world, true, true)
-        .map_err(crate::CompileError::from)
+    compile_world(source, file_name, resolve, world, true, true).map_err(crate::CompileError::from)
 }
 
 /// Build a linked core module exporting every exported TypeScript function with its raw core

@@ -39,7 +39,10 @@ impl<'s> FunctionBuilder<'s> {
         {
             self.class_getter_call(ctx, object, owner_class, type_args, getter)?
         } else {
-            let get = FieldGetOp::new(ctx, object, property.to_string()).map_diag(codes::TYPE_MISMATCH, "property update needs a declared numeric field")?;
+            let get = FieldGetOp::new(ctx, object, property.to_string()).map_diag(
+                codes::TYPE_MISMATCH,
+                "property update needs a declared numeric field",
+            )?;
             self.append_value(ctx, &get)
         };
         let field_type = previous.get_type(ctx);

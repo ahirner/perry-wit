@@ -170,7 +170,9 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self
                 .call(ctx, callee, args, *byte_offset)
-                .and_then(|value| value.ok_or_diag(codes::TYPE_MISMATCH, "a void call has no value"))
+                .and_then(|value| {
+                    value.ok_or_diag(codes::TYPE_MISMATCH, "a void call has no value")
+                })
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,

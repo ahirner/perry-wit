@@ -131,9 +131,7 @@ pub(crate) fn compile(
         .ok_or_internal("the handler world exports wasi:http/handler")?;
     let name = resolve.name_world_key(key);
     let handle = &resolve.interfaces[interface].functions["handle"];
-    let result = handle
-        .result
-        .ok_or_internal("handle returns a result")?;
+    let result = handle.result.ok_or_internal("handle returns a result")?;
     let exports = vec![Export {
         core_name: format!("{name}#handle"),
         function: "__perryHttpHandle".into(),

@@ -553,12 +553,8 @@ impl<'a> Library<'a> {
                         }
                         Operator::I32Const { value } if value >= 0 => stack.push(value as u32),
                         Operator::I32Add => {
-                            let right = stack
-                                .pop()
-                                .ok_or_internal("data offset operand")?;
-                            let left = stack
-                                .pop()
-                                .ok_or_internal("data offset operand")?;
+                            let right = stack.pop().ok_or_internal("data offset operand")?;
+                            let left = stack.pop().ok_or_internal("data offset operand")?;
                             stack.push(
                                 left.checked_add(right)
                                     .ok_or_internal("data offset overflow")?,

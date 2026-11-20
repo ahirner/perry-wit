@@ -173,7 +173,9 @@ impl Instances<'_> {
             hir_compat::display_name(&function.name)
         );
         let id = self.next_function;
-        self.next_function = id.checked_add(1).ok_or_internal("function identifier limit")?;
+        self.next_function = id
+            .checked_add(1)
+            .ok_or_internal("function identifier limit")?;
         self.keys.insert(key, id);
         let bindings = function
             .type_params
@@ -245,7 +247,9 @@ impl Instances<'_> {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let next = self.next_local;
-                self.next_local = next.checked_add(1).ok_or_internal("local identifier limit")?;
+                self.next_local = next
+                    .checked_add(1)
+                    .ok_or_internal("local identifier limit")?;
                 *entry.insert(next)
             }
         };

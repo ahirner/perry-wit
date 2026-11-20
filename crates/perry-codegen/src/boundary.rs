@@ -528,7 +528,10 @@ impl FunctionLowering<'_, '_> {
             return Ok(bytes);
         }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_diag(codes::CONTRACT_MISMATCH, "WIT list needs a TypeScript array")?
+            .map_diag(
+                codes::CONTRACT_MISMATCH,
+                "WIT list needs a TypeScript array",
+            )?
             .deref(ctx)
             .element();
         let lift_mir = scalar_mir_type(ctx, element_mir);
@@ -553,8 +556,10 @@ impl FunctionLowering<'_, '_> {
     }
 
     fn record_type(&self, ctx: &Context, mir_ty: TypeHandle) -> Result<TypedHandle<RecordType>> {
-        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx)
-            .map_diag(codes::CONTRACT_MISMATCH, "WIT record needs a TypeScript object type")?;
+        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx).map_diag(
+            codes::CONTRACT_MISMATCH,
+            "WIT record needs a TypeScript object type",
+        )?;
         ensure_diag!(
             matches!(
                 record.deref(ctx).kind(),
@@ -704,7 +709,10 @@ impl FunctionLowering<'_, '_> {
             }
         }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_diag(codes::CONTRACT_MISMATCH, "WIT list needs a TypeScript array")?
+            .map_diag(
+                codes::CONTRACT_MISMATCH,
+                "WIT list needs a TypeScript array",
+            )?
             .deref(ctx)
             .element();
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);

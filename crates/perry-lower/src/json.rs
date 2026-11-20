@@ -202,7 +202,9 @@ impl<'s> FunctionBuilder<'s> {
                 if matches!(kind(ctx, source), Ok(Kind::Exception)) {
                     continue;
                 }
-                let source = self.json_operand(ctx, source)?.ok_or_unsupported("object spread is supported over typed records or JSON values with static keys")?;
+                let source = self.json_operand(ctx, source)?.ok_or_unsupported(
+                    "object spread is supported over typed records or JSON values with static keys",
+                )?;
                 self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
             }
         }

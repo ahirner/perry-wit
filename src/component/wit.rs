@@ -192,8 +192,12 @@ pub(crate) fn resolve_wit_inner(wit_dir: &Path) -> Result<(Resolve, PackageId)> 
         )));
     }
     let mut resolve = Resolve::new();
-    let main = parse_dir(wit_dir)
-        .map_err(|err| wrap_wit(err, format!("loading WIT package from {}", wit_dir.display())))?;
+    let main = parse_dir(wit_dir).map_err(|err| {
+        wrap_wit(
+            err,
+            format!("loading WIT package from {}", wit_dir.display()),
+        )
+    })?;
     let deps = read_dependencies(&wit_dir.join("deps"), &mut resolve)?;
     let package = resolve_with(main, &mut resolve, deps, true).map_err(|err| {
         wrap_wit(

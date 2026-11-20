@@ -592,7 +592,13 @@ mod tests {
         }
     }
 
-    fn span(file: &str, start_line: u32, start_column: u32, start_byte: usize, end_byte: usize) -> SourceSpan {
+    fn span(
+        file: &str,
+        start_line: u32,
+        start_column: u32,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> SourceSpan {
         SourceSpan {
             file: file.into(),
             start_line,
@@ -649,7 +655,10 @@ mod tests {
             .with_internal_context("compiling module");
         assert_eq!(internal.kind(), ErrorKind::Internal);
         assert_eq!(internal.message(), "invariant violated");
-        assert_eq!(note_msgs(&internal), vec!["compiling module", "lowering function run"]);
+        assert_eq!(
+            note_msgs(&internal),
+            vec!["compiling module", "lowering function run"]
+        );
 
         let wrapped = Diagnostic::new(codes::CONTRACT_MISMATCH, "expected 2 arguments")
             .with_help("pass 2 arguments")
@@ -674,7 +683,10 @@ mod tests {
             );
         assert_eq!(wrapped_bug.code(), codes::INTERNAL);
         assert_eq!(wrapped_bug.span(), Some(&user_span));
-        assert_eq!(note_msgs(&wrapped_bug), vec!["binding WIT export run", "lowering op"]);
+        assert_eq!(
+            note_msgs(&wrapped_bug),
+            vec!["binding WIT export run", "lowering op"]
+        );
 
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let internal_source = Diagnostic::internal_from("outer phase", &io_err);

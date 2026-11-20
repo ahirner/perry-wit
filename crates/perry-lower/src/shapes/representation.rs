@@ -331,7 +331,10 @@ impl Shapes<'_> {
                     _ => invalid = true,
                 }
             }
-            let tag = tag.ok_or_diag(codes::UNSUPPORTED_TYPE, "union members need a literal `tag`")?;
+            let tag = tag.ok_or_diag(
+                codes::UNSUPPORTED_TYPE,
+                "union members need a literal `tag`",
+            )?;
             ensure_diag!(
                 !invalid,
                 codes::UNSUPPORTED_TYPE,

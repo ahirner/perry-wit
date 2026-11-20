@@ -44,13 +44,21 @@ pub fn generate_sdk_files(
 }
 
 fn create_dir(path: &Path, what: &str) -> Result<()> {
-    fs::create_dir_all(path)
-        .map_err(|err| Diagnostic::io(format!("Failed to create {what} at {}", path.display()), &err))
+    fs::create_dir_all(path).map_err(|err| {
+        Diagnostic::io(
+            format!("Failed to create {what} at {}", path.display()),
+            &err,
+        )
+    })
 }
 
 fn write_file(path: &Path, contents: impl AsRef<[u8]>, what: &str) -> Result<()> {
-    fs::write(path, contents)
-        .map_err(|err| Diagnostic::io(format!("Failed to write {what} at {}", path.display()), &err))
+    fs::write(path, contents).map_err(|err| {
+        Diagnostic::io(
+            format!("Failed to write {what} at {}", path.display()),
+            &err,
+        )
+    })
 }
 
 fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
