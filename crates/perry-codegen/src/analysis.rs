@@ -118,6 +118,18 @@ pub(crate) fn function_values(ctx: &Context, function: &FuncOp) -> Vec<Value> {
     values
 }
 
+pub(crate) fn function_type(
+    ctx: &Context,
+    function: &FuncOp,
+) -> Result<pliron::r#type::TypedHandle<pliron::builtin::types::FunctionType>> {
+    use perry_mir::PlironResultExt as _;
+    pliron::r#type::TypedHandle::<pliron::builtin::types::FunctionType>::from_handle(
+        pliron::r#type::Typed::get_type(function, ctx),
+        ctx,
+    )
+    .to_diag(ctx)
+}
+
 pub(crate) fn function_signature(
     ctx: &Context,
     function: &FuncOp,
@@ -126,11 +138,7 @@ pub(crate) fn function_signature(
     Vec<pliron::r#type::TypeHandle>,
 )> {
     use pliron::builtin::type_interfaces::FunctionTypeInterface;
-    let ty = pliron::r#type::TypedHandle::<pliron::builtin::types::FunctionType>::from_handle(
-        pliron::r#type::Typed::get_type(function, ctx),
-        ctx,
-    )
-    .map_err(|_| internal!("function type"))?;
+    let ty = function_type(ctx, function)?;
     let ty = ty.deref(ctx);
     Ok((ty.arg_types(), ty.res_types()))
 }

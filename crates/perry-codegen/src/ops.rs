@@ -21,7 +21,7 @@ use pliron::{
         attributes::{FPDoubleAttr, IntegerAttr},
         op_interfaces::BranchOpInterface,
         ops::ConstantOp,
-        types::FP64Type,
+        types::{FP64Type, Signedness},
     },
     context::{Context, Ptr},
     op::Op,
@@ -138,11 +138,12 @@ impl FunctionLowering<'_, '_> {
                 drop(attr);
                 self.f64_const(ctx, value)
             } else if let Some(int) = attr.downcast_ref::<IntegerAttr>() {
-                let ty = int.get_type().into();
+                let (width, signed) = {
+                    let ty = int.get_type().deref(ctx);
+                    (ty.width(), ty.signedness() != Signedness::Unsigned)
+                };
                 let bits: APInt = int.clone().into();
                 drop(attr);
-                let (width, signed) = crate::numeric::integer(ctx, ty)
-                    .ok_or_else(|| internal!("integer attribute type"))?;
                 if width == 64 {
                     self.i64_const(ctx, bits.to_u64())
                 } else {
@@ -308,9 +309,9 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if Operation::get_op::<MirReturnOp>(op, ctx).is_some() {
-            if self.frame.is_some() {
+            if let Some(frame) = self.frame.as_deref().map(|f| f.frame) {
                 let value = op.deref(ctx).operands().next();
-                return self.settle_return(ctx, value);
+                return self.settle_return(ctx, frame, value);
             }
             let mut values = self.flatten_operands(ctx, op, 0)?;
             if self.throws {

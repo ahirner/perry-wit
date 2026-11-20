@@ -141,40 +141,41 @@ fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGro
 /// Resolve only supplied package contents and the compiler's pinned standard packages.
 pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, PackageId)> {
     let mut resolve = Resolve::new();
+    let mut decode_encoded = |bytes: &[u8]| -> Result<PackageId> {
+        let decoded = wit_parser::decoding::decode(bytes)
+            .map_err(|e| Diagnostic::from(WitError::InvalidPackageEncoding(Some(e.as_ref()))))?;
+        let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) = decoded else {
+            return Err(Diagnostic::from(WitError::InvalidPackageEncoding(None)));
+        };
+        let remap = resolve
+            .merge(decoded)
+            .map_err(|e| wit_diagnostic(crate::codes::WIT_DEPENDENCY, e.as_ref()))?;
+        Ok(remap.packages[package.index()])
+    };
+    let (main, application) = match &input.application {
+        crate::api::Package::Sources(sources) => (source_package(sources)?, None),
+        crate::api::Package::Encoded(bytes) => {
+            let package = decode_encoded(bytes)?;
+            // push_groups needs a main package; the marker only anchors explicit dependencies.
+            let marker = UnresolvedPackageGroup::parse(
+                "dependencies.wit",
+                "package perry:compiler-dependencies;",
+            )
+            .map_err(|(map, error)| {
+                internal!("parsing dependency anchor WIT: {}", error.render(&map))
+            })?;
+            (marker, Some(package))
+        }
+    };
     let mut groups = Vec::new();
-    let mut application = None;
-    for (index, package) in std::iter::once(&input.application)
-        .chain(&input.dependencies)
-        .enumerate()
-    {
+    for package in &input.dependencies {
         match package {
             crate::api::Package::Sources(sources) => groups.push(source_package(sources)?),
             crate::api::Package::Encoded(bytes) => {
-                let decoded = wit_parser::decoding::decode(bytes).map_err(|e| {
-                    Diagnostic::from(WitError::InvalidPackageEncoding(Some(e.as_ref())))
-                })?;
-                let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) = decoded
-                else {
-                    return Err(Diagnostic::from(WitError::InvalidPackageEncoding(None)));
-                };
-                let remap = resolve
-                    .merge(decoded)
-                    .map_err(|e| wit_diagnostic(crate::codes::WIT_DEPENDENCY, e.as_ref()))?;
-                if index == 0 {
-                    application = Some(remap.packages[package.index()]);
-                }
+                decode_encoded(bytes)?;
             }
         }
     }
-    let main = if application.is_none() {
-        groups.remove(0)
-    } else {
-        // push_groups needs a main package; the marker only anchors explicit dependencies.
-        UnresolvedPackageGroup::parse("dependencies.wit", "package perry:compiler-dependencies;")
-            .map_err(|(map, error)| {
-                internal!("parsing dependency anchor WIT: {}", error.render(&map))
-            })?
-    };
     let package = resolve_with(main, &mut resolve, groups, false)?;
     Ok((resolve, application.unwrap_or(package)))
 }

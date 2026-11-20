@@ -11,13 +11,12 @@ use crate::{
     runtime::Runtime,
 };
 use perry_mir::{PlironResultExt as _, is_exported};
-use perry_wit_diagnostics::{
-    Diagnostic, Result, bail_internal, codes, diag, ensure_unsupported, internal,
-};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, codes, diag, ensure_unsupported};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
+        type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
     context::{Context, Ptr},
@@ -27,7 +26,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
@@ -297,34 +296,45 @@ pub(crate) fn lower(
     for function in &functions {
         state.leased.extend(lease::leased(ctx, function, &live));
     }
-    for function in &functions {
+    let mut lowered_functions = HashMap::with_capacity(functions.len());
+    for function in functions {
         let symbol = function.get_symbol_name(ctx);
-        if let Some(kind) = state.async_functions.iter().position(|f| *f == symbol) {
-            async_split::lower(ctx, &mut state, function, kind as i32).map_err(|err| {
-                err.with_fallback_span(perry_mir::source_span(ctx, function))
-                    .with_internal_context(format!("lowering async function {symbol} to wasm"))
-            })?;
-            if raw && is_exported(ctx, function) {
-                let wrapper = async_export_wrapper(ctx, &mut state, function, &symbol)?;
+        let wasm = if let Some(kind) = state.async_functions.iter().position(|f| *f == symbol) {
+            let ramp =
+                async_split::lower(ctx, &mut state, &function, kind as i32).map_err(|err| {
+                    err.with_fallback_span(perry_mir::source_span(ctx, &function))
+                        .with_internal_context(format!("lowering async function {symbol} to wasm"))
+                })?;
+            if raw && is_exported(ctx, &function) {
+                let wrapper = async_export_wrapper(ctx, &mut state, &function, &symbol)?;
                 state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
             }
-            continue;
-        }
-        let lowered = FunctionLowering::lower(ctx, &mut state, function).map_err(|err| {
-            err.with_fallback_span(perry_mir::source_span(ctx, function))
-                .with_internal_context(format!("lowering function {symbol} to wasm"))
-        })?;
-        state.wasm.append_operation(ctx, lowered.get_operation(), 0);
-        if raw && is_exported(ctx, function) {
-            let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
-            append_export(ctx, &mut state, &wrapper, &lowered, symbol.as_ref());
-        }
+            ramp
+        } else {
+            let lowered = FunctionLowering::lower(ctx, &mut state, &function).map_err(|err| {
+                err.with_fallback_span(perry_mir::source_span(ctx, &function))
+                    .with_internal_context(format!("lowering function {symbol} to wasm"))
+            })?;
+            state.wasm.append_operation(ctx, lowered.get_operation(), 0);
+            if raw && is_exported(ctx, &function) {
+                let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
+                append_export(ctx, &mut state, &wrapper, &lowered, symbol.as_ref());
+            }
+            lowered
+        };
+        lowered_functions.insert(
+            symbol.into(),
+            LoweredFunction {
+                mir: function,
+                wasm,
+            },
+        );
     }
     if !state.async_functions.is_empty() {
         async_split::resume(ctx, &mut state);
     }
     if let Exports::Canonical { exports, .. } = exports {
-        bind_exports(ctx, &mut state, &functions, exports)?;
+        bind_exports(ctx, &mut state, &lowered_functions, exports)?;
     }
     if matches!(exports, Exports::RawChecked) {
         memory::export_checks(ctx, &mut state);
@@ -435,25 +445,28 @@ impl From<CodegenError<'_>> for Diagnostic {
     }
 }
 
+/// A MIR function paired with its lowered Wasm entry-point function (or async ramp).
+#[derive(Clone, Copy)]
+struct LoweredFunction {
+    mir: FuncOp,
+    wasm: FuncOp,
+}
+
 /// Emit the canonical-ABI glue of every WIT export.
 fn bind_exports(
     ctx: &mut Context,
     state: &mut ModuleState<'_>,
-    functions: &[FuncOp],
+    lowered_functions: &HashMap<String, LoweredFunction>,
     exports: &[boundary::Export],
 ) -> Result<()> {
-    let mir_functions: HashMap<String, FuncOp> = functions
-        .iter()
-        .map(|f| (f.get_symbol_name(ctx).into(), *f))
-        .collect();
     if state.uses_io
         && let Some(export) = exports.iter().find(|e| !e.is_async())
     {
         return Err(Diagnostic::from(CodegenError::SyncExportUsesConsole {
             core_name: &export.core_name,
-            span: mir_functions
+            span: lowered_functions
                 .get(&export.function)
-                .and_then(|function| perry_mir::source_span(ctx, function)),
+                .and_then(|function| perry_mir::source_span(ctx, &function.mir)),
         }));
     }
     // A command reports uncaught exceptions on stderr.
@@ -478,9 +491,9 @@ fn bind_exports(
             .is_some_and(|summary| summary.effects.may_suspend || summary.effects.host_work)
     {
         return Err(Diagnostic::from(CodegenError::PendingInitialization {
-            span: mir_functions
+            span: lowered_functions
                 .get(perry_mir::INITIALIZER)
-                .and_then(|function| perry_mir::source_span(ctx, function)),
+                .and_then(|function| perry_mir::source_span(ctx, &function.mir)),
         }));
     }
     let stderr = state.imports.as_ref().is_some_and(|imports| {
@@ -488,8 +501,9 @@ fn bind_exports(
             .iter()
             .any(|name| name.starts_with("wasi:cli/stderr@"))
     });
+    let mut resolved = Vec::with_capacity(exports.len());
     for export in exports {
-        let function = mir_functions.get(&export.function).ok_or_else(|| {
+        let &lowered = lowered_functions.get(&export.function).ok_or_else(|| {
             diag!(
                 codes::MISSING_EXPORT,
                 "WIT export {} has no function {}",
@@ -499,7 +513,7 @@ fn bind_exports(
         })?;
         let effects = &state
             .program_facts
-            .function_summary(ctx, function)
+            .function_summary(ctx, &lowered.mir)
             .to_diag(ctx)?
             .effects;
         if export.is_async()
@@ -519,7 +533,7 @@ fn bind_exports(
             return Err(Diagnostic::from(
                 CodegenError::AsyncInitializerRequiresAsyncExport {
                     core_name: &export.core_name,
-                    span: perry_mir::source_span(ctx, function),
+                    span: perry_mir::source_span(ctx, &lowered.mir),
                 },
             ));
         }
@@ -533,35 +547,20 @@ fn bind_exports(
             if export.is_async() && !stderr {
                 return Err(Diagnostic::from(CodegenError::MissingErrorChannel {
                     core_name: &export.core_name,
-                    span: perry_mir::source_span(ctx, function),
+                    span: perry_mir::source_span(ctx, &lowered.mir),
                 }));
             }
             if export.is_async() {
                 state.reports_rejection = true;
             }
         }
+        resolved.push((export, lowered));
     }
-    let lowered: HashMap<_, _> = crate::analysis::module_functions(ctx, &state.wasm)
-        .into_iter()
-        .map(|function| (function.get_symbol_name(ctx), function))
-        .collect();
-    for export in exports {
-        let function = mir_functions.get(&export.function).ok_or_else(|| {
-            diag!(
-                codes::MISSING_EXPORT,
-                "WIT export {} has no function {}",
-                export.core_name,
-                export.function
-            )
-        })?;
-        let symbol = function.get_symbol_name(ctx);
-        let lowered_function = lowered
-            .get(&symbol)
-            .ok_or_else(|| internal!("missing lowered Wasm function {symbol}"))?;
-        boundary::export(ctx, state, function, lowered_function, export).map_err(|source| {
+    for (export, lowered) in resolved {
+        boundary::export(ctx, state, &lowered.mir, &lowered.wasm, export).map_err(|source| {
             Diagnostic::from(CodegenError::ExportBinding {
                 core_name: &export.core_name,
-                span: perry_mir::source_span(ctx, function),
+                span: perry_mir::source_span(ctx, &lowered.mir),
                 source,
             })
         })?;
@@ -621,9 +620,8 @@ fn export_wrapper(
     inner: &FuncOp,
     name: &Identifier,
 ) -> Result<FuncOp> {
-    let (params, results) = crate::analysis::function_signature(ctx, inner)?;
-    let ty = TypedHandle::<FunctionType>::from_handle(inner.get_type(ctx), ctx)
-        .map_err(|_| internal!("function type"))?;
+    let ty = crate::analysis::function_type(ctx, inner)?;
+    let (params, results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
     let wrapper = FuncOp::new(ctx, ident!("export_") + name.clone(), ty);
     set_export(ctx, &wrapper, name.as_ref());
     let entry = wrapper.get_entry_block(ctx);

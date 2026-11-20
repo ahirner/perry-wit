@@ -49,7 +49,7 @@ pub(crate) struct FunctionLowering<'s, 'e> {
     /// so the results dominate the code after it.
     pub(crate) landing: Option<(Ptr<BasicBlock>, Vec<TypeHandle>)>,
     /// The frame, when lowering the step function of an async function.
-    pub(crate) frame: Option<async_split::Frame>,
+    pub(crate) frame: Option<&'s mut async_split::Frame>,
     /// The runtime's table of one-character ASCII strings, once loaded.
     pub(crate) ascii_strings: Option<Value>,
     /// Root stack length at entry, restored on every exit.

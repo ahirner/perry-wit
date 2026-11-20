@@ -142,8 +142,8 @@ impl FunctionLowering<'_, '_> {
         if let Some(block) = self.throw_block {
             return block;
         }
-        if self.frame.is_some() {
-            let block = self.reject_block(ctx);
+        if let Some(frame) = self.frame.as_deref().map(|f| f.frame) {
+            let block = self.reject_block(ctx, frame);
             self.throw_block = Some(block);
             return block;
         }

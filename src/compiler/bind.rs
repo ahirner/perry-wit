@@ -2,7 +2,7 @@
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_contract::export_names::core_export_name;
 use perry_contract::types::{Contract, Input, convert};
-use perry_mir::is_exported;
+use perry_mir::{PlironResultExt as _, is_exported};
 use perry_wit_diagnostics::Result;
 use pliron::{
     builtin::{
@@ -200,8 +200,7 @@ pub(crate) fn constrain_numbers(
         };
         let existing =
             perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
-        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx)
-            .map_err(|_| perry_wit_diagnostics::internal!("function type"))?;
+        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).to_diag(ctx)?;
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
         if !export.is_command() && args.len() != export.params.len() {
             return Err(crate::Diagnostic::from(BindError::ArityMismatch {
