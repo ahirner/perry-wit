@@ -43,7 +43,7 @@ impl FunctionLowering<'_, '_> {
     pub(crate) fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
         ensure_diag!(
             self.state.can_import(interface),
-            codes::IMPORT_SIGNATURE_MISMATCH,
+            codes::CONTRACT_MISMATCH,
             "{what} needs the WIT world to import {interface}"
         );
         Ok(())

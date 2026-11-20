@@ -98,7 +98,7 @@ fn module_name(name: &str) -> Result<&str> {
             && name
                 .split('/')
                 .all(|part| !part.is_empty() && part != "." && part != ".."),
-        crate::codes::INVALID_MODULE_PATH,
+        crate::codes::INVALID_INPUT,
         "module identity must be package-relative: {name:?}"
     );
     Ok(name)
@@ -111,7 +111,7 @@ pub(crate) fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, S
         let name = module_name(&source.name)?;
         ensure_diag!(
             name != identity && !modules.contains_key(name),
-            crate::codes::DUPLICATE_MODULE,
+            crate::codes::INVALID_INPUT,
             "duplicate module identity: {name}"
         );
         modules.insert(

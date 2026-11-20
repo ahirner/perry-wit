@@ -105,7 +105,7 @@ fn dependency_modules_require_unique_relative_identities_and_utf8() -> Result<()
         2
     ];
     let dup_err = api::compile_core(&input).unwrap_err();
-    assert_eq!(dup_err.primary().code(), perry_wit::codes::DUPLICATE_MODULE);
+    assert_eq!(dup_err.primary().code(), perry_wit::codes::INVALID_INPUT);
     assert!(format!("{dup_err:#}").contains("duplicate module identity"));
     Ok(())
 }

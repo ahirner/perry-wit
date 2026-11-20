@@ -75,7 +75,7 @@ impl fmt::Display for LinkError {
 impl LinkError {
     fn code(&self) -> crate::Code {
         match self {
-            Self::MissingStreamAnchor => crate::codes::BYTE_STREAM_NEEDS_WIT_STREAM,
+            Self::MissingStreamAnchor => crate::codes::UNSUPPORTED_CONSTRUCT,
             Self::UnknownCanonicalPlaceholder(_)
             | Self::MalformedCanonicalPlaceholder(_)
             | Self::UnsupportedCoreImports

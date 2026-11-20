@@ -269,12 +269,11 @@ impl<'s> FunctionBuilder<'s> {
             && let Some((binding, signature)) = self.shapes.foreign_function(name)
         {
             if args.len() != signature.params.len() {
-                let error = perry_wit_diagnostics::Diagnostic::from(
-                    crate::LowerErrorKind::ImportSignatureMismatch {
-                        binding: binding.to_owned(),
-                        expected: signature.params.len(),
-                        actual: args.len(),
-                    },
+                let error = diag!(
+                    codes::CONTRACT_MISMATCH,
+                    "WIT import {binding} expects {} arguments, got {}",
+                    signature.params.len(),
+                    args.len()
                 );
                 return Err(self.shapes.annotate_call(error, byte_offset));
             }
@@ -369,13 +368,17 @@ impl<'s> FunctionBuilder<'s> {
         let signature = self
             .signatures
             .get(id)
-            .ok_or_else(|| internal!("call to an unknown function"))?;
+            .ok_or_internal("call to an unknown function")?;
+        let callee_name = self
+            .shapes
+            .metadata
+            .locations
+            .display_function_name(signature.name.as_ref());
         let (fixed, rest) = signature.parameters();
         ensure_diag!(
             rest.is_some() || args.len() <= fixed.len(),
             codes::TYPE_MISMATCH,
-            "call to {} with {} arguments, expected {}",
-            signature.name,
+            "call to {callee_name} with {} arguments, expected {}",
             args.len(),
             fixed.len()
         );
@@ -384,27 +387,21 @@ impl<'s> FunctionBuilder<'s> {
             values.push(
                 self.bind_fixed_arg(ctx, param, args.get(i))
                     .map_err(|err| {
-                        err.with_note(format!("in argument {} of '{}'", i + 1, signature.name))
+                        err.with_note(format!("in argument {} of '{callee_name}'", i + 1))
                     })?,
             );
         }
         if let Some(rest) = rest {
-            let array =
-                TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx).map_err(|_| {
-                    diag!(
-                        codes::TYPE_MISMATCH,
-                        "rest parameter must have an array type"
-                    )
-                })?;
+            let array = TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx)
+                .map_diag(codes::TYPE_MISMATCH, "rest parameter must have an array type")?;
             let element = array.deref(ctx).element();
             let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
             for (offset, arg) in args.iter().skip(fixed.len()).enumerate() {
                 let value = self.expression_with(ctx, arg, Some(element))?;
                 items.push(self.fit(ctx, value, element).map_err(|err| {
                     err.with_note(format!(
-                        "in argument {} of '{}'",
-                        fixed.len() + offset + 1,
-                        signature.name
+                        "in argument {} of '{callee_name}'",
+                        fixed.len() + offset + 1
                     ))
                 })?);
             }
@@ -451,7 +448,7 @@ impl<'s> FunctionBuilder<'s> {
         if signature.is_async {
             let result = signature
                 .result
-                .ok_or_else(|| internal!("async function must settle one result"))?;
+                .ok_or_internal("async function must settle one result")?;
             return Ok(Some(self.emit_value(ctx, |ctx| {
                 AsyncCallOp::new(ctx, signature.name.clone(), values, result.carrier)
             })));

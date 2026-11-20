@@ -9,7 +9,7 @@ fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<(
     ).expect_err("union boxing cannot copy a record to a different layout");
     assert_eq!(
         error.primary().code(),
-        perry_wit::codes::INCOMPATIBLE_RECORD_LAYOUT,
+        perry_wit::codes::TYPE_MISMATCH,
         "{error}"
     );
     assert!(

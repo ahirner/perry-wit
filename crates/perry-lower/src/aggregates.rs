@@ -28,12 +28,10 @@ impl<'s> FunctionBuilder<'s> {
                 .deref(ctx)
                 .field(&field)
                 .map(|(_, ty)| ty)
-                .ok_or_else(|| {
-                    diag!(
-                        codes::TYPE_MISMATCH,
-                        "tuple index is outside its declared shape"
-                    )
-                })?;
+                .ok_or_diag(
+                    codes::TYPE_MISMATCH,
+                    "tuple index is outside its declared shape",
+                )?;
             let value = self.expression_with(ctx, value, Some(ty))?;
             let value = self.fit(ctx, value, ty)?;
             self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
@@ -78,12 +76,10 @@ impl<'s> FunctionBuilder<'s> {
                 .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
-                .ok_or_else(|| {
-                    diag!(
-                        codes::TYPE_MISMATCH,
-                        "property write requires a record alternative"
-                    )
-                })?;
+                .ok_or_diag(
+                    codes::TYPE_MISMATCH,
+                    "property write requires a record alternative",
+                )?;
             self.emit_value(ctx, |ctx| {
                 perry_mir::VariantPayloadOp::new(ctx, record, payload)
             })
@@ -106,7 +102,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let rec_ty = perry_mir::typed::<RecordType>(ctx, record.get_type(ctx))
             .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object)
-            .ok_or_else(|| unsupported!("property writes are only supported on records so far"))?;
+            .ok_or_unsupported("property writes are only supported on records so far")?;
         let field_type = rec_ty
             .deref(ctx)
             .field(field)

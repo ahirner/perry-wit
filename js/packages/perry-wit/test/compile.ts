@@ -92,7 +92,7 @@ test("reports diagnostics as a CompileError", async () => {
     formatDiagnostics([
       {
         kind: "contract",
-        code: "export-type-mismatch",
+        code: "contract-mismatch",
         message: "type mismatch",
         span: { file: "src/main.ts", startLine: 4, startColumn: 1, endLine: 4, endColumn: 12, startByte: 20, endByte: 31 },
         notes: [
@@ -105,7 +105,7 @@ test("reports diagnostics as a CompileError", async () => {
         help: "update signature",
       },
     ]),
-    "src/main.ts:4:1: error[export-type-mismatch]: type mismatch\n  while binding WIT export run\n  src/types.ts:1:10: expected here\n  help: update signature",
+    "src/main.ts:4:1: error[contract-mismatch]: type mismatch\n  while binding WIT export run\n  src/types.ts:1:10: expected here\n  help: update signature",
   );
 });
 

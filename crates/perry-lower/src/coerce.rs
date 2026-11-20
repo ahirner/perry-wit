@@ -111,8 +111,7 @@ impl KindExt for Kind {
 }
 
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
-    Kind::of(ctx, value.get_type(ctx))
-        .ok_or_else(|| unsupported!("unsupported value type in expression"))
+    Kind::of(ctx, value.get_type(ctx)).ok_or_unsupported("unsupported value type in expression")
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -276,10 +275,10 @@ impl<'s> FunctionBuilder<'s> {
                 .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(name, payload)| (name == tag).then_some(payload).flatten())
-                .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "value is outside the finite union"))?;
+                .ok_or_diag(codes::TYPE_MISMATCH, "value is outside the finite union")?;
             ensure_diag!(
                 tag != "object" || ty == payload || perry_mir::can_widen(ctx, ty, payload),
-                codes::INCOMPATIBLE_RECORD_LAYOUT,
+                codes::TYPE_MISMATCH,
                 "record alternatives must preserve their layout and identity"
             );
             let value = self.fit(ctx, value, payload)?;
@@ -380,21 +379,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             let actual = describe_type(ctx, ty);
             let expected = describe_type(ctx, target);
-            let shape_error = if let (Ok(src_rec), Ok(dst_rec)) = (
-                TypedHandle::<RecordType>::from_handle(source, ctx),
-                TypedHandle::<RecordType>::from_handle(wanted, ctx),
-            ) && src_rec.deref(ctx).kind() == dst_rec.deref(ctx).kind()
-                && matches!(
-                    src_rec.deref(ctx).kind(),
-                    RecordKind::Object | RecordKind::Tuple
-                ) {
-                ShapeError::IncompatibleRecordLayout { actual, expected }
-            } else if absence(ctx, ty) != absence(ctx, target) {
-                ShapeError::AbsenceMismatch { actual, expected }
-            } else {
-                ShapeError::TypeMismatch { actual, expected }
-            };
-            Err(perry_wit_diagnostics::Diagnostic::from(shape_error))
+            bail_diag!(
+                codes::TYPE_MISMATCH,
+                "value type {actual} differs from the expected type {expected}"
+            )
         }
     }
 

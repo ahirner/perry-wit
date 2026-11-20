@@ -41,7 +41,7 @@ pub(crate) fn prepare(
     let key = wit_parser::WorldKey::Name(ANCHOR.into());
     ensure_diag!(
         !resolve.worlds[world].exports.contains_key(&key),
-        crate::codes::INVALID_EXPORT_NAME,
+        crate::codes::CONTRACT_MISMATCH,
         "WIT export '{ANCHOR}' is reserved for internal promise signals"
     );
     let ty = resolve.types.alloc(wit_parser::TypeDef {

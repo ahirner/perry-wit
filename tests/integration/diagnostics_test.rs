@@ -117,6 +117,122 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         bad_utf8_err.to_string().contains("corrupt.wit"),
         "{bad_utf8_err}"
     );
+
+    // Errors inside imported helpers, monomorphized generics, and imported classes
+    // attach spanned notes pointing back to the caller in workflow.ts across lowering, MIR, and codegen.
+    let assert_caller_note = |error: &perry_wit::CompileError, expected_file: &str, needle: &str| {
+        let diag = error.primary();
+        let primary = diag.span().expect("primary span in library");
+        assert_eq!(primary.file.to_string_lossy(), expected_file, "{diag}");
+        assert!(
+            !diag.to_string().contains("__perry_module_"),
+            "leaked internal module prefix: {diag}"
+        );
+        assert!(
+            !diag.to_string().contains("_instance_"),
+            "leaked internal instance suffix: {diag}"
+        );
+        let note = diag
+            .notes()
+            .iter()
+            .find(|note| {
+                note.span()
+                    .is_some_and(|span| span.file.to_string_lossy() == "src/workflow.ts")
+            })
+            .unwrap_or_else(|| panic!("expected spanned note pointing to src/workflow.ts in:\n{diag}"));
+        assert!(note.message().contains(needle), "{diag}");
+    };
+
+    // 1. Imported helper failing during lowering (unsupported op) and MIR narrowing (possibly-null receiver) and codegen (invalid regex).
+    for (lib_source, workflow_source, expected_code) in [
+        (
+            "export function helper(n: number): number {\n  return n ** 2;\n}",
+            "import { helper } from './lib';\nexport function run(n: number): number {\n  return helper(n);\n}",
+            codes::UNSUPPORTED_OPERATOR,
+        ),
+        (
+            "export function helper(values: number[] | null): number {\n  return values.length;\n}",
+            "import { helper } from './lib';\nexport function run(values: number[] | null): number {\n  return helper(values);\n}",
+            codes::POSSIBLY_NULL_RECEIVER,
+        ),
+        (
+            "export function helper(input: string, n: number): boolean {\n  if (n > 0) return helper(input, n - 1);\n  return /(/.test(input);\n}",
+            "import { helper } from './lib';\nexport function run(input: string): boolean {\n  return helper(input, 1);\n}",
+            codes::UNSUPPORTED_REGEX,
+        ),
+    ] {
+        let err = api::compile_core(&Program {
+            source: Source {
+                name: Some("src/workflow.ts".into()),
+                contents: workflow_source.as_bytes().to_vec(),
+            },
+            modules: vec![Module {
+                name: "src/lib.ts".into(),
+                contents: lib_source.as_bytes().to_vec(),
+            }],
+        })
+        .unwrap_err();
+        assert_eq!(err.primary().code(), expected_code, "{err}");
+        assert_caller_note(&err, "src/lib.ts", "helper");
+    }
+
+    // 2. Monomorphized generic function failing inside lib.ts points back to instantiation site in workflow.ts.
+    let generic_err = api::compile_core(&Program {
+        source: Source {
+            name: Some("src/workflow.ts".into()),
+            contents: b"import { wrap } from './lib';\nexport function run(): number {\n  return wrap('bad');\n}".to_vec(),
+        },
+        modules: vec![Module {
+            name: "src/lib.ts".into(),
+            contents: b"export function wrap<T>(value: T): number {\n  return value;\n}".to_vec(),
+        }],
+    })
+    .unwrap_err();
+    assert_eq!(generic_err.primary().code(), codes::TYPE_MISMATCH, "{generic_err}");
+    assert_caller_note(&generic_err, "src/lib.ts", "while instantiating 'wrap'");
+
+    // 3. Nested chain: workflow.ts -> generic mid<T> in mid.ts -> helper leaf in leaf.ts.
+    let chain_err = api::compile_core(&Program {
+        source: Source {
+            name: Some("src/workflow.ts".into()),
+            contents: b"import { mid } from './mid';\nexport function run(): number {\n  return mid(1);\n}".to_vec(),
+        },
+        modules: vec![
+            Module {
+                name: "src/mid.ts".into(),
+                contents: b"import { leaf } from './leaf';\nexport function mid<T>(x: T): number {\n  return leaf(1);\n}".to_vec(),
+            },
+            Module {
+                name: "src/leaf.ts".into(),
+                contents: b"export function leaf(n: number): number {\n  return n ** 2;\n}".to_vec(),
+            },
+        ],
+    })
+    .unwrap_err();
+    assert_eq!(chain_err.primary().code(), codes::UNSUPPORTED_OPERATOR, "{chain_err}");
+    assert_caller_note(&chain_err, "src/leaf.ts", "while instantiating 'mid'");
+    assert!(
+        chain_err.primary().notes().iter().any(|note| {
+            note.span()
+                .is_some_and(|span| span.file.to_string_lossy() == "src/mid.ts")
+        }),
+        "expected intermediate note in src/mid.ts:\n{chain_err}"
+    );
+
+    // 4. Imported generic class method failing inside lib.ts points back to call site in workflow.ts.
+    let class_err = api::compile_core(&Program {
+        source: Source {
+            name: Some("src/workflow.ts".into()),
+            contents: b"import { Box } from './lib';\nexport function run(): number {\n  return new Box('bad').asNumber();\n}".to_vec(),
+        },
+        modules: vec![Module {
+            name: "src/lib.ts".into(),
+            contents: b"export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}".to_vec(),
+        }],
+    })
+    .unwrap_err();
+    assert_eq!(class_err.primary().code(), codes::TYPE_MISMATCH, "{class_err}");
+    assert_caller_note(&class_err, "src/lib.ts", "called from here");
 }
 
 /// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
@@ -430,7 +546,7 @@ world app {
     );
     check(
         "// header\nexport async function run(id: number): Promise<bigint> { return 1n; }",
-        codes::WIDE_INTEGER_REQUIRES_BIGINT,
+        codes::CONTRACT_MISMATCH,
         2,
         "bigint",
     );
@@ -442,7 +558,7 @@ world app {
     );
     check(
         "import { ping } from 'test:mismatch/host';\nexport async function run(id: bigint): Promise<bigint> {\n  const x = (ping as any)(1);\n  return id;\n}",
-        codes::IMPORT_SIGNATURE_MISMATCH,
+        codes::CONTRACT_MISMATCH,
         3,
         "expects 2 arguments, got 1",
     );

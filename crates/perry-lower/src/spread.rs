@@ -449,7 +449,12 @@ impl<'s> FunctionBuilder<'s> {
         let signature = self
             .signatures
             .get(&id)
-            .ok_or_else(|| internal!("call to an unknown function"))?;
+            .ok_or_internal("call to an unknown function")?;
+        let callee_name = self
+            .shapes
+            .metadata
+            .locations
+            .display_function_name(signature.name.as_ref());
         let (params, rest) = signature.parameters();
         let fixed_len = params.len();
         let mut values = Vec::with_capacity(signature.params.len());
@@ -460,7 +465,7 @@ impl<'s> FunctionBuilder<'s> {
                 perry_frontend::hir::CallArg::Expr(expr) => {
                     let arg_num = values.len() + 1;
                     values.push(self.bind_fixed_arg(ctx, param, Some(expr)).map_err(|err| {
-                        err.with_note(format!("in argument {arg_num} of '{}'", signature.name))
+                        err.with_note(format!("in argument {arg_num} of '{callee_name}'"))
                     })?);
                     arg_idx += 1;
                 }
@@ -492,19 +497,13 @@ impl<'s> FunctionBuilder<'s> {
             let arg_num = values.len() + 1;
             let param = &params[values.len()];
             values.push(self.bind_fixed_arg(ctx, param, None).map_err(|err| {
-                err.with_note(format!("in argument {arg_num} of '{}'", signature.name))
+                err.with_note(format!("in argument {arg_num} of '{callee_name}'"))
             })?);
         }
         if let Some(rest_param) = rest {
             let rest_arr_ty =
-                TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx).map_err(
-                    |_| {
-                        diag!(
-                            codes::TYPE_MISMATCH,
-                            "rest parameter must have an array type"
-                        )
-                    },
-                )?;
+                TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx)
+                    .map_diag(codes::TYPE_MISMATCH, "rest parameter must have an array type")?;
             let elem_ty = rest_arr_ty.deref(ctx).element();
             values.push(self.collect_spread_args(ctx, &args[arg_idx..], elem_ty)?);
         }

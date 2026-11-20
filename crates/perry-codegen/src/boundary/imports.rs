@@ -12,7 +12,7 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<()> {
         let import = self.state.bindings.get(binding).copied().ok_or_else(|| {
             diag!(
-                codes::IMPORT_SIGNATURE_MISMATCH,
+                codes::CONTRACT_MISMATCH,
                 "WIT import {binding} is absent from the selected world"
             )
         })?;
@@ -22,7 +22,7 @@ impl FunctionLowering<'_, '_> {
         let operands: Vec<_> = op.deref(ctx).operands().collect();
         ensure_diag!(
             operands.len() == import.params.len(),
-            codes::IMPORT_SIGNATURE_MISMATCH,
+            codes::CONTRACT_MISMATCH,
             "WIT import argument count mismatch"
         );
         let values = operands
@@ -213,7 +213,7 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<()> {
         let import = self.state.bindings.get(binding).copied().ok_or_else(|| {
             diag!(
-                codes::IMPORT_SIGNATURE_MISMATCH,
+                codes::CONTRACT_MISMATCH,
                 "WIT import {binding} is absent from the selected world"
             )
         })?;

@@ -160,7 +160,7 @@ impl<'s> FunctionBuilder<'s> {
         let tag = names
             .iter()
             .position(|&n| n == "tag")
-            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "variant literal needs a tag"))?;
+            .ok_or_diag(codes::TYPE_MISMATCH, "variant literal needs a tag")?;
         let Expr::String(tag) = &args[tag] else {
             bail_unsupported!("variant construction needs a literal tag");
         };

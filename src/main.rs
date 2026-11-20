@@ -3,46 +3,13 @@
 #[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
 mod wasm;
 
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use perry_wit::compiler::{CompileOptions, compile_file};
 
-enum CliError {
-    Message(String),
-    Compile(perry_wit::CompileError),
-}
-
-impl fmt::Display for CliError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Message(message) => f.write_str(message),
-            Self::Compile(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl From<perry_wit::CompileError> for CliError {
-    fn from(error: perry_wit::CompileError) -> Self {
-        Self::Compile(error)
-    }
-}
-
-impl From<std::io::Error> for CliError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Message(error.to_string())
-    }
-}
-
-impl From<String> for CliError {
-    fn from(message: String) -> Self {
-        Self::Message(message)
-    }
-}
-
-type Result<T> = std::result::Result<T, CliError>;
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const HELP: &str = "\
 Usage: perry-wit [OPTIONS] <input.ts>
@@ -200,7 +167,7 @@ fn run() -> Result<()> {
     let component = compiled
         .component
         .as_ref()
-        .ok_or_else(|| CliError::Message("Missing component output".to_owned()))?;
+        .ok_or("Missing component output")?;
     let output = if keep_names {
         &component.bytes
     } else {
@@ -218,7 +185,7 @@ fn run() -> Result<()> {
     let mut validator = wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all());
     validator
         .validate_all(output)
-        .map_err(|err| CliError::Message(format!("Validating component: {err}")))?;
+        .map_err(|err| format!("Validating component: {err}"))?;
 
     Ok(())
 }

@@ -112,29 +112,34 @@ pub(super) fn build_module(
     }
     let mut signatures = HashMap::new();
     for function in &hir.functions {
+        let display_name = locations.display_function_name(&function.name);
         if function.is_generator {
-            return Err(
-                unsupported!("generator function {} is not supported yet", function.name)
+            return Err(locations.annotate_caller(
+                unsupported!("generator function {display_name} is not supported yet")
                     .with_fallback_span(locations.function_span(&function.name)),
-            );
+                &function.name,
+            ));
         }
 
         let mut params = Vec::with_capacity(function.params.len());
         for (idx, param) in function.params.iter().enumerate() {
             if param.is_rest && idx + 1 != function.params.len() {
-                return Err(shapes.annotate_local(
-                    diag!(
-                        codes::PARSE_ERROR,
-                        "rest parameter must be last in {}",
-                        function.name
+                return Err(locations.annotate_caller(
+                    shapes.annotate_local(
+                        diag!(
+                            codes::PARSE_ERROR,
+                            "rest parameter must be last in {display_name}"
+                        ),
+                        param.id,
                     ),
-                    param.id,
+                    &function.name,
                 ));
             }
             let base_carrier = shapes.value_type(ctx, &param.ty).map_err(|error| {
-                shapes
+                let error = shapes
                     .annotate_local(error, param.id)
-                    .with_note(format!("in parameter '{}' of '{}'", param.name, function.name))
+                    .with_note(format!("in parameter '{}' of '{display_name}'", param.name));
+                locations.annotate_caller(error, &function.name)
             })?;
             let integer = shapes.integer_type(ctx, &param.ty);
             let carrier = if param.default.is_some() && !function.is_exported {
@@ -159,9 +164,10 @@ pub(super) fn build_module(
             (ty, false) => shapes.value_type(ctx, ty).map(Some),
         }
         .map_err(|error| {
-            error
+            let error = error
                 .with_fallback_span(locations.function_span(&function.name))
-                .with_note(format!("in return type of '{}'", function.name))
+                .with_note(format!("in return type of '{display_name}'"));
+            locations.annotate_caller(error, &function.name)
         })?;
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
@@ -243,13 +249,18 @@ pub(super) fn build_module(
     for function in &hir.functions {
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins).map_err(
             |error| {
-                error
+                let error = error
                     .with_fallback_span(locations.function_span(&function.name))
-                    .with_internal_context(format!("lowering function {}", function.name))
+                    .with_internal_context(format!("lowering function {}", function.name));
+                locations.annotate_caller(error, &function.name)
             },
         )?;
         if let Some(span) = locations.function_span(&function.name) {
             perry_mir::set_source_span(ctx, &func, &span);
+        }
+        let caller_notes = locations.caller_notes(&function.name);
+        if !caller_notes.is_empty() {
+            perry_mir::set_caller_notes(ctx, &func, &caller_notes);
         }
         if let Some((wit_params, wit_results)) = signatures[&function.id].wit_constraints() {
             perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);

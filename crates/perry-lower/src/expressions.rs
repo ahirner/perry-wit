@@ -51,7 +51,7 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::Sequence(parts) = expr {
             let (last, effects) = parts
                 .split_last()
-                .ok_or_else(|| internal!("empty sequence expression"))?;
+                .ok_or_internal("empty sequence expression")?;
             if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
                 return self
                     .expression_with(ctx, last, expected)
@@ -80,9 +80,9 @@ impl<'s> FunctionBuilder<'s> {
                     .map_err(|error| self.shapes.annotate_local(error, id))?,
             };
             let receiver = self.defined(ctx, receiver)?;
-            let value = call.lower(self, ctx, receiver)?.ok_or_else(|| {
-                diag!(codes::TYPE_MISMATCH, "method expression produces no value")
-            })?;
+            let value = call
+                .lower(self, ctx, receiver)?
+                .ok_or_diag(codes::TYPE_MISMATCH, "method expression produces no value")?;
             return self.narrow_value(ctx, expr, value);
         }
         let value = match expr {
@@ -109,9 +109,7 @@ impl<'s> FunctionBuilder<'s> {
                 {
                     let recv = self.defined(ctx, value)?;
                     self.class_method_call(ctx, recv, owner_class, &type_args, func, &[])?
-                        .ok_or_else(|| {
-                            diag!(codes::TYPE_MISMATCH, "toString() produced no value")
-                        })?
+                        .ok_or_diag(codes::TYPE_MISMATCH, "toString() produced no value")?
                 } else {
                     self.display(ctx, value)?
                 }
@@ -172,9 +170,7 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self
                 .call(ctx, callee, args, *byte_offset)
-                .and_then(|value| {
-                    value.ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))
-                })
+                .and_then(|value| value.ok_or_diag(codes::TYPE_MISMATCH, "a void call has no value"))
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
@@ -492,20 +488,19 @@ impl<'s> FunctionBuilder<'s> {
                 args,
             } => self
                 .class_static_method_call(ctx, class_name, method_name, args)?
-                .ok_or_else(|| {
-                    diag!(
-                        codes::TYPE_MISMATCH,
-                        "a void static method call has no value"
-                    )
-                })?,
+                .ok_or_diag(
+                    codes::TYPE_MISMATCH,
+                    "a void static method call has no value",
+                )?,
             Expr::New {
                 class_name,
                 args,
                 type_args,
+                byte_offset,
                 ..
-            } if self.shapes.classes.named.contains_key(class_name.as_str()) => {
-                self.class_new(ctx, class_name, args, type_args, expected)?
-            }
+            } if self.shapes.classes.named.contains_key(class_name.as_str()) => self
+                .class_new(ctx, class_name, args, type_args, expected)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
                 class_name, args, ..
             } => self.object_literal(ctx, class_name, args, expected)?,
@@ -571,13 +566,12 @@ impl<'s> FunctionBuilder<'s> {
                 let width = digits
                     .len()
                     .checked_mul(4)
-                    .ok_or_else(|| unsupported!("bigint literal too large"))?;
+                    .ok_or_unsupported("bigint literal too large")?;
                 APInt::from_str(digits, width, radix as u8)
-                    .map_err(|_| diag!(codes::PARSE_ERROR, "invalid bigint literal"))?
+                    .map_diag(codes::PARSE_ERROR, "invalid bigint literal")?
             }
         };
-        let width =
-            u32::try_from(value.bw()).map_err(|_| unsupported!("bigint literal too large"))?;
+        let width = u32::try_from(value.bw()).map_unsupported("bigint literal too large")?;
         let ty = IntegerType::get(ctx, width, Signedness::Unsigned);
         let magnitude = IntegerAttr::new(ty, value);
         Ok(self.emit_value(ctx, |ctx| perry_mir::BigIntConstOp::new(ctx, magnitude)))
@@ -619,7 +613,7 @@ impl<'s> FunctionBuilder<'s> {
         });
         ensure_diag!(
             allowed,
-            codes::ABSENCE_MISMATCH,
+            codes::TYPE_MISMATCH,
             "{} is not admitted by the declared type",
             if null { "null" } else { "undefined" }
         );

@@ -81,13 +81,13 @@ perry_frontend::method_catalog!(lower_calls);
 
 fn map_types(ctx: &Context, map: Value) -> Result<(TypeHandle, TypeHandle)> {
     let (key, value, _) = kv_entry_types(ctx, map.get_type(ctx))
-        .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "method receiver must be a Map"))?;
+        .ok_or_diag(codes::TYPE_MISMATCH, "method receiver must be a Map")?;
     Ok((key, value))
 }
 
 fn set_element(ctx: &Context, set: Value) -> Result<TypeHandle> {
     let (element, _) = set_entry_type(ctx, set.get_type(ctx))
-        .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "method receiver must be a Set"))?;
+        .ok_or_diag(codes::TYPE_MISMATCH, "method receiver must be a Set")?;
     Ok(element)
 }
 
@@ -329,7 +329,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         let source = args
             .first()
-            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "set needs a source"))?;
+            .ok_or_diag(codes::TYPE_MISMATCH, "set needs a source")?;
         let source = self.expression(ctx, source)?;
         let source = self.defined(ctx, source)?;
         let source = match kind(ctx, source)? {

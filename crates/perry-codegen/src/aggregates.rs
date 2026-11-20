@@ -666,7 +666,7 @@ impl FunctionLowering<'_, '_> {
             .find(|(_, (name, _))| name == field)
             .ok_or_else(|| {
                 diag!(
-                    codes::EXPORT_TYPE_MISMATCH,
+                    codes::CONTRACT_MISMATCH,
                     "TypeScript type {} has no field {field}",
                     record.name()
                 )

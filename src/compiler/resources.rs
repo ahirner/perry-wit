@@ -29,7 +29,7 @@ pub(super) fn definitions(
                 let key = canonical_type(resolve, *id).index() as u32;
                 ensure_diag!(
                     !definitions.contains_key(&key),
-                    crate::codes::RESOURCE_IMPORTED_AND_EXPORTED,
+                    crate::codes::CONTRACT_MISMATCH,
                     "resource {module}#{name} is declared on both sides of this world; import and export resource identities are distinct, so use an exported interface that aliases the imported resource or separate resource interfaces"
                 );
                 definitions.insert(

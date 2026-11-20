@@ -165,7 +165,7 @@ fn world_type_declarations(names: &TsNames<'_>) -> String {
 /// Generates TypeScript declarations (.d.ts) for a given WIT world.
 pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
     perry_contract::export_names::validate_implementation_names(resolve, world)
-        .map_err(|error| Diagnostic::new(codes::INVALID_EXPORT_NAME, error.to_string()))?;
+        .map_err(|error| Diagnostic::new(codes::CONTRACT_MISMATCH, error.to_string()))?;
     let names = &TsNames::new(resolve, world);
     let mut out = String::new();
 

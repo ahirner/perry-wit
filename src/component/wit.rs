@@ -1,105 +1,10 @@
 //! Versioned WASI and custom WIT package resolution.
 
 use std::collections::HashSet;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use perry_wit_diagnostics::{Diagnostic, Result, internal};
 use wit_parser::{PackageId, Resolve, SourceMap, UnresolvedPackageGroup};
-
-enum WitError<'a> {
-    MissingDirectory(&'a Path),
-    SelectWorld {
-        package_name: String,
-        has_requested_world: bool,
-        available: Vec<String>,
-        source: &'a (dyn std::error::Error + 'static),
-    },
-    EmptySources,
-    InvalidPackageEncoding(Option<&'a (dyn std::error::Error + 'static)>),
-}
-
-impl WitError<'_> {
-    fn code(&self) -> crate::Code {
-        match self {
-            Self::MissingDirectory(_) => crate::codes::MISSING_WIT_DIRECTORY,
-            Self::SelectWorld { .. } => crate::codes::WIT_WORLD_SELECTION,
-            Self::EmptySources => crate::codes::EMPTY_WIT_SOURCES,
-            Self::InvalidPackageEncoding(_) => crate::codes::WIT_PACKAGE_ENCODING,
-        }
-    }
-
-    fn help(&self) -> Option<String> {
-        match self {
-            Self::MissingDirectory(dir) => Some(format!(
-                "Create '{}/world.wit' or pass '--wit <PATH>' to specify your WIT directory.",
-                dir.display()
-            )),
-            Self::SelectWorld {
-                package_name,
-                has_requested_world,
-                available,
-                ..
-            } => Some(match (available.is_empty(), *has_requested_world) {
-                (true, _) => {
-                    "Declare a 'world <name> { ... }' block in your WIT package.".to_owned()
-                }
-                (false, true) => {
-                    format!(
-                        "Available worlds in package '{package_name}': {}.",
-                        available.join(", ")
-                    )
-                }
-                (false, false) => {
-                    format!(
-                        "Pass '--world <NAME>' to select a world (available: {}).",
-                        available.join(", ")
-                    )
-                }
-            }),
-            Self::EmptySources | Self::InvalidPackageEncoding(_) => None,
-        }
-    }
-
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::SelectWorld { source, .. } => source.source(),
-            Self::InvalidPackageEncoding(Some(source)) => source.source(),
-            Self::MissingDirectory(_) | Self::EmptySources | Self::InvalidPackageEncoding(None) => {
-                None
-            }
-        }
-    }
-}
-
-impl fmt::Display for WitError<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingDirectory(dir) => {
-                write!(f, "WIT directory '{}' does not exist", dir.display())
-            }
-            Self::SelectWorld { source, .. } => write!(f, "{source}"),
-            Self::EmptySources => f.write_str("WIT package has no sources"),
-            Self::InvalidPackageEncoding(Some(source)) => write!(f, "{source}"),
-            Self::InvalidPackageEncoding(None) => {
-                f.write_str("expected an encoded WIT package, not an application component")
-            }
-        }
-    }
-}
-
-impl From<WitError<'_>> for Diagnostic {
-    fn from(error: WitError<'_>) -> Self {
-        let mut diagnostic = Self::new(error.code(), error.to_string());
-        if let Some(help) = error.help() {
-            diagnostic = diagnostic.with_help(help);
-        }
-        if let Some(source) = error.source() {
-            diagnostic = diagnostic.with_source_notes(source);
-        }
-        diagnostic
-    }
-}
 
 fn wit_diagnostic(code: crate::Code, source: &(dyn std::error::Error + 'static)) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(code, source.to_string());
@@ -135,7 +40,10 @@ mod embedded {
 
 fn source_package(sources: &[crate::api::Source]) -> Result<UnresolvedPackageGroup> {
     if sources.is_empty() {
-        return Err(Diagnostic::from(WitError::EmptySources));
+        return Err(Diagnostic::new(
+            crate::codes::INVALID_INPUT,
+            "WIT package has no sources",
+        ));
     }
     let mut map = SourceMap::new();
     for (index, source) in sources.iter().enumerate() {
@@ -153,9 +61,12 @@ pub(crate) fn resolve_contents(input: &crate::api::Wit) -> Result<(Resolve, Pack
     let mut resolve = Resolve::new();
     let mut decode_encoded = |bytes: &[u8]| -> Result<PackageId> {
         let decoded = wit_parser::decoding::decode(bytes)
-            .map_err(|e| Diagnostic::from(WitError::InvalidPackageEncoding(Some(e.as_ref()))))?;
+            .map_err(|e| wit_diagnostic(crate::codes::WIT_PARSE, e.as_ref()))?;
         let wit_parser::decoding::DecodedWasm::WitPackage(decoded, package) = decoded else {
-            return Err(Diagnostic::from(WitError::InvalidPackageEncoding(None)));
+            return Err(Diagnostic::new(
+                crate::codes::WIT_PARSE,
+                "expected an encoded WIT package, not an application component",
+            ));
         };
         let remap = resolve
             .merge(decoded)
@@ -256,7 +167,7 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
                         if has_io_error(err) {
                             Diagnostic::io(format!("reading WIT package {}", path.display()), err)
                         } else {
-                            Diagnostic::from(WitError::InvalidPackageEncoding(Some(err)))
+                            wit_diagnostic(crate::codes::WIT_PARSE, err)
                         }
                     })?;
                     continue;
@@ -271,7 +182,14 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
 
 pub(crate) fn resolve_wit_inner(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
     if !wit_dir.exists() {
-        return Err(Diagnostic::from(WitError::MissingDirectory(wit_dir)));
+        return Err(Diagnostic::new(
+            crate::codes::WIT_DEPENDENCY,
+            format!("WIT directory '{}' does not exist", wit_dir.display()),
+        )
+        .with_help(format!(
+            "Create '{}/world.wit' or pass '--wit <PATH>' to specify your WIT directory.",
+            wit_dir.display()
+        )));
     }
     let mut resolve = Resolve::new();
     let main = parse_dir(wit_dir)
@@ -298,13 +216,21 @@ pub(crate) fn select_world(
     world: Option<&str>,
 ) -> Result<wit_parser::WorldId> {
     resolve.select_world(&[package], world).map_err(|source| {
-        let available = resolve.packages[package].worlds.keys().cloned().collect();
-        Diagnostic::from(WitError::SelectWorld {
-            package_name: resolve.packages[package].name.to_string(),
-            has_requested_world: world.is_some(),
-            available,
-            source: source.as_ref(),
-        })
+        let pkg = &resolve.packages[package];
+        let available: Vec<&str> = pkg.worlds.keys().map(String::as_str).collect();
+        let help = match (available.is_empty(), world.is_some()) {
+            (true, _) => "Declare a 'world <name> { ... }' block in your WIT package.".to_owned(),
+            (false, true) => format!(
+                "Available worlds in package '{}': {}.",
+                pkg.name,
+                available.join(", ")
+            ),
+            (false, false) => format!(
+                "Pass '--world <NAME>' to select a world (available: {}).",
+                available.join(", ")
+            ),
+        };
+        wit_diagnostic(crate::codes::WIT_WORLD_SELECTION, source.as_ref()).with_help(help)
     })
 }
 

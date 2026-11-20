@@ -470,7 +470,7 @@ fn cli_help_and_diagnostics_are_aligned_and_deduplicated() {
         "{missing_wit}"
     );
     assert_eq!(
-        missing_wit.matches("error[missing-wit-directory]:").count(),
+        missing_wit.matches("error[wit-dependency]:").count(),
         1,
         "{missing_wit}"
     );

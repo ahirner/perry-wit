@@ -14,9 +14,9 @@ use crate::{
 };
 use perry_abi::layout::{array as layout, string as strings};
 use perry_mir::{ArrayType, RecordType};
-use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{
-    bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag, ensure_internal, internal,
+    OptionExt as _, Result, ResultExt as _, bail_diag, bail_internal, bail_unsupported, codes,
+    diag, ensure_diag, ensure_internal, internal,
 };
 use pliron::{
     builtin::{
@@ -320,7 +320,7 @@ fn identifier(name: &str) -> Identifier {
 fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> {
     ensure_diag!(
         mir_ty.deref(ctx).is::<FP64Type>(),
-        codes::EXPORT_TYPE_MISMATCH,
+        codes::CONTRACT_MISMATCH,
         "WIT {ty:?} needs a TypeScript number"
     );
     Ok(())
@@ -413,7 +413,7 @@ impl FunctionLowering<'_, '_> {
             AbiType::Bool => {
                 ensure_diag!(
                     repr(ctx, mir_ty)? == Repr::Bool,
-                    codes::EXPORT_TYPE_MISMATCH,
+                    codes::CONTRACT_MISMATCH,
                     "WIT bool needs a TypeScript boolean"
                 );
                 let zero = self.i32_const(ctx, 0);
@@ -486,7 +486,7 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<Value> {
         ensure_diag!(
             mir_ty.deref(ctx).is::<perry_mir::ReadableType>(),
-            codes::EXPORT_TYPE_MISMATCH,
+            codes::CONTRACT_MISMATCH,
             "WIT stream<u8> needs a TypeScript ReadableStream<Uint8Array>"
         );
         self.state.uses_streams = true;
@@ -502,7 +502,7 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<Value> {
         ensure_diag!(
             mir_ty.deref(ctx).is::<perry_mir::StringType>(),
-            codes::EXPORT_TYPE_MISMATCH,
+            codes::CONTRACT_MISMATCH,
             "WIT string needs a TypeScript string"
         );
         let string = self.runtime(ctx, Runtime::StringAdopt, vec![ptr, len]);
@@ -528,12 +528,7 @@ impl FunctionLowering<'_, '_> {
             return Ok(bytes);
         }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_err(|_| {
-                diag!(
-                    codes::EXPORT_TYPE_MISMATCH,
-                    "WIT list needs a TypeScript array"
-                )
-            })?
+            .map_diag(codes::CONTRACT_MISMATCH, "WIT list needs a TypeScript array")?
             .deref(ctx)
             .element();
         let lift_mir = scalar_mir_type(ctx, element_mir);
@@ -558,12 +553,8 @@ impl FunctionLowering<'_, '_> {
     }
 
     fn record_type(&self, ctx: &Context, mir_ty: TypeHandle) -> Result<TypedHandle<RecordType>> {
-        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx).map_err(|_| {
-            diag!(
-                codes::EXPORT_TYPE_MISMATCH,
-                "WIT record needs a TypeScript object type"
-            )
-        })?;
+        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx)
+            .map_diag(codes::CONTRACT_MISMATCH, "WIT record needs a TypeScript object type")?;
         ensure_diag!(
             matches!(
                 record.deref(ctx).kind(),
@@ -571,7 +562,7 @@ impl FunctionLowering<'_, '_> {
                     | perry_mir::RecordKind::Tuple
                     | perry_mir::RecordKind::DictionaryEntry
             ),
-            codes::EXPORT_TYPE_MISMATCH,
+            codes::CONTRACT_MISMATCH,
             "WIT record needs a TypeScript object type"
         );
         Ok(record)
@@ -588,11 +579,11 @@ impl FunctionLowering<'_, '_> {
         let field_count = record
             .deref(ctx)
             .fields()
-            .map_err(|_| internal!("record without fields"))?
+            .map_internal("record without fields")?
             .len();
         ensure_diag!(
             values.len() == field_count,
-            codes::EXPORT_TYPE_MISMATCH,
+            codes::CONTRACT_MISMATCH,
             "the WIT record has {} fields but the TypeScript type {} has {field_count}",
             values.len(),
             record.deref(ctx).name()
@@ -607,7 +598,7 @@ impl FunctionLowering<'_, '_> {
                     .deref(ctx)
                     .field(name)
                     .map(|(index, _)| index as u32)
-                    .ok_or_else(|| diag!(codes::EXPORT_TYPE_MISMATCH, "record has no field {name}"))
+                    .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "record has no field {name}"))
             })
             .collect::<Result<Vec<_>>>()?;
         let order = self.record_order(ctx, record, Some(&order))?;
@@ -713,12 +704,7 @@ impl FunctionLowering<'_, '_> {
             }
         }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_err(|_| {
-                diag!(
-                    codes::EXPORT_TYPE_MISMATCH,
-                    "WIT list needs a TypeScript array"
-                )
-            })?
+            .map_diag(codes::CONTRACT_MISMATCH, "WIT list needs a TypeScript array")?
             .deref(ctx)
             .element();
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);
@@ -824,7 +810,7 @@ impl FunctionLowering<'_, '_> {
                 let value = value.scalar()?;
                 ensure_diag!(
                     mir_ty.deref(ctx).is::<perry_mir::StringType>(),
-                    codes::EXPORT_TYPE_MISMATCH,
+                    codes::CONTRACT_MISMATCH,
                     "WIT string needs a TypeScript string"
                 );
                 let data = self.load(ctx, MemKind::I32, value, strings::DATA);
@@ -869,7 +855,7 @@ fn record_field(
     let record = record.deref(ctx);
     record.field(name).ok_or_else(|| {
         diag!(
-            codes::EXPORT_TYPE_MISMATCH,
+            codes::CONTRACT_MISMATCH,
             "TypeScript type {} has no field {name}",
             record.name()
         )

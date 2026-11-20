@@ -40,9 +40,7 @@ impl Shapes<'_> {
                 Ok(PromiseType::get(ctx, settled).into())
             }
             HirType::Unknown => Ok(perry_mir::JsonType::get(ctx).into()),
-            HirType::Any => Err(perry_wit_diagnostics::Diagnostic::from(
-                ShapeError::MissingTypeAnnotation,
-            )),
+            HirType::Any => Err(missing_type_annotation()),
             HirType::Generic { base, type_args } => {
                 if base == "WitInput" {
                     let [inner] = type_args.as_slice() else {
@@ -143,11 +141,9 @@ impl Shapes<'_> {
                     )?
                     .into())
             }
-            HirType::Function(_) | HirType::Symbol | HirType::TypeVar(_) => Err(
-                perry_wit_diagnostics::Diagnostic::from(ShapeError::UnsupportedType {
-                    ty: format!("{ty:?}"),
-                }),
-            ),
+            HirType::Function(_) | HirType::Symbol | HirType::TypeVar(_) => {
+                bail_diag!(codes::UNSUPPORTED_TYPE, "type {ty:?} is not supported yet")
+            }
         }
     }
 
@@ -218,12 +214,10 @@ impl Shapes<'_> {
                     codes::UNSUPPORTED_TYPE,
                     "finite value unions require plain record alternatives"
                 );
-                let tag = perry_mir::value_tag(ctx, ty).ok_or_else(|| {
-                    diag!(
-                        codes::UNSUPPORTED_TYPE,
-                        "finite value unions support numbers, strings, booleans and one plain record shape"
-                    )
-                })?;
+                let tag = perry_mir::value_tag(ctx, ty).ok_or_diag(
+                    codes::UNSUPPORTED_TYPE,
+                    "finite value unions support numbers, strings, booleans and one plain record shape",
+                )?;
                 if let Some((_, payload)) = cases.iter().find(|(name, _)| name == tag) {
                     ensure_diag!(
                         *payload == Some(ty),
@@ -240,12 +234,10 @@ impl Shapes<'_> {
         let records = members
             .iter()
             .map(|&ty| {
-                resolver.record(ty, 0).ok_or_else(|| {
-                    diag!(
-                        codes::UNSUPPORTED_TYPE,
-                        "unions other than tagged object types are not supported yet"
-                    )
-                })
+                resolver.record(ty, 0).ok_or_diag(
+                    codes::UNSUPPORTED_TYPE,
+                    "unions other than tagged object types are not supported yet",
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         if !records.is_empty()
@@ -339,12 +331,7 @@ impl Shapes<'_> {
                     _ => invalid = true,
                 }
             }
-            let tag = tag.ok_or_else(|| {
-                diag!(
-                    codes::UNSUPPORTED_TYPE,
-                    "union members need a literal `tag`"
-                )
-            })?;
+            let tag = tag.ok_or_diag(codes::UNSUPPORTED_TYPE, "union members need a literal `tag`")?;
             ensure_diag!(
                 !invalid,
                 codes::UNSUPPORTED_TYPE,

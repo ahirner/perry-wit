@@ -325,7 +325,7 @@ impl<'s> FunctionBuilder<'s> {
                     matches!(
                         kind(ctx, value).or_else(|_| optional_value(ctx, value.get_type(ctx))
                             .map(|_| Kind::Number)
-                            .ok_or_else(|| unsupported!("unsupported thrown value")))?,
+                            .ok_or_unsupported("unsupported thrown value"))?,
                         Kind::Exception
                             | Kind::Json
                             | Kind::Number
@@ -410,9 +410,7 @@ impl<'s> FunctionBuilder<'s> {
             (None, Some(value)) => value.get_type(ctx),
             (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
             (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
-                return Err(perry_wit_diagnostics::Diagnostic::from(
-                    ShapeError::MissingTypeAnnotation,
-                ));
+                return Err(missing_type_annotation());
             }
             (None, None) => bail_diag!(
                 codes::MISSING_TYPE_ANNOTATION,

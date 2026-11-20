@@ -40,16 +40,23 @@ pub(crate) fn has_marker(ctx: &Context, op: &dyn Op, key: &pliron::identifier::I
 }
 
 fn violation(ctx: &Context, unwrap: &UnwrapOp) -> Diagnostic {
-    let span = crate::source_span(ctx, unwrap).or_else(|| {
-        let function = unwrap.get_operation().deref(ctx).get_parent_op(ctx)?;
-        crate::source_span(ctx, &Operation::get_op::<FuncOp>(function, ctx)?)
-    });
-    Diagnostic::new(
+    let func = unwrap
+        .get_operation()
+        .deref(ctx)
+        .get_parent_op(ctx)
+        .and_then(|parent| Operation::get_op::<FuncOp>(parent, ctx));
+    let span = crate::source_span(ctx, unwrap)
+        .or_else(|| func.as_ref().and_then(|f| crate::source_span(ctx, f)));
+    let diagnostic = Diagnostic::new(
         codes::POSSIBLY_NULL_RECEIVER,
         "property access receiver is possibly null",
     )
     .with_optional_span(span)
-    .with_help("Check the receiver before accessing its properties, or use optional chaining.")
+    .with_help("Check the receiver before accessing its properties, or use optional chaining.");
+    match &func {
+        Some(func) => crate::attach_caller_notes(ctx, func, diagnostic),
+        None => diagnostic,
+    }
 }
 
 pub(crate) fn check_receivers(

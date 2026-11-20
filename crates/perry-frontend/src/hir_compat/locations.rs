@@ -1,13 +1,41 @@
 //! Original source coordinates for merged AST and HIR declarations.
 use perry_hir::ir::Expr;
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{Diagnostic, SourceSpan};
-use std::{collections::HashMap, path::PathBuf};
+use perry_wit_diagnostics::{Diagnostic, Note, SourceSpan};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
+
+/// Strip internal module-mangling prefixes (`__perry_module_<N>_`) for user-facing names.
+pub fn display_name(name: &str) -> &str {
+    name.strip_prefix("__perry_module_")
+        .and_then(|rest| {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            (digits > 0)
+                .then(|| rest[digits..].strip_prefix('_'))
+                .flatten()
+        })
+        .unwrap_or(name)
+}
+
+#[derive(Clone)]
+enum CallerKind {
+    Instantiation { template: String },
+    ImportedCall,
+}
+
+#[derive(Clone)]
+struct CallerOrigin {
+    kind: CallerKind,
+    call_span: Option<SourceSpan>,
+    caller: Option<String>,
+}
 
 pub fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
     let Expr::Sequence(parts) = expr else {
@@ -34,6 +62,7 @@ pub struct Locations<'s> {
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
+    origins: HashMap<String, CallerOrigin>,
 }
 
 impl<'s> Locations<'s> {
@@ -93,15 +122,112 @@ impl<'s> Locations<'s> {
         self.files.push((file, source, offset));
     }
 
+    pub(crate) fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    fn template_name<'a>(&'a self, mut name: &'a str) -> &'a str {
+        let mut seen = HashSet::new();
+        while seen.insert(name)
+            && let Some(CallerOrigin {
+                kind: CallerKind::Instantiation { template },
+                ..
+            }) = self.origins.get(name)
+        {
+            name = template;
+        }
+        name
+    }
+
+    pub fn display_function_name<'a>(&'a self, name: &'a str) -> &'a str {
+        display_name(self.template_name(name))
+    }
+
+    pub(crate) fn record_instantiation(
+        &mut self,
+        instance: String,
+        template: String,
+        call_byte_offset: u32,
+        caller: Option<String>,
+    ) {
+        let call_span = self.call_span(call_byte_offset);
+        self.origins.insert(
+            instance,
+            CallerOrigin {
+                kind: CallerKind::Instantiation { template },
+                call_span,
+                caller,
+            },
+        );
+    }
+
+    pub(crate) fn record_imported_call(
+        &mut self,
+        callee: String,
+        call_byte_offset: u32,
+        caller: Option<String>,
+    ) {
+        if self.origins.contains_key(&callee) {
+            return;
+        }
+        let Some(call_span) = self.call_span(call_byte_offset) else {
+            return;
+        };
+        let Some(callee_span) = self.function_span(&callee) else {
+            return;
+        };
+        if call_span.file == callee_span.file {
+            return;
+        }
+        self.origins.insert(
+            callee,
+            CallerOrigin {
+                kind: CallerKind::ImportedCall,
+                call_span: Some(call_span),
+                caller,
+            },
+        );
+    }
+
+    pub fn caller_notes(&self, function_name: &str) -> Vec<Note> {
+        let mut notes = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = function_name;
+        while seen.insert(current)
+            && let Some(origin) = self.origins.get(current)
+        {
+            if let Some(span) = &origin.call_span {
+                let message = match &origin.kind {
+                    CallerKind::Instantiation { template } => {
+                        format!("while instantiating '{}'", display_name(template))
+                    }
+                    CallerKind::ImportedCall => {
+                        format!("called from here ('{}')", display_name(current))
+                    }
+                };
+                notes.push(Note::spanned(span.clone(), message));
+            }
+            let Some(caller) = origin.caller.as_deref() else {
+                break;
+            };
+            current = caller;
+        }
+        notes
+    }
+
+    pub fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
+        error.with_notes(self.caller_notes(function_name))
+    }
+
     pub(crate) fn has_explicit_return(&self, name: &str) -> bool {
         self.functions
-            .get(name)
+            .get(self.template_name(name))
             .is_some_and(|info| info.explicit_return)
     }
 
     pub fn function_span(&self, name: &str) -> Option<SourceSpan> {
         self.functions
-            .get(name)
+            .get(self.template_name(name))
             .and_then(|info| self.span(info.span))
     }
 
@@ -229,6 +355,18 @@ impl<'s> Locations<'s> {
                 let previous = self.class_name.replace(decl.ident.sym.to_string());
                 decl.visit_children_with(self);
                 self.class_name = previous;
+            }
+            fn visit_constructor(&mut self, ctor: &ast::Constructor) {
+                if let Some(class_name) = &self.class_name {
+                    self.locations.functions.insert(
+                        format!("{class_name}::constructor"),
+                        FunctionInfo {
+                            span: ctor.span,
+                            explicit_return: false,
+                        },
+                    );
+                }
+                ctor.visit_children_with(self);
             }
             fn visit_class_method(&mut self, method: &ast::ClassMethod) {
                 if let Some(class_name) = &self.class_name {

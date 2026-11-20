@@ -528,7 +528,7 @@ pub(super) fn insert_before_terminator(
     let terminator = block
         .deref(ctx)
         .get_terminator(ctx)
-        .ok_or_else(|| internal!("a closed block ends in a terminator"))?;
+        .ok_or_internal("a closed block ends in a terminator")?;
     for operation in operations {
         operation.insert_before(ctx, terminator);
     }

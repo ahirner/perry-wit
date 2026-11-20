@@ -168,20 +168,14 @@ define_codes! {
     AMBIGUOUS_EXPORT => ("ambiguous-export", Module),
 
     INVALID_UTF8 => ("invalid-utf8", InvalidInput),
-    INVALID_MODULE_PATH => ("invalid-module-path", InvalidInput),
-    DUPLICATE_MODULE => ("duplicate-module", InvalidInput),
-    EMPTY_WIT_SOURCES => ("empty-wit-sources", InvalidInput),
+    INVALID_INPUT => ("invalid-input", InvalidInput),
 
     WIT_PARSE => ("wit-parse", Wit),
-    WIT_PACKAGE_ENCODING => ("wit-package-encoding", Wit),
     WIT_DEPENDENCY => ("wit-dependency", Wit),
     WIT_WORLD_SELECTION => ("wit-world-selection", Wit),
-    MISSING_WIT_DIRECTORY => ("missing-wit-directory", Wit),
 
     MISSING_TYPE_ANNOTATION => ("missing-type-annotation", TypeCheck),
     MISSING_REQUIRED_FIELD => ("missing-required-field", TypeCheck),
-    ABSENCE_MISMATCH => ("absence-mismatch", TypeCheck),
-    INCOMPATIBLE_RECORD_LAYOUT => ("incompatible-record-layout", TypeCheck),
     TYPE_MISMATCH => ("type-mismatch", TypeCheck),
     POSSIBLY_NULL_RECEIVER => ("possibly-null-receiver", TypeCheck),
 
@@ -189,22 +183,11 @@ define_codes! {
     UNSUPPORTED_OPERATOR => ("unsupported-operator", Unsupported),
     UNSUPPORTED_CONSTRUCT => ("unsupported-construct", Unsupported),
     UNSUPPORTED_REGEX => ("unsupported-regex", Unsupported),
-    UNSUPPORTED_ABI_TYPE => ("unsupported-abi-type", Unsupported),
-    BYTE_STREAM_NEEDS_WIT_STREAM => ("byte-stream-needs-wit-stream", Unsupported),
 
-    INVALID_EXPORT_NAME => ("invalid-export-name", Contract),
-    RESOURCE_IMPORTED_AND_EXPORTED => ("resource-imported-and-exported", Contract),
-    EXPORT_TYPE_MISMATCH => ("export-type-mismatch", Contract),
-    EXPORT_ARITY => ("export-arity", Contract),
     MISSING_EXPORT => ("missing-export", Contract),
+    CONTRACT_MISMATCH => ("contract-mismatch", Contract),
     ASYNC_MISMATCH => ("async-mismatch", Contract),
-    WIDE_INTEGER_REQUIRES_BIGINT => ("wide-integer-requires-bigint", Contract),
-    TOP_LEVEL_REQUIRES_COMMAND_WORLD => ("top-level-requires-command-world", Contract),
-    IMPORT_SIGNATURE_MISMATCH => ("import-signature-mismatch", Contract),
     MISSING_ERROR_CHANNEL => ("missing-error-channel", Contract),
-    ASYNC_INITIALIZER_REQUIRES_ASYNC_EXPORT => ("async-initializer-requires-async-export", Contract),
-    PENDING_INITIALIZATION => ("pending-initialization", Contract),
-    SYNC_EXPORT_CONSOLE => ("sync-export-console", Contract),
 
     IO => ("io", Io),
     INTERNAL => ("internal", Internal),
@@ -268,6 +251,14 @@ impl Diagnostic {
         }))
     }
 
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(codes::UNSUPPORTED_CONSTRUCT, message)
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(codes::INTERNAL, message)
+    }
+
     pub fn io(message: impl Into<String>, source: &(dyn std::error::Error + 'static)) -> Self {
         Self::new(codes::IO, message).with_source_notes(source)
     }
@@ -304,6 +295,11 @@ impl Diagnostic {
 
     pub fn with_spanned_note(mut self, span: SourceSpan, message: impl Into<String>) -> Self {
         self.0.notes.push(Note::spanned(span, message));
+        self
+    }
+
+    pub fn with_notes(mut self, notes: impl IntoIterator<Item = Note>) -> Self {
+        self.0.notes.extend(notes);
         self
     }
 
@@ -405,6 +401,44 @@ impl fmt::Display for Diagnostic {
 }
 
 impl std::error::Error for Diagnostic {}
+
+/// Convert an `Option` into a `Result<T, Diagnostic>` without allocating on the `Some` path.
+pub trait OptionExt<T> {
+    fn ok_or_diag(self, code: Code, message: &'static str) -> Result<T>;
+    fn ok_or_unsupported(self, message: &'static str) -> Result<T>;
+    fn ok_or_internal(self, message: &'static str) -> Result<T>;
+}
+
+impl<T> OptionExt<T> for Option<T> {
+    fn ok_or_diag(self, code: Code, message: &'static str) -> Result<T> {
+        self.ok_or_else(|| Diagnostic::new(code, message))
+    }
+    fn ok_or_unsupported(self, message: &'static str) -> Result<T> {
+        self.ok_or_else(|| Diagnostic::unsupported(message))
+    }
+    fn ok_or_internal(self, message: &'static str) -> Result<T> {
+        self.ok_or_else(|| Diagnostic::internal(message))
+    }
+}
+
+/// Map a foreign `Result` error into a `Diagnostic` without allocating on the `Ok` path.
+pub trait ResultExt<T> {
+    fn map_diag(self, code: Code, message: &'static str) -> Result<T>;
+    fn map_unsupported(self, message: &'static str) -> Result<T>;
+    fn map_internal(self, message: &'static str) -> Result<T>;
+}
+
+impl<T, E> ResultExt<T> for std::result::Result<T, E> {
+    fn map_diag(self, code: Code, message: &'static str) -> Result<T> {
+        self.map_err(|_| Diagnostic::new(code, message))
+    }
+    fn map_unsupported(self, message: &'static str) -> Result<T> {
+        self.map_err(|_| Diagnostic::unsupported(message))
+    }
+    fn map_internal(self, message: &'static str) -> Result<T> {
+        self.map_err(|_| Diagnostic::internal(message))
+    }
+}
 
 /// A compiler failure holding one or more [`Diagnostic`]s.
 #[derive(Debug)]
@@ -581,7 +615,7 @@ mod tests {
             "src/é.ts:2:3: error[missing-required-field]: Missing value\n  Record fields are mandatory\n  help: Add value: null\nerror[parse-error]: Unexpected token"
         );
 
-        let spanned = Diagnostic::new(codes::EXPORT_TYPE_MISMATCH, "type mismatch")
+        let spanned = Diagnostic::new(codes::CONTRACT_MISMATCH, "type mismatch")
             .with_span(SourceSpan {
                 file: "src/main.ts".into(),
                 start_line: 4,
@@ -607,7 +641,7 @@ mod tests {
             .with_help("update signature");
         assert_eq!(
             spanned.to_string(),
-            "src/main.ts:4:1: error[export-type-mismatch]: type mismatch\n  while binding WIT export run\n  src/types.ts:1:10: expected here\n  help: update signature"
+            "src/main.ts:4:1: error[contract-mismatch]: type mismatch\n  while binding WIT export run\n  src/types.ts:1:10: expected here\n  help: update signature"
         );
     }
 
@@ -644,7 +678,7 @@ mod tests {
             vec!["compiling module", "lowering function run"]
         );
 
-        let wrapped = Diagnostic::new(codes::EXPORT_ARITY, "expected 2 arguments")
+        let wrapped = Diagnostic::new(codes::CONTRACT_MISMATCH, "expected 2 arguments")
             .with_help("pass 2 arguments")
             .with_internal_context("dropped internal layer")
             .wrap_boundary(
@@ -652,7 +686,7 @@ mod tests {
                 "while binding WIT export run",
                 "binding WIT export run",
             );
-        assert_eq!(wrapped.code(), codes::EXPORT_ARITY);
+        assert_eq!(wrapped.code(), codes::CONTRACT_MISMATCH);
         assert_eq!(wrapped.message(), "expected 2 arguments");
         assert_eq!(wrapped.span(), Some(&user_span));
         assert_eq!(wrapped.help(), Some("pass 2 arguments"));

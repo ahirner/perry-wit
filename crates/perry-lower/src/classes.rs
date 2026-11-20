@@ -55,8 +55,17 @@ impl<'s> FunctionBuilder<'s> {
                 }
             }
         }
+        let member_span = match &expansion {
+            ClassExpansion::Callable(func) => self
+                .shapes
+                .metadata
+                .locations
+                .function_span(&format!("{owner_class}::{}", func.name))
+                .or_else(|| self.shapes.metadata.locations.type_span(owner_class)),
+            ClassExpansion::Fields(_) => self.shapes.metadata.locations.type_span(owner_class),
+        };
         self.class_expansions.push(expansion);
-        let result = lower(self, ctx);
+        let result = lower(self, ctx).map_err(|error| error.with_fallback_span(member_span));
         self.class_expansions.pop();
         result
     }
@@ -134,7 +143,7 @@ impl<'s> FunctionBuilder<'s> {
         let field_defs: Vec<(String, TypeHandle)> = rec
             .deref(ctx)
             .fields()
-            .map_err(|_| internal!("incomplete class record"))?
+            .map_internal("incomplete class record")?
             .to_vec();
         let mut init_operands = Vec::with_capacity(field_defs.len());
         for (field, field_ty) in &field_defs {
@@ -224,7 +233,7 @@ impl<'s> FunctionBuilder<'s> {
             .ok_or_else(|| internal!("unknown class {class_name}"))?;
         let rec_val = self.load(ctx, this_slot)?;
         let rec = TypedHandle::<RecordType>::from_handle(rec_val.get_type(ctx), ctx)
-            .map_err(|_| internal!("expected class record"))?;
+            .map_internal("expected class record")?;
         let saved_this = self.this_slot.replace(this_slot);
         let res = self.with_class_expansion(
             ctx,
@@ -254,11 +263,9 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     pub(super) fn class_this(&mut self, ctx: &mut Context) -> Result<Value> {
-        let slot = self.this_slot.ok_or_else(|| {
-            unsupported!(
-                "'this' is only supported inside class constructors, methods, and accessors"
-            )
-        })?;
+        let slot = self.this_slot.ok_or_unsupported(
+            "'this' is only supported inside class constructors, methods, and accessors",
+        )?;
         self.load(ctx, slot)
     }
 
@@ -376,7 +383,7 @@ impl<'s> FunctionBuilder<'s> {
             ClassArguments::Expressions(&[]),
             ClassReceiver::Instance(slot),
         )?
-        .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "class getter produced no value"))
+        .ok_or_diag(codes::TYPE_MISMATCH, "class getter produced no value")
     }
 
     pub(super) fn class_setter_call(
@@ -476,13 +483,10 @@ impl<'s> FunctionBuilder<'s> {
                 )
             };
             let value = if param.is_rest {
-                let rest_ty = param_ty.ok_or_else(|| {
-                    diag!(codes::TYPE_MISMATCH, "rest parameter must have array type")
-                })?;
+                let rest_ty =
+                    param_ty.ok_or_diag(codes::TYPE_MISMATCH, "rest parameter must have array type")?;
                 let element = TypedHandle::<ArrayType>::from_handle(rest_ty, ctx)
-                    .map_err(|_| {
-                        diag!(codes::TYPE_MISMATCH, "rest parameter must have array type")
-                    })?
+                    .map_diag(codes::TYPE_MISMATCH, "rest parameter must have array type")?
                     .deref(ctx)
                     .element();
                 let mut items = Vec::new();

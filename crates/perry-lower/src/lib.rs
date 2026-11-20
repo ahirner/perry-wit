@@ -58,10 +58,9 @@ use perry_mir::{
     WrapOp, absence, admits_undefined, may_throw, optional_parts, optional_value, present_type,
     set_async,
 };
-use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{
-    Diagnostic, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag,
-    ensure_internal, ensure_unsupported, internal, unsupported,
+    Diagnostic, OptionExt as _, Result, ResultExt as _, bail_diag, bail_internal, bail_unsupported,
+    codes, diag, ensure_diag, ensure_internal, ensure_unsupported, internal, unsupported,
 };
 use pliron::printable::Printable as _;
 use pliron::{
@@ -97,7 +96,7 @@ use program::{Builtin, Signature};
 /// functions, otherwise an entry point awaiting module initialization.
 pub const MAIN: &str = "perry_main";
 
-use diagnostics::{LowerErrorKind, ShapeError};
+use diagnostics::missing_type_annotation;
 pub use perry_frontend::hir;
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with

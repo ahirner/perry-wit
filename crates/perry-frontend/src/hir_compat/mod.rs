@@ -18,7 +18,7 @@ pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;
-pub use locations::{Locations, non_null_assertion};
+pub use locations::{Locations, display_name, non_null_assertion};
 mod methods;
 mod names;
 mod parser;

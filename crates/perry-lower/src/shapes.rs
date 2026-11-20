@@ -2,9 +2,10 @@
 //!
 //! Frontend record identities map to carriers; object construction evaluates fields in source order.
 use crate::{
-    Diagnostic, Result, ShapeError, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
-    internal, unsupported,
+    Diagnostic, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported, internal,
+    missing_type_annotation, unsupported,
 };
+use perry_wit_diagnostics::OptionExt as _;
 use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
 use pliron::printable::Printable as _;
@@ -186,12 +187,33 @@ impl<'h> Shapes<'h> {
         error.with_fallback_span(self.metadata.locations.offset_span(byte_offset, len))
     }
 
+    fn annotate_site(
+        &self,
+        error: Diagnostic,
+        span: Option<perry_wit_diagnostics::SourceSpan>,
+    ) -> Diagnostic {
+        let Some(site) = span else {
+            return error;
+        };
+        match error.span() {
+            None => error.with_span(site),
+            Some(inner)
+                if inner.file != site.file
+                    || inner.start_byte < site.start_byte
+                    || inner.end_byte > site.end_byte =>
+            {
+                error.with_spanned_note(site, "called from here")
+            }
+            Some(_) => error,
+        }
+    }
+
     pub(super) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
-        error.with_fallback_span(self.metadata.locations.call_span(byte_offset))
+        self.annotate_site(error, self.metadata.locations.call_span(byte_offset))
     }
 
     pub(super) fn annotate_member(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
-        error.with_fallback_span(self.metadata.locations.member_span(byte_offset))
+        self.annotate_site(error, self.metadata.locations.member_span(byte_offset))
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {

@@ -210,13 +210,10 @@ impl<'s> FunctionBuilder<'s> {
                     BinaryOp::Mul => BinaryKind::Mul,
                     BinaryOp::Div => BinaryKind::Div,
                     BinaryOp::Mod => BinaryKind::Rem,
-                    other => {
-                        return Err(perry_wit_diagnostics::Diagnostic::from(
-                            LowerErrorKind::UnsupportedOperator {
-                                op: format!("{other:?}"),
-                            },
-                        ));
-                    }
+                    other => bail_diag!(
+                        codes::UNSUPPORTED_OPERATOR,
+                        "operator {other:?} is not supported yet"
+                    ),
                 };
                 self.binary(ctx, kind, lhs, rhs)
             }

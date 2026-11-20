@@ -394,7 +394,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let expected = present_type(ctx, expected);
         let (_, _, tuple_rec) = kv_entry_types(ctx, expected)
-            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "expected a Map<K, V> type"))?;
+            .ok_or_diag(codes::TYPE_MISMATCH, "expected a Map<K, V> type")?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)
     }
 
@@ -452,7 +452,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let expected = present_type(ctx, expected);
         let (_, tuple_rec) = set_entry_type(ctx, expected)
-            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "expected a Set<T> type"))?;
+            .ok_or_diag(codes::TYPE_MISMATCH, "expected a Set<T> type")?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)
     }
 

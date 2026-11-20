@@ -42,19 +42,19 @@ fn matching_record<'a>(
         return Ok(None);
     };
     let definition = record.deref(ctx);
-    let fields = definition
-        .fields()
-        .map_err(|_| internal!("record without fields"))?;
+    let fields = definition.fields().map_internal("record without fields")?;
     let required = fields
         .iter()
         .filter(|(name, ty)| !admits_undefined(ctx, *ty) && !names.clone().any(|key| key == name));
     match missing {
         MissingFields::Diagnose => {
-            let missing: Vec<_> = required.map(|(name, _)| name.clone()).collect();
+            let missing: Vec<_> = required.map(|(name, _)| name.as_str()).collect();
             if !missing.is_empty() {
-                return Err(perry_wit_diagnostics::Diagnostic::from(
-                    LowerErrorKind::MissingRequiredField { fields: missing },
-                ));
+                bail_diag!(
+                    codes::MISSING_REQUIRED_FIELD,
+                    "missing required record fields: {}",
+                    missing.join(", ")
+                );
             }
         }
         MissingFields::Infer if required.count() != 0 => return Ok(None),
@@ -244,13 +244,11 @@ impl<'a> RecordAssembly<'a> {
                 None => {
                     let ty = record.deref(ctx).fields().to_diag(ctx)?[index].1;
                     if !admits_undefined(ctx, ty) {
-                        return Err(perry_wit_diagnostics::Diagnostic::from(
-                            LowerErrorKind::MissingRequiredField {
-                                fields: vec![
-                                    record.deref(ctx).fields().to_diag(ctx)?[index].0.clone(),
-                                ],
-                            },
-                        ));
+                        bail_diag!(
+                            codes::MISSING_REQUIRED_FIELD,
+                            "missing required record fields: {}",
+                            record.deref(ctx).fields().to_diag(ctx)?[index].0
+                        );
                     }
                     Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)))
                 }

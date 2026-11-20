@@ -31,7 +31,7 @@ pub(crate) fn export(
     let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
     ensure_diag!(
         mir_params.len() == export.params.len(),
-        codes::EXPORT_ARITY,
+        codes::CONTRACT_MISMATCH,
         "{} takes {} parameters but the WIT export has {}",
         export.function,
         mir_params.len(),
@@ -43,7 +43,7 @@ pub(crate) fn export(
         .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
     ensure_diag!(
         completion || mir_results.len() == usize::from(export.result.is_some()),
-        codes::EXPORT_ARITY,
+        codes::CONTRACT_MISMATCH,
         "{} returns {} values but the WIT export returns {}",
         export.function,
         mir_results.len(),
@@ -208,7 +208,7 @@ fn async_export(
         .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
     ensure_diag!(
         mir_params.len() == export.params.len(),
-        codes::EXPORT_ARITY,
+        codes::CONTRACT_MISMATCH,
         "{} takes {} parameters but the WIT export has {}",
         export.function,
         mir_params.len(),
