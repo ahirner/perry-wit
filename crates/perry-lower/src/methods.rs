@@ -80,14 +80,14 @@ macro_rules! lower_calls {
 perry_frontend::method_catalog!(lower_calls);
 
 fn map_types(ctx: &Context, map: Value) -> Result<(TypeHandle, TypeHandle)> {
-    let (key, value, _) =
-        kv_entry_types(ctx, map.get_type(ctx)).context("method receiver must be a Map")?;
+    let (key, value, _) = kv_entry_types(ctx, map.get_type(ctx))
+        .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "method receiver must be a Map"))?;
     Ok((key, value))
 }
 
 fn set_element(ctx: &Context, set: Value) -> Result<TypeHandle> {
-    let (element, _) =
-        set_entry_type(ctx, set.get_type(ctx)).context("method receiver must be a Set")?;
+    let (element, _) = set_entry_type(ctx, set.get_type(ctx))
+        .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "method receiver must be a Set"))?;
     Ok(element)
 }
 
@@ -99,7 +99,7 @@ impl<'s> FunctionBuilder<'s> {
         collection: Value,
         method: IteratorMethod,
     ) -> Result<Value> {
-        ensure!(
+        ensure_unsupported!(
             dict_entry_types(ctx, collection.get_type(ctx)).is_none(),
             "dictionary values have no iterator method"
         );
@@ -231,7 +231,7 @@ impl<'s> FunctionBuilder<'s> {
         let intrinsic = match kind(ctx, separator)? {
             Kind::String => Intrinsic::StringSplit,
             Kind::Regex => Intrinsic::RegexSplit,
-            _ => bail!("string.split requires a string or literal regex separator"),
+            _ => bail_unsupported!("string.split requires a string or literal regex separator"),
         };
         Ok(self.call_intrinsic(ctx, intrinsic, vec![text, separator]))
     }
@@ -253,7 +253,7 @@ impl<'s> FunctionBuilder<'s> {
         regex: &'s Expr,
     ) -> Result<Option<Value>> {
         let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
-        ensure!(
+        ensure_unsupported!(
             !FunctionBuilder::regex_global(ctx, regex)?,
             "Regex search supports only the u and s flags"
         );
@@ -266,7 +266,7 @@ impl<'s> FunctionBuilder<'s> {
         regex: Value,
         text: &'s Expr,
     ) -> Result<Value> {
-        ensure!(
+        ensure_unsupported!(
             !FunctionBuilder::regex_global(ctx, regex)?,
             "Regex search supports only the u and s flags"
         );
@@ -327,13 +327,18 @@ impl<'s> FunctionBuilder<'s> {
         bytes: Value,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        let source = args.first().context("set needs a source")?;
+        let source = args
+            .first()
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "set needs a source"))?;
         let source = self.expression(ctx, source)?;
         let source = self.defined(ctx, source)?;
         let source = match kind(ctx, source)? {
             Kind::Bytes => source,
             Kind::Array => self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![source]),
-            _ => bail!("Uint8Array.set needs a Uint8Array or number[] source"),
+            _ => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "Uint8Array.set needs a Uint8Array or number[] source"
+            ),
         };
         let offset = self.number_or(ctx, args.get(1), 0.0)?;
         for arg in args.iter().skip(2) {
@@ -396,7 +401,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         let intrinsic = if let Some(options) = options {
             let fields = self.init_fields(Some(options))?;
-            ensure!(
+            ensure_unsupported!(
                 fields.len() == 1
                     && fields[0].0 == "mode"
                     && matches!(fields[0].1, Expr::String(mode) if mode == "byob"),
@@ -418,7 +423,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         let view = self.typed_operand(ctx, view, Kind::Bytes, "a Uint8Array")?;
         let fields = self.init_fields(options)?;
-        ensure!(
+        ensure_unsupported!(
             fields.is_empty() || (fields.len() == 1 && fields[0].0 == "min"),
             "BYOB read supports only {{min}}"
         );

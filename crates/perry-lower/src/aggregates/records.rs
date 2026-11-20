@@ -44,7 +44,7 @@ fn matching_record<'a>(
     let definition = record.deref(ctx);
     let fields = definition
         .fields()
-        .map_err(|_| anyhow!("record without fields"))?;
+        .map_err(|_| internal!("record without fields"))?;
     let required = fields
         .iter()
         .filter(|(name, ty)| !admits_undefined(ctx, *ty) && !names.clone().any(|key| key == name));
@@ -169,7 +169,12 @@ impl<'a> RecordAssembly<'a> {
         } else {
             b.fit(ctx, loaded, target)
         }
-        .with_context(|| format!("record field {name} cannot become {}", target.disp(ctx)))?;
+        .map_err(|err| {
+            internal_context(
+                err,
+                format!("record field {name} cannot become {}", target.disp(ctx)),
+            )
+        })?;
         match position {
             Some(index) => self.fields[index].1 = value,
             None => self.fields.push((name, value)),
@@ -227,7 +232,7 @@ impl<'a> RecordAssembly<'a> {
             let (index, ty) = record
                 .deref(ctx)
                 .field(&name)
-                .with_context(|| format!("record has no field {name}"))?;
+                .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "record has no field {name}"))?;
             slots[index] = Some(b.fit(ctx, value, ty)?);
             if literal {
                 order.push(index as u32);
@@ -373,7 +378,11 @@ impl<'s> FunctionBuilder<'s> {
                 let source = self.defined(ctx, raw)?;
                 let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                     .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
-                    .context("object spread is supported over typed records or JSON values with static keys")?;
+                    .ok_or_else(|| {
+                        unsupported!(
+                            "object spread is supported over typed records or JSON values with static keys"
+                        )
+                    })?;
                 sources.push(RecordSource::Spread(source));
                 assembly.copy(self, ctx, source, record, &[], CopyMode::Spread)?;
             }
@@ -398,7 +407,7 @@ impl<'s> FunctionBuilder<'s> {
         let source = self.defined(ctx, source)?;
         let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
             .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
-            .context("object rest destructuring requires a typed record")?;
+            .ok_or_else(|| unsupported!("object rest destructuring requires a typed record"))?;
         let expected = expected
             .map(|ty| present_type(ctx, ty))
             .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))

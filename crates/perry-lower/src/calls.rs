@@ -104,7 +104,7 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(call) = hir_compat::runtime_call(callee, args) {
             return match call {
                 RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
-                    anyhow!("cannot find name '{ident}'"),
+                    diag!(codes::TYPE_MISMATCH, "cannot find name '{ident}'"),
                     byte_offset,
                     ident.len() as u32,
                 )),
@@ -131,12 +131,13 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 RuntimeCall::ExitCode(args) => {
                     let [code] = args else {
-                        bail!("process.exitCode takes one value");
+                        bail_diag!(codes::TYPE_MISMATCH, "process.exitCode takes one value");
                     };
                     let code = self.expression(ctx, code)?;
                     let code = self.arithmetic(ctx, code);
-                    ensure!(
+                    ensure_diag!(
                         kind(ctx, code)? == Kind::Number,
+                        codes::TYPE_MISMATCH,
                         "process.exitCode must be a number"
                     );
                     self.intrinsic_void(ctx, Intrinsic::ExitCodeSet, vec![code]);
@@ -174,7 +175,7 @@ impl<'s> FunctionBuilder<'s> {
             let intrinsic = match property.as_str() {
                 "log" | "info" | "debug" => Intrinsic::PrintOut,
                 "error" | "warn" => Intrinsic::PrintErr,
-                other => bail!("console.{other} is not supported yet"),
+                other => bail_unsupported!("console.{other} is not supported yet"),
             };
             let line = self.console_line(ctx, args)?;
             self.call_intrinsic(ctx, intrinsic, vec![line]);
@@ -199,7 +200,7 @@ impl<'s> FunctionBuilder<'s> {
                             }
                             Ok(Some(self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![])))
                         }
-                        other => bail!("performance.{other} is not supported yet"),
+                        other => bail_unsupported!("performance.{other} is not supported yet"),
                     };
                 }
                 if class == "Promise" {
@@ -210,10 +211,10 @@ impl<'s> FunctionBuilder<'s> {
                         "all" => Combinator::All,
                         "race" => Combinator::Race,
                         "allSettled" => Combinator::AllSettled,
-                        other => bail!("Promise.{other} is not supported yet"),
+                        other => bail_unsupported!("Promise.{other} is not supported yet"),
                     };
                     let [inputs] = args else {
-                        bail!("Promise.{property} takes one array");
+                        bail_diag!(codes::TYPE_MISMATCH, "Promise.{property} takes one array");
                     };
                     let inputs = match inputs {
                         Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
@@ -224,8 +225,12 @@ impl<'s> FunctionBuilder<'s> {
                     } else {
                         inputs
                     };
-                    let op = PromiseCombinatorOp::new(ctx, combinator, inputs)
-                        .context("Promise combinators take an array of promises of one type")?;
+                    let op =
+                        PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_else(|| {
+                            unsupported!(
+                                "Promise combinators take an array of promises of one type"
+                            )
+                        })?;
                     return Ok(Some(self.append_value(ctx, &op)));
                 }
             }
@@ -240,7 +245,9 @@ impl<'s> FunctionBuilder<'s> {
         {
             return match builtin {
                 Builtin::SetTimeout => self.timer(ctx, args).map(Some),
-                Builtin::Writable => bail!("Writable is a class; only Writable.toWeb is supported"),
+                Builtin::Writable => {
+                    bail_unsupported!("Writable is a class; only Writable.toWeb is supported")
+                }
                 Builtin::Serve(intrinsic) => {
                     let mut operands = Vec::with_capacity(args.len());
                     for arg in args {
@@ -316,7 +323,10 @@ impl<'s> FunctionBuilder<'s> {
             && name == "structuredClone"
         {
             let [arg] = args else {
-                bail!("structuredClone requires one argument");
+                bail_diag!(
+                    codes::TYPE_MISMATCH,
+                    "structuredClone requires one argument"
+                );
             };
             let val = self.expression(ctx, arg)?;
             return self.clone_structured_value(ctx, val).map(Some);
@@ -335,22 +345,24 @@ impl<'s> FunctionBuilder<'s> {
         let Expr::FuncRef(id) = callee else {
             return Err(match callee {
                 Expr::LocalGet(id) => {
-                    let error = anyhow!(
+                    let error = unsupported!(
                         "indirect calls through local or parameter bindings are not supported yet; call a declared module function directly"
                     );
                     let error = self.shapes.annotate_call(error, byte_offset);
                     self.shapes.annotate_local(error, *id)
                 }
-                Expr::Closure { .. } => anyhow!(
+                Expr::Closure { .. } => unsupported!(
                     "immediately invoked function expressions and closure calls are not supported yet; declare a named function instead"
                 ),
                 Expr::ExternFuncRef { name, .. } => {
-                    anyhow!("call to external or unresolved function '{name}' is not supported yet")
+                    unsupported!(
+                        "call to external or unresolved function '{name}' is not supported yet"
+                    )
                 }
                 Expr::IndexGet { .. } => {
-                    anyhow!("computed method or element calls are not supported yet")
+                    unsupported!("computed method or element calls are not supported yet")
                 }
-                _ => anyhow!(
+                _ => unsupported!(
                     "indirect function calls are not supported yet; call a declared module function directly"
                 ),
             });
@@ -358,10 +370,11 @@ impl<'s> FunctionBuilder<'s> {
         let signature = self
             .signatures
             .get(id)
-            .context("call to an unknown function")?;
+            .ok_or_else(|| internal!("call to an unknown function"))?;
         let (fixed, rest) = signature.parameters();
-        ensure!(
+        ensure_diag!(
             rest.is_some() || args.len() <= fixed.len(),
+            codes::TYPE_MISMATCH,
             "call to {} with {} arguments, expected {}",
             signature.name,
             args.len(),
@@ -371,12 +384,19 @@ impl<'s> FunctionBuilder<'s> {
         for (i, param) in fixed.iter().enumerate() {
             values.push(
                 self.bind_fixed_arg(ctx, param, args.get(i))
-                    .with_context(|| format!("argument {} of {}", i + 1, signature.name))?,
+                    .map_err(|err| {
+                        internal_context(err, format!("argument {} of {}", i + 1, signature.name))
+                    })?,
             );
         }
         if let Some(rest) = rest {
-            let array = TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx)
-                .context("rest parameter must have an array type")?;
+            let array =
+                TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx).map_err(|_| {
+                    diag!(
+                        codes::TYPE_MISMATCH,
+                        "rest parameter must have an array type"
+                    )
+                })?;
             let element = array.deref(ctx).element();
             let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
             for arg in args.iter().skip(fixed.len()) {
@@ -414,7 +434,7 @@ impl<'s> FunctionBuilder<'s> {
             let value = self.expression_with(ctx, default, Some(carrier))?;
             return self.fit(ctx, value, carrier);
         }
-        bail!("missing required argument")
+        bail_diag!(codes::TYPE_MISMATCH, "missing required argument")
     }
 
     pub(super) fn emit_signature_call(
@@ -426,7 +446,7 @@ impl<'s> FunctionBuilder<'s> {
         if signature.is_async {
             let result = signature
                 .result
-                .context("async function must settle one result")?;
+                .ok_or_else(|| internal!("async function must settle one result"))?;
             return Ok(Some(self.emit_value(ctx, |ctx| {
                 AsyncCallOp::new(ctx, signature.name.clone(), values, result.carrier)
             })));
@@ -464,7 +484,7 @@ impl<'s> FunctionBuilder<'s> {
             let fields = rec
                 .deref(ctx)
                 .fields()
-                .map_err(|_| anyhow!("record without fields"))?
+                .map_err(|_| internal!("record without fields"))?
                 .to_vec();
             let mut field_vals = Vec::with_capacity(fields.len());
             for (field_name, field_ty) in fields {

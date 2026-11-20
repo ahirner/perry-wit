@@ -117,7 +117,7 @@ impl<'s> FunctionBuilder<'s> {
                     if index.is_none()
                         && let Fields::Duration(method) = schema
                     {
-                        bail!(
+                        bail_unsupported!(
                             "Temporal {method} duration field {name} is not supported; use years, months, weeks, or days"
                         );
                     }
@@ -152,7 +152,7 @@ impl<'s> FunctionBuilder<'s> {
                 fields[0] = Some(FieldValue::Loaded(value));
             } else {
                 let record = TypedHandle::<RecordType>::from_handle(value.get_type(ctx), ctx)
-                    .with_context(|| schema.object_error())?;
+                    .map_err(|_| diag!(codes::TYPE_MISMATCH, "{}", schema.object_error()))?;
                 for (slot, &(name, _)) in fields.iter_mut().zip(names) {
                     if record.deref(ctx).field(name).is_some() {
                         let op = FieldGetOp::new(ctx, value, name.into())?;
@@ -171,7 +171,7 @@ impl<'s> FunctionBuilder<'s> {
             });
             let Some(field) = field else {
                 if !literal && index < 3 && matches!(schema, Fields::Date | Fields::DateTime) {
-                    bail!("{}", schema.object_error());
+                    bail_diag!(codes::TYPE_MISMATCH, "{}", schema.object_error());
                 }
                 values[index] = choices
                     .first()
@@ -184,7 +184,7 @@ impl<'s> FunctionBuilder<'s> {
                 let code = choices
                     .iter()
                     .find(|(_, names)| names.contains(&name.as_str()));
-                ensure!(
+                ensure_unsupported!(
                     code.is_some() || matches!(schema, Fields::Overflow),
                     "unsupported Temporal largestUnit {name:?}"
                 );
@@ -202,7 +202,9 @@ impl<'s> FunctionBuilder<'s> {
                 let default = if let Some((_, names)) = choices.first() {
                     self.string(
                         ctx,
-                        names.first().context("Temporal option has no spelling")?,
+                        names
+                            .first()
+                            .ok_or_else(|| internal!("Temporal option has no spelling"))?,
                     )
                 } else {
                     self.number(ctx, 0.0)
@@ -218,8 +220,9 @@ impl<'s> FunctionBuilder<'s> {
                 value = self.defined(ctx, value)?;
             }
             let (name, what) = names[index];
-            ensure!(
+            ensure_diag!(
                 kind(ctx, value)? == if option { Kind::String } else { Kind::Number },
+                codes::TYPE_MISMATCH,
                 "{}",
                 if literal {
                     format!("{what} is required here")
@@ -266,7 +269,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let value =
             self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::Overflow)?[0]
-                .context("overflow field default missing")?;
+                .ok_or_else(|| internal!("overflow field default missing"))?;
         let constrain = self.number(ctx, Overflow::Constrain as u32 as f64);
         let valid = self.compare(ctx, CompareKind::Le, value, constrain);
         let done = self.new_block(ctx, "overflow_valid");
@@ -349,16 +352,18 @@ impl<'s> FunctionBuilder<'s> {
                     self.intrinsic(ctx, intrinsic, vec![value])
                 });
             }
-            ensure!(
+            ensure_diag!(
                 input_kind == Kind::Record,
+                codes::TYPE_MISMATCH,
                 "Temporal.{class}.from expects an ISO string, {class}, or {{ year, month, day }}, got {}",
                 input_kind.label()
             );
             FieldValue::Loaded(value)
         };
         let fields = self.temporal_fields(ctx, Some(input), schema)?;
-        ensure!(
+        ensure_diag!(
             fields[..3].iter().all(Option::is_some),
+            codes::TYPE_MISMATCH,
             "{}",
             schema.object_error()
         );
@@ -387,14 +392,19 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         match (class, factory) {
             ("Now", "timeZoneId") => {
-                ensure!(
+                ensure_diag!(
                     args.is_empty(),
+                    codes::TYPE_MISMATCH,
                     "Temporal.Now.timeZoneId takes no arguments"
                 );
                 return Ok(self.string(ctx, "UTC"));
             }
             ("Now", "instant") => {
-                ensure!(args.is_empty(), "Temporal.Now.instant takes no arguments");
+                ensure_diag!(
+                    args.is_empty(),
+                    codes::TYPE_MISMATCH,
+                    "Temporal.Now.instant takes no arguments"
+                );
                 let ms = self.intrinsic(ctx, Intrinsic::DateNow, vec![]);
                 return Ok(self.intrinsic(ctx, Intrinsic::InstantFromMs, vec![ms]));
             }
@@ -403,12 +413,13 @@ impl<'s> FunctionBuilder<'s> {
                     if let Expr::String(tz) = arg
                         && !matches!(tz.as_str(), "UTC" | "Z" | "+00:00")
                     {
-                        bail!("Temporal.Now.{factory} only supports the UTC time zone");
+                        bail_unsupported!("Temporal.Now.{factory} only supports the UTC time zone");
                     }
                     let _ = self.typed_operand(ctx, arg, Kind::String, "a time zone string")?;
                 } else {
-                    ensure!(
+                    ensure_diag!(
                         args.is_empty(),
+                        codes::TYPE_MISMATCH,
                         "Temporal.Now.{factory} takes at most one time zone argument"
                     );
                 }
@@ -428,8 +439,9 @@ impl<'s> FunctionBuilder<'s> {
                 return Ok(self.intrinsic(ctx, Intrinsic::PlainDateTimeFrom, vec![local_iso]));
             }
             ("PlainDate" | "PlainDateTime", "from") => {
-                ensure!(
+                ensure_diag!(
                     (1..=2).contains(&args.len()),
+                    codes::TYPE_MISMATCH,
                     "Temporal.{class}.from takes one or two arguments"
                 );
                 let target = if class == "PlainDate" {
@@ -440,8 +452,9 @@ impl<'s> FunctionBuilder<'s> {
                 return self.coerce_plain(ctx, &args[0], args.get(1), target);
             }
             ("PlainDate", "compare") => {
-                ensure!(
+                ensure_diag!(
                     args.len() == 2,
+                    codes::TYPE_MISMATCH,
                     "Temporal.PlainDate.compare takes two arguments"
                 );
                 let a = self.coerce_plain_date(ctx, &args[0], None)?;
@@ -457,12 +470,14 @@ impl<'s> FunctionBuilder<'s> {
                 (Intrinsic::InstantFromMs, Kind::Number, "a number")
             }
             ("Instant", "from") => (Intrinsic::InstantFrom, Kind::String, "an ISO string"),
-            _ => bail!(
+            _ => bail_unsupported!(
                 "Temporal.{class}.{factory} is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now"
             ),
         };
         let [arg] = args else {
-            bail!("Temporal.{class}.{factory} takes one argument; options are not supported");
+            bail_unsupported!(
+                "Temporal.{class}.{factory} takes one argument; options are not supported"
+            );
         };
         let arg = self.typed_operand(ctx, arg, input, what)?;
         Ok(self.intrinsic(ctx, intrinsic, vec![arg]))
@@ -488,7 +503,7 @@ impl<'s> FunctionBuilder<'s> {
             "millisecond" if !date => DatePart::Millisecond,
             "microsecond" if !date => DatePart::Microsecond,
             "nanosecond" if !date => DatePart::Nanosecond,
-            other => bail!(
+            other => bail_unsupported!(
                 "property {other} is not supported on {} yet",
                 receiver_kind.label()
             ),
@@ -511,7 +526,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let unit =
             self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::LargestUnit)?[0]
-                .context("largestUnit field default missing")?;
+                .ok_or_else(|| internal!("largestUnit field default missing"))?;
         let da = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![start]);
         let db = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![end]);
         let diff = self.binary(ctx, BinaryKind::Sub, db, da);
@@ -609,8 +624,9 @@ impl<'s> FunctionBuilder<'s> {
             Fields::Duration(method),
         )?;
         let (years, months, weeks, days) = (fields[0], fields[1], fields[2], fields[3]);
-        ensure!(
+        ensure_diag!(
             years.is_some() || months.is_some() || weeks.is_some() || days.is_some(),
+            codes::TYPE_MISMATCH,
             "Temporal {method} requires at least one of years, months, weeks, or days"
         );
         if years.is_none()

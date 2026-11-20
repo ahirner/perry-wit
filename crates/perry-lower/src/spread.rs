@@ -197,7 +197,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             if !fixed_element && let Some(previous) = element {
                 let inner = present_type(ctx, previous);
-                ensure!(
+                ensure_unsupported!(
                     present_type(ctx, source_element) == inner,
                     "array spreads must have one element type"
                 );
@@ -227,10 +227,20 @@ impl<'s> FunctionBuilder<'s> {
             result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
         }
         if holes > 0 {
-            let element = element.context("array holes need an element type")?;
+            let element = element.ok_or_else(|| {
+                diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "array holes need an element type"
+                )
+            })?;
             result = self.append_holes(ctx, result, element, holes);
         }
-        result.context("an empty spread array needs an element type")
+        result.ok_or_else(|| {
+            diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an empty spread array needs an element type"
+            )
+        })
     }
 
     /// `prefix` followed by `count` holes.
@@ -269,7 +279,7 @@ impl<'s> FunctionBuilder<'s> {
             object, property, ..
         } = callee
         else {
-            bail!("spread calls require a dense array push receiver")
+            bail_unsupported!("spread calls require a dense array push receiver")
         };
         let method_name = hir_compat::method(property).name();
         if matches!(method_name, "max" | "min") {
@@ -296,7 +306,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             return self.load(ctx, acc_slot);
         }
-        ensure!(
+        ensure_unsupported!(
             matches!(method_name, "push" | "concat"),
             "spread calls are supported for dense array push"
         );
@@ -305,7 +315,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        ensure!(
+        ensure_unsupported!(
             kind(ctx, receiver)? == Kind::Array,
             "push requires a dense array receiver"
         );
@@ -439,7 +449,7 @@ impl<'s> FunctionBuilder<'s> {
         let signature = self
             .signatures
             .get(&id)
-            .context("call to an unknown function")?;
+            .ok_or_else(|| internal!("call to an unknown function"))?;
         let (params, rest) = signature.parameters();
         let fixed_len = params.len();
         let mut values = Vec::with_capacity(signature.params.len());
@@ -469,24 +479,33 @@ impl<'s> FunctionBuilder<'s> {
                         }
                         arg_idx += 1;
                     } else {
-                        bail!("spreading into fixed parameters requires a tuple");
+                        bail_unsupported!("spreading into fixed parameters requires a tuple");
                     }
                 }
             }
         }
         while values.len() < fixed_len {
             let param = &params[values.len()];
-            values.push(self.bind_fixed_arg(ctx, param, None).with_context(|| {
-                format!(
-                    "missing required argument in spread call to {}",
-                    signature.name
+            values.push(self.bind_fixed_arg(ctx, param, None).map_err(|err| {
+                internal_context(
+                    err,
+                    format!(
+                        "missing required argument in spread call to {}",
+                        signature.name
+                    ),
                 )
             })?);
         }
         if let Some(rest_param) = rest {
             let rest_arr_ty =
-                TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx)
-                    .context("rest parameter must have an array type")?;
+                TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx).map_err(
+                    |_| {
+                        diag!(
+                            codes::TYPE_MISMATCH,
+                            "rest parameter must have an array type"
+                        )
+                    },
+                )?;
             let elem_ty = rest_arr_ty.deref(ctx).element();
             values.push(self.collect_spread_args(ctx, &args[arg_idx..], elem_ty)?);
         }

@@ -45,9 +45,11 @@ impl<'s> FunctionBuilder<'s> {
         key: Value,
         rec_handle: TypedHandle<RecordType>,
     ) -> Result<Value> {
-        let uniform_ty = record_uniform_field_type(ctx, rec_handle).context(
-            "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>",
-        )?;
+        let uniform_ty = record_uniform_field_type(ctx, rec_handle).ok_or_else(|| {
+            unsupported!(
+                "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>"
+            )
+        })?;
         let fields = rec_handle.deref(ctx).fields()?.to_vec();
         let opt_ty = crate::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
         let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
@@ -103,10 +105,12 @@ impl<'s> FunctionBuilder<'s> {
             let elem_ty = if method == IteratorMethod::Keys {
                 str_ty
             } else {
-                record_uniform_field_type(ctx, rec).with_context(|| format!(
-                    "Object.{} on a closed record requires all fields to share a uniform value type",
-                    method.name(),
-                ))?
+                record_uniform_field_type(ctx, rec).ok_or_else(|| {
+                    unsupported!(
+                        "Object.{} on a closed record requires all fields to share a uniform value type",
+                        method.name(),
+                    )
+                })?
             };
             let pair = if method == IteratorMethod::Entries {
                 Some(self.shapes.pair_type(ctx, str_ty, elem_ty)?)
@@ -150,9 +154,11 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(json) = self.json_operand(ctx, obj)? {
                 return Ok(self.intrinsic(ctx, Intrinsic::JsonKeys, vec![json]));
             }
-            bail!("Object.keys requires a Record, interface/object shape, or JSON value");
+            bail_unsupported!(
+                "Object.keys requires a Record, interface/object shape, or JSON value"
+            );
         }
-        bail!(
+        bail_unsupported!(
             "Object.{} requires a Record<K, V> or uniform record shape",
             method.name()
         )
@@ -169,7 +175,12 @@ impl<'s> FunctionBuilder<'s> {
         let entries_val = self.defined(ctx, entries_val)?;
         let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
             .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
-            .context("Object.fromEntries requires an iterable of [key, value] pairs")?;
+            .ok_or_else(|| {
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "Object.fromEntries requires an iterable of [key, value] pairs"
+                )
+            })?;
         let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
             None => self.shapes.dict_tuple_type(ctx, k_ty, v_ty)?,
@@ -240,7 +251,7 @@ impl<'s> FunctionBuilder<'s> {
             let fields = rec
                 .deref(ctx)
                 .fields()
-                .map_err(|_| anyhow!("record without fields"))?
+                .map_err(|_| internal!("record without fields"))?
                 .to_vec();
             let mut acc = self.boolean(ctx, false);
             let bool_ty = acc.get_type(ctx);
@@ -264,7 +275,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(acc);
         }
-        bail!("'in' operator requires a Record<K, V> or closed record shape")
+        bail_unsupported!("'in' operator requires a Record<K, V> or closed record shape")
     }
 
     /// `delete obj[key]` or `delete obj.prop` on a `Record<K, V>` dictionary or optional record field.
@@ -274,7 +285,9 @@ impl<'s> FunctionBuilder<'s> {
             Expr::PropertyGet {
                 object, property, ..
             } => (object, Err(property)),
-            _ => bail!("delete operator requires a property or index access on a Record<K, V>"),
+            _ => bail_unsupported!(
+                "delete operator requires a property or index access on a Record<K, V>"
+            ),
         };
         let obj = self.expression(ctx, object)?;
         let obj = self.defined(ctx, obj)?;
@@ -299,7 +312,7 @@ impl<'s> FunctionBuilder<'s> {
                 Err(_) => return Ok(self.boolean(ctx, true)),
             };
             // Hole-aware reads are enabled per module, so the frontend must have seen this delete.
-            ensure!(
+            ensure_internal!(
                 self.shapes.metadata.sparse_arrays,
                 "array element deletion was not detected before lowering"
             );
@@ -336,11 +349,12 @@ impl<'s> FunctionBuilder<'s> {
                 return Ok(self.boolean(ctx, true));
             }
         }
-        bail!(if prop_or_idx.is_ok() {
-            "delete operator is only supported on Record<K, V> dictionary types"
-        } else {
+        if prop_or_idx.is_ok() {
+            bail_unsupported!("delete operator is only supported on Record<K, V> dictionary types")
+        }
+        bail_unsupported!(
             "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
-        })
+        )
     }
 
     /// `array[key]` as `(index, present, length)`: `present` holds when `key` is a canonical

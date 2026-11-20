@@ -22,19 +22,24 @@ impl<'s> FunctionBuilder<'s> {
                     format!("_{}", *index as u64)
                 }
                 Expr::Integer(index) if *index >= 0 => format!("_{index}"),
-                _ => bail!("tuples require literal positions"),
+                _ => bail_unsupported!("tuples require literal positions"),
             };
             let ty = record
                 .deref(ctx)
                 .field(&field)
                 .map(|(_, ty)| ty)
-                .context("tuple index is outside its declared shape")?;
+                .ok_or_else(|| {
+                    diag!(
+                        codes::TYPE_MISMATCH,
+                        "tuple index is outside its declared shape"
+                    )
+                })?;
             let value = self.expression_with(ctx, value, Some(ty))?;
             let value = self.fit(ctx, value, ty)?;
             self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
             return Ok(self.bigint_view(ctx, value));
         }
-        ensure!(
+        ensure_unsupported!(
             kind(ctx, array)? == Kind::Array,
             "computed property keys are only supported on arrays (subset rule R1)"
         );
@@ -72,7 +77,12 @@ impl<'s> FunctionBuilder<'s> {
             let payload = perry_mir::variant_cases(ctx, record.get_type(ctx))?
                 .into_iter()
                 .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
-                .context("property write requires a record alternative")?;
+                .ok_or_else(|| {
+                    diag!(
+                        codes::TYPE_MISMATCH,
+                        "property write requires a record alternative"
+                    )
+                })?;
             self.emit_value(ctx, |ctx| {
                 perry_mir::VariantPayloadOp::new(ctx, record, payload)
             })
@@ -95,13 +105,16 @@ impl<'s> FunctionBuilder<'s> {
         }
         let rec_ty = perry_mir::typed::<RecordType>(ctx, record.get_type(ctx))
             .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object)
-            .ok_or_else(|| anyhow!("property writes are only supported on records so far"))?;
+            .ok_or_else(|| unsupported!("property writes are only supported on records so far"))?;
         let field_type = rec_ty
             .deref(ctx)
             .field(field)
             .map(|(_, ty)| ty)
             .ok_or_else(|| {
-                anyhow!("property {field} does not exist on this shape (subset rule R1)")
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "property {field} does not exist on this shape (subset rule R1)"
+                )
             })?;
         let value = self.expression_with(ctx, value, Some(field_type))?;
         let value = self.fit(ctx, value, field_type)?;
@@ -122,8 +135,8 @@ impl<'s> FunctionBuilder<'s> {
         let names = self
             .shapes
             .literal_fields(class_name)
-            .with_context(|| format!("class {class_name} is not supported yet"))?;
-        ensure!(
+            .ok_or_else(|| unsupported!("class {class_name} is not supported yet"))?;
+        ensure_internal!(
             names.len() == args.len(),
             "object literal arity differs from its shape"
         );
@@ -177,7 +190,10 @@ impl<'s> FunctionBuilder<'s> {
                     perry_mir::OptionalType::get_with(ctx, inner, states).into()
                 })
             }
-            (None, None) => bail!("an empty array literal needs a declared element type"),
+            (None, None) => bail_diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an empty array literal needs a declared element type"
+            ),
         };
         let values = values
             .into_iter()

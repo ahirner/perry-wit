@@ -237,7 +237,8 @@ impl<'s> FunctionBuilder<'s> {
                 self.binary(ctx, kind, lhs, rhs)
             }
             (op, left_kind, right_kind) => {
-                bail!(
+                bail_diag!(
+                    codes::UNSUPPORTED_OPERATOR,
                     "operator {op:?} on {} and {} is not supported yet",
                     left_kind.label(),
                     right_kind.label()
@@ -267,7 +268,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(value);
         }
         if loose {
-            bail!("loose equality is not supported; use === or !==");
+            bail_unsupported!("loose equality is not supported; use === or !==");
         }
         let lhs = self.expression(ctx, left)?;
         let rhs = self.expression(ctx, right)?;
@@ -346,14 +347,14 @@ impl<'s> FunctionBuilder<'s> {
                 // Strict equality with `undefined` in play: compare as `T | undefined`.
                 let left_inner = present_type(ctx, lhs.get_type(ctx));
                 let right_inner = present_type(ctx, rhs.get_type(ctx));
-                ensure!(
+                ensure_unsupported!(
                     left_inner == right_inner,
                     "comparison of different types is not supported"
                 );
                 let target = perry_mir::OptionalType::get_with(ctx, left_inner, states).into();
                 let lhs = self.fit(ctx, lhs, target)?;
                 let rhs = self.fit(ctx, rhs, target)?;
-                ensure!(
+                ensure_unsupported!(
                     lhs.get_type(ctx) == rhs.get_type(ctx),
                     "comparison of different types is not supported"
                 );
@@ -363,11 +364,11 @@ impl<'s> FunctionBuilder<'s> {
         let lhs = self.arithmetic(ctx, lhs);
         let rhs = self.arithmetic(ctx, rhs);
         let (left_kind, right_kind) = (kind(ctx, lhs)?, kind(ctx, rhs)?);
-        ensure!(
+        ensure_unsupported!(
             left_kind != Kind::Regex && right_kind != Kind::Regex,
             "regex object identity is outside the literal matching profile"
         );
-        ensure!(
+        ensure_unsupported!(
             left_kind == right_kind,
             "comparison of different types ({} and {}) is not supported",
             left_kind.label(),
@@ -381,10 +382,10 @@ impl<'s> FunctionBuilder<'s> {
             CompareOp::Gt => CompareKind::Gt,
             CompareOp::Ge => CompareKind::Ge,
             CompareOp::LooseEq | CompareOp::LooseNe => {
-                bail!("loose equality is not supported; use === or !==")
+                bail_unsupported!("loose equality is not supported; use === or !==")
             }
         };
-        ensure!(
+        ensure_unsupported!(
             matches!(left_kind, Kind::Number | Kind::String | Kind::BigInt)
                 || matches!(kind, CompareKind::Eq | CompareKind::Ne),
             "ordered comparison is only supported on numbers and strings"
@@ -687,7 +688,10 @@ impl<'s> FunctionBuilder<'s> {
             (UnaryOp::Pos, Kind::String) => {
                 self.intrinsic(ctx, Intrinsic::StringToNumber, vec![value])
             }
-            (op, _) => bail!("unary {op:?} on this type is not supported yet"),
+            (op, _) => bail_diag!(
+                codes::UNSUPPORTED_OPERATOR,
+                "unary {op:?} on this type is not supported yet"
+            ),
         })
     }
 
@@ -738,7 +742,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.dispatch_value(ctx, value, result, &|b, ctx, value| b.truthy(ctx, value))
             }
             Kind::BigInt => {
-                bail!("narrow this scalar before testing truthiness")
+                bail_unsupported!("narrow this scalar before testing truthiness")
             }
             _ => Ok(self.boolean(ctx, true)),
         }

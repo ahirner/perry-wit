@@ -111,7 +111,8 @@ impl KindExt for Kind {
 }
 
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
-    Kind::of(ctx, value.get_type(ctx)).context("unsupported value type in expression")
+    Kind::of(ctx, value.get_type(ctx))
+        .ok_or_else(|| unsupported!("unsupported value type in expression"))
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -273,9 +274,10 @@ impl<'s> FunctionBuilder<'s> {
             let payload = perry_mir::variant_cases(ctx, wanted)?
                 .into_iter()
                 .find_map(|(name, payload)| (name == tag).then_some(payload).flatten())
-                .context("value is outside the finite union")?;
-            ensure!(
+                .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "value is outside the finite union"))?;
+            ensure_diag!(
                 tag != "object" || ty == payload || perry_mir::can_widen(ctx, ty, payload),
+                codes::INCOMPATIBLE_RECORD_LAYOUT,
                 "record alternatives must preserve their layout and identity"
             );
             let value = self.fit(ctx, value, payload)?;
@@ -325,7 +327,7 @@ impl<'s> FunctionBuilder<'s> {
             } else if wanted.deref(ctx).is::<IntegerType>() {
                 Intrinsic::ExceptionToBool
             } else {
-                bail!("thrown values require a supported scalar type")
+                bail_unsupported!("thrown values require a supported scalar type")
             };
             let exception = self.defined(ctx, value)?;
             let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
@@ -397,8 +399,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn string_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
-        ensure!(
+        ensure_diag!(
             kind(ctx, value)? == Kind::String,
+            codes::TYPE_MISMATCH,
             "a string is required here"
         );
         Ok(value)
@@ -408,8 +411,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn index(&mut self, ctx: &mut Context, index: &'s Expr) -> Result<Value> {
         let index = self.expression(ctx, index)?;
         let index = self.arithmetic(ctx, index);
-        ensure!(
+        ensure_diag!(
             kind(ctx, index)? == Kind::Number,
+            codes::TYPE_MISMATCH,
             "array indices must be numbers"
         );
         Ok(index)
@@ -419,8 +423,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn number_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.arithmetic(ctx, value);
-        ensure!(
+        ensure_diag!(
             kind(ctx, value)? == Kind::Number,
+            codes::TYPE_MISMATCH,
             "a number is required here"
         );
         Ok(value)
@@ -448,7 +453,11 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
-        ensure!(kind(ctx, value)? == want, "{what} is required here");
+        ensure_diag!(
+            kind(ctx, value)? == want,
+            codes::TYPE_MISMATCH,
+            "{what} is required here"
+        );
         Ok(value)
     }
 
@@ -505,7 +514,9 @@ impl<'s> FunctionBuilder<'s> {
                 |b, ctx| Ok(b.string(ctx, "true")),
                 |b, ctx| Ok(b.string(ctx, "false")),
             )?,
-            _ => bail!("only strings, numbers and booleans can be converted to strings yet"),
+            _ => bail_unsupported!(
+                "only strings, numbers and booleans can be converted to strings yet"
+            ),
         })
     }
 

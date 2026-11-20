@@ -22,8 +22,9 @@ impl<'s> FunctionBuilder<'s> {
                             }
                             _ => {
                                 let value = self.arithmetic(ctx, value);
-                                ensure!(
+                                ensure_diag!(
                                     kind(ctx, value)? == Kind::Number,
+                                    codes::TYPE_MISMATCH,
                                     "Date requires a number, ISO string or Date"
                                 );
                                 value

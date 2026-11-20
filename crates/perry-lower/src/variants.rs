@@ -99,7 +99,11 @@ impl<'s> FunctionBuilder<'s> {
         if field == "tag" {
             return Ok(self.emit_value(ctx, |ctx| VariantTagOp::new(ctx, value)));
         }
-        ensure!(field == "val", "variants have tag and val only");
+        ensure_diag!(
+            field == "val",
+            codes::TYPE_MISMATCH,
+            "variants have tag and val only"
+        );
         let variant = TypedHandle::<VariantType>::from_handle(value.get_type(ctx), ctx)?;
         let path = path(object);
         let mut reachable = false;
@@ -117,8 +121,9 @@ impl<'s> FunctionBuilder<'s> {
             reachable = true;
             match *ty {
                 Some(ty) => {
-                    ensure!(
+                    ensure_diag!(
                         payload.is_none_or(|other| other == ty),
+                        codes::TYPE_MISMATCH,
                         "narrow a heterogeneous variant by its tag before reading val"
                     );
                     payload = Some(ty);
@@ -126,7 +131,11 @@ impl<'s> FunctionBuilder<'s> {
                 None => absent = true,
             }
         }
-        ensure!(reachable, "variant payload access has no reachable case");
+        ensure_diag!(
+            reachable,
+            codes::TYPE_MISMATCH,
+            "variant payload access has no reachable case"
+        );
         let result = match payload {
             Some(ty) if absent => perry_mir::OptionalType::get(ctx, ty).into(),
             Some(ty) => ty,
@@ -142,16 +151,17 @@ impl<'s> FunctionBuilder<'s> {
         names: &[&str],
         args: &'s [Expr],
     ) -> Result<Value> {
-        ensure!(
+        ensure_diag!(
             names.iter().all(|&n| n == "tag" || n == "val"),
+            codes::TYPE_MISMATCH,
             "variants have tag and val only"
         );
         let tag = names
             .iter()
             .position(|&n| n == "tag")
-            .context("variant literal needs a tag")?;
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "variant literal needs a tag"))?;
         let Expr::String(tag) = &args[tag] else {
-            bail!("variant construction needs a literal tag");
+            bail_unsupported!("variant construction needs a literal tag");
         };
         let variant = TypedHandle::<VariantType>::from_handle(ty, ctx)?;
         let payload = variant
@@ -160,7 +170,12 @@ impl<'s> FunctionBuilder<'s> {
             .iter()
             .find(|(name, _)| name == tag)
             .map(|(_, payload)| *payload)
-            .context("literal tag is not a case of this variant")?;
+            .ok_or_else(|| {
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "literal tag is not a case of this variant"
+                )
+            })?;
         let argument = names.iter().position(|&n| n == "val");
         let value = match (argument, payload) {
             (Some(index), Some(payload)) => {
@@ -168,7 +183,10 @@ impl<'s> FunctionBuilder<'s> {
                 Some(self.fit(ctx, value, payload)?)
             }
             (None, None) => None,
-            _ => bail!("variant val must match its active case"),
+            _ => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "variant val must match its active case"
+            ),
         };
         Ok(self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, ty, tag, value)))
     }

@@ -336,7 +336,10 @@ impl<'s> FunctionBuilder<'s> {
                 ) =>
             {
                 let [items, key_fn] = args.as_slice() else {
-                    bail!("Map.groupBy requires (items, callbackFn)");
+                    bail_diag!(
+                        codes::TYPE_MISMATCH,
+                        "Map.groupBy requires (items, callbackFn)"
+                    );
                 };
                 Ok(Some(self.map_group_by(ctx, items, key_fn, expected)?))
             }
@@ -384,11 +387,14 @@ impl<'s> FunctionBuilder<'s> {
 
     fn empty_map(&mut self, ctx: &mut Context, expected: Option<TypeHandle>) -> Result<Value> {
         let Some(expected) = expected else {
-            bail!("an empty Map requires a type annotation (e.g. Map<K, V>)");
+            bail_diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an empty Map requires a type annotation (e.g. Map<K, V>)"
+            );
         };
         let expected = present_type(ctx, expected);
-        let (_, _, tuple_rec) =
-            kv_entry_types(ctx, expected).context("expected a Map<K, V> type")?;
+        let (_, _, tuple_rec) = kv_entry_types(ctx, expected)
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "expected a Map<K, V> type"))?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)
     }
 
@@ -409,7 +415,12 @@ impl<'s> FunctionBuilder<'s> {
         let entries_val = self.defined(ctx, entries_val)?;
         let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
             .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
-            .context("Map constructor requires an iterable of [key, value] tuples")?;
+            .ok_or_else(|| {
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "Map constructor requires an iterable of [key, value] tuples"
+                )
+            })?;
         let map_tuple = match expected.and_then(|e| map_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
             None => self.shapes.map_tuple_type(ctx, k_ty, v_ty)?,
@@ -434,10 +445,14 @@ impl<'s> FunctionBuilder<'s> {
 
     fn empty_set(&mut self, ctx: &mut Context, expected: Option<TypeHandle>) -> Result<Value> {
         let Some(expected) = expected else {
-            bail!("an empty Set requires a type annotation (e.g. Set<T>)");
+            bail_diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an empty Set requires a type annotation (e.g. Set<T>)"
+            );
         };
         let expected = present_type(ctx, expected);
-        let (_, tuple_rec) = set_entry_type(ctx, expected).context("expected a Set<T> type")?;
+        let (_, tuple_rec) = set_entry_type(ctx, expected)
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "expected a Set<T> type"))?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)
     }
 

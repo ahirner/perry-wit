@@ -493,7 +493,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(crate) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
         let box_val = self
             .collection_underlying_box(ctx, coll)?
-            .context("clear() requires a Map or Set")?;
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "clear() requires a Map or Set"))?;
         let entries = self.collection_entries_array(ctx, box_val)?;
         let zero = self.number(ctx, 0.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();

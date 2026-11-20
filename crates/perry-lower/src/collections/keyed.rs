@@ -125,8 +125,12 @@ impl<'s> FunctionBuilder<'s> {
         key: Value,
         val: Value,
     ) -> Result<Value> {
-        let (k_ty, v_ty, _) = kv_entry_types(ctx, coll.get_type(ctx))
-            .context("key-value insertion requires a Map, dictionary or entry array")?;
+        let (k_ty, v_ty, _) = kv_entry_types(ctx, coll.get_type(ctx)).ok_or_else(|| {
+            diag!(
+                codes::TYPE_MISMATCH,
+                "key-value insertion requires a Map, dictionary or entry array"
+            )
+        })?;
         let arr = self.collection_entries_array(ctx, coll)?;
         let box_opt = self.collection_underlying_box(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
@@ -156,7 +160,7 @@ impl<'s> FunctionBuilder<'s> {
         payload: &[Value],
     ) -> Result<()> {
         let record = TypedHandle::<RecordType>::from_handle(self.array_element(ctx, entries)?, ctx)
-            .context("collection entries must be records")?;
+            .map_err(|_| internal!("collection entries must be records"))?;
         let mut fields = Vec::with_capacity(record.deref(ctx).fields()?.len());
         fields.extend_from_slice(payload);
         let append_bb = self.new_block(ctx, &format!("{label}_append"));

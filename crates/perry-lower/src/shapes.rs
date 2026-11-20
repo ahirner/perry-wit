@@ -1,8 +1,11 @@
 //! Map frontend declarations and record identities to MIR representations.
 //!
 //! Frontend record identities map to carriers; object construction evaluates fields in source order.
-use crate::ShapeError;
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use crate::{
+    ShapeError, bail_diag, codes, diag, ensure_diag, ensure_unsupported, internal,
+    internal_context, unsupported,
+};
+use anyhow::Result;
 use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
 use pliron::printable::Printable as _;
@@ -31,7 +34,7 @@ fn fresh_record(
     kind: RecordKind,
     fields: Option<Vec<(String, TypeHandle)>>,
 ) -> Result<TypedHandle<RecordType>> {
-    RecordType::fresh(ctx, kind, fields).map_err(|error| anyhow!("{}", error.disp(ctx)))
+    RecordType::fresh(ctx, kind, fields).map_err(|error| internal!("{}", error.disp(ctx)))
 }
 
 /// The runtime carrier type of a binding, paired with its declared WIT integer domain when
@@ -97,7 +100,8 @@ pub(super) struct Shapes<'h> {
 }
 
 pub(super) fn identifier(name: &str) -> Result<Identifier> {
-    Identifier::try_from(name.to_string()).map_err(|_| anyhow!("{name} is not a MIR identifier"))
+    Identifier::try_from(name.to_string())
+        .map_err(|_| unsupported!("{name} is not a valid identifier"))
 }
 
 impl<'h> Shapes<'h> {
@@ -235,7 +239,7 @@ impl<'h> Shapes<'h> {
             let kind = record.kind();
             let fields = record
                 .fields()
-                .map_err(|_| anyhow!("opaque input record"))?
+                .map_err(|_| internal!("opaque input record"))?
                 .to_vec();
             drop(deref);
             let mapped = fresh_record(ctx, kind, None)?;
@@ -246,7 +250,7 @@ impl<'h> Shapes<'h> {
                 .collect::<Result<_>>()?;
             let name = mapped.deref(ctx).name().clone();
             RecordType::get_kind(ctx, name, Some(fields), kind)
-                .map_err(|e| anyhow!("{}", e.disp(ctx)))?
+                .map_err(|e| internal!("{}", e.disp(ctx)))?
                 .into()
         } else {
             ty
@@ -373,7 +377,7 @@ impl<'h> Shapes<'h> {
         if user {
             return self.generic(ctx, name, &[]);
         }
-        bail!("type {name} is not supported yet")
+        bail_diag!(codes::UNSUPPORTED_TYPE, "type {name} is not supported yet")
     }
 
     /// Reserve recursive identity before resolving source fields.
@@ -421,7 +425,7 @@ impl<'h> Shapes<'h> {
                     int_ty.into()
                 } else {
                     self.value_type(ctx, ty)
-                        .with_context(|| format!("field {field}"))?
+                        .map_err(|err| internal_context(err, format!("field {field}")))?
                 };
                 let ty = if *optional {
                     OptionalType::get(ctx, ty).into()
@@ -439,7 +443,7 @@ impl<'h> Shapes<'h> {
         let record = match reserved {
             Some(record) => {
                 let name = record.deref(ctx).name().clone();
-                RecordType::get(ctx, name, Some(typed)).map_err(|e| anyhow!("{}", e.disp(ctx)))
+                RecordType::get(ctx, name, Some(typed)).map_err(|e| internal!("{}", e.disp(ctx)))
             }
             None if let Some(record) = self.records.borrow().get(&identity) => Ok(*record),
             None if identity.is_nominal() => fresh_record(ctx, RecordKind::Object, Some(typed)),
@@ -472,7 +476,7 @@ impl<'h> Shapes<'h> {
         kind: RecordKind,
         fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        RecordType::structural(ctx, kind, fields).map_err(|error| anyhow!("{}", error.disp(ctx)))
+        RecordType::structural(ctx, kind, fields).map_err(|error| internal!("{}", error.disp(ctx)))
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.

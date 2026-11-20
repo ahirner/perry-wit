@@ -17,7 +17,7 @@ impl<'s> FunctionBuilder<'s> {
         ]
         .iter()
         .position(|&name| name == field)
-        .ok_or_else(|| anyhow!("unsupported URL field {field}"))?;
+        .ok_or_else(|| unsupported!("unsupported URL field {field}"))?;
         let index = self.number(ctx, index as f64);
         Ok(self.intrinsic(ctx, Intrinsic::UrlGet, vec![value, index]))
     }
@@ -28,7 +28,7 @@ impl<'s> FunctionBuilder<'s> {
         match kind(ctx, value)? {
             Kind::String => Ok(value),
             Kind::Url => self.url_field(ctx, value, "href"),
-            _ => bail!("a string or URL is required here"),
+            _ => bail_diag!(codes::TYPE_MISMATCH, "a string or URL is required here"),
         }
     }
 

@@ -2,9 +2,11 @@ use super::*;
 
 impl<'s> FunctionBuilder<'s> {
     pub(crate) fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
-        static_regex(ctx, regex, |op| op.flags(ctx).contains('g')).context(
-            "regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag",
-        )
+        static_regex(ctx, regex, |op| op.flags(ctx).contains('g')).ok_or_else(|| {
+            unsupported!(
+                "regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag"
+            )
+        })
     }
 
     pub(crate) fn regex_result(ctx: &Context, value: Value) -> bool {
@@ -36,19 +38,21 @@ impl<'s> FunctionBuilder<'s> {
         all: bool,
     ) -> Result<Value> {
         let regex = kind(ctx, search)? == Kind::Regex;
-        ensure!(
+        ensure_unsupported!(
             regex || kind(ctx, search)? == Kind::String,
             "string replacement requires a string or literal regex pattern"
         );
         let (global, captures, named) = if regex {
             let global = Self::regex_global(ctx, search)?;
-            ensure!(
+            ensure_unsupported!(
                 !all || global,
                 "String.prototype.replaceAll called with a non-global RegExp argument"
             );
             let (captures, named) = static_regex(ctx, search, |op| op.captures(ctx))
                 .flatten()
-                .context("replacement callbacks require statically known capture arity")?;
+                .ok_or_else(|| {
+                    unsupported!("replacement callbacks require statically known capture arity")
+                })?;
             (global, captures, named)
         } else {
             (all, 0, false)

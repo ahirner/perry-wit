@@ -79,7 +79,10 @@ impl<'s> FunctionBuilder<'s> {
                 result = self.inline_return(ctx, None);
             }
         }
-        let frame = self.inline_returns.pop().context("inline return frame")?;
+        let frame = self
+            .inline_returns
+            .pop()
+            .ok_or_else(|| internal!("inline return frame"))?;
         result?;
         let slot = match frame.slot {
             Some(slot) => Some(slot),
@@ -118,7 +121,7 @@ impl<'s> FunctionBuilder<'s> {
         expression: Option<&'s Expr>,
     ) -> Result<()> {
         let Some(mut frame) = self.inline_returns.pop() else {
-            bail!("return outside an inline function")
+            bail_internal!("return outside an inline function")
         };
         // The frame is off the stack only while the result is stored: a `finally` body run
         // below may itself `return` from this frame.

@@ -59,7 +59,7 @@ pub(super) fn build_module(
         .iter()
         .find(|class| class.extends_name.is_some())
     {
-        bail!(
+        bail_unsupported!(
             "class {} extends {}: class inheritance is not supported yet",
             class.name,
             class.extends_name.as_deref().unwrap_or_default()
@@ -85,7 +85,7 @@ pub(super) fn build_module(
             );
         if matches!(source, "fs" | "node:fs") {
             return Err(annotate(
-                anyhow!(
+                unsupported!(
                     "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
                 ),
                 locations.import_span(source),
@@ -93,7 +93,7 @@ pub(super) fn build_module(
         }
         if module.is_none() && builtin {
             return Err(annotate(
-                anyhow!(
+                unsupported!(
                     "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
                 ),
                 locations.import_span(source),
@@ -104,12 +104,12 @@ pub(super) fn build_module(
             let perry_frontend::hir::ir::ImportSpecifier::Named { imported, local } = specifier
             else {
                 return Err(annotate(
-                    anyhow!("only named imports from {source} are supported yet"),
+                    unsupported!("only named imports from {source} are supported yet"),
                     locations.import_span(source),
                 ));
             };
             let builtin = Builtin::from_import(module, imported)
-                .with_context(|| format!("{imported} from {source} is not supported yet"))
+                .ok_or_else(|| unsupported!("{imported} from {source} is not supported yet"))
                 .map_err(|error| annotate(error, locations.import_span(source)))?;
             builtins.insert(local.as_str(), builtin);
         }
@@ -118,7 +118,7 @@ pub(super) fn build_module(
     for function in &hir.functions {
         if function.is_generator {
             return Err(annotate(
-                anyhow!("generator function {} is not supported yet", function.name),
+                unsupported!("generator function {} is not supported yet", function.name),
                 locations.function_span(&function.name),
             ));
         }
@@ -127,14 +127,23 @@ pub(super) fn build_module(
         for (idx, param) in function.params.iter().enumerate() {
             if param.is_rest && idx + 1 != function.params.len() {
                 return Err(shapes.annotate_local(
-                    anyhow!("rest parameter must be last in {}", function.name),
+                    diag!(
+                        codes::PARSE_ERROR,
+                        "rest parameter must be last in {}",
+                        function.name
+                    ),
                     param.id,
                 ));
             }
             let base_carrier = shapes
                 .value_type(ctx, &param.ty)
                 .map_err(|error| shapes.annotate_local(error, param.id))
-                .with_context(|| format!("parameter {} of {}", param.name, function.name))?;
+                .map_err(|err| {
+                    internal_context(
+                        err,
+                        format!("parameter {} of {}", param.name, function.name),
+                    )
+                })?;
             let integer = shapes.integer_type(ctx, &param.ty);
             let carrier = if param.default.is_some() && !function.is_exported {
                 crate::coerce::admitting(ctx, base_carrier, perry_mir::Absence::Undefined)
@@ -158,7 +167,7 @@ pub(super) fn build_module(
             (ty, false) => shapes.value_type(ctx, ty).map(Some),
         }
         .map_err(|error| annotate(error, locations.function_span(&function.name)))
-        .with_context(|| format!("result of {}", function.name))?;
+        .map_err(|err| internal_context(err, format!("result of {}", function.name)))?;
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
             .flatten();
@@ -229,7 +238,7 @@ pub(super) fn build_module(
         for (signature, body) in &entries {
             let func =
                 FunctionBuilder::lower_body(ctx, signature, body, &signatures, &shapes, &builtins)
-                    .context("lowering top-level statements")?;
+                    .map_err(|err| internal_context(err, "lowering top-level statements"))?;
             if signature.is_async {
                 set_async(ctx, &func);
             }
@@ -239,7 +248,7 @@ pub(super) fn build_module(
     for function in &hir.functions {
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins)
             .map_err(|error| annotate(error, locations.function_span(&function.name)))
-            .with_context(|| format!("lowering function {}", function.name))?;
+            .map_err(|err| internal_context(err, format!("lowering function {}", function.name)))?;
         if let Some(span) = locations.function_span(&function.name) {
             perry_mir::set_source_span(ctx, &func, &span);
         }

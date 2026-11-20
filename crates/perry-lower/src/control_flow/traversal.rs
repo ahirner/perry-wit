@@ -179,13 +179,13 @@ impl Projection {
                 record
                     .deref(ctx)
                     .field("_0")
-                    .context("collection view missing box")?
+                    .ok_or_else(|| internal!("collection view missing box"))?
                     .1,
             )
         } else if set_entry_type(ctx, ty).is_some() {
             (CollectionViewKind::SetValues, ty)
         } else {
-            ensure!(
+            ensure_unsupported!(
                 map_entry_types(ctx, ty).is_some(),
                 "expected an array or collection iterable"
             );
@@ -194,13 +194,13 @@ impl Projection {
         let record = map_entry_types(ctx, box_type)
             .map(|(_, _, record)| record)
             .or_else(|| set_entry_type(ctx, box_type).map(|(_, record)| record))
-            .context("collection view requires a Map or Set box")?;
+            .ok_or_else(|| internal!("collection view requires a Map or Set box"))?;
         let field = |name| {
             record
                 .deref(ctx)
                 .field(name)
                 .map(|(_, ty)| (name, ty))
-                .context("collection entry missing field")
+                .ok_or_else(|| internal!("collection entry missing field"))
         };
         Ok(match view {
             CollectionViewKind::MapKeys | CollectionViewKind::SetValues => {
