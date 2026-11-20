@@ -5,7 +5,7 @@ use perry_hir::{
     walker::{stmt_any_expr, walk_expr_children},
 };
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{Diagnostic, Note, Result, ResultExt as _, SourceSpan, codes};
+use perry_wit_diagnostics::{Diagnostic, Note, Result, SourceSpan, codes};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -130,10 +130,12 @@ impl<'s> Locations<'s> {
 
     pub(crate) fn add(&mut self, path: PathBuf, source: &'s str) -> Result<u32> {
         let offset = self.files.last().map_or(0, |file| *file.positions.end());
-        let end = u32::try_from(u64::from(offset) + source.len() as u64 + 1).map_diag(
-            codes::INVALID_INPUT,
-            "TypeScript sources exceed the 32-bit span range",
-        )?;
+        let end = u32::try_from(u64::from(offset) + source.len() as u64 + 1).map_err(|_| {
+            Diagnostic::new(
+                codes::INVALID_INPUT,
+                "TypeScript sources exceed the 32-bit span range",
+            )
+        })?;
         self.files.push(SourceFile {
             path,
             source,

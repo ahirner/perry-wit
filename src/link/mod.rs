@@ -14,9 +14,7 @@ use std::{
 
 use parsed::ParsedModule;
 use perry_codegen::HELPER_MODULE;
-use perry_wit_diagnostics::{
-    Diagnostic, OptionExt as _, Result, ResultExt as _, ensure_internal, internal,
-};
+use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal, internal};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
@@ -184,9 +182,11 @@ pub(crate) fn link_helpers_with(
             }
             let (module, name) = if module == CANON_MODULE {
                 let (module, name) = streams
-                    .ok_or_unsupported(
-                        "byte streams need a WIT function with a stream<u8> in the world",
-                    )?
+                    .ok_or_else(|| {
+                        Diagnostic::unsupported(
+                            "byte streams need a WIT function with a stream<u8> in the world",
+                        )
+                    })?
                     .resolve(name)?;
                 (Cow::Owned(module), Cow::Owned(name))
             } else {
@@ -247,8 +247,8 @@ pub(crate) fn link_helpers_with(
         .transpose()
         .map_err(wasm_err)?
         .map_or(0, |table| table.ty.initial);
-    let mut current_table_size =
-        u32::try_from(original_table_size).map_internal("core table exceeds table32")?;
+    let mut current_table_size = u32::try_from(original_table_size)
+        .map_err(|_| Diagnostic::internal("core table exceeds table32"))?;
     let mut lib_placements = Vec::new();
     for prep in &prepared_libs {
         let memory_base = helper_memory.place(&prep.lib, Some(&prep.reachable))?;
@@ -256,7 +256,7 @@ pub(crate) fn link_helpers_with(
         let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
         current_table_size = table_base
             .checked_add(prep.lib.table_size)
-            .ok_or_internal("helper table exceeds table32")?;
+            .ok_or_else(|| Diagnostic::internal("helper table exceeds table32"))?;
 
         lib_placements.push(LibPlacement {
             memory_base,
@@ -444,7 +444,9 @@ pub(crate) fn link_helpers_with(
                     maximum
                         .checked_add(initial - table.ty.initial)
                         .filter(|maximum| table.ty.table64 || *maximum <= u64::from(u32::MAX))
-                        .ok_or_internal("Helper function table exceeds its address space")
+                        .ok_or_else(|| {
+                            Diagnostic::internal("Helper function table exceeds its address space")
+                        })
                 })
                 .transpose()?;
             table.ty.initial = initial;

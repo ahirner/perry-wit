@@ -82,7 +82,7 @@ impl<'s> FunctionBuilder<'s> {
         let frame = self
             .inline_returns
             .pop()
-            .ok_or_internal("inline return frame")?;
+            .ok_or_else(|| Diagnostic::internal("inline return frame"))?;
         result?;
         let slot = match frame.slot {
             Some(slot) => Some(slot),

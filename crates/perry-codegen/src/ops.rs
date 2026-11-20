@@ -14,9 +14,7 @@ use perry_mir::{
     ReturnOp as MirReturnOp, SettledField, SettledFieldOp, SettledType, StringConstOp, StringLenOp,
     StringType, TimerOp, UndefOp,
 };
-use perry_wit_diagnostics::{
-    OptionExt as _, Result, ResultExt as _, bail_internal, bail_unsupported, ensure_internal,
-};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, bail_unsupported, ensure_internal};
 use pliron::{
     builtin::{
         attributes::{FPDoubleAttr, IntegerAttr},
@@ -106,7 +104,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(constant) = Operation::get_op::<perry_mir::BigIntConstOp>(op, ctx) {
             let magnitude = constant
                 .get_attr_perry_integer_value(ctx)
-                .ok_or_internal("BigInt constant without a magnitude")?
+                .ok_or_else(|| Diagnostic::internal("BigInt constant without a magnitude"))?
                 .value();
             let mut bytes = vec![0; magnitude.bw().div_ceil(32).max(2) * 4 + 8];
             magnitude.to_u8_slice(&mut bytes[8..]);
@@ -117,7 +115,7 @@ impl FunctionLowering<'_, '_> {
             bytes.copy_within(8..16, 0);
             bytes[8..12].fill(0);
             let extra_len = u32::try_from((bytes.len() - 16) / 4)
-                .map_internal("BigInt literal exceeds maximum length")?;
+                .map_err(|_| Diagnostic::internal("BigInt literal exceeds maximum length"))?;
             bytes[12..16].copy_from_slice(&extra_len.to_le_bytes());
             let address = self.state.data.append(8, &bytes);
             let value = self.i32_const(ctx, address as i32);
@@ -127,7 +125,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
-                .ok_or_internal("constant without value")?;
+                .ok_or_else(|| Diagnostic::internal("constant without value"))?;
             if let Some(&number) = attr.downcast_ref::<perry_mir::NumericConstant>() {
                 drop(attr);
                 let value = self.numeric_constant(ctx, number);
@@ -349,7 +347,7 @@ impl FunctionLowering<'_, '_> {
             if callee_throws {
                 let status = *values
                     .last()
-                    .ok_or_internal("throwing call has no status result")?;
+                    .ok_or_else(|| Diagnostic::internal("throwing call has no status result"))?;
                 let throw = self.throw_target(ctx, status);
                 let next = self.new_block(ctx, vec![]);
                 self.cond_br(ctx, status, throw, (next, vec![]));
@@ -361,7 +359,7 @@ impl FunctionLowering<'_, '_> {
             let address = {
                 let text = constant
                     .get_attr_perry_string_value(ctx)
-                    .ok_or_internal("string constant without value")?;
+                    .ok_or_else(|| Diagnostic::internal("string constant without value"))?;
                 self.state.data.string(text.as_ref())
             };
             let value = self.i32_const(ctx, address as i32);
@@ -486,8 +484,9 @@ impl FunctionLowering<'_, '_> {
                 }
                 field => {
                     let ty = op.deref(ctx).get_result(0).get_type(ctx);
-                    let inner = optional_inner(ctx, ty)
-                        .ok_or_internal("settled field needs an optional result")?;
+                    let inner = optional_inner(ctx, ty).ok_or_else(|| {
+                        Diagnostic::internal("settled field needs an optional result")
+                    })?;
                     let loaded = self.load(ctx, slot_kind(ctx, inner)?, promise, VALUE);
                     let undefined = self.undefined(ctx, ty)?;
                     if field == SettledField::Value {

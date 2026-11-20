@@ -9,9 +9,7 @@ use crate::{
 };
 use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, U64, UNDEFINED, UNSIGNED};
 use perry_mir::{BinaryKind, CompareKind, NumericConstant, NumericType};
-use perry_wit_diagnostics::{
-    OptionExt as _, Result, bail_diag, bail_internal, codes, ensure_internal,
-};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_diag, bail_internal, codes, ensure_internal};
 use pliron::{
     builtin::{
         attributes::IntegerAttr,
@@ -181,8 +179,8 @@ impl FunctionLowering<'_, '_> {
             return self.numeric_cast(ctx, raw, source, target);
         }
         if target.deref(ctx).is::<perry_mir::BigIntType>() {
-            let (_, signed) =
-                integer(ctx, source).ok_or_internal("bigint boxing needs an integer")?;
+            let (_, signed) = integer(ctx, source)
+                .ok_or_else(|| Diagnostic::internal("bigint boxing needs an integer"))?;
             let wide = IntegerType::get(
                 ctx,
                 64,

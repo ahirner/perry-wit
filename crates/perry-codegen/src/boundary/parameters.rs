@@ -1,5 +1,6 @@
 //! Canonical parameter records when the flat argument limit is exceeded.
 use super::*;
+use perry_wit_diagnostics::Diagnostic;
 
 pub(super) fn export_signature(params: &[AbiType]) -> Vec<Flat> {
     let flat: Vec<_> = params.iter().flat_map(AbiType::flat).collect();
@@ -27,7 +28,7 @@ impl FunctionLowering<'_, '_> {
         }
         let area = flat
             .pop()
-            .ok_or_internal("missing indirect parameter record")?;
+            .ok_or_else(|| Diagnostic::internal("missing indirect parameter record"))?;
         let mut args = Vec::with_capacity(params.len());
         for ((ty, mir), offset) in params.iter().zip(mir).zip(record_offsets(params.iter())) {
             args.push(self.lift_abi(ctx, ty, *mir, Canonical::Memory(area, offset))?);

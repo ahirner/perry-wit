@@ -160,7 +160,7 @@ impl<'s> FunctionBuilder<'s> {
         let tag = names
             .iter()
             .position(|&n| n == "tag")
-            .ok_or_diag(codes::TYPE_MISMATCH, "variant literal needs a tag")?;
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "variant literal needs a tag"))?;
         let Expr::String(tag) = &args[tag] else {
             bail_unsupported!("variant construction needs a literal tag");
         };
@@ -171,10 +171,12 @@ impl<'s> FunctionBuilder<'s> {
             .iter()
             .find(|(name, _)| name == tag)
             .map(|(_, payload)| *payload)
-            .ok_or_diag(
-                codes::TYPE_MISMATCH,
-                "literal tag is not a case of this variant",
-            )?;
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    codes::TYPE_MISMATCH,
+                    "literal tag is not a case of this variant",
+                )
+            })?;
         let argument = names.iter().position(|&n| n == "val");
         let value = match (argument, payload) {
             (Some(index), Some(payload)) => {

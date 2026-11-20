@@ -451,7 +451,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn slot_type(&self, ctx: &Context, slot: Value) -> Result<TypeHandle> {
         Ok(
             TypedHandle::<perry_mir::SlotType>::from_handle(slot.get_type(ctx), ctx)
-                .map_internal("not a slot")?
+                .map_err(|_| Diagnostic::internal("not a slot"))?
                 .deref(ctx)
                 .value(),
         )
@@ -460,7 +460,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn array_element(&self, ctx: &Context, array: Value) -> Result<TypeHandle> {
         Ok(
             TypedHandle::<ArrayType>::from_handle(array.get_type(ctx), ctx)
-                .map_diag(codes::TYPE_MISMATCH, "expected an array")?
+                .map_err(|_| Diagnostic::new(codes::TYPE_MISMATCH, "expected an array"))?
                 .deref(ctx)
                 .element(),
         )
@@ -528,7 +528,7 @@ pub(super) fn insert_before_terminator(
     let terminator = block
         .deref(ctx)
         .get_terminator(ctx)
-        .ok_or_internal("a closed block ends in a terminator")?;
+        .ok_or_else(|| Diagnostic::internal("a closed block ends in a terminator"))?;
     for operation in operations {
         operation.insert_before(ctx, terminator);
     }

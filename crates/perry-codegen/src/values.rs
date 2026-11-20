@@ -1,7 +1,7 @@
 //! Multi-carrier lowering for MIR values whose runtime representation uses a register pair.
 use crate::{function::FunctionLowering, repr::wasm_type};
 use perry_mir::NumericType;
-use perry_wit_diagnostics::{OptionExt as _, Result, ensure_internal, internal};
+use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal, internal};
 use pliron::{
     builtin::types::{IntegerType, Signedness},
     context::{Context, Ptr},
@@ -126,7 +126,9 @@ impl FunctionLowering<'_, '_> {
         let mut physical = physical.into_iter();
         for value in logical {
             let parts = carriers(ctx, value.get_type(ctx))?.try_map(|ty| {
-                let carrier = physical.next().ok_or_internal("missing value carrier")?;
+                let carrier = physical
+                    .next()
+                    .ok_or_else(|| Diagnostic::internal("missing value carrier"))?;
                 ensure_internal!(carrier.get_type(ctx) == ty, "value carrier type mismatch");
                 Ok(carrier)
             })?;

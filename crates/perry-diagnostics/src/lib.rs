@@ -388,44 +388,6 @@ impl fmt::Display for Diagnostic {
 
 impl std::error::Error for Diagnostic {}
 
-/// Convert an `Option` into a `Result<T, Diagnostic>` without allocating on the `Some` path.
-pub trait OptionExt<T> {
-    fn ok_or_diag(self, code: Code, message: &'static str) -> Result<T>;
-    fn ok_or_unsupported(self, message: &'static str) -> Result<T>;
-    fn ok_or_internal(self, message: &'static str) -> Result<T>;
-}
-
-impl<T> OptionExt<T> for Option<T> {
-    fn ok_or_diag(self, code: Code, message: &'static str) -> Result<T> {
-        self.ok_or_else(|| Diagnostic::new(code, message))
-    }
-    fn ok_or_unsupported(self, message: &'static str) -> Result<T> {
-        self.ok_or_else(|| Diagnostic::unsupported(message))
-    }
-    fn ok_or_internal(self, message: &'static str) -> Result<T> {
-        self.ok_or_else(|| Diagnostic::internal(message))
-    }
-}
-
-/// Map a foreign `Result` error into a `Diagnostic` without allocating on the `Ok` path.
-pub trait ResultExt<T> {
-    fn map_diag(self, code: Code, message: &'static str) -> Result<T>;
-    fn map_unsupported(self, message: &'static str) -> Result<T>;
-    fn map_internal(self, message: &'static str) -> Result<T>;
-}
-
-impl<T, E> ResultExt<T> for std::result::Result<T, E> {
-    fn map_diag(self, code: Code, message: &'static str) -> Result<T> {
-        self.map_err(|_| Diagnostic::new(code, message))
-    }
-    fn map_unsupported(self, message: &'static str) -> Result<T> {
-        self.map_err(|_| Diagnostic::unsupported(message))
-    }
-    fn map_internal(self, message: &'static str) -> Result<T> {
-        self.map_err(|_| Diagnostic::internal(message))
-    }
-}
-
 /// A compiler failure holding one or more [`Diagnostic`]s.
 #[derive(Debug)]
 pub struct CompileError {

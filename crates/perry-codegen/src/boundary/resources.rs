@@ -1,5 +1,6 @@
 //! Opaque resource lowering and acknowledgement-scoped canonical ownership changes.
 use super::*;
+use perry_wit_diagnostics::Diagnostic;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
 use std::collections::HashSet;
 
@@ -248,9 +249,9 @@ impl FunctionLowering<'_, '_> {
         value: Value,
     ) -> Result<Value> {
         self.check_resource_type(ctx, ty, key)?;
-        let (scope, _) = self
-            .resource_scope
-            .ok_or_internal("resource lowered outside a canonical resource scope")?;
+        let (scope, _) = self.resource_scope.ok_or_else(|| {
+            Diagnostic::internal("resource lowered outside a canonical resource scope")
+        })?;
         let own = self.i32_const(ctx, i32::from(owned));
         let handle = self.runtime(ctx, Runtime::ResourceLower, vec![scope, value, own]);
         self.resource_status(ctx);

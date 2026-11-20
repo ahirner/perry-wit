@@ -202,9 +202,9 @@ impl<'s> FunctionBuilder<'s> {
                 let default = if let Some((_, names)) = choices.first() {
                     self.string(
                         ctx,
-                        names
-                            .first()
-                            .ok_or_internal("Temporal option has no spelling")?,
+                        names.first().ok_or_else(|| {
+                            Diagnostic::internal("Temporal option has no spelling")
+                        })?,
                     )
                 } else {
                     self.number(ctx, 0.0)
@@ -269,7 +269,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let value =
             self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::Overflow)?[0]
-                .ok_or_internal("overflow field default missing")?;
+                .ok_or_else(|| Diagnostic::internal("overflow field default missing"))?;
         let constrain = self.number(ctx, Overflow::Constrain as u32 as f64);
         let valid = self.compare(ctx, CompareKind::Le, value, constrain);
         let done = self.new_block(ctx, "overflow_valid");
@@ -526,7 +526,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let unit =
             self.temporal_fields(ctx, options.map(FieldValue::Literal), Fields::LargestUnit)?[0]
-                .ok_or_internal("largestUnit field default missing")?;
+                .ok_or_else(|| Diagnostic::internal("largestUnit field default missing"))?;
         let da = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![start]);
         let db = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![end]);
         let diff = self.binary(ctx, BinaryKind::Sub, db, da);

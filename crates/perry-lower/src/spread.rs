@@ -227,16 +227,20 @@ impl<'s> FunctionBuilder<'s> {
             result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
         }
         if holes > 0 {
-            let element = element.ok_or_diag(
-                codes::MISSING_TYPE_ANNOTATION,
-                "array holes need an element type",
-            )?;
+            let element = element.ok_or_else(|| {
+                Diagnostic::new(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "array holes need an element type",
+                )
+            })?;
             result = self.append_holes(ctx, result, element, holes);
         }
-        result.ok_or_diag(
-            codes::MISSING_TYPE_ANNOTATION,
-            "an empty spread array needs an element type",
-        )
+        result.ok_or_else(|| {
+            Diagnostic::new(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an empty spread array needs an element type",
+            )
+        })
     }
 
     /// `prefix` followed by `count` holes.
@@ -445,7 +449,7 @@ impl<'s> FunctionBuilder<'s> {
         let signature = self
             .signatures
             .get(&id)
-            .ok_or_internal("call to an unknown function")?;
+            .ok_or_else(|| Diagnostic::internal("call to an unknown function"))?;
         let callee_name = self
             .shapes
             .metadata
@@ -498,9 +502,13 @@ impl<'s> FunctionBuilder<'s> {
         }
         if let Some(rest_param) = rest {
             let rest_arr_ty =
-                TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx).map_diag(
-                    codes::TYPE_MISMATCH,
-                    "rest parameter must have an array type",
+                TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx).map_err(
+                    |_| {
+                        Diagnostic::new(
+                            codes::TYPE_MISMATCH,
+                            "rest parameter must have an array type",
+                        )
+                    },
                 )?;
             let elem_ty = rest_arr_ty.deref(ctx).element();
             values.push(self.collect_spread_args(ctx, &args[arg_idx..], elem_ty)?);

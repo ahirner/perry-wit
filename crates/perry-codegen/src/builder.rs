@@ -7,7 +7,7 @@ use crate::{
     runtime::Runtime,
     values::Carriers,
 };
-use perry_wit_diagnostics::{OptionExt as _, Result};
+use perry_wit_diagnostics::{Diagnostic, Result};
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -240,7 +240,7 @@ impl FunctionLowering<'_, '_> {
         self.values
             .get(&value)
             .copied()
-            .ok_or_internal("operand defined after its use")
+            .ok_or_else(|| Diagnostic::internal("operand defined after its use"))
     }
 
     pub(crate) fn operand(

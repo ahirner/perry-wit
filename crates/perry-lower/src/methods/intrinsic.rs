@@ -1,7 +1,6 @@
 //! Built-in methods whose arguments feed one intrinsic in source order.
 use super::super::*;
 use Argument::{Number, Padding, SearchString};
-use perry_wit_diagnostics::OptionExt as _;
 
 pub(super) enum Argument {
     Number(f64),
@@ -45,13 +44,17 @@ impl IntrinsicCall {
                 Number(default) => builder.number_or(ctx, expr, *default)?,
                 SearchString => builder.typed_operand(
                     ctx,
-                    expr.ok_or_diag(codes::TYPE_MISMATCH, "a search string is required")?,
+                    expr.ok_or_else(|| {
+                        Diagnostic::new(codes::TYPE_MISMATCH, "a search string is required")
+                    })?,
                     Kind::String,
                     "a search string",
                 )?,
                 Argument::Required(kind, description) => builder.typed_operand(
                     ctx,
-                    expr.ok_or_diag(codes::TYPE_MISMATCH, "a method argument is required")?,
+                    expr.ok_or_else(|| {
+                        Diagnostic::new(codes::TYPE_MISMATCH, "a method argument is required")
+                    })?,
                     *kind,
                     description,
                 )?,
@@ -76,7 +79,8 @@ impl IntrinsicCall {
             }
             Return::Receiver => Some(receiver),
             Return::Found => {
-                let found = value.ok_or_internal("string search must return an index")?;
+                let found = value
+                    .ok_or_else(|| Diagnostic::internal("string search must return an index"))?;
                 let missing = builder.number(ctx, -1.0);
                 Some(builder.compare(ctx, CompareKind::Ne, found, missing))
             }

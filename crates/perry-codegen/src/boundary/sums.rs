@@ -1,6 +1,7 @@
 //! Canonical discriminants and payloads for closed WIT sums.
 use super::*;
 use perry_mir::{absence, optional_value, present_type};
+use perry_wit_diagnostics::Diagnostic;
 
 impl AbiType {
     /// Explicit tagged results take precedence over completion-style returns.
@@ -188,7 +189,7 @@ impl FunctionLowering<'_, '_> {
                 identifier("perry_completion_error"),
                 Some(vec![("message".into(), string), ("name".into(), string)]),
             )
-            .map_internal("inconsistent completion Error record shape")?
+            .map_err(|_| Diagnostic::internal("inconsistent completion Error record shape"))?
             .into();
             let name = self.runtime(ctx, Runtime::StdExceptionName, vec![exception]);
             let message = self.runtime(ctx, Runtime::ExceptionMessage, vec![exception]);
@@ -274,10 +275,12 @@ impl FunctionLowering<'_, '_> {
         let (offset, field) = match ty {
             AbiType::Option(_) => {
                 return Ok(NativePayload {
-                    mir: optional_value(ctx, mir).ok_or_diag(
-                        codes::CONTRACT_MISMATCH,
-                        "WIT option needs a nullable TypeScript value",
-                    )?,
+                    mir: optional_value(ctx, mir).ok_or_else(|| {
+                        Diagnostic::new(
+                            codes::CONTRACT_MISMATCH,
+                            "WIT option needs a nullable TypeScript value",
+                        )
+                    })?,
                     slot: None,
                 });
             }
@@ -291,17 +294,21 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Variant(cases) => {
                 let variant = TypedHandle::<perry_mir::VariantType>::from_handle(mir, ctx)
-                    .map_diag(
-                        codes::CONTRACT_MISMATCH,
-                        "variant needs a closed tagged union",
-                    )?;
+                    .map_err(|_| {
+                        Diagnostic::new(
+                            codes::CONTRACT_MISMATCH,
+                            "variant needs a closed tagged union",
+                        )
+                    })?;
                 let field = variant
                     .deref(ctx)
                     .cases()
                     .iter()
                     .find(|(name, _)| *name == cases[case].0)
                     .and_then(|(_, payload)| *payload)
-                    .ok_or_diag(codes::CONTRACT_MISMATCH, "variant payload is missing")?;
+                    .ok_or_else(|| {
+                        Diagnostic::new(codes::CONTRACT_MISMATCH, "variant payload is missing")
+                    })?;
                 (perry_abi::layout::variant::VALUE, field)
             }
             _ => bail_internal!("sum has no payload"),
@@ -355,7 +362,7 @@ impl FunctionLowering<'_, '_> {
                 let fields = record
                     .deref(ctx)
                     .fields()
-                    .map_internal("record without fields")?
+                    .map_err(|_| Diagnostic::internal("record without fields"))?
                     .to_vec();
                 let mut values = Vec::new();
                 for (name, field) in &fields {
@@ -589,10 +596,12 @@ impl FunctionLowering<'_, '_> {
             destination.write(b, ctx, ty.discriminant_kind(), 0, tag)?;
             if let Some(payload_abi) = payload_abi {
                 let (mir, value) = match source {
-                    BoundaryValue::Completion { payload, .. } => payload.ok_or_diag(
-                        codes::CONTRACT_MISMATCH,
-                        "WIT result payload requires a return value",
-                    )?,
+                    BoundaryValue::Completion { payload, .. } => payload.ok_or_else(|| {
+                        Diagnostic::new(
+                            codes::CONTRACT_MISMATCH,
+                            "WIT result payload requires a return value",
+                        )
+                    })?,
                     BoundaryValue::Native(mir, value) => {
                         let payload = b.native_payload(ctx, ty, mir, case, payload_abi)?;
                         b.read_native_payload(ctx, payload, value)?

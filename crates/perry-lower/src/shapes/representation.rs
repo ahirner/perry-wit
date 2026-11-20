@@ -214,10 +214,10 @@ impl Shapes<'_> {
                     codes::UNSUPPORTED_TYPE,
                     "finite value unions require plain record alternatives"
                 );
-                let tag = perry_mir::value_tag(ctx, ty).ok_or_diag(
+                let tag = perry_mir::value_tag(ctx, ty).ok_or_else(|| Diagnostic::new(
                     codes::UNSUPPORTED_TYPE,
                     "finite value unions support numbers, strings, booleans and one plain record shape",
-                )?;
+                ))?;
                 if let Some((_, payload)) = cases.iter().find(|(name, _)| name == tag) {
                     ensure_diag!(
                         *payload == Some(ty),
@@ -234,10 +234,12 @@ impl Shapes<'_> {
         let records = members
             .iter()
             .map(|&ty| {
-                resolver.record(ty, 0).ok_or_diag(
-                    codes::UNSUPPORTED_TYPE,
-                    "unions other than tagged object types are not supported yet",
-                )
+                resolver.record(ty, 0).ok_or_else(|| {
+                    Diagnostic::new(
+                        codes::UNSUPPORTED_TYPE,
+                        "unions other than tagged object types are not supported yet",
+                    )
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         if !records.is_empty()
@@ -331,10 +333,12 @@ impl Shapes<'_> {
                     _ => invalid = true,
                 }
             }
-            let tag = tag.ok_or_diag(
-                codes::UNSUPPORTED_TYPE,
-                "union members need a literal `tag`",
-            )?;
+            let tag = tag.ok_or_else(|| {
+                Diagnostic::new(
+                    codes::UNSUPPORTED_TYPE,
+                    "union members need a literal `tag`",
+                )
+            })?;
             ensure_diag!(
                 !invalid,
                 codes::UNSUPPORTED_TYPE,

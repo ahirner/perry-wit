@@ -492,9 +492,9 @@ impl<'s> FunctionBuilder<'s> {
 
     /// Empty a collection box and invalidate its cursors' cached positions.
     pub(crate) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
-        let box_val = self
-            .collection_underlying_box(ctx, coll)?
-            .ok_or_diag(codes::TYPE_MISMATCH, "clear() requires a Map or Set")?;
+        let box_val = self.collection_underlying_box(ctx, coll)?.ok_or_else(|| {
+            Diagnostic::new(codes::TYPE_MISMATCH, "clear() requires a Map or Set")
+        })?;
         let entries = self.collection_entries_array(ctx, box_val)?;
         let zero = self.number(ctx, 0.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();

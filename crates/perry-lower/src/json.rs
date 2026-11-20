@@ -173,7 +173,7 @@ impl<'s> FunctionBuilder<'s> {
                 return self.record_object_spread(ctx, parts, Some(first_src), expected_record);
             }
             if !is_exc {
-                initial = Some(first_json.ok_or_unsupported("object spread is supported over typed records or JSON values with static keys")?);
+                initial = Some(first_json.ok_or_else(|| Diagnostic::unsupported("object spread is supported over typed records or JSON values with static keys"))?);
             }
             remaining = &parts[1..];
         } else if (expected_record.is_some()
@@ -202,9 +202,9 @@ impl<'s> FunctionBuilder<'s> {
                 if matches!(kind(ctx, source), Ok(Kind::Exception)) {
                     continue;
                 }
-                let source = self.json_operand(ctx, source)?.ok_or_unsupported(
+                let source = self.json_operand(ctx, source)?.ok_or_else(|| Diagnostic::unsupported(
                     "object spread is supported over typed records or JSON values with static keys",
-                )?;
+                ))?;
                 self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
             }
         }

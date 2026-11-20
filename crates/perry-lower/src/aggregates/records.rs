@@ -42,7 +42,9 @@ fn matching_record<'a>(
         return Ok(None);
     };
     let definition = record.deref(ctx);
-    let fields = definition.fields().map_internal("record without fields")?;
+    let fields = definition
+        .fields()
+        .map_err(|_| Diagnostic::internal("record without fields"))?;
     let required = fields
         .iter()
         .filter(|(name, ty)| !admits_undefined(ctx, *ty) && !names.clone().any(|key| key == name));
@@ -376,7 +378,7 @@ impl<'s> FunctionBuilder<'s> {
                 let source = self.defined(ctx, raw)?;
                 let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                     .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
-                    .ok_or_unsupported("object spread is supported over typed records or JSON values with static keys")?;
+                    .ok_or_else(|| Diagnostic::unsupported("object spread is supported over typed records or JSON values with static keys"))?;
                 sources.push(RecordSource::Spread(source));
                 assembly.copy(self, ctx, source, record, &[], CopyMode::Spread)?;
             }
@@ -401,7 +403,9 @@ impl<'s> FunctionBuilder<'s> {
         let source = self.defined(ctx, source)?;
         let record = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
             .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
-            .ok_or_unsupported("object rest destructuring requires a typed record")?;
+            .ok_or_else(|| {
+                Diagnostic::unsupported("object rest destructuring requires a typed record")
+            })?;
         let expected = expected
             .map(|ty| present_type(ctx, ty))
             .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))

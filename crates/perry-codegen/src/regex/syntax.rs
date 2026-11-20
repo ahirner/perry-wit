@@ -1,8 +1,6 @@
 //! Maps the supported ECMAScript literal syntax to Rust regex syntax.
 
-use perry_wit_diagnostics::{
-    OptionExt as _, Result, ResultExt as _, bail_diag, codes, ensure_diag,
-};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_diag, codes, ensure_diag};
 
 const SPACE: &str =
     r"\x09-\x0D\x20\u{A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}";
@@ -84,9 +82,9 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
                 r"[^\n\r\u{2028}\u{2029}]"
             }),
             '\\' => {
-                let escaped = chars
-                    .next()
-                    .ok_or_diag(codes::UNSUPPORTED_REGEX, "Unfinished regex escape")?;
+                let escaped = chars.next().ok_or_else(|| {
+                    Diagnostic::new(codes::UNSUPPORTED_REGEX, "Unfinished regex escape")
+                })?;
                 match escaped {
                     'd' | 'D' | 'w' | 'W' | 's' | 'S' => {
                         let body = match escaped.to_ascii_lowercase() {
@@ -123,19 +121,23 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
                             chars.next();
                             let mut hex = String::new();
                             loop {
-                                let digit = chars.next().ok_or_diag(
-                                    codes::UNSUPPORTED_REGEX,
-                                    "Unfinished regex Unicode escape",
-                                )?;
+                                let digit = chars.next().ok_or_else(|| {
+                                    Diagnostic::new(
+                                        codes::UNSUPPORTED_REGEX,
+                                        "Unfinished regex Unicode escape",
+                                    )
+                                })?;
                                 if digit == '}' {
                                     break;
                                 }
                                 hex.push(digit);
                             }
-                            u32::from_str_radix(&hex, 16).map_diag(
-                                codes::UNSUPPORTED_REGEX,
-                                "Invalid regex Unicode escape",
-                            )?
+                            u32::from_str_radix(&hex, 16).map_err(|_| {
+                                Diagnostic::new(
+                                    codes::UNSUPPORTED_REGEX,
+                                    "Invalid regex Unicode escape",
+                                )
+                            })?
                         } else {
                             read_hex(&mut chars, 4)?
                         };
@@ -184,10 +186,9 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
 fn read_hex(chars: &mut impl Iterator<Item = char>, count: usize) -> Result<u32> {
     let mut code = 0u32;
     for _ in 0..count {
-        let digit = chars
-            .next()
-            .and_then(|c| c.to_digit(16))
-            .ok_or_diag(codes::UNSUPPORTED_REGEX, "Invalid regex Unicode escape")?;
+        let digit = chars.next().and_then(|c| c.to_digit(16)).ok_or_else(|| {
+            Diagnostic::new(codes::UNSUPPORTED_REGEX, "Invalid regex Unicode escape")
+        })?;
         code = code * 16 + digit;
     }
     Ok(code)

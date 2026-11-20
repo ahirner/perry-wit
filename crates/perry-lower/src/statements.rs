@@ -325,7 +325,7 @@ impl<'s> FunctionBuilder<'s> {
                     matches!(
                         kind(ctx, value).or_else(|_| optional_value(ctx, value.get_type(ctx))
                             .map(|_| Kind::Number)
-                            .ok_or_unsupported("unsupported thrown value"))?,
+                            .ok_or_else(|| Diagnostic::unsupported("unsupported thrown value")))?,
                         Kind::Exception
                             | Kind::Json
                             | Kind::Number

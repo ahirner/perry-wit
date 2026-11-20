@@ -2,7 +2,7 @@
 use super::walk::Node;
 use super::*;
 use perry_hir::ir::Function;
-use perry_wit_diagnostics::{OptionExt as _, codes, diag, ensure_diag, ensure_unsupported};
+use perry_wit_diagnostics::{Diagnostic, codes, diag, ensure_diag, ensure_unsupported};
 
 pub(super) fn arguments(
     function: &Function,
@@ -175,7 +175,7 @@ impl Instances<'_> {
         let id = self.next_function;
         self.next_function = id
             .checked_add(1)
-            .ok_or_internal("function identifier limit")?;
+            .ok_or_else(|| Diagnostic::internal("function identifier limit"))?;
         self.keys.insert(key, id);
         let bindings = function
             .type_params
@@ -248,7 +248,7 @@ impl Instances<'_> {
                 let next = self.next_local;
                 self.next_local = next
                     .checked_add(1)
-                    .ok_or_internal("local identifier limit")?;
+                    .ok_or_else(|| Diagnostic::internal("local identifier limit"))?;
                 *entry.insert(next)
             }
         };
@@ -461,10 +461,10 @@ pub(crate) fn specialize_functions(
         pending: Vec::new(),
         next_function: next_function
             .checked_add(1)
-            .ok_or_internal("function identifier limit")?,
+            .ok_or_else(|| Diagnostic::internal("function identifier limit"))?,
         next_local: next_local
             .checked_add(1)
-            .ok_or_internal("local identifier limit")?,
+            .ok_or_else(|| Diagnostic::internal("local identifier limit"))?,
         instantiations: Vec::new(),
         remapped_locals: Vec::new(),
     };

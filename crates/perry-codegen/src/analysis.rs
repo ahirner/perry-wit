@@ -2,7 +2,7 @@
 //! deterministic value order.
 use crate::Exports;
 use perry_mir::{AsyncCallOp, CallOp, LiveValues, PlironResultExt as _, ProgramFacts, is_exported};
-use perry_wit_diagnostics::{OptionExt as _, Result};
+use perry_wit_diagnostics::{Diagnostic, Result};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SymbolOpInterface},
@@ -39,10 +39,10 @@ pub(super) fn module_analyses<'a>(
     Ok(ModuleAnalyses {
         facts: analyses
             .try_get_analysis::<ProgramFacts>(op)
-            .ok_or_internal("computed program facts are missing")?,
+            .ok_or_else(|| Diagnostic::internal("computed program facts are missing"))?,
         live: analyses
             .try_get_analysis::<LiveValues>(op)
-            .ok_or_internal("computed liveness is missing")?,
+            .ok_or_else(|| Diagnostic::internal("computed liveness is missing"))?,
     })
 }
 

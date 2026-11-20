@@ -12,9 +12,7 @@ use perry_mir::{
     ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema,
     PlironResultExt as _, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
-use perry_wit_diagnostics::{
-    OptionExt as _, Result, ResultExt as _, codes, diag, ensure_unsupported, internal,
-};
+use perry_wit_diagnostics::{Diagnostic, Result, codes, diag, ensure_unsupported, internal};
 use pliron::{
     builtin::types::FP64Type,
     context::{Context, Ptr},
@@ -49,7 +47,9 @@ impl FunctionLowering<'_, '_> {
     /// Byte size of `record`: its header and every field slot.
     pub(crate) fn record_size(ctx: &Context, record: TypedHandle<RecordType>) -> Result<u32> {
         let record = record.deref(ctx);
-        let fields = record.fields().map_internal("record without fields")?;
+        let fields = record
+            .fields()
+            .map_err(|_| Diagnostic::internal("record without fields"))?;
         Ok(record_offset(ctx, fields))
     }
 
@@ -182,20 +182,20 @@ impl FunctionLowering<'_, '_> {
         if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
             let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
-                .map_internal("expected a record")?;
+                .map_err(|_| Diagnostic::internal("expected a record"))?;
             let fields: Vec<_> = record
                 .deref(ctx)
                 .fields()
-                .map_internal("record without fields")?
+                .map_err(|_| Diagnostic::internal("record without fields"))?
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect();
             let byte_size = Self::record_size(ctx, record)?;
             let size = self.i32_const(ctx, byte_size as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
-                let base = self
-                    .local_frame
-                    .ok_or_internal("frame-resident record without frame storage")?;
+                let base = self.local_frame.ok_or_else(|| {
+                    Diagnostic::internal("frame-resident record without frame storage")
+                })?;
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
@@ -646,7 +646,7 @@ impl FunctionLowering<'_, '_> {
 
     pub(crate) fn element_type(ctx: &Context, array: Value) -> Result<TypeHandle> {
         let ty = TypedHandle::<ArrayType>::from_handle(array.get_type(ctx), ctx)
-            .map_internal("expected an array")?;
+            .map_err(|_| Diagnostic::internal("expected an array"))?;
         Ok(ty.deref(ctx).element())
     }
 
@@ -675,7 +675,7 @@ impl FunctionLowering<'_, '_> {
 
     fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
         let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
-            .map_internal("expected a record")?;
+            .map_err(|_| Diagnostic::internal("expected a record"))?;
         Self::record_type_field_slot(ctx, record, field)
     }
 

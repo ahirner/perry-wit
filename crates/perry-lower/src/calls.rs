@@ -225,9 +225,12 @@ impl<'s> FunctionBuilder<'s> {
                     } else {
                         inputs
                     };
-                    let op = PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_unsupported(
-                        "Promise combinators take an array of promises of one type",
-                    )?;
+                    let op =
+                        PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_else(|| {
+                            Diagnostic::unsupported(
+                                "Promise combinators take an array of promises of one type",
+                            )
+                        })?;
                     return Ok(Some(self.append_value(ctx, &op)));
                 }
             }
@@ -365,7 +368,7 @@ impl<'s> FunctionBuilder<'s> {
         let signature = self
             .signatures
             .get(id)
-            .ok_or_internal("call to an unknown function")?;
+            .ok_or_else(|| Diagnostic::internal("call to an unknown function"))?;
         let callee_name = self
             .shapes
             .metadata
@@ -389,10 +392,13 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         if let Some(rest) = rest {
-            let array = TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx).map_diag(
-                codes::TYPE_MISMATCH,
-                "rest parameter must have an array type",
-            )?;
+            let array =
+                TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx).map_err(|_| {
+                    Diagnostic::new(
+                        codes::TYPE_MISMATCH,
+                        "rest parameter must have an array type",
+                    )
+                })?;
             let element = array.deref(ctx).element();
             let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
             for (offset, arg) in args.iter().skip(fixed.len()).enumerate() {
@@ -447,7 +453,7 @@ impl<'s> FunctionBuilder<'s> {
         if signature.is_async {
             let result = signature
                 .result
-                .ok_or_internal("async function must settle one result")?;
+                .ok_or_else(|| Diagnostic::internal("async function must settle one result"))?;
             return Ok(Some(self.emit_value(ctx, |ctx| {
                 AsyncCallOp::new(ctx, signature.name.clone(), values, result.carrier)
             })));
@@ -485,7 +491,7 @@ impl<'s> FunctionBuilder<'s> {
             let fields = rec
                 .deref(ctx)
                 .fields()
-                .map_internal("record without fields")?
+                .map_err(|_| Diagnostic::internal("record without fields"))?
                 .to_vec();
             let mut field_vals = Vec::with_capacity(fields.len());
             for (field_name, field_ty) in fields {

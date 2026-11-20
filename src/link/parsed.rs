@@ -1,6 +1,6 @@
 //! Borrowed Wasm sections and the function index space shared by linker inputs.
 use super::wasm_err;
-use perry_wit_diagnostics::{OptionExt as _, Result, ensure_internal};
+use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal};
 use wasm_encoder::{CodeSection, FunctionSection, reencode::Reencode};
 use wasmparser::*;
 
@@ -34,7 +34,7 @@ impl<'a> ParsedModule<'a> {
             {
                 let bit = 1u32
                     .checked_shl(u32::from(id))
-                    .ok_or_internal("unsupported section id")?;
+                    .ok_or_else(|| Diagnostic::internal("unsupported section id"))?;
                 ensure_internal!(sections & bit == 0, "duplicate Wasm section {id}");
                 sections |= bit;
             }
@@ -103,11 +103,11 @@ impl<'a> ParsedModule<'a> {
             let ty = *self
                 .function_types
                 .get(local)
-                .ok_or_internal("function declaration out of range")?;
+                .ok_or_else(|| Diagnostic::internal("function declaration out of range"))?;
             let body = self
                 .bodies
                 .get(local)
-                .ok_or_internal("function body out of range")?;
+                .ok_or_else(|| Diagnostic::internal("function body out of range"))?;
             functions.function(relocation.type_index(ty).map_err(wasm_err)?);
             relocation
                 .parse_function_body(code, body.clone())

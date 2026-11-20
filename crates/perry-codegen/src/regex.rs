@@ -4,9 +4,7 @@ use perry_abi::layout::regex::{
     FORWARD_ROWS, GLOBAL, LookCode, MAX_CAPTURES, MAX_STATES, NAMES_OFFSET, NFA_HEADER, NfaOp,
     REVERSE_ROWS,
 };
-use perry_wit_diagnostics::{
-    OptionExt as _, Result, ResultExt as _, bail_diag, codes, diag, ensure_diag,
-};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_diag, codes, diag, ensure_diag};
 use regex_automata::{
     Anchored, Input, MatchKind, PatternID,
     dfa::{Automaton, StartKind, dense},
@@ -38,7 +36,8 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
         "Regex has {} capture groups; at most {MAX_CAPTURES} are supported",
         groups - 1
     );
-    let group_count = u16::try_from(groups).map_internal("Regex capture group count overflow")?;
+    let group_count = u16::try_from(groups)
+        .map_err(|_| Diagnostic::internal("Regex capture group count overflow"))?;
 
     // Search only needs the leftmost start. An overlapping reverse DFA reports
     // all possible starts; the final report is the earliest, independent of greed.
@@ -106,7 +105,9 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     let nfa_offset = if nfa_bytes.is_some() {
         fwd_offset
             .checked_add(table_len::<u32>(FORWARD_ROWS + fwd_bytes_len)?)
-            .ok_or_diag(codes::UNSUPPORTED_REGEX, "Regex table exceeds size limit")?
+            .ok_or_else(|| {
+                Diagnostic::new(codes::UNSUPPORTED_REGEX, "Regex table exceeds size limit")
+            })?
     } else {
         0
     };
@@ -133,10 +134,12 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     for (index, name) in nfa.group_info().pattern_names(PatternID::ZERO).enumerate() {
         if let Some(name) = name {
             bytes.extend(table_len::<u16>(index)?.to_le_bytes());
-            let name_len = u16::try_from(name.len()).map_diag(
-                codes::UNSUPPORTED_REGEX,
-                "Regex capture group name is too long",
-            )?;
+            let name_len = u16::try_from(name.len()).map_err(|_| {
+                Diagnostic::new(
+                    codes::UNSUPPORTED_REGEX,
+                    "Regex capture group name is too long",
+                )
+            })?;
             bytes.extend(name_len.to_le_bytes());
             bytes.extend(name.as_bytes());
         }
@@ -160,8 +163,8 @@ impl<const N: usize> DfaTable<N> {
         for (byte, &class) in classes.iter().enumerate() {
             representatives[usize::from(class)] = byte as u8;
         }
-        let stride =
-            u16::try_from((class_count + 2) * 2).map_internal("Regex state stride overflow")?;
+        let stride = u16::try_from((class_count + 2) * 2)
+            .map_err(|_| Diagnostic::internal("Regex state stride overflow"))?;
         let mut ids = BTreeMap::new();
         let mut pending = VecDeque::new();
         let mut offsets = [0; N];
@@ -203,17 +206,19 @@ fn state_offset(
     stride: u16,
 ) -> Result<u16> {
     const LIMIT: &str = "Regex state table exceeds size limit";
-    let next_id = u16::try_from(ids.len()).map_diag(codes::UNSUPPORTED_REGEX, LIMIT)?;
+    let next_id =
+        u16::try_from(ids.len()).map_err(|_| Diagnostic::new(codes::UNSUPPORTED_REGEX, LIMIT))?;
     let id = *ids.entry(state).or_insert_with(|| {
         pending.push_back(state);
         next_id
     });
     id.checked_mul(stride)
-        .ok_or_diag(codes::UNSUPPORTED_REGEX, LIMIT)
+        .ok_or_else(|| Diagnostic::new(codes::UNSUPPORTED_REGEX, LIMIT))
 }
 
 fn table_len<T: TryFrom<usize>>(value: usize) -> Result<T> {
-    T::try_from(value).map_diag(codes::UNSUPPORTED_REGEX, "Regex table exceeds size limit")
+    T::try_from(value)
+        .map_err(|_| Diagnostic::new(codes::UNSUPPORTED_REGEX, "Regex table exceeds size limit"))
 }
 
 fn compile_nfa(nfa: &thompson::NFA) -> Result<Vec<u8>> {
@@ -223,16 +228,19 @@ fn compile_nfa(nfa: &thompson::NFA) -> Result<Vec<u8>> {
         codes::UNSUPPORTED_REGEX,
         "Regex capture program exceeds {MAX_STATES} states"
     );
-    let state_count = u16::try_from(states.len()).map_internal("Regex NFA state count overflow")?;
-    let start_state =
-        u16::try_from(nfa.start_anchored().as_usize()).map_internal("Regex NFA start overflow")?;
+    let state_count = u16::try_from(states.len())
+        .map_err(|_| Diagnostic::internal("Regex NFA state count overflow"))?;
+    let start_state = u16::try_from(nfa.start_anchored().as_usize())
+        .map_err(|_| Diagnostic::internal("Regex NFA start overflow"))?;
     let mut state_offsets = Vec::with_capacity(states.len());
     let mut body = Vec::new();
     for state in states {
-        let offset = u16::try_from(body.len()).map_diag(
-            codes::UNSUPPORTED_REGEX,
-            "Regex capture program exceeds bytecode size limit",
-        )?;
+        let offset = u16::try_from(body.len()).map_err(|_| {
+            Diagnostic::new(
+                codes::UNSUPPORTED_REGEX,
+                "Regex capture program exceeds bytecode size limit",
+            )
+        })?;
         state_offsets.push(offset);
         match *state {
             State::Fail => body.push(NfaOp::Fail as u8),

@@ -108,7 +108,8 @@ impl<'s> FunctionBuilder<'s> {
             let operands = vec![body, text, status, status_text, headers];
             return Ok(self.intrinsic(ctx, Intrinsic::ResponseNew, operands));
         }
-        let url = first.ok_or_diag(codes::TYPE_MISMATCH, "new Request needs a URL")?;
+        let url = first
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "new Request needs a URL"))?;
         let url = self.typed_operand(ctx, url, Kind::String, "a URL string")?;
         let method = match field("method") {
             Some(expr) => self.typed_operand(ctx, expr, Kind::String, "a method string")?,
@@ -223,7 +224,7 @@ impl<'s> FunctionBuilder<'s> {
         crate::methods::Call::member(crate::methods::Receiver::of(ctx, receiver)?, name, args)?
             .ok_or_else(|| unsupported!("{name} is not supported on this receiver"))?
             .lower(self, ctx, receiver)?
-            .ok_or_diag(codes::TYPE_MISMATCH, "web members produce a value")
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "web members produce a value"))
     }
 
     /// `fetch(url, { method, headers, body })` as Perry HIR desugars a literal init.
@@ -288,7 +289,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let path = args
             .first()
-            .ok_or_diag(codes::TYPE_MISMATCH, "a path is required")?;
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "a path is required"))?;
         let path = self.typed_operand(ctx, path, Kind::String, "a path string")?;
         let (intrinsic, operands) = match builtin {
             Builtin::ReadFile => {

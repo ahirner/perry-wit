@@ -50,9 +50,11 @@ impl<'s> FunctionBuilder<'s> {
             );
             let (captures, named) = static_regex(ctx, search, |op| op.captures(ctx))
                 .flatten()
-                .ok_or_unsupported(
-                    "replacement callbacks require statically known capture arity",
-                )?;
+                .ok_or_else(|| {
+                    Diagnostic::unsupported(
+                        "replacement callbacks require statically known capture arity",
+                    )
+                })?;
             (global, captures, named)
         } else {
             (all, 0, false)

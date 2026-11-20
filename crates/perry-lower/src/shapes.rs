@@ -9,7 +9,6 @@ use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
 use perry_mir::{
     ArrayType, OptionalType, PlironResultExt as _, PromiseType, RecordKind, RecordType, StringType,
 };
-use perry_wit_diagnostics::{OptionExt as _, ResultExt as _};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::Context,
@@ -260,7 +259,7 @@ impl<'h> Shapes<'h> {
             let kind = record.kind();
             let fields = record
                 .fields()
-                .map_internal("opaque input record")?
+                .map_err(|_| Diagnostic::internal("opaque input record"))?
                 .to_vec();
             drop(deref);
             let mapped = fresh_record(ctx, kind, None)?;

@@ -169,7 +169,7 @@ impl<'s> FunctionBuilder<'s> {
         let catch_block = catch.map(|_| self.new_block(ctx, "catch"));
         let first = catch_block
             .or(rethrow_block)
-            .ok_or_internal("try without catch or finally")?;
+            .ok_or_else(|| Diagnostic::internal("try without catch or finally"))?;
 
         if finally.is_some() {
             self.finallies.push(outer);

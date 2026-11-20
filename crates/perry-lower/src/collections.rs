@@ -394,7 +394,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let expected = present_type(ctx, expected);
         let (_, _, tuple_rec) = kv_entry_types(ctx, expected)
-            .ok_or_diag(codes::TYPE_MISMATCH, "expected a Map<K, V> type")?;
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "expected a Map<K, V> type"))?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)
     }
 
@@ -415,10 +415,12 @@ impl<'s> FunctionBuilder<'s> {
         let entries_val = self.defined(ctx, entries_val)?;
         let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
             .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
-            .ok_or_diag(
-                codes::TYPE_MISMATCH,
-                "Map constructor requires an iterable of [key, value] tuples",
-            )?;
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    codes::TYPE_MISMATCH,
+                    "Map constructor requires an iterable of [key, value] tuples",
+                )
+            })?;
         let map_tuple = match expected.and_then(|e| map_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
             None => self.shapes.map_tuple_type(ctx, k_ty, v_ty)?,
@@ -450,7 +452,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let expected = present_type(ctx, expected);
         let (_, tuple_rec) = set_entry_type(ctx, expected)
-            .ok_or_diag(codes::TYPE_MISMATCH, "expected a Set<T> type")?;
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "expected a Set<T> type"))?;
         self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)
     }
 

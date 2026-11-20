@@ -111,7 +111,8 @@ impl KindExt for Kind {
 }
 
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
-    Kind::of(ctx, value.get_type(ctx)).ok_or_unsupported("unsupported value type in expression")
+    Kind::of(ctx, value.get_type(ctx))
+        .ok_or_else(|| Diagnostic::unsupported("unsupported value type in expression"))
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -275,7 +276,9 @@ impl<'s> FunctionBuilder<'s> {
                 .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(name, payload)| (name == tag).then_some(payload).flatten())
-                .ok_or_diag(codes::TYPE_MISMATCH, "value is outside the finite union")?;
+                .ok_or_else(|| {
+                    Diagnostic::new(codes::TYPE_MISMATCH, "value is outside the finite union")
+                })?;
             ensure_diag!(
                 tag != "object" || ty == payload || perry_mir::can_widen(ctx, ty, payload),
                 codes::TYPE_MISMATCH,

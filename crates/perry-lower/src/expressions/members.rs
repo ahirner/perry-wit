@@ -39,10 +39,12 @@ impl<'s> FunctionBuilder<'s> {
         {
             self.class_getter_call(ctx, object, owner_class, type_args, getter)?
         } else {
-            let get = FieldGetOp::new(ctx, object, property.to_string()).map_diag(
-                codes::TYPE_MISMATCH,
-                "property update needs a declared numeric field",
-            )?;
+            let get = FieldGetOp::new(ctx, object, property.to_string()).map_err(|_| {
+                Diagnostic::new(
+                    codes::TYPE_MISMATCH,
+                    "property update needs a declared numeric field",
+                )
+            })?;
             self.append_value(ctx, &get)
         };
         let field_type = previous.get_type(ctx);
@@ -148,7 +150,7 @@ impl<'s> FunctionBuilder<'s> {
                     ),
                 };
                 let op = SettledFieldOp::new(ctx, field, value)
-                    .ok_or_internal("expected a settled result")?;
+                    .ok_or_else(|| Diagnostic::internal("expected a settled result"))?;
                 self.append_value(ctx, &op)
             }
             (
@@ -304,7 +306,7 @@ fn tuple_length(ctx: &Context, ty: TypeHandle) -> Result<Option<usize>> {
             record
                 .deref(ctx)
                 .fields()
-                .map_internal("tuple without fields")?
+                .map_err(|_| Diagnostic::internal("tuple without fields"))?
                 .len(),
         )),
         _ => Ok(None),

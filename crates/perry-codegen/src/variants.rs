@@ -6,7 +6,7 @@ use crate::{
 };
 use perry_abi::layout::variant;
 use perry_mir::{PlironResultExt as _, admits_payload};
-use perry_wit_diagnostics::{OptionExt as _, Result};
+use perry_wit_diagnostics::{Diagnostic, Result};
 use pliron::{context::Context, r#type::TypeHandle, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
@@ -39,7 +39,8 @@ impl FunctionLowering<'_, '_> {
         let inner = optional_inner(ctx, ty).unwrap_or(ty);
         let cases = perry_mir::variant_cases(ctx, inner).to_diag(ctx)?;
         for (index, (tag, payload)) in cases.iter().enumerate() {
-            let payload = payload.ok_or_internal("value union without a payload")?;
+            let payload =
+                payload.ok_or_else(|| Diagnostic::internal("value union without a payload"))?;
             let next = if index + 1 < cases.len() {
                 let tag = self.state.data.string(tag);
                 let tag = self.i32_const(ctx, tag as i32);

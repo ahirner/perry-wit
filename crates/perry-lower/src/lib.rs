@@ -58,8 +58,8 @@ use perry_mir::{
     set_async,
 };
 use perry_wit_diagnostics::{
-    Diagnostic, OptionExt as _, Result, ResultExt as _, bail_diag, bail_internal, bail_unsupported,
-    codes, diag, ensure_diag, ensure_internal, ensure_unsupported, internal, unsupported,
+    Diagnostic, Result, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag,
+    ensure_internal, ensure_unsupported, internal, unsupported,
 };
 use pliron::printable::Printable as _;
 use pliron::{
