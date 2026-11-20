@@ -18,8 +18,8 @@
 //! # }
 //! ```
 
-use anyhow::{Result, ensure};
-use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
+use anyhow::Result;
+use perry_wit_diagnostics::{anyhow_ext::FromAnyhow as _, ensure_diag};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
@@ -94,12 +94,13 @@ pub(crate) fn text<'a>(contents: &'a [u8], name: Option<&str>) -> Result<&'a str
 }
 
 fn module_name(name: &str) -> Result<&str> {
-    ensure!(
+    ensure_diag!(
         !name.is_empty()
             && !name.contains(['\\', '\0', ':'])
             && name
                 .split('/')
                 .all(|part| !part.is_empty() && part != "." && part != ".."),
+        crate::codes::INVALID_MODULE_PATH,
         "module identity must be package-relative: {name:?}"
     );
     Ok(name)
@@ -110,8 +111,9 @@ pub(crate) fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, S
     let mut modules = BTreeMap::new();
     for source in &input.modules {
         let name = module_name(&source.name)?;
-        ensure!(
+        ensure_diag!(
             name != identity && !modules.contains_key(name),
+            crate::codes::DUPLICATE_MODULE,
             "duplicate module identity: {name}"
         );
         modules.insert(

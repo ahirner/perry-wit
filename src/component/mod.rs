@@ -15,9 +15,7 @@ pub fn embed_and_encode(
     world_name: Option<&str>,
 ) -> Result<Vec<u8>> {
     let (resolve, pkg_id) = wit::resolve_wit(wit_dir)?;
-    let world_id = resolve
-        .select_world(&[pkg_id], world_name)
-        .with_context(|| format!("selecting world {:?}", world_name))?;
+    let world_id = wit::select_world(&resolve, pkg_id, world_name)?;
 
     encode_resolved(core_wasm, &resolve, world_id)
 }

@@ -60,8 +60,12 @@ impl ComponentOutput {
 }
 
 fn compile_file_impl(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
-    let source = fs::read_to_string(input_file)
-        .with_context(|| format!("Reading TypeScript source {}", input_file.display()))?;
+    let source = fs::read_to_string(input_file).map_err(|err| {
+        crate::Diagnostic::io(
+            format!("Reading TypeScript source {}", input_file.display()),
+            &err,
+        )
+    })?;
     compile_typescript_impl(&source, &input_file.to_string_lossy(), options)
 }
 

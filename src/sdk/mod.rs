@@ -1,6 +1,6 @@
 //! Zero-Config SDK generation and TypeScript developer experience.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use perry_wit_diagnostics::anyhow_ext::FromAnyhow as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -51,17 +51,24 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let artifacts = declarations(&resolve, world).map_err(|error| {
         crate::Diagnostic::from_error_with_fallback(error, crate::codes::WIT_DEPENDENCY)
     })?;
-    fs::create_dir_all(&options.out_dir).with_context(|| {
-        format!(
-            "Failed to create SDK output directory at {}",
-            options.out_dir.display()
+    fs::create_dir_all(&options.out_dir).map_err(|err| {
+        crate::Diagnostic::io(
+            format!(
+                "Failed to create SDK output directory at {}",
+                options.out_dir.display()
+            ),
+            &err,
         )
     })?;
 
     for artifact in artifacts {
         let path = options.out_dir.join(artifact.name);
-        fs::write(&path, artifact.contents)
-            .with_context(|| format!("Failed to write declaration file at {}", path.display()))?;
+        fs::write(&path, artifact.contents).map_err(|err| {
+            crate::Diagnostic::io(
+                format!("Failed to write declaration file at {}", path.display()),
+                &err,
+            )
+        })?;
     }
     let dts_path = options.out_dir.join("world.d.ts");
 
@@ -88,7 +95,15 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
         "import * as implementation from {};\nimport type {{ ComponentImplementation }} from './world';\nconst checked: ComponentImplementation = implementation;\nexport {{ checked }};\n",
         serde_json::to_string(&entry_import)?
     );
-    fs::write(&check_path, check)?;
+    fs::write(&check_path, check).map_err(|err| {
+        crate::Diagnostic::io(
+            format!(
+                "Failed to write implementation check at {}",
+                check_path.display()
+            ),
+            &err,
+        )
+    })?;
     let compiler_options = || {
         serde_json::json!({
             "target": "ES2022",
@@ -109,10 +124,13 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
             "include": ["src/**/*", "examples/**/*", "*.ts", ".perry/types/**/*"],
             "files": [relative_path(&project_root, &check_path)?]
         });
-        fs::write(&tsconfig_path, serde_json::to_string_pretty(&config)?).with_context(|| {
-            format!(
-                "Failed to write tsconfig.json at {}",
-                tsconfig_path.display()
+        fs::write(&tsconfig_path, serde_json::to_string_pretty(&config)?).map_err(|err| {
+            crate::Diagnostic::io(
+                format!(
+                    "Failed to write tsconfig.json at {}",
+                    tsconfig_path.display()
+                ),
+                &err,
             )
         })?;
         Some(tsconfig_path)
@@ -131,10 +149,20 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     if let Some(path) = &generated_tsconfig {
         check_config["extends"] = serde_json::json!(relative_path(&options.out_dir, path)?);
     }
+    let check_tsconfig_path = options.out_dir.join("tsconfig.json");
     fs::write(
-        options.out_dir.join("tsconfig.json"),
+        &check_tsconfig_path,
         serde_json::to_string_pretty(&check_config)?,
-    )?;
+    )
+    .map_err(|err| {
+        crate::Diagnostic::io(
+            format!(
+                "Failed to write tsconfig.json at {}",
+                check_tsconfig_path.display()
+            ),
+            &err,
+        )
+    })?;
 
     Ok(SdkResult {
         types_path: dts_path,
@@ -159,18 +187,32 @@ pub(crate) fn declarations(
 
 /// Emits the compiler's supported ambient runtime surface for editors and `tsc`.
 pub fn write_runtime_declarations(out_dir: &Path) -> Result<()> {
-    fs::create_dir_all(out_dir)?;
-    fs::write(
-        out_dir.join("runtime.d.ts"),
-        perry_frontend::sdk::RUNTIME_DECLARATIONS,
-    )?;
+    fs::create_dir_all(out_dir).map_err(|err| {
+        crate::Diagnostic::io(
+            format!(
+                "Failed to create runtime declarations directory at {}",
+                out_dir.display()
+            ),
+            &err,
+        )
+    })?;
+    let path = out_dir.join("runtime.d.ts");
+    fs::write(&path, perry_frontend::sdk::RUNTIME_DECLARATIONS).map_err(|err| {
+        crate::Diagnostic::io(
+            format!("Failed to write runtime declarations at {}", path.display()),
+            &err,
+        )
+    })?;
     Ok(())
 }
 
 fn relative_path(from: &Path, to: &Path) -> Result<String> {
     fn normalized(path: &Path) -> Result<PathBuf> {
         let mut result = PathBuf::new();
-        for component in std::path::absolute(path)?.components() {
+        let absolute = std::path::absolute(path).map_err(|err| {
+            crate::Diagnostic::io(format!("Failed to resolve path {}", path.display()), &err)
+        })?;
+        for component in absolute.components() {
             if component == std::path::Component::ParentDir {
                 result.pop();
             } else {

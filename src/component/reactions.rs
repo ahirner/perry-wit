@@ -1,6 +1,7 @@
 //! Private unit futures for promise observers. The anchor exists while the component
 //! encoder resolves canonical future builtins, and its synthetic export is removed afterwards.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
+use perry_wit_diagnostics::ensure_diag;
 use std::convert::Infallible;
 use wasm_encoder::{
     reencode::{self, Reencode, ReencodeComponent},
@@ -35,9 +36,10 @@ pub(crate) fn prepare(
 ) -> Result<(Vec<u8>, wit_parser::Resolve)> {
     let mut resolve = resolve.clone();
     let key = wit_parser::WorldKey::Name(ANCHOR.into());
-    ensure!(
+    ensure_diag!(
         !resolve.worlds[world].exports.contains_key(&key),
-        "reserved internal promise anchor"
+        crate::codes::INVALID_EXPORT_NAME,
+        "WIT export '{ANCHOR}' is reserved for internal promise signals"
     );
     let ty = resolve.types.alloc(wit_parser::TypeDef {
         name: None,

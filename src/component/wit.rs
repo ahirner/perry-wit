@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use perry_wit_diagnostics::anyhow_ext::{FromAnyhow as _, wrap_source};
 use wit_parser::{PackageId, Resolve, SourceMap, UnresolvedPackageGroup};
 
 #[derive(Debug)]
@@ -129,16 +130,35 @@ impl std::error::Error for WitError {
 
 impl From<WitError> for crate::Diagnostic {
     fn from(error: WitError) -> Self {
-        let code = error.code();
-        let help = error.help();
-        let mut diagnostic = Self::new(code, error.to_string());
-        if let Some(help) = help {
-            diagnostic = diagnostic.with_help(help);
+        match error {
+            WitError::ParsePackage { dir, source, .. }
+                if source.chain().any(|c| c.is::<Self>()) =>
+            {
+                let label = format!("loading WIT package from {}", dir.display());
+                wrap_source(source, None, format!("while {label}"), label)
+            }
+            WitError::ResolveDependencies { target, source }
+                if source.chain().any(|c| c.is::<Self>()) =>
+            {
+                let label = format!("resolving WIT dependencies for {target}");
+                wrap_source(source, None, format!("while {label}"), label)
+            }
+            WitError::Resolve(source) if source.chain().any(|c| c.is::<Self>()) => {
+                Self::from_error(source)
+            }
+            error => {
+                let code = error.code();
+                let help = error.help();
+                let mut diagnostic = Self::new(code, error.to_string());
+                if let Some(help) = help {
+                    diagnostic = diagnostic.with_help(help);
+                }
+                if let Some(source) = std::error::Error::source(&error) {
+                    diagnostic = diagnostic.with_source_notes(source);
+                }
+                diagnostic
+            }
         }
-        if let Some(source) = std::error::Error::source(&error) {
-            diagnostic = diagnostic.with_source_notes(source);
-        }
-        diagnostic
     }
 }
 
@@ -222,7 +242,16 @@ pub(crate) fn resolve_embedded_source(name: &str, source: &str) -> Result<(Resol
 
 fn parse_dir(path: &Path) -> Result<UnresolvedPackageGroup> {
     let mut map = SourceMap::default();
-    map.push_dir(path)?;
+    map.push_dir(path).map_err(|err| {
+        if let Some(io) = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        {
+            crate::Diagnostic::io(format!("reading WIT directory {}", path.display()), io).into()
+        } else {
+            err
+        }
+    })?;
     map.parse()
         .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))
 }
@@ -231,7 +260,16 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let mut entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    let io_dir = |err: std::io::Error| {
+        crate::Diagnostic::io(
+            format!("reading WIT dependency directory {}", dir.display()),
+            &err,
+        )
+    };
+    let mut entries = std::fs::read_dir(dir)
+        .map_err(io_dir)?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(io_dir)?;
     entries.sort_by_key(|entry| entry.file_name());
     let mut groups = Vec::new();
     for entry in entries {
@@ -241,12 +279,29 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
         } else {
             match path.extension().and_then(|ext| ext.to_str()) {
                 Some("wit") => {
-                    let source = std::fs::read_to_string(&path)?;
-                    UnresolvedPackageGroup::parse(&path, &source)
-                        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?
+                    let source = std::fs::read_to_string(&path).map_err(|err| {
+                        crate::Diagnostic::io(format!("reading WIT file {}", path.display()), &err)
+                    })?;
+                    UnresolvedPackageGroup::parse(&path, &source).map_err(|(map, error)| {
+                        crate::Diagnostic::from(WitError::ParseSource {
+                            source: anyhow::anyhow!(error.render(&map)),
+                        })
+                    })?
                 }
                 Some("wasm" | "wat") => {
-                    resolve.push_file(&path)?;
+                    resolve.push_file(&path).map_err(|err| {
+                        if let Some(io) = err
+                            .chain()
+                            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                        {
+                            crate::Diagnostic::io(
+                                format!("reading WIT package {}", path.display()),
+                                io,
+                            )
+                        } else {
+                            crate::Diagnostic::from(WitError::InvalidPackageEncoding(Some(err)))
+                        }
+                    })?;
                     continue;
                 }
                 _ => continue,
@@ -308,10 +363,19 @@ pub(crate) fn select_world(
 /// Resolve a WIT package given as source, with the ambient WASI packages.
 pub fn resolve_source(name: &str, source: &str) -> Result<(Resolve, PackageId)> {
     let mut resolve = Resolve::new();
-    let main = UnresolvedPackageGroup::parse(name, source)
-        .map_err(|(map, error)| anyhow::anyhow!(error.render(&map)))?;
+    let main = UnresolvedPackageGroup::parse(name, source).map_err(|(map, error)| {
+        crate::Diagnostic::from(WitError::ParseSource {
+            source: anyhow::anyhow!(error.render(&map)),
+        })
+    })?;
     resolve_with(main, &mut resolve, Vec::new(), true)
-        .with_context(|| format!("resolving WIT dependencies for {name}"))
+        .map_err(|source| {
+            crate::Diagnostic::from(WitError::ResolveDependencies {
+                target: name.to_owned(),
+                source,
+            })
+            .into()
+        })
         .map(|package| (resolve, package))
 }
 

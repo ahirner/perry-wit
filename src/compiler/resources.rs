@@ -1,8 +1,9 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
 use perry_contract::names::canonical_type;
 use perry_frontend::wit::{ResourceOperation as SourceResourceOperation, WorldTypes};
+use perry_wit_diagnostics::ensure_diag;
 use std::collections::BTreeMap;
 use wit_parser::{Resolve, TypeDefKind, WorldId, WorldItem};
 
@@ -27,8 +28,9 @@ pub(super) fn definitions(
                     continue;
                 }
                 let key = canonical_type(resolve, *id).index() as u32;
-                ensure!(
+                ensure_diag!(
                     !definitions.contains_key(&key),
+                    crate::codes::RESOURCE_IMPORTED_AND_EXPORTED,
                     "resource {module}#{name} is declared on both sides of this world; import and export resource identities are distinct, so use an exported interface that aliases the imported resource or separate resource interfaces"
                 );
                 definitions.insert(

@@ -8,6 +8,7 @@ use perry_contract::names::{
     TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children,
 };
 use perry_contract::types::{Contract, Input, convert};
+use perry_wit_diagnostics::{Diagnostic, codes};
 use std::{collections::HashSet, fmt::Write as _};
 use wit_parser::{Function, Resolve, Type, TypeDefKind, World, WorldItem, WorldKey};
 
@@ -163,7 +164,8 @@ fn world_type_declarations(names: &TsNames<'_>) -> String {
 
 /// Generates TypeScript declarations (.d.ts) for a given WIT world.
 pub(super) fn generate_world_declarations(resolve: &Resolve, world: &World) -> Result<String> {
-    perry_contract::export_names::validate_implementation_names(resolve, world)?;
+    perry_contract::export_names::validate_implementation_names(resolve, world)
+        .map_err(|error| Diagnostic::new(codes::INVALID_EXPORT_NAME, error.to_string()))?;
     let names = &TsNames::new(resolve, world);
     let mut out = String::new();
 
