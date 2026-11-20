@@ -13,7 +13,8 @@ use crate::{
 use anyhow::Result;
 use perry_mir::is_exported;
 use perry_wit_diagnostics::{
-    anyhow_ext::{annotate_existing, internal_context},
+    Diagnostic,
+    anyhow_ext::{annotate_existing, internal_context, wrap_source},
     bail_internal, codes, diag, ensure_unsupported, internal,
 };
 use pliron::{
@@ -363,6 +364,81 @@ pub(crate) fn lower(
     Ok((state.wasm, state.data.bytes, memory))
 }
 
+/// Structured boundary errors emitted during Wasm lowering.
+enum CodegenError<'a> {
+    SyncExportUsesConsole {
+        core_name: &'a str,
+        span: Option<perry_mir::SourceSpan>,
+    },
+    PendingInitialization {
+        span: Option<perry_mir::SourceSpan>,
+    },
+    AsyncInitializerRequiresAsyncExport {
+        core_name: &'a str,
+        span: Option<perry_mir::SourceSpan>,
+    },
+    MissingErrorChannel {
+        core_name: &'a str,
+        span: Option<perry_mir::SourceSpan>,
+    },
+    ExportBinding {
+        core_name: &'a str,
+        span: Option<perry_mir::SourceSpan>,
+        source: anyhow::Error,
+    },
+}
+
+impl From<CodegenError<'_>> for Diagnostic {
+    fn from(error: CodegenError<'_>) -> Self {
+        match error {
+            CodegenError::SyncExportUsesConsole { core_name, span } => Self::new(
+                codes::SYNC_EXPORT_CONSOLE,
+                format!(
+                    "console output needs async exports: WASI P3 output streams are asynchronous, but {core_name} is a synchronous export"
+                ),
+            )
+            .with_optional_span(span)
+            .with_help(
+                "Declare the WIT export async or remove console output from this component.",
+            ),
+            CodegenError::PendingInitialization { span } => Self::new(
+                codes::PENDING_INITIALIZATION,
+                "top-level statements leave asynchronous work pending",
+            )
+            .with_optional_span(span)
+            .with_help(
+                "Await the asynchronous work in the top-level statements, so every entry point waits for it.",
+            ),
+            CodegenError::AsyncInitializerRequiresAsyncExport { core_name, span } => Self::new(
+                codes::ASYNC_INITIALIZER_REQUIRES_ASYNC_EXPORT,
+                format!("{core_name} requires asynchronous module initialization"),
+            )
+            .with_optional_span(span)
+            .with_help(
+                "Declare this WIT export async so it can await module initialization and its error channel.",
+            ),
+            CodegenError::MissingErrorChannel { core_name, span } => Self::new(
+                codes::MISSING_ERROR_CHANNEL,
+                format!("{core_name} can throw without a compatible WIT error channel"),
+            )
+            .with_optional_span(span)
+            .with_help(
+                "Declare a WIT result error, or use an async export with wasi:cli/stderr support.",
+            ),
+            CodegenError::ExportBinding {
+                core_name,
+                span,
+                source,
+            } => wrap_source(
+                source,
+                span,
+                format!("while binding WIT export {core_name}"),
+                format!("binding WIT export {core_name}"),
+            ),
+        }
+    }
+}
+
 /// Emit the canonical-ABI glue of every WIT export.
 fn bind_exports(
     ctx: &mut Context,
@@ -377,14 +453,12 @@ fn bind_exports(
     if state.uses_io
         && let Some(export) = exports.iter().find(|e| !e.is_async())
     {
-        return Err(perry_wit_diagnostics::Diagnostic::from(
-            crate::CodegenError::SyncExportUsesConsole {
-                core_name: export.core_name.clone(),
-                span: mir_functions
-                    .get(&export.function)
-                    .and_then(|function| perry_mir::source_span(ctx, function)),
-            },
-        )
+        return Err(Diagnostic::from(CodegenError::SyncExportUsesConsole {
+            core_name: &export.core_name,
+            span: mir_functions
+                .get(&export.function)
+                .and_then(|function| perry_mir::source_span(ctx, function)),
+        })
         .into());
     }
     // A command reports uncaught exceptions on stderr.
@@ -408,13 +482,11 @@ fn bind_exports(
         && initialization
             .is_some_and(|summary| summary.effects.may_suspend || summary.effects.host_work)
     {
-        return Err(perry_wit_diagnostics::Diagnostic::from(
-            crate::CodegenError::PendingInitialization {
-                span: mir_functions
-                    .get(perry_mir::INITIALIZER)
-                    .and_then(|function| perry_mir::source_span(ctx, function)),
-            },
-        )
+        return Err(Diagnostic::from(CodegenError::PendingInitialization {
+            span: mir_functions
+                .get(perry_mir::INITIALIZER)
+                .and_then(|function| perry_mir::source_span(ctx, function)),
+        })
         .into());
     }
     let stderr = state.imports.as_ref().is_some_and(|imports| {
@@ -446,13 +518,13 @@ fn bind_exports(
             state.reports_rejection = true;
         }
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
-            return Err(perry_wit_diagnostics::Diagnostic::from(
-                crate::CodegenError::AsyncInitializerRequiresAsyncExport {
-                    core_name: export.core_name.clone(),
+            return Err(
+                Diagnostic::from(CodegenError::AsyncInitializerRequiresAsyncExport {
+                    core_name: &export.core_name,
                     span: perry_mir::source_span(ctx, function),
-                },
-            )
-            .into());
+                })
+                .into(),
+            );
         }
         if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
@@ -462,12 +534,10 @@ fn bind_exports(
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
             if export.is_async() && !stderr {
-                return Err(perry_wit_diagnostics::Diagnostic::from(
-                    crate::CodegenError::MissingErrorChannel {
-                        core_name: export.core_name.clone(),
-                        span: perry_mir::source_span(ctx, function),
-                    },
-                )
+                return Err(Diagnostic::from(CodegenError::MissingErrorChannel {
+                    core_name: &export.core_name,
+                    span: perry_mir::source_span(ctx, function),
+                })
                 .into());
             }
             if export.is_async() {
@@ -488,16 +558,13 @@ fn bind_exports(
                 export.function
             )
         })?;
-        boundary::export(
-            ctx,
-            state,
-            function,
-            &lowered[&function.get_symbol_name(ctx)],
-            export,
-        )
-        .map_err(|source| {
-            perry_wit_diagnostics::Diagnostic::from(crate::CodegenError::ExportBinding {
-                core_name: export.core_name.clone(),
+        let symbol = function.get_symbol_name(ctx);
+        let lowered_function = lowered
+            .get(&symbol)
+            .ok_or_else(|| internal!("missing lowered Wasm function {symbol}"))?;
+        boundary::export(ctx, state, function, lowered_function, export).map_err(|source| {
+            Diagnostic::from(CodegenError::ExportBinding {
+                core_name: &export.core_name,
                 span: perry_mir::source_span(ctx, function),
                 source,
             })

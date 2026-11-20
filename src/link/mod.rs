@@ -34,7 +34,7 @@ use libraries::{HelperMemory, Library, LibraryId, Relocations, align_to};
 pub(crate) use type_compaction::compact;
 
 #[derive(Debug)]
-pub(crate) enum LinkError {
+enum LinkError {
     UnknownCanonicalPlaceholder(String),
     MalformedCanonicalPlaceholder(String),
     UnsupportedCoreImports,

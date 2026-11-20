@@ -368,7 +368,7 @@ fn every_kind_has_a_fixture() {
         modules: vec![],
     };
 
-    let fixtures: [(ErrorKind, perry_wit::Diagnostic); 9] = [
+    let fixtures: [(ErrorKind, perry_wit::CompileError); 9] = [
         (
             ErrorKind::InvalidInput,
             api::compile_core(&Program {
@@ -380,16 +380,12 @@ fn every_kind_has_a_fixture() {
                     contents: vec![],
                 }],
             })
-            .unwrap_err()
-            .primary()
-            .clone(),
+            .unwrap_err(),
         ),
         (
             ErrorKind::Io,
             perry_wit::compile_file(&temp.path().join("missing.ts"), &CompileOptions::default())
-                .unwrap_err()
-                .primary()
-                .clone(),
+                .unwrap_err(),
         ),
         (
             ErrorKind::Wit,
@@ -401,39 +397,26 @@ fn every_kind_has_a_fixture() {
                 },
                 &Options::default(),
             )
-            .unwrap_err()
-            .primary()
-            .clone(),
+            .unwrap_err(),
         ),
         (
             ErrorKind::Syntax,
-            api::compile_core(&program("export function {"))
-                .unwrap_err()
-                .primary()
-                .clone(),
+            api::compile_core(&program("export function {")).unwrap_err(),
         ),
         (
             ErrorKind::Module,
-            api::compile_core(&program("export { run } from './missing';"))
-                .unwrap_err()
-                .primary()
-                .clone(),
+            api::compile_core(&program("export { run } from './missing';")).unwrap_err(),
         ),
         (
             ErrorKind::TypeCheck,
-            api::compile_core(&program("export function run(x) { return x; }"))
-                .unwrap_err()
-                .primary()
-                .clone(),
+            api::compile_core(&program("export function run(x) { return x; }")).unwrap_err(),
         ),
         (
             ErrorKind::Unsupported,
             api::compile_core(&program(
                 "export function run(x: number): number { return x ** (2 ** x); }",
             ))
-            .unwrap_err()
-            .primary()
-            .clone(),
+            .unwrap_err(),
         ),
         (
             ErrorKind::Contract,
@@ -442,18 +425,17 @@ fn every_kind_has_a_fixture() {
                 &wit,
                 &Options::default(),
             )
-            .unwrap_err()
-            .primary()
-            .clone(),
+            .unwrap_err(),
         ),
         (
             ErrorKind::Internal,
-            perry_wit::Diagnostic::from_error(anyhow::anyhow!("synthetic internal error")),
+            perry_wit::CompileError::from_error(anyhow::anyhow!("synthetic internal error")),
         ),
     ];
 
     let mut covered = [false; 9];
-    for (expected, diagnostic) in fixtures {
+    for (expected, error) in fixtures {
+        let diagnostic = error.primary();
         assert_eq!(diagnostic.kind(), expected, "{diagnostic}");
         let slot = match diagnostic.kind() {
             ErrorKind::InvalidInput => 0,

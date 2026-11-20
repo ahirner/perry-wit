@@ -138,8 +138,8 @@ impl FunctionLowering<'_, '_> {
                 let ty = int.get_type().into();
                 let bits: APInt = int.clone().into();
                 drop(attr);
-                let (width, signed) =
-                    crate::numeric::integer(ctx, ty).expect("integer attribute type");
+                let (width, signed) = crate::numeric::integer(ctx, ty)
+                    .ok_or_else(|| internal!("integer attribute type"))?;
                 if width == 64 {
                     self.i64_const(ctx, bits.to_u64())
                 } else {

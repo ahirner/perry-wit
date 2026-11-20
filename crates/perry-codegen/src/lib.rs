@@ -27,7 +27,6 @@
 //! functions into state machines, and [boundary] binds them to the canonical ABI.
 use anyhow::Result;
 use perry_abi::layout::descriptor::{OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL};
-use perry_mir::ErrorKind;
 use perry_wit_diagnostics::{anyhow_ext::internal_context, internal};
 use pliron::{
     builtin::ops::ModuleOp,
@@ -66,97 +65,6 @@ mod values;
 mod variants;
 
 pub use memory::explain_tiers;
-
-/// Structured boundary errors emitted during Wasm lowering.
-#[derive(Debug)]
-pub(crate) enum CodegenError {
-    SyncExportUsesConsole {
-        core_name: String,
-        span: Option<perry_mir::SourceSpan>,
-    },
-    PendingInitialization {
-        span: Option<perry_mir::SourceSpan>,
-    },
-    AsyncInitializerRequiresAsyncExport {
-        core_name: String,
-        span: Option<perry_mir::SourceSpan>,
-    },
-    MissingErrorChannel {
-        core_name: String,
-        span: Option<perry_mir::SourceSpan>,
-    },
-    ExportBinding {
-        core_name: String,
-        span: Option<perry_mir::SourceSpan>,
-        source: anyhow::Error,
-    },
-}
-
-impl CodegenError {
-    fn code(&self) -> perry_wit_diagnostics::Code {
-        use perry_wit_diagnostics::codes;
-        match self {
-            Self::SyncExportUsesConsole { .. } => codes::SYNC_EXPORT_CONSOLE,
-            Self::PendingInitialization { .. } => codes::PENDING_INITIALIZATION,
-            Self::AsyncInitializerRequiresAsyncExport { .. } => {
-                codes::ASYNC_INITIALIZER_REQUIRES_ASYNC_EXPORT
-            }
-            Self::MissingErrorChannel { .. } => codes::MISSING_ERROR_CHANNEL,
-            Self::ExportBinding { .. } => codes::INTERNAL,
-        }
-    }
-}
-
-impl From<CodegenError> for perry_wit_diagnostics::Diagnostic {
-    fn from(error: CodegenError) -> Self {
-        use perry_wit_diagnostics::{Diagnostic, anyhow_ext};
-        let code = error.code();
-        match error {
-            CodegenError::SyncExportUsesConsole { core_name, span } => Diagnostic::new(
-                code,
-                format!(
-                    "console output needs async exports: WASI P3 output streams are asynchronous, but {core_name} is a synchronous export"
-                ),
-            )
-            .with_optional_span(span)
-            .with_help("Declare the WIT export async or remove console output from this component."),
-            CodegenError::PendingInitialization { span } => Diagnostic::new(
-                code,
-                "top-level statements leave asynchronous work pending",
-            )
-            .with_optional_span(span)
-            .with_help(
-                "Await the asynchronous work in the top-level statements, so every entry point waits for it.",
-            ),
-            CodegenError::AsyncInitializerRequiresAsyncExport { core_name, span } => Diagnostic::new(
-                code,
-                format!("{core_name} requires asynchronous module initialization"),
-            )
-            .with_optional_span(span)
-            .with_help(
-                "Declare this WIT export async so it can await module initialization and its error channel.",
-            ),
-            CodegenError::MissingErrorChannel { core_name, span } => Diagnostic::new(
-                code,
-                format!("{core_name} can throw without a compatible WIT error channel"),
-            )
-            .with_optional_span(span)
-            .with_help(
-                "Declare a WIT result error, or use an async export with wasi:cli/stderr support.",
-            ),
-            CodegenError::ExportBinding {
-                core_name,
-                span,
-                source,
-            } => anyhow_ext::wrap_source(
-                source,
-                span,
-                format!("while binding WIT export {core_name}"),
-                format!("binding WIT export {core_name}"),
-            ),
-        }
-    }
-}
 
 /// Import module of runtime and standard-library functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -239,17 +147,4 @@ pub fn compile(
         names: true,
     };
     Ok(emit_module(ctx, &wasm, &options)?)
-}
-
-/// Return the non-zero status code for an exception `kind` (0 represents normal completion).
-pub fn status_code(kind: ErrorKind) -> i32 {
-    match kind {
-        ErrorKind::Any => 3,
-        ErrorKind::TypeError => 1,
-        ErrorKind::RangeError => 2,
-        ErrorKind::ReferenceError => 6,
-        ErrorKind::SyntaxError => 7,
-        ErrorKind::Value => 4,
-        ErrorKind::Exit => 5,
-    }
 }

@@ -1,8 +1,8 @@
 //! Structured lowering diagnostics mapped directly into [`perry_wit_diagnostics::Diagnostic`].
-use perry_wit_diagnostics::{Code, Diagnostic, SourceSpan, anyhow_ext, codes};
+pub(crate) use perry_wit_diagnostics::anyhow_ext::annotate;
+use perry_wit_diagnostics::{Code, Diagnostic, codes};
 
 /// Type-shape and coercion errors during HIR-to-MIR lowering.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ShapeError {
     MissingTypeAnnotation,
     UnsupportedType { ty: String },
@@ -60,14 +60,12 @@ impl From<ShapeError> for Diagnostic {
 }
 
 /// Domain error kinds emitted by the HIR-to-MIR lowerer.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LowerErrorKind {
     ImportSignatureMismatch {
         binding: String,
         expected: usize,
         actual: usize,
     },
-    Shape(ShapeError),
     MissingRequiredField {
         fields: Vec<String>,
     },
@@ -76,26 +74,12 @@ pub(crate) enum LowerErrorKind {
     },
 }
 
-impl From<ShapeError> for LowerErrorKind {
-    fn from(error: ShapeError) -> Self {
-        Self::Shape(error)
-    }
-}
-
 impl LowerErrorKind {
     fn code(&self) -> Code {
         match self {
             Self::ImportSignatureMismatch { .. } => codes::IMPORT_SIGNATURE_MISMATCH,
-            Self::Shape(shape) => shape.code(),
             Self::MissingRequiredField { .. } => codes::MISSING_REQUIRED_FIELD,
             Self::UnsupportedOperator { .. } => codes::UNSUPPORTED_OPERATOR,
-        }
-    }
-
-    fn help(&self) -> Option<&'static str> {
-        match self {
-            Self::Shape(shape) => shape.help(),
-            _ => None,
         }
     }
 }
@@ -113,7 +97,6 @@ impl std::fmt::Display for LowerErrorKind {
                     "WIT import {binding} expects {expected} arguments, got {actual}"
                 )
             }
-            Self::Shape(shape) => shape.fmt(f),
             Self::MissingRequiredField { fields } => {
                 write!(f, "missing required record fields: {}", fields.join(", "))
             }
@@ -126,14 +109,6 @@ impl std::fmt::Display for LowerErrorKind {
 
 impl From<LowerErrorKind> for Diagnostic {
     fn from(error: LowerErrorKind) -> Self {
-        let mut diagnostic = Diagnostic::new(error.code(), error.to_string());
-        if let Some(help) = error.help() {
-            diagnostic = diagnostic.with_help(help);
-        }
-        diagnostic
+        Diagnostic::new(error.code(), error.to_string())
     }
-}
-
-pub(crate) fn annotate(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-    anyhow_ext::annotate(error, span)
 }

@@ -276,7 +276,7 @@ impl Diagnostic {
         self
     }
 
-    pub fn set_span_if_missing(&mut self, span: Option<SourceSpan>) {
+    pub(crate) fn set_span_if_missing(&mut self, span: Option<SourceSpan>) {
         if self.span.is_none() {
             self.span = span;
         }
@@ -427,19 +427,32 @@ pub mod anyhow_ext {
         anyhow::Error::new(diagnostic)
     }
 
-    fn find_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
-        error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<Diagnostic>())
-            .cloned()
-    }
-
-    fn context_prefix(error: &anyhow::Error) -> Vec<Note> {
-        error
-            .chain()
-            .take_while(|cause| cause.downcast_ref::<Diagnostic>().is_none())
-            .map(|cause| Note::new(cause.to_string()))
-            .collect()
+    fn extract_diagnostic(error: anyhow::Error) -> Result<(Diagnostic, Vec<Note>), anyhow::Error> {
+        let mut chain = error.chain();
+        let prefix = if chain.next().is_some_and(|top| top.is::<Diagnostic>()) {
+            Vec::new()
+        } else {
+            match chain.find_map(|cause| cause.downcast_ref::<Diagnostic>()) {
+                Some(inner) if inner.kind() == ErrorKind::Internal => error
+                    .chain()
+                    .take_while(|cause| cause.downcast_ref::<Diagnostic>().is_none())
+                    .map(|cause| Note::new(cause.to_string()))
+                    .collect(),
+                Some(_) => Vec::new(),
+                None => return Err(error),
+            }
+        };
+        match error.downcast::<Diagnostic>() {
+            Ok(diagnostic) => Ok((diagnostic, prefix)),
+            Err(error) => match error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<Diagnostic>())
+                .cloned()
+            {
+                Some(diagnostic) => Ok((diagnostic, prefix)),
+                None => Err(error),
+            },
+        }
     }
 
     pub trait FromAnyhow: Sized {
@@ -448,17 +461,19 @@ pub mod anyhow_ext {
 
     impl FromAnyhow for Diagnostic {
         fn from_error(error: anyhow::Error) -> Self {
-            if let Some(mut diagnostic) = find_diagnostic(&error) {
-                if diagnostic.kind() == ErrorKind::Internal {
-                    diagnostic.prepend_notes(context_prefix(&error));
+            match extract_diagnostic(error) {
+                Ok((mut diagnostic, prefix)) => {
+                    diagnostic.prepend_notes(prefix);
+                    diagnostic
                 }
-                return diagnostic;
+                Err(error) => {
+                    let mut diagnostic = Diagnostic::new(codes::INTERNAL, error.to_string());
+                    if let Some(source) = error.source() {
+                        diagnostic = diagnostic.with_source_notes(source);
+                    }
+                    diagnostic
+                }
             }
-            let mut diagnostic = Diagnostic::new(codes::INTERNAL, error.to_string());
-            if let Some(source) = error.source() {
-                diagnostic = diagnostic.with_source_notes(source);
-            }
-            diagnostic
         }
     }
 
@@ -481,14 +496,14 @@ pub mod anyhow_ext {
 
     /// Attach `span` only when `error` already carries a [`Diagnostic`]; untyped errors pass through.
     pub fn annotate_existing(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-        if let Some(mut diagnostic) = find_diagnostic(&error) {
-            if diagnostic.kind() == ErrorKind::Internal {
-                diagnostic.prepend_notes(context_prefix(&error));
+        match extract_diagnostic(error) {
+            Ok((mut diagnostic, prefix)) => {
+                diagnostic.prepend_notes(prefix);
+                diagnostic.set_span_if_missing(span);
+                diagnostic.into()
             }
-            diagnostic.set_span_if_missing(span);
-            return diagnostic.into();
+            Err(error) => error,
         }
-        error
     }
 
     /// Apply the shared propagation rule when a boundary wrapper adds context around `source`.
@@ -504,20 +519,23 @@ pub mod anyhow_ext {
         user_note: impl Into<String>,
         internal_context: impl Into<String>,
     ) -> Diagnostic {
-        if let Some(mut inner) = find_diagnostic(&source) {
-            if inner.kind() == ErrorKind::Internal {
-                let mut prefix = vec![Note::new(internal_context)];
-                prefix.extend(context_prefix(&source));
-                inner.prepend_notes(prefix);
+        match extract_diagnostic(source) {
+            Ok((mut inner, prefix)) => {
                 inner.set_span_if_missing(span);
-                return inner;
+                if inner.kind() == ErrorKind::Internal {
+                    let mut notes = Vec::with_capacity(prefix.len() + 1);
+                    notes.push(Note::new(internal_context));
+                    notes.extend(prefix);
+                    inner.prepend_notes(notes);
+                    inner
+                } else {
+                    inner.with_note(user_note)
+                }
             }
-            inner.set_span_if_missing(span);
-            return inner.with_note(user_note);
+            Err(source) => Diagnostic::new(codes::INTERNAL, internal_context)
+                .with_optional_span(span)
+                .with_source_notes(source.as_ref()),
         }
-        Diagnostic::new(codes::INTERNAL, internal_context)
-            .with_optional_span(span)
-            .with_source_notes(source.as_ref())
     }
 
     /// Add an internal breadcrumb note around `source` while passing non-`Internal` diagnostics
@@ -526,19 +544,20 @@ pub mod anyhow_ext {
         source: impl Into<anyhow::Error>,
         context: impl Into<String>,
     ) -> anyhow::Error {
-        let source = source.into();
-        if let Some(mut inner) = find_diagnostic(&source) {
-            if inner.kind() == ErrorKind::Internal {
-                let mut prefix = vec![Note::new(context)];
-                prefix.extend(context_prefix(&source));
-                inner.prepend_notes(prefix);
-                return inner.into();
+        match extract_diagnostic(source.into()) {
+            Ok((mut inner, prefix)) => {
+                if inner.kind() == ErrorKind::Internal {
+                    let mut notes = Vec::with_capacity(prefix.len() + 1);
+                    notes.push(Note::new(context));
+                    notes.extend(prefix);
+                    inner.prepend_notes(notes);
+                }
+                inner.into()
             }
-            return inner.into();
+            Err(source) => Diagnostic::new(codes::INTERNAL, context)
+                .with_source_notes(source.as_ref())
+                .into(),
         }
-        Diagnostic::new(codes::INTERNAL, context)
-            .with_source_notes(source.as_ref())
-            .into()
     }
 }
 

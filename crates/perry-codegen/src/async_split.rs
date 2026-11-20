@@ -23,7 +23,7 @@ use crate::{
 use anyhow::Result;
 use perry_abi::layout::promise as promises;
 use perry_mir::AwaitOp;
-use perry_wit_diagnostics::bail_internal;
+use perry_wit_diagnostics::{bail_internal, internal};
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -168,7 +168,9 @@ pub(crate) fn lower(
         let mut args_iter = args.into_iter();
         for param in &params {
             for (at, access) in slots[param].iter() {
-                let arg = args_iter.next().expect("ramp argument");
+                let arg = args_iter
+                    .next()
+                    .ok_or_else(|| internal!("missing ramp argument"))?;
                 b.store(ctx, access, frame, at, arg);
             }
         }
@@ -336,8 +338,12 @@ impl FunctionLowering<'_, '_> {
         let promise = take.deref(ctx).get_argument(0);
         let zero = self.i32_const(ctx, 0);
         self.store(ctx, MemKind::I32, frame, AWAITED, zero);
-        let parent = op.deref(ctx).get_parent_op(ctx).expect("MIR function");
-        let function = Operation::get_op::<FuncOp>(parent, ctx).expect("MIR function");
+        let parent = op
+            .deref(ctx)
+            .get_parent_op(ctx)
+            .ok_or_else(|| internal!("await outside MIR function"))?;
+        let function = Operation::get_op::<FuncOp>(parent, ctx)
+            .ok_or_else(|| internal!("await parent is not a MIR function"))?;
         if self
             .state
             .program_facts

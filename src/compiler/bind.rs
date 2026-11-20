@@ -15,38 +15,36 @@ use pliron::{
 use std::fmt;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
-#[derive(Debug)]
-enum BindError {
+enum BindError<'a> {
     ArityMismatch {
         span: Option<crate::SourceSpan>,
-        function: String,
+        function: &'a str,
         actual: usize,
-        core_name: String,
+        core_name: &'a str,
         expected: usize,
     },
     WideIntegerRequiresBigInt {
         span: Option<crate::SourceSpan>,
-        function: String,
-        core_name: String,
+        function: &'a str,
+        core_name: &'a str,
     },
     MissingExport {
         span: Option<crate::SourceSpan>,
-        core_name: String,
-        implementation: String,
+        core_name: &'a str,
+        implementation: &'a str,
         is_unexported: bool,
     },
     AsyncMismatch {
         span: Option<crate::SourceSpan>,
-        implementation: String,
-        core_name: String,
-        is_async: bool,
+        implementation: &'a str,
+        core_name: &'a str,
         expected_async: bool,
     },
     TopLevelRequiresCommandWorld,
-    UnsupportedAbiType(String),
+    UnsupportedAbiType(&'a str),
 }
 
-impl BindError {
+impl BindError<'_> {
     fn code(&self) -> crate::Code {
         match self {
             Self::ArityMismatch { .. } => crate::codes::EXPORT_ARITY,
@@ -121,7 +119,7 @@ impl BindError {
     }
 }
 
-impl fmt::Display for BindError {
+impl fmt::Display for BindError<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ArityMismatch {
@@ -148,13 +146,12 @@ impl fmt::Display for BindError {
             Self::AsyncMismatch {
                 implementation,
                 core_name,
-                is_async,
                 expected_async,
                 ..
             } => write!(
                 f,
                 "{implementation} is {}async but the WIT export {core_name} is {}async",
-                if *is_async { "" } else { "not " },
+                if *expected_async { "not " } else { "" },
                 if *expected_async { "" } else { "not " },
             ),
             Self::TopLevelRequiresCommandWorld => {
@@ -167,10 +164,8 @@ impl fmt::Display for BindError {
     }
 }
 
-impl std::error::Error for BindError {}
-
-impl From<BindError> for crate::Diagnostic {
-    fn from(error: BindError) -> Self {
+impl From<BindError<'_>> for crate::Diagnostic {
+    fn from(error: BindError<'_>) -> Self {
         let code = error.code();
         let message = error.to_string();
         let help = error.help();
@@ -205,14 +200,15 @@ pub(crate) fn constrain_numbers(
         };
         let existing =
             perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
-        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).expect("function type");
+        let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx)
+            .map_err(|_| perry_wit_diagnostics::internal!("function type"))?;
         let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
         if !export.is_command() && args.len() != export.params.len() {
             return Err(crate::Diagnostic::from(BindError::ArityMismatch {
                 span: perry_mir::source_span(ctx, function),
-                function: export.function.clone(),
+                function: &export.function,
                 actual: args.len(),
-                core_name: export.core_name.clone(),
+                core_name: &export.core_name,
                 expected: export.params.len(),
             })
             .into());
@@ -240,8 +236,8 @@ pub(crate) fn constrain_numbers(
                 return Err(
                     crate::Diagnostic::from(BindError::WideIntegerRequiresBigInt {
                         span: perry_mir::source_span(ctx, function),
-                        function: export.function.clone(),
-                        core_name: export.core_name.clone(),
+                        function: &export.function,
+                        core_name: &export.core_name,
                     })
                     .into(),
                 );
@@ -306,84 +302,81 @@ pub(crate) fn exports(
         } else {
             function.name.clone()
         };
-        {
-            let found = exported.remove(&implementation);
-            // A command's `wasi:cli/run.run` may be the module's top-level statements.
-            let command = found.is_none() && is_cli_run(&core_name) && main_present;
-            let Some(mir_function) = found else {
-                if command {
-                    bound.push(Export {
-                        core_name,
-                        function: perry_lower::MAIN.to_string(),
-                        params: vec![],
-                        result: None,
-                        kind: ExportKind::Async {
-                            task_return: (
-                                format!("[export]{}", resolve.name_world_key(entry.key)),
-                                function.name.clone(),
-                            ),
-                            command: true,
-                        },
-                    });
-                    continue;
-                }
-                let unexported = module_functions(ctx, mir).into_iter().find(|candidate| {
-                    !is_exported(ctx, candidate)
-                        && candidate.get_symbol_name(ctx).as_ref() == implementation
+        let found = exported.remove(&implementation);
+        // A command's `wasi:cli/run.run` may be the module's top-level statements.
+        let command = found.is_none() && is_cli_run(&core_name) && main_present;
+        let Some(mir_function) = found else {
+            if command {
+                bound.push(Export {
+                    core_name,
+                    function: perry_lower::MAIN.to_string(),
+                    params: vec![],
+                    result: None,
+                    kind: ExportKind::Async {
+                        task_return: (
+                            format!("[export]{}", resolve.name_world_key(entry.key)),
+                            function.name.clone(),
+                        ),
+                        command: true,
+                    },
                 });
-                let span = unexported
-                    .as_ref()
-                    .and_then(|candidate| perry_mir::source_span(ctx, candidate));
-                return Err(crate::Diagnostic::from(BindError::MissingExport {
-                    span,
-                    core_name,
-                    implementation,
-                    is_unexported: unexported.is_some(),
-                })
-                .into());
-            };
-            let is_async = perry_mir::is_async(ctx, &mir_function);
-            if is_async != function.kind.is_async() {
-                return Err(crate::Diagnostic::from(BindError::AsyncMismatch {
-                    span: perry_mir::source_span(ctx, &mir_function),
-                    implementation,
-                    core_name,
-                    is_async,
-                    expected_async: function.kind.is_async(),
-                })
-                .into());
+                continue;
             }
-            let params = function
-                .params
-                .iter()
-                .map(|param| abi_type(resolve, &param.ty))
-                .collect::<Result<_>>()?;
-            let result = function
-                .result
-                .as_ref()
-                .map(|ty| abi_type(resolve, ty))
-                .transpose()?;
-            // Async exports return through `task.return`, imported from `[export]<interface>`.
-            let kind = if function.kind.is_async() {
-                let module = match entry.interface {
-                    Some(_) => format!("[export]{}", resolve.name_world_key(entry.key)),
-                    None => "[export]$root".to_string(),
-                };
-                ExportKind::Async {
-                    task_return: (module, function.name.clone()),
-                    command: false,
-                }
-            } else {
-                ExportKind::Sync
-            };
-            bound.push(Export {
-                core_name,
-                function: implementation,
-                params,
-                result,
-                kind,
+            let unexported = module_functions(ctx, mir).into_iter().find(|candidate| {
+                !is_exported(ctx, candidate)
+                    && candidate.get_symbol_name(ctx).as_ref() == implementation
             });
+            let span = unexported
+                .as_ref()
+                .and_then(|candidate| perry_mir::source_span(ctx, candidate));
+            return Err(crate::Diagnostic::from(BindError::MissingExport {
+                span,
+                core_name: &core_name,
+                implementation: &implementation,
+                is_unexported: unexported.is_some(),
+            })
+            .into());
+        };
+        let is_async = perry_mir::is_async(ctx, &mir_function);
+        if is_async != function.kind.is_async() {
+            return Err(crate::Diagnostic::from(BindError::AsyncMismatch {
+                span: perry_mir::source_span(ctx, &mir_function),
+                implementation: &implementation,
+                core_name: &core_name,
+                expected_async: function.kind.is_async(),
+            })
+            .into());
         }
+        let params = function
+            .params
+            .iter()
+            .map(|param| abi_type(resolve, &param.ty))
+            .collect::<Result<_>>()?;
+        let result = function
+            .result
+            .as_ref()
+            .map(|ty| abi_type(resolve, ty))
+            .transpose()?;
+        // Async exports return through `task.return`, imported from `[export]<interface>`.
+        let kind = if function.kind.is_async() {
+            let module = match entry.interface {
+                Some(_) => format!("[export]{}", resolve.name_world_key(entry.key)),
+                None => "[export]$root".to_string(),
+            };
+            ExportKind::Async {
+                task_return: (module, function.name.clone()),
+                command: false,
+            }
+        } else {
+            ExportKind::Sync
+        };
+        bound.push(Export {
+            core_name,
+            function: implementation,
+            params,
+            result,
+            kind,
+        });
     }
     // Exported functions outside the selected world stay internal.
     Ok(bound)
@@ -470,7 +463,7 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
     convert(resolve, Input::Reference(*ty), &|_| None, &|contract| {
         Ok(match contract {
             Contract::Scalar(ty) => scalar_type(ty).ok_or_else(|| {
-                crate::Diagnostic::from(BindError::UnsupportedAbiType(format!("{ty:?}")))
+                crate::Diagnostic::from(BindError::UnsupportedAbiType(&format!("{ty:?}")))
             })?,
             Contract::Resource { id, owned } => AbiType::Resource {
                 key: perry_contract::names::canonical_type(resolve, id).index() as u32,
@@ -502,10 +495,7 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
                     .collect::<Result<_>>()?,
             ),
             Contract::Unsupported(kind) => {
-                return Err(crate::Diagnostic::from(BindError::UnsupportedAbiType(
-                    kind.to_owned(),
-                ))
-                .into());
+                return Err(crate::Diagnostic::from(BindError::UnsupportedAbiType(kind)).into());
             }
         })
     })

@@ -4,7 +4,6 @@ use crate::{
     function::FunctionLowering,
     repr::{Repr, i32_type, repr, val_type_is_i64},
     runtime::Runtime,
-    status_code,
 };
 use anyhow::Result;
 use perry_abi::layout::exception::{KIND, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
@@ -22,6 +21,19 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
+
+/// Return the non-zero status code for an exception `kind` (0 represents normal completion).
+fn status_code(kind: ErrorKind) -> i32 {
+    match kind {
+        ErrorKind::Any => 3,
+        ErrorKind::TypeError => 1,
+        ErrorKind::RangeError => 2,
+        ErrorKind::ReferenceError => 6,
+        ErrorKind::SyntaxError => 7,
+        ErrorKind::Value => 4,
+        ErrorKind::Exit => 5,
+    }
+}
 
 impl FunctionLowering<'_, '_> {
     /// Lower an exception operation, returning `false` for other operations.

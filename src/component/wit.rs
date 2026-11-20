@@ -111,7 +111,7 @@ impl fmt::Display for WitError {
     }
 }
 
-impl std::error::Error for WitError {
+impl WitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ParsePackage { source, .. } | Self::ResolveDependencies { source, .. } => {
@@ -153,7 +153,7 @@ impl From<WitError> for crate::Diagnostic {
                 if let Some(help) = help {
                     diagnostic = diagnostic.with_help(help);
                 }
-                if let Some(source) = std::error::Error::source(&error) {
+                if let Some(source) = error.source() {
                     diagnostic = diagnostic.with_source_notes(source);
                 }
                 diagnostic

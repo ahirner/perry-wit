@@ -150,7 +150,7 @@ pub struct Export {
 }
 
 impl Export {
-    pub fn is_async(&self) -> bool {
+    pub(crate) fn is_async(&self) -> bool {
         matches!(self.kind, ExportKind::Async { .. })
     }
 
