@@ -7,9 +7,10 @@ use crate::{
     runtime::Runtime,
     values::is_numeric_type,
 };
-use anyhow::{Result, bail, ensure};
+use anyhow::Result;
 use perry_abi::layout::numeric::{FLOAT, NULL, OMITTED, SIGNED, U8, U64, UNDEFINED, UNSIGNED};
 use perry_mir::{BinaryKind, CompareKind, NumericConstant, NumericType};
+use perry_wit_diagnostics::{bail_diag, bail_internal, codes, ensure_internal, internal};
 use pliron::{
     builtin::{
         attributes::IntegerAttr,
@@ -70,7 +71,7 @@ fn fixed_width_tag(bits: u32, signed: bool) -> Result<i32> {
         16 => 1,
         32 => 2,
         64 => 3,
-        other => bail!("{other}-bit integers have no numeric tag"),
+        other => bail_internal!("{other}-bit integers have no numeric tag"),
     };
     Ok(U8 + 2 * width + i32::from(signed))
 }
@@ -179,8 +180,8 @@ impl FunctionLowering<'_, '_> {
             return self.numeric_cast(ctx, raw, source, target);
         }
         if target.deref(ctx).is::<perry_mir::BigIntType>() {
-            let (_, signed) = integer(ctx, source)
-                .ok_or_else(|| anyhow::anyhow!("bigint boxing needs an integer"))?;
+            let (_, signed) =
+                integer(ctx, source).ok_or_else(|| internal!("bigint boxing needs an integer"))?;
             let wide = IntegerType::get(
                 ctx,
                 64,
@@ -231,7 +232,7 @@ impl FunctionLowering<'_, '_> {
                     (true, false) => NumOpcode::I64TruncSatF64U,
                 })
             }
-            _ => bail!(
+            _ => bail_internal!(
                 "unsupported numeric representation conversion: source={}, target={}",
                 source.disp(ctx),
                 target.disp(ctx)
@@ -584,7 +585,10 @@ impl FunctionLowering<'_, '_> {
             let runtime = match kind {
                 BinaryKind::Add => Runtime::StdBigintAdd,
                 BinaryKind::Sub => Runtime::StdBigintSub,
-                _ => bail!("bigint {kind:?} is not supported yet"),
+                _ => bail_diag!(
+                    codes::UNSUPPORTED_OPERATOR,
+                    "bigint {kind:?} is not supported yet"
+                ),
             };
             let value = self.runtime(ctx, runtime, operands);
             let status = self.runtime(ctx, Runtime::Status, vec![]);
@@ -612,7 +616,7 @@ impl FunctionLowering<'_, '_> {
             return Ok(self.normalize_integer(ctx, value, ty));
         }
         if !ty.deref(ctx).is::<FP64Type>() {
-            bail!("{kind:?} requires a resolved numeric representation");
+            bail_internal!("{kind:?} requires a resolved numeric representation");
         }
         Ok(match kind {
             BinaryKind::Rem => self.remainder(ctx, operands, divisor),
@@ -689,7 +693,7 @@ impl FunctionLowering<'_, '_> {
             let (bits, signed) = match integer(ctx, scalar) {
                 Some(integer) => integer,
                 None => {
-                    ensure!(
+                    ensure_internal!(
                         repr(ctx, scalar)? == Repr::Ref
                             && matches!(kind, CompareKind::Eq | CompareKind::Ne),
                         "comparison {kind:?} is not supported on {}",

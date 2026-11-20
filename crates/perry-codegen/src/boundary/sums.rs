@@ -156,17 +156,18 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<Option<(TypeHandle, Carriers<Value>)>> {
         use perry_abi::layout::exception as exception_layout;
         let AbiType::Result { err, .. } = result else {
-            bail!("completion requires a WIT result");
+            bail_internal!("completion requires a WIT result");
         };
         let Some(err) = err.as_deref() else {
             return Ok(None);
         };
         if let AbiType::Record(fields) = err {
-            ensure!(
+            ensure_diag!(
                 fields.len() == 2
                     && ["name", "message"].iter().all(|name| fields
                         .iter()
                         .any(|(field, ty)| field == name && *ty == AbiType::String)),
+                codes::EXPORT_TYPE_MISMATCH,
                 "completion-style Error objects require a {{name: string, message: string}} WIT error; return an explicit tagged result for {err:?}"
             );
             let kind = self.load(ctx, MemKind::I32, exception, exception_layout::KIND);
@@ -187,7 +188,7 @@ impl FunctionLowering<'_, '_> {
                 identifier("perry_completion_error"),
                 Some(vec![("message".into(), string), ("name".into(), string)]),
             )
-            .map_err(|_| anyhow!("inconsistent completion Error record shape"))?
+            .map_err(|_| internal!("inconsistent completion Error record shape"))?
             .into();
             let name = self.runtime(ctx, Runtime::StdExceptionName, vec![exception]);
             let message = self.runtime(ctx, Runtime::ExceptionMessage, vec![exception]);
@@ -222,7 +223,8 @@ impl FunctionLowering<'_, '_> {
                 FP64Type::get(ctx).into(),
                 MemKind::F64,
             ),
-            _ => bail!(
+            _ => bail_diag!(
+                codes::EXPORT_TYPE_MISMATCH,
                 "completion-style throws require a scalar WIT error; return an explicit tagged result for {err:?}"
             ),
         };
@@ -272,8 +274,12 @@ impl FunctionLowering<'_, '_> {
         let (offset, field) = match ty {
             AbiType::Option(_) => {
                 return Ok(NativePayload {
-                    mir: optional_value(ctx, mir)
-                        .ok_or_else(|| anyhow!("WIT option needs a nullable TypeScript value"))?,
+                    mir: optional_value(ctx, mir).ok_or_else(|| {
+                        diag!(
+                            codes::EXPORT_TYPE_MISMATCH,
+                            "WIT option needs a nullable TypeScript value"
+                        )
+                    })?,
                     slot: None,
                 });
             }
@@ -286,17 +292,25 @@ impl FunctionLowering<'_, '_> {
                 )?
             }
             AbiType::Variant(cases) => {
-                let variant = TypedHandle::<perry_mir::VariantType>::from_handle(mir, ctx)?;
+                let variant = TypedHandle::<perry_mir::VariantType>::from_handle(mir, ctx)
+                    .map_err(|_| {
+                        diag!(
+                            codes::EXPORT_TYPE_MISMATCH,
+                            "variant needs a closed tagged union"
+                        )
+                    })?;
                 let field = variant
                     .deref(ctx)
                     .cases()
                     .iter()
                     .find(|(name, _)| *name == cases[case].0)
                     .and_then(|(_, payload)| *payload)
-                    .ok_or_else(|| anyhow!("variant payload is missing"))?;
+                    .ok_or_else(|| {
+                        diag!(codes::EXPORT_TYPE_MISMATCH, "variant payload is missing")
+                    })?;
                 (perry_abi::layout::variant::VALUE, field)
             }
-            _ => bail!("sum has no payload"),
+            _ => bail_internal!("sum has no payload"),
         };
         let mir = if matches!(ty, AbiType::Result { .. }) && !matches!(abi, AbiType::Option(_)) {
             present_type(ctx, field)
@@ -320,16 +334,18 @@ impl FunctionLowering<'_, '_> {
         match ty {
             AbiType::Variant(cases) => self.variant_new(ctx, &cases[case].0, payload),
             AbiType::Enum(names) => {
-                ensure!(
+                ensure_diag!(
                     mir.deref(ctx).is::<perry_mir::StringType>(),
+                    codes::EXPORT_TYPE_MISMATCH,
                     "WIT enum needs a string literal union"
                 );
                 let text = self.state.data.string(&names[case]);
                 Ok(self.i32_const(ctx, text as i32))
             }
             AbiType::Option(_) => {
-                ensure!(
+                ensure_diag!(
                     optional_value(ctx, mir).is_some(),
+                    codes::EXPORT_TYPE_MISMATCH,
                     "WIT option needs a nullable TypeScript value"
                 );
                 match payload {
@@ -345,25 +361,30 @@ impl FunctionLowering<'_, '_> {
                 let fields = record
                     .deref(ctx)
                     .fields()
-                    .map_err(|_| anyhow!("record without fields"))?
+                    .map_err(|_| internal!("record without fields"))?
                     .to_vec();
                 let mut values = Vec::new();
                 for (name, field) in &fields {
                     let value = if name.as_str() == "ok" {
-                        ensure!(
+                        ensure_diag!(
                             repr(ctx, *field)? == Repr::Bool,
+                            codes::EXPORT_TYPE_MISMATCH,
                             "result ok field must be boolean"
                         );
                         self.i32_const(ctx, i32::from(case == 0))
                     } else if name.as_str() == if case == 0 { "value" } else { "error" } {
                         payload
                             .ok_or_else(|| {
-                                anyhow!("payload-free result has an unexpected {name} field")
+                                diag!(
+                                    codes::EXPORT_TYPE_MISMATCH,
+                                    "payload-free result has an unexpected {name} field"
+                                )
                             })?
                             .1
                     } else {
-                        ensure!(
+                        ensure_diag!(
                             absence(ctx, *field).is_some_and(|a| a.admits_undefined()),
+                            codes::EXPORT_TYPE_MISMATCH,
                             "inactive result field {name} must admit undefined"
                         );
                         let field_lift = scalar_mir_type(ctx, *field);
@@ -373,7 +394,7 @@ impl FunctionLowering<'_, '_> {
                 }
                 self.build_record(ctx, mir, values)
             }
-            other => bail!("WIT {other:?} is not a sum type"),
+            other => bail_internal!("WIT {other:?} is not a sum type"),
         }
     }
 
@@ -468,8 +489,9 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<Value> {
         Ok(match ty {
             AbiType::Option(_) => {
-                ensure!(
+                ensure_diag!(
                     optional_value(ctx, mir).is_some(),
+                    codes::EXPORT_TYPE_MISMATCH,
                     "WIT option needs a nullable TypeScript value"
                 );
                 let absent = self.is_absent(ctx, value, mir)?;
@@ -479,8 +501,9 @@ impl FunctionLowering<'_, '_> {
                 let value = value.scalar()?;
                 let record = self.record_type(ctx, mir)?;
                 let (offset, field) = Self::record_type_field_slot(ctx, record, "ok")?;
-                ensure!(
+                ensure_diag!(
                     repr(ctx, field)? == Repr::Bool,
+                    codes::EXPORT_TYPE_MISMATCH,
                     "result ok field must be boolean"
                 );
                 let ok = self.load(ctx, MemKind::I32, value, offset);
@@ -488,8 +511,9 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Variant(cases) => {
                 let value = value.scalar()?;
-                ensure!(
+                ensure_diag!(
                     mir.deref(ctx).is::<perry_mir::VariantType>(),
+                    codes::EXPORT_TYPE_MISMATCH,
                     "variant needs a closed tagged union"
                 );
                 let tag = self.load(ctx, MemKind::I32, value, 0);
@@ -497,13 +521,14 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::Enum(names) => {
                 let value = value.scalar()?;
-                ensure!(
+                ensure_diag!(
                     mir.deref(ctx).is::<perry_mir::StringType>(),
+                    codes::EXPORT_TYPE_MISMATCH,
                     "WIT enum needs a string literal union"
                 );
                 self.string_tag(ctx, names.iter().map(String::as_str), value)
             }
-            other => bail!("WIT {other:?} is not a sum type"),
+            other => bail_internal!("WIT {other:?} is not a sum type"),
         })
     }
 
@@ -570,8 +595,12 @@ impl FunctionLowering<'_, '_> {
             destination.write(b, ctx, ty.discriminant_kind(), 0, tag)?;
             if let Some(payload_abi) = payload_abi {
                 let (mir, value) = match source {
-                    BoundaryValue::Completion { payload, .. } => payload
-                        .ok_or_else(|| anyhow!("WIT result payload requires a return value"))?,
+                    BoundaryValue::Completion { payload, .. } => payload.ok_or_else(|| {
+                        diag!(
+                            codes::EXPORT_TYPE_MISMATCH,
+                            "WIT result payload requires a return value"
+                        )
+                    })?,
                     BoundaryValue::Native(mir, value) => {
                         let payload = b.native_payload(ctx, ty, mir, case, payload_abi)?;
                         b.read_native_payload(ctx, payload, value)?

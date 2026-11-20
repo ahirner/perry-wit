@@ -23,6 +23,7 @@ use crate::{
 use anyhow::Result;
 use perry_abi::layout::promise as promises;
 use perry_mir::AwaitOp;
+use perry_wit_diagnostics::bail_internal;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -309,7 +310,7 @@ impl FunctionLowering<'_, '_> {
     /// `await promise` inside a step function.
     pub(crate) fn lower_await(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
         let Some(frame) = self.frame.as_ref().map(|f| f.frame) else {
-            anyhow::bail!("await outside an async function");
+            bail_internal!("await outside an async function");
         };
         let promise = self.operand(ctx, op, 0)?;
         let i32 = i32_type(ctx);
@@ -417,11 +418,7 @@ impl FunctionLowering<'_, '_> {
     /// `setTimeout(delay, value)`: an async-lowered `wait-for` whose completion settles the
     /// promise with `value`.
     pub(crate) fn lower_timer(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
-        anyhow::ensure!(
-            self.state.can_import(crate::MONOTONIC_CLOCK),
-            "setTimeout needs the WIT world to import {}",
-            crate::MONOTONIC_CLOCK
-        );
+        self.needs_import(crate::MONOTONIC_CLOCK, "setTimeout")?;
         let delay = self.operand(ctx, op, 0)?;
         let value = op.deref(ctx).get_operand(1);
         // Node waits at least 1 ms; NaN and smaller delays become 1 ms.

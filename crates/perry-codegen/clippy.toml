@@ -1,0 +1,2 @@
+disallowed-macros = ["anyhow::bail", "anyhow::anyhow", "anyhow::ensure"]
+disallowed-methods = ["anyhow::Context::context", "anyhow::Context::with_context"]

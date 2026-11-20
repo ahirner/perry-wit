@@ -1,10 +1,11 @@
 //! Bounded literal regexes compiled into immutable reverse and forward DFA tables.
 mod syntax;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::Result;
 use perry_abi::layout::regex::{
     FORWARD_ROWS, GLOBAL, LookCode, MAX_CAPTURES, MAX_STATES, NAMES_OFFSET, NFA_HEADER, NfaOp,
     REVERSE_ROWS,
 };
+use perry_wit_diagnostics::{bail_diag, codes, diag, ensure_diag, internal};
 use regex_automata::{
     Anchored, Input, MatchKind, PatternID,
     dfa::{Automaton, StartKind, dense},
@@ -19,15 +20,22 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     let nfa = thompson::Compiler::new()
         .configure(thompson::Config::new().nfa_size_limit(Some(1024 * 1024)))
         .build(&pattern)
-        .context("Unsupported or oversized literal regex")?;
+        .map_err(|_| {
+            diag!(
+                codes::UNSUPPORTED_REGEX,
+                "Unsupported or oversized literal regex"
+            )
+        })?;
     // Group 0 is the whole match; the matcher tracks `MAX_CAPTURES` explicit groups after it.
     let groups = nfa.group_info().all_group_len();
-    ensure!(
+    ensure_diag!(
         groups <= 1 + MAX_CAPTURES,
+        codes::UNSUPPORTED_REGEX,
         "Regex has {} capture groups; at most {MAX_CAPTURES} are supported",
         groups - 1
     );
-    let group_count = u16::try_from(groups)?;
+    let group_count =
+        u16::try_from(groups).map_err(|_| internal!("Regex capture group count overflow"))?;
 
     // Search only needs the leftmost start. An overlapping reverse DFA reports
     // all possible starts; the final report is the earliest, independent of greed.
@@ -45,7 +53,12 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
                 .nfa_size_limit(Some(1024 * 1024)),
         )
         .build(&pattern)
-        .context("Unsupported or oversized literal regex")?;
+        .map_err(|_| {
+            diag!(
+                codes::UNSUPPORTED_REGEX,
+                "Unsupported or oversized literal regex"
+            )
+        })?;
     let start = dfa.start_state_reverse(&Input::new(b""))?;
     let reverse = DfaTable::new(&dfa, [start], false)?;
 
@@ -61,7 +74,12 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
         )
         .thompson(thompson::Config::new().nfa_size_limit(Some(1024 * 1024)))
         .build(&pattern)
-        .context("Unsupported or oversized literal regex")?;
+        .map_err(|_| {
+            diag!(
+                codes::UNSUPPORTED_REGEX,
+                "Unsupported or oversized literal regex"
+            )
+        })?;
     let start_bof = fwd_dfa.start_state_forward(&Input::new(b"").anchored(Anchored::Yes))?;
     let start_word =
         fwd_dfa.start_state_forward(&Input::new(&b"a"[..]).range(1..1).anchored(Anchored::Yes))?;
@@ -82,7 +100,7 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     let nfa_offset = if nfa_bytes.is_some() {
         fwd_offset
             .checked_add(u32::try_from(FORWARD_ROWS + fwd_bytes_len)?)
-            .context("Regex NFA offset overflow")?
+            .ok_or_else(|| internal!("Regex NFA offset overflow"))?
     } else {
         0
     };
@@ -109,7 +127,13 @@ pub(super) fn compile(pattern: &str, flags: &str) -> Result<Vec<u8>> {
     for (index, name) in nfa.group_info().pattern_names(PatternID::ZERO).enumerate() {
         if let Some(name) = name {
             bytes.extend(u16::try_from(index)?.to_le_bytes());
-            bytes.extend(u16::try_from(name.len())?.to_le_bytes());
+            let name_len = u16::try_from(name.len()).map_err(|_| {
+                diag!(
+                    codes::UNSUPPORTED_REGEX,
+                    "Regex capture group name is too long"
+                )
+            })?;
+            bytes.extend(name_len.to_le_bytes());
             bytes.extend(name.as_bytes());
         }
     }
@@ -132,24 +156,34 @@ impl<const N: usize> DfaTable<N> {
         for (byte, &class) in classes.iter().enumerate() {
             representatives[usize::from(class)] = byte as u8;
         }
-        let stride = u16::try_from((class_count + 2) * 2).context("Regex state stride overflow")?;
+        let stride = u16::try_from((class_count + 2) * 2)
+            .map_err(|_| internal!("Regex state stride overflow"))?;
         let mut ids = BTreeMap::new();
         let mut pending = VecDeque::new();
         let mut offsets = [0; N];
         for (index, start) in starts.into_iter().enumerate() {
-            let next_id = u16::try_from(ids.len()).context("Regex state count overflow")?;
+            let next_id = u16::try_from(ids.len()).map_err(|_| {
+                diag!(
+                    codes::UNSUPPORTED_REGEX,
+                    "Regex state table exceeds size limit"
+                )
+            })?;
             let id = *ids.entry(start).or_insert_with(|| {
                 pending.push_back(start);
                 next_id
             });
-            offsets[index] = id
-                .checked_mul(stride)
-                .context("Regex state offset overflow")?;
+            offsets[index] = id.checked_mul(stride).ok_or_else(|| {
+                diag!(
+                    codes::UNSUPPORTED_REGEX,
+                    "Regex state table exceeds size limit"
+                )
+            })?;
         }
         let mut rows = Vec::new();
         while let Some(state) = pending.pop_front() {
-            ensure!(
+            ensure_diag!(
                 !dfa.is_quit_state(state),
+                codes::UNSUPPORTED_REGEX,
                 "Regex requires an unsupported runtime fallback"
             );
             rows.push(
@@ -161,15 +195,22 @@ impl<const N: usize> DfaTable<N> {
                 .map(|&byte| dfa.next_state(state, byte))
                 .chain([dfa.next_eoi_state(state)])
             {
-                let next_id = u16::try_from(ids.len()).context("Regex state count overflow")?;
+                let next_id = u16::try_from(ids.len()).map_err(|_| {
+                    diag!(
+                        codes::UNSUPPORTED_REGEX,
+                        "Regex state table exceeds size limit"
+                    )
+                })?;
                 let id = *ids.entry(next).or_insert_with(|| {
                     pending.push_back(next);
                     next_id
                 });
-                rows.push(
-                    id.checked_mul(stride)
-                        .context("Regex state offset overflow")?,
-                );
+                rows.push(id.checked_mul(stride).ok_or_else(|| {
+                    diag!(
+                        codes::UNSUPPORTED_REGEX,
+                        "Regex state table exceeds size limit"
+                    )
+                })?);
             }
         }
         Ok(Self {
@@ -183,17 +224,24 @@ impl<const N: usize> DfaTable<N> {
 
 fn compile_nfa(nfa: &thompson::NFA) -> Result<Vec<u8>> {
     let states = nfa.states();
-    ensure!(
+    ensure_diag!(
         states.len() <= MAX_STATES,
+        codes::UNSUPPORTED_REGEX,
         "Regex capture program exceeds {MAX_STATES} states"
     );
-    let state_count = u16::try_from(states.len()).context("Regex NFA state count overflow")?;
-    let start_state =
-        u16::try_from(nfa.start_anchored().as_usize()).context("Regex NFA start overflow")?;
+    let state_count =
+        u16::try_from(states.len()).map_err(|_| internal!("Regex NFA state count overflow"))?;
+    let start_state = u16::try_from(nfa.start_anchored().as_usize())
+        .map_err(|_| internal!("Regex NFA start overflow"))?;
     let mut state_offsets = Vec::with_capacity(states.len());
     let mut body = Vec::new();
     for state in states {
-        let offset = u16::try_from(body.len()).context("Regex NFA bytecode size overflow")?;
+        let offset = u16::try_from(body.len()).map_err(|_| {
+            diag!(
+                codes::UNSUPPORTED_REGEX,
+                "Regex capture program exceeds bytecode size limit"
+            )
+        })?;
         state_offsets.push(offset);
         match *state {
             State::Fail => body.push(NfaOp::Fail as u8),
@@ -249,7 +297,10 @@ fn compile_nfa(nfa: &thompson::NFA) -> Result<Vec<u8>> {
                     Look::WordAsciiNegate => LookCode::NotWordBoundary,
                     Look::WordStartAscii => LookCode::WordStart,
                     Look::WordEndAscii => LookCode::WordEnd,
-                    other => bail!("Unsupported regex look assertion: {other:?}"),
+                    other => bail_diag!(
+                        codes::UNSUPPORTED_REGEX,
+                        "Unsupported regex look assertion: {other:?}"
+                    ),
                 };
                 body.push(NfaOp::Look as u8);
                 body.push(code as u8);

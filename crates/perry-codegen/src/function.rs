@@ -7,8 +7,9 @@ use crate::{
     repr::i32_type,
     values::{self, Carriers},
 };
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use perry_mir::CaughtOp;
+use perry_wit_diagnostics::anyhow_ext::{annotate_existing, internal_context};
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -193,8 +194,10 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
                     args.extend(types.iter().copied());
                     self.landing = Some((self.new_block(ctx, args), types));
                 }
-                let lowered = self.op(ctx, op).with_context(|| {
-                    format!("lowering {}", Operation::get_op_dyn(op, ctx).get_opid())
+                let lowered = self.op(ctx, op).map_err(|err| {
+                    let op_dyn = Operation::get_op_dyn(op, ctx);
+                    let err = annotate_existing(err, perry_mir::source_span(ctx, op_dyn.as_ref()));
+                    internal_context(err, format!("lowering {}", op_dyn.get_opid()))
                 });
                 let landing = self.landing.take();
                 lowered?;

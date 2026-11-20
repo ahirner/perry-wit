@@ -12,9 +12,12 @@ use crate::{
     runtime::Runtime,
     values::is_numeric_type,
 };
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::Result;
 use perry_abi::layout::{array as layout, string as strings};
 use perry_mir::{ArrayType, RecordType};
+use perry_wit_diagnostics::{
+    bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag, ensure_internal, internal,
+};
 use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
@@ -315,8 +318,9 @@ fn identifier(name: &str) -> Identifier {
 }
 
 fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> {
-    ensure!(
+    ensure_diag!(
         mir_ty.deref(ctx).is::<FP64Type>(),
+        codes::EXPORT_TYPE_MISMATCH,
         "WIT {ty:?} needs a TypeScript number"
     );
     Ok(())
@@ -407,8 +411,9 @@ impl FunctionLowering<'_, '_> {
                 return self.lift_resource(ctx, *key, *owned, mir_ty, raw);
             }
             AbiType::Bool => {
-                ensure!(
+                ensure_diag!(
                     repr(ctx, mir_ty)? == Repr::Bool,
+                    codes::EXPORT_TYPE_MISMATCH,
                     "WIT bool needs a TypeScript boolean"
                 );
                 let zero = self.i32_const(ctx, 0);
@@ -424,7 +429,7 @@ impl FunctionLowering<'_, '_> {
                 expect_number(ctx, mir_ty, ty)?;
                 return Ok(raw);
             }
-            _ => bail!("{ty:?} is not a scalar"),
+            _ => bail_internal!("{ty:?} is not a scalar"),
         };
         expect_number(ctx, mir_ty, ty)?;
         Ok(self.num(ctx, opcode, vec![raw]))
@@ -465,7 +470,7 @@ impl FunctionLowering<'_, '_> {
             scalar => {
                 let kind = scalar
                     .mem_kind()
-                    .ok_or_else(|| anyhow!("{scalar:?} is not a scalar"))?;
+                    .ok_or_else(|| internal!("{scalar:?} is not a scalar"))?;
                 let raw = source.read(self, ctx, kind, 0)?;
                 self.lift_scalar(ctx, scalar, mir_ty, raw)
             }
@@ -479,8 +484,9 @@ impl FunctionLowering<'_, '_> {
         mir_ty: TypeHandle,
         handle: Value,
     ) -> Result<Value> {
-        ensure!(
+        ensure_diag!(
             mir_ty.deref(ctx).is::<perry_mir::ReadableType>(),
+            codes::EXPORT_TYPE_MISMATCH,
             "WIT stream<u8> needs a TypeScript ReadableStream<Uint8Array>"
         );
         self.state.uses_streams = true;
@@ -494,8 +500,9 @@ impl FunctionLowering<'_, '_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
-        ensure!(
+        ensure_diag!(
             mir_ty.deref(ctx).is::<perry_mir::StringType>(),
+            codes::EXPORT_TYPE_MISMATCH,
             "WIT string needs a TypeScript string"
         );
         let string = self.runtime(ctx, Runtime::StringAdopt, vec![ptr, len]);
@@ -521,7 +528,12 @@ impl FunctionLowering<'_, '_> {
             return Ok(bytes);
         }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
+            .map_err(|_| {
+                diag!(
+                    codes::EXPORT_TYPE_MISMATCH,
+                    "WIT list needs a TypeScript array"
+                )
+            })?
             .deref(ctx)
             .element();
         let lift_mir = scalar_mir_type(ctx, element_mir);
@@ -546,15 +558,20 @@ impl FunctionLowering<'_, '_> {
     }
 
     fn record_type(&self, ctx: &Context, mir_ty: TypeHandle) -> Result<TypedHandle<RecordType>> {
-        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx)
-            .map_err(|_| anyhow!("WIT record needs a TypeScript object type"))?;
-        ensure!(
+        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx).map_err(|_| {
+            diag!(
+                codes::EXPORT_TYPE_MISMATCH,
+                "WIT record needs a TypeScript object type"
+            )
+        })?;
+        ensure_diag!(
             matches!(
                 record.deref(ctx).kind(),
                 perry_mir::RecordKind::Object
                     | perry_mir::RecordKind::Tuple
                     | perry_mir::RecordKind::DictionaryEntry
             ),
+            codes::EXPORT_TYPE_MISMATCH,
             "WIT record needs a TypeScript object type"
         );
         Ok(record)
@@ -571,10 +588,11 @@ impl FunctionLowering<'_, '_> {
         let field_count = record
             .deref(ctx)
             .fields()
-            .map_err(|_| anyhow!("record without fields"))?
+            .map_err(|_| internal!("record without fields"))?
             .len();
-        ensure!(
+        ensure_diag!(
             values.len() == field_count,
+            codes::EXPORT_TYPE_MISMATCH,
             "the WIT record has {} fields but the TypeScript type {} has {field_count}",
             values.len(),
             record.deref(ctx).name()
@@ -589,7 +607,7 @@ impl FunctionLowering<'_, '_> {
                     .deref(ctx)
                     .field(name)
                     .map(|(index, _)| index as u32)
-                    .ok_or_else(|| anyhow!("record has no field {name}"))
+                    .ok_or_else(|| diag!(codes::EXPORT_TYPE_MISMATCH, "record has no field {name}"))
             })
             .collect::<Result<Vec<_>>>()?;
         let order = self.record_order(ctx, record, Some(&order))?;
@@ -659,7 +677,7 @@ impl FunctionLowering<'_, '_> {
                 expect_number(ctx, mir_ty, ty)?;
                 return Ok(value);
             }
-            _ => bail!("{ty:?} is not a scalar"),
+            _ => bail_internal!("{ty:?} is not a scalar"),
         };
         expect_number(ctx, mir_ty, ty)?;
         Ok(self.num(ctx, opcode, vec![value]))
@@ -695,7 +713,12 @@ impl FunctionLowering<'_, '_> {
             }
         }
         let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_err(|_| anyhow!("WIT list needs a TypeScript array"))?
+            .map_err(|_| {
+                diag!(
+                    codes::EXPORT_TYPE_MISMATCH,
+                    "WIT list needs a TypeScript array"
+                )
+            })?
             .deref(ctx)
             .element();
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);
@@ -760,7 +783,7 @@ impl FunctionLowering<'_, '_> {
                 (Flat::I64, Some(&value)) => self.num(ctx, NumOpcode::I64ExtendI32U, vec![value]),
                 (Flat::I32, None) => self.i32_const(ctx, 0),
                 (Flat::I64, None) => self.i64_const(ctx, 0),
-                (Flat::F32 | Flat::F64, _) => bail!("float slots in a handle result"),
+                (Flat::F32 | Flat::F64, _) => bail_internal!("float slots in a handle result"),
             });
         }
         Ok(())
@@ -778,10 +801,12 @@ impl FunctionLowering<'_, '_> {
             ty if ty.is_sum() => {
                 self.lower_sum(ctx, ty, BoundaryValue::Native(mir_ty, value), target)?
             }
-            AbiType::ByteStream => bail!("returning a stream<u8> is not supported yet"),
+            AbiType::ByteStream => {
+                bail_unsupported!("returning a stream<u8> is not supported yet")
+            }
             AbiType::OkHandle { flat, .. } => {
                 let Canonical::Flat(out) = target else {
-                    bail!("handle results are returned flat");
+                    bail_internal!("handle results are returned flat");
                 };
                 // `ok` (0), the handle, and zeros for the rest of the error payload.
                 let f64_ty = FP64Type::get(ctx).into();
@@ -797,8 +822,9 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::String => {
                 let value = value.scalar()?;
-                ensure!(
+                ensure_diag!(
                     mir_ty.deref(ctx).is::<perry_mir::StringType>(),
+                    codes::EXPORT_TYPE_MISMATCH,
                     "WIT string needs a TypeScript string"
                 );
                 let data = self.load(ctx, MemKind::I32, value, strings::DATA);
@@ -826,7 +852,7 @@ impl FunctionLowering<'_, '_> {
                 let raw = self.lower_flat(ctx, scalar, mir_ty, value)?;
                 let kind = scalar
                     .mem_kind()
-                    .ok_or_else(|| anyhow!("{scalar:?} is not a scalar"))?;
+                    .ok_or_else(|| internal!("{scalar:?} is not a scalar"))?;
                 target.write(self, ctx, kind, 0, raw)?;
             }
         }
@@ -841,7 +867,11 @@ fn record_field(
     name: &str,
 ) -> Result<(usize, TypeHandle)> {
     let record = record.deref(ctx);
-    record
-        .field(name)
-        .ok_or_else(|| anyhow!("TypeScript type {} has no field {name}", record.name()))
+    record.field(name).ok_or_else(|| {
+        diag!(
+            codes::EXPORT_TYPE_MISMATCH,
+            "TypeScript type {} has no field {name}",
+            record.name()
+        )
+    })
 }

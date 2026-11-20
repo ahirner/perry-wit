@@ -163,7 +163,7 @@ impl FunctionLowering<'_, '_> {
         needed: bool,
         roots: Option<Value>,
     ) -> Result<()> {
-        ensure!(
+        ensure_internal!(
             self.resource_scope.is_none(),
             "resource scopes are not nested; the previous one must end first"
         );
@@ -207,10 +207,11 @@ impl FunctionLowering<'_, '_> {
         self.block = normal;
     }
     fn check_resource_type(&self, ctx: &Context, ty: TypeHandle, key: u32) -> Result<()> {
-        ensure!(
+        ensure_diag!(
             ty.deref(ctx)
                 .downcast_ref::<perry_mir::ResourceType>()
                 .is_some_and(|r| r.key() == key),
+            codes::EXPORT_TYPE_MISMATCH,
             "WIT resource requires its declared opaque SDK type"
         );
         Ok(())
@@ -249,7 +250,7 @@ impl FunctionLowering<'_, '_> {
         self.check_resource_type(ctx, ty, key)?;
         let (scope, _) = self
             .resource_scope
-            .ok_or_else(|| anyhow!("resource lowered outside a canonical resource scope"))?;
+            .ok_or_else(|| internal!("resource lowered outside a canonical resource scope"))?;
         let own = self.i32_const(ctx, i32::from(owned));
         let handle = self.runtime(ctx, Runtime::ResourceLower, vec![scope, value, own]);
         self.resource_status(ctx);

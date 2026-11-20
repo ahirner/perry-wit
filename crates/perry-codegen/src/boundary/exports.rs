@@ -13,8 +13,9 @@ pub(crate) fn export(
     let is_async = state
         .async_functions
         .contains(&function.get_symbol_name(ctx));
-    ensure!(
+    ensure_diag!(
         is_async == export.is_async(),
+        codes::ASYNC_MISMATCH,
         "{} is {}async but the WIT export is {}async",
         export.function,
         if is_async { "" } else { "not " },
@@ -28,8 +29,9 @@ pub(crate) fn export(
         return async_export(ctx, state, function, export, task_return, *command);
     }
     let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
-    ensure!(
+    ensure_diag!(
         mir_params.len() == export.params.len(),
+        codes::EXPORT_ARITY,
         "{} takes {} parameters but the WIT export has {}",
         export.function,
         mir_params.len(),
@@ -39,8 +41,9 @@ pub(crate) fn export(
         .result
         .as_ref()
         .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
-    ensure!(
+    ensure_diag!(
         completion || mir_results.len() == usize::from(export.result.is_some()),
+        codes::EXPORT_ARITY,
         "{} returns {} values but the WIT export returns {}",
         export.function,
         mir_results.len(),
@@ -203,8 +206,9 @@ fn async_export(
         .result
         .as_ref()
         .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
-    ensure!(
+    ensure_diag!(
         mir_params.len() == export.params.len(),
+        codes::EXPORT_ARITY,
         "{} takes {} parameters but the WIT export has {}",
         export.function,
         mir_params.len(),

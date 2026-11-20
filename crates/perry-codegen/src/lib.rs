@@ -25,9 +25,10 @@
 //! `module` drives the lowering of a whole module and `function` lowers individual functions,
 //! dispatching operations through `ops` to the topical modules. `async_split` transforms async
 //! functions into state machines, and [boundary] binds them to the canonical ABI.
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::Result;
 use perry_abi::layout::descriptor::{OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL};
 use perry_mir::ErrorKind;
+use perry_wit_diagnostics::{anyhow_ext::internal_context, internal};
 use pliron::{
     builtin::ops::ModuleOp,
     context::Context,
@@ -203,7 +204,7 @@ pub fn compile(
     });
     while cleanup
         .run(wasm.get_operation(), ctx, &mut lowered_analyses)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?
+        .map_err(|error| internal!("{}", error.disp(ctx)))?
         .ir_changed
         == pliron::irbuild::IRStatus::Changed
     {}
@@ -211,9 +212,12 @@ pub fn compile(
     for function in analysis::module_functions(ctx, &wasm) {
         pliron_wasm::reducible::make_reducible(ctx, &function);
     }
-    verify_operation(wasm.get_operation(), ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))
-        .context("verifying the lowered wasm module")?;
+    verify_operation(wasm.get_operation(), ctx).map_err(|error| {
+        internal_context(
+            internal!("{}", error.disp(ctx)),
+            "verifying the lowered wasm module",
+        )
+    })?;
     let end = DATA_BASE as usize + data.len();
     let options = EmitOptions {
         memory: if memory {

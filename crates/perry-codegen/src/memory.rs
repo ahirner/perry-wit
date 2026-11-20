@@ -8,6 +8,7 @@ use crate::{
 use anyhow::Result;
 use perry_abi::layout::{array, record, roots as root_stack};
 use perry_mir::{AsyncCallOp, CallOp, RecordType};
+use perry_wit_diagnostics::bail_internal;
 use pliron::{
     context::{Context, Ptr},
     op::Op,
@@ -278,7 +279,7 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn initialization_promise(&mut self, ctx: &mut Context) -> Result<Value> {
         use pliron_wasm::ops::CallOp;
         let Some(crate::module::Initializer::Async(address)) = self.state.initializer else {
-            anyhow::bail!("module_initialize without an async initializer");
+            bail_internal!("module_initialize without an async initializer");
         };
         let function = crate::module::INITIALIZER;
         let cell = self.i32_const(ctx, address as i32);

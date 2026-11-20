@@ -1,7 +1,8 @@
 //! Multi-carrier lowering for MIR values whose runtime representation uses a register pair.
 use crate::{function::FunctionLowering, repr::wasm_type};
-use anyhow::{Result, anyhow, ensure};
+use anyhow::Result;
 use perry_mir::NumericType;
+use perry_wit_diagnostics::{ensure_internal, internal};
 use pliron::{
     builtin::types::{IntegerType, Signedness},
     context::{Context, Ptr},
@@ -26,7 +27,7 @@ impl<T: Copy> Carriers<T> {
     pub(crate) fn scalar(self) -> Result<T> {
         match self {
             Self::Scalar(value) => Ok(value),
-            Self::Numeric { .. } => Err(anyhow!(
+            Self::Numeric { .. } => Err(internal!(
                 "numeric alternatives require both register carriers"
             )),
         }
@@ -36,7 +37,7 @@ impl<T: Copy> Carriers<T> {
     pub(crate) fn numeric(self) -> Result<(T, T)> {
         match self {
             Self::Numeric { tag, payload } => Ok((tag, payload)),
-            Self::Scalar(_) => Err(anyhow!("numeric alternatives require a tagged carrier")),
+            Self::Scalar(_) => Err(internal!("numeric alternatives require a tagged carrier")),
         }
     }
 
@@ -84,7 +85,7 @@ impl<T: Copy> Carriers<T> {
                 tag: (at, bt),
                 payload: (ap, bp),
             }),
-            _ => Err(anyhow!("carrier shape mismatch")),
+            _ => Err(internal!("carrier shape mismatch")),
         }
     }
 }
@@ -128,13 +129,13 @@ impl FunctionLowering<'_, '_> {
             let parts = carriers(ctx, value.get_type(ctx))?.try_map(|ty| {
                 let carrier = physical
                     .next()
-                    .ok_or_else(|| anyhow!("missing value carrier"))?;
-                ensure!(carrier.get_type(ctx) == ty, "value carrier type mismatch");
+                    .ok_or_else(|| internal!("missing value carrier"))?;
+                ensure_internal!(carrier.get_type(ctx) == ty, "value carrier type mismatch");
                 Ok(carrier)
             })?;
             self.values.insert(value, parts);
         }
-        ensure!(physical.next().is_none(), "unexpected value carrier");
+        ensure_internal!(physical.next().is_none(), "unexpected value carrier");
         Ok(())
     }
 

@@ -1,8 +1,9 @@
 //! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::Result;
 use perry_mir::{AsyncCallOp, CallOp, LiveValues, ProgramFacts, is_exported};
+use perry_wit_diagnostics::internal;
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SymbolOpInterface},
@@ -35,17 +36,17 @@ pub(super) fn module_analyses<'a>(
     let op = module.get_operation();
     analyses
         .get_analysis::<ProgramFacts>(op, ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+        .map_err(|error| internal!("{}", error.disp(ctx)))?;
     analyses
         .get_analysis::<LiveValues>(op, ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+        .map_err(|error| internal!("{}", error.disp(ctx)))?;
     Ok(ModuleAnalyses {
         facts: analyses
             .try_get_analysis::<ProgramFacts>(op)
-            .context("computed program facts are missing")?,
+            .ok_or_else(|| internal!("computed program facts are missing"))?,
         live: analyses
             .try_get_analysis::<LiveValues>(op)
-            .context("computed liveness is missing")?,
+            .ok_or_else(|| internal!("computed liveness is missing"))?,
     })
 }
 
@@ -129,7 +130,7 @@ pub(crate) fn function_signature(
         pliron::r#type::Typed::get_type(function, ctx),
         ctx,
     )
-    .map_err(|_| anyhow::anyhow!("function type"))?;
+    .map_err(|_| internal!("function type"))?;
     let ty = ty.deref(ctx);
     Ok((ty.arg_types(), ty.res_types()))
 }

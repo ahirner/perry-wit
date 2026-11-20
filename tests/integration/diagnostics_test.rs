@@ -180,8 +180,7 @@ fn unsupported_forms_have_exact_diagnostics() {
     let iteration = |expression: &str| {
         format!("export function run():number {{for(const value of {expression}){{}} return 0;}}")
     };
-    const REGEX_CONST: &str =
-        "error[internal]: lowering function test to wasm\n  lowering perry.regex_const\n  ";
+    const REGEX_CONST: &str = "case.ts:1:8: error[unsupported-regex]: ";
     let cases = [
         (iteration("new Headers()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; this receiver has no supported iterator".into()),
         (iteration("new URLSearchParams()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported".into()),

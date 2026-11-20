@@ -4,9 +4,10 @@ use crate::{
     repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use perry_abi::layout::variant;
 use perry_mir::admits_payload;
+use perry_wit_diagnostics::internal;
 use pliron::{context::Context, r#type::TypeHandle, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
@@ -39,7 +40,7 @@ impl FunctionLowering<'_, '_> {
         let inner = optional_inner(ctx, ty).unwrap_or(ty);
         let cases = perry_mir::variant_cases(ctx, inner)?;
         for (index, (tag, payload)) in cases.iter().enumerate() {
-            let payload = payload.context("value union without a payload")?;
+            let payload = payload.ok_or_else(|| internal!("value union without a payload"))?;
             let next = if index + 1 < cases.len() {
                 let tag = self.state.data.string(tag);
                 let tag = self.i32_const(ctx, tag as i32);

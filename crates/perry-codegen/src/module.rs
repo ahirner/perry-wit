@@ -10,8 +10,12 @@ use crate::{
     repr::{Repr, i32_type, repr, slot_kind, wasm_type},
     runtime::Runtime,
 };
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::Result;
 use perry_mir::is_exported;
+use perry_wit_diagnostics::{
+    anyhow_ext::{annotate_existing, internal_context},
+    bail_internal, codes, diag, ensure_unsupported, internal,
+};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
@@ -298,16 +302,20 @@ pub(crate) fn lower(
     for function in &functions {
         let symbol = function.get_symbol_name(ctx);
         if let Some(kind) = state.async_functions.iter().position(|f| *f == symbol) {
-            async_split::lower(ctx, &mut state, function, kind as i32)
-                .with_context(|| format!("lowering async function {symbol} to wasm"))?;
+            async_split::lower(ctx, &mut state, function, kind as i32).map_err(|err| {
+                let err = annotate_existing(err, perry_mir::source_span(ctx, function));
+                internal_context(err, format!("lowering async function {symbol} to wasm"))
+            })?;
             if raw && is_exported(ctx, function) {
                 let wrapper = async_export_wrapper(ctx, &mut state, function, &symbol)?;
                 state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
             }
             continue;
         }
-        let lowered = FunctionLowering::lower(ctx, &mut state, function)
-            .with_context(|| format!("lowering function {symbol} to wasm"))?;
+        let lowered = FunctionLowering::lower(ctx, &mut state, function).map_err(|err| {
+            let err = annotate_existing(err, perry_mir::source_span(ctx, function));
+            internal_context(err, format!("lowering function {symbol} to wasm"))
+        })?;
         state.wasm.append_operation(ctx, lowered.get_operation(), 0);
         if raw && is_exported(ctx, function) {
             let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
@@ -416,7 +424,8 @@ fn bind_exports(
     });
     for export in exports {
         let function = mir_functions.get(&export.function).ok_or_else(|| {
-            anyhow!(
+            diag!(
+                codes::MISSING_EXPORT,
                 "WIT export {} has no function {}",
                 export.core_name,
                 export.function
@@ -472,7 +481,8 @@ fn bind_exports(
         .collect();
     for export in exports {
         let function = mir_functions.get(&export.function).ok_or_else(|| {
-            anyhow!(
+            diag!(
+                codes::MISSING_EXPORT,
                 "WIT export {} has no function {}",
                 export.core_name,
                 export.function
@@ -550,7 +560,7 @@ fn export_wrapper(
 ) -> Result<FuncOp> {
     let (params, results) = crate::analysis::function_signature(ctx, inner)?;
     let ty = TypedHandle::<FunctionType>::from_handle(inner.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
+        .map_err(|_| internal!("function type"))?;
     let wrapper = FuncOp::new(ctx, ident!("export_") + name.clone(), ty);
     set_export(ctx, &wrapper, name.as_ref());
     let entry = wrapper.get_entry_block(ctx);
@@ -569,7 +579,7 @@ fn export_wrapper(
     }
     b.ret(ctx, values);
     for param in params {
-        ensure!(
+        ensure_unsupported!(
             repr(ctx, param)? != Repr::Ref,
             "export {name} takes a reference; reference arguments need the component boundary (P6.1)"
         );
@@ -587,7 +597,7 @@ fn async_export_wrapper(
 ) -> Result<FuncOp> {
     let (params, results) = crate::analysis::function_signature(ctx, mir)?;
     let &[value_ty] = results.as_slice() else {
-        bail!("async function {name} returns {} values", results.len());
+        bail_internal!("async function {name} returns {} values", results.len());
     };
     let wasm_params = params
         .iter()

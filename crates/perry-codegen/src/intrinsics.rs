@@ -6,8 +6,9 @@ use crate::{
     repr::{Carriers, Repr, repr},
     runtime::{Runtime, W},
 };
-use anyhow::{Context as _, Result, bail, ensure};
+use anyhow::Result;
 use perry_mir::{Intrinsic, NumericType, absence};
+use perry_wit_diagnostics::{bail_unsupported, codes, ensure_diag, internal};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::{Context, Ptr},
@@ -39,9 +40,10 @@ impl FunctionLowering<'_, '_> {
         Ok(self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, buffer]))
     }
 
-    fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
-        ensure!(
+    pub(crate) fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
+        ensure_diag!(
             self.state.can_import(interface),
+            codes::IMPORT_SIGNATURE_MISMATCH,
             "{what} needs the WIT world to import {interface}"
         );
         Ok(())
@@ -399,7 +401,7 @@ impl FunctionLowering<'_, '_> {
                 Some(self.runtime(ctx, Runtime::StdJsonFromScalar, vec![kind, truth]))
             }
             Intrinsic::JsonSerialize => {
-                bail!("JSON.stringify of parsed JSON values is not supported yet")
+                bail_unsupported!("JSON.stringify of parsed JSON values is not supported yet")
             }
             Intrinsic::WritableStdout | Intrinsic::WritableStderr => {
                 let (interface, fd) = if intrinsic == Intrinsic::WritableStdout {
@@ -475,8 +477,8 @@ impl FunctionLowering<'_, '_> {
                     }
                     _ => {}
                 }
-                let function = Runtime::for_intrinsic(other).with_context(|| {
-                    format!("intrinsic {} has no runtime lowering", other.name())
+                let function = Runtime::for_intrinsic(other).ok_or_else(|| {
+                    internal!("intrinsic {} has no runtime lowering", other.name())
                 })?;
                 let result = self.call_runtime(ctx, function, args);
                 // Runtime results as `number | undefined` come as bits.

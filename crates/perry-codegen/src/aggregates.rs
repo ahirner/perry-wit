@@ -5,7 +5,7 @@ use crate::{
     runtime::Runtime,
     values::is_numeric_type,
 };
-use anyhow::{Result, anyhow, ensure};
+use anyhow::Result;
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayHoleOp, ArrayLenOp, ArrayNewOp,
@@ -13,6 +13,7 @@ use perry_mir::{
     ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema, RecordOrderOp,
     RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
+use perry_wit_diagnostics::{codes, diag, ensure_unsupported, internal};
 use pliron::{
     builtin::types::FP64Type,
     context::{Context, Ptr},
@@ -49,7 +50,7 @@ impl FunctionLowering<'_, '_> {
         let record = record.deref(ctx);
         let fields = record
             .fields()
-            .map_err(|_| anyhow!("record without fields"))?;
+            .map_err(|_| internal!("record without fields"))?;
         Ok(record_offset(ctx, fields))
     }
 
@@ -182,11 +183,11 @@ impl FunctionLowering<'_, '_> {
         if let Some(allocation) = Operation::get_op::<AllocOp>(op, ctx) {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
             let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
-                .map_err(|_| anyhow!("expected a record"))?;
+                .map_err(|_| internal!("expected a record"))?;
             let fields: Vec<_> = record
                 .deref(ctx)
                 .fields()
-                .map_err(|_| anyhow!("record without fields"))?
+                .map_err(|_| internal!("record without fields"))?
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect();
@@ -195,7 +196,7 @@ impl FunctionLowering<'_, '_> {
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
                 let base = self
                     .local_frame
-                    .ok_or_else(|| anyhow!("frame-resident record without frame storage"))?;
+                    .ok_or_else(|| internal!("frame-resident record without frame storage"))?;
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
@@ -338,7 +339,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(native) = Operation::get_op::<perry_mir::NativeJsonOp>(op, ctx) {
             use pliron::builtin::op_interfaces::OneOpdInterface;
             let source = native.get_operand(ctx);
-            ensure!(
+            ensure_unsupported!(
                 JsonSchema::supports_reflection(ctx, source.get_type(ctx)),
                 "unsupported native cause field type"
             );
@@ -646,7 +647,7 @@ impl FunctionLowering<'_, '_> {
 
     pub(crate) fn element_type(ctx: &Context, array: Value) -> Result<TypeHandle> {
         let ty = TypedHandle::<ArrayType>::from_handle(array.get_type(ctx), ctx)
-            .map_err(|_| anyhow!("expected an array"))?;
+            .map_err(|_| internal!("expected an array"))?;
         Ok(ty.deref(ctx).element())
     }
 
@@ -658,18 +659,24 @@ impl FunctionLowering<'_, '_> {
         let record = record.deref(ctx);
         let fields = record
             .fields()
-            .map_err(|_| anyhow!("record has no field {field}"))?;
+            .map_err(|_| internal!("record has no field {field}"))?;
         let (index, (_, field_ty)) = fields
             .iter()
             .enumerate()
             .find(|(_, (name, _))| name == field)
-            .ok_or_else(|| anyhow!("TypeScript type {} has no field {field}", record.name()))?;
+            .ok_or_else(|| {
+                diag!(
+                    codes::EXPORT_TYPE_MISMATCH,
+                    "TypeScript type {} has no field {field}",
+                    record.name()
+                )
+            })?;
         Ok((record_offset(ctx, &fields[..index]), *field_ty))
     }
 
     fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
         let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
-            .map_err(|_| anyhow!("expected a record"))?;
+            .map_err(|_| internal!("expected a record"))?;
         Self::record_type_field_slot(ctx, record, field)
     }
 
