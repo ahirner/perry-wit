@@ -170,6 +170,35 @@ pub enum Flat {
 }
 
 impl AbiType {
+    /// The WIT spelling of this type's outermost constructor, for diagnostics.
+    pub(crate) fn wit_name(&self) -> &'static str {
+        match self {
+            Self::Bool => "bool",
+            Self::S8 => "s8",
+            Self::U8 => "u8",
+            Self::S16 => "s16",
+            Self::U16 => "u16",
+            Self::S32 => "s32",
+            Self::U32 => "u32",
+            Self::S64 => "s64",
+            Self::U64 => "u64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::String => "string",
+            Self::List(_) => "list",
+            Self::Record(_) => "record",
+            Self::Option(_) => "option",
+            Self::Result { .. } => "result",
+            Self::Enum(_) => "enum",
+            Self::Variant(_) => "variant",
+            Self::ByteStream => "stream<u8>",
+            Self::Resource { owned: true, .. } => "own",
+            Self::Resource { owned: false, .. } => "borrow",
+            // The ok case is a resource handle, a number in TypeScript.
+            Self::OkHandle { .. } => "own",
+        }
+    }
+
     /// Exact integer domain supplied by WIT, independent of the source representation.
     pub fn integer_type(&self, ctx: &Context) -> Option<TypeHandle> {
         use Signedness::{Signed, Unsigned};
@@ -321,7 +350,8 @@ fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> 
     ensure_diag!(
         mir_ty.deref(ctx).is::<FP64Type>(),
         codes::CONTRACT_MISMATCH,
-        "WIT {ty:?} needs a TypeScript number"
+        "WIT {} needs a TypeScript number",
+        ty.wit_name()
     );
     Ok(())
 }

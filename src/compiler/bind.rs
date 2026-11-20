@@ -3,7 +3,7 @@ use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_contract::export_names::core_export_name;
 use perry_contract::types::{Contract, Input, convert};
 use perry_mir::{PlironResultExt as _, is_exported};
-use perry_wit_diagnostics::{Diagnostic, Result, diag};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, diag};
 use pliron::{
     builtin::{
         op_interfaces::SymbolOpInterface,
@@ -297,12 +297,7 @@ fn stream_functions<'a>(
 pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
     convert(resolve, Input::Reference(*ty), &|_| None, &|contract| {
         Ok(match contract {
-            Contract::Scalar(ty) => scalar_type(ty).ok_or_else(|| {
-                diag!(
-                    crate::codes::UNSUPPORTED_TYPE,
-                    "WIT {ty:?} values are not supported by the compiler yet"
-                )
-            })?,
+            Contract::Scalar(ty) => scalar_type(ty)?,
             Contract::Resource { id, owned } => AbiType::Resource {
                 key: perry_contract::names::canonical_type(resolve, id).index() as u32,
                 owned,
@@ -342,8 +337,14 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
     })
 }
 
-fn scalar_type(ty: Type) -> Option<AbiType> {
-    Some(match ty {
+fn scalar_type(ty: Type) -> Result<AbiType> {
+    let unsupported = |name: &str| {
+        diag!(
+            crate::codes::UNSUPPORTED_TYPE,
+            "WIT {name} values are not supported by the compiler yet"
+        )
+    };
+    Ok(match ty {
         Type::Bool => AbiType::Bool,
         Type::U8 => AbiType::U8,
         Type::S8 => AbiType::S8,
@@ -356,6 +357,9 @@ fn scalar_type(ty: Type) -> Option<AbiType> {
         Type::F32 => AbiType::F32,
         Type::F64 => AbiType::F64,
         Type::String => AbiType::String,
-        Type::Char | Type::ErrorContext | Type::Id(_) => return None,
+        Type::Char => return Err(unsupported("char")),
+        Type::ErrorContext => return Err(unsupported("error-context")),
+        // `convert` resolves named types before constructing `Contract::Scalar`.
+        Type::Id(_) => bail_internal!("named WIT type reached scalar conversion"),
     })
 }
