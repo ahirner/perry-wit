@@ -18,5 +18,5 @@ export async function loadCoreModule(name) {
   const slice = coreSlices[name];
   if (!slice) throw new Error(`Missing compiler slice for ${name}`);
   const bytes = await compilerBytes();
-  return WebAssembly.compile(bytes.subarray(slice.start, slice.end));
+  return new WebAssembly.Module(bytes.subarray(slice.start, slice.end));
 }
