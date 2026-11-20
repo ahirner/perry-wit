@@ -9,9 +9,9 @@ import type {
   CompileOptions,
   DeclarationFile,
   Diagnostic,
-  DiagnosticCode,
-  DiagnosticSeverity,
+  ErrorKind,
   FileContents,
+  Note,
   ProgramOptions,
   SourceFile,
   SourceSpan,
@@ -194,14 +194,27 @@ function call<T>(run: () => T): T {
   }
 }
 
+/** Convert a WIT source span into a {@link SourceSpan}, with byte offsets as numbers rather than bigints. */
+function sourceSpan(span: Api.SourceSpan): SourceSpan {
+  return { ...span, startByte: Number(span.startByte), endByte: Number(span.endByte) };
+}
+
+/** Convert a compiler note into a {@link Note}. */
+function note({ message, span }: Api.Note): Note {
+  return span ? { message, span: sourceSpan(span) } : { message };
+}
+
 /** Convert a compiler diagnostic into a {@link Diagnostic}, with byte offsets as numbers rather than bigints. */
-function diagnostic({ span, ...rest }: Api.Diagnostic): Diagnostic {
-  if (!span) return rest;
-  return { ...rest, span: { ...span, startByte: Number(span.startByte), endByte: Number(span.endByte) } };
+function diagnostic({ span, notes, ...rest }: Api.Diagnostic): Diagnostic {
+  const mappedNotes = notes.map(note);
+  if (!span) return { ...rest, notes: mappedNotes };
+  return { ...rest, notes: mappedNotes, span: sourceSpan(span) };
 }
 
 // The public diagnostic types restate the compiler's WIT contract; fail the build when they drift.
-true satisfies Same<Api.DiagnosticCode, DiagnosticCode>;
-true satisfies Same<Api.DiagnosticSeverity, DiagnosticSeverity>;
-true satisfies Same<Omit<Api.Diagnostic, "span">, Omit<Diagnostic, "span">>;
+true satisfies Same<Api.ErrorKind, ErrorKind>;
+true satisfies Same<Omit<Api.Note, "span">, Omit<Note, "span">>;
+true satisfies Same<keyof Api.Note, keyof Note>;
+true satisfies Same<Omit<Api.Diagnostic, "span" | "notes">, Omit<Diagnostic, "span" | "notes">>;
+true satisfies Same<keyof Api.Diagnostic, keyof Diagnostic>;
 true satisfies Same<keyof Api.SourceSpan, keyof SourceSpan>;

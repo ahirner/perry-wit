@@ -10,7 +10,7 @@ const compiler = await Compiler.load();
 function diagnosticsMatch(pattern) {
   return error => error instanceof CompileError
     && error.diagnostics.length > 0
-    && error.diagnostics.every(diagnostic => diagnostic.code && diagnostic.severity && diagnostic.message)
+    && error.diagnostics.every(diagnostic => diagnostic.kind && diagnostic.kind !== 'internal' && diagnostic.code && diagnostic.message)
     && pattern.test(error.message);
 }
 
@@ -40,8 +40,9 @@ assert.throws(
   error => {
     assert(error instanceof CompileError);
     const [diagnostic] = error.diagnostics;
+    assert.equal(error.primary, diagnostic);
+    assert.equal(diagnostic.kind, 'type-check');
     assert.equal(diagnostic.code, 'missing-type-annotation');
-    assert.equal(diagnostic.severity, 'error');
     assert.equal(diagnostic.span.file, 'src/helper.ts');
     assert.equal(diagnostic.span.startLine, 2);
     const start = encode(helperSource.slice(0, helperSource.indexOf('value'))).length;

@@ -1,23 +1,32 @@
-import type { Diagnostic } from "./types.js";
+import type { Diagnostic, SourceSpan } from "./types.js";
 
 /** Thrown when the compiler rejects its input. */
 export class CompileError extends Error {
   override readonly name = "CompileError";
   readonly diagnostics: readonly Diagnostic[];
+  readonly primary: Diagnostic;
 
   constructor(diagnostics: readonly Diagnostic[]) {
+    if (diagnostics.length === 0) {
+      throw new RangeError("CompileError requires at least one diagnostic");
+    }
     super(formatDiagnostics(diagnostics));
     this.diagnostics = diagnostics;
+    this.primary = diagnostics[0]!;
   }
 }
 
-/** Render diagnostics as `file:line:column: severity[code]: message` lines. */
+function formatLocation(span?: SourceSpan): string {
+  return span ? `${span.file}:${span.startLine}:${span.startColumn}: ` : "";
+}
+
+/** Render diagnostics as `file:line:column: error[code]: message` lines. */
 export function formatDiagnostics(diagnostics: readonly Diagnostic[]): string {
   return diagnostics
-    .map(({ code, severity, message, span, notes, help }) => {
-      const location = span ? `${span.file}:${span.startLine}:${span.startColumn}: ` : "";
-      const details = notes.map((note) => `\n  ${note}`).join("");
-      return `${location}${severity}[${code}]: ${message}${details}${help ? `\n  help: ${help}` : ""}`;
+    .map(({ code, message, span, notes, help }) => {
+      const location = formatLocation(span);
+      const details = notes.map((note) => `\n  ${formatLocation(note.span)}${note.message}`).join("");
+      return `${location}error[${code}]: ${message}${details}${help ? `\n  help: ${help}` : ""}`;
     })
     .join("\n");
 }

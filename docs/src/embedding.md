@@ -11,7 +11,7 @@ The runtime and standard libraries are precompiled and embedded in the compiler 
 {{#include embedding-example.rs}}
 ```
 
-Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`PerryDiagnostic`](../rust/perry_wit/struct.PerryDiagnostic.html) records with a source span and a [`DiagnosticCode`](../rust/perry_wit/enum.DiagnosticCode.html).
+Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`Diagnostic`](../rust/perry_wit/struct.Diagnostic.html) records, each with an [`ErrorKind`](../rust/perry_wit/enum.ErrorKind.html), a stable [`Code`](../rust/perry_wit/struct.Code.html), optional [`SourceSpan`](../rust/perry_wit/struct.SourceSpan.html), optional spanned [`Note`](../rust/perry_wit/struct.Note.html) entries, and optional help text.
 
 
 ## JavaScript API
@@ -48,9 +48,16 @@ Each function takes its inputs from memory:
   WASI 0.3 packages are built in.
 - `world` selects a world when the package declares more than one.
 
-A rejected program throws a `CompileError`.
-Its `diagnostics` hold the same codes, spans, notes and help as the Rust API.
-Its `message` (and `formatDiagnostics`) formats them as `file:line:column: severity[code]: message` lines.
+A rejected program throws a `CompileError` exposing `diagnostics` and `primary` (its first diagnostic).
+Its diagnostics carry the same `kind`, kebab-case `code`, `span`, spanned `notes`, and `help` as the Rust API.
+Its `message` (and `formatDiagnostics`) formats them identically to Rust `Display`:
+
+```text
+file:line:column: error[code]: message
+  unspanned note
+  file:line:column: spanned note
+  help: suggestion
+```
 
 The functions are asynchronous because the compiler loads on first use.
 `await Compiler.load()` returns a compiler whose `compile`, `compileCore` and `generateTypes` methods run synchronously, for example inside a bundler's synchronous transform hook.
@@ -69,3 +76,38 @@ Browsers fetch it through static `new URL(…, import.meta.url)` references, whi
 
 The [playground](../play/index.html) runs it in a Web Worker.
 Because the `api` export operates on in-memory buffers, a server can instantiate it with empty filesystem preopens, fuel limits and memory caps to compile untrusted TypeScript.
+
+## Diagnostics
+
+Every diagnostic pairs a broad, caller-actionable `ErrorKind` with a specific kebab-case `code`.
+
+| Kind | Meaning |
+| :--- | :--- |
+| `invalid-input` | Malformed API input from the embedding caller: invalid UTF-8, invalid module path, duplicate module identity, or empty WIT sources. |
+| `io` | A host filesystem read or write failed (native file entrypoints only). |
+| `wit` | The WIT input is invalid on its own: syntax error, invalid package encoding, missing dependency, missing directory, or ambiguous world selection. |
+| `syntax` | The TypeScript source does not parse. |
+| `module` | The TypeScript module graph cannot be built: unresolved, cyclic, unknown, or ambiguous local import or export. |
+| `type-check` | A TypeScript value does not fit its declared or required type: missing annotation, nullability, record fields, or type mismatch. |
+| `unsupported` | Valid TypeScript, regex, or WIT construct that Perry-WIT does not compile yet. |
+| `contract` | The TypeScript module's export or import surface disagrees with the WIT world: names, arity, async, error channels, or top-level statements. |
+| `internal` | A compiler bug. |
+
+### Classification rules
+
+- A type or shape error on a TypeScript value is `type-check`, even when the expected type came from WIT.
+- A declared TypeScript signature that disagrees with the WIT signature is `contract`; a TypeScript value that does not fit a declared type is `type-check`.
+- A valid WIT type with no compiler ABI mapping is `unsupported`, not `wit`.
+- A missing WIT dependency is `wit`; an unresolved TypeScript import is `module`.
+
+### Versioning
+
+Branch on `kind`, and use `code` for display, documentation, and tests.
+Adding a variant to `ErrorKind` is a breaking change.
+Adding a new diagnostic `code` is non-breaking; `code` crosses the WIT and JavaScript boundaries as a kebab-case `string`.
+
+### Source spans
+
+`startLine`, `endLine`, `startColumn`, and `endColumn` are 1-based, and columns count Unicode scalar values.
+`startByte` and `endByte` are 0-based UTF-8 byte offsets.
+Editors and LSP integrations that expect UTF-16 code-unit columns should derive them from `startByte` and `endByte`.

@@ -42,29 +42,20 @@ interface api {
     name: string,
     contents: list<u8>,
   }
-  enum diagnostic-code {
-    parse-error,
-    unsupported-operator,
-    /// Reserved for compatibility; no longer emitted. Review diagnostic extensibility in 0.2.0.
-    unsupported-spread,
-    missing-type-annotation,
-    unsupported-type,
-    unsupported-expression,
-    incompatible-record-layout,
-    missing-required-field,
-    absence-mismatch,
-    interface-mismatch,
-    export-mismatch,
-    import-signature-mismatch,
-    module-resolution,
+  /// Broad, caller-actionable category of a compiler error.
+  enum error-kind {
     invalid-input,
-    wit-resolution,
-    codegen-failure,
-    missing-error-channel,
     io,
-    internal-compiler-error,
+    wit,
+    syntax,
+    module,
+    type-check,
+    unsupported,
+    contract,
+    internal,
   }
-  enum diagnostic-severity { error, warning, info }
+  /// A range in a source file. Lines and columns start at 1 (columns count Unicode scalar values);
+  /// byte offsets are 0-based UTF-8 byte offsets.
   record source-span {
     file: string,
     start-line: u32,
@@ -74,12 +65,17 @@ interface api {
     start-byte: u64,
     end-byte: u64,
   }
-  record diagnostic {
-    code: diagnostic-code,
-    severity: diagnostic-severity,
+  /// An additional note attached to a diagnostic, optionally anchored to a source span.
+  record note {
     message: string,
     span: option<source-span>,
-    notes: list<string>,
+  }
+  record diagnostic {
+    kind: error-kind,
+    code: string,
+    message: string,
+    span: option<source-span>,
+    notes: list<note>,
     help: option<string>,
   }
   compile: func(program: program, wit: wit-input, options: compile-options) -> result<compiled, list<diagnostic>>;

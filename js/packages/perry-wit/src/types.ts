@@ -79,30 +79,23 @@ export interface DeclarationFile {
   contents: string;
 }
 
-export type DiagnosticCode =
-  | "parse-error"
-  | "unsupported-operator"
-  | "unsupported-spread"
-  | "missing-type-annotation"
-  | "unsupported-type"
-  | "unsupported-expression"
-  | "incompatible-record-layout"
-  | "missing-required-field"
-  | "absence-mismatch"
-  | "interface-mismatch"
-  | "export-mismatch"
-  | "import-signature-mismatch"
-  | "module-resolution"
+/** Broad, caller-actionable category of a compiler error. */
+export type ErrorKind =
   | "invalid-input"
-  | "wit-resolution"
-  | "codegen-failure"
-  | "missing-error-channel"
   | "io"
-  | "internal-compiler-error";
+  | "wit"
+  | "syntax"
+  | "module"
+  | "type-check"
+  | "unsupported"
+  | "contract"
+  | "internal";
 
-export type DiagnosticSeverity = "error" | "warning" | "info";
-
-/** A range in a source file. Lines and columns start at 1; byte offsets at 0. */
+/**
+ * A range in a source file.
+ * Lines and columns start at 1 (columns count Unicode scalar values);
+ * byte offsets are 0-based UTF-8 byte offsets.
+ */
 export interface SourceSpan {
   file: string;
   startLine: number;
@@ -113,12 +106,18 @@ export interface SourceSpan {
   endByte: number;
 }
 
-/** A problem the compiler found in its input. */
-export interface Diagnostic {
-  code: DiagnosticCode;
-  severity: DiagnosticSeverity;
+/** An additional note attached to a {@link Diagnostic}, optionally anchored to a {@link SourceSpan}. */
+export interface Note {
   message: string;
   span?: SourceSpan;
-  notes: string[];
+}
+
+/** A problem the compiler found in its input. */
+export interface Diagnostic {
+  kind: ErrorKind;
+  code: string;
+  message: string;
+  span?: SourceSpan;
+  notes: Note[];
   help?: string;
 }

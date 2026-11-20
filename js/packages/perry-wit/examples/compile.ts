@@ -22,8 +22,8 @@ try {
   console.log(`greeter.wasm: ${component.byteLength} bytes`);
 } catch (error) {
   if (!(error instanceof CompileError)) throw error;
-  for (const { severity, code, message, span } of error.diagnostics) {
-    console.error(`${span?.file}:${span?.startLine}: ${severity}[${code}] ${message}`);
+  for (const { kind, code, message, span } of error.diagnostics) {
+    console.error(`${span?.file}:${span?.startLine}: error[${code}] (${kind}): ${message}`);
   }
   process.exitCode = 1;
 }
