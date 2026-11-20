@@ -107,8 +107,8 @@ pub use collections::{
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{
-    PlironResultExt, SourceSpan, attach_caller_notes, pliron_to_diagnostic, set_caller_notes,
-    set_source_span, source_span,
+    PlironResultExt, SourceSpan, attach_caller_notes, set_caller_notes, set_source_span,
+    source_span,
 };
 pub use effects::{Allocation, Effects, Failure, Summary, allocates, allocation};
 pub use exceptions::{

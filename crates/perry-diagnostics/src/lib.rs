@@ -14,37 +14,23 @@ pub struct SourceSpan {
 
 impl SourceSpan {
     pub fn new(file: impl Into<PathBuf>, source: &str, start: usize, end: usize) -> Self {
-        fn boundary(source: &str, offset: usize) -> usize {
-            let mut offset = offset.min(source.len());
-            while !source.is_char_boundary(offset) {
-                offset -= 1;
-            }
-            offset
-        }
-        fn position(source: &str, offset: usize) -> (u32, u32) {
-            let mut line = 1;
-            let mut column = 1;
-            let mut chars = source[..offset].chars().peekable();
-            while let Some(ch) = chars.next() {
-                match ch {
-                    '\r' => {
-                        chars.next_if_eq(&'\n');
-                        line += 1;
-                        column = 1;
+        let start_byte = source.floor_char_boundary(start);
+        let end_byte = source.floor_char_boundary(end.max(start_byte));
+        let mut chars = source.char_indices().peekable();
+        let mut position = (1, 1);
+        let mut after_cr = false;
+        let [(start_line, start_column), (end_line, end_column)] =
+            [start_byte, end_byte].map(|offset| {
+                while let Some((_, ch)) = chars.next_if(|(byte, _)| *byte < offset) {
+                    match ch {
+                        '\n' if after_cr => {}
+                        '\r' | '\n' | '\u{2028}' | '\u{2029}' => position = (position.0 + 1, 1),
+                        _ => position.1 += 1,
                     }
-                    '\n' | '\u{2028}' | '\u{2029}' => {
-                        line += 1;
-                        column = 1;
-                    }
-                    _ => column += 1,
+                    after_cr = ch == '\r';
                 }
-            }
-            (line, column)
-        }
-        let start_byte = boundary(source, start);
-        let end_byte = boundary(source, end.max(start_byte));
-        let (start_line, start_column) = position(source, start_byte);
-        let (end_line, end_column) = position(source, end_byte);
+                position
+            });
         Self {
             file: file.into(),
             start_line,
@@ -588,6 +574,27 @@ mod tests {
                 is_kebab_case(code.kind().as_str()),
                 "kind name must be kebab-case: {}",
                 code.kind().as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn source_spans_clamp_byte_offsets_and_count_crlf_once() {
+        let source = "é\r\n🙂";
+        for (start, end, bytes, columns) in [
+            (1, 3, (0, 3), ((1, 1), (2, 1))),
+            (3, 4, (3, 4), ((2, 1), (2, 1))),
+            (5, usize::MAX, (4, 8), ((2, 1), (2, 2))),
+            (8, 2, (8, 8), ((2, 2), (2, 2))),
+        ] {
+            let span = SourceSpan::new("input.ts", source, start, end);
+            assert_eq!((span.start_byte, span.end_byte), bytes);
+            assert_eq!(
+                (
+                    (span.start_line, span.start_column),
+                    (span.end_line, span.end_column)
+                ),
+                columns
             );
         }
     }

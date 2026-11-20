@@ -6,6 +6,7 @@ use wit_parser::{Resolve, WorldId};
 
 pub const RUNTIME_DECLARATIONS: &str = include_str!("runtime.d.ts");
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declaration {
     pub name: String,
     pub contents: Vec<u8>,

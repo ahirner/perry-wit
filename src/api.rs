@@ -75,11 +75,7 @@ pub struct Options {
     pub core_only: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Artifact {
-    pub name: String,
-    pub contents: Vec<u8>,
-}
+pub use perry_frontend::sdk::Declaration as Artifact;
 
 pub(crate) fn text<'a>(contents: &'a [u8], name: Option<&str>) -> Result<&'a str> {
     std::str::from_utf8(contents).map_err(|error| {
@@ -104,7 +100,7 @@ fn module_name(name: &str) -> Result<&str> {
     Ok(name)
 }
 
-pub(crate) fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, String>)> {
+fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, String>)> {
     let identity = module_name(input.source.name.as_deref().unwrap_or("input.ts"))?;
     let mut modules = BTreeMap::new();
     for source in &input.modules {
@@ -124,35 +120,6 @@ pub(crate) fn program(input: &Program) -> Result<(&str, &str, BTreeMap<String, S
         identity,
         modules,
     ))
-}
-
-/// Compile supplied TypeScript and WIT contents with the embedded standard packages.
-fn compile_impl(input: &Program, wit: &Wit, options: &Options) -> Result<crate::Compiled> {
-    let (source, identity, modules) = program(input)?;
-    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
-    let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    crate::compiler::compile_sources(
-        source,
-        identity,
-        &modules,
-        &resolve,
-        world,
-        !options.core_only,
-        false,
-    )
-}
-
-/// Compile raw TypeScript exports with core signatures from supplied in-memory sources.
-fn compile_core_impl(input: &Program) -> Result<Vec<u8>> {
-    let (source, identity, modules) = program(input)?;
-    crate::compiler::compile_core_sources(source, identity, &modules, false)
-}
-
-/// Generate declaration contents. Project layout and writing belong to the caller.
-fn generate_sdk_impl(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>> {
-    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
-    let world = crate::component::wit::select_world(&resolve, package, world)?;
-    crate::sdk::declarations(&resolve, world)
 }
 
 /// Compile in-memory TypeScript source modules and WIT package definitions into a
@@ -195,17 +162,31 @@ pub fn compile(
     input: &Program,
     wit: &Wit,
     options: &Options,
-) -> std::result::Result<crate::Compiled, crate::CompileError> {
-    compile_impl(input, wit, options).map_err(crate::CompileError::from)
+) -> Result<crate::Compiled, crate::CompileError> {
+    let (source, identity, modules) = program(input)?;
+    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
+    let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
+    crate::compiler::compile_sources(
+        source,
+        identity,
+        &modules,
+        &resolve,
+        world,
+        !options.core_only,
+        false,
+    )
+    .map_err(Into::into)
 }
 
-pub fn compile_core(input: &Program) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    compile_core_impl(input).map_err(crate::CompileError::from)
+/// Compile raw TypeScript exports with core signatures from supplied in-memory sources.
+pub fn compile_core(input: &Program) -> Result<Vec<u8>, crate::CompileError> {
+    let (source, identity, modules) = program(input)?;
+    crate::compiler::compile_core_sources(source, identity, &modules, false).map_err(Into::into)
 }
 
-pub fn generate_sdk(
-    wit: &Wit,
-    world: Option<&str>,
-) -> std::result::Result<Vec<Artifact>, crate::CompileError> {
-    generate_sdk_impl(wit, world).map_err(crate::CompileError::from)
+/// Generate declaration contents for the selected world.
+pub fn generate_sdk(wit: &Wit, world: Option<&str>) -> Result<Vec<Artifact>, crate::CompileError> {
+    let (resolve, package) = crate::component::wit::resolve_contents(wit)?;
+    let world = crate::component::wit::select_world(&resolve, package, world)?;
+    perry_frontend::sdk::declarations(&resolve, world).map_err(Into::into)
 }

@@ -180,7 +180,7 @@ fn read_dependencies(dir: &Path, resolve: &mut Resolve) -> Result<Vec<Unresolved
     Ok(groups)
 }
 
-pub(crate) fn resolve_wit_inner(wit_dir: &Path) -> Result<(Resolve, PackageId)> {
+pub fn resolve_wit(wit_dir: &Path) -> Result<(Resolve, PackageId), crate::CompileError> {
     if !wit_dir.exists() {
         return Err(Diagnostic::new(
             crate::codes::WIT_DEPENDENCY,
@@ -189,7 +189,8 @@ pub(crate) fn resolve_wit_inner(wit_dir: &Path) -> Result<(Resolve, PackageId)> 
         .with_help(format!(
             "Create '{}/world.wit' or pass '--wit <PATH>' to specify your WIT directory.",
             wit_dir.display()
-        )));
+        ))
+        .into());
     }
     let mut resolve = Resolve::new();
     let main = parse_dir(wit_dir).map_err(|err| {
@@ -206,12 +207,6 @@ pub(crate) fn resolve_wit_inner(wit_dir: &Path) -> Result<(Resolve, PackageId)> 
         )
     })?;
     Ok((resolve, package))
-}
-
-pub fn resolve_wit(
-    wit_dir: &Path,
-) -> std::result::Result<(Resolve, PackageId), crate::CompileError> {
-    resolve_wit_inner(wit_dir).map_err(crate::CompileError::from)
 }
 
 pub(crate) fn select_world(
@@ -242,11 +237,7 @@ pub(crate) fn select_world(
 pub fn resolve_source(
     name: &str,
     source: &str,
-) -> std::result::Result<(Resolve, PackageId), crate::CompileError> {
-    resolve_source_inner(name, source).map_err(crate::CompileError::from)
-}
-
-fn resolve_source_inner(name: &str, source: &str) -> Result<(Resolve, PackageId)> {
+) -> Result<(Resolve, PackageId), crate::CompileError> {
     let mut resolve = Resolve::new();
     let main = UnresolvedPackageGroup::parse(name, source).map_err(wit_parse_error)?;
     let package = resolve_with(main, &mut resolve, Vec::new(), true)

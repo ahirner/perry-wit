@@ -53,16 +53,12 @@ pub(super) fn build_module(
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
     // Subclass instances flow into base-typed bindings, where methods would bind statically
     // and `instanceof` would read the declared type: reject inheritance instead of miscompiling.
-    if let Some(class) = hir
+    if let Some((class, base)) = hir
         .classes
         .iter()
-        .find(|class| class.extends_name.is_some())
+        .find_map(|class| Some((&class.name, class.extends_name.as_deref()?)))
     {
-        bail_unsupported!(
-            "class {} extends {}: class inheritance is not supported yet",
-            class.name,
-            class.extends_name.as_deref().unwrap_or_default()
-        );
+        bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
     let shapes = Shapes::new(module, hir, foreign, metadata);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
@@ -258,10 +254,7 @@ pub(super) fn build_module(
         if let Some(span) = locations.function_span(&function.name) {
             perry_mir::set_source_span(ctx, &func, &span);
         }
-        let caller_notes = locations.caller_notes(&function.name);
-        if !caller_notes.is_empty() {
-            perry_mir::set_caller_notes(ctx, &func, &caller_notes);
-        }
+        perry_mir::set_caller_notes(ctx, &func, &locations.caller_notes(&function.name));
         if let Some((wit_params, wit_results)) = signatures[&function.id].wit_constraints() {
             perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);
         }

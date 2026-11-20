@@ -59,23 +59,26 @@ impl ComponentOutput {
     }
 }
 
-fn compile_file_impl(input_file: &Path, options: &CompileOptions) -> Result<Compiled> {
+pub fn compile_file(
+    input_file: &Path,
+    options: &CompileOptions,
+) -> Result<Compiled, crate::CompileError> {
     let source = fs::read_to_string(input_file).map_err(|err| {
         crate::Diagnostic::io(
             format!("Reading TypeScript source {}", input_file.display()),
             &err,
         )
     })?;
-    compile_typescript_impl(&source, &input_file.to_string_lossy(), options)
+    compile_typescript(&source, &input_file.to_string_lossy(), options)
 }
 
 /// Compile against the world selected from `options.wit_dir`.
-fn compile_typescript_impl(
+pub fn compile_typescript(
     source: &str,
     file_name: &str,
     options: &CompileOptions,
-) -> Result<Compiled> {
-    let (resolve, package) = component::wit::resolve_wit_inner(&options.wit_dir)?;
+) -> Result<Compiled, crate::CompileError> {
+    let (resolve, package) = component::wit::resolve_wit(&options.wit_dir)?;
     let world = component::wit::select_world(&resolve, package, options.world.as_deref())?;
     compile_world(
         source,
@@ -85,6 +88,7 @@ fn compile_typescript_impl(
         !options.core_only,
         false,
     )
+    .map_err(Into::into)
 }
 
 fn compile_world(
@@ -136,10 +140,8 @@ pub(crate) fn compile_sources(
     let program = perry_frontend::load_sources(ctx, source, identity, modules, foreign.foreign())?;
     let mir = perry_lower::lower_program(ctx, &program)?;
     let mut exports = bind::exports(ctx, &mir, resolve, world)?;
-    bind::constrain_numbers(ctx, &mir, &exports)?;
     let mut analyses = optimize(ctx, &mir)?;
-    bind::specialized_implementations(ctx, &mir, &mut exports);
-    bind::check_main(ctx, &mir, &exports)?;
+    bind::finalize_exports(ctx, &mir, &mut exports)?;
     emit_component(
         ctx,
         &mir,
@@ -276,21 +278,6 @@ fn uses_stdout(ctx: &Context, mir: &pliron::builtin::ops::ModuleOp) -> bool {
         })
 }
 
-pub fn compile_file(
-    input_file: &Path,
-    options: &CompileOptions,
-) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_file_impl(input_file, options).map_err(crate::CompileError::from)
-}
-
-pub fn compile_typescript(
-    source: &str,
-    file_name: &str,
-    options: &CompileOptions,
-) -> std::result::Result<Compiled, crate::CompileError> {
-    compile_typescript_impl(source, file_name, options).map_err(crate::CompileError::from)
-}
-
 /// Compile against a resolved world, wrapping the output in a component when `componentize`
 /// is true.
 pub fn compile_for_world(
@@ -299,7 +286,7 @@ pub fn compile_for_world(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
     componentize: bool,
-) -> std::result::Result<Compiled, crate::CompileError> {
+) -> Result<Compiled, crate::CompileError> {
     compile_world(source, file_name, resolve, world, componentize, false)
         .map_err(crate::CompileError::from)
 }
@@ -311,17 +298,14 @@ pub fn compile_for_world_with_memory_checks(
     file_name: &str,
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
-) -> std::result::Result<Compiled, crate::CompileError> {
+) -> Result<Compiled, crate::CompileError> {
     compile_world(source, file_name, resolve, world, true, true).map_err(crate::CompileError::from)
 }
 
 /// Build a linked core module exporting every exported TypeScript function with its raw core
 /// signature (numbers as `f64`, references as addresses, plus an `i32` exception status for
 /// functions that may throw). Components use [compile_for_world].
-pub fn compile_core(
-    source: &str,
-    file_name: &str,
-) -> std::result::Result<Vec<u8>, crate::CompileError> {
+pub fn compile_core(source: &str, file_name: &str) -> Result<Vec<u8>, crate::CompileError> {
     compile_core_with(source, file_name, false).map_err(crate::CompileError::from)
 }
 
@@ -334,6 +318,6 @@ pub fn compile_core(
 pub fn compile_core_with_memory_checks(
     source: &str,
     file_name: &str,
-) -> std::result::Result<Vec<u8>, crate::CompileError> {
+) -> Result<Vec<u8>, crate::CompileError> {
     compile_core_with(source, file_name, true).map_err(crate::CompileError::from)
 }

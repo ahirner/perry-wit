@@ -16,7 +16,7 @@
 use crate::{
     function::FunctionLowering,
     module::ModuleState,
-    repr::{i32_type, slot_kind, slot_size},
+    repr::{Repr, i32_type, repr, slot_kind, slot_size},
     runtime::Runtime,
     values::{self, Carriers},
 };
@@ -107,34 +107,28 @@ pub(crate) fn lower(
         bail_internal!("async function {name} returns {} values", mir_results.len());
     };
     let entry = mir.get_entry_block(ctx);
-    let params: Vec<Value> = entry.deref(ctx).arguments().collect();
 
     // Frame layout: parameters first, then every other value live across an await.
     let mut slots: HashMap<Value, Carriers<(u32, MemKind)>> = HashMap::new();
     let mut offset = SLOTS;
-    let mut alloc_slot =
-        |ty: pliron::r#type::TypeHandle| -> Result<Carriers<((u32, MemKind), pliron::r#type::TypeHandle)>> {
-            match values::carriers(ctx, ty)? {
-                Carriers::Numeric { tag, payload } => {
-                    let slot = Carriers::Numeric {
-                        tag: ((offset, MemKind::I32), tag),
-                        payload: ((offset + 8, MemKind::I64), payload),
-                    };
-                    offset += 16;
-                    Ok(slot)
-                }
-                Carriers::Scalar(wasm_ty) => {
-                    let slot = Carriers::Scalar(((offset, slot_kind(ctx, ty)?), wasm_ty));
-                    offset += 8;
-                    Ok(slot)
-                }
-            }
-        };
+    let mut pointers = state.collectible.then(|| vec![PROMISE, AWAITED]);
+    let mut alloc_slot = |ty| {
+        if let Some(pointers) = &mut pointers
+            && repr(ctx, ty)? == Repr::Ref
+        {
+            pointers.push(offset);
+        }
+        values::carriers(ctx, ty)?.try_map(|wasm_ty| {
+            let slot = (offset, slot_kind(ctx, wasm_ty)?);
+            offset += 8;
+            Ok((slot, wasm_ty))
+        })
+    };
     let mut wasm_params = Vec::with_capacity(mir_params.len());
     let mut param_slots = Vec::with_capacity(mir_params.len());
-    for (param, &ty) in params.iter().zip(&mir_params) {
+    for (param, ty) in entry.deref(ctx).arguments().zip(mir_params) {
         let carriers = alloc_slot(ty)?;
-        slots.insert(*param, carriers.map(|(slot, _)| slot));
+        slots.insert(param, carriers.map(|(slot, _)| slot));
         for (slot, wasm_ty) in carriers.iter() {
             param_slots.push(slot);
             wasm_params.push(wasm_ty);
@@ -156,15 +150,7 @@ pub(crate) fn lower(
         debug_assert_eq!(args.len(), param_slots.len());
         let mut b = FunctionLowering::glue(state, ctx, &ramp);
         let size = b.i32_const(ctx, frame_size as i32);
-        let frame = if b.state.collectible {
-            let mut offsets = vec![PROMISE, AWAITED];
-            offsets.extend(slots.iter().filter_map(|(value, slot)| {
-                crate::repr::repr(ctx, value.get_type(ctx))
-                    .is_ok_and(|kind| kind == crate::repr::Repr::Ref)
-                    .then(|| slot.scalar().ok().map(|(offset, _)| offset))
-                    .flatten()
-            }));
-            offsets.sort_unstable();
+        let frame = if let Some(offsets) = pointers {
             let shape = b.pointer_shape(&offsets);
             let shape = b.i32_const(ctx, shape as i32);
             let frame = b.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
@@ -227,13 +213,12 @@ pub(crate) fn lower(
     }
     // State 0 enters the body with the parameters loaded from the frame.
     let begin = b.new_block(ctx, vec![]);
-    let first = targets[0];
     b.in_block(begin, |b| {
         let loaded = param_slots
             .iter()
             .map(|&(at, access)| b.load(ctx, access, frame, at))
             .collect();
-        b.br(ctx, first, loaded);
+        b.br(ctx, start, loaded);
     });
     targets[0] = begin;
     let invalid = b.new_block(ctx, vec![]);

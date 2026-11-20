@@ -36,13 +36,6 @@ pub struct SdkResult {
     pub tsconfig_path: Option<PathBuf>,
 }
 
-/// Generates world/import declarations, an implementation check, and a missing tsconfig.
-pub fn generate_sdk_files(
-    options: &SdkOptions,
-) -> std::result::Result<SdkResult, crate::CompileError> {
-    generate_sdk_files_impl(options).map_err(crate::CompileError::from)
-}
-
 fn create_dir(path: &Path, what: &str) -> Result<()> {
     fs::create_dir_all(path).map_err(|err| {
         Diagnostic::io(
@@ -61,10 +54,11 @@ fn write_file(path: &Path, contents: impl AsRef<[u8]>, what: &str) -> Result<()>
     })
 }
 
-fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
-    let (resolve, package) = crate::component::wit::resolve_wit_inner(&options.wit_dir)?;
+/// Generates world/import declarations, an implementation check, and a missing tsconfig.
+pub fn generate_sdk_files(options: &SdkOptions) -> Result<SdkResult, crate::CompileError> {
+    let (resolve, package) = crate::component::wit::resolve_wit(&options.wit_dir)?;
     let world = crate::component::wit::select_world(&resolve, package, options.world.as_deref())?;
-    let artifacts = declarations(&resolve, world)?;
+    let artifacts = perry_frontend::sdk::declarations(&resolve, world)?;
     create_dir(&options.out_dir, "SDK output directory")?;
 
     for artifact in artifacts {
@@ -74,7 +68,7 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     let dts_path = options.out_dir.join("world.d.ts");
 
     // Determine project root for tsconfig.json
-    let project_root = options.project_root.clone().unwrap_or_else(|| {
+    let project_root = options.project_root.as_deref().unwrap_or_else(|| {
         if options.out_dir.ends_with(".perry/types") {
             options
                 .out_dir
@@ -82,9 +76,8 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
                 .and_then(|p| p.parent())
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new("."))
-                .to_path_buf()
         } else {
-            PathBuf::from(".")
+            Path::new(".")
         }
     });
 
@@ -118,7 +111,7 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
         let config = serde_json::json!({
             "compilerOptions": compiler_options(),
             "include": ["src/**/*", "examples/**/*", "*.ts", ".perry/types/**/*"],
-            "files": [relative_path(&project_root, &check_path)?]
+            "files": [relative_path(project_root, &check_path)?]
         });
         let config_json = serde_json::to_string_pretty(&config)
             .map_err(|err| Diagnostic::internal_from("serializing tsconfig.json", &err))?;
@@ -151,26 +144,8 @@ fn generate_sdk_files_impl(options: &SdkOptions) -> Result<SdkResult> {
     })
 }
 
-/// Generate portable declaration contents independently of a project layout.
-pub(crate) fn declarations(
-    resolve: &wit_parser::Resolve,
-    world: wit_parser::WorldId,
-) -> Result<Vec<crate::api::Artifact>> {
-    Ok(perry_frontend::sdk::declarations(resolve, world)?
-        .into_iter()
-        .map(|declaration| crate::api::Artifact {
-            name: declaration.name,
-            contents: declaration.contents,
-        })
-        .collect())
-}
-
 /// Emits the compiler's supported ambient runtime surface for editors and `tsc`.
-pub fn write_runtime_declarations(out_dir: &Path) -> std::result::Result<(), crate::CompileError> {
-    write_runtime_declarations_impl(out_dir).map_err(crate::CompileError::from)
-}
-
-fn write_runtime_declarations_impl(out_dir: &Path) -> Result<()> {
+pub fn write_runtime_declarations(out_dir: &Path) -> Result<(), crate::CompileError> {
     create_dir(out_dir, "runtime declarations directory")?;
     let path = out_dir.join("runtime.d.ts");
     write_file(
@@ -178,6 +153,7 @@ fn write_runtime_declarations_impl(out_dir: &Path) -> Result<()> {
         perry_frontend::sdk::RUNTIME_DECLARATIONS,
         "runtime declarations",
     )
+    .map_err(Into::into)
 }
 
 fn relative_path(from: &Path, to: &Path) -> Result<String> {

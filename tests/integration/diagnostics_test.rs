@@ -28,6 +28,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         "import { helper } from './helper'; export function run():number{return helper(1);}",
         &[("src/helper.ts", helper)],
     );
+    program.source.contents.extend([b' '; 512]);
     let error = api::compile_core(&program).unwrap_err();
     let diagnostic = error.primary();
     assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION);
@@ -77,7 +78,10 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let span = parse_error.primary().span().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));
+}
 
+#[test]
+fn sdk_errors_identify_the_failing_wit_or_output_path() {
     let temp = tempfile::tempdir().unwrap();
     let wit_dir = temp.path().join("wit");
     std::fs::create_dir_all(&wit_dir).unwrap();
@@ -120,9 +124,11 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         bad_utf8_err.to_string().contains("corrupt.wit"),
         "{bad_utf8_err}"
     );
+}
 
-    // Errors inside imported helpers, monomorphized generics, and imported classes
-    // attach spanned notes pointing back to the caller in workflow.ts across lowering, MIR, and codegen.
+#[test]
+fn imported_helpers_report_the_call_chain_across_compiler_phases() {
+    const WORKFLOW: &str = "src/work\x1e\x1fflow.ts";
     let assert_caller_note =
         |error: &perry_wit::CompileError, expected_file: &str, needle: &str| {
             let diag = error.primary();
@@ -130,17 +136,14 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
             assert_eq!(primary.file.to_string_lossy(), expected_file, "{diag}");
             assert!(!diag.to_string().contains("__perry_module_"), "{diag}");
             assert!(!diag.to_string().contains("_instance_"), "{diag}");
-            let note = diag
-                .notes()
-                .iter()
-                .find(|note| {
+            assert!(
+                diag.notes().iter().any(|note| {
                     note.span()
-                        .is_some_and(|span| span.file.to_string_lossy() == "src/workflow.ts")
-                })
-                .unwrap_or_else(|| {
-                    panic!("expected spanned note pointing to src/workflow.ts in:\n{diag}")
-                });
-            assert!(note.message().contains(needle), "{diag}");
+                        .is_some_and(|span| span.file == std::path::Path::new(WORKFLOW))
+                        && note.message().contains(needle)
+                }),
+                "expected a caller note containing {needle:?} in {WORKFLOW:?}: {diag}"
+            );
         };
 
     for (lib_source, workflow_source, expected_code, needle) in [
@@ -176,7 +179,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         ),
     ] {
         let err = api::compile_core(&program_with(
-            "src/workflow.ts",
+            WORKFLOW,
             workflow_source,
             &[("src/lib.ts", lib_source)],
         ))
@@ -187,7 +190,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
 
     // Nested chain: workflow.ts -> generic mid<T> in mid.ts -> helper leaf in leaf.ts.
     let chain_err = api::compile_core(&program_with(
-        "src/workflow.ts",
+        WORKFLOW,
         "import { mid } from './mid';\nexport function run(): number {\n  return mid(1);\n}",
         &[
             (
@@ -249,9 +252,8 @@ fn nullable_property_access_requires_narrowing() {
 }
 
 #[test]
-fn parse_and_required_field_errors_have_typed_codes() {
+fn type_errors_preserve_source_spans_and_field_names() {
     for (source, code) in [
-        ("export function {", codes::PARSE_ERROR),
         (
             "interface Item { value:number|null } export function run():number { const item:Item={};return 0; }",
             codes::MISSING_REQUIRED_FIELD,
@@ -275,7 +277,6 @@ fn parse_and_required_field_errors_have_typed_codes() {
         assert!(!error.primary().message().contains("_0"), "{error}");
     }
 
-    // Plain anyhow rejections from HIR lowering for missing required arguments are TypeCheck, not Internal.
     for source in [
         "export function run(): string { return atob(); }",
         "export function run(): string { return new URL().href; }",
@@ -330,8 +331,10 @@ fn parse_and_required_field_errors_have_typed_codes() {
         shape_err.to_string().contains("field 'count'"),
         "{shape_err}"
     );
+}
 
-    // Invalid regex syntax preserves the builder's underlying cause as a note.
+#[test]
+fn regex_errors_preserve_the_underlying_cause() {
     let regex_err = perry_wit::compile_core(
         "export function run(input: string): boolean { return /(/.test(input); }",
         "regex.ts",
@@ -350,8 +353,10 @@ fn parse_and_required_field_errors_have_typed_codes() {
             .any(|note| note.message().contains("unclosed group")),
         "{regex_err}"
     );
+}
 
-    // Static missing namespace member reports unknown-export; computed access remains unsupported.
+#[test]
+fn namespace_errors_distinguish_missing_members_from_computed_access() {
     let helper = &[(
         "src/helper.ts",
         "export function present(): number { return 1; }",
@@ -588,10 +593,10 @@ fn every_kind_has_a_fixture() {
         modules: vec![],
     };
 
-    let fixtures: [(ErrorKind, perry_wit::CompileError); 9] = [
-        (
-            ErrorKind::InvalidInput,
-            api::compile_core(&Program {
+    let kinds: std::collections::HashSet<_> = codes::ALL.iter().map(|code| code.kind()).collect();
+    for kind in kinds {
+        let error = match kind {
+            ErrorKind::InvalidInput => api::compile_core(&Program {
                 source: b"export function run(): number { return 1; }"
                     .as_slice()
                     .into(),
@@ -601,15 +606,11 @@ fn every_kind_has_a_fixture() {
                 }],
             })
             .unwrap_err(),
-        ),
-        (
-            ErrorKind::Io,
-            perry_wit::compile_file(&temp.path().join("missing.ts"), &CompileOptions::default())
-                .unwrap_err(),
-        ),
-        (
-            ErrorKind::Wit,
-            api::compile(
+            ErrorKind::Io => {
+                perry_wit::compile_file(&temp.path().join("missing.ts"), &CompileOptions::default())
+                    .unwrap_err()
+            }
+            ErrorKind::Wit => api::compile(
                 &program("export function run(): number { return 1; }"),
                 &Wit {
                     application: b"not valid wit".as_slice().into(),
@@ -618,61 +619,28 @@ fn every_kind_has_a_fixture() {
                 &Options::default(),
             )
             .unwrap_err(),
-        ),
-        (
-            ErrorKind::Syntax,
-            api::compile_core(&program("export function {")).unwrap_err(),
-        ),
-        (
-            ErrorKind::Module,
-            api::compile_core(&program("export { run } from './missing';")).unwrap_err(),
-        ),
-        (
-            ErrorKind::TypeCheck,
-            api::compile_core(&program("export function run(x) { return x; }")).unwrap_err(),
-        ),
-        (
-            ErrorKind::Unsupported,
-            api::compile_core(&program(
+            ErrorKind::Syntax => api::compile_core(&program("export function {")).unwrap_err(),
+            ErrorKind::Module => {
+                api::compile_core(&program("export { run } from './missing';")).unwrap_err()
+            }
+            ErrorKind::TypeCheck => {
+                api::compile_core(&program("export function run(x) { return x; }")).unwrap_err()
+            }
+            ErrorKind::Unsupported => api::compile_core(&program(
                 "export function run(x: number): number { return x ** (2 ** x); }",
             ))
             .unwrap_err(),
-        ),
-        (
-            ErrorKind::Contract,
-            api::compile(
+            ErrorKind::Contract => api::compile(
                 &program("export function other(): number { return 1; }"),
                 &wit,
                 &Options::default(),
             )
             .unwrap_err(),
-        ),
-        (
-            ErrorKind::Internal,
-            perry_wit::CompileError::from(perry_wit::Diagnostic::new(
+            ErrorKind::Internal => perry_wit::CompileError::from(perry_wit::Diagnostic::new(
                 codes::INTERNAL,
                 "synthetic internal error",
             )),
-        ),
-    ];
-
-    let mut covered = [false; 9];
-    for (expected, error) in fixtures {
-        let diagnostic = error.primary();
-        assert_eq!(diagnostic.kind(), expected, "{diagnostic}");
-        let slot = match diagnostic.kind() {
-            ErrorKind::InvalidInput => 0,
-            ErrorKind::Io => 1,
-            ErrorKind::Wit => 2,
-            ErrorKind::Syntax => 3,
-            ErrorKind::Module => 4,
-            ErrorKind::TypeCheck => 5,
-            ErrorKind::Unsupported => 6,
-            ErrorKind::Contract => 7,
-            ErrorKind::Internal => 8,
         };
-        assert!(!covered[slot], "duplicate fixture for {expected}");
-        covered[slot] = true;
+        assert_eq!(error.primary().kind(), kind, "{error}");
     }
-    assert!(covered.into_iter().all(|seen| seen));
 }

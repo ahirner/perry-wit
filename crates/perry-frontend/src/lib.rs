@@ -62,7 +62,10 @@ pub fn load_sources<'s>(
     let loaded = modules::load(source, identity, sources, foreign)?;
     let mut lowered = hir_compat::lower(loaded, identity)?;
     infer::specialize_functions(ctx, &mut lowered.module, &mut lowered.metadata, foreign)?;
-    infer::record_call_origins(&mut lowered.module, &mut lowered.metadata.locations);
+    lowered
+        .metadata
+        .locations
+        .record_call_origins(&lowered.module);
     infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
     if !lowered.metadata.sparse_arrays {
         lowered.metadata.sparse_arrays =

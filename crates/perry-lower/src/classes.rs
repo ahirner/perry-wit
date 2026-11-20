@@ -15,6 +15,7 @@ enum ClassReceiver {
     Constructor(Value),
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum ClassExpansion<'s> {
     Callable(&'s Function),
     Fields(&'s perry_frontend::hir::ir::Class),
@@ -55,19 +56,19 @@ impl<'s> FunctionBuilder<'s> {
                 }
             }
         }
-        let member_span = match &expansion {
-            ClassExpansion::Callable(func) => self
-                .shapes
-                .metadata
-                .locations
-                .function_span(&format!("{owner_class}::{}", func.name))
-                .or_else(|| self.shapes.metadata.locations.type_span(owner_class)),
-            ClassExpansion::Fields(_) => self.shapes.metadata.locations.type_span(owner_class),
-        };
         self.class_expansions.push(expansion);
-        let result = lower(self, ctx).map_err(|error| error.with_fallback_span(member_span));
+        let result = lower(self, ctx);
         self.class_expansions.pop();
-        result
+        result.map_err(|error| {
+            let locations = &self.shapes.metadata.locations;
+            let member_span = match expansion {
+                ClassExpansion::Callable(func) => {
+                    locations.function_span(&format!("{owner_class}::{}", func.name))
+                }
+                ClassExpansion::Fields(_) => None,
+            };
+            error.with_fallback_span(member_span.or_else(|| locations.type_span(owner_class)))
+        })
     }
 
     /// `new ClassName<type_args>(args)` for a user-defined class.

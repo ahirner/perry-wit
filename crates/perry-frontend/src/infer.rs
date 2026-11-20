@@ -29,7 +29,7 @@ mod environment;
 mod functions;
 use absence::*;
 use closures::{infer_array_closure_return, infer_closure_return};
-pub(crate) use functions::{record_call_origins, specialize_functions};
+pub(crate) use functions::specialize_functions;
 mod expressions;
 mod methods;
 pub(crate) mod walk;

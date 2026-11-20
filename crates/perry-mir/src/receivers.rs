@@ -39,24 +39,15 @@ pub(crate) fn has_marker(ctx: &Context, op: &dyn Op, key: &pliron::identifier::I
         .is_some()
 }
 
-fn violation(ctx: &Context, unwrap: &UnwrapOp) -> Diagnostic {
-    let func = unwrap
-        .get_operation()
-        .deref(ctx)
-        .get_parent_op(ctx)
-        .and_then(|parent| Operation::get_op::<FuncOp>(parent, ctx));
-    let span = crate::source_span(ctx, unwrap)
-        .or_else(|| func.as_ref().and_then(|f| crate::source_span(ctx, f)));
+fn violation(ctx: &Context, function: &FuncOp, unwrap: &UnwrapOp) -> Diagnostic {
+    let span = crate::source_span(ctx, unwrap).or_else(|| crate::source_span(ctx, function));
     let diagnostic = Diagnostic::new(
         codes::POSSIBLY_NULL_RECEIVER,
         "property access receiver is possibly null",
     )
     .with_optional_span(span)
     .with_help("Check the receiver before accessing its properties, or use optional chaining.");
-    match &func {
-        Some(func) => crate::attach_caller_notes(ctx, func, diagnostic),
-        None => diagnostic,
-    }
+    crate::attach_caller_notes(ctx, function, diagnostic)
 }
 
 pub(crate) fn check_receivers(
@@ -98,7 +89,7 @@ pub(crate) fn check_receivers(
         let mut guards = GuardedFacts::new(ctx, &facts, &function);
         for (block, unwrap) in receivers {
             if guards.may_be_null_at(&mut dominance, block, unwrap.get_operand(ctx)) {
-                return pliron::input_err_noloc!(violation(ctx, &unwrap));
+                return pliron::input_err_noloc!(violation(ctx, &function, &unwrap));
             }
         }
     }

@@ -13,19 +13,11 @@ pub fn embed_and_encode(
     core_wasm: &[u8],
     wit_dir: &Path,
     world_name: Option<&str>,
-) -> std::result::Result<Vec<u8>, crate::CompileError> {
-    embed_and_encode_impl(core_wasm, wit_dir, world_name).map_err(crate::CompileError::from)
-}
-
-fn embed_and_encode_impl(
-    core_wasm: &[u8],
-    wit_dir: &Path,
-    world_name: Option<&str>,
-) -> Result<Vec<u8>> {
-    let (resolve, pkg_id) = wit::resolve_wit_inner(wit_dir)?;
+) -> Result<Vec<u8>, crate::CompileError> {
+    let (resolve, pkg_id) = wit::resolve_wit(wit_dir)?;
     let world_id = wit::select_world(&resolve, pkg_id, world_name)?;
 
-    encode_resolved(core_wasm, &resolve, world_id)
+    encode_resolved(core_wasm, &resolve, world_id).map_err(Into::into)
 }
 
 /// Encode the resolved world directly. Modules using promise signals carry the

@@ -159,14 +159,24 @@ fn round_trip(ctx: &Context, module: Ptr<Operation>) -> Result<String> {
 fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
     let ctx = &mut Context::new();
     let module = parse(ctx, TEMPORARY_RECORDS);
-    let alloc = Operation::get_op::<crate::AllocOp>(
-        first::<crate::AllocOp>(ctx, &function(ctx, module, "run")),
+    let run = function(ctx, module, "run");
+    let alloc =
+        Operation::get_op::<crate::AllocOp>(first::<crate::AllocOp>(ctx, &run), ctx).unwrap();
+    crate::set_caller_notes(
         ctx,
-    )
-    .unwrap();
+        &run,
+        &[
+            perry_wit_diagnostics::Note::spanned(
+                crate::SourceSpan::new("main.ts", "run()", 0, 5),
+                "called from here",
+            ),
+            perry_wit_diagnostics::Note::new("while compiling"),
+        ],
+    );
     alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(vec![1, 0]));
     let printed = round_trip(ctx, module)?;
     for expected in [
+        "perry.caller_notes",
         "perry.alloc Unassigned (",
         "perry.record <Point { x: builtin.fp64",
         "perry.field_get",

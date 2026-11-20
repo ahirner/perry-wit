@@ -147,7 +147,6 @@ struct Instances<'a> {
     pending: Vec<Function>,
     next_function: FuncId,
     next_local: LocalId,
-    current_caller: Option<String>,
     instantiations: Vec<(String, String, u32, Option<String>)>,
     remapped_locals: Vec<(LocalId, LocalId)>,
 }
@@ -158,6 +157,7 @@ impl Instances<'_> {
         function: &Function,
         arguments: Vec<HirType>,
         call_byte_offset: u32,
+        caller: Option<&str>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<FuncId> {
         let key = (
@@ -202,13 +202,11 @@ impl Instances<'_> {
             }
             Ok(())
         })?;
-        self.remapped_locals
-            .extend(locals.iter().map(|(&old, &new)| (old, new)));
         self.instantiations.push((
             instance.name.clone(),
             function.name.clone(),
             call_byte_offset,
-            self.current_caller.clone(),
+            caller.map(str::to_owned),
         ));
         for param in &mut instance.params {
             if let Some(default) = &mut param.default {
@@ -216,6 +214,7 @@ impl Instances<'_> {
             }
         }
         perry_hir::analysis::remap_local_ids_in_stmts(&mut instance.body, &locals);
+        self.remapped_locals.extend(locals);
         if matches!(instance.return_type, HirType::Any | HirType::Unknown) {
             let locals = instance
                 .params
@@ -256,7 +255,12 @@ impl Instances<'_> {
         Ok(())
     }
 
-    fn body(&mut self, body: &mut [Stmt], env: &mut FunctionEnv<'_>) -> Result<()> {
+    fn body(
+        &mut self,
+        body: &mut [Stmt],
+        caller: Option<&str>,
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<()> {
         walk::visit_body(body, &mut |node: Node<'_>| {
             if let Node::Binding(id, ty) = node {
                 if contains_type_var(ty) {
@@ -270,13 +274,18 @@ impl Instances<'_> {
         walk::scan(body, env, None, None);
         walk::visit_body(body, &mut |node: Node<'_>| {
             if let Node::Expression(expr) = node {
-                self.call(expr, env)?;
+                self.call(expr, caller, env)?;
             }
             Ok(())
         })
     }
 
-    fn call(&mut self, expr: &mut Expr, env: &mut FunctionEnv<'_>) -> Result<()> {
+    fn call(
+        &mut self,
+        expr: &mut Expr,
+        caller: Option<&str>,
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<()> {
         if let Expr::Call {
             callee,
             args,
@@ -290,17 +299,22 @@ impl Instances<'_> {
             let arguments = arguments(function, args, type_args, env)
                 .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
             *id = self
-                .request(function, arguments, *byte_offset, env)
+                .request(function, arguments, *byte_offset, caller, env)
                 .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
             type_args.clear();
         }
         Ok(())
     }
 
-    fn expression(&mut self, expr: &mut Expr, env: &mut FunctionEnv<'_>) -> Result<()> {
+    fn expression(
+        &mut self,
+        expr: &mut Expr,
+        caller: Option<&str>,
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<()> {
         walk::visit_expr(expr, &mut |node: Node<'_>| {
             if let Node::Expression(expr) = node {
-                self.call(expr, env)?;
+                self.call(expr, caller, env)?;
             }
             Ok(())
         })
@@ -310,14 +324,15 @@ impl Instances<'_> {
         &mut self,
         params: &mut [perry_hir::ir::Param],
         body: &mut [Stmt],
+        caller: Option<&str>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
         for param in params {
             if let Some(default) = &mut param.default {
-                self.expression(default, env)?;
+                self.expression(default, caller, env)?;
             }
         }
-        self.body(body, env)
+        self.body(body, caller, env)
     }
 
     fn append(&mut self, functions: &mut Vec<Function>, base: &mut perry_hir::HirTypeEnv) {
@@ -434,87 +449,86 @@ pub(crate) fn specialize_functions(
         &hir.classes,
         foreign,
     );
-    let (instantiations, remapped_locals) = {
-        let inference = Inference {
-            ctx,
-            decls: &decls,
-            metadata,
-            generic_functions: Some(&templates),
-        };
-        let mut instances = Instances {
-            templates: &templates,
-            keys: HashMap::new(),
-            pending: Vec::new(),
-            next_function: next_function
-                .checked_add(1)
-                .ok_or_internal("function identifier limit")?,
-            next_local: next_local
-                .checked_add(1)
-                .ok_or_internal("local identifier limit")?,
-            current_caller: None,
-            instantiations: Vec::new(),
-            remapped_locals: Vec::new(),
-        };
-        let mut locals = HashMap::new();
-        {
-            let mut env = inference.function(&base, &hir.classes, &mut locals);
-            instances.body(&mut hir.init, &mut env)?;
-        }
-        instances.append(&mut hir.functions, &mut base);
-        for class_idx in 0..hir.classes.len() {
-            base.set_current_class(Some(hir.classes[class_idx].name.clone()));
-            let mut inits: Vec<Expr> = class_initializers(&mut hir.classes[class_idx])
-                .map(|init| std::mem::replace(init, Expr::Undefined))
-                .collect();
-            for init in &mut inits {
-                let mut env = inference.function(&base, &hir.classes, &mut locals);
-                instances.expression(init, &mut env)?;
-                instances.append(&mut hir.functions, &mut base);
-            }
-            for (dst, src) in class_initializers(&mut hir.classes[class_idx]).zip(inits) {
-                *dst = src;
-            }
-            let mut class_fns: Vec<(Vec<perry_hir::ir::Param>, Vec<Stmt>)> =
-                shapes::class_functions_mut(&mut hir.classes[class_idx])
-                    .map(|target| {
-                        (
-                            std::mem::take(&mut target.params),
-                            std::mem::take(&mut target.body),
-                        )
-                    })
-                    .collect();
-            for (params, body) in &mut class_fns {
-                let mut env =
-                    inference.function_with_params(&base, &hir.classes, &mut locals, params);
-                instances.callable(params, body, &mut env)?;
-                instances.append(&mut hir.functions, &mut base);
-            }
-            for (target, (params, body)) in
-                shapes::class_functions_mut(&mut hir.classes[class_idx]).zip(class_fns)
-            {
-                target.params = params;
-                target.body = body;
-            }
-        }
-        base.set_current_class(None);
-        let mut cursor = 0;
-        loop {
-            instances.append(&mut hir.functions, &mut base);
-            let Some(function) = hir.functions.get_mut(cursor) else {
-                break;
-            };
-            cursor += 1;
-            if !function.type_params.is_empty() {
-                continue;
-            }
-            instances.current_caller = Some(function.name.clone());
-            let mut env =
-                inference.function_with_params(&base, &hir.classes, &mut locals, &function.params);
-            instances.callable(&mut function.params, &mut function.body, &mut env)?;
-        }
-        (instances.instantiations, instances.remapped_locals)
+    let inference = Inference {
+        ctx,
+        decls: &decls,
+        metadata,
+        generic_functions: Some(&templates),
     };
-    for (old_id, new_id) in remapped_locals {
+    let mut instances = Instances {
+        templates: &templates,
+        keys: HashMap::new(),
+        pending: Vec::new(),
+        next_function: next_function
+            .checked_add(1)
+            .ok_or_internal("function identifier limit")?,
+        next_local: next_local
+            .checked_add(1)
+            .ok_or_internal("local identifier limit")?,
+        instantiations: Vec::new(),
+        remapped_locals: Vec::new(),
+    };
+    let mut locals = HashMap::new();
+    {
+        let mut env = inference.function(&base, &hir.classes, &mut locals);
+        instances.body(&mut hir.init, None, &mut env)?;
+    }
+    instances.append(&mut hir.functions, &mut base);
+    for class_idx in 0..hir.classes.len() {
+        base.set_current_class(Some(hir.classes[class_idx].name.clone()));
+        let mut inits: Vec<Expr> = class_initializers(&mut hir.classes[class_idx])
+            .map(|init| std::mem::replace(init, Expr::Undefined))
+            .collect();
+        for init in &mut inits {
+            let mut env = inference.function(&base, &hir.classes, &mut locals);
+            instances.expression(init, None, &mut env)?;
+            instances.append(&mut hir.functions, &mut base);
+        }
+        for (dst, src) in class_initializers(&mut hir.classes[class_idx]).zip(inits) {
+            *dst = src;
+        }
+        let mut class_fns: Vec<(Vec<perry_hir::ir::Param>, Vec<Stmt>)> =
+            shapes::class_functions_mut(&mut hir.classes[class_idx])
+                .map(|target| {
+                    (
+                        std::mem::take(&mut target.params),
+                        std::mem::take(&mut target.body),
+                    )
+                })
+                .collect();
+        for (params, body) in &mut class_fns {
+            let mut env = inference.function_with_params(&base, &hir.classes, &mut locals, params);
+            instances.callable(params, body, None, &mut env)?;
+            instances.append(&mut hir.functions, &mut base);
+        }
+        for (target, (params, body)) in
+            shapes::class_functions_mut(&mut hir.classes[class_idx]).zip(class_fns)
+        {
+            target.params = params;
+            target.body = body;
+        }
+    }
+    base.set_current_class(None);
+    let mut cursor = 0;
+    loop {
+        instances.append(&mut hir.functions, &mut base);
+        let Some(function) = hir.functions.get_mut(cursor) else {
+            break;
+        };
+        cursor += 1;
+        if !function.type_params.is_empty() {
+            continue;
+        }
+        let mut env =
+            inference.function_with_params(&base, &hir.classes, &mut locals, &function.params);
+        instances.callable(
+            &mut function.params,
+            &mut function.body,
+            Some(&function.name),
+            &mut env,
+        )?;
+    }
+    for (old_id, new_id) in instances.remapped_locals {
         if let Some(span) = hir.local_source_spans.get(&old_id).copied() {
             hir.local_source_spans.insert(new_id, span);
         }
@@ -522,69 +536,10 @@ pub(crate) fn specialize_functions(
             metadata.inferred_bindings.insert(new_id);
         }
     }
-    for (instance_name, template_name, byte_offset, caller) in instantiations {
+    for (instance_name, template_name, byte_offset, caller) in instances.instantiations {
         metadata
             .locations
             .record_instantiation(instance_name, template_name, byte_offset, caller);
     }
     Ok(())
-}
-
-/// Record cross-file call sites so errors inside imported helpers point back to their caller.
-pub(crate) fn record_call_origins(hir: &mut HirModule, locations: &mut hir_compat::Locations<'_>) {
-    if locations.file_count() <= 1 {
-        return;
-    }
-    let func_names: HashMap<FuncId, String> = hir
-        .functions
-        .iter()
-        .map(|function| (function.id, function.name.clone()))
-        .collect();
-    fn record(
-        node: Node<'_>,
-        caller: Option<&str>,
-        func_names: &HashMap<FuncId, String>,
-        locations: &mut hir_compat::Locations<'_>,
-    ) -> Result<()> {
-        if let Node::Expression(Expr::Call {
-            callee,
-            byte_offset,
-            ..
-        }) = node
-            && let Expr::FuncRef(id) = callee.as_ref()
-            && let Some(callee_name) = func_names.get(id)
-        {
-            locations.record_imported_call(
-                callee_name.clone(),
-                *byte_offset,
-                caller.map(str::to_owned),
-            );
-        }
-        Ok(())
-    }
-    let _ = walk::visit_body(&mut hir.init, &mut |n: Node<'_>| {
-        record(n, None, &func_names, locations)
-    });
-    for exported_first in [true, false] {
-        for function in &mut hir.functions {
-            if function.is_exported == exported_first {
-                let caller = function.name.clone();
-                let _ = walk::function(function, &mut |n: Node<'_>| {
-                    record(n, Some(&caller), &func_names, locations)
-                });
-            }
-        }
-    }
-    for class in &mut hir.classes {
-        for initializer in class_initializers(class) {
-            let _ = walk::visit_expr(initializer, &mut |n: Node<'_>| {
-                record(n, None, &func_names, locations)
-            });
-        }
-        for function in shapes::class_functions_mut(class) {
-            let _ = walk::function(function, &mut |n: Node<'_>| {
-                record(n, None, &func_names, locations)
-            });
-        }
-    }
 }
