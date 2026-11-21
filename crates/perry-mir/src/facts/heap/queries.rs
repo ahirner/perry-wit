@@ -4,55 +4,46 @@ use crate::effects::{Mutation, Observed};
 use pliron::builtin::op_interfaces::OneOpdInterface;
 use std::collections::HashSet;
 
-/// The heap cell `value` names, looking through operations whose result aliases an operand,
-/// and whether it may hold an untracked aggregate. `visited` terminates alias cycles in
-/// unreachable code as untracked.
-fn root_heap_cells(ctx: &Context, state: &State, value: Value) -> (Vec<usize>, bool) {
+/// The allocations reachable through value aliases, and whether they may hold unmodelled contents.
+fn reachable_heap(
+    ctx: &Context,
+    heap: &HeapFacts,
+    state: &State,
+    mut value: Value,
+) -> (BTreeSet<usize>, bool) {
     let mut visited = HashSet::new();
-    let mut current = value;
-    loop {
-        if let Some(&cell) = state.heap_values.get(&current) {
-            return (vec![cell], false);
+    let root = loop {
+        if let Some(&cell) = state.heap_values.get(&value) {
+            break cell;
         }
-        let aliased = current.defining_op().and_then(|op| {
+        let aliased = value.defining_op().and_then(|op| {
             let operand = OperationKind::classify(ctx, op).aliased_operand()?;
             visited
                 .insert(op)
                 .then(|| op.deref(ctx).get_operand(operand))
         });
-        match aliased {
-            Some(operand) => current = operand,
-            None => {
-                let untracked = crate::effects::may_hold_heap(ctx, current.get_type(ctx));
-                return (Vec::new(), untracked);
+        let Some(operand) = aliased else {
+            return (
+                BTreeSet::new(),
+                crate::effects::may_hold_heap(ctx, value.get_type(ctx)),
+            );
+        };
+        value = operand;
+    };
+    let mut open = heap.cells[root].objects.is_empty();
+    let mut objects = BTreeSet::new();
+    let mut pending = vec![root];
+    while let Some(cell) = pending.pop() {
+        let cell = &heap.cells[cell];
+        open |= cell.summarized;
+        for &object in &cell.objects {
+            if objects.insert(object) {
+                let object = &heap.objects[object];
+                open |= object.open;
+                pending.extend(object.contents.slots());
             }
         }
     }
-}
-
-/// The objects reachable from `root_cells`, and whether any of them may hold unmodelled
-/// contents: an untracked root, an empty or summarized cell, or an open object.
-fn collect_reachable_heap(
-    heap: &HeapFacts,
-    root_cells: &[usize],
-    untracked: bool,
-) -> (BTreeSet<usize>, bool) {
-    let cells = crate::reachable(root_cells.iter().copied(), move |cell| {
-        heap.cells[cell]
-            .objects
-            .iter()
-            .flat_map(move |&object| heap.objects[object].contents.slots().iter().copied())
-    });
-    let objects: BTreeSet<usize> = cells
-        .iter()
-        .flat_map(|&cell| heap.cells[cell].objects.iter().copied())
-        .collect();
-    let open = untracked
-        || root_cells
-            .iter()
-            .any(|&cell| heap.cells[cell].objects.is_empty())
-        || cells.iter().any(|&cell| heap.cells[cell].summarized)
-        || objects.iter().any(|&object| heap.objects[object].open);
     (objects, open)
 }
 
@@ -65,8 +56,7 @@ struct Aliases<'a> {
 
 impl<'a> Aliases<'a> {
     fn new(ctx: &'a Context, heap: &'a HeapFacts, state: &State, value: Value) -> Self {
-        let (cells, untracked) = root_heap_cells(ctx, state, value);
-        let (objects, open) = collect_reachable_heap(heap, &cells, untracked);
+        let (objects, open) = reachable_heap(ctx, heap, state, value);
         Self {
             ctx,
             heap,
@@ -76,8 +66,7 @@ impl<'a> Aliases<'a> {
     }
 
     fn contains(&self, state: &State, value: Value) -> bool {
-        let (cells, untracked) = root_heap_cells(self.ctx, state, value);
-        let (objects, open) = collect_reachable_heap(self.heap, &cells, untracked);
+        let (objects, open) = reachable_heap(self.ctx, self.heap, state, value);
         !self.objects.is_disjoint(&objects) || self.open && open
     }
 
@@ -125,11 +114,6 @@ struct Interference<'a> {
     observed: Observed,
     tracked: Tracked<'a>,
     calls: HashMap<usize, bool>,
-}
-
-/// The module binding a global slot names.
-fn global(ctx: &Context, slot: Value) -> Option<Identifier> {
-    Some(Operation::get_op::<crate::GlobalOp>(slot.defining_op()?, ctx)?.name(ctx))
 }
 
 impl Interference<'_> {
@@ -304,8 +288,7 @@ impl ProgramFacts {
             return true;
         };
         let state = &self.states[id];
-        let (root_cells, untracked) = root_heap_cells(ctx, state, value);
-        let (_, open_or_summarized) = collect_reachable_heap(&self.heap, &root_cells, untracked);
+        let (_, open_or_summarized) = reachable_heap(ctx, &self.heap, state, value);
         open_or_summarized
     }
 

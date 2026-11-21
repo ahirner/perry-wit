@@ -12,6 +12,15 @@ impl ProgramFacts {
         value: Value,
     ) -> Result<Option<TypeHandle>> {
         let ty = value.get_type(ctx);
+        if ty.deref(ctx).is::<crate::SlotType>()
+            && let Some(name) = global(ctx, value)
+            && let Some(&cell) = self.heap.globals.get(&name)
+        {
+            let inner = self.heap.cells[cell].ty;
+            return Ok(self
+                .specialized_cell_type(ctx, inner, cell)?
+                .map(|layout| crate::SlotType::get(ctx, layout).into()));
+        }
         if aggregate(ctx, ty)
             && !ty.deref(ctx).is::<PromiseType>()
             && let Some(&cell) = self.states[id].heap_values.get(&value)
@@ -102,11 +111,10 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> Result<Option<TypeHandle>> {
-        let plan = LayoutPlan::new(ctx, &self.heap, ty, cell, Lossless::All);
-        if !plan.changed[0] {
-            return Ok(None);
-        }
-        plan.materialize(ctx, 0, &mut HashMap::new()).map(Some)
+        let nodes = LayoutPlanner::nodes(ctx, &self.heap, ty, cell, Lossless::All);
+        LayoutPlan::new(nodes)
+            .map(|plan| plan.materialize(ctx, 0, &mut HashMap::new()))
+            .transpose()
     }
 
     pub(in crate::facts) fn verify_cell_layout_lossless(
@@ -116,10 +124,10 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> pliron::result::Result<()> {
-        let plan = LayoutPlan::new(ctx, &self.heap, ty, cell, Lossless::Any);
-        for node in &plan.nodes {
+        let nodes = LayoutPlanner::nodes(ctx, &self.heap, ty, cell, Lossless::Any);
+        for node in &nodes {
             for (index, &child) in node.children().iter().enumerate() {
-                if !matches!(plan.nodes[child], LayoutNode::Numeric(_)) {
+                if !matches!(nodes[child], LayoutNode::Numeric(_)) {
                     continue;
                 }
                 let message = match node {
@@ -173,57 +181,11 @@ fn projected_type(
     Some(crate::types::OptionalType::get_with(ctx, payload, absence).into())
 }
 
-/// How the slots holding one child of every object in a group specialize.
-enum Step {
-    /// The lossless requirement holds for an `f64` child: its numeric carrier.
-    Numeric(TypeHandle),
-    /// The child is an aggregate, decided by the objects its slots may hold.
-    Nested(BTreeSet<usize>),
-    Keep,
-}
-
 /// Specialization requires unanimous slot agreement and rejects any lossy slot.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lossless {
     All,
     Any,
-}
-
-impl HeapFacts {
-    /// Classify a child slot and verify matching object shapes.
-    fn step(
-        &self,
-        ctx: &Context,
-        objects: &BTreeSet<usize>,
-        field: Option<usize>,
-        ty: TypeHandle,
-        requirement: Lossless,
-    ) -> Option<Step> {
-        let mut lossless = requirement == Lossless::All;
-        let is_aggregate = aggregate(ctx, ty);
-        let mut nested = BTreeSet::new();
-        for &object in objects {
-            let slot = match (&self.objects[object].contents, field) {
-                (Contents::Array { element, .. }, None) => *element,
-                (Contents::Record(slots), Some(index)) => *slots.get(index)?,
-                _ => return None,
-            };
-            let cell = &self.cells[slot];
-            let needs_lossless = cell.facts.domain.needs_lossless_64();
-            match requirement {
-                Lossless::All => lossless &= needs_lossless,
-                Lossless::Any => lossless |= needs_lossless,
-            }
-            if is_aggregate {
-                nested.extend(cell.layout_objects.iter().copied());
-            }
-        }
-        Some(match numeric_type_for(ctx, ty) {
-            Some(numeric) if lossless => Step::Numeric(numeric),
-            _ if is_aggregate => Step::Nested(nested),
-            _ => Step::Keep,
-        })
-    }
 }
 
 /// One heap walk supplies both the specialization graph and the lossless verifier.
@@ -265,29 +227,18 @@ struct LayoutPlanner<'a> {
 }
 
 impl LayoutPlan {
-    fn new(
-        ctx: &Context,
-        heap: &HeapFacts,
-        ty: TypeHandle,
-        cell: usize,
-        lossless: Lossless,
-    ) -> Self {
-        let mut planner = LayoutPlanner {
-            ctx,
-            heap,
-            lossless,
-            visiting: HashMap::new(),
-            nodes: Vec::new(),
-        };
-        planner.visit(ty, &heap.cells[cell].layout_objects);
-        let nodes = planner.nodes;
+    fn new(nodes: Vec<LayoutNode>) -> Option<Self> {
+        let mut pending: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(id, node)| matches!(node, LayoutNode::Numeric(_)).then_some(id))
+            .collect();
+        if pending.is_empty() {
+            return None;
+        }
         let mut changed = vec![false; nodes.len()];
         let mut dependents = vec![Vec::new(); nodes.len()];
-        let mut pending = Vec::new();
         for (parent, node) in nodes.iter().enumerate() {
-            if matches!(node, LayoutNode::Numeric(_)) {
-                pending.push(parent);
-            }
             for &child in node.children() {
                 dependents[child].push(parent);
             }
@@ -297,7 +248,7 @@ impl LayoutPlan {
                 pending.extend(dependents[node].iter().copied());
             }
         }
-        Self { nodes, changed }
+        Some(Self { nodes, changed })
     }
 
     fn materialize(
@@ -381,7 +332,26 @@ impl LayoutPlan {
 }
 
 impl LayoutPlanner<'_> {
-    fn visit(&mut self, ty: TypeHandle, objects: &BTreeSet<usize>) -> usize {
+    fn nodes(
+        ctx: &Context,
+        heap: &HeapFacts,
+        ty: TypeHandle,
+        cell: usize,
+        lossless: Lossless,
+    ) -> Vec<LayoutNode> {
+        let mut planner = LayoutPlanner {
+            ctx,
+            heap,
+            lossless,
+            visiting: HashMap::new(),
+            nodes: Vec::new(),
+        };
+        planner.visit(ty, cell);
+        planner.nodes
+    }
+
+    fn visit(&mut self, ty: TypeHandle, cell: usize) -> usize {
+        let objects = &self.heap.cells[cell].layout_objects;
         if let Some(&node) = self.visiting.get(&ty) {
             return node;
         }
@@ -394,7 +364,7 @@ impl LayoutPlanner<'_> {
         let layout = if let Some((inner, absence)) = crate::optional::optional_parts(self.ctx, ty) {
             Some(LayoutNode::Optional {
                 absence,
-                inner: self.visit(inner, objects),
+                inner: self.visit(inner, cell),
             })
         } else if let Some(array) = crate::typed::<ArrayType>(self.ctx, ty) {
             let element = array.deref(self.ctx).element();
@@ -429,13 +399,33 @@ impl LayoutPlanner<'_> {
         field: Option<usize>,
         ty: TypeHandle,
     ) -> Option<usize> {
-        let step = self
-            .heap
-            .step(self.ctx, objects, field, ty, self.lossless)?;
-        let node = match step {
-            Step::Numeric(ty) => LayoutNode::Numeric(ty),
-            Step::Nested(nested) => return Some(self.visit(ty, &nested)),
-            Step::Keep => LayoutNode::Keep(ty),
+        let mut child = None;
+        let mut lossless = self.lossless == Lossless::All;
+        for &object in objects {
+            let slot = match (&self.heap.objects[object].contents, field) {
+                (Contents::Array { element, .. }, None) => *element,
+                (Contents::Record(slots), Some(index)) => *slots.get(index)?,
+                _ => return None,
+            };
+            let cell = &self.heap.cells[slot];
+            // Sibling slots already agree on every nested layout when the solver converges.
+            debug_assert!(child.is_none_or(
+                |other: usize| self.heap.cells[other].layout_objects == cell.layout_objects
+            ));
+            child = Some(slot);
+            let required = cell.facts.domain.needs_lossless_64();
+            match self.lossless {
+                Lossless::All => lossless &= required,
+                Lossless::Any => lossless |= required,
+            }
+        }
+        if aggregate(self.ctx, ty) {
+            return Some(self.visit(ty, child?));
+        }
+        let node = if lossless && let Some(numeric) = numeric_type_for(self.ctx, ty) {
+            LayoutNode::Numeric(numeric)
+        } else {
+            LayoutNode::Keep(ty)
         };
         let index = self.nodes.len();
         self.nodes.push(node);

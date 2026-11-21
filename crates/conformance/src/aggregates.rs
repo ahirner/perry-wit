@@ -715,6 +715,13 @@ pub(crate) fn aggregate_case_strategy() -> impl Strategy<Value = AggregateCase> 
 pub(crate) fn contract() -> Contract {
     let witnesses = vec![
         Witness {
+            partition: "persistent-record-map-aliases",
+            case: Case::Function {
+                source: include_str!("../cases/persistent_aggregates.ts").to_owned(),
+                asynchronous: false,
+            },
+        },
+        Witness {
             partition: "self-recursive-wide-parseint-and-float",
             case: Case::Aggregate(AggregateCase {
                 shape: AggregateShape::SelfRecursive,
