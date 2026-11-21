@@ -110,11 +110,12 @@ fn view_compatible(
         }
         false
     }
-    let aggregate = source.deref(ctx).is::<RecordType>()
-        || source.deref(ctx).is::<ArrayType>()
-        || source.deref(ctx).is::<crate::PromiseType>()
-        || source.deref(ctx).is::<VariantType>()
-        || source.deref(ctx).is::<crate::ValueUnionType>();
+    let shape = crate::present_type(ctx, source).deref(ctx);
+    let aggregate = shape.is::<RecordType>()
+        || shape.is::<ArrayType>()
+        || shape.is::<crate::PromiseType>()
+        || shape.is::<VariantType>()
+        || shape.is::<crate::ValueUnionType>();
     aggregate && compatible(ctx, source, target, source_values, &mut HashSet::new())
 }
 

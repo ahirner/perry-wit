@@ -24,6 +24,11 @@ impl<'s> FunctionBuilder<'s> {
             self.variant_guards.assign_as(id, Discriminant::TypeOf, tag);
         } else if let Some(tag) = self.literal_tag(ctx, expr, assigned) {
             self.variant_guards.assign_as(id, Discriminant::Tag, tag);
+        } else if assigned.get_type(ctx).deref(ctx).is::<ArrayType>()
+            && !self.shapes.global_ids.contains(&id)
+        {
+            self.variant_guards
+                .assign_as(id, Discriminant::TypeOf, "object");
         } else {
             self.variant_guards.assign(id);
         }
@@ -53,7 +58,22 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         value: Value,
     ) -> Result<Value> {
-        let ty = present_type(ctx, value.get_type(ctx));
+        let source = value.get_type(ctx);
+        let ty = present_type(ctx, source);
+        if ty.deref(ctx).is::<ArrayType>()
+            && absence(ctx, source) == Some(perry_mir::Absence::Undefined)
+            && let Expr::LocalGet(id) = expr
+            && !self.shapes.global_ids.contains(id)
+            && self
+                .variant_guards
+                .tags(
+                    &perry_frontend::narrowing::Path::local(*id),
+                    Discriminant::TypeOf,
+                )
+                .any(|(tag, equal)| (tag == "undefined") != equal)
+        {
+            return self.defined(ctx, value);
+        }
         if !crate::value_unions::is_value_union(ctx, ty) {
             return Ok(value);
         }

@@ -568,6 +568,14 @@ export function labels(values: string[], replace: boolean): string[] {
             },
         )?;
     }
+    let unguarded = Standard.component(
+        "package test:optional; world check {export run: func(parts: option<list<string>>) -> list<list<u8>>;}",
+        "check",
+        "optional.ts",
+        "export function run(parts: string[] | undefined): (string | Uint8Array)[] { return parts; }",
+    ).expect_err("a required byte list needs a defined source")
+        .downcast::<perry_wit::CompileError>()?;
+    assert_eq!(unguarded.primary().code(), perry_wit::codes::TYPE_MISMATCH);
     let labels = ["é"].as_slice();
     component.check(
         "labels",

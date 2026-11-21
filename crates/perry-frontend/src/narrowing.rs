@@ -160,10 +160,12 @@ impl<'s> Guards<'s> {
         }
     }
 
-    /// Record that `left === right` is `equal` when one side is a tag or `typeof` of a path
-    /// and the other a string.
+    /// Record comparisons of a path with `undefined`, or its tag or `typeof` with a string.
     pub fn equality(&mut self, left: &'s Expr, right: &'s Expr, equal: bool) {
-        let (object, tag, discriminant) = match (left, right) {
+        let (object, tag, discriminant): (&Expr, &str, _) = match (left, right) {
+            (expr, Expr::Undefined) | (Expr::Undefined, expr) => {
+                (expr, "undefined", Discriminant::TypeOf)
+            }
             (
                 Expr::PropertyGet {
                     object, property, ..
@@ -181,7 +183,7 @@ impl<'s> Guards<'s> {
             _ => return,
         };
         if let Some(path) = path(object) {
-            self.push(path, tag.as_str(), equal, discriminant);
+            self.push(path, tag, equal, discriminant);
         }
     }
 

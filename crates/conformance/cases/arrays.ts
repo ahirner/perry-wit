@@ -170,8 +170,18 @@ function recordArrayLoop(x: number): number {
 for (const x of [0, 3, 100, 5000]) console.log("record-array-loop", x, recordArrayLoop(x));
 
 type TextOrBytes = string | Uint8Array;
+function guardedAlias(labels: string[] | undefined): number {
+  const maybe: TextOrBytes[] | undefined = labels;
+  if (labels === undefined) return maybe === undefined ? 0 : -1;
+  const writable: TextOrBytes[] = labels;
+  writable[0] = new Uint8Array(3);
+  return labels[0].length;
+}
 function storedAlias(): void {
-  const labels: string[] = ["é"];
+  let labels: string[] | undefined = undefined;
+  const before: TextOrBytes[] | undefined = labels;
+  labels = ["é"];
+  console.log(before === undefined, guardedAlias(undefined), guardedAlias(["é"]));
   const names: string[] = ["aba"];
   const saved = new Map<number, string[]>();
   saved.set(1, labels);
