@@ -315,6 +315,9 @@ fn build_with_storage<'s>(
     let mut register_class = |source, projected| {
         if let Some(class) = shapes.class_of_type(ctx, source) {
             shapes.class_records.borrow_mut().insert(projected, class);
+            true
+        } else {
+            false
         }
     };
     use perry_mir::SourceBinding;

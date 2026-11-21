@@ -111,7 +111,7 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> Result<Option<TypeHandle>> {
-        self.cell_layout(ctx, ty, cell, LayoutRule::Numeric, &mut |_, _| {})
+        self.cell_layout(ctx, ty, cell, LayoutRule::Numeric, &mut |_, _| true)
     }
 
     pub(super) fn cell_layout(
@@ -120,11 +120,11 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
         rule: LayoutRule,
-        record: &mut dyn FnMut(TypeHandle, TypeHandle),
+        nominal: &mut dyn FnMut(TypeHandle, TypeHandle) -> bool,
     ) -> Result<Option<TypeHandle>> {
         let nodes = LayoutPlanner::nodes(ctx, &self.heap, ty, cell, rule);
         LayoutPlan::new(nodes)
-            .map(|plan| plan.materialize(ctx, 0, &mut HashMap::new(), record))
+            .map(|plan| plan.materialize(ctx, 0, &mut HashMap::new(), nominal))
             .transpose()
     }
 
@@ -266,20 +266,21 @@ impl LayoutPlan {
         &self,
         ctx: &Context,
         node: usize,
-        constructed: &mut HashMap<usize, TypeHandle>,
-        record: &mut dyn FnMut(TypeHandle, TypeHandle),
+        constructed: &mut HashMap<usize, (TypeHandle, bool)>,
+        nominal: &mut dyn FnMut(TypeHandle, TypeHandle) -> bool,
     ) -> Result<TypeHandle> {
-        if let Some(&ty) = constructed.get(&node) {
-            return Ok(ty);
+        if let Some((ty, referenced)) = constructed.get_mut(&node) {
+            *referenced = true;
+            return Ok(*ty);
         }
         match &self.nodes[node] {
             LayoutNode::Keep(ty) | LayoutNode::Replace(ty) => Ok(*ty),
             LayoutNode::Optional { absence, inner } => {
-                let inner = self.materialize(ctx, *inner, constructed, record)?;
+                let inner = self.materialize(ctx, *inner, constructed, nominal)?;
                 Ok(crate::types::OptionalType::get_with(ctx, inner, *absence).into())
             }
             LayoutNode::Array(element) => {
-                let element = self.materialize(ctx, *element, constructed, record)?;
+                let element = self.materialize(ctx, *element, constructed, nominal)?;
                 Ok(ArrayType::get(ctx, element).into())
             }
             LayoutNode::Record {
@@ -295,13 +296,18 @@ impl LayoutPlan {
                 let kind = ty.deref(ctx).kind();
                 let reserved: TypeHandle =
                     RecordType::get_kind(ctx, name.clone(), None, kind)?.into();
-                constructed.insert(node, reserved);
-                record((*ty).into(), reserved);
+                constructed.insert(node, (reserved, false));
                 let mut fields = ty.deref(ctx).fields()?.to_vec();
                 for ((_, ty), &child) in fields.iter_mut().zip(children) {
-                    *ty = self.materialize(ctx, child, constructed, record)?;
+                    *ty = self.materialize(ctx, child, constructed, nominal)?;
                 }
-                Ok(RecordType::get_kind(ctx, name, Some(fields), kind)?.into())
+                let layout = if nominal((*ty).into(), reserved) || constructed[&node].1 {
+                    RecordType::get_kind(ctx, name, Some(fields), kind)?
+                } else {
+                    RecordType::structural(ctx, kind, fields)?
+                };
+                constructed.insert(node, (layout.into(), false));
+                Ok(layout.into())
             }
         }
     }

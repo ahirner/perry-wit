@@ -25,7 +25,22 @@ function firstIs(items: WitInput<Uint8Array>[], seed: Uint8Array): boolean {
 
 function keep<T>(items: T[]): T[] { return items; }
 
+interface Pair { left: string[]; right: string[] }
+interface Left { left: WitInput<Uint8Array>[]; right: string[] }
+interface Right { left: string[]; right: WitInput<Uint8Array>[] }
+
+function replaceFields(pair: Pair): void {
+  const left: Left = pair;
+  const right: Right = pair;
+  left.left = [new Uint8Array(4)];
+  right.right = [new Uint8Array(3)];
+  console.log(left === right, pair.left[0].length, pair.right[0].length);
+}
+
 function check(): void {
+  const pair: Pair = { left: ["é"], right: ["a"] };
+  replaceFields(pair);
+  console.log(pair.left[0].length, pair.right[0].length);
   const seed = new Uint8Array(3);
   const parts: Parts = { items: [seed] };
   const inputs: Inputs = parts;

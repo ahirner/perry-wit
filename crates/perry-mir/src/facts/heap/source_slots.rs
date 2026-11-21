@@ -76,18 +76,11 @@ impl ProgramFacts {
         &self,
         ctx: &Context,
         binding: SourceBinding<'_>,
-        record: &mut dyn FnMut(TypeHandle, TypeHandle),
+        nominal: &mut dyn FnMut(TypeHandle, TypeHandle) -> bool,
     ) -> Result<Option<TypeHandle>> {
         let (ty, cell) = match binding {
             SourceBinding::Local(value) => {
-                let Some(function) = value
-                    .get_parent_block(ctx)
-                    .and_then(|block| block.deref(ctx).get_parent_op(ctx))
-                else {
-                    return Ok(None);
-                };
-                let Some(&cell) = self.states[self.generic[&function]].heap_values.get(&value)
-                else {
+                let Some(cell) = self.generic_heap_cell(ctx, value) else {
                     return Ok(None);
                 };
                 (self.heap.cells[cell].ty, cell)
@@ -109,6 +102,6 @@ impl ProgramFacts {
                 (ty, cell)
             }
         };
-        self.cell_layout(ctx, ty, cell, specialize::LayoutRule::Source, record)
+        self.cell_layout(ctx, ty, cell, specialize::LayoutRule::Source, nominal)
     }
 }

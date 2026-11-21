@@ -83,6 +83,14 @@ impl HeapFacts {
 }
 
 impl ProgramFacts {
+    fn generic_heap_cell(&self, ctx: &Context, value: Value) -> Option<usize> {
+        let function = value.get_parent_block(ctx)?.deref(ctx).get_parent_op(ctx)?;
+        self.states[*self.generic.get(&function)?]
+            .heap_values
+            .get(&value)
+            .copied()
+    }
+
     /// Whether the program may create array holes at all.
     pub fn has_array_holes(&self) -> bool {
         self.has_array_holes
@@ -93,16 +101,7 @@ impl ProgramFacts {
         if !self.has_array_holes {
             return true;
         }
-        let Some(parent) = array
-            .get_parent_block(ctx)
-            .and_then(|block| block.deref(ctx).get_parent_op(ctx))
-        else {
-            return false;
-        };
-        let Some(&id) = self.generic.get(&parent) else {
-            return false;
-        };
-        let Some(&base) = self.states[id].heap_values.get(&array) else {
+        let Some(base) = self.generic_heap_cell(ctx, array) else {
             return false;
         };
         let cell = &self.heap.cells[base];
