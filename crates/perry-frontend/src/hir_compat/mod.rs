@@ -220,6 +220,19 @@ function builtin() { return new Set<string>(); }
     }
 }
 
+/// A key known without executing a computed property expression.
+pub fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
+    use perry_hir::ir::ObjectPart;
+    match part {
+        ObjectPart::Define(name, _) => Some(name),
+        ObjectPart::Computed { key, .. } => match &**key {
+            Expr::String(name) => Some(name),
+            _ => None,
+        },
+        ObjectPart::Spread(_) => None,
+    }
+}
+
 /// Object fields retained across Perry's duplicate-key and literal-class desugarings.
 pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
     expr: &'s Expr,
@@ -227,7 +240,9 @@ pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
 ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s, F>> {
     let (fields, defined, names, args) = match expr {
         Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
-        Expr::ObjectSpread { parts } if parts.iter().all(|(key, _)| key.is_some()) => {
+        Expr::ObjectSpread { parts }
+            if parts.iter().all(|part| static_property(part).is_some()) =>
+        {
             (&[][..], &parts[..], &[][..], &[][..])
         }
         Expr::New {
@@ -242,7 +257,7 @@ pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
             .chain(
                 defined
                     .iter()
-                    .filter_map(|(name, value)| Some((name.as_deref()?, value))),
+                    .filter_map(|part| Some((static_property(part)?, part.value()))),
             )
             .chain(names.iter().copied().zip(args)),
     )
