@@ -271,7 +271,7 @@ impl Instances<'_> {
             }
             Ok(())
         })?;
-        walk::scan(body, env, &mut None, None);
+        walk::scan(body, env, None, None);
         walk::visit_body(body, &mut |node: Node<'_>| {
             if let Node::Expression(expr) = node {
                 self.call(expr, caller, env)?;

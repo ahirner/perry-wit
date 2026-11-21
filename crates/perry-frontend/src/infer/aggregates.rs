@@ -437,7 +437,7 @@ pub(super) fn resolve(
     let mut constraints = Constraints::default();
     let mut locals = HashMap::new();
     let mut collect = |body: &mut [Stmt], mut env: FunctionEnv<'_>| {
-        walk::scan(body, &mut env, &mut None, None);
+        walk::scan(body, &mut env, None, None);
         let Ok(()) = walk::visit_body(
             body,
             &mut Collect {

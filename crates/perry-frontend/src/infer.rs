@@ -189,7 +189,7 @@ fn infer_body_return(
             push_return_type(&mut types, ty, decls);
         }
     };
-    walk::scan(body, env, &mut Some(&mut collect), None);
+    walk::scan(body, env, Some(&mut collect), None);
     if unresolved {
         return false;
     }

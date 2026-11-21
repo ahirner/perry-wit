@@ -1,5 +1,6 @@
 //! Explicit, checked JSON schema conversion into ordinary native aggregates.
 use super::*;
+use crate::hir::ir::ObjectPart;
 use perry_mir::JsonSchema;
 
 /// Accepted deviation: JSON revivers and indentation are diagnosed at compile time.
@@ -146,16 +147,22 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn object_spread(
         &mut self,
         ctx: &mut Context,
-        parts: &'s [(Option<String>, Expr)],
+        parts: &'s [ObjectPart],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let expected_record = expected
             .map(|ty| present_type(ctx, ty))
             .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))
             .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object);
+        if parts
+            .iter()
+            .any(|part| part.defines_key() && hir_compat::static_property(part).is_none())
+        {
+            bail_unsupported!("computed object spread properties require a static string key");
+        }
         let mut remaining = parts;
         let mut initial = None;
-        if let Some((None, first_spread)) = parts.first() {
+        if let Some(ObjectPart::Spread(first_spread)) = parts.first() {
             let first_src = self.expression(ctx, first_spread)?;
             let is_exc = matches!(kind(ctx, first_src), Ok(Kind::Exception));
             let first_json = if is_exc {
@@ -168,7 +175,7 @@ impl<'s> FunctionBuilder<'s> {
                     || (!is_exc
                         && parts[1..]
                             .iter()
-                            .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some())))
+                            .all(|part| part.defines_key() || self.peek_record_type(ctx, part.value()).is_some())))
             {
                 return self.record_object_spread(ctx, parts, Some(first_src), expected_record);
             }
@@ -177,14 +184,14 @@ impl<'s> FunctionBuilder<'s> {
             }
             remaining = &parts[1..];
         } else if (expected_record.is_some()
-            && !parts.iter().any(|(k, v)| {
-                k.is_none()
-                    && matches!(v, Expr::LocalGet(id) if self.locals.get(id).and_then(|l| self.slot_type(ctx, l.slot).ok()).is_some_and(|ty| present_type(ctx, ty).deref(ctx).is::<JsonType>()))
+            && !parts.iter().any(|part| {
+                !part.defines_key()
+                    && matches!(part.value(), Expr::LocalGet(id) if self.locals.get(id).and_then(|l| self.slot_type(ctx, l.slot).ok()).is_some_and(|ty| present_type(ctx, ty).deref(ctx).is::<JsonType>()))
             }))
-            || (parts.iter().any(|(k, _)| k.is_none())
+            || (parts.iter().any(|part| !part.defines_key())
                 && parts
                     .iter()
-                    .all(|(k, v)| k.is_some() || self.peek_record_type(ctx, v).is_some()))
+                    .all(|part| part.defines_key() || self.peek_record_type(ctx, part.value()).is_some()))
         {
             return self.record_object_spread(ctx, parts, None, expected_record);
         }
@@ -192,8 +199,9 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(source) = initial {
             self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
         }
-        for (key, value) in remaining {
-            if let Some(key) = key {
+        for part in remaining {
+            let value = part.value();
+            if let Some(key) = hir_compat::static_property(part) {
                 let key = self.string(ctx, key);
                 let value = self.json_value(ctx, value)?;
                 self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
