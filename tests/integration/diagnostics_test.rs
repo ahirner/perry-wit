@@ -414,7 +414,6 @@ fn unsupported_forms_have_exact_diagnostics() {
     };
     const REGEX_CONST: &str = "case.ts:1:8: error[unsupported-regex]: ";
     let cases = [
-        (iteration("new Headers()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; this receiver has no supported iterator".into()),
         (iteration("new URLSearchParams()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported".into()),
         ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), "case.ts:1:40: error[unsupported-construct]: String.prototype.replaceAll called with a non-global RegExp argument".into()),
         ("class A {} class B extends A {} export function run(): number { return 0; }".into(), "error[unsupported-construct]: class B extends A: class inheritance is not supported yet".into()),

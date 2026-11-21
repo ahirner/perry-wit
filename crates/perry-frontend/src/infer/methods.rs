@@ -183,31 +183,27 @@ pub(super) fn result<'s>(
         }
         MethodResult::Number => HirType::Number,
         MethodResult::Boolean => HirType::Boolean,
-        MethodResult::Duration => HirType::Object(perry_hir::types::ObjectType {
-            name: None,
-            properties: [
-                ("blank", HirType::Boolean),
-                ("days", HirType::Number),
-                ("months", HirType::Number),
-                ("sign", HirType::Number),
-                ("weeks", HirType::Number),
-                ("years", HirType::Number),
-            ]
-            .into_iter()
-            .map(|(name, ty)| {
-                (
-                    name.into(),
-                    perry_hir::types::PropertyInfo {
-                        ty,
-                        optional: false,
-                        readonly: false,
-                    },
-                )
-            })
-            .collect(),
-            property_order: None,
-            index_signature: None,
-        }),
+        MethodResult::HeaderStep => {
+            let source = strip_nullish(expression(object, env)).0;
+            let item = if matches!(&source, HirType::Named(name) if name == Kind::HeaderStrings.label())
+            {
+                HirType::String
+            } else {
+                HirType::Tuple(vec![HirType::String, HirType::String])
+            };
+            object_result([
+                ("done", HirType::Boolean),
+                ("value", with_absences(item, Absence::Undefined)),
+            ])
+        }
+        MethodResult::Duration => object_result([
+            ("blank", HirType::Boolean),
+            ("days", HirType::Number),
+            ("months", HirType::Number),
+            ("sign", HirType::Number),
+            ("weeks", HirType::Number),
+            ("years", HirType::Number),
+        ]),
         MethodResult::Lookup => match strip_nullish(expression(object, env)).0 {
             HirType::Generic { base, type_args }
                 if matches!(base.as_str(), "Map" | "ReadonlyMap") =>
@@ -220,6 +216,27 @@ pub(super) fn result<'s>(
             _ => perry_hir::infer_expr_type(expr, env),
         },
     }
+}
+
+fn object_result<const N: usize>(properties: [(&str, HirType); N]) -> HirType {
+    HirType::Object(perry_hir::types::ObjectType {
+        name: None,
+        properties: properties
+            .into_iter()
+            .map(|(name, ty)| {
+                (
+                    name.into(),
+                    perry_hir::types::PropertyInfo {
+                        ty,
+                        optional: false,
+                        readonly: false,
+                    },
+                )
+            })
+            .collect(),
+        property_order: None,
+        index_signature: None,
+    })
 }
 
 pub(super) fn map_group_by(items: &Expr, key_fn: &Expr, env: &mut FunctionEnv<'_>) -> HirType {

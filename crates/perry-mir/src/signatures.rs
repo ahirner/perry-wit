@@ -110,6 +110,9 @@ type_kinds! {
     OptBytes = OptionalType::get(ctx, Ty::Bytes.get(ctx)).into(),
         accepts optional_of(ctx, ty, Ty::Bytes);
     Headers = HeadersType::get(ctx).into();
+    HeaderStrings = crate::types::HeaderStringsType::get(ctx).into();
+    HeaderEntries = crate::types::HeaderEntriesType::get(ctx).into();
+    HeaderCursor = Ty::HeaderEntries.get(ctx), accepts ty == Ty::HeaderEntries.get(ctx) || ty == Ty::HeaderStrings.get(ctx);
     Response = ResponseType::get(ctx).into();
     Request = RequestType::get(ctx).into();
     Writable = WritableType::get(ctx).into();

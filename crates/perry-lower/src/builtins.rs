@@ -26,12 +26,16 @@ impl<'s> FunctionBuilder<'s> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
         if method == hir_compat::Method::Iteration {
+            if kind(ctx, receiver)? == Kind::Headers {
+                return self
+                    .collection_iterator(ctx, receiver, crate::collections::IteratorMethod::Entries)
+                    .map(Some);
+            }
             ensure_unsupported!(
-                matches!(kind(ctx, receiver)?, Kind::Array | Kind::String)
-                    || crate::collections::is_collection_or_view_record(
-                        ctx,
-                        receiver.get_type(ctx)
-                    ),
+                matches!(
+                    kind(ctx, receiver)?,
+                    Kind::Array | Kind::String | Kind::HeaderEntries | Kind::HeaderStrings
+                ) || crate::collections::is_collection_or_view_record(ctx, receiver.get_type(ctx)),
                 "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
             );
             return Ok(Some(receiver));

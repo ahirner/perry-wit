@@ -146,7 +146,7 @@ macro_rules! method_catalog {
             Receiver::Value(Kind::Bytes), "method" {
                 BytesSet "set" Void Upstream Method [args:rest] => optional(bytes_set(args)), "needs a source and optional offset";
             }
-            Receiver::Map | Receiver::Set | Receiver::Value(Kind::Array), "method" {
+            Receiver::Map | Receiver::Set | Receiver::Value(Kind::Array | Kind::Headers), "method" {
                 CollectionKeys "keys" IteratorKeys Upstream Method [] => value(iterator_method(IteratorMethod::Keys)), "takes no arguments";
                 CollectionValues "values" IteratorValues Upstream Method [] => value(iterator_method(IteratorMethod::Values)), "takes no arguments";
                 CollectionEntries "entries" IteratorEntries Upstream Method [] => value(iterator_method(IteratorMethod::Entries)), "takes no arguments";
@@ -169,7 +169,11 @@ macro_rules! method_catalog {
                 TemporalAdd "add" Receiver Upstream Method [duration, options:optional] => optional(temporal_add(duration, options, false)), "takes a duration object and optional options";
                 TemporalSubtract "subtract" Receiver Upstream Method [duration, options:optional] => optional(temporal_add(duration, options, true)), "takes a duration object and optional options";
             }
+            Receiver::Value(Kind::HeaderEntries | Kind::HeaderStrings), "Headers iterator" {
+                HeaderNext "next" HeaderStep Always Method [] => value(header_next()), "takes no arguments";
+            }
             Receiver::Value(Kind::Headers), "Headers" {
+                HeadersForEach "forEach" Void Always Method [callback] => value(headers_for_each(callback)), "requires one callback";
                 HeadersAppend "append" Void Upstream Method [name, value] => intrinsic(HeadersAppend, [name, value], [Required(Kind::String, "a string"), Required(Kind::String, "a string")], Undefined), "requires 2 string arguments";
                 HeadersSet "set" Void Upstream Method [name, value] => intrinsic(HeadersSet, [name, value], [Required(Kind::String, "a string"), Required(Kind::String, "a string")], Undefined), "requires 2 string arguments";
                 HeadersDelete "delete" Void Upstream Method [name] => intrinsic(HeadersDelete, [name], [Required(Kind::String, "a string")], Undefined), "requires 1 string arguments";

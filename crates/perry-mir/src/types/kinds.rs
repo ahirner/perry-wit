@@ -57,6 +57,8 @@ value_types! {
         StatsType("perry.stats", []);
         /// A Fetch `Headers` list.
         HeadersType("perry.headers", ["Headers"]);
+        HeaderEntriesType("perry.header_entries", ["$$HeadersEntries"]);
+        HeaderStringsType("perry.header_strings", ["$$HeadersStrings"]);
         /// A Fetch `Response`.
         ResponseType("perry.response", ["Response"]);
         /// A Fetch `Request`.

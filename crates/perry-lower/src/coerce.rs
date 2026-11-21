@@ -81,6 +81,8 @@ impl KindExt for Kind {
             Date => DateType,
             Stats => StatsType,
             Headers => HeadersType,
+            HeaderEntries => HeaderEntriesType,
+            HeaderStrings => HeaderStringsType,
             Response => ResponseType,
             Request => RequestType,
             Writable => WritableType,

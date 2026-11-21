@@ -213,6 +213,45 @@ impl<'s> FunctionBuilder<'s> {
         Ok((self.optional(ctx, value), text))
     }
 
+    pub(super) fn header_item(&mut self, ctx: &mut Context, cursor: Value) -> Result<Value> {
+        let value = self.intrinsic(ctx, Intrinsic::HeaderValue, vec![cursor]);
+        if kind(ctx, cursor)? == Kind::HeaderStrings {
+            return Ok(value);
+        }
+        let key = self.intrinsic(ctx, Intrinsic::HeaderKey, vec![cursor]);
+        self.pair(ctx, key, value)
+    }
+
+    pub(super) fn header_next(&mut self, ctx: &mut Context, cursor: Value) -> Result<Value> {
+        let string = StringType::get(ctx).into();
+        let item = if kind(ctx, cursor)? == Kind::HeaderStrings {
+            string
+        } else {
+            self.shapes.pair_type(ctx, string, string)?.into()
+        };
+        let optional = perry_mir::OptionalType::get(ctx, item).into();
+        let present = self.intrinsic(ctx, Intrinsic::HeaderAdvance, vec![cursor]);
+        let value = self.choose(
+            ctx,
+            optional,
+            present,
+            |b, ctx| {
+                let item = b.header_item(ctx, cursor)?;
+                Ok(b.optional(ctx, item))
+            },
+            |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, optional))),
+        )?;
+        let done = self.not(ctx, present);
+        let record = self.shapes.mir_record(
+            ctx,
+            vec![
+                ("done".into(), done.get_type(ctx)),
+                ("value".into(), optional),
+            ],
+        )?;
+        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![done, value])))
+    }
+
     /// A property (`args` is `None`) or method of `Headers`, `Response` or `Request`.
     pub(super) fn web_member(
         &mut self,
@@ -272,6 +311,16 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
+        if hir_compat::method(method) == hir_compat::Method::Iteration
+            && kind(ctx, receiver)? == Kind::Headers
+        {
+            return self.collection_iterator(
+                ctx,
+                receiver,
+                crate::collections::IteratorMethod::Entries,
+            );
+        }
+        let method = hir_compat::method(method).name();
         let property = hir_compat::native_member_is_property(
             crate::methods::Receiver::of(ctx, receiver)?,
             method,

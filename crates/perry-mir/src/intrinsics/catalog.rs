@@ -364,6 +364,11 @@ macro_rules! intrinsic_catalog {
                 WebFetchClose = "web_fetch_close" ();
                 WebFetchEvent = "web_fetch_event" (I32, I32, I32) -> I32;
                 WebFetchPending = "web_fetch_pending" () -> I32;
+                WebHeadersIterator = "web_headers_iterator" [HeaderEntries = "header_entries" (Headers, Index) -> (HeaderEntries), Effectful, Conservative;
+                    HeaderStrings = "header_strings" (Headers, Index) -> (HeaderStrings), Effectful, Conservative;];
+                WebHeadersAdvance = "web_headers_advance" [HeaderAdvance = "header_advance" (HeaderCursor) -> (Bool), Effectful, Conservative;];
+                WebHeadersKey = "web_headers_key" [HeaderKey = "header_key" (HeaderCursor) -> (String), Effectful, None;];
+                WebHeadersValue = "web_headers_value" [HeaderValue = "header_value" (HeaderCursor) -> (String), Effectful, None;];
                 WebHeadersAppend = "web_headers_append" [HeadersAppend = "headers_append" (Headers, String, String) -> (), Throws, Conservative;];
                 WebHeadersCopy = "web_headers_copy" [HeadersCopy = "headers_copy" (Headers) -> (Headers), Effectful, Conservative;];
                 WebHeadersDelete = "web_headers_delete" [HeadersDelete = "headers_delete" (Headers, String) -> (), Throws, Conservative;];

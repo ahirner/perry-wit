@@ -260,6 +260,9 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 Ok(self.intrinsic(ctx, intrinsic, vec![array, index]))
             }
+            Kind::HeaderEntries | Kind::HeaderStrings if matches!(object, Expr::LocalGet(id) if self.iteration.is_for_of_source(*id)) => {
+                self.header_item(ctx, array)
+            }
             Kind::Record if is_collection_or_view_record(ctx, ty) => {
                 let idx = self.number_operand(ctx, index)?;
                 self.collection_view_element_at(ctx, array, idx)

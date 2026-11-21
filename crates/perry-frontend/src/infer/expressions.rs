@@ -662,6 +662,13 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
 /// fresh array of indices, elements, or `[index, element]` pairs), or `None` for other receivers.
 pub(super) fn iterator_view(source: HirType, method: IteratorMethod) -> Option<HirType> {
     match source {
+        HirType::Named(name) if name == "Headers" => Some(HirType::Named(
+            match method {
+                IteratorMethod::Entries => "$$HeadersEntries",
+                IteratorMethod::Keys | IteratorMethod::Values => "$$HeadersStrings",
+            }
+            .into(),
+        )),
         HirType::Generic { base, type_args }
             if matches!(base.as_str(), "Map" | "ReadonlyMap") && type_args.len() == 2 =>
         {

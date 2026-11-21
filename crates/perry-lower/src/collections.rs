@@ -354,6 +354,15 @@ impl<'s> FunctionBuilder<'s> {
         method: IteratorMethod,
     ) -> Result<Value> {
         let ty = receiver.get_type(ctx);
+        if kind(ctx, receiver)? == Kind::Headers {
+            let (intrinsic, projection) = match method {
+                IteratorMethod::Entries => (Intrinsic::HeaderEntries, 0),
+                IteratorMethod::Keys => (Intrinsic::HeaderStrings, 1),
+                IteratorMethod::Values => (Intrinsic::HeaderStrings, 2),
+            };
+            let projection = self.i32(ctx, projection);
+            return Ok(self.intrinsic(ctx, intrinsic, vec![receiver, projection]));
+        }
         if set_box_record(ctx, ty).is_some() {
             return self.alloc_collection_view(ctx, receiver, method.set_view());
         }

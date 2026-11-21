@@ -6,6 +6,7 @@ use crate::*;
 #[repr(C)]
 pub(crate) struct Headers {
     fields: Buffer,
+    revision: u64,
 }
 
 fn field_buffer() -> Buffer {
@@ -18,6 +19,12 @@ fn headers<'a>(h: *mut u8) -> &'a mut Headers {
     unsafe { &mut *(h as *mut Headers) }
 }
 
+fn field_parts(field: &[u8; 16]) -> (&'static [u8], &'static [u8]) {
+    // SAFETY: each descriptor points to the immutable name and value traced by its header list.
+    let [n, nl, v, vl] = unsafe { field.as_ptr().cast::<[u32; 4]>().read_unaligned() };
+    unsafe { (slice(n, nl), slice(v, vl)) }
+}
+
 impl Headers {
     fn fields(&self) -> impl Iterator<Item = (&'static [u8], &'static [u8])> + '_ {
         self.fields
@@ -25,13 +32,11 @@ impl Headers {
             .as_chunks::<16>()
             .0
             .iter()
-            .map(|field| unsafe {
-                let [n, nl, v, vl] = *(field.as_ptr() as *const [u32; 4]);
-                (slice(n, nl), slice(v, vl))
-            })
+            .map(field_parts)
     }
 
     fn push(&mut self, name: &[u8], value: &[u8]) {
+        self.revision += 1;
         for word in [
             name.as_ptr() as u32,
             name.len() as u32,
@@ -58,6 +63,7 @@ impl Headers {
             }
         }
         self.fields = kept;
+        self.revision += 1;
     }
 }
 
@@ -69,6 +75,7 @@ pub(crate) extern "C" fn web_headers_new() -> *mut u8 {
     unsafe {
         h.write(Headers {
             fields: field_buffer(),
+            revision: 0,
         })
     };
     h as *mut u8
@@ -165,7 +172,9 @@ pub(crate) extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8
         }
     }
     list.fields = replaced;
-    if !found {
+    if found {
+        list.revision += 1;
+    } else {
         list.push(key, text);
     }
 }
@@ -176,29 +185,53 @@ pub(crate) extern "C" fn web_headers_get(h: *mut u8, key: *mut u8) -> *mut u8 {
     let Some(key) = name(b"Headers.get", key) else {
         return core::ptr::null_mut();
     };
-    let mut joined = Buffer::new();
-    let mut found = false;
-    for (name, value) in headers(h).fields() {
-        if name != key {
-            continue;
+    values_string(
+        headers(h)
+            .fields()
+            .filter_map(|(name, value)| (name == key).then_some(value)),
+    )
+}
+
+fn values_string(mut values: impl Iterator<Item = &'static [u8]>) -> *mut u8 {
+    let Some(first) = values.next() else {
+        return core::ptr::null_mut();
+    };
+    let second = values.next();
+    if second.is_none() && first.is_ascii() {
+        if first.is_empty() {
+            return from_static(perry_rt_sys::static_text!(""));
         }
-        if found {
+        // The string header traces the immutable ASCII value already owned by Headers.
+        return unsafe {
+            perry_rt_sys::adopt_counted(
+                first.as_ptr().cast_mut(),
+                first.len() as u32,
+                first.len() as u32,
+            )
+        };
+    }
+    let mut joined = Buffer::new();
+    for (index, value) in core::iter::once(first)
+        .chain(second)
+        .chain(values)
+        .enumerate()
+    {
+        if index > 0 {
             joined.extend_from_slice(b", ");
         }
-        found = true;
         for &byte in value {
             if byte < 0x80 {
                 joined.push(byte);
             } else {
-                joined.extend_from_slice(&[0xC0 | (byte >> 6), 0x80 | (byte & 0x3F)]);
+                joined.extend_from_slice(&[0xc0 | (byte >> 6), 0x80 | (byte & 0x3f)]);
             }
         }
     }
-    if !found {
-        return core::ptr::null_mut();
-    }
-    from_bytes(joined.as_slice())
+    // SAFETY: every Latin-1 byte was encoded as one UTF-8 scalar.
+    unsafe { joined.into_string() }
 }
+
+mod iteration;
 
 /// `headers.has(name)`.
 #[unsafe(no_mangle)]

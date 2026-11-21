@@ -56,10 +56,53 @@ export async function run(url: string) {
     reader.releaseLock();
   }
   const missing = await fetch(url + '/missing', { headers: {} });
-  return text + '|' + posted.status + '|' + used + '|' + posted.headers.get('x-reply') + '|' +
+  const forwarded = new Headers();
+  posted.headers.forEach((value, key) => { forwarded.append(key, value); });
+  return text + '|' + posted.status + '|' + used + '|' + forwarded.get('x-reply') + '|' +
     bytes.length + '|' + count + '|' + streamed.bodyUsed + '|' + missing.status + '|' + missing.ok;
 }
 "#;
+
+#[test]
+fn headers_iterate_in_fetch_order_and_observe_mutations() -> Result<()> {
+    crate::node_oracle::assert_numbers(
+        r#"
+export function run():number {
+  const headers=new Headers();
+  headers.append('X-Custom','one');
+  headers.append('Set-Cookie','a=1');
+  headers.append('x-custom','twó');
+  headers.append('Set-Cookie','b=2');
+  let pairs='';
+  for(const [name,value] of headers) pairs+=name+'='+value+';';
+  if(pairs!=='set-cookie=a=1;set-cookie=b=2;x-custom=one, twó;')return 1;
+  const keys=headers.keys();
+  const first=keys.next().value;
+  let rest='';
+  for(const key of keys)rest+=key+';';
+  if(first!=='set-cookie'||rest!=='set-cookie;x-custom;')return 2;
+  const end=keys.next(); if(!end.done||end.value!==undefined)return 6;
+  let values='';
+  for(const value of headers.values())values+=value+';';
+  if(values!=='a=1;b=2;one, twó;')return 3;
+  let entries='';
+  for(const [name,value] of headers.entries())entries+=name+'='+value+';';
+  if(entries!==pairs)return 4;
+  const step=headers.entries().next();
+  const pair=step.value;
+  if(step.done||pair===undefined||pair[0]!=='set-cookie'||pair[1]!=='a=1')return 7;
+  const h=new Headers({a:'1',c:'3'});
+  let called='';
+  h.forEach((value,key,owner)=>{
+    called+=key+'='+value+';';
+    if(key==='a'){owner.append('b','2');owner.set('c','four');}
+  });
+  return called==='a=1;b=2;c=four;'?0:5;
+}
+"#,
+        &[("run", &[], 0.0)],
+    )
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn fetch_sends_requests_and_reads_responses() -> Result<()> {

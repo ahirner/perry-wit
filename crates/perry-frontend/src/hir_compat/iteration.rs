@@ -4,6 +4,7 @@ use super::*;
 #[derive(Default)]
 pub struct Iteration {
     guards: HashSet<LocalId>,
+    for_of_sources: HashSet<LocalId>,
     released: HashSet<LocalId>,
     positions: HashMap<LocalId, usize>,
 }
@@ -46,6 +47,17 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
 
 impl Iteration {
     pub fn register_binding(&mut self, id: LocalId, name: &str, init: Option<&Expr>) {
+        let method = match init {
+            Some(Expr::Call { callee, .. }) => match callee.as_ref() {
+                Expr::PropertyGet { property, .. } => Some(property),
+                _ => None,
+            },
+            Some(Expr::NativeMethodCall { method, .. }) => Some(method),
+            _ => None,
+        };
+        if method.is_some_and(|method| method == super::streams::ITERATION) {
+            self.for_of_sources.insert(id);
+        }
         if matches!(
             init.and_then(runtime),
             Some(("arrayRecordIndex", [Expr::Integer(0)]))
@@ -123,6 +135,10 @@ impl Iteration {
 
     pub fn is_release(&self, expr: &Expr) -> bool {
         matches!(expr, Expr::LocalSet(id, value) if self.released.contains(id) && matches!(&**value, Expr::Undefined))
+    }
+
+    pub fn is_for_of_source(&self, id: LocalId) -> bool {
+        self.for_of_sources.contains(&id)
     }
 
     pub fn for_of_loop(&self, condition: Option<&Expr>) -> Option<(LocalId, LocalId)> {

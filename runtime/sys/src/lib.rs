@@ -434,6 +434,30 @@ pub fn insecure_random_u64() -> u64 {
     unsafe { imports::insecure_random_u64() }
 }
 
+/// Iterative bounded-stack heapsort.
+pub fn heap_sort<T>(items: &mut [T], compare: impl Fn(&T, &T) -> core::cmp::Ordering) {
+    let sift = |items: &mut [T], mut root: usize| {
+        while root < items.len() / 2 {
+            let mut child = root * 2 + 1;
+            if child + 1 < items.len() && compare(&items[child], &items[child + 1]).is_lt() {
+                child += 1;
+            }
+            if !compare(&items[root], &items[child]).is_lt() {
+                break;
+            }
+            items.swap(root, child);
+            root = child;
+        }
+    };
+    for root in (0..items.len() / 2).rev() {
+        sift(items, root);
+    }
+    for end in (1..items.len()).rev() {
+        items.swap(0, end);
+        sift(&mut items[..end], 0);
+    }
+}
+
 /// Exclusive growable storage in the module's selected allocation tier.
 /// Callers finish mutation before exposing immutable views, and host borrows acknowledge before reserving capacity.
 #[repr(C)]

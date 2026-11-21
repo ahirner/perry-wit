@@ -10,6 +10,7 @@ pub(super) enum LoopCondition<'s> {
     Before(Option<&'s Expr>),
     After(&'s Expr),
     Indices(Value, LoopBound),
+    HeaderNext(Value),
 }
 
 #[derive(Clone, Copy)]
@@ -278,7 +279,7 @@ impl<'s> FunctionBuilder<'s> {
         let tested = match condition {
             LoopCondition::Before(condition) => condition,
             LoopCondition::After(condition) => Some(condition),
-            LoopCondition::Indices(..) => None,
+            LoopCondition::Indices(..) | LoopCondition::HeaderNext(_) => None,
         };
         let guards = self.variant_guards.depth();
         let closures = &self.closures;
@@ -300,9 +301,24 @@ impl<'s> FunctionBuilder<'s> {
         body: &'s [Stmt],
         label: Option<&'s str>,
     ) -> Result<()> {
+        let mut condition = condition;
+        if let LoopCondition::Before(test) = condition
+            && let Some((_, receiver)) = self.iteration.for_of_loop(test)
+            && self.iteration.is_for_of_source(receiver)
+            && let Ok(slot) = self.local(receiver)
+            && let cursor = self.load(ctx, slot)?
+            && matches!(
+                kind(ctx, cursor)?,
+                Kind::HeaderEntries | Kind::HeaderStrings
+            )
+        {
+            condition = LoopCondition::HeaderNext(cursor);
+        }
         let collection = match condition {
             LoopCondition::Before(condition) => self.collection_loop(ctx, condition)?,
-            LoopCondition::After(_) | LoopCondition::Indices(..) => None,
+            LoopCondition::After(_) | LoopCondition::Indices(..) | LoopCondition::HeaderNext(_) => {
+                None
+            }
         };
         self.repeat(
             ctx,
@@ -321,6 +337,30 @@ impl<'s> FunctionBuilder<'s> {
                 lowered
             },
         )
+    }
+
+    pub(crate) fn headers_for_each(
+        &mut self,
+        ctx: &mut Context,
+        headers: Value,
+        callback: &'s Expr,
+    ) -> Result<Value> {
+        let cursor =
+            self.collection_iterator(ctx, headers, crate::collections::IteratorMethod::Entries)?;
+        self.repeat(
+            ctx,
+            "headers",
+            LoopCondition::HeaderNext(cursor),
+            None,
+            None,
+            |b, ctx, _, _| {
+                let key = b.intrinsic(ctx, Intrinsic::HeaderKey, vec![cursor]);
+                let value = b.intrinsic(ctx, Intrinsic::HeaderValue, vec![cursor]);
+                b.array_callback(ctx, callback, &[value, key, headers])
+            },
+        )?;
+        let ty = void_type(ctx);
+        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
     }
 
     /// The live collection a lowered `for...of` (`for (; i < items.length; …)`) walks, with
@@ -389,6 +429,9 @@ impl<'s> FunctionBuilder<'s> {
             LoopCondition::Before(None | Some(Expr::Bool(true))) => None,
             LoopCondition::Before(Some(condition)) | LoopCondition::After(condition) => {
                 Some(self.condition(ctx, condition)?)
+            }
+            LoopCondition::HeaderNext(cursor) => {
+                Some(self.intrinsic(ctx, Intrinsic::HeaderAdvance, vec![cursor]))
             }
             LoopCondition::Indices(index, bound) => {
                 let current = self.load(ctx, index)?;
