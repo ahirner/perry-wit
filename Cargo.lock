@@ -1412,6 +1412,7 @@ version = "0.5.1663"
 source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 dependencies = [
  "anyhow",
+ "perry-abi 0.5.1663",
  "perry-api-manifest",
  "perry-diagnostics",
  "perry-dispatch",
