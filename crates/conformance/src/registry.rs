@@ -587,6 +587,10 @@ export function run(x: number): {value: number, trace: number[]} {
     }
     for (id, source) in [
         ("ecma.json.command", include_str!("../cases/json.ts")),
+        (
+            "ecma.array.wit-input-aliases",
+            include_str!("../cases/wit_input_aliases.ts"),
+        ),
         ("ecma.command.arrays", include_str!("../cases/arrays.ts")),
         (
             "ecma.command.sparse-arrays",

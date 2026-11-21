@@ -249,24 +249,38 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::Uint8ArrayFrom(source) => self.bytes_from(ctx, BytesCreation::From, source)?,
             Expr::Uint8ArrayGet { array, index } => {
-                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
+                let value = self.expression(ctx, array)?;
+                let value = self.defined(ctx, value)?;
                 let index = self.number_operand(ctx, index)?;
-                self.intrinsic(ctx, Intrinsic::BytesGet, vec![bytes, index])
+                if perry_mir::is_byte_input(ctx, value.get_type(ctx)) {
+                    self.byte_input_index(ctx, value, index)?
+                } else {
+                    let bytes = self.fit(ctx, value, BytesType::get(ctx).into())?;
+                    self.intrinsic(ctx, Intrinsic::BytesGet, vec![bytes, index])
+                }
             }
             Expr::Uint8ArraySet {
                 array,
                 index,
                 value,
             } => {
-                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
+                let bytes = self.expression(ctx, array)?;
+                let bytes = self.defined(ctx, bytes)?;
                 let index = self.number_operand(ctx, index)?;
                 let value = self.number_operand(ctx, value)?;
+                let bytes = self.fit(ctx, bytes, BytesType::get(ctx).into())?;
                 self.intrinsic_void(ctx, Intrinsic::BytesSet, vec![bytes, index, value]);
                 value
             }
             Expr::Uint8ArrayLength(array) => {
-                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
-                self.intrinsic(ctx, Intrinsic::BytesLength, vec![bytes])
+                let value = self.expression(ctx, array)?;
+                let value = self.defined(ctx, value)?;
+                if perry_mir::is_byte_input(ctx, value.get_type(ctx)) {
+                    self.value_union_member(ctx, value, "length")?
+                } else {
+                    let bytes = self.fit(ctx, value, BytesType::get(ctx).into())?;
+                    self.intrinsic(ctx, Intrinsic::BytesLength, vec![bytes])
+                }
             }
             Expr::TextEncoderNew => self.intrinsic(ctx, Intrinsic::EncoderNew, vec![]),
             Expr::TextDecoderNew {

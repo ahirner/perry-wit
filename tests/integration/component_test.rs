@@ -519,6 +519,7 @@ world boundary {
     record payload { text: list<u8>, parts: list<list<u8>> }
     export encode: func(text: string, bytes: list<u8>, text-first: bool) -> payload;
     export regular: func(bytes: list<u8>) -> payload;
+    export labels: func(values: list<string>, replace: bool) -> list<string>;
 }
 "#
     );
@@ -539,6 +540,12 @@ function make(text: string, bytes: Uint8Array, textFirst: boolean): WitInput<Pay
 }
 export function encode(text: string, bytes: Uint8Array, textFirst: boolean) {
     return make(text, bytes, textFirst);
+}
+export function labels(values: string[], replace: boolean): string[] {
+    const inputs: WitInput<Uint8Array>[] = values;
+    if (replace) inputs[0] = new Uint8Array(1);
+    else inputs.push("漢");
+    return values;
 }
 "#,
     )?;
@@ -561,6 +568,17 @@ export function encode(text: string, bytes: Uint8Array, textFirst: boolean) {
             },
         )?;
     }
+    let labels = ["é"].as_slice();
+    component.check(
+        "labels",
+        (labels, false),
+        &vec!["é".to_owned(), "漢".to_owned()],
+    )?;
+    assert!(
+        component
+            .call::<_, Vec<String>>("labels", (labels, true))
+            .is_err()
+    );
     Ok(())
 }
 

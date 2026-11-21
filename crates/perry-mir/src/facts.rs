@@ -31,6 +31,7 @@ use std::{
 mod domains;
 pub(crate) mod guards;
 mod heap;
+pub use heap::source_slots::SourceSlots;
 pub(crate) mod paths;
 mod rewrite;
 mod transfer;
@@ -202,6 +203,22 @@ struct Body {
     has_integer_constraints: bool,
 }
 
+fn branch_arguments(ctx: &Context, op: Ptr<Operation>, mut visit: impl FnMut(Value, Value)) {
+    let dynamic = Operation::get_op_dyn(op, ctx);
+    if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
+        for i in 0..op.deref(ctx).get_num_successors() {
+            let target = op.deref(ctx).get_successor(i);
+            for (from, to) in branch
+                .successor_operands(ctx, i)
+                .into_iter()
+                .zip(target.deref(ctx).arguments())
+            {
+                visit(from, to);
+            }
+        }
+    }
+}
+
 impl Body {
     fn new(ctx: &Context, function: FuncOp, effects: crate::effects::LocalEffects) -> Result<Self> {
         let fn_ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
@@ -237,22 +254,12 @@ impl Body {
             for value in op.deref(ctx).operands().chain(op.deref(ctx).results()) {
                 dependents.entry(value).or_default().push(index);
             }
-            let dynamic = Operation::get_op_dyn(op, ctx);
-            if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
-                for successor in 0..op.deref(ctx).get_num_successors() {
-                    let block = op.deref(ctx).get_successor(successor);
-                    for (to, from) in block
-                        .deref(ctx)
-                        .arguments()
-                        .zip(branch.successor_operands(ctx, successor))
-                    {
-                        let index = constraints.len();
-                        constraints.push(Constraint::Edge { from, to });
-                        dependents.entry(from).or_default().push(index);
-                        dependents.entry(to).or_default().push(index);
-                    }
-                }
-            }
+            branch_arguments(ctx, op, |from, to| {
+                let index = constraints.len();
+                constraints.push(Constraint::Edge { from, to });
+                dependents.entry(from).or_default().push(index);
+                dependents.entry(to).or_default().push(index);
+            });
         }
         let (declared_args, declared_results) = match signature {
             Some(signature) => integer_signature(ctx, signature),

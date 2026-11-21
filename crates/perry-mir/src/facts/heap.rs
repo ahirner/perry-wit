@@ -12,6 +12,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 
 mod operations;
 mod queries;
+pub(super) mod source_slots;
 mod specialize;
 
 use crate::semantics::OperationKind;

@@ -82,6 +82,75 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.string(ctx, "[object Object]"))
     }
 
+    pub(super) fn byte_input_method(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        method: &str,
+        args: &'s [Expr],
+    ) -> Result<Option<Value>> {
+        use crate::methods::{Call, Receiver};
+        let text = Call::parse(Receiver::Value(Kind::String), method, args)?;
+        let bytes = Call::parse(Receiver::Value(Kind::Bytes), method, args)?;
+        let (tag, ty, call) = match (text, bytes) {
+            (Some(_), Some(_)) if method == "slice" => {
+                return self
+                    .dispatch_value(ctx, value, value.get_type(ctx), &|b, ctx, item| {
+                        let call = Call::parse(Receiver::of(ctx, item)?, method, args)?
+                            .ok_or_else(|| internal!("missing slice method"))?;
+                        call.lower(b, ctx, item)?
+                            .ok_or_else(|| internal!("slice has no result"))
+                    })
+                    .map(Some);
+            }
+            (Some(_), None) if matches!(method, "at" | "indexOf" | "lastIndexOf" | "includes") => {
+                bail_unsupported!("narrow the string or Uint8Array before calling {method}")
+            }
+            (Some(call), None) => ("string", StringType::get(ctx).into(), call),
+            (None, Some(call)) => ("object", BytesType::get(ctx).into(), call),
+            _ => bail_unsupported!("method {method} is not supported on a string or Uint8Array"),
+        };
+        let actual = self.emit_value(ctx, |ctx| VariantTagOp::new(ctx, value));
+        let tag = self.string(ctx, tag);
+        let matches = self.compare(ctx, CompareKind::Eq, actual, tag);
+        let invoke = self.new_block(ctx, "method");
+        let missing = self.new_block(ctx, "missing_method");
+        self.branch(ctx, matches, invoke, missing);
+        self.switch_to(missing);
+        for arg in args {
+            self.effect(ctx, arg)?;
+        }
+        self.raise_error(
+            ctx,
+            ErrorKind::TypeError,
+            &format!("{method} is not a function"),
+        );
+        self.jump(ctx, invoke);
+        self.switch_to(invoke);
+        let item = self.fit(ctx, value, ty)?;
+        call.lower(self, ctx, item)
+    }
+
+    pub(super) fn byte_input_index(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        index: Value,
+    ) -> Result<Value> {
+        let result = self.shapes.value_type(
+            ctx,
+            &HirType::Union(vec![HirType::Number, HirType::String, HirType::Void]),
+        )?;
+        self.dispatch_value(ctx, value, result, &|b, ctx, item| {
+            let get = if item.get_type(ctx).deref(ctx).is::<StringType>() {
+                Intrinsic::StringIndex
+            } else {
+                Intrinsic::BytesGet
+            };
+            Ok(b.intrinsic(ctx, get, vec![item, index]))
+        })
+    }
+
     pub(super) fn value_union_member(
         &mut self,
         ctx: &mut Context,
@@ -90,12 +159,18 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let cases = perry_mir::variant_cases(ctx, value.get_type(ctx)).to_diag(ctx)?;
         let mut result = None;
+        let mut missing = false;
         for (_, payload) in &cases {
             let field_type = payload.and_then(|ty| {
                 let ty = ty.deref(ctx);
                 if let Some(record) = ty.downcast_ref::<RecordType>() {
                     record.field(field).map(|(_, ty)| ty)
-                } else if ty.is::<StringType>() && field == "length" {
+                } else if ty.is::<BytesType>() && field == "buffer" {
+                    Some(perry_mir::ByteBufferType::get(ctx).into())
+                } else if (ty.is::<StringType>() && field == "length")
+                    || (ty.is::<BytesType>()
+                        && matches!(field, "length" | "byteLength" | "byteOffset"))
+                {
                     Some(FP64Type::get(ctx).into())
                 } else {
                     None
@@ -107,6 +182,8 @@ impl<'s> FunctionBuilder<'s> {
                     "union property needs one value type"
                 );
                 result = Some(ty);
+            } else {
+                missing = true;
             }
         }
         let result = result.ok_or_else(|| {
@@ -115,7 +192,11 @@ impl<'s> FunctionBuilder<'s> {
                 "property does not exist on any union member",
             )
         })?;
-        let result = crate::coerce::admitting(ctx, result, perry_mir::Absence::Undefined);
+        let result = if missing {
+            crate::coerce::admitting(ctx, result, perry_mir::Absence::Undefined)
+        } else {
+            result
+        };
         self.dispatch_value(ctx, value, result, &|b, ctx, payload| {
             let has_field = payload
                 .get_type(ctx)
@@ -125,11 +206,17 @@ impl<'s> FunctionBuilder<'s> {
             if has_field {
                 let op = FieldGetOp::new(ctx, payload, field.to_owned()).to_diag(ctx)?;
                 b.field_read(ctx, &op)
+            } else if payload.get_type(ctx).deref(ctx).is::<BytesType>() {
+                match field {
+                    "length" | "byteLength" => {
+                        Ok(b.intrinsic(ctx, Intrinsic::BytesLength, vec![payload]))
+                    }
+                    "byteOffset" => Ok(b.intrinsic(ctx, Intrinsic::BytesOffset, vec![payload])),
+                    "buffer" => Ok(b.intrinsic(ctx, Intrinsic::BytesBuffer, vec![payload])),
+                    _ => b.absent_literal(ctx, false, Some(result)),
+                }
             } else if payload.get_type(ctx).deref(ctx).is::<StringType>() && field == "length" {
-                let len = b.emit_value(ctx, |ctx| StringLenOp::new(ctx, payload));
-                Ok(b.emit_value(ctx, |ctx| {
-                    NumericCastOp::new(ctx, len, FP64Type::get(ctx).into())
-                }))
+                Ok(b.string_length(ctx, payload))
             } else {
                 b.absent_literal(ctx, false, Some(result))
             }

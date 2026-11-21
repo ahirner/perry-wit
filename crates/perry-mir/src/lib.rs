@@ -116,7 +116,8 @@ pub use exceptions::{
     set_exit_only,
 };
 pub use facts::{
-    ProgramFacts, constrain_signature, specialized_implementation, wit_signature, with_fact_limits,
+    ProgramFacts, SourceSlots, constrain_signature, specialized_implementation, wit_signature,
+    with_fact_limits,
 };
 pub use foreign::{ForeignOp, Phase};
 pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};
@@ -141,6 +142,7 @@ pub use regex::RegexConstOp;
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
 pub use types::*;
 pub use variants::{
-    VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, value_tag, variant_cases,
+    VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, byte_input, is_byte_input,
+    value_tag, variant_cases,
 };
-pub use views::{AggregateViewOp, can_widen};
+pub use views::{AggregateViewOp, SourceViewOp, can_share_source, can_widen};

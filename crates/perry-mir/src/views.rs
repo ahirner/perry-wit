@@ -1,7 +1,7 @@
 //! Alias-preserving widening of closed aggregates with identical storage layouts.
 use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OutputContract};
-use crate::types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType, VariantType};
+use crate::types::{ArrayType, OptionalType, RecordType, VariantType};
 use pliron::{
     common_traits::Verify,
     context::Context,
@@ -16,16 +16,36 @@ use std::collections::HashSet;
 /// Only matching record fields, array elements, and variant cases may widen their admitted states.
 /// No field is added, removed, reordered or converted to another representation.
 pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool {
+    view_compatible(ctx, source, target, false)
+}
+
+pub fn can_share_source(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool {
+    view_compatible(ctx, source, target, true)
+}
+
+fn view_compatible(
+    ctx: &Context,
+    source: TypeHandle,
+    target: TypeHandle,
+    source_values: bool,
+) -> bool {
     fn compatible(
         ctx: &Context,
         source: TypeHandle,
         target: TypeHandle,
+        source_values: bool,
         seen: &mut HashSet<(TypeHandle, TypeHandle)>,
     ) -> bool {
         if source == target || !seen.insert((source, target)) {
             return true;
         }
         let (a, b) = (source.deref(ctx), target.deref(ctx));
+        if source_values
+            && crate::is_byte_input(ctx, target)
+            && (a.is::<crate::StringType>() || a.is::<crate::BytesType>())
+        {
+            return true;
+        }
         if a.is::<crate::ValueUnionType>() && b.is::<crate::ValueUnionType>() {
             let (Ok(a), Ok(b)) = (
                 crate::variant_cases(ctx, source),
@@ -35,13 +55,10 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
             };
             return a.iter().all(|case| b.contains(case));
         }
-        if a.is::<BytesType>() && b.is::<ByteInputType>() {
-            return true;
-        }
         if !a.is::<OptionalType>()
             && let Some(b) = b.downcast_ref::<OptionalType>()
         {
-            return compatible(ctx, source, b.value(), seen);
+            return compatible(ctx, source, b.value(), source_values, seen);
         }
         if let (Some(a), Some(b)) = (
             a.downcast_ref::<OptionalType>(),
@@ -50,16 +67,16 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
             let (from, to) = (a.absence(), b.absence());
             return (!from.admits_null() || to.admits_null())
                 && (!from.admits_undefined() || to.admits_undefined())
-                && compatible(ctx, a.value(), b.value(), seen);
+                && compatible(ctx, a.value(), b.value(), source_values, seen);
         }
         if let (Some(a), Some(b)) = (a.downcast_ref::<ArrayType>(), b.downcast_ref::<ArrayType>()) {
-            return compatible(ctx, a.element(), b.element(), seen);
+            return compatible(ctx, a.element(), b.element(), source_values, seen);
         }
         if let (Some(a), Some(b)) = (
             a.downcast_ref::<crate::PromiseType>(),
             b.downcast_ref::<crate::PromiseType>(),
         ) {
-            return compatible(ctx, a.value(), b.value(), seen);
+            return compatible(ctx, a.value(), b.value(), source_values, seen);
         }
         if let (Some(a), Some(b)) = (
             a.downcast_ref::<RecordType>(),
@@ -72,9 +89,9 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
                 return false;
             };
             return a.len() == b.len()
-                && a.iter()
-                    .zip(b)
-                    .all(|((a, at), (b, bt))| a == b && compatible(ctx, *at, *bt, seen));
+                && a.iter().zip(b).all(|((a, at), (b, bt))| {
+                    a == b && compatible(ctx, *at, *bt, source_values, seen)
+                });
         }
         if let (Some(a), Some(b)) = (
             a.downcast_ref::<VariantType>(),
@@ -86,7 +103,7 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
                     .find(|(b_tag, _)| b_tag == tag)
                     .is_some_and(|(_, b_payload)| match (a_payload, b_payload) {
                         (None, None) => true,
-                        (Some(at), Some(bt)) => compatible(ctx, *at, *bt, seen),
+                        (Some(at), Some(bt)) => compatible(ctx, *at, *bt, source_values, seen),
                         _ => false,
                     })
             });
@@ -98,7 +115,7 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
         || source.deref(ctx).is::<crate::PromiseType>()
         || source.deref(ctx).is::<VariantType>()
         || source.deref(ctx).is::<crate::ValueUnionType>();
-    aggregate && compatible(ctx, source, target, &mut HashSet::new())
+    aggregate && compatible(ctx, source, target, source_values, &mut HashSet::new())
 }
 
 op_schema! {
@@ -108,6 +125,17 @@ op_schema! {
     constructors { pub new(value: Value, target: TypeHandle) => explicit(target); }
     result(ctx, value: Value): impl OutputContract = Accepts(move |ctx: &Context, target| {
         can_widen(ctx, value.get_type(ctx), target)
+    });
+    error = IncompatibleLayout;
+}
+
+op_schema! {
+    pub SourceViewOp(value) -> infallible;
+    name = "perry.source_view";
+    format = "$0 ` : ` type($0)";
+    constructors { pub new(value: Value, target: TypeHandle) => explicit(target); }
+    result(ctx, value: Value): impl OutputContract = Accepts(move |ctx: &Context, target| {
+        can_share_source(ctx, value.get_type(ctx), target)
     });
     error = IncompatibleLayout;
 }

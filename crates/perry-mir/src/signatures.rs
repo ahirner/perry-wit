@@ -87,7 +87,6 @@ type_kinds! {
     Bytes = BytesType::get(ctx).into();
     ByteBuffer = crate::types::ByteBufferType::get(ctx).into();
     ByobReader = crate::types::ByobReaderType::get(ctx).into();
-    ByteInput = crate::types::ByteInputType::get(ctx).into();
     Url = crate::types::UrlType::get(ctx).into();
     SearchParams = crate::types::SearchParamsType::get(ctx).into();
     Json = JsonType::get(ctx).into();

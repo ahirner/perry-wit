@@ -303,18 +303,6 @@ impl<'s> FunctionBuilder<'s> {
             });
             return self.fit(ctx, payload, target);
         }
-        if target.deref(ctx).is::<perry_mir::ByteInputType>() {
-            let convert = if ty.deref(ctx).is::<StringType>() {
-                Some(Intrinsic::StringByteInput)
-            } else if ty.deref(ctx).is::<BytesType>() {
-                Some(Intrinsic::BytesByteInput)
-            } else {
-                None
-            };
-            if let Some(convert) = convert {
-                return Ok(self.intrinsic(ctx, convert, vec![value]));
-            }
-        }
         if ty.deref(ctx).is::<JsonType>()
             && ty != target
             && perry_mir::JsonSchema::supports_descriptor(ctx, target)
@@ -362,6 +350,12 @@ impl<'s> FunctionBuilder<'s> {
             Ok(self.emit_value(ctx, |ctx| {
                 perry_mir::AggregateViewOp::new(ctx, value, target)
             }))
+        } else if let shapes::Storage::Source { views, .. } = &self.shapes.byte_slots
+            && perry_mir::can_share_source(ctx, ty, target)
+        {
+            let view = self.emit_value(ctx, |ctx| perry_mir::SourceViewOp::new(ctx, value, target));
+            views.borrow_mut().push(view);
+            Ok(view)
         } else {
             // A value that never materializes takes any type.
             if self.never_values.contains(&value) {
@@ -447,6 +441,9 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
+        if want == Kind::Bytes && perry_mir::is_byte_input(ctx, value.get_type(ctx)) {
+            return self.fit(ctx, value, BytesType::get(ctx).into());
+        }
         ensure_diag!(
             kind(ctx, value)? == want,
             codes::TYPE_MISMATCH,

@@ -216,13 +216,13 @@ impl Shapes<'_> {
                 );
                 let tag = perry_mir::value_tag(ctx, ty).ok_or_else(|| Diagnostic::new(
                     codes::UNSUPPORTED_TYPE,
-                    "finite value unions support numbers, strings, booleans and one plain record shape",
+                    "finite value unions support numbers, strings, booleans and one object alternative (Uint8Array or a plain record)",
                 ))?;
                 if let Some((_, payload)) = cases.iter().find(|(name, _)| name == tag) {
                     ensure_diag!(
                         *payload == Some(ty),
                         codes::UNSUPPORTED_TYPE,
-                        "finite value unions require one shape per JavaScript type"
+                        "finite value unions require one representation per typeof tag"
                     );
                 } else {
                     cases.push((tag.to_owned(), Some(ty)));

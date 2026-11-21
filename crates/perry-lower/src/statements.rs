@@ -381,6 +381,9 @@ impl<'s> FunctionBuilder<'s> {
             .resolved()
             .map(|ty| self.active_value_type(ctx, ty))
             .transpose()?;
+        let declared = declared
+            .map(|ty| self.shapes.storage(ctx, shapes::Binding::Local(id), ty))
+            .transpose()?;
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
         });
@@ -433,6 +436,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         // A declaration lowered again (a `finally` body at each exit) binds a new value.
         self.variant_guards.assign(id);
+        self.shapes.byte_slots.record(id, slot);
         self.locals.insert(
             id,
             LocalBinding {

@@ -30,7 +30,7 @@ use crate::{
     scalar::{BinaryOp, CompareOp, NumericCastOp},
     types::{BigIntType, RecordType},
     variants::{VariantNewOp, VariantPayloadOp, VariantTagOp},
-    views::AggregateViewOp,
+    views::{AggregateViewOp, SourceViewOp},
 };
 use pliron::{
     builtin::{attributes::StringAttr, op_interfaces::BranchOpInterface},
@@ -78,6 +78,16 @@ impl OperationKind {
             Self::None
         } else {
             Self::Unknown
+        }
+    }
+
+    pub(crate) fn storage_slot(self) -> Option<usize> {
+        match self {
+            Self::Read { slot } | Self::Mutate(Mutation::Field { slot: Some(slot) }) => Some(slot),
+            Self::Mutate(Mutation::Element { .. } | Mutation::InBoundsElement | Mutation::Hole) => {
+                Some(0)
+            }
+            _ => None,
         }
     }
 
@@ -173,7 +183,7 @@ primitive_semantics! { _ctx, _this;
         CatchOp, RecordOrderOp => OperationKind::Unknown;
     }
     (Allocation::None, None, false) {
-        WrapOp, AggregateViewOp => OperationKind::Alias;
+        WrapOp, AggregateViewOp, SourceViewOp => OperationKind::Alias;
         ToNumberOp => OperationKind::ToNumber;
         FieldGetOp => field_slot(_ctx, _this.get_operation().deref(_ctx).get_operand(0), _this.get_attr_perry_get_field(_ctx).as_deref())
             .map_or(OperationKind::Unknown, |slot| OperationKind::Read { slot });

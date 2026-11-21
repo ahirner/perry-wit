@@ -6,7 +6,7 @@ pub(super) fn byte_list_input(ctx: &Context, mut ty: TypeHandle) -> bool {
     while let Some(array) = ty.deref(ctx).downcast_ref::<ArrayType>() {
         ty = array.element();
     }
-    ty.deref(ctx).is::<perry_mir::ByteInputType>()
+    perry_mir::is_byte_input(ctx, ty)
 }
 
 /// Whether `actual` is structurally compatible with outbound import parameter type `expected`.
@@ -20,9 +20,10 @@ pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHan
         if expected == actual || !seen.insert((expected, actual)) {
             return true;
         }
+        let byte_input = perry_mir::is_byte_input(ctx, expected);
         let expected = expected.deref(ctx);
         let actual = actual.deref(ctx);
-        if expected.is::<perry_mir::ByteInputType>() {
+        if byte_input {
             return actual.is::<BytesType>() || actual.is::<StringType>();
         }
         if let (Some(a), Some(b)) = (

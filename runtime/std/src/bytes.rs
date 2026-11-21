@@ -290,14 +290,3 @@ pub(crate) unsafe extern "C" fn std_text_encode(string: *mut u8) -> *mut u8 {
 pub(crate) unsafe extern "C" fn std_bytes_adopt(len: u32, data: *mut u8) -> *mut u8 {
     perry_rt_sys::bytes_view(len, data)
 }
-
-/// Borrow existing UTF-8 storage for an outbound WIT byte list. The compiler exposes this
-/// header only through its read-only byte-input type.
-///
-/// # Safety
-/// `text` is a live Perry string.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_byte_input(text: *mut u8) -> *mut u8 {
-    let bytes = unsafe { string_bytes(text) };
-    perry_rt_sys::bytes_view(bytes.len() as u32, bytes.as_ptr().cast_mut())
-}

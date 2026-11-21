@@ -254,8 +254,16 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
     },
     CatalogEntry {
+        id: "ecma.array.wit-input-aliases",
+        description: "Mutable WIT input aliases retain JavaScript values and object identity",
+        specification: "https://tc39.es/ecma262/#sec-array-objects",
+        domain: "Array identity, bidirectional writes, source string length, and byte object identity through an alias, a record, a helper and a class constructor",
+        partitions: &["standard-source"],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
         id: "ecma.command.arrays",
-        description: "CLI dense array manipulation and iteration",
+        description: "Dense array iteration, spread copies and mutable aliases retained by maps",
         specification: "https://nodejs.org/api/",
         domain: "Standard CLI source; exact output bytes and successful exit",
         partitions: &["standard-source"],

@@ -141,18 +141,7 @@ impl Solver {
                     self.write_slot(ctx, id, slot, value, reader)?;
                 }
             }
-            OperationKind::Read { .. }
-            | OperationKind::Mutate(
-                Mutation::Field { slot: Some(_) }
-                | Mutation::Element { .. }
-                | Mutation::Hole
-                | Mutation::InBoundsElement,
-            ) => {
-                let position = match kind {
-                    OperationKind::Read { slot }
-                    | OperationKind::Mutate(Mutation::Field { slot: Some(slot) }) => slot,
-                    _ => 0,
-                };
+            kind if let Some(position) = kind.storage_slot() => {
                 let Some(base) = self.heap_value(ctx, id, operation.get_operand(0)) else {
                     return Ok(None);
                 };

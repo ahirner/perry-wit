@@ -84,6 +84,7 @@ impl<'s> FunctionBuilder<'s> {
                 slot
             }
         };
+        self.shapes.byte_slots.record(param.id, slot);
         self.locals.insert(
             param.id,
             LocalBinding {

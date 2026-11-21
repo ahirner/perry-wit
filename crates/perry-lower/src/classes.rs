@@ -139,6 +139,14 @@ impl<'s> FunctionBuilder<'s> {
             (ty, effective)
         };
 
+        let rec_ty = expected
+            .map(|ty| present_type(ctx, ty))
+            .filter(|ty| {
+                self.shapes
+                    .class_of_type(ctx, *ty)
+                    .is_some_and(|(name, args)| name == class_name && args == effective_args)
+            })
+            .unwrap_or(rec_ty);
         let rec = TypedHandle::<RecordType>::from_handle(rec_ty, ctx)
             .map_err(|_| internal!("expected class record for {class_name}"))?;
         let field_defs: Vec<(String, TypeHandle)> = rec
@@ -485,6 +493,12 @@ impl<'s> FunctionBuilder<'s> {
                         .class_value_type(ctx, owner_class, type_args, &param.ty)?,
                 )
             };
+            let param_ty = param_ty
+                .map(|ty| {
+                    self.shapes
+                        .storage(ctx, shapes::Binding::Local(param.id), ty)
+                })
+                .transpose()?;
             let value = if param.is_rest {
                 let rest_ty = param_ty.ok_or_else(|| {
                     Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")

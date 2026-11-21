@@ -254,10 +254,18 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
         if let Some(constructor) = self.shapes.metadata.constructors.get(expr) {
+            let storage = |declared| {
+                expected
+                    .filter(|&ty| {
+                        matches!(self.shapes.byte_slots, shapes::Storage::Materialized(_))
+                            && perry_mir::can_share_source(ctx, declared, ty)
+                    })
+                    .unwrap_or(declared)
+            };
             return match constructor {
                 Constructor::Map { types, init } => {
                     let expected = match types {
-                        Some((key, value)) => Some(self.shapes.map_type(ctx, key, value)?),
+                        Some((key, value)) => Some(storage(self.shapes.map_type(ctx, key, value)?)),
                         None => expected,
                     };
                     match init {
@@ -268,7 +276,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 Constructor::Set { element, init } => {
                     let expected = match element {
-                        Some(element) => Some(self.shapes.set_type(ctx, element)?),
+                        Some(element) => Some(storage(self.shapes.set_type(ctx, element)?)),
                         None => expected,
                     };
                     match init {

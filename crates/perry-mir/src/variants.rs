@@ -28,6 +28,21 @@ pub fn variant_cases(ctx: &Context, ty: TypeHandle) -> Result<Vec<(String, Optio
     verify_err!(pliron::location::Location::Unknown, InvalidVariant)
 }
 
+pub fn byte_input(ctx: &Context) -> TypeHandle {
+    let variants = VariantType::get(
+        ctx,
+        vec![
+            ("object".into(), Some(crate::BytesType::get(ctx).into())),
+            ("string".into(), Some(StringType::get(ctx).into())),
+        ],
+    );
+    crate::ValueUnionType::get(ctx, variants.into()).into()
+}
+
+pub fn is_byte_input(ctx: &Context, ty: TypeHandle) -> bool {
+    ty.deref(ctx).is::<crate::ValueUnionType>() && ty == byte_input(ctx)
+}
+
 pub fn value_tag(ctx: &Context, ty: TypeHandle) -> Option<&'static str> {
     let ty = ty.deref(ctx);
     if ty.is::<pliron::builtin::types::FP64Type>() {
@@ -39,9 +54,10 @@ pub fn value_tag(ctx: &Context, ty: TypeHandle) -> Option<&'static str> {
         .is_some_and(|ty| ty.width() == 1)
     {
         Some("boolean")
-    } else if ty
-        .downcast_ref::<crate::RecordType>()
-        .is_some_and(|ty| ty.kind() == crate::RecordKind::Object)
+    } else if ty.is::<crate::BytesType>()
+        || ty
+            .downcast_ref::<crate::RecordType>()
+            .is_some_and(|ty| ty.kind() == crate::RecordKind::Object)
     {
         Some("object")
     } else {

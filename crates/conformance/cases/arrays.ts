@@ -199,3 +199,21 @@ function nestedConstructorInference(n: number): number {
     return pair.value + pair.extra + inferred.size + inferredMap.size;
 }
 for (const n of [0, 7]) console.log("nested-constructors", nestedConstructorInference(n));
+
+type TextOrBytes = string | Uint8Array;
+function storedAlias(): void {
+  const labels: string[] = ["é"];
+  const names: string[] = ["aba"];
+  const saved = new Map<number, string[]>();
+  saved.set(1, labels);
+  const writable: TextOrBytes[] = labels;
+  const copy = [...writable];
+  const bytes = new Uint8Array(5);
+  writable[0] = bytes;
+  const retained = saved.get(1);
+  if (retained !== undefined) {
+    console.log(retained === labels, typeof retained[0], retained[0].length, writable[0] === bytes);
+  }
+  console.log(copy[0].length, names[0].slice(1).indexOf("a"));
+}
+storedAlias();
