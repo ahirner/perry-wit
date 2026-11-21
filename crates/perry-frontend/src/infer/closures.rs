@@ -44,9 +44,8 @@ pub(super) fn infer_closure_return(
     walk::scan(
         body,
         env,
-        &mut Some(&mut |ty| {
-            if first.is_none() && !matches!(ty, HirType::Any | HirType::Unknown | HirType::Void)
-            {
+        Some(&mut |ty| {
+            if first.is_none() && !matches!(ty, HirType::Any | HirType::Unknown | HirType::Void) {
                 first = Some(ty);
             }
         }),
