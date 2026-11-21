@@ -244,6 +244,7 @@ const GLOBALS = [
   ['Time', 'Temporal.PlainDate.compare', 'Temporal.PlainDate.compare(Temporal.PlainDate.from("2024-02-29"), Temporal.PlainDate.from("2024-03-01"))'],
   ['Time', 'Temporal.PlainDateTime.from', 'Temporal.PlainDateTime.from("2024-02-29T10:00")'],
   ['Binary, text', 'Uint8Array', 'new Uint8Array(4)'],
+  ['Binary, text', 'DataView', 'new DataView(new Uint8Array(4).buffer)'],
   ['Binary, text', 'TextEncoder', 'new TextEncoder()'],
   ['Binary, text', 'TextDecoder', 'new TextDecoder().decode(new Uint8Array(1))'],
   ['Collections', 'Map', 'new Map<string, number>()'],
@@ -277,7 +278,7 @@ const RECEIVERS = new Map([
   ['Number', 'number'], ['String', 'string'], ['Array', 'Array'], ['Bytes', 'Uint8Array'], ['Stats', 'fs.Stats'],
   ['Regex', 'RegExp'], ['Abort', 'AbortController'], ['Writer', 'WritableStreamDefaultWriter'],
   ['Reader', 'ReadableStreamDefaultReader'], ['ReadResult', 'ReadableStream read result'], ['Date', 'Date'], ['Map', 'Map'],
-  ['Set', 'Set'], ['Url', 'URL'],
+  ['Set', 'Set'], ['Url', 'URL'], ['DataView', 'DataView'],
 ]);
 
 /** The inventory: probed globals, then methods and module functions read from compiler tables. */
@@ -306,7 +307,7 @@ async function inventory(repository, compiler) {
       });
       continue;
     }
-    const entry = line.match(/^\s*([A-Z][A-Za-z]+?)\s+("[^"]+"(?:\s*\|\s*"[^"]+")*)\s+/);
+    const entry = line.match(/^\s*([A-Z][A-Za-z0-9]*?)\s+("[^"]+"(?:\s*\|\s*"[^"]+")*)\s+/);
     // An entry whose lowering recipe rejects the call documents a rejection, not support.
     if (!entry || /=>\s*reject\(/.test(line)) continue;
     if (receivers.length === 0) throw new Error(`No method registry receiver for ${entry[1]}`);

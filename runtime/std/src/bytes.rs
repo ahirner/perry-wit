@@ -129,7 +129,7 @@ pub(crate) unsafe extern "C" fn std_data_view_new(
         integer(length)
     };
     if length < 0 || length > remaining {
-        view_range_error();
+        offset_out_of_bounds();
         return ptr::null_mut();
     }
     unsafe { perry_rt_sys::buffer_view(buffer, offset as u32, length as u32) }
@@ -140,15 +140,15 @@ fn view_index(number: f64) -> Option<i64> {
     if (0..=9_007_199_254_740_991).contains(&index) {
         Some(index)
     } else {
-        view_range_error();
+        offset_out_of_bounds();
         None
     }
 }
 
-fn view_range_error() {
+fn offset_out_of_bounds() {
     raise(
         RANGE_ERROR,
-        perry_rt_sys::static_text!("Offset is outside the bounds of the DataView"),
+        perry_rt_sys::static_text!("offset is out of bounds"),
     );
 }
 
@@ -178,7 +178,7 @@ fn word_address(view: *mut u8, offset: f64) -> Option<*mut [u8; 4]> {
     // The view's bounds are relative to its own data pointer.
     let view = unsafe { &*view.cast::<Bytes>() };
     if offset > i64::from(view.len) - 4 {
-        view_range_error();
+        offset_out_of_bounds();
         return None;
     }
     Some(unsafe { view.data.add(offset as usize).cast() })
@@ -356,10 +356,7 @@ pub(crate) extern "C" fn std_bytes_set_from(target: *mut u8, source: *mut u8, of
     let target_len = unsafe { (*target.cast::<Bytes>()).len as usize };
     let source_len = unsafe { (*source.cast::<Bytes>()).len as usize };
     if offset < 0 || offset as u64 + source_len as u64 > target_len as u64 {
-        raise(
-            RANGE_ERROR,
-            perry_rt_sys::static_text!("offset is out of bounds"),
-        );
+        offset_out_of_bounds();
         return;
     }
     // SAFETY: validated attached ranges; raw pointers permit overlapping aliases.
