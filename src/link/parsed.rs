@@ -1,5 +1,6 @@
 //! Borrowed Wasm sections and the function index space shared by linker inputs.
-use anyhow::{Context, Result, ensure};
+use super::wasm_err;
+use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal};
 use wasm_encoder::{CodeSection, FunctionSection, reencode::Reencode};
 use wasmparser::*;
 
@@ -27,26 +28,30 @@ impl<'a> ParsedModule<'a> {
         let mut module = Self::default();
         let mut sections = 0u32;
         for payload in Parser::new(0).parse_all(bytes) {
-            let payload = payload?;
+            let payload = payload.map_err(wasm_err)?;
             if let Some((id, _)) = payload.as_section()
                 && id != 0
             {
                 let bit = 1u32
                     .checked_shl(u32::from(id))
-                    .context("unsupported section id")?;
-                ensure!(sections & bit == 0, "duplicate Wasm section {id}");
+                    .ok_or_else(|| Diagnostic::internal("unsupported section id"))?;
+                ensure_internal!(sections & bit == 0, "duplicate Wasm section {id}");
                 sections |= bit;
             }
             match payload {
                 Payload::TypeSection(section) => {
                     module.types = section
                         .into_iter_err_on_gc_types()
-                        .map(|ty| Ok(wasm_encoder::reencode::RoundtripReencoder.func_type(ty?)?))
+                        .map(|ty| {
+                            wasm_encoder::reencode::RoundtripReencoder
+                                .func_type(ty.map_err(wasm_err)?)
+                                .map_err(wasm_err)
+                        })
                         .collect::<Result<_>>()?;
                 }
                 Payload::ImportSection(section) => {
                     for import in section.into_imports() {
-                        let import = import?;
+                        let import = import.map_err(wasm_err)?;
                         if let TypeRef::Func(ty) = import.ty {
                             module.imports.push((import.module, import.name, ty));
                         } else {
@@ -55,7 +60,10 @@ impl<'a> ParsedModule<'a> {
                     }
                 }
                 Payload::FunctionSection(section) => {
-                    module.function_types = section.into_iter().collect::<Result<_, _>>()?;
+                    module.function_types = section
+                        .into_iter()
+                        .map(|ty| ty.map_err(wasm_err))
+                        .collect::<Result<_>>()?;
                 }
                 Payload::CodeSectionEntry(body) => module.bodies.push(body),
                 Payload::TableSection(section) => module.tables = Some(section),
@@ -71,12 +79,12 @@ impl<'a> ParsedModule<'a> {
                 _ => (),
             }
         }
-        ensure!(
+        ensure_internal!(
             module.bodies.len() == module.function_types.len(),
             "function declarations must match bodies"
         );
         if let Some(count) = module.data_count {
-            ensure!(
+            ensure_internal!(
                 count == module.data.as_ref().map_or(0, |data| data.count()),
                 "data count must match segments"
             );
@@ -95,19 +103,15 @@ impl<'a> ParsedModule<'a> {
             let ty = *self
                 .function_types
                 .get(local)
-                .context("function declaration out of range")?;
+                .ok_or_else(|| Diagnostic::internal("function declaration out of range"))?;
             let body = self
                 .bodies
                 .get(local)
-                .context("function body out of range")?;
-            functions.function(
-                relocation
-                    .type_index(ty)
-                    .map_err(|error| anyhow::anyhow!("{error}"))?,
-            );
+                .ok_or_else(|| Diagnostic::internal("function body out of range"))?;
+            functions.function(relocation.type_index(ty).map_err(wasm_err)?);
             relocation
                 .parse_function_body(code, body.clone())
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                .map_err(wasm_err)?;
         }
         Ok(())
     }

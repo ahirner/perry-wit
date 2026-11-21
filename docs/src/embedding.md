@@ -11,9 +11,6 @@ The runtime and standard libraries are precompiled and embedded in the compiler 
 {{#include embedding-example.rs}}
 ```
 
-Errors are [`CompileError`](../rust/perry_wit/struct.CompileError.html) values holding [`PerryDiagnostic`](../rust/perry_wit/struct.PerryDiagnostic.html) records with a source span and a [`DiagnosticCode`](../rust/perry_wit/enum.DiagnosticCode.html).
-
-
 ## JavaScript API
 
 perry-wit compiles a statically typed subset of TypeScript into WebAssembly components.
@@ -48,10 +45,6 @@ Each function takes its inputs from memory:
   WASI 0.3 packages are built in.
 - `world` selects a world when the package declares more than one.
 
-A rejected program throws a `CompileError`.
-Its `diagnostics` hold the same codes, spans, notes and help as the Rust API.
-Its `message` (and `formatDiagnostics`) formats them as `file:line:column: severity[code]: message` lines.
-
 The functions are asynchronous because the compiler loads on first use.
 `await Compiler.load()` returns a compiler whose `compile`, `compileCore` and `generateTypes` methods run synchronously, for example inside a bundler's synchronous transform hook.
 
@@ -61,11 +54,23 @@ Browsers fetch it through static `new URL(…, import.meta.url)` references, whi
 
 ## WebAssembly Component
 
-[`perry-wit.wasm`](../downloads/perry-wit.wasm) is a WASI 0.2 component that exports this interface ([`compiler.wit`](../downloads/compiler.wit)) next to a `wasi:cli/run` command:
+The WASI 0.2 [compiler component](../downloads/perry-wit.wasm) exports `perry:compiler/api` for in-memory compilation and `wasi:cli/run` for command-line use.
+Generate bindings for this package from [`compiler.wit`](../downloads/compiler.wit).
 
 ```wit
-{{#include ../../wit/compiler/world.wit}}
+{{#include ../../wit/compiler/world.wit:1}}
 ```
 
 The [playground](../play/index.html) runs it in a Web Worker.
 Because the `api` export operates on in-memory buffers, a server can instantiate it with empty filesystem preopens, fuel limits and memory caps to compile untrusted TypeScript.
+
+## Diagnostics
+
+On failure, Rust returns a [`CompileError`](../rust/perry_wit/struct.CompileError.html), JavaScript throws a `CompileError`, and the WIT functions return a list of diagnostics.
+Display the Rust error or JavaScript `error.message` to show the diagnostic with any source locations, notes, and help.
+
+Match `error.primary().kind()` in Rust or `error.primary.kind` in JavaScript to handle an [error category](../rust/perry_wit/enum.ErrorKind.html).
+The stable `code` identifies the specific error. New codes can appear within a category.
+
+Source spans use one-based lines and columns. Columns count Unicode scalar values.
+For editors that use UTF-16 columns, convert from the span’s zero-based UTF-8 byte offsets.

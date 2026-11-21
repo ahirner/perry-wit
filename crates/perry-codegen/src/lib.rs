@@ -25,9 +25,9 @@
 //! `module` drives the lowering of a whole module and `function` lowers individual functions,
 //! dispatching operations through `ops` to the topical modules. `async_split` transforms async
 //! functions into state machines, and [boundary] binds them to the canonical ABI.
-use anyhow::{Context as _, Result, anyhow};
 use perry_abi::layout::descriptor::{OMITTED_BOOL, OMITTED_REF, UNDEFINED_BOOL};
-use perry_mir::ErrorKind;
+use perry_mir::PlironResultExt as _;
+use perry_wit_diagnostics::{Result, internal};
 use pliron::{
     builtin::ops::ModuleOp,
     context::Context,
@@ -35,7 +35,6 @@ use pliron::{
     operation::verify_operation,
     opts::{dce::DCEPass, simplify_cfg::SimplifyCFGPass},
     pass::{AnalysisManager, PMConfig, Pass, Passes},
-    printable::Printable,
 };
 use pliron_wasm::emit::{DataSegment, EmitOptions, Memory, emit_module};
 
@@ -65,60 +64,6 @@ mod values;
 mod variants;
 
 pub use memory::explain_tiers;
-
-/// Structured boundary errors emitted during Wasm lowering.
-#[derive(Debug)]
-pub enum CodegenError {
-    PendingInitialization {
-        span: Option<perry_mir::SourceSpan>,
-    },
-    AsyncInitializerRequiresAsyncExport {
-        core_name: String,
-        span: Option<perry_mir::SourceSpan>,
-    },
-    MissingErrorChannel {
-        core_name: String,
-        span: Option<perry_mir::SourceSpan>,
-    },
-    ExportBinding {
-        core_name: String,
-        span: Option<perry_mir::SourceSpan>,
-        source: anyhow::Error,
-    },
-}
-
-impl std::fmt::Display for CodegenError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PendingInitialization { .. } => {
-                write!(f, "top-level statements leave asynchronous work pending")
-            }
-            Self::AsyncInitializerRequiresAsyncExport { core_name, .. } => {
-                write!(f, "{core_name} requires asynchronous module initialization")
-            }
-            Self::MissingErrorChannel { core_name, .. } => {
-                write!(
-                    f,
-                    "{core_name} can throw without a compatible WIT error channel"
-                )
-            }
-            Self::ExportBinding { core_name, .. } => {
-                write!(f, "binding WIT export {core_name}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CodegenError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::ExportBinding { source, .. } => Some(source.as_ref()),
-            Self::PendingInitialization { .. }
-            | Self::AsyncInitializerRequiresAsyncExport { .. }
-            | Self::MissingErrorChannel { .. } => None,
-        }
-    }
-}
 
 /// Import module of runtime and standard-library functions, resolved by `perry-wit`'s linker.
 pub const HELPER_MODULE: &str = "__perry_helper";
@@ -166,7 +111,7 @@ pub fn compile(
     });
     while cleanup
         .run(wasm.get_operation(), ctx, &mut lowered_analyses)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?
+        .to_diag(ctx)?
         .ir_changed
         == pliron::irbuild::IRStatus::Changed
     {}
@@ -175,8 +120,8 @@ pub fn compile(
         pliron_wasm::reducible::make_reducible(ctx, &function);
     }
     verify_operation(wasm.get_operation(), ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))
-        .context("verifying the lowered wasm module")?;
+        .to_diag(ctx)
+        .map_err(|err| err.with_internal_context("verifying the lowered wasm module"))?;
     let end = DATA_BASE as usize + data.len();
     let options = EmitOptions {
         memory: if memory {
@@ -197,18 +142,5 @@ pub fn compile(
         },
         names: true,
     };
-    Ok(emit_module(ctx, &wasm, &options)?)
-}
-
-/// Return the non-zero status code for an exception `kind` (0 represents normal completion).
-pub fn status_code(kind: ErrorKind) -> i32 {
-    match kind {
-        ErrorKind::Any => 3,
-        ErrorKind::TypeError => 1,
-        ErrorKind::RangeError => 2,
-        ErrorKind::ReferenceError => 6,
-        ErrorKind::SyntaxError => 7,
-        ErrorKind::Value => 4,
-        ErrorKind::Exit => 5,
-    }
+    emit_module(ctx, &wasm, &options).map_err(|err| internal!("{err}"))
 }

@@ -45,16 +45,14 @@ impl<'s> FunctionBuilder<'s> {
         key: Value,
         rec_handle: TypedHandle<RecordType>,
     ) -> Result<Value> {
-        let uniform_ty = record_uniform_field_type(ctx, rec_handle).context(
-            "dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>",
-        )?;
-        let fields = rec_handle.deref(ctx).fields()?.to_vec();
+        let uniform_ty = record_uniform_field_type(ctx, rec_handle).ok_or_else(|| Diagnostic::unsupported("dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>"))?;
+        let fields = rec_handle.deref(ctx).fields().to_diag(ctx)?.to_vec();
         let opt_ty = crate::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
         let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
         for (name, _) in fields.into_iter().rev() {
             let name_str = self.string(ctx, &name);
             let eq = self.compare(ctx, CompareKind::Eq, key, name_str);
-            let op = FieldGetOp::new(ctx, rec, name)?;
+            let op = FieldGetOp::new(ctx, rec, name).to_diag(ctx)?;
             let field_val = self.append_value(ctx, &op);
             let normalized = self.normalize_optional_read(ctx, field_val)?;
             let field_opt = self.fit(ctx, normalized, opt_ty)?;
@@ -103,10 +101,12 @@ impl<'s> FunctionBuilder<'s> {
             let elem_ty = if method == IteratorMethod::Keys {
                 str_ty
             } else {
-                record_uniform_field_type(ctx, rec).with_context(|| format!(
-                    "Object.{} on a closed record requires all fields to share a uniform value type",
-                    method.name(),
-                ))?
+                record_uniform_field_type(ctx, rec).ok_or_else(|| {
+                    unsupported!(
+                        "Object.{} on a closed record requires all fields to share a uniform value type",
+                        method.name(),
+                    )
+                })?
             };
             let pair = if method == IteratorMethod::Entries {
                 Some(self.shapes.pair_type(ctx, str_ty, elem_ty)?)
@@ -115,7 +115,7 @@ impl<'s> FunctionBuilder<'s> {
             };
             let output_ty = pair.map_or(elem_ty, Into::into);
             let tuple = rec.deref(ctx).kind() == RecordKind::Tuple;
-            let fields = rec.deref(ctx).fields()?.to_vec();
+            let fields = rec.deref(ctx).fields().to_diag(ctx)?.to_vec();
             let mut values = Vec::with_capacity(fields.len());
             for (index, (name, field_ty)) in fields.into_iter().enumerate() {
                 let position = tuple.then(|| index.to_string());
@@ -124,7 +124,7 @@ impl<'s> FunctionBuilder<'s> {
                     self.string(ctx, key)
                 } else {
                     let entry = pair.map(|pair| (pair, self.string(ctx, key)));
-                    let op = FieldGetOp::new(ctx, obj, name)?;
+                    let op = FieldGetOp::new(ctx, obj, name).to_diag(ctx)?;
                     let value = self.append_value(ctx, &op);
                     let value = if admits_undefined(ctx, field_ty) {
                         self.normalize_optional_read(ctx, value)?
@@ -150,9 +150,11 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(json) = self.json_operand(ctx, obj)? {
                 return Ok(self.intrinsic(ctx, Intrinsic::JsonKeys, vec![json]));
             }
-            bail!("Object.keys requires a Record, interface/object shape, or JSON value");
+            bail_unsupported!(
+                "Object.keys requires a Record, interface/object shape, or JSON value"
+            );
         }
-        bail!(
+        bail_unsupported!(
             "Object.{} requires a Record<K, V> or uniform record shape",
             method.name()
         )
@@ -169,7 +171,12 @@ impl<'s> FunctionBuilder<'s> {
         let entries_val = self.defined(ctx, entries_val)?;
         let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
             .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
-            .context("Object.fromEntries requires an iterable of [key, value] pairs")?;
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    codes::TYPE_MISMATCH,
+                    "Object.fromEntries requires an iterable of [key, value] pairs",
+                )
+            })?;
         let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
             None => self.shapes.dict_tuple_type(ctx, k_ty, v_ty)?,
@@ -240,7 +247,7 @@ impl<'s> FunctionBuilder<'s> {
             let fields = rec
                 .deref(ctx)
                 .fields()
-                .map_err(|_| anyhow!("record without fields"))?
+                .map_err(|_| Diagnostic::internal("record without fields"))?
                 .to_vec();
             let mut acc = self.boolean(ctx, false);
             let bool_ty = acc.get_type(ctx);
@@ -253,7 +260,7 @@ impl<'s> FunctionBuilder<'s> {
                     eq,
                     |b, ctx| {
                         if admits_undefined(ctx, field_ty) {
-                            let op = FieldPresentOp::new(ctx, obj, name)?;
+                            let op = FieldPresentOp::new(ctx, obj, name).to_diag(ctx)?;
                             Ok(b.append_value(ctx, &op))
                         } else {
                             Ok(b.boolean(ctx, true))
@@ -264,7 +271,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(acc);
         }
-        bail!("'in' operator requires a Record<K, V> or closed record shape")
+        bail_unsupported!("'in' operator requires a Record<K, V> or closed record shape")
     }
 
     /// `delete obj[key]` or `delete obj.prop` on a `Record<K, V>` dictionary or optional record field.
@@ -274,7 +281,9 @@ impl<'s> FunctionBuilder<'s> {
             Expr::PropertyGet {
                 object, property, ..
             } => (object, Err(property)),
-            _ => bail!("delete operator requires a property or index access on a Record<K, V>"),
+            _ => bail_unsupported!(
+                "delete operator requires a property or index access on a Record<K, V>"
+            ),
         };
         let obj = self.expression(ctx, object)?;
         let obj = self.defined(ctx, obj)?;
@@ -299,7 +308,7 @@ impl<'s> FunctionBuilder<'s> {
                 Err(_) => return Ok(self.boolean(ctx, true)),
             };
             // Hole-aware reads are enabled per module, so the frontend must have seen this delete.
-            ensure!(
+            ensure_internal!(
                 self.shapes.metadata.sparse_arrays,
                 "array element deletion was not detected before lowering"
             );
@@ -336,11 +345,12 @@ impl<'s> FunctionBuilder<'s> {
                 return Ok(self.boolean(ctx, true));
             }
         }
-        bail!(if prop_or_idx.is_ok() {
-            "delete operator is only supported on Record<K, V> dictionary types"
-        } else {
+        if prop_or_idx.is_ok() {
+            bail_unsupported!("delete operator is only supported on Record<K, V> dictionary types")
+        }
+        bail_unsupported!(
             "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
-        })
+        )
     }
 
     /// `array[key]` as `(index, present, length)`: `present` holds when `key` is a canonical

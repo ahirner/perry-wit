@@ -97,10 +97,8 @@ fn partial_supplied_packages_do_not_resolve_unrelated_standards() -> anyhow::Res
         };
         generate("test:producer/api@1.0.0")?;
         let error = generate("wasi:clocks/types@0.3.0").unwrap_err();
-        assert_eq!(
-            error.diagnostics[0].code,
-            perry_wit::DiagnosticCode::WitResolution
-        );
+        assert_ne!(error.primary().kind(), perry_wit::ErrorKind::Internal);
+        assert_eq!(error.primary().code(), perry_wit::codes::WIT_DEPENDENCY);
         let message = format!("{error:#}");
         assert!(
             message.contains("types") && message.contains("wasi:clocks"),

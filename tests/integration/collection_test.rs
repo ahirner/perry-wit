@@ -7,6 +7,11 @@ fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<(
         "export function run():number { const row={value:1,extra:2}; const mixed:(number|{value:number})[]=[row]; return mixed.length; }",
         "union-layout.ts",
     ).expect_err("union boxing cannot copy a record to a different layout");
+    assert_eq!(
+        error.primary().code(),
+        perry_wit::codes::TYPE_MISMATCH,
+        "{error}"
+    );
     assert!(
         error
             .to_string()

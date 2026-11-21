@@ -1,5 +1,5 @@
 //! TypeScript parsing, Perry HIR compatibility, specialization and source metadata.
-use anyhow::Result;
+use perry_wit_diagnostics::Result;
 use pliron::context::Context;
 use std::collections::{BTreeMap, HashMap};
 mod open_types;
@@ -61,7 +61,11 @@ pub fn load_sources<'s>(
 ) -> Result<Program<'s>> {
     let loaded = modules::load(source, identity, sources, foreign)?;
     let mut lowered = hir_compat::lower(loaded, identity)?;
-    infer::specialize_functions(ctx, &mut lowered.module, &lowered.metadata, foreign)?;
+    infer::specialize_functions(ctx, &mut lowered.module, &mut lowered.metadata, foreign)?;
+    lowered
+        .metadata
+        .locations
+        .record_call_origins(&lowered.module);
     infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
     if !lowered.metadata.sparse_arrays {
         lowered.metadata.sparse_arrays =

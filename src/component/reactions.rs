@@ -1,12 +1,16 @@
 //! Private unit futures for promise observers. The anchor exists while the component
 //! encoder resolves canonical future builtins, and its synthetic export is removed afterwards.
-use anyhow::{Context, Result, ensure};
+use perry_wit_diagnostics::{Diagnostic, Result, ensure_diag};
 use std::convert::Infallible;
 use wasm_encoder::{
     reencode::{self, Reencode, ReencodeComponent},
     *,
 };
 use wasmparser::{Parser, Payload, TypeRef};
+
+fn wasm_err(err: impl std::error::Error + 'static) -> Diagnostic {
+    Diagnostic::internal_from("rewriting promise-signal module", &err)
+}
 
 /// Name of the synthetic export whose `future` result type backs runtime promise signals.
 /// The runtime imports the canonical future builtins under this name.
@@ -15,9 +19,9 @@ pub(crate) const ANCHOR: &str = "perry-internal-promise";
 /// Whether the core module imports promise-signal future builtins and so needs the anchor.
 pub(crate) fn uses_signals(core: &[u8]) -> Result<bool> {
     for payload in Parser::new(0).parse_all(core) {
-        if let Payload::ImportSection(imports) = payload? {
+        if let Payload::ImportSection(imports) = payload.map_err(wasm_err)? {
             for import in imports.into_imports() {
-                if import?.name.ends_with(ANCHOR) {
+                if import.map_err(wasm_err)?.name.ends_with(ANCHOR) {
                     return Ok(true);
                 }
             }
@@ -35,9 +39,10 @@ pub(crate) fn prepare(
 ) -> Result<(Vec<u8>, wit_parser::Resolve)> {
     let mut resolve = resolve.clone();
     let key = wit_parser::WorldKey::Name(ANCHOR.into());
-    ensure!(
+    ensure_diag!(
         !resolve.worlds[world].exports.contains_key(&key),
-        "reserved internal promise anchor"
+        crate::codes::CONTRACT_MISMATCH,
+        "WIT export '{ANCHOR}' is reserved for internal promise signals"
     );
     let ty = resolve.types.alloc(wit_parser::TypeDef {
         name: None,
@@ -63,10 +68,11 @@ pub(crate) fn prepare(
     );
     let mut functions = 0;
     for payload in Parser::new(0).parse_all(core) {
-        match payload? {
+        match payload.map_err(wasm_err)? {
             Payload::ImportSection(imports) => {
                 for import in imports.into_imports() {
-                    functions += u32::from(matches!(import?.ty, TypeRef::Func(_)));
+                    functions +=
+                        u32::from(matches!(import.map_err(wasm_err)?.ty, TypeRef::Func(_)));
                 }
             }
             Payload::FunctionSection(section) => functions += section.count(),
@@ -78,7 +84,8 @@ pub(crate) fn prepare(
         function: functions,
         ty: 0,
     }
-    .parse_core_module(&mut module, Parser::new(0), core)?;
+    .parse_core_module(&mut module, Parser::new(0), core)
+    .map_err(wasm_err)?;
     Ok((module.finish(), resolve))
 }
 
@@ -177,7 +184,7 @@ pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
     let mut depth = 0;
     let mut removed = None;
     for payload in Parser::new(0).parse_all(component) {
-        let payload = payload?;
+        let payload = payload.map_err(wasm_err)?;
         if matches!(payload, Payload::Version { .. }) {
             depth += 1;
         }
@@ -186,26 +193,30 @@ pub(crate) fn hide(component: &[u8]) -> Result<Vec<u8>> {
         {
             let mut index = validator
                 .types(0)
-                .context("component exports precede the component's types")?
+                .ok_or_else(|| {
+                    Diagnostic::internal("component exports precede the component's types")
+                })?
                 .component_function_count();
             for export in section.clone() {
-                let export = export?;
+                let export = export.map_err(wasm_err)?;
                 if export.name.name == ANCHOR {
                     removed = Some(index);
                 }
                 index += u32::from(export.kind == wasmparser::ComponentExternalKind::Func);
             }
         }
-        validator.payload(&payload)?;
+        validator.payload(&payload).map_err(wasm_err)?;
         if matches!(payload, Payload::End(_)) {
             depth -= 1;
         }
     }
     let mut out = Component::new();
     Hide {
-        removed: removed.context("component lacks the synthetic promise export")?,
+        removed: removed
+            .ok_or_else(|| Diagnostic::internal("component lacks the synthetic promise export"))?,
         depth: 0,
     }
-    .parse_component(&mut out, Parser::new(0), component)?;
+    .parse_component(&mut out, Parser::new(0), component)
+    .map_err(wasm_err)?;
     Ok(out.finish())
 }

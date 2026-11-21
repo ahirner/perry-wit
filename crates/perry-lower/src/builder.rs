@@ -126,7 +126,7 @@ impl<'s> FunctionBuilder<'s> {
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
-        ensure!(
+        ensure_unsupported!(
             function
                 .captures
                 .iter()
@@ -136,7 +136,7 @@ impl<'s> FunctionBuilder<'s> {
         );
         let signature = signatures
             .get(&function.id)
-            .with_context(|| format!("no signature for function {}", function.name))?;
+            .ok_or_else(|| internal!("no signature for function {}", function.name))?;
         Self::lower_body(ctx, signature, &function.body, signatures, shapes, builtins)
     }
 
@@ -197,7 +197,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);
-            let await_ = AwaitOp::new(ctx, promise)?;
+            let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
             builder.append_value(ctx, &await_);
         }
         if signature.top_level && !shapes.static_fields.is_empty() {
@@ -378,16 +378,16 @@ impl<'s> FunctionBuilder<'s> {
 
     pub(super) fn load(&mut self, ctx: &mut Context, slot: Value) -> Result<Value> {
         if self.global_slots.contains(&slot) {
-            let op = perry_mir::GlobalLoadOp::new(ctx, slot)?;
+            let op = perry_mir::GlobalLoadOp::new(ctx, slot).to_diag(ctx)?;
             return Ok(self.append_value(ctx, &op));
         }
-        let op = LoadOp::new(ctx, slot)?;
+        let op = LoadOp::new(ctx, slot).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
     pub(super) fn local_binding(&self, id: LocalId) -> Result<LocalBinding> {
         self.locals.get(&id).copied().ok_or_else(|| {
-            anyhow!(
+            unsupported!(
                 "unsupported reference to local {id} (globals and captures are not supported yet)"
             )
         })
@@ -451,7 +451,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn slot_type(&self, ctx: &Context, slot: Value) -> Result<TypeHandle> {
         Ok(
             TypedHandle::<perry_mir::SlotType>::from_handle(slot.get_type(ctx), ctx)
-                .map_err(|_| anyhow!("not a slot"))?
+                .map_err(|_| Diagnostic::internal("not a slot"))?
                 .deref(ctx)
                 .value(),
         )
@@ -460,7 +460,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn array_element(&self, ctx: &Context, array: Value) -> Result<TypeHandle> {
         Ok(
             TypedHandle::<ArrayType>::from_handle(array.get_type(ctx), ctx)
-                .map_err(|_| anyhow!("expected an array"))?
+                .map_err(|_| Diagnostic::new(codes::TYPE_MISMATCH, "expected an array"))?
                 .deref(ctx)
                 .element(),
         )
@@ -528,7 +528,7 @@ pub(super) fn insert_before_terminator(
     let terminator = block
         .deref(ctx)
         .get_terminator(ctx)
-        .context("a closed block ends in a terminator")?;
+        .ok_or_else(|| Diagnostic::internal("a closed block ends in a terminator"))?;
     for operation in operations {
         operation.insert_before(ctx, terminator);
     }

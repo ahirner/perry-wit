@@ -9,8 +9,9 @@ impl FunctionLowering<'_, '_> {
         mir: TypeHandle,
         raw: Value,
     ) -> Result<Value> {
-        ensure!(
+        ensure_diag!(
             mir.deref(ctx).is::<perry_mir::BigIntType>(),
+            codes::CONTRACT_MISMATCH,
             "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion"
         );
         let zero = self.i64_const(ctx, 0);
@@ -37,8 +38,9 @@ impl FunctionLowering<'_, '_> {
         mir: TypeHandle,
         value: Value,
     ) -> Result<Value> {
-        ensure!(
+        ensure_diag!(
             mir.deref(ctx).is::<perry_mir::BigIntType>(),
+            codes::CONTRACT_MISMATCH,
             "WIT 64-bit integers require TypeScript bigint"
         );
         let magnitude = self.load(ctx, MemKind::I64, value, 0);

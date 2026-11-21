@@ -179,13 +179,13 @@ impl Projection {
                 record
                     .deref(ctx)
                     .field("_0")
-                    .context("collection view missing box")?
+                    .ok_or_else(|| Diagnostic::internal("collection view missing box"))?
                     .1,
             )
         } else if set_entry_type(ctx, ty).is_some() {
             (CollectionViewKind::SetValues, ty)
         } else {
-            ensure!(
+            ensure_unsupported!(
                 map_entry_types(ctx, ty).is_some(),
                 "expected an array or collection iterable"
             );
@@ -194,13 +194,13 @@ impl Projection {
         let record = map_entry_types(ctx, box_type)
             .map(|(_, _, record)| record)
             .or_else(|| set_entry_type(ctx, box_type).map(|(_, record)| record))
-            .context("collection view requires a Map or Set box")?;
+            .ok_or_else(|| Diagnostic::internal("collection view requires a Map or Set box"))?;
         let field = |name| {
             record
                 .deref(ctx)
                 .field(name)
                 .map(|(_, ty)| (name, ty))
-                .context("collection entry missing field")
+                .ok_or_else(|| Diagnostic::internal("collection entry missing field"))
         };
         Ok(match view {
             CollectionViewKind::MapKeys | CollectionViewKind::SetValues => {
@@ -244,8 +244,8 @@ impl Projection {
         entry: Value,
     ) -> Result<Value> {
         let field = |b: &mut FunctionBuilder<'_>, ctx: &mut Context, name: &str| {
-            let op = FieldGetOp::new(ctx, entry, name.to_owned())?;
-            Ok::<_, anyhow::Error>(b.append_value(ctx, &op))
+            let op = FieldGetOp::new(ctx, entry, name.to_owned()).to_diag(ctx)?;
+            Ok::<_, crate::Diagnostic>(b.append_value(ctx, &op))
         };
         match self {
             Self::Item(_) => Ok(entry),

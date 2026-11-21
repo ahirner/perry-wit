@@ -197,12 +197,14 @@ export async function double(x: number) {
     }
 
     let error = |export: &str, source: &str| {
-        format!(
+        let message = format!(
             "{:#}",
             Standard
                 .component(&world(export), "dual", "dual.ts", source)
                 .unwrap_err()
-        )
+        );
+        assert!(!message.contains("error[internal]:"), "{message}");
+        message
     };
     let pending = error(
         "async func",

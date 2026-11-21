@@ -39,7 +39,7 @@ impl<'s> FunctionBuilder<'s> {
                     if let Some(record) = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                         && record.deref(ctx).kind() == RecordKind::Tuple
                     {
-                        let length = record.deref(ctx).fields()?.len();
+                        let length = record.deref(ctx).fields().to_diag(ctx)?.len();
                         Ok(self.number(ctx, length as f64))
                     } else {
                         Ok(self.array_length(ctx, source))
@@ -49,11 +49,13 @@ impl<'s> FunctionBuilder<'s> {
             };
         }
         if let Expr::Sequence(parts) = expr {
-            let (last, effects) = parts.split_last().context("empty sequence expression")?;
+            let (last, effects) = parts
+                .split_last()
+                .ok_or_else(|| Diagnostic::internal("empty sequence expression"))?;
             if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
                 return self
                     .expression_with(ctx, last, expected)
-                    .map_err(|error| crate::diagnostics::annotate(error, Some(span)));
+                    .map_err(|error| error.with_fallback_span(Some(span)));
             }
             for effect in effects {
                 self.effect(ctx, effect)?;
@@ -78,9 +80,9 @@ impl<'s> FunctionBuilder<'s> {
                     .map_err(|error| self.shapes.annotate_local(error, id))?,
             };
             let receiver = self.defined(ctx, receiver)?;
-            let value = call
-                .lower(self, ctx, receiver)?
-                .context("method expression produces no value")?;
+            let value = call.lower(self, ctx, receiver)?.ok_or_else(|| {
+                Diagnostic::new(codes::TYPE_MISMATCH, "method expression produces no value")
+            })?;
             return self.narrow_value(ctx, expr, value);
         }
         let value = match expr {
@@ -88,7 +90,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
             }
             Expr::RegExpDynamic { .. } => {
-                bail!("RegExp construction is unsupported; use a bounded regex literal")
+                bail_unsupported!("RegExp construction is unsupported; use a bounded regex literal")
             }
             Expr::ObjectSpread { parts } => self.object_spread(ctx, parts, expected)?,
             Expr::ObjectRest {
@@ -107,7 +109,9 @@ impl<'s> FunctionBuilder<'s> {
                 {
                     let recv = self.defined(ctx, value)?;
                     self.class_method_call(ctx, recv, owner_class, &type_args, func, &[])?
-                        .context("toString() produced no value")?
+                        .ok_or_else(|| {
+                            Diagnostic::new(codes::TYPE_MISMATCH, "toString() produced no value")
+                        })?
                 } else {
                     self.display(ctx, value)?
                 }
@@ -168,7 +172,11 @@ impl<'s> FunctionBuilder<'s> {
                 ..
             } => self
                 .call(ctx, callee, args, *byte_offset)
-                .and_then(|value| value.context("a void call has no value"))
+                .and_then(|value| {
+                    value.ok_or_else(|| {
+                        Diagnostic::new(codes::TYPE_MISMATCH, "a void call has no value")
+                    })
+                })
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
@@ -284,7 +292,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.intrinsic(ctx, intrinsic, vec![decoder])
             }
             Expr::StringFromCharCode(_) | Expr::StringFromCharCodeSpread(_) => {
-                bail!("fromCharCode uses UTF-16 code units; use fromCodePoint")
+                bail_unsupported!("fromCharCode uses UTF-16 code units; use fromCodePoint")
             }
             Expr::StringFromCodePoint(value) => {
                 let value = self.number_operand(ctx, value)?;
@@ -316,7 +324,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::JsonStringify(value) => self.stringify(ctx, value)?,
             Expr::JsonStringifyFull(value, replacer, space) => {
-                ensure!(
+                ensure_unsupported!(
                     matches!(&**space, Expr::Null | Expr::Undefined),
                     "{JSON_CALLBACKS}"
                 );
@@ -324,14 +332,14 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::JsonParseWithReviver(text, reviver)
             | Expr::JsonParseReviver { text, reviver } => {
-                ensure!(
+                ensure_unsupported!(
                     matches!(&**reviver, Expr::Null | Expr::Undefined),
                     "{JSON_CALLBACKS}"
                 );
                 let text = self.string_operand(ctx, text)?;
                 self.parse_json_text(ctx, text, expected)?
             }
-            Expr::JsonStringifyPretty { .. } => bail!("{JSON_CALLBACKS}"),
+            Expr::JsonStringifyPretty { .. } => bail_unsupported!("{JSON_CALLBACKS}"),
             Expr::MathRandom => self.intrinsic(ctx, Intrinsic::MathRandom, vec![]),
             Expr::CryptoRandomUUID => self.intrinsic(ctx, Intrinsic::RandomUuid, vec![]),
             Expr::TypeOf(value) => {
@@ -375,7 +383,7 @@ impl<'s> FunctionBuilder<'s> {
             } => self.error_with_options(ctx, *error_kind, message, options)?,
             Expr::ErrorMessage(error) => {
                 let error = self.expression(ctx, error)?;
-                ensure!(
+                ensure_unsupported!(
                     kind(ctx, error)? == Kind::Exception,
                     ".message is only supported on caught exceptions and Error objects"
                 );
@@ -413,7 +421,11 @@ impl<'s> FunctionBuilder<'s> {
             Expr::New {
                 class_name, args, ..
             } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
-                ensure!(args.is_empty(), "new AbortController takes no arguments");
+                ensure_diag!(
+                    args.is_empty(),
+                    codes::TYPE_MISMATCH,
+                    "new AbortController takes no arguments"
+                );
                 self.intrinsic(ctx, Intrinsic::AbortNew, vec![])
             }
             Expr::New {
@@ -432,7 +444,7 @@ impl<'s> FunctionBuilder<'s> {
                 signal,
                 redirect,
             } => {
-                ensure!(
+                ensure_unsupported!(
                     signal.is_none() && redirect.is_none(),
                     "fetch signal and redirect options are not supported yet"
                 );
@@ -482,15 +494,21 @@ impl<'s> FunctionBuilder<'s> {
                 args,
             } => self
                 .class_static_method_call(ctx, class_name, method_name, args)?
-                .context("a void static method call has no value")?,
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        codes::TYPE_MISMATCH,
+                        "a void static method call has no value",
+                    )
+                })?,
             Expr::New {
                 class_name,
                 args,
                 type_args,
+                byte_offset,
                 ..
-            } if self.shapes.classes.named.contains_key(class_name.as_str()) => {
-                self.class_new(ctx, class_name, args, type_args, expected)?
-            }
+            } if self.shapes.classes.named.contains_key(class_name.as_str()) => self
+                .class_new(ctx, class_name, args, type_args, expected)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
                 class_name, args, ..
             } => self.object_literal(ctx, class_name, args, expected)?,
@@ -530,7 +548,8 @@ impl<'s> FunctionBuilder<'s> {
             } => self
                 .set_index(ctx, object, index, value)
                 .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
-            other => bail!("MIR backend does not support expression {other:?} yet"),
+            Expr::Object(_) => bail_unsupported!("this object literal form is not supported yet"),
+            _ => bail_unsupported!("this expression form is not supported yet"),
         };
         self.narrow_value(ctx, expr, value)
     }
@@ -555,11 +574,13 @@ impl<'s> FunctionBuilder<'s> {
                 let width = digits
                     .len()
                     .checked_mul(4)
-                    .context("bigint literal too large")?;
-                APInt::from_str(digits, width, radix as u8).context("invalid bigint literal")?
+                    .ok_or_else(|| Diagnostic::unsupported("bigint literal too large"))?;
+                APInt::from_str(digits, width, radix as u8)
+                    .map_err(|_| Diagnostic::new(codes::PARSE_ERROR, "invalid bigint literal"))?
             }
         };
-        let width = u32::try_from(value.bw()).context("bigint literal too large")?;
+        let width = u32::try_from(value.bw())
+            .map_err(|_| Diagnostic::unsupported("bigint literal too large"))?;
         let ty = IntegerType::get(ctx, width, Signedness::Unsigned);
         let magnitude = IntegerAttr::new(ty, value);
         Ok(self.emit_value(ctx, |ctx| perry_mir::BigIntConstOp::new(ctx, magnitude)))
@@ -599,8 +620,9 @@ impl<'s> FunctionBuilder<'s> {
                 a.admits_undefined()
             }
         });
-        ensure!(
+        ensure_diag!(
             allowed,
+            codes::TYPE_MISMATCH,
             "{} is not admitted by the declared type",
             if null { "null" } else { "undefined" }
         );
@@ -641,7 +663,11 @@ impl<'s> FunctionBuilder<'s> {
         let local = self.local_binding(id)?;
         let old = self.load(ctx, local.slot)?;
         let old = self.arithmetic(ctx, old);
-        ensure!(kind(ctx, old)? == Kind::Number, "++/-- needs a number");
+        ensure_diag!(
+            kind(ctx, old)? == Kind::Number,
+            codes::TYPE_MISMATCH,
+            "++/-- needs a number"
+        );
         let one = self.number(ctx, 1.0);
         let kind = match op {
             UpdateOp::Increment => BinaryKind::Add,
@@ -722,13 +748,13 @@ impl<'s> FunctionBuilder<'s> {
 
     /// `await promise` in an async function.
     fn await_(&mut self, ctx: &mut Context, promise: &'s Expr) -> Result<Value> {
-        ensure!(self.is_async, "await is only valid in async functions");
+        ensure_unsupported!(self.is_async, "await is only valid in async functions");
         let promise = self.expression(ctx, promise)?;
-        ensure!(
+        ensure_unsupported!(
             perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx)).is_some(),
             "await of a non-promise value is not supported yet"
         );
-        let op = AwaitOp::new(ctx, promise).map_err(|e| anyhow!("{}", e.disp(ctx)))?;
+        let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 }

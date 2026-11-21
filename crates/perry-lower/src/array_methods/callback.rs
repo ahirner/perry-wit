@@ -25,8 +25,11 @@ impl<'s> FunctionBuilder<'s> {
             _ => callback,
         };
         if let Expr::FuncRef(id) = callback {
-            let signature = self.signatures.get(id).context("unknown callback")?;
-            ensure!(
+            let signature = self
+                .signatures
+                .get(id)
+                .ok_or_else(|| Diagnostic::unsupported("unknown callback"))?;
+            ensure_unsupported!(
                 !signature.is_async && signature.params.iter().all(|p| !p.source.is_rest),
                 "array callbacks require synchronous functions without rest parameters"
             );
@@ -62,9 +65,9 @@ impl<'s> FunctionBuilder<'s> {
             ..
         } = callback
         else {
-            bail!("array callbacks require an inline closure or named function")
+            bail_unsupported!("array callbacks require an inline closure or named function")
         };
-        ensure!(
+        ensure_unsupported!(
             !is_async && !is_generator && params.iter().all(|p| !p.is_rest),
             "array callbacks must be synchronous; rest parameters are not supported"
         );
@@ -83,8 +86,9 @@ impl<'s> FunctionBuilder<'s> {
                     Some(&value) => value,
                     None => {
                         let ty = this.shapes.value_type(ctx, &param.ty)?;
-                        ensure!(
+                        ensure_diag!(
                             param.default.is_some() || admits_undefined(ctx, ty),
+                            codes::TYPE_MISMATCH,
                             "missing required callback argument"
                         );
                         let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);

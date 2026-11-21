@@ -9,6 +9,8 @@ import {
   type CompiledComponent,
   type CompiledModule,
   type Diagnostic,
+  type ErrorKind,
+  type Note,
 } from "perry-wit";
 
 const wit = `
@@ -59,6 +61,11 @@ const error = await compile({ source: { path: "src/bad.ts", contents: "export fu
 );
 assert.ok(error instanceof CompileError, "invalid programs reject with a CompileError");
 const [diagnostic]: readonly Diagnostic[] = error.diagnostics;
+const primaryKind: ErrorKind = error.primary.kind;
+const notes: readonly Note[] = error.primary.notes;
+assert.equal(primaryKind, "type-check");
+assert.equal(error.primary.code, "missing-type-annotation");
+assert.ok(Array.isArray(notes));
 assert.equal(diagnostic?.span?.file, "src/bad.ts");
 
 const compiler = await Compiler.load();

@@ -43,7 +43,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<()> {
         let value = self.expression(ctx, discriminant)?;
         let ty = value.get_type(ctx);
-        ensure!(
+        ensure_unsupported!(
             matches!(
                 kind(ctx, value)?,
                 Kind::Number | Kind::String | Kind::Boolean | Kind::BigInt
@@ -60,7 +60,7 @@ impl<'s> FunctionBuilder<'s> {
             .zip(&blocks)
             .find(|(case, _)| case.test.is_none())
             .map_or(done, |(_, &block)| block);
-        ensure!(
+        ensure_internal!(
             cases.iter().filter(|case| case.test.is_none()).count() <= 1,
             "switch has more than one default"
         );
@@ -169,7 +169,7 @@ impl<'s> FunctionBuilder<'s> {
         let catch_block = catch.map(|_| self.new_block(ctx, "catch"));
         let first = catch_block
             .or(rethrow_block)
-            .context("try without catch or finally")?;
+            .ok_or_else(|| Diagnostic::internal("try without catch or finally"))?;
 
         if finally.is_some() {
             self.finallies.push(outer);

@@ -1,5 +1,6 @@
 //! Intern core function signatures after linking, preserving every type reference.
-use anyhow::Result;
+use super::wasm_err;
+use perry_wit_diagnostics::Result;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     convert::Infallible,
@@ -86,18 +87,22 @@ impl Reencode for Types {
 pub(crate) fn compact(core: &[u8]) -> Result<Vec<u8>> {
     let mut declarations = Vec::new();
     for payload in Parser::new(0).parse_all(core) {
-        if let Payload::TypeSection(section) = payload? {
+        if let Payload::TypeSection(section) = payload.map_err(wasm_err)? {
             for ty in section.into_iter_err_on_gc_types() {
-                declarations.push(ty?);
+                declarations.push(ty.map_err(wasm_err)?);
             }
         }
     }
     let mut references = ReferencedTypes::default();
-    references.parse_core_module(&mut Module::new(), Parser::new(0), core)?;
+    references
+        .parse_core_module(&mut Module::new(), Parser::new(0), core)
+        .map_err(wasm_err)?;
     let mut visited = BTreeSet::new();
     while let Some(&index) = references.0.difference(&visited).next() {
         visited.insert(index);
-        references.func_type(declarations[index as usize].clone())?;
+        references
+            .func_type(declarations[index as usize].clone())
+            .map_err(wasm_err)?;
     }
     let mut interned = HashMap::new();
     let mut types = Types {
@@ -113,13 +118,16 @@ pub(crate) fn compact(core: &[u8]) -> Result<Vec<u8>> {
         });
     }
     let mut module = Module::new();
-    types.parse_core_module(&mut module, Parser::new(0), core)?;
+    types
+        .parse_core_module(&mut module, Parser::new(0), core)
+        .map_err(wasm_err)?;
     Ok(module.finish())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn compacts_imports_calls_blocks_and_indirect_function_types() -> Result<()> {

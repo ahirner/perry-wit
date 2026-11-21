@@ -18,11 +18,16 @@ impl<'s> FunctionBuilder<'s> {
             let (id, _) = self
                 .shapes
                 .static_field(class_name, property)
-                .with_context(|| format!("static field {class_name}.{property} not found"))?;
+                .ok_or_else(|| {
+                    diag!(
+                        codes::TYPE_MISMATCH,
+                        "static field {class_name}.{property} not found"
+                    )
+                })?;
             let update_op = match op {
                 BinaryOp::Add => UpdateOp::Increment,
                 BinaryOp::Sub => UpdateOp::Decrement,
-                _ => bail!("invalid property update"),
+                _ => bail_internal!("invalid property update"),
             };
             return self.update(ctx, id, &update_op, prefix);
         }
@@ -34,21 +39,26 @@ impl<'s> FunctionBuilder<'s> {
         {
             self.class_getter_call(ctx, object, owner_class, type_args, getter)?
         } else {
-            let get = FieldGetOp::new(ctx, object, property.to_string())
-                .map_err(|_| anyhow!("property update needs a declared numeric field"))?;
+            let get = FieldGetOp::new(ctx, object, property.to_string()).map_err(|_| {
+                Diagnostic::new(
+                    codes::TYPE_MISMATCH,
+                    "property update needs a declared numeric field",
+                )
+            })?;
             self.append_value(ctx, &get)
         };
         let field_type = previous.get_type(ctx);
         let old = self.arithmetic(ctx, previous);
-        ensure!(
+        ensure_diag!(
             kind(ctx, old)? == Kind::Number,
+            codes::TYPE_MISMATCH,
             "property update needs a numeric field"
         );
         let one = self.number(ctx, 1.0);
         let kind = match op {
             BinaryOp::Add => BinaryKind::Add,
             BinaryOp::Sub => BinaryKind::Sub,
-            _ => bail!("invalid property update"),
+            _ => bail_internal!("invalid property update"),
         };
         let next = self.binary(ctx, kind, old, one);
         let stored = self.fit(ctx, next, field_type)?;
@@ -103,7 +113,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.kv_get(ctx, value, key, k_ty, v_ty)?
             }
             (Kind::Array, "groups" | "index" | "input") => {
-                ensure!(
+                ensure_unsupported!(
                     Self::regex_result(ctx, value),
                     "regex result metadata requires an exec result or a non-global match result"
                 );
@@ -134,10 +144,13 @@ impl<'s> FunctionBuilder<'s> {
                     "status" => SettledField::Status,
                     "value" => SettledField::Value,
                     "reason" => SettledField::Reason,
-                    other => bail!("settled results have no property {other}"),
+                    other => bail_diag!(
+                        codes::TYPE_MISMATCH,
+                        "settled results have no property {other}"
+                    ),
                 };
-                let op =
-                    SettledFieldOp::new(ctx, field, value).context("expected a settled result")?;
+                let op = SettledFieldOp::new(ctx, field, value)
+                    .ok_or_else(|| Diagnostic::internal("expected a settled result"))?;
                 self.append_value(ctx, &op)
             }
             (
@@ -194,10 +207,13 @@ impl<'s> FunctionBuilder<'s> {
                 Err(_) if self.rest_excluded_keys.iter().any(|k| k == field) => {
                     self.absent_literal(ctx, false, None)?
                 }
-                Err(_) => bail!("property {field} does not exist on this shape (subset rule R1)"),
+                Err(_) => bail_diag!(
+                    codes::TYPE_MISMATCH,
+                    "property {field} does not exist on this shape (subset rule R1)"
+                ),
             },
             (receiver_kind, property) => {
-                bail!(
+                bail_unsupported!(
                     "property {property} is not supported on {} yet",
                     receiver_kind.label()
                 )
@@ -237,7 +253,10 @@ impl<'s> FunctionBuilder<'s> {
                 let intrinsic = match kind(ctx, index)? {
                     Kind::String => Intrinsic::JsonMember,
                     Kind::Number => Intrinsic::JsonIndex,
-                    _ => bail!("JSON lookup requires a string or number key"),
+                    _ => bail_diag!(
+                        codes::TYPE_MISMATCH,
+                        "JSON lookup requires a string or number key"
+                    ),
                 };
                 Ok(self.intrinsic(ctx, intrinsic, vec![array, index]))
             }
@@ -255,14 +274,14 @@ impl<'s> FunctionBuilder<'s> {
                     (_, Some(position)) => format!("_{position}"),
                     _ => {
                         let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty) else {
-                            bail!("expected a record for dynamic index");
+                            bail_internal!("expected a record for dynamic index");
                         };
                         let key = self.string_operand(ctx, index)?;
                         return self.record_dynamic_get(ctx, array, key, rec);
                     }
                 };
                 let op = FieldGetOp::new(ctx, array, field.clone())
-                    .map_err(|_| anyhow!("record has no field {field}"))?;
+                    .map_err(|_| diag!(codes::TYPE_MISMATCH, "record has no field {field}"))?;
                 self.field_read(ctx, &op)
             }
             Kind::Array => {
@@ -271,11 +290,11 @@ impl<'s> FunctionBuilder<'s> {
                     return self.kv_get(ctx, array, key, k_ty, v_ty);
                 }
                 let index = self.index(ctx, index)?;
-                let op = ArrayGetOp::new(ctx, array, index)?;
+                let op = ArrayGetOp::new(ctx, array, index).to_diag(ctx)?;
                 let val = self.append_value(ctx, &op);
                 Ok(val)
             }
-            _ => bail!("indexing is only supported on arrays so far"),
+            _ => bail_unsupported!("indexing is only supported on arrays so far"),
         }
     }
 }
@@ -287,7 +306,7 @@ fn tuple_length(ctx: &Context, ty: TypeHandle) -> Result<Option<usize>> {
             record
                 .deref(ctx)
                 .fields()
-                .map_err(|_| anyhow!("tuple without fields"))?
+                .map_err(|_| Diagnostic::internal("tuple without fields"))?
                 .len(),
         )),
         _ => Ok(None),

@@ -1,7 +1,8 @@
 //! Temporal codec calls with opaque collectible payloads.
 use crate::{function::FunctionLowering, runtime::Runtime};
-use anyhow::{Result, bail};
 use perry_mir::Intrinsic;
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::bail_internal;
 use pliron::{context::Context, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
@@ -153,7 +154,7 @@ impl FunctionLowering<'_, '_> {
             Intrinsic::PlainDateTimeString => {
                 self.time_string(ctx, Runtime::TimePlainFormat, args[0])
             }
-            _ => bail!("not a Temporal intrinsic: {intrinsic:?}"),
+            _ => bail_internal!("not a Temporal intrinsic: {intrinsic:?}"),
         })
     }
 }

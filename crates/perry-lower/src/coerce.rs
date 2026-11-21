@@ -111,7 +111,8 @@ impl KindExt for Kind {
 }
 
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
-    Kind::of(ctx, value.get_type(ctx)).context("unsupported value type in expression")
+    Kind::of(ctx, value.get_type(ctx))
+        .ok_or_else(|| Diagnostic::unsupported("unsupported value type in expression"))
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -152,7 +153,7 @@ impl<'s> FunctionBuilder<'s> {
         if !self.is_optional(ctx, value) {
             return Ok(value);
         }
-        let op = UnwrapOp::new(ctx, value)?;
+        let op = UnwrapOp::new(ctx, value).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
@@ -167,7 +168,8 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(value);
         }
         let locations = &self.shapes.metadata.locations;
-        let op = UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset))?;
+        let op =
+            UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset)).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
@@ -270,12 +272,16 @@ impl<'s> FunctionBuilder<'s> {
             && crate::value_unions::is_value_union(ctx, wanted)
             && let Some(tag) = perry_mir::value_tag(ctx, ty)
         {
-            let payload = perry_mir::variant_cases(ctx, wanted)?
+            let payload = perry_mir::variant_cases(ctx, wanted)
+                .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(name, payload)| (name == tag).then_some(payload).flatten())
-                .context("value is outside the finite union")?;
-            ensure!(
+                .ok_or_else(|| {
+                    Diagnostic::new(codes::TYPE_MISMATCH, "value is outside the finite union")
+                })?;
+            ensure_diag!(
                 tag != "object" || ty == payload || perry_mir::can_widen(ctx, ty, payload),
+                codes::TYPE_MISMATCH,
                 "record alternatives must preserve their layout and identity"
             );
             let value = self.fit(ctx, value, payload)?;
@@ -286,7 +292,8 @@ impl<'s> FunctionBuilder<'s> {
         }
         if !crate::value_unions::is_value_union(ctx, wanted)
             && crate::value_unions::is_value_union(ctx, ty)
-            && perry_mir::variant_cases(ctx, present_type(ctx, ty))?
+            && perry_mir::variant_cases(ctx, present_type(ctx, ty))
+                .to_diag(ctx)?
                 .iter()
                 .any(|(_, payload)| *payload == Some(wanted))
         {
@@ -325,7 +332,7 @@ impl<'s> FunctionBuilder<'s> {
             } else if wanted.deref(ctx).is::<IntegerType>() {
                 Intrinsic::ExceptionToBool
             } else {
-                bail!("thrown values require a supported scalar type")
+                bail_unsupported!("thrown values require a supported scalar type")
             };
             let exception = self.defined(ctx, value)?;
             let converted = self.intrinsic(ctx, intrinsic, vec![exception]);
@@ -368,28 +375,17 @@ impl<'s> FunctionBuilder<'s> {
             let wanted = present_type(ctx, target);
             if (ty == source || absence(ctx, ty) == Some(perry_mir::Absence::Undefined))
                 && let Some(dst_rec) = record_projection(ctx, source, wanted)
-                && (!dst_rec.deref(ctx).fields()?.is_empty()
+                && (!dst_rec.deref(ctx).fields().to_diag(ctx)?.is_empty()
                     || self.shapes.class_of_type(ctx, wanted).is_some())
             {
                 return self.project_record(ctx, value, ty == source, dst_rec, target);
             }
             let actual = describe_type(ctx, ty);
             let expected = describe_type(ctx, target);
-            let shape_error = if let (Ok(src_rec), Ok(dst_rec)) = (
-                TypedHandle::<RecordType>::from_handle(source, ctx),
-                TypedHandle::<RecordType>::from_handle(wanted, ctx),
-            ) && src_rec.deref(ctx).kind() == dst_rec.deref(ctx).kind()
-                && matches!(
-                    src_rec.deref(ctx).kind(),
-                    RecordKind::Object | RecordKind::Tuple
-                ) {
-                ShapeError::IncompatibleRecordLayout { actual, expected }
-            } else if absence(ctx, ty) != absence(ctx, target) {
-                ShapeError::AbsenceMismatch { actual, expected }
-            } else {
-                ShapeError::TypeMismatch { actual, expected }
-            };
-            Err(LowerError::new(shape_error).into())
+            bail_diag!(
+                codes::TYPE_MISMATCH,
+                "value type {actual} differs from the expected type {expected}"
+            )
         }
     }
 
@@ -397,8 +393,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn string_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
-        ensure!(
+        ensure_diag!(
             kind(ctx, value)? == Kind::String,
+            codes::TYPE_MISMATCH,
             "a string is required here"
         );
         Ok(value)
@@ -408,8 +405,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn index(&mut self, ctx: &mut Context, index: &'s Expr) -> Result<Value> {
         let index = self.expression(ctx, index)?;
         let index = self.arithmetic(ctx, index);
-        ensure!(
+        ensure_diag!(
             kind(ctx, index)? == Kind::Number,
+            codes::TYPE_MISMATCH,
             "array indices must be numbers"
         );
         Ok(index)
@@ -419,8 +417,9 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn number_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.arithmetic(ctx, value);
-        ensure!(
+        ensure_diag!(
             kind(ctx, value)? == Kind::Number,
+            codes::TYPE_MISMATCH,
             "a number is required here"
         );
         Ok(value)
@@ -448,7 +447,11 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
-        ensure!(kind(ctx, value)? == want, "{what} is required here");
+        ensure_diag!(
+            kind(ctx, value)? == want,
+            codes::TYPE_MISMATCH,
+            "{what} is required here"
+        );
         Ok(value)
     }
 
@@ -505,7 +508,9 @@ impl<'s> FunctionBuilder<'s> {
                 |b, ctx| Ok(b.string(ctx, "true")),
                 |b, ctx| Ok(b.string(ctx, "false")),
             )?,
-            _ => bail!("only strings, numbers and booleans can be converted to strings yet"),
+            _ => bail_unsupported!(
+                "only strings, numbers and booleans can be converted to strings yet"
+            ),
         })
     }
 

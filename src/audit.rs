@@ -1,6 +1,6 @@
 //! Compiler dependency and guest feature contracts.
 
-use anyhow::{Result, ensure};
+use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal};
 
 /// Validate the supported stackless component profile independently of host defaults.
 pub(crate) fn validate_guest(bytes: &[u8]) -> Result<()> {
@@ -14,7 +14,9 @@ pub(crate) fn validate_guest(bytes: &[u8]) -> Result<()> {
             | WasmFeatures::CM_MORE_ASYNC_BUILTINS
             | WasmFeatures::CM_THREADING,
     );
-    Validator::new_with_features(features).validate_all(bytes)?;
+    Validator::new_with_features(features)
+        .validate_all(bytes)
+        .map_err(|err| Diagnostic::internal_from("validating stackless Wasm", &err))?;
     Ok(())
 }
 
@@ -32,7 +34,7 @@ pub(crate) fn audit_no_llvm(cargo_lock: &str) -> Result<()> {
                 || pkg_name.ends_with("-llvm")
                 || pkg_name.contains("inkwell"))
                 && !pkg_name.contains("gnullvm");
-            ensure!(
+            ensure_internal!(
                 !is_compiler_llvm,
                 "Prohibited LLVM/inkwell dependency detected in compiler graph: {pkg_name}"
             );

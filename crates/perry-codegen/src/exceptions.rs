@@ -4,14 +4,14 @@ use crate::{
     function::FunctionLowering,
     repr::{Repr, i32_type, repr, val_type_is_i64},
     runtime::Runtime,
-    status_code,
 };
-use anyhow::{Result, bail};
 use perry_abi::layout::exception::{KIND, TAG_BIGINT, TAG_BOOLEAN, TAG_NUMBER, TAG_STRING};
 use perry_mir::{
     BigIntType, CatchOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
     ExitOp, RaiseOp, RethrowOp, StringType,
 };
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::bail_unsupported;
 use pliron::{
     basic_block::BasicBlock,
     builtin::types::FP64Type,
@@ -21,6 +21,19 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
+
+/// Return the non-zero status code for an exception `kind` (0 represents normal completion).
+fn status_code(kind: ErrorKind) -> i32 {
+    match kind {
+        ErrorKind::Any => 3,
+        ErrorKind::TypeError => 1,
+        ErrorKind::RangeError => 2,
+        ErrorKind::ReferenceError => 6,
+        ErrorKind::SyntaxError => 7,
+        ErrorKind::Value => 4,
+        ErrorKind::Exit => 5,
+    }
+}
 
 impl FunctionLowering<'_, '_> {
     /// Lower an exception operation, returning `false` for other operations.
@@ -107,7 +120,7 @@ impl FunctionLowering<'_, '_> {
             Repr::Bool => TAG_BOOLEAN,
             _ if inner.deref(ctx).is::<StringType>() => TAG_STRING,
             _ if inner.deref(ctx).is::<BigIntType>() => TAG_BIGINT,
-            _ => bail!("this value cannot be thrown yet"),
+            _ => bail_unsupported!("this value cannot be thrown yet"),
         };
         let kind = self.i32_const(ctx, status_code(ErrorKind::Value));
         let mut tag = self.i32_const(ctx, tag as i32);
@@ -129,8 +142,8 @@ impl FunctionLowering<'_, '_> {
         if let Some(block) = self.throw_block {
             return block;
         }
-        if self.frame.is_some() {
-            let block = self.reject_block(ctx);
+        if let Some(frame) = self.frame.as_deref().map(|f| f.frame) {
+            let block = self.reject_block(ctx, frame);
             self.throw_block = Some(block);
             return block;
         }

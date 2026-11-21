@@ -2,6 +2,7 @@
 use super::walk::Node;
 use super::*;
 use perry_hir::ir::Function;
+use perry_wit_diagnostics::{Diagnostic, codes, diag, ensure_diag, ensure_unsupported};
 
 pub(super) fn arguments(
     function: &Function,
@@ -9,8 +10,9 @@ pub(super) fn arguments(
     explicit: &[HirType],
     env: &mut FunctionEnv<'_>,
 ) -> Result<Vec<HirType>> {
-    ensure!(
+    ensure_diag!(
         explicit.len() <= function.type_params.len(),
+        codes::TYPE_MISMATCH,
         "too many type arguments for {}",
         function.name
     );
@@ -34,10 +36,12 @@ pub(super) fn arguments(
                 .remove(param.name.as_str())
                 .or_else(|| param.default.as_deref().cloned())
                 .filter(|ty| !contains_type_var(ty) && !matches!(ty, HirType::Any | HirType::Never))
-                .with_context(|| {
-                    format!(
+                .ok_or_else(|| {
+                    diag!(
+                        codes::MISSING_TYPE_ANNOTATION,
                         "cannot infer type argument {} of {}",
-                        param.name, function.name
+                        param.name,
+                        function.name
                     )
                 })
         })
@@ -143,6 +147,8 @@ struct Instances<'a> {
     pending: Vec<Function>,
     next_function: FuncId,
     next_local: LocalId,
+    instantiations: Vec<(String, String, u32, Option<String>)>,
+    remapped_locals: Vec<(LocalId, LocalId)>,
 }
 
 impl Instances<'_> {
@@ -150,6 +156,8 @@ impl Instances<'_> {
         &mut self,
         function: &Function,
         arguments: Vec<HirType>,
+        call_byte_offset: u32,
+        caller: Option<&str>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<FuncId> {
         let key = (
@@ -159,13 +167,15 @@ impl Instances<'_> {
         if let Some(id) = self.keys.get(&key) {
             return Ok(*id);
         }
-        ensure!(
+        ensure_unsupported!(
             self.keys.len() < 256,
             "generic function instantiation expands indefinitely: {}",
-            function.name
+            hir_compat::display_name(&function.name)
         );
         let id = self.next_function;
-        self.next_function = id.checked_add(1).context("function identifier limit")?;
+        self.next_function = id
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::internal("function identifier limit"))?;
         self.keys.insert(key, id);
         let bindings = function
             .type_params
@@ -192,12 +202,19 @@ impl Instances<'_> {
             }
             Ok(())
         })?;
+        self.instantiations.push((
+            instance.name.clone(),
+            function.name.clone(),
+            call_byte_offset,
+            caller.map(str::to_owned),
+        ));
         for param in &mut instance.params {
             if let Some(default) = &mut param.default {
                 perry_hir::analysis::remap_local_ids_in_expr(default, &locals);
             }
         }
         perry_hir::analysis::remap_local_ids_in_stmts(&mut instance.body, &locals);
+        self.remapped_locals.extend(locals);
         if matches!(instance.return_type, HirType::Any | HirType::Unknown) {
             let locals = instance
                 .params
@@ -229,14 +246,21 @@ impl Instances<'_> {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let next = self.next_local;
-                self.next_local = next.checked_add(1).context("local identifier limit")?;
+                self.next_local = next
+                    .checked_add(1)
+                    .ok_or_else(|| Diagnostic::internal("local identifier limit"))?;
                 *entry.insert(next)
             }
         };
         Ok(())
     }
 
-    fn body(&mut self, body: &mut [Stmt], env: &mut FunctionEnv<'_>) -> Result<()> {
+    fn body(
+        &mut self,
+        body: &mut [Stmt],
+        caller: Option<&str>,
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<()> {
         walk::visit_body(body, &mut |node: Node<'_>| {
             if let Node::Binding(id, ty) = node {
                 if contains_type_var(ty) {
@@ -250,13 +274,18 @@ impl Instances<'_> {
         walk::scan(body, env, None, None);
         walk::visit_body(body, &mut |node: Node<'_>| {
             if let Node::Expression(expr) = node {
-                self.call(expr, env)?;
+                self.call(expr, caller, env)?;
             }
             Ok(())
         })
     }
 
-    fn call(&mut self, expr: &mut Expr, env: &mut FunctionEnv<'_>) -> Result<()> {
+    fn call(
+        &mut self,
+        expr: &mut Expr,
+        caller: Option<&str>,
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<()> {
         if let Expr::Call {
             callee,
             args,
@@ -269,16 +298,23 @@ impl Instances<'_> {
         {
             let arguments = arguments(function, args, type_args, env)
                 .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
-            *id = self.request(function, arguments, env)?;
+            *id = self
+                .request(function, arguments, *byte_offset, caller, env)
+                .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
             type_args.clear();
         }
         Ok(())
     }
 
-    fn expression(&mut self, expr: &mut Expr, env: &mut FunctionEnv<'_>) -> Result<()> {
+    fn expression(
+        &mut self,
+        expr: &mut Expr,
+        caller: Option<&str>,
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<()> {
         walk::visit_expr(expr, &mut |node: Node<'_>| {
             if let Node::Expression(expr) = node {
-                self.call(expr, env)?;
+                self.call(expr, caller, env)?;
             }
             Ok(())
         })
@@ -288,14 +324,15 @@ impl Instances<'_> {
         &mut self,
         params: &mut [perry_hir::ir::Param],
         body: &mut [Stmt],
+        caller: Option<&str>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
         for param in params {
             if let Some(default) = &mut param.default {
-                self.expression(default, env)?;
+                self.expression(default, caller, env)?;
             }
         }
-        self.body(body, env)
+        self.body(body, caller, env)
     }
 
     fn append(&mut self, functions: &mut Vec<Function>, base: &mut perry_hir::HirTypeEnv) {
@@ -363,7 +400,7 @@ fn class_initializers(class: &mut perry_hir::ir::Class) -> impl Iterator<Item = 
 pub(crate) fn specialize_functions(
     ctx: &Context,
     hir: &mut HirModule,
-    metadata: &hir_compat::Metadata<'_>,
+    metadata: &mut hir_compat::Metadata<'_>,
     foreign: &HashMap<String, crate::hir::Foreign>,
 ) -> Result<()> {
     if hir
@@ -424,15 +461,17 @@ pub(crate) fn specialize_functions(
         pending: Vec::new(),
         next_function: next_function
             .checked_add(1)
-            .context("function identifier limit")?,
+            .ok_or_else(|| Diagnostic::internal("function identifier limit"))?,
         next_local: next_local
             .checked_add(1)
-            .context("local identifier limit")?,
+            .ok_or_else(|| Diagnostic::internal("local identifier limit"))?,
+        instantiations: Vec::new(),
+        remapped_locals: Vec::new(),
     };
     let mut locals = HashMap::new();
     {
         let mut env = inference.function(&base, &hir.classes, &mut locals);
-        instances.body(&mut hir.init, &mut env)?;
+        instances.body(&mut hir.init, None, &mut env)?;
     }
     instances.append(&mut hir.functions, &mut base);
     for class_idx in 0..hir.classes.len() {
@@ -442,7 +481,7 @@ pub(crate) fn specialize_functions(
             .collect();
         for init in &mut inits {
             let mut env = inference.function(&base, &hir.classes, &mut locals);
-            instances.expression(init, &mut env)?;
+            instances.expression(init, None, &mut env)?;
             instances.append(&mut hir.functions, &mut base);
         }
         for (dst, src) in class_initializers(&mut hir.classes[class_idx]).zip(inits) {
@@ -459,7 +498,7 @@ pub(crate) fn specialize_functions(
                 .collect();
         for (params, body) in &mut class_fns {
             let mut env = inference.function_with_params(&base, &hir.classes, &mut locals, params);
-            instances.callable(params, body, &mut env)?;
+            instances.callable(params, body, None, &mut env)?;
             instances.append(&mut hir.functions, &mut base);
         }
         for (target, (params, body)) in
@@ -482,7 +521,25 @@ pub(crate) fn specialize_functions(
         }
         let mut env =
             inference.function_with_params(&base, &hir.classes, &mut locals, &function.params);
-        instances.callable(&mut function.params, &mut function.body, &mut env)?;
+        instances.callable(
+            &mut function.params,
+            &mut function.body,
+            Some(&function.name),
+            &mut env,
+        )?;
+    }
+    for (old_id, new_id) in instances.remapped_locals {
+        if let Some(span) = hir.local_source_spans.get(&old_id).copied() {
+            hir.local_source_spans.insert(new_id, span);
+        }
+        if metadata.inferred_bindings.contains(&old_id) {
+            metadata.inferred_bindings.insert(new_id);
+        }
+    }
+    for (instance_name, template_name, byte_offset, caller) in instances.instantiations {
+        metadata
+            .locations
+            .record_instantiation(instance_name, template_name, byte_offset, caller);
     }
     Ok(())
 }

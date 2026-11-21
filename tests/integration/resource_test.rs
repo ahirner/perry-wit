@@ -320,7 +320,8 @@ fn ambiguous_imported_and_exported_resource_declarations_are_diagnosed() {
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("resource identities are distinct"),
+        error.contains("error[contract-mismatch]:")
+            && error.contains("resource identities are distinct"),
         "{error}"
     );
 }

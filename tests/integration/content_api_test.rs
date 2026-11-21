@@ -53,16 +53,19 @@ fn raw_core_and_wit_core_have_distinct_boundaries() -> Result<()> {
     };
     assert!(exports(&raw)?.contains(&"extra".into()));
     assert!(!exports(&core_only.core)?.contains(&"extra".into()));
-    assert!(
-        api::compile(
-            &input,
-            &wit("package test:missing; world app { export missing: func(); }"),
-            &Options {
-                core_only: true,
-                ..Default::default()
-            }
-        )
-        .is_err()
+    let missing_err = api::compile(
+        &input,
+        &wit("package test:missing; world app { export missing: func(); }"),
+        &Options {
+            core_only: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_ne!(
+        missing_err.primary().kind(),
+        perry_wit::ErrorKind::Internal,
+        "{missing_err:#}"
     );
     Ok(())
 }
@@ -75,15 +78,25 @@ fn dependency_modules_require_unique_relative_identities_and_utf8() -> Result<()
             name: name.into(),
             contents: vec![],
         }];
-        assert!(api::compile_core(&input).is_err(), "accepted {name:?}");
+        let err = api::compile_core(&input)
+            .err()
+            .unwrap_or_else(|| panic!("accepted {name:?}"));
+        assert_eq!(
+            err.primary().kind(),
+            perry_wit::ErrorKind::InvalidInput,
+            "{name:?}: {err:#}"
+        );
     }
     input.modules = vec![Module {
         name: "other.ts".into(),
         contents: vec![255],
     }];
-    assert!(
-        format!("{:#}", api::compile_core(&input).unwrap_err()).contains("other.ts is not UTF-8")
+    let utf8_err = api::compile_core(&input).unwrap_err();
+    assert_eq!(
+        utf8_err.primary().kind(),
+        perry_wit::ErrorKind::InvalidInput
     );
+    assert!(format!("{utf8_err:#}").contains("other.ts is not UTF-8"));
     input.modules = vec![
         Module {
             name: "other.ts".into(),
@@ -91,10 +104,9 @@ fn dependency_modules_require_unique_relative_identities_and_utf8() -> Result<()
         };
         2
     ];
-    assert!(
-        format!("{:#}", api::compile_core(&input).unwrap_err())
-            .contains("duplicate module identity")
-    );
+    let dup_err = api::compile_core(&input).unwrap_err();
+    assert_eq!(dup_err.primary().code(), perry_wit::codes::INVALID_INPUT);
+    assert!(format!("{dup_err:#}").contains("duplicate module identity"));
     Ok(())
 }
 
@@ -155,13 +167,13 @@ fn explicit_modules_and_packages_resolve_without_paths() -> Result<()> {
         application: contract.application.clone(),
         dependencies: vec![],
     };
-    assert!(
-        format!(
-            "{:#}",
-            api::compile(&input, &missing, &Options::default()).unwrap_err()
-        )
-        .contains("test:types")
+    let missing_err = api::compile(&input, &missing, &Options::default()).unwrap_err();
+    assert_ne!(
+        missing_err.primary().kind(),
+        perry_wit::ErrorKind::Internal,
+        "{missing_err:#}"
     );
+    assert!(format!("{missing_err:#}").contains("test:types"));
     if let Package::Sources(sources) = &mut contract.application {
         sources.push(
             b"package test:bytes; interface additional {}"
@@ -171,13 +183,13 @@ fn explicit_modules_and_packages_resolve_without_paths() -> Result<()> {
     }
     api::compile(&input, &contract, &Options::default())?;
     input.modules.clear();
-    assert!(
-        format!(
-            "{:#}",
-            api::compile(&input, &contract, &Options::default()).unwrap_err()
-        )
-        .contains("Cannot resolve")
+    let unresolved = api::compile(&input, &contract, &Options::default()).unwrap_err();
+    assert_ne!(
+        unresolved.primary().kind(),
+        perry_wit::ErrorKind::Internal,
+        "{unresolved:#}"
     );
+    assert!(format!("{unresolved:#}").contains("Cannot resolve"));
     Ok(())
 }
 
@@ -196,7 +208,7 @@ fn encoded_wit_and_invalid_bytes_are_reported() -> Result<()> {
             program("export function {"),
             wit(WORLD),
             "Parsing",
-            perry_wit::DiagnosticCode::ParseError,
+            perry_wit::codes::PARSE_ERROR,
         ),
         (
             Program {
@@ -205,7 +217,7 @@ fn encoded_wit_and_invalid_bytes_are_reported() -> Result<()> {
             },
             wit(WORLD),
             "UTF-8",
-            perry_wit::DiagnosticCode::InvalidInput,
+            perry_wit::codes::INVALID_UTF8,
         ),
         (
             input.clone(),
@@ -214,17 +226,17 @@ fn encoded_wit_and_invalid_bytes_are_reported() -> Result<()> {
                 dependencies: vec![],
             },
             "UTF-8",
-            perry_wit::DiagnosticCode::WitResolution,
+            perry_wit::codes::INVALID_UTF8,
         ),
         (
             input,
             wit("invalid WIT"),
             "expected",
-            perry_wit::DiagnosticCode::WitResolution,
+            perry_wit::codes::WIT_PARSE,
         ),
     ] {
         let error = api::compile(&input, &contract, &Options::default()).unwrap_err();
-        assert_eq!(error.diagnostics[0].code, code, "{error:#}");
+        assert_eq!(error.primary().code(), code, "{error:#}");
         assert!(format!("{error:#}").contains(expected), "{error:#}");
     }
     Ok(())
@@ -239,7 +251,12 @@ fn content_api_resolves_only_supplied_files_and_packages() -> Result<()> {
             &wit("package test:http; world example { import wasi:http/client@0.3.0; }"),
             None,
         )?;
-        assert!(api::compile_core(&program("export { run } from './hidden';")).is_err());
+        let err = api::compile_core(&program("export { run } from './hidden';")).unwrap_err();
+        assert_ne!(
+            err.primary().kind(),
+            perry_wit::ErrorKind::Internal,
+            "{err:#}"
+        );
         return Ok(());
     }
     let directory = tempfile::tempdir()?;

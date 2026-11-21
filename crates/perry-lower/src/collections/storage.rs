@@ -83,7 +83,7 @@ impl LiveCursor {
             kind,
             ..
         } = self;
-        let seq_op = FieldGetOp::new(ctx, entry, kind.seq_field().to_string())?;
+        let seq_op = FieldGetOp::new(ctx, entry, kind.seq_field().to_string()).to_diag(ctx)?;
         let seq = b.append_value(ctx, &seq_op);
         let one = b.number(ctx, 1.0);
         let next_seq = b.binary(ctx, BinaryKind::Add, seq, one);
@@ -112,7 +112,7 @@ impl LiveCursor {
 
 impl<'s> FunctionBuilder<'s> {
     fn storage_field(&mut self, ctx: &mut Context, record: Value, field: Field) -> Result<Value> {
-        let op = FieldGetOp::new(ctx, record, field.name().to_owned())?;
+        let op = FieldGetOp::new(ctx, record, field.name().to_owned()).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
@@ -222,9 +222,9 @@ impl<'s> FunctionBuilder<'s> {
             let v = self.element_at(ctx, entry, one)?;
             return Ok((k, v));
         }
-        let k_op = FieldGetOp::new(ctx, entry, "_0".to_string())?;
+        let k_op = FieldGetOp::new(ctx, entry, "_0".to_string()).to_diag(ctx)?;
         let k = self.append_value(ctx, &k_op);
-        let v_op = FieldGetOp::new(ctx, entry, "_1".to_string())?;
+        let v_op = FieldGetOp::new(ctx, entry, "_1".to_string()).to_diag(ctx)?;
         let v = self.append_value(ctx, &v_op);
         Ok((k, v))
     }
@@ -298,7 +298,7 @@ impl<'s> FunctionBuilder<'s> {
             len,
             |b, ctx, i, next, scan_done| {
                 let e = b.element_at(ctx, entries, i)?;
-                let seq_op = FieldGetOp::new(ctx, e, kind.seq_field().to_string())?;
+                let seq_op = FieldGetOp::new(ctx, e, kind.seq_field().to_string()).to_diag(ctx)?;
                 let e_seq = b.append_value(ctx, &seq_op);
                 let reached = b.compare(ctx, CompareKind::Ge, e_seq, min_seq);
                 let step_bb = b.new_block(ctx, "sync_cursor_step");
@@ -456,7 +456,8 @@ impl<'s> FunctionBuilder<'s> {
 
         self.switch_to(compact_bb);
         self.retain_array(ctx, entries, |b, ctx, entry| {
-            let op = FieldGetOp::new(ctx, entry, tombstone.kind.live_field().to_string())?;
+            let op = FieldGetOp::new(ctx, entry, tombstone.kind.live_field().to_string())
+                .to_diag(ctx)?;
             Ok(b.append_value(ctx, &op))
         })?;
         self.bump_box_epoch(ctx, box_val)?;
@@ -477,7 +478,7 @@ impl<'s> FunctionBuilder<'s> {
         let Some(kind) = kind else {
             return Ok(None);
         };
-        let op = FieldGetOp::new(ctx, entry, kind.live_field().to_string())?;
+        let op = FieldGetOp::new(ctx, entry, kind.live_field().to_string()).to_diag(ctx)?;
         Ok(Some(self.append_value(ctx, &op)))
     }
 
@@ -491,9 +492,9 @@ impl<'s> FunctionBuilder<'s> {
 
     /// Empty a collection box and invalidate its cursors' cached positions.
     pub(crate) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
-        let box_val = self
-            .collection_underlying_box(ctx, coll)?
-            .context("clear() requires a Map or Set")?;
+        let box_val = self.collection_underlying_box(ctx, coll)?.ok_or_else(|| {
+            Diagnostic::new(codes::TYPE_MISMATCH, "clear() requires a Map or Set")
+        })?;
         let entries = self.collection_entries_array(ctx, box_val)?;
         let zero = self.number(ctx, 0.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();

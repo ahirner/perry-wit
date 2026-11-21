@@ -16,13 +16,13 @@
 use crate::{
     function::FunctionLowering,
     module::ModuleState,
-    repr::{i32_type, slot_kind, slot_size},
+    repr::{Repr, i32_type, repr, slot_kind, slot_size},
     runtime::Runtime,
     values::{self, Carriers},
 };
-use anyhow::Result;
 use perry_abi::layout::promise as promises;
 use perry_mir::AwaitOp;
+use perry_wit_diagnostics::{Result, bail_internal};
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -49,6 +49,7 @@ use perry_abi::layout::async_frame::{OBSERVER, PIN, SLOTS};
 
 /// The frame of the async function being lowered.
 pub(crate) struct Frame {
+    pub(crate) mir: FuncOp,
     pub(crate) frame: Value,
     /// Frame slot offset and access of each MIR value kept in the frame.
     pub(crate) slots: HashMap<Value, Carriers<(u32, MemKind)>>,
@@ -92,63 +93,64 @@ fn live_across_awaits(
     across
 }
 
-/// Lower async MIR function `mir` with dispatch kind `kind`: emit its ramp and step functions.
+/// Lower async MIR function `mir` with dispatch kind `kind`: emit its ramp and step functions,
+/// returning the lowered ramp entry point.
 pub(crate) fn lower(
     ctx: &mut Context,
     state: &mut ModuleState,
     mir: &FuncOp,
     kind: i32,
-) -> Result<()> {
+) -> Result<FuncOp> {
     let name = mir.get_symbol_name(ctx);
     let (mir_params, mir_results) = crate::analysis::function_signature(ctx, mir)?;
+    let &[result_ty] = mir_results.as_slice() else {
+        bail_internal!("async function {name} returns {} values", mir_results.len());
+    };
     let entry = mir.get_entry_block(ctx);
-    let params: Vec<Value> = entry.deref(ctx).arguments().collect();
 
     // Frame layout: parameters first, then every other value live across an await.
     let mut slots: HashMap<Value, Carriers<(u32, MemKind)>> = HashMap::new();
     let mut offset = SLOTS;
-    let mut alloc_slot = |ty: pliron::r#type::TypeHandle| -> Result<Carriers<(u32, MemKind)>> {
-        if crate::values::is_numeric_type(ctx, ty) {
-            let slot = Carriers::Numeric {
-                tag: (offset, MemKind::I32),
-                payload: (offset + 8, MemKind::I64),
-            };
-            offset += 16;
-            Ok(slot)
-        } else {
-            let slot = Carriers::Scalar((offset, slot_kind(ctx, ty)?));
-            offset += 8;
-            Ok(slot)
+    let mut pointers = state.collectible.then(|| vec![PROMISE, AWAITED]);
+    let mut alloc_slot = |ty| {
+        if let Some(pointers) = &mut pointers
+            && repr(ctx, ty)? == Repr::Ref
+        {
+            pointers.push(offset);
         }
+        values::carriers(ctx, ty)?.try_map(|wasm_ty| {
+            let slot = (offset, slot_kind(ctx, wasm_ty)?);
+            offset += 8;
+            Ok((slot, wasm_ty))
+        })
     };
-    for (param, ty) in params.iter().zip(&mir_params) {
-        slots.insert(*param, alloc_slot(*ty)?);
+    let mut wasm_params = Vec::with_capacity(mir_params.len());
+    let mut param_slots = Vec::with_capacity(mir_params.len());
+    for (param, ty) in entry.deref(ctx).arguments().zip(mir_params) {
+        let carriers = alloc_slot(ty)?;
+        slots.insert(param, carriers.map(|(slot, _)| slot));
+        for (slot, wasm_ty) in carriers.iter() {
+            param_slots.push(slot);
+            wasm_params.push(wasm_ty);
+        }
     }
     for value in live_across_awaits(ctx, mir, state.live) {
         if let std::collections::hash_map::Entry::Vacant(slot) = slots.entry(value) {
-            slot.insert(alloc_slot(value.get_type(ctx))?);
+            slot.insert(alloc_slot(value.get_type(ctx))?.map(|(entry, _)| entry));
         }
     }
     let frame_size = offset;
 
     // Ramp: allocate the frame, store the arguments, run the body to its first suspension.
-    let wasm_params = values::signature(ctx, mir_params.iter().copied())?;
     let i32 = i32_type(ctx);
     let ramp_ty = FunctionType::get(ctx, wasm_params, vec![i32]);
     let ramp = FuncOp::new(ctx, name.clone(), ramp_ty);
     {
         let args: Vec<_> = ramp.get_entry_block(ctx).deref(ctx).arguments().collect();
+        debug_assert_eq!(args.len(), param_slots.len());
         let mut b = FunctionLowering::glue(state, ctx, &ramp);
         let size = b.i32_const(ctx, frame_size as i32);
-        let frame = if b.state.collectible {
-            let mut offsets = vec![PROMISE, AWAITED];
-            offsets.extend(slots.iter().filter_map(|(value, slot)| {
-                crate::repr::repr(ctx, value.get_type(ctx))
-                    .is_ok_and(|kind| kind == crate::repr::Repr::Ref)
-                    .then(|| slot.scalar().ok().map(|(offset, _)| offset))
-                    .flatten()
-            }));
-            offsets.sort_unstable();
+        let frame = if let Some(offsets) = pointers {
             let shape = b.pointer_shape(&offsets);
             let shape = b.i32_const(ctx, shape as i32);
             let frame = b.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
@@ -162,14 +164,10 @@ pub(crate) fn lower(
         b.store(ctx, MemKind::I32, frame, KIND, kind_value);
         let zero = b.i32_const(ctx, 0);
         b.store(ctx, MemKind::I32, frame, STATE, zero);
-        let promise = b.new_promise(ctx, mir_results[0])?;
+        let promise = b.new_promise(ctx, result_ty)?;
         b.store(ctx, MemKind::I32, frame, PROMISE, promise);
-        let mut args_iter = args.into_iter();
-        for param in &params {
-            for (at, access) in slots[param].iter() {
-                let arg = args_iter.next().expect("ramp argument");
-                b.store(ctx, access, frame, at, arg);
-            }
+        for (&(at, access), arg) in param_slots.iter().zip(args) {
+            b.store(ctx, access, frame, at, arg);
         }
         let call = CallOp::new(ctx, step_name(&name), vec![frame], vec![]).get_operation();
         b.insert(ctx, call);
@@ -183,25 +181,29 @@ pub(crate) fn lower(
     let dispatch = step.get_entry_block(ctx);
     let frame = dispatch.deref(ctx).get_argument(0);
     let results = values::signature(ctx, mir_results.iter().copied())?;
-    let mut b = FunctionLowering::glue(state, ctx, &step);
-    b.throws = true;
-    b.results = results;
-    b.frame = Some(Frame {
+    let mut step_frame = Frame {
+        mir: *mir,
         frame,
         slots,
         resumes: Vec::new(),
-    });
-    b.enter_roots(ctx);
-    let start = b.map_blocks(ctx, mir, None)?;
-    b.translate(ctx, mir)?;
+    };
+    let start = {
+        let mut b = FunctionLowering::glue(state, ctx, &step);
+        b.throws = true;
+        b.results = results;
+        b.frame = Some(&mut step_frame);
+        b.enter_roots(ctx);
+        let start = b.map_blocks(ctx, mir, None)?;
+        b.translate(ctx, mir)?;
+        start
+    };
 
     // Dispatch: state 0 starts with the parameters from the frame; state k resumes await k.
+    let mut b = FunctionLowering::glue(state, ctx, &step);
     b.block = dispatch;
     let current = b.load(ctx, MemKind::I32, frame, STATE);
-    // Every await is lowered; the resume targets are complete.
-    let resumes = std::mem::take(&mut b.step_frame_mut().resumes);
     let mut targets = vec![start];
-    for &take in &resumes {
+    for &take in &step_frame.resumes {
         let resume = b.new_block(ctx, vec![]);
         b.in_block(resume, |b| {
             let awaited = b.load(ctx, MemKind::I32, frame, AWAITED);
@@ -211,16 +213,12 @@ pub(crate) fn lower(
     }
     // State 0 enters the body with the parameters loaded from the frame.
     let begin = b.new_block(ctx, vec![]);
-    let first = targets[0];
     b.in_block(begin, |b| {
-        let mut loaded = Vec::new();
-        for param in &params {
-            let slot = b.step_frame().slots[param];
-            for (at, access) in slot.iter() {
-                loaded.push(b.load(ctx, access, frame, at));
-            }
-        }
-        b.br(ctx, first, loaded);
+        let loaded = param_slots
+            .iter()
+            .map(|&(at, access)| b.load(ctx, access, frame, at))
+            .collect();
+        b.br(ctx, start, loaded);
     });
     targets[0] = begin;
     let invalid = b.new_block(ctx, vec![]);
@@ -228,7 +226,7 @@ pub(crate) fn lower(
     b.block = invalid;
     b.trap(ctx);
     b.state.wasm.append_operation(ctx, step.get_operation(), 0);
-    Ok(())
+    Ok(ramp)
 }
 
 /// Resume one frame from the fan-out selected by a native P3 completion event.
@@ -308,19 +306,20 @@ impl FunctionLowering<'_, '_> {
 
     /// `await promise` inside a step function.
     pub(crate) fn lower_await(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
-        let Some(frame) = self.frame.as_ref().map(|f| f.frame) else {
-            anyhow::bail!("await outside an async function");
-        };
         let promise = self.operand(ctx, op, 0)?;
         let i32 = i32_type(ctx);
         let take = self.new_block(ctx, vec![i32]);
+        let Some(step) = self.frame.as_mut() else {
+            bail_internal!("await outside an async function");
+        };
+        let (frame, mir) = (step.frame, step.mir);
+        step.resumes.push(take);
+        let state = step.resumes.len() as i32;
+
         let suspend = self.new_block(ctx, vec![]);
         let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
         self.cond_br(ctx, settled, (take, vec![promise]), (suspend, vec![]));
 
-        let resumes = &mut self.step_frame_mut().resumes;
-        resumes.push(take);
-        let state = resumes.len() as i32;
         self.block = suspend;
         let state = self.i32_const(ctx, state);
         self.store(ctx, MemKind::I32, frame, STATE, state);
@@ -335,12 +334,10 @@ impl FunctionLowering<'_, '_> {
         let promise = take.deref(ctx).get_argument(0);
         let zero = self.i32_const(ctx, 0);
         self.store(ctx, MemKind::I32, frame, AWAITED, zero);
-        let parent = op.deref(ctx).get_parent_op(ctx).expect("MIR function");
-        let function = Operation::get_op::<FuncOp>(parent, ctx).expect("MIR function");
         if self
             .state
             .program_facts
-            .may_reject(&function, op.deref(ctx).get_operand(0))
+            .may_reject(&mir, op.deref(ctx).get_operand(0))
         {
             let settled = self.load(ctx, MemKind::I32, promise, promises::STATE);
             let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
@@ -366,33 +363,26 @@ impl FunctionLowering<'_, '_> {
         Ok(())
     }
 
-    /// The frame of the step function being lowered. Only step functions lower awaits,
-    /// returns through the frame and the frame's throw target.
-    fn step_frame(&self) -> &Frame {
-        self.frame.as_ref().expect("lowering a step function")
-    }
-
-    fn step_frame_mut(&mut self) -> &mut Frame {
-        self.frame.as_mut().expect("lowering a step function")
-    }
-
     /// `return value` in a step function: fulfil the frame's promise.
-    pub(crate) fn settle_return(&mut self, ctx: &mut Context, value: Option<Value>) -> Result<()> {
-        let frame = self.step_frame().frame;
+    pub(crate) fn settle_return(
+        &mut self,
+        ctx: &mut Context,
+        frame: Value,
+        value: Option<Value>,
+    ) -> Result<()> {
         let promise = self.load(ctx, MemKind::I32, frame, PROMISE);
         let bits = match value {
             Some(value) => self.promise_value_bits(ctx, value)?,
             None => self.i64_const(ctx, 0),
         };
         self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
-        self.finish_frame(ctx);
+        self.finish_frame(ctx, frame);
         self.ret(ctx, vec![]);
         Ok(())
     }
 
-    fn finish_frame(&mut self, ctx: &mut Context) {
+    fn finish_frame(&mut self, ctx: &mut Context, frame: Value) {
         if self.state.collectible {
-            let frame = self.step_frame().frame;
             let pin = self.load(ctx, MemKind::I32, frame, PIN);
             self.runtime_void(ctx, Runtime::GcUnpin, vec![pin]);
         }
@@ -400,15 +390,14 @@ impl FunctionLowering<'_, '_> {
     }
 
     /// The throw target of a step function: reject the frame's promise.
-    pub(crate) fn reject_block(&mut self, ctx: &mut Context) -> Ptr<BasicBlock> {
-        let frame = self.step_frame().frame;
+    pub(crate) fn reject_block(&mut self, ctx: &mut Context, frame: Value) -> Ptr<BasicBlock> {
         let i32 = i32_type(ctx);
         let block = self.new_block(ctx, vec![i32]);
         self.in_block(block, |b| {
             let promise = b.load(ctx, MemKind::I32, frame, PROMISE);
             let status = block.deref(ctx).get_argument(0);
             b.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
-            b.finish_frame(ctx);
+            b.finish_frame(ctx, frame);
             b.ret(ctx, vec![]);
         });
         block
@@ -417,11 +406,7 @@ impl FunctionLowering<'_, '_> {
     /// `setTimeout(delay, value)`: an async-lowered `wait-for` whose completion settles the
     /// promise with `value`.
     pub(crate) fn lower_timer(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<()> {
-        anyhow::ensure!(
-            self.state.can_import(crate::MONOTONIC_CLOCK),
-            "setTimeout needs the WIT world to import {}",
-            crate::MONOTONIC_CLOCK
-        );
+        self.needs_import(crate::MONOTONIC_CLOCK, "setTimeout")?;
         let delay = self.operand(ctx, op, 0)?;
         let value = op.deref(ctx).get_operand(1);
         // Node waits at least 1 ms; NaN and smaller delays become 1 ms.

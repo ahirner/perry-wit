@@ -10,12 +10,13 @@ use crate::{
     repr::{Repr, i32_type, repr, slot_kind, wasm_type},
     runtime::Runtime,
 };
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use perry_mir::is_exported;
+use perry_mir::{PlironResultExt as _, is_exported};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, codes, diag, ensure_unsupported};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SingleBlockRegionInterface, SymbolOpInterface},
         ops::{FuncOp, ModuleOp},
+        type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
     context::{Context, Ptr},
@@ -25,7 +26,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
@@ -295,30 +296,46 @@ pub(crate) fn lower(
     for function in &functions {
         state.leased.extend(lease::leased(ctx, function, &live));
     }
-    for function in &functions {
+    let mut lowered_functions = HashMap::with_capacity(functions.len());
+    for function in functions {
         let symbol = function.get_symbol_name(ctx);
-        if let Some(kind) = state.async_functions.iter().position(|f| *f == symbol) {
-            async_split::lower(ctx, &mut state, function, kind as i32)
-                .with_context(|| format!("lowering async function {symbol} to wasm"))?;
-            if raw && is_exported(ctx, function) {
-                let wrapper = async_export_wrapper(ctx, &mut state, function, &symbol)?;
+        let wrap_err = |ctx: &Context, err: Diagnostic, phase: &str| {
+            let err = err
+                .with_fallback_span(perry_mir::source_span(ctx, &function))
+                .with_internal_context(format!("lowering {phase} {symbol} to wasm"));
+            perry_mir::attach_caller_notes(ctx, &function, err)
+        };
+        let wasm = if let Some(kind) = state.async_functions.iter().position(|f| *f == symbol) {
+            let ramp = async_split::lower(ctx, &mut state, &function, kind as i32)
+                .map_err(|err| wrap_err(ctx, err, "async function"))?;
+            if raw && is_exported(ctx, &function) {
+                let wrapper = async_export_wrapper(ctx, &mut state, &function, &symbol)?;
                 state.wasm.append_operation(ctx, wrapper.get_operation(), 0);
             }
-            continue;
-        }
-        let lowered = FunctionLowering::lower(ctx, &mut state, function)
-            .with_context(|| format!("lowering function {symbol} to wasm"))?;
-        state.wasm.append_operation(ctx, lowered.get_operation(), 0);
-        if raw && is_exported(ctx, function) {
-            let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
-            append_export(ctx, &mut state, &wrapper, &lowered, symbol.as_ref());
-        }
+            ramp
+        } else {
+            let lowered = FunctionLowering::lower(ctx, &mut state, &function)
+                .map_err(|err| wrap_err(ctx, err, "function"))?;
+            state.wasm.append_operation(ctx, lowered.get_operation(), 0);
+            if raw && is_exported(ctx, &function) {
+                let wrapper = export_wrapper(ctx, &mut state, &lowered, &symbol)?;
+                append_export(ctx, &mut state, &wrapper, &lowered, symbol.as_ref());
+            }
+            lowered
+        };
+        lowered_functions.insert(
+            symbol.into(),
+            LoweredFunction {
+                mir: function,
+                wasm,
+            },
+        );
     }
     if !state.async_functions.is_empty() {
         async_split::resume(ctx, &mut state);
     }
     if let Exports::Canonical { exports, .. } = exports {
-        bind_exports(ctx, &mut state, &functions, exports)?;
+        bind_exports(ctx, &mut state, &lowered_functions, exports)?;
     }
     if matches!(exports, Exports::RawChecked) {
         memory::export_checks(ctx, &mut state);
@@ -355,20 +372,36 @@ pub(crate) fn lower(
     Ok((state.wasm, state.data.bytes, memory))
 }
 
+/// A MIR function paired with its lowered Wasm entry-point function (or async ramp).
+#[derive(Clone, Copy)]
+struct LoweredFunction {
+    mir: FuncOp,
+    wasm: FuncOp,
+}
+
 /// Emit the canonical-ABI glue of every WIT export.
 fn bind_exports(
     ctx: &mut Context,
     state: &mut ModuleState<'_>,
-    functions: &[FuncOp],
+    lowered_functions: &HashMap<String, LoweredFunction>,
     exports: &[boundary::Export],
 ) -> Result<()> {
     if state.uses_io
         && let Some(export) = exports.iter().find(|e| !e.is_async())
     {
-        bail!(
+        return Err(diag!(
+            codes::ASYNC_MISMATCH,
             "console output needs async exports: WASI P3 output streams are asynchronous, but {} is a synchronous export",
             export.core_name
-        );
+        )
+        .with_optional_span(
+            lowered_functions
+                .get(&export.function)
+                .and_then(|function| perry_mir::source_span(ctx, &function.mir)),
+        )
+        .with_help(
+            "Declare the WIT export async or remove console output from this component.",
+        ));
     }
     // A command reports uncaught exceptions on stderr.
     if exports.iter().any(boundary::Export::is_command) {
@@ -381,10 +414,6 @@ fn bind_exports(
     }) {
         state.uses_streams = true;
     }
-    let mir_functions: HashMap<String, FuncOp> = functions
-        .iter()
-        .map(|f| (f.get_symbol_name(ctx).into(), *f))
-        .collect();
     let initialization = state
         .program_facts
         .effects(&Identifier::new(perry_mir::INITIALIZER));
@@ -395,27 +424,39 @@ fn bind_exports(
         && initialization
             .is_some_and(|summary| summary.effects.may_suspend || summary.effects.host_work)
     {
-        return Err(crate::CodegenError::PendingInitialization {
-            span: mir_functions
+        return Err(Diagnostic::new(
+            codes::ASYNC_MISMATCH,
+            "top-level statements leave asynchronous work pending",
+        )
+        .with_optional_span(
+            lowered_functions
                 .get(perry_mir::INITIALIZER)
-                .and_then(|function| perry_mir::source_span(ctx, function)),
-        }
-        .into());
+                .and_then(|function| perry_mir::source_span(ctx, &function.mir)),
+        )
+        .with_help(
+            "Await the asynchronous work in the top-level statements, so every entry point waits for it.",
+        ));
     }
     let stderr = state.imports.as_ref().is_some_and(|imports| {
         imports
             .iter()
             .any(|name| name.starts_with("wasi:cli/stderr@"))
     });
+    let mut resolved = Vec::with_capacity(exports.len());
     for export in exports {
-        let function = mir_functions.get(&export.function).ok_or_else(|| {
-            anyhow!(
+        let &lowered = lowered_functions.get(&export.function).ok_or_else(|| {
+            diag!(
+                codes::MISSING_EXPORT,
                 "WIT export {} has no function {}",
                 export.core_name,
                 export.function
             )
         })?;
-        let effects = &state.program_facts.function_summary(ctx, function)?.effects;
+        let effects = &state
+            .program_facts
+            .function_summary(ctx, &lowered.mir)
+            .to_diag(ctx)?
+            .effects;
         if export.is_async()
             && stderr
             && ((effects.host_work
@@ -430,11 +471,15 @@ fn bind_exports(
             state.reports_rejection = true;
         }
         if !export.is_async() && matches!(state.initializer, Some(Initializer::Async(_))) {
-            return Err(crate::CodegenError::AsyncInitializerRequiresAsyncExport {
-                core_name: export.core_name.clone(),
-                span: perry_mir::source_span(ctx, function),
-            }
-            .into());
+            return Err(diag!(
+                codes::ASYNC_MISMATCH,
+                "{} requires asynchronous module initialization",
+                export.core_name
+            )
+            .with_optional_span(perry_mir::source_span(ctx, &lowered.mir))
+            .with_help(
+                "Declare this WIT export async so it can await module initialization and its error channel.",
+            ));
         }
         if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
@@ -444,40 +489,29 @@ fn bind_exports(
                 .is_some_and(boundary::AbiType::accepts_exception)
         {
             if export.is_async() && !stderr {
-                return Err(crate::CodegenError::MissingErrorChannel {
-                    core_name: export.core_name.clone(),
-                    span: perry_mir::source_span(ctx, function),
-                }
-                .into());
+                return Err(diag!(
+                    codes::MISSING_ERROR_CHANNEL,
+                    "{} can throw without a compatible WIT error channel",
+                    export.core_name
+                )
+                .with_optional_span(perry_mir::source_span(ctx, &lowered.mir))
+                .with_help(
+                    "Declare a WIT result error, or use an async export with wasi:cli/stderr support.",
+                ));
             }
             if export.is_async() {
                 state.reports_rejection = true;
             }
         }
+        resolved.push((export, lowered));
     }
-    let lowered: HashMap<_, _> = crate::analysis::module_functions(ctx, &state.wasm)
-        .into_iter()
-        .map(|function| (function.get_symbol_name(ctx), function))
-        .collect();
-    for export in exports {
-        let function = mir_functions.get(&export.function).ok_or_else(|| {
-            anyhow!(
-                "WIT export {} has no function {}",
-                export.core_name,
-                export.function
+    for (export, lowered) in resolved {
+        boundary::export(ctx, state, &lowered.mir, &lowered.wasm, export).map_err(|source| {
+            source.wrap_boundary(
+                perry_mir::source_span(ctx, &lowered.mir),
+                format!("while binding WIT export {}", export.core_name),
+                format!("binding WIT export {}", export.core_name),
             )
-        })?;
-        boundary::export(
-            ctx,
-            state,
-            function,
-            &lowered[&function.get_symbol_name(ctx)],
-            export,
-        )
-        .map_err(|source| crate::CodegenError::ExportBinding {
-            core_name: export.core_name.clone(),
-            span: perry_mir::source_span(ctx, function),
-            source,
         })?;
     }
     Ok(())
@@ -535,9 +569,8 @@ fn export_wrapper(
     inner: &FuncOp,
     name: &Identifier,
 ) -> Result<FuncOp> {
-    let (params, results) = crate::analysis::function_signature(ctx, inner)?;
-    let ty = TypedHandle::<FunctionType>::from_handle(inner.get_type(ctx), ctx)
-        .map_err(|_| anyhow!("function type"))?;
+    let ty = crate::analysis::function_type(ctx, inner)?;
+    let (params, results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
     let wrapper = FuncOp::new(ctx, ident!("export_") + name.clone(), ty);
     set_export(ctx, &wrapper, name.as_ref());
     let entry = wrapper.get_entry_block(ctx);
@@ -556,7 +589,7 @@ fn export_wrapper(
     }
     b.ret(ctx, values);
     for param in params {
-        ensure!(
+        ensure_unsupported!(
             repr(ctx, param)? != Repr::Ref,
             "export {name} takes a reference; reference arguments need the component boundary (P6.1)"
         );
@@ -574,7 +607,7 @@ fn async_export_wrapper(
 ) -> Result<FuncOp> {
     let (params, results) = crate::analysis::function_signature(ctx, mir)?;
     let &[value_ty] = results.as_slice() else {
-        bail!("async function {name} returns {} values", results.len());
+        bail_internal!("async function {name} returns {} values", results.len());
     };
     let wasm_params = params
         .iter()

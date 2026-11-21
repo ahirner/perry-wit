@@ -60,23 +60,52 @@ test("reports diagnostics as a CompileError", async () => {
   assert.equal(error.name, "CompileError");
   const [first] = error.diagnostics;
   assert.ok(first);
-  assert.equal(first.severity, "error");
+  assert.equal(error.primary, first);
+  assert.equal(first.kind, "type-check");
+  assert.equal(first.code, "missing-type-annotation");
   assert.equal(first.span?.file, "src/main.ts");
   assert.equal(typeof first.span?.startByte, "number");
-  assert.match(error.message, /^src\/main\.ts:1:\d+: error\[/);
+  assert.match(error.message, /^src\/main\.ts:1:\d+: error\[missing-type-annotation\]:/);
+
+  const mutable = [first];
+  const snapshotError = new CompileError(mutable);
+  mutable.shift();
+  assert.equal(snapshotError.diagnostics.length, 1);
+  assert.equal(snapshotError.primary, snapshotError.diagnostics[0]);
+  assert.equal(snapshotError.primary, first);
+  assert.ok(Object.isFrozen(snapshotError.diagnostics));
   assert.equal(
     formatDiagnostics([
       {
+        kind: "type-check",
         code: "missing-required-field",
-        severity: "error",
         message: "Missing value",
         span: { file: "src/é.ts", startLine: 2, startColumn: 3, endLine: 2, endColumn: 8, startByte: 10, endByte: 15 },
-        notes: ["Record fields are mandatory"],
+        notes: [{ message: "Record fields are mandatory" }],
         help: "Add value: null",
       },
-      { code: "parse-error", severity: "error", message: "Unexpected token", notes: [] },
+      { kind: "syntax", code: "parse-error", message: "Unexpected token", notes: [] },
     ]),
     "src/é.ts:2:3: error[missing-required-field]: Missing value\n  Record fields are mandatory\n  help: Add value: null\nerror[parse-error]: Unexpected token",
+  );
+  assert.equal(
+    formatDiagnostics([
+      {
+        kind: "contract",
+        code: "contract-mismatch",
+        message: "type mismatch",
+        span: { file: "src/main.ts", startLine: 4, startColumn: 1, endLine: 4, endColumn: 12, startByte: 20, endByte: 31 },
+        notes: [
+          { message: "while binding WIT export run" },
+          {
+            message: "expected here",
+            span: { file: "src/types.ts", startLine: 1, startColumn: 10, endLine: 1, endColumn: 16, startByte: 9, endByte: 15 },
+          },
+        ],
+        help: "update signature",
+      },
+    ]),
+    "src/main.ts:4:1: error[contract-mismatch]: type mismatch\n  while binding WIT export run\n  src/types.ts:1:10: expected here\n  help: update signature",
   );
 });
 

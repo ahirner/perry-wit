@@ -173,8 +173,16 @@ impl Shapes<'_> {
         let box_rec = match (view.source(), arguments) {
             (EntryKind::Map, [k, v]) => self.map_type(ctx, k, v)?,
             (EntryKind::Set, [element]) => self.set_type(ctx, element)?,
-            (EntryKind::Map, _) => bail!("{} needs key and value type arguments", view.type_name()),
-            (EntryKind::Set, _) => bail!("{} needs one element type argument", view.type_name()),
+            (EntryKind::Map, _) => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "{} needs key and value type arguments",
+                view.type_name()
+            ),
+            (EntryKind::Set, _) => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "{} needs one element type argument",
+                view.type_name()
+            ),
         };
         Ok(self.collection_view_type(ctx, box_rec, view)?.into())
     }

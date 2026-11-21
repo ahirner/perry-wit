@@ -3,8 +3,8 @@ use crate::{
     repr::{optional_inner, slot_size},
     runtime::Runtime,
 };
-use anyhow::Result;
-use perry_mir::{ArrayType, JsonSchema, RecordType};
+use perry_mir::{ArrayType, JsonSchema, PlironResultExt as _, RecordType};
+use perry_wit_diagnostics::Result;
 use pliron::{
     context::Context,
     operation::Operation,
@@ -128,7 +128,7 @@ impl FunctionLowering<'_, '_> {
         let source_inner = optional_inner(ctx, source).unwrap_or(source);
         let target_inner = optional_inner(ctx, target).unwrap_or(target);
         let count = match JsonSchema::of(ctx, target_inner) {
-            Some(JsonSchema::Record(record)) => record.deref(ctx).fields()?.len(),
+            Some(JsonSchema::Record(record)) => record.deref(ctx).fields().to_diag(ctx)?.len(),
             Some(JsonSchema::Variant(variant)) => variant.deref(ctx).cases().len(),
             _ => 1,
         };
@@ -137,11 +137,11 @@ impl FunctionLowering<'_, '_> {
         let mut words = Vec::with_capacity(2 + 2 * count);
         words.extend([target_desc, source_desc]);
         if let Some(target) = perry_mir::typed::<RecordType>(ctx, target_inner) {
-            let source = TypedHandle::<RecordType>::from_handle(source_inner, ctx)?;
+            let source = TypedHandle::<RecordType>::from_handle(source_inner, ctx).to_diag(ctx)?;
             let source = source.deref(ctx);
-            for (name, ty) in target.deref(ctx).fields()? {
+            for (name, ty) in target.deref(ctx).fields().to_diag(ctx)? {
                 let mut offset = perry_abi::layout::record::HEADER;
-                let field = source.fields()?.iter().find_map(|(key, ty)| {
+                let field = source.fields().to_diag(ctx)?.iter().find_map(|(key, ty)| {
                     let slot = offset;
                     offset += slot_size(ctx, *ty);
                     (key == name).then_some((*ty, slot))
@@ -153,7 +153,7 @@ impl FunctionLowering<'_, '_> {
                 }
             }
         } else if let Some(target) = perry_mir::typed::<ArrayType>(ctx, target_inner) {
-            let source = TypedHandle::<ArrayType>::from_handle(source_inner, ctx)?;
+            let source = TypedHandle::<ArrayType>::from_handle(source_inner, ctx).to_diag(ctx)?;
             words.push(self.json_copy_plan(
                 ctx,
                 source.deref(ctx).element(),

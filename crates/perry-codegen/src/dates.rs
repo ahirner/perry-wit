@@ -1,7 +1,8 @@
 //! Boxed UTC dates and their calendar helper calls.
 use crate::{function::FunctionLowering, repr::i32_type, runtime::Runtime};
-use anyhow::{Result, bail};
 use perry_mir::Intrinsic;
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::bail_internal;
 use pliron::{context::Context, value::Value};
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 
@@ -89,7 +90,7 @@ impl FunctionLowering<'_, '_> {
                 self.block = merged;
                 merged.deref(ctx).get_argument(0)
             }
-            other => bail!("{other:?} is not a date intrinsic"),
+            other => bail_internal!("{other:?} is not a date intrinsic"),
         })
     }
 }

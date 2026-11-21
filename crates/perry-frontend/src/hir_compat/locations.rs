@@ -1,13 +1,45 @@
 //! Original source coordinates for merged AST and HIR declarations.
-use perry_hir::ir::Expr;
+use perry_hir::{
+    ir::{Expr, Function, Module, Stmt},
+    types::FuncId,
+    walker::{stmt_any_expr, walk_expr_children},
+};
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic, SourceSpan};
-use std::{collections::HashMap, path::PathBuf};
+use perry_wit_diagnostics::{Diagnostic, Note, Result, SourceSpan, codes};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
+
+/// Strip internal module-mangling prefixes (`__perry_module_<N>_`) for user-facing names.
+pub(crate) fn display_name(name: &str) -> &str {
+    name.strip_prefix("__perry_module_")
+        .and_then(|rest| {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            (digits > 0)
+                .then(|| rest[digits..].strip_prefix('_'))
+                .flatten()
+        })
+        .unwrap_or(name)
+}
+
+struct CallerOrigin {
+    site: CallSite,
+    caller: Option<String>,
+}
+
+enum CallSite {
+    Instantiation {
+        template: String,
+        note: Option<Note>,
+    },
+    Import(Note),
+}
 
 pub fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
     let Expr::Sequence(parts) = expr else {
@@ -25,15 +57,22 @@ struct FunctionInfo {
     explicit_return: bool,
 }
 
+struct SourceFile<'s> {
+    path: PathBuf,
+    source: &'s str,
+    positions: std::ops::RangeInclusive<u32>,
+}
+
 #[derive(Default)]
 pub struct Locations<'s> {
-    files: Vec<(PathBuf, &'s str, u32)>,
+    files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
     calls: HashMap<u32, Span>,
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
+    origins: HashMap<String, CallerOrigin>,
 }
 
 impl<'s> Locations<'s> {
@@ -89,19 +128,154 @@ impl<'s> Locations<'s> {
         self.operators.get(index).and_then(|span| self.span(*span))
     }
 
-    pub(crate) fn add(&mut self, file: PathBuf, source: &'s str, offset: u32) {
-        self.files.push((file, source, offset));
+    pub(crate) fn add(&mut self, path: PathBuf, source: &'s str) -> Result<u32> {
+        let offset = self.files.last().map_or(0, |file| *file.positions.end());
+        let end = u32::try_from(u64::from(offset) + source.len() as u64 + 1).map_err(|_| {
+            Diagnostic::new(
+                codes::INVALID_INPUT,
+                "TypeScript sources exceed the 32-bit span range",
+            )
+        })?;
+        self.files.push(SourceFile {
+            path,
+            source,
+            positions: offset + 1..=end,
+        });
+        Ok(offset)
+    }
+
+    fn template_name<'a>(&'a self, mut name: &'a str) -> &'a str {
+        let mut seen = HashSet::new();
+        while let Some(CallSite::Instantiation { template, .. }) =
+            self.origins.get(name).map(|origin| &origin.site)
+            && seen.insert(name)
+        {
+            name = template;
+        }
+        name
+    }
+
+    pub fn display_function_name<'a>(&'a self, name: &'a str) -> &'a str {
+        display_name(self.template_name(name))
+    }
+
+    pub(crate) fn record_instantiation(
+        &mut self,
+        instance: String,
+        template: String,
+        call_byte_offset: u32,
+        caller: Option<String>,
+    ) {
+        let note = self.call_span(call_byte_offset).map(|span| {
+            Note::spanned(
+                span,
+                format!("while instantiating '{}'", display_name(&template)),
+            )
+        });
+        self.origins.insert(
+            instance,
+            CallerOrigin {
+                site: CallSite::Instantiation { template, note },
+                caller,
+            },
+        );
+    }
+
+    /// Keep the first cross-file caller, giving exported functions priority.
+    pub(crate) fn record_call_origins(&mut self, module: &Module) {
+        if self.files.len() <= 1 {
+            return;
+        }
+        let names: HashMap<_, _> = module
+            .functions
+            .iter()
+            .map(|function| (function.id, function.name.as_str()))
+            .collect();
+        let mut record = |id: FuncId, offset: u32, caller: Option<&str>| {
+            let Some(&callee) = names.get(&id) else {
+                return;
+            };
+            if self.origins.contains_key(callee) {
+                return;
+            }
+            let Some(declaration) = self.functions.get(callee) else {
+                return;
+            };
+            if let (Some(call), Some(target)) =
+                (self.file_at(offset), self.file_at(declaration.span.lo.0))
+                && call.path != target.path
+                && let Some(span) = self.call_span(offset)
+            {
+                self.origins.insert(
+                    callee.to_owned(),
+                    CallerOrigin {
+                        site: CallSite::Import(Note::spanned(
+                            span,
+                            format!("called from here ('{}')", display_name(callee)),
+                        )),
+                        caller: caller.map(str::to_owned),
+                    },
+                );
+            }
+        };
+        body_calls(&module.init, &mut |id, offset| record(id, offset, None));
+        for exported in [true, false] {
+            for function in module
+                .functions
+                .iter()
+                .filter(|f| f.is_exported == exported)
+            {
+                function_calls(function, &mut |id, offset| {
+                    record(id, offset, Some(&function.name))
+                });
+            }
+        }
+        let mut class_call = |id, offset| record(id, offset, None);
+        for class in &module.classes {
+            for field in class.fields.iter().chain(&class.static_fields) {
+                if let Some(init) = &field.init {
+                    expression_calls(init, &mut class_call);
+                }
+            }
+            for function in crate::shapes::class_functions(class) {
+                function_calls(function, &mut class_call);
+            }
+        }
+    }
+
+    pub fn caller_notes(&self, function_name: &str) -> Vec<Note> {
+        let mut notes = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = function_name;
+        while let Some(origin) = self.origins.get(current)
+            && seen.insert(current)
+        {
+            let note = match &origin.site {
+                CallSite::Instantiation { note, .. } => note.as_ref(),
+                CallSite::Import(note) => Some(note),
+            };
+            notes.extend(note.cloned());
+            let Some(caller) = origin.caller.as_deref() else {
+                break;
+            };
+            current = caller;
+        }
+        notes
+    }
+
+    pub fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
+        error.with_notes(self.caller_notes(function_name))
     }
 
     pub(crate) fn has_explicit_return(&self, name: &str) -> bool {
         self.functions
-            .get(name)
+            .get(self.template_name(name))
             .is_some_and(|info| info.explicit_return)
     }
 
     pub fn function_span(&self, name: &str) -> Option<SourceSpan> {
         self.functions
-            .get(name)
+            .get(self.template_name(name))
             .and_then(|info| self.span(info.span))
     }
 
@@ -134,30 +308,28 @@ impl<'s> Locations<'s> {
         self.imports.get(source).and_then(|span| self.span(*span))
     }
 
-    pub(crate) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        Self::attach(error, self.call_span(byte_offset))
+    pub(crate) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
+        error.with_fallback_span(self.call_span(byte_offset))
     }
 
     fn span(&self, span: Span) -> Option<SourceSpan> {
-        self.files.iter().find_map(|(file, source, offset)| {
-            let start = span.lo.0.checked_sub(offset + 1)? as usize;
-            let end = span.hi.0.checked_sub(offset + 1)? as usize;
-            (start <= source.len() && end <= source.len())
-                .then(|| SourceSpan::new(file.clone(), source, start, end))
-        })
+        let file = self.file_at(span.lo.0)?;
+        let start = (span.lo.0 - file.positions.start()) as usize;
+        let end = span.hi.0.checked_sub(*file.positions.start())? as usize;
+        (end <= file.source.len()).then(|| SourceSpan::new(&file.path, file.source, start, end))
     }
 
-    pub(crate) fn annotate(&self, error: anyhow::Error, span: Span) -> anyhow::Error {
-        Self::attach(error, self.span(span))
+    fn file_at(&self, position: u32) -> Option<&SourceFile<'s>> {
+        let index = self
+            .files
+            .partition_point(|file| *file.positions.end() < position);
+        self.files
+            .get(index)
+            .filter(|file| file.positions.contains(&position))
     }
 
-    fn attach(error: anyhow::Error, span: Option<SourceSpan>) -> anyhow::Error {
-        let mut diagnostic =
-            PerryDiagnostic::from_error(error, DiagnosticCode::UnsupportedExpression);
-        if diagnostic.span.is_none() {
-            diagnostic.span = span;
-        }
-        diagnostic.into()
+    pub(crate) fn annotate(&self, error: Diagnostic, span: Span) -> Diagnostic {
+        error.with_fallback_span(self.span(span))
     }
 
     pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
@@ -235,6 +407,18 @@ impl<'s> Locations<'s> {
                 decl.visit_children_with(self);
                 self.class_name = previous;
             }
+            fn visit_constructor(&mut self, ctor: &ast::Constructor) {
+                if let Some(class_name) = &self.class_name {
+                    self.locations.functions.insert(
+                        format!("{class_name}::constructor"),
+                        FunctionInfo {
+                            span: ctor.span,
+                            explicit_return: false,
+                        },
+                    );
+                }
+                ctor.visit_children_with(self);
+            }
             fn visit_class_method(&mut self, method: &ast::ClassMethod) {
                 if let Some(class_name) = &self.class_name {
                     let name = match &method.key {
@@ -269,5 +453,37 @@ impl<'s> Locations<'s> {
             locations: self,
             class_name: None,
         });
+    }
+}
+
+fn function_calls(function: &Function, visit: &mut impl FnMut(FuncId, u32)) {
+    for default in function.params.iter().filter_map(|p| p.default.as_ref()) {
+        expression_calls(default, visit);
+    }
+    body_calls(&function.body, visit);
+}
+
+fn body_calls(body: &[Stmt], visit: &mut impl FnMut(FuncId, u32)) {
+    for statement in body {
+        stmt_any_expr(statement, &mut |expr| {
+            expression_calls(expr, visit);
+            false
+        });
+    }
+}
+
+fn expression_calls(expr: &Expr, visit: &mut impl FnMut(FuncId, u32)) {
+    if let Expr::Closure { body, .. } = expr {
+        body_calls(body, visit);
+    }
+    walk_expr_children(expr, &mut |child| expression_calls(child, visit));
+    if let Expr::Call {
+        callee,
+        byte_offset,
+        ..
+    } = expr
+        && let Expr::FuncRef(id) = callee.as_ref()
+    {
+        visit(*id, *byte_offset);
     }
 }

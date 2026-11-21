@@ -75,8 +75,9 @@ impl<'s> FunctionBuilder<'s> {
                     Ok(if let Some(comparator) = comparator {
                         let cmp = b.array_callback(ctx, comparator, &[candidate, key])?;
                         let cmp = b.arithmetic(ctx, cmp);
-                        ensure!(
+                        ensure_diag!(
                             kind(ctx, cmp)? == Kind::Number,
+                            codes::TYPE_MISMATCH,
                             "sort comparator must return a number"
                         );
                         b.compare(ctx, CompareKind::Gt, cmp, zero)
@@ -321,7 +322,9 @@ impl<'s> FunctionBuilder<'s> {
             Some(Expr::Number(n)) if (*n as i32) == 1 => 1,
             Some(Expr::Integer(n)) if *n <= 0 => 0,
             Some(Expr::Integer(1)) => 1,
-            _ => bail!("array.flat requires a constant depth of 0 or 1 in typed arrays"),
+            _ => {
+                bail_unsupported!("array.flat requires a constant depth of 0 or 1 in typed arrays")
+            }
         };
         let nested = perry_mir::typed::<ArrayType>(ctx, present_type(ctx, outer_elem_ty));
         let Some(inner) = nested.filter(|_| depth_num == 1) else {
@@ -406,14 +409,16 @@ impl<'s> FunctionBuilder<'s> {
             && !rec.deref(ctx).is_tuple()
             && rec.deref(ctx).field("length").is_some()
         {
-            let op = FieldGetOp::new(ctx, src_val, "length".to_string())?;
+            let op = FieldGetOp::new(ctx, src_val, "length".to_string()).to_diag(ctx)?;
             let raw_len = self.field_read(ctx, &op)?;
             let raw_len = self.arithmetic(ctx, raw_len);
             let len_trunc = self.integer_or_infinity(ctx, raw_len)?;
             let zero = self.number(ctx, 0.0);
             Input::UndefinedCount(self.intrinsic(ctx, Intrinsic::MathMax, vec![len_trunc, zero]))
         } else {
-            bail!("Array.from source must be a string, array, Set, Map, or {{ length }} object");
+            bail_unsupported!(
+                "Array.from source must be a string, array, Set, Map, or {{ length }} object"
+            );
         };
         let expected_elem = expected_elem.filter(|_| matches!(input, Input::UndefinedCount(_)));
         let mapper = map_fn.map(|callback| {

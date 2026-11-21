@@ -74,7 +74,7 @@ impl<'s> FunctionBuilder<'s> {
         input: Value,
         target: TypeHandle,
     ) -> Result<Value> {
-        ensure!(
+        ensure_unsupported!(
             JsonSchema::supports_descriptor(ctx, target),
             "unsupported JSON schema"
         );
@@ -127,7 +127,7 @@ impl<'s> FunctionBuilder<'s> {
             Kind::String => "string",
             Kind::Number => "number",
             Kind::Boolean => "boolean",
-            _ => bail!("JSON equality requires a string, number or boolean operand"),
+            _ => bail_unsupported!("JSON equality requires a string, number or boolean operand"),
         };
         let actual = self.intrinsic(ctx, Intrinsic::JsonTypeOf, vec![json]);
         let expected = self.string(ctx, tag);
@@ -173,9 +173,7 @@ impl<'s> FunctionBuilder<'s> {
                 return self.record_object_spread(ctx, parts, Some(first_src), expected_record);
             }
             if !is_exc {
-                initial = Some(first_json.context(
-                    "object spread is supported over typed records or JSON values with static keys",
-                )?);
+                initial = Some(first_json.ok_or_else(|| Diagnostic::unsupported("object spread is supported over typed records or JSON values with static keys"))?);
             }
             remaining = &parts[1..];
         } else if (expected_record.is_some()
@@ -204,9 +202,9 @@ impl<'s> FunctionBuilder<'s> {
                 if matches!(kind(ctx, source), Ok(Kind::Exception)) {
                     continue;
                 }
-                let source = self.json_operand(ctx, source)?.context(
+                let source = self.json_operand(ctx, source)?.ok_or_else(|| Diagnostic::unsupported(
                     "object spread is supported over typed records or JSON values with static keys",
-                )?;
+                ))?;
                 self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
             }
         }
@@ -263,7 +261,7 @@ impl<'s> FunctionBuilder<'s> {
             Kind::Record | Kind::Array => {
                 return Ok(self.emit_value(ctx, |ctx| perry_mir::NativeJsonOp::new(ctx, value)));
             }
-            _ => bail!("unsupported Error cause type"),
+            _ => bail_unsupported!("unsupported Error cause type"),
         };
         Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }
@@ -282,7 +280,7 @@ impl<'s> FunctionBuilder<'s> {
             Kind::Number => Intrinsic::JsonFromNumber,
             Kind::String => Intrinsic::JsonFromString,
             Kind::Boolean => Intrinsic::JsonFromBool,
-            _ => bail!(
+            _ => bail_unsupported!(
                 "members of a spread object literal are JSON values, numbers, strings, \
                  booleans or null so far"
             ),

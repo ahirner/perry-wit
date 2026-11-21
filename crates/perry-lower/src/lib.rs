@@ -21,7 +21,6 @@ mod coerce;
 mod collections;
 mod control_flow;
 mod dates;
-mod diagnostics;
 mod expressions;
 mod foreign;
 mod host;
@@ -38,7 +37,6 @@ mod temporal;
 mod url;
 mod value_unions;
 mod variants;
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_frontend::hir::{
     ir::{
         BinaryOp, CompareOp, Expr, Function, LogicalOp, Module as HirModule, Stmt, UnaryOp,
@@ -53,10 +51,15 @@ use perry_mir::{
     ConcatOp, CondBrOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
     ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, Intrinsic, IsNullOp, IsUndefinedOp,
     JsonStringifyOp, JsonType, LoadOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp,
-    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType, RaiseOp, RecordKind,
-    RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp, StringLenOp,
-    StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp, WrapOp, absence,
-    admits_undefined, may_throw, optional_parts, optional_value, present_type, set_async,
+    PlironResultExt as _, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType,
+    RaiseOp, RecordKind, RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp,
+    StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
+    WrapOp, absence, admits_undefined, may_throw, optional_parts, optional_value, present_type,
+    set_async,
+};
+use perry_wit_diagnostics::{
+    Diagnostic, Result, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag,
+    ensure_internal, ensure_unsupported, internal, unsupported,
 };
 use pliron::printable::Printable as _;
 use pliron::{
@@ -92,8 +95,15 @@ use program::{Builtin, Signature};
 /// functions, otherwise an entry point awaiting module initialization.
 pub const MAIN: &str = "perry_main";
 
-pub use diagnostics::{LowerError, LowerErrorKind, ShapeError};
 pub use perry_frontend::hir;
+
+fn missing_type_annotation() -> Diagnostic {
+    Diagnostic::new(
+        codes::MISSING_TYPE_ANNOTATION,
+        "the value type cannot be inferred",
+    )
+    .with_help("Add a concrete type annotation to this binding, parameter, or function return.")
+}
 
 /// Parse TypeScript, lower it to Perry HIR, and build a verified-ready MIR module, with
 /// `foreign` symbols by SDK name: WIT types and functions the program imports.

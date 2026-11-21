@@ -1,6 +1,7 @@
 //! Compilation-local constructor types, indexed independently of HIR traversal order.
 use super::*;
 use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::{bail_diag, bail_internal, codes, internal, unsupported};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 const CONSTRUCTOR: &str = "\0perry_constructor:";
@@ -40,20 +41,28 @@ impl Constructors {
             let entry = self
                 .0
                 .get_mut(index)
-                .with_context(|| format!("no constructor was preserved as {:?}", alias.name))?;
+                .ok_or_else(|| internal!("no constructor was preserved as {:?}", alias.name))?;
             let HirType::Generic { type_args, .. } = alias.ty else {
-                bail!("the type arguments of a Map or Set constructor did not survive as generics");
+                bail_internal!(
+                    "the type arguments of a Map or Set constructor did not survive as generics"
+                );
             };
             match entry {
                 ConstructorTypes::Map(types) => {
                     let Ok([key, value]) = <[HirType; 2]>::try_from(type_args) else {
-                        bail!("new Map takes key and value type arguments");
+                        bail_diag!(
+                            codes::TYPE_MISMATCH,
+                            "new Map takes key and value type arguments"
+                        );
                     };
                     *types = Some((key, value));
                 }
                 ConstructorTypes::Set(element) => {
                     let Ok([item]) = <[HirType; 1]>::try_from(type_args) else {
-                        bail!("new Set takes one element type argument");
+                        bail_diag!(
+                            codes::TYPE_MISMATCH,
+                            "new Set takes one element type argument"
+                        );
                     };
                     *element = Some(item);
                 }
@@ -129,7 +138,7 @@ pub(super) fn preserve(
     struct Preserver {
         registry: Constructors,
         unresolved: SyntaxContext,
-        error: Option<anyhow::Error>,
+        error: Option<perry_wit_diagnostics::Diagnostic>,
         aliases: Vec<ast::ModuleItem>,
     }
     impl VisitMut for Preserver {
@@ -150,7 +159,7 @@ pub(super) fn preserve(
             if args.len() > 1 || args.iter().any(|arg| arg.spread.is_some()) {
                 // Keep the first error; later ones may be its consequences.
                 self.error.get_or_insert_with(|| {
-                    anyhow!("{} takes at most one iterable argument", ident.sym)
+                    unsupported!("{} takes at most one iterable argument", ident.sym)
                 });
                 return;
             }

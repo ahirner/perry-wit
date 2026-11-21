@@ -5,9 +5,10 @@ use crate::{
     repr::{Repr, i32_type, repr, slot_size},
     runtime::Runtime,
 };
-use anyhow::Result;
 use perry_abi::layout::{array, record, roots as root_stack};
-use perry_mir::{AsyncCallOp, CallOp, RecordType};
+use perry_mir::{AsyncCallOp, CallOp, PlironResultExt as _, RecordType};
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::bail_internal;
 use pliron::{
     context::{Context, Ptr},
     op::Op,
@@ -72,7 +73,10 @@ pub(crate) fn needs_collector(
     use pliron::builtin::op_interfaces::SymbolOpInterface;
     for function in functions {
         let name = function.get_symbol_name(ctx);
-        let effects = &summaries.function_summary(ctx, function)?.effects;
+        let effects = &summaries
+            .function_summary(ctx, function)
+            .to_diag(ctx)?
+            .effects;
         if name.as_ref() == perry_mir::INITIALIZER
             || effects.repeated_allocations
             || effects.unknown_helper_bound
@@ -109,7 +113,7 @@ pub fn explain_tiers(
     };
     let mut report = format!("Allocation tiers after MIR optimization: {tier}\n");
     let stats = perry_mir::optimization_statistics(module.get_operation(), ctx);
-    writeln!(
+    let _ = writeln!(
         report,
         "Optimization statistics: numeric_contexts={}, constraint_visits={}, specializations={}, cleanup_rounds={}, summarized_heap_sets={}, summarized_contexts={}, range_widenings={}, parse_stringify_rewrites={}, parse_stringify_missed={}",
         stats.numeric_contexts,
@@ -121,10 +125,10 @@ pub fn explain_tiers(
         stats.range_widenings,
         stats.parse_stringify_rewrites,
         stats.parse_stringify_missed
-    )?;
+    );
     for function in &functions {
         let name = function.get_symbol_name(ctx);
-        let summary = summaries.function_summary(ctx, function)?;
+        let summary = summaries.function_summary(ctx, function).to_diag(ctx)?;
         let mut sites = 0;
         let mut frames = 0;
         for op in crate::analysis::function_ops(ctx, function) {
@@ -135,13 +139,13 @@ pub fn explain_tiers(
             );
         }
         let leases = crate::lease::leased(ctx, function, &live).len();
-        writeln!(
+        let _ = writeln!(
             report,
             "  {name}: {sites} allocation sites; {frames} frame sites; repeated allocations={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
             summary.effects.repeated_allocations,
             summary.effects.unknown_helper_bound,
             summary.escapes
-        )?;
+        );
     }
     report.push_str("  scalar: eliminated closed aggregates have no allocation site\n  frame: proven nonescaping scalar records reuse bounded activation storage; other aggregates use the selected task or instance storage\n  buffer: host operations pin owners until acknowledgement\n");
     Ok(report)
@@ -166,7 +170,8 @@ impl FunctionLowering<'_, '_> {
                     let record = TypedHandle::<RecordType>::from_handle(
                         allocation.get_result(ctx).get_type(ctx),
                         ctx,
-                    )?;
+                    )
+                    .to_diag(ctx)?;
                     self.frame_slots.insert(op, bytes);
                     bytes += Self::record_size(ctx, record)?;
                 }
@@ -278,7 +283,7 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn initialization_promise(&mut self, ctx: &mut Context) -> Result<Value> {
         use pliron_wasm::ops::CallOp;
         let Some(crate::module::Initializer::Async(address)) = self.state.initializer else {
-            anyhow::bail!("module_initialize without an async initializer");
+            bail_internal!("module_initialize without an async initializer");
         };
         let function = crate::module::INITIALIZER;
         let cell = self.i32_const(ctx, address as i32);
@@ -551,10 +556,10 @@ impl FunctionLowering<'_, '_> {
         let shape = if let Some(&shape) = self.state.pointer_maps.get(&ty) {
             shape
         } else {
-            let record = TypedHandle::<RecordType>::from_handle(ty, ctx)?;
+            let record = TypedHandle::<RecordType>::from_handle(ty, ctx).to_diag(ctx)?;
             let mut offsets = Vec::new();
             let mut field_offset = record::HEADER;
-            for (_, field_ty) in record.deref(ctx).fields()?.iter() {
+            for (_, field_ty) in record.deref(ctx).fields().to_diag(ctx)?.iter() {
                 if repr(ctx, *field_ty).is_ok_and(|kind| kind == Repr::Ref) {
                     offsets.push(field_offset);
                 }

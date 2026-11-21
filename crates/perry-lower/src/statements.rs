@@ -147,7 +147,11 @@ impl<'s> FunctionBuilder<'s> {
                                 }
                                 _ => false,
                             };
-                            ensure!(is_never_expr, "a void function returns a value");
+                            ensure_diag!(
+                                is_never_expr,
+                                codes::TYPE_MISMATCH,
+                                "a void function returns a value"
+                            );
                             self.effect(ctx, expr)?;
                             (self.implicit_results(ctx), None)
                         }
@@ -163,16 +167,17 @@ impl<'s> FunctionBuilder<'s> {
                     // Returning a promise runs finalizers before adoption; its later rejection
                     // does not enter a catch surrounding the return expression.
                     let handlers = std::mem::take(&mut self.handlers);
-                    let await_ = AwaitOp::new(ctx, promise)?;
+                    let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
                     let value = self.append_value(ctx, &await_);
                     values.push(self.fit(ctx, value, expected)?);
                     self.handlers = handlers;
                 }
-                ensure!(
+                ensure_diag!(
                     values
                         .iter()
                         .map(|v| v.get_type(ctx))
                         .eq(self.result.iter().map(|r| r.carrier)),
+                    codes::TYPE_MISMATCH,
                     "return value type differs from the declared result"
                 );
                 self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
@@ -274,15 +279,16 @@ impl<'s> FunctionBuilder<'s> {
                     .find_map(|(index, control)| {
                         control.target(jump, label).map(|target| (index, target))
                     })
-                    .with_context(|| match label {
-                        Some(label) => format!(
+                    .ok_or_else(|| match label {
+                        Some(label) => diag!(
+                            codes::PARSE_ERROR,
                             "{} {label} has no enclosing target",
                             match jump {
                                 Jump::Break => "break",
                                 Jump::Continue => "continue",
                             }
                         ),
-                        None => "break/continue has no enclosing target".into(),
+                        None => diag!(codes::PARSE_ERROR, "break/continue has no enclosing target"),
                     })?;
                 self.run_finallies(ctx, |f| f.controls > index)?;
                 self.jump(ctx, target);
@@ -315,11 +321,11 @@ impl<'s> FunctionBuilder<'s> {
             }
             Stmt::Throw(value) => {
                 let value = self.expression(ctx, value)?;
-                ensure!(
+                ensure_unsupported!(
                     matches!(
                         kind(ctx, value).or_else(|_| optional_value(ctx, value.get_type(ctx))
                             .map(|_| Kind::Number)
-                            .context("unsupported thrown value"))?,
+                            .ok_or_else(|| Diagnostic::unsupported("unsupported thrown value")))?,
                         Kind::Exception
                             | Kind::Json
                             | Kind::Number
@@ -339,7 +345,7 @@ impl<'s> FunctionBuilder<'s> {
                 finally,
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
             Stmt::PreallocateBoxes { .. } | Stmt::PreallocateTdzBoxes(_) => {}
-            other => bail!("MIR backend does not support statement {other:?} yet"),
+            _ => bail_unsupported!("this statement form is not supported yet"),
         }
         Ok(())
     }
@@ -363,7 +369,7 @@ impl<'s> FunctionBuilder<'s> {
                 let source = self.defined(ctx, source)?;
                 let tuple = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
                     .is_some_and(|record| record.deref(ctx).kind() == RecordKind::Tuple);
-                ensure!(
+                ensure_unsupported!(
                     kind(ctx, source)? == Kind::Array || tuple,
                     "array destructuring is supported for arrays so far"
                 );
@@ -404,9 +410,12 @@ impl<'s> FunctionBuilder<'s> {
             (None, Some(value)) => value.get_type(ctx),
             (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
             (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
-                return Err(LowerError::new(ShapeError::MissingTypeAnnotation).into());
+                return Err(missing_type_annotation());
             }
-            (None, None) => bail!("an untyped binding needs an initializer"),
+            (None, None) => bail_diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an untyped binding needs an initializer"
+            ),
         };
         let binding = BindingType { carrier, integer };
         let slot = if self.shapes.global_ids.contains(&id) {
@@ -461,8 +470,9 @@ impl<'s> FunctionBuilder<'s> {
                 Some(code) => {
                     let code = self.expression(ctx, code)?;
                     let code = self.arithmetic(ctx, code);
-                    ensure!(
+                    ensure_diag!(
                         kind(ctx, code)? == Kind::Number,
+                        codes::TYPE_MISMATCH,
                         "process.exit takes a number"
                     );
                     code

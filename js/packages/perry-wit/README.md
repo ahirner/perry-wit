@@ -10,7 +10,7 @@ npm install perry-wit  # todo: publishing still to come
 ```
 
 ```ts
-import { compile, CompileError } from "perry-wit";
+import { compile } from "perry-wit";
 
 const { component } = await compile({
   source: `export function greet(name: string): string { return \`Hello, \${name}!\`; }`,
@@ -24,7 +24,7 @@ const { component } = await compile({
 - `generateTypes(options)` generates TypeScript declarations for a world's imports and exports.
 - `Compiler.load()` loads a compiler whose methods run synchronously.
 
-Invalid programs throw a `CompileError` holding the compiler's `diagnostics`.
+Catch `CompileError` and display `error.message` to show the diagnostic.
 
 The [Embedding](https://ahirner.github.io/perry-wit/docs/embedding.html) chapter of the handbook describes every option.
 The [Authoring](https://ahirner.github.io/perry-wit/docs/authoring.html) chapter describes the TypeScript the compiler accepts.

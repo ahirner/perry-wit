@@ -1,42 +1,50 @@
 use perry_wit::{
-    DiagnosticCode, SdkOptions,
+    CompileOptions, ErrorKind, SdkOptions,
     api::{self, Module, Options, Program, Source, Wit},
-    generate_sdk_files,
+    codes, generate_sdk_files,
 };
+
+fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
+    Program {
+        source: Source {
+            name: Some(name.into()),
+            contents: source.as_bytes().to_vec(),
+        },
+        modules: modules
+            .iter()
+            .map(|(name, contents)| Module {
+                name: (*name).into(),
+                contents: contents.as_bytes().to_vec(),
+            })
+            .collect(),
+    }
+}
 
 #[test]
 fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let helper = "// é🙂\r\nexport function helper(value) { return value; }";
-    let program = Program {
-        source: Source {
-            name: Some("src/main.ts".into()),
-            contents: b"import { helper } from './helper'; export function run():number{return helper(1);}".to_vec(),
-        },
-        modules: vec![Module {
-            name: "src/helper.ts".into(),
-            contents: helper.as_bytes().to_vec(),
-        }],
-    };
+    let mut program = program_with(
+        "src/main.ts",
+        "import { helper } from './helper'; export function run():number{return helper(1);}",
+        &[("src/helper.ts", helper)],
+    );
+    program.source.contents.extend([b' '; 512]);
     let error = api::compile_core(&program).unwrap_err();
-    let diagnostic = &error.diagnostics[0];
-    assert_eq!(diagnostic.code, DiagnosticCode::MissingTypeAnnotation);
-    let span = diagnostic.span.as_ref().expect("declaration span");
+    let diagnostic = error.primary();
+    assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION);
+    let span = diagnostic.span().expect("declaration span");
     assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
     assert_eq!(span.start_line, 2);
     assert!(helper[span.start_byte..span.end_byte].contains("value"));
-    assert!(diagnostic.help.is_some());
+    assert!(diagnostic.help().is_some());
     assert!(std::error::Error::source(&error).is_some());
 
     let helper =
         "// é🙂\r\nexport function helper(value:number):number {\r\n return value ** 1;\r\n}";
-    let mut program = program;
     program.modules[0].contents = helper.as_bytes().to_vec();
     let error = api::compile_core(&program).unwrap_err();
-    assert_eq!(
-        error.diagnostics[0].code,
-        DiagnosticCode::UnsupportedOperator
-    );
-    let span = error.diagnostics[0].span.as_ref().unwrap();
+    assert_eq!(error.primary().code(), codes::UNSUPPORTED_OPERATOR);
+    let span = error.primary().span().unwrap();
     assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
     assert_eq!(&helper[span.start_byte..span.end_byte], "value ** 1");
     assert_eq!((span.start_line, span.start_column), (3, 9));
@@ -51,32 +59,29 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         );
         program.modules[0].contents = helper.as_bytes().to_vec();
         let error = api::compile_core(&program).unwrap_err();
-        let span = error.diagnostics[0].span.as_ref().unwrap();
+        assert_ne!(error.primary().kind(), ErrorKind::Internal, "{error}");
+        let span = error.primary().span().unwrap();
         assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
         assert_eq!(&helper[span.start_byte..span.end_byte], expression);
         assert_eq!((span.start_line, span.start_column), (2, 15));
     }
 
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
-    let parse_error = api::compile_core(&Program {
-        source: Source {
-            name: Some("parse.ts".into()),
-            contents: parse_source.as_bytes().to_vec(),
-        },
-        modules: vec![],
-    })
-    .unwrap_err();
-    assert_eq!(parse_error.diagnostics[0].code, DiagnosticCode::ParseError);
+    let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
+    assert_eq!(parse_error.primary().code(), codes::PARSE_ERROR);
     assert_eq!(
         perry_wit::compile_core(parse_source, "parse.ts")
             .unwrap_err()
-            .diagnostics,
-        parse_error.diagnostics
+            .primary(),
+        parse_error.primary()
     );
-    let span = parse_error.diagnostics[0].span.as_ref().unwrap();
+    let span = parse_error.primary().span().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));
+}
 
+#[test]
+fn sdk_errors_identify_the_failing_wit_or_output_path() {
     let temp = tempfile::tempdir().unwrap();
     let wit_dir = temp.path().join("wit");
     std::fs::create_dir_all(&wit_dir).unwrap();
@@ -87,7 +92,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         ..SdkOptions::default()
     })
     .unwrap_err();
-    assert_eq!(wit_err.diagnostics[0].code, DiagnosticCode::WitResolution);
+    assert_eq!(wit_err.primary().code(), codes::WIT_PARSE);
 
     std::fs::write(
         wit_dir.join("world.wit"),
@@ -102,7 +107,116 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         ..SdkOptions::default()
     })
     .unwrap_err();
-    assert_eq!(io_err.diagnostics[0].code, DiagnosticCode::Io);
+    assert_eq!(io_err.primary().code(), codes::IO);
+
+    // Multi-file WIT directory with one invalid-UTF-8 file preserves the failing filename in notes.
+    let bad_wit_dir = temp.path().join("bad-wit");
+    std::fs::create_dir_all(&bad_wit_dir).unwrap();
+    std::fs::write(
+        bad_wit_dir.join("good.wit"),
+        "package test:multi; world app { export run: func() -> f64; }",
+    )
+    .unwrap();
+    std::fs::write(bad_wit_dir.join("corrupt.wit"), [0xffu8, 0xfe]).unwrap();
+    let bad_utf8_err = perry_wit::component::wit::resolve_wit(&bad_wit_dir).unwrap_err();
+    assert_eq!(bad_utf8_err.primary().code(), codes::IO, "{bad_utf8_err}");
+    assert!(
+        bad_utf8_err.to_string().contains("corrupt.wit"),
+        "{bad_utf8_err}"
+    );
+}
+
+#[test]
+fn imported_helpers_report_the_call_chain_across_compiler_phases() {
+    const WORKFLOW: &str = "src/work\x1e\x1fflow.ts";
+    let assert_caller_note =
+        |error: &perry_wit::CompileError, expected_file: &str, needle: &str| {
+            let diag = error.primary();
+            let primary = diag.span().expect("primary span in library");
+            assert_eq!(primary.file.to_string_lossy(), expected_file, "{diag}");
+            assert!(!diag.to_string().contains("__perry_module_"), "{diag}");
+            assert!(!diag.to_string().contains("_instance_"), "{diag}");
+            assert!(
+                diag.notes().iter().any(|note| {
+                    note.span()
+                        .is_some_and(|span| span.file == std::path::Path::new(WORKFLOW))
+                        && note.message().contains(needle)
+                }),
+                "expected a caller note containing {needle:?} in {WORKFLOW:?}: {diag}"
+            );
+        };
+
+    for (lib_source, workflow_source, expected_code, needle) in [
+        (
+            "export function helper(n: number): number {\n  return n ** 2;\n}",
+            "import { helper } from './lib';\nexport function run(n: number): number {\n  return helper(n);\n}",
+            codes::UNSUPPORTED_OPERATOR,
+            "helper",
+        ),
+        (
+            "export function helper(values: number[] | null): number {\n  return values.length;\n}",
+            "import { helper } from './lib';\nexport function run(values: number[] | null): number {\n  return helper(values);\n}",
+            codes::POSSIBLY_NULL_RECEIVER,
+            "helper",
+        ),
+        (
+            "export function helper(input: string, n: number): boolean {\n  if (n > 0) return helper(input, n - 1);\n  return /(/.test(input);\n}",
+            "import { helper } from './lib';\nexport function run(input: string): boolean {\n  return helper(input, 1);\n}",
+            codes::UNSUPPORTED_REGEX,
+            "helper",
+        ),
+        (
+            "export function wrap<T>(value: T): number {\n  return value;\n}",
+            "import { wrap } from './lib';\nexport function run(): number {\n  return wrap('bad');\n}",
+            codes::TYPE_MISMATCH,
+            "while instantiating 'wrap'",
+        ),
+        (
+            "export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}",
+            "import { Box } from './lib';\nexport function run(): number {\n  return new Box('bad').asNumber();\n}",
+            codes::TYPE_MISMATCH,
+            "called from here",
+        ),
+    ] {
+        let err = api::compile_core(&program_with(
+            WORKFLOW,
+            workflow_source,
+            &[("src/lib.ts", lib_source)],
+        ))
+        .unwrap_err();
+        assert_eq!(err.primary().code(), expected_code, "{err}");
+        assert_caller_note(&err, "src/lib.ts", needle);
+    }
+
+    // Nested chain: workflow.ts -> generic mid<T> in mid.ts -> helper leaf in leaf.ts.
+    let chain_err = api::compile_core(&program_with(
+        WORKFLOW,
+        "import { mid } from './mid';\nexport function run(): number {\n  return mid(1);\n}",
+        &[
+            (
+                "src/mid.ts",
+                "import { leaf } from './leaf';\nexport function mid<T>(x: T): number {\n  return leaf(1);\n}",
+            ),
+            (
+                "src/leaf.ts",
+                "export function leaf(n: number): number {\n  return n ** 2;\n}",
+            ),
+        ],
+    ))
+    .unwrap_err();
+    assert_eq!(
+        chain_err.primary().code(),
+        codes::UNSUPPORTED_OPERATOR,
+        "{chain_err}"
+    );
+    assert_caller_note(&chain_err, "src/leaf.ts", "while instantiating 'mid'");
+    assert!(
+        chain_err.primary().notes().iter().any(|note| {
+            note.span()
+                .is_some_and(|span| span.file.to_string_lossy() == "src/mid.ts")
+        }),
+        "expected intermediate note in src/mid.ts:\n{chain_err}"
+    );
 }
 
 /// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
@@ -114,15 +228,8 @@ fn nullable_property_access_requires_narrowing() {
         dependencies: vec![],
     };
     let source = "export function count(values: number[] | null): number {\n  if (values !== null) { const count = values.length; } return values.length;\n}";
-    let program = Program {
-        source: Source {
-            name: Some("main.ts".into()),
-            contents: source.as_bytes().to_vec(),
-        },
-        modules: vec![],
-    };
     let error = api::compile(
-        &program,
+        &program_with("main.ts", source, &[]),
         &wit,
         &Options {
             world: Some("demo".into()),
@@ -130,37 +237,34 @@ fn nullable_property_access_requires_narrowing() {
         },
     )
     .expect_err("nullable access must be rejected");
-    let diagnostic = &error.diagnostics[0];
+    let diagnostic = error.primary();
+    assert_eq!(diagnostic.code(), codes::POSSIBLY_NULL_RECEIVER, "{error}");
     assert_eq!(
-        diagnostic.code,
-        DiagnosticCode::UnsupportedExpression,
+        diagnostic.message(),
+        "property access receiver is possibly null",
         "{error}"
     );
-    assert_eq!(
-        diagnostic.message, "property access receiver is possibly null",
-        "{error}"
-    );
-    let span = diagnostic.span.as_ref().expect("property access span");
+    assert!(diagnostic.notes().is_empty(), "{error}");
+    let span = diagnostic.span().expect("property access span");
     assert_eq!(span.file.to_string_lossy(), "main.ts");
     assert_eq!(span.start_byte, source.rfind("values.length").unwrap());
     assert_eq!(&source[span.start_byte..span.end_byte], "values.length");
 }
 
 #[test]
-fn parse_and_required_field_errors_have_typed_codes() {
+fn type_errors_preserve_source_spans_and_field_names() {
     for (source, code) in [
-        ("export function {", DiagnosticCode::ParseError),
         (
             "interface Item { value:number|null } export function run():number { const item:Item={};return 0; }",
-            DiagnosticCode::MissingRequiredField,
+            codes::MISSING_REQUIRED_FIELD,
         ),
         (
             "export async function mergeDocs():Promise<Map<string,string>> { const base=JSON.parse('{\"y\":\"v\"}'); return { \"x\": base.y }; }",
-            DiagnosticCode::UnsupportedType,
+            codes::TYPE_MISMATCH,
         ),
         (
             "export async function mergeDocs():Promise<Map<string,string>> { const [base, update]=[JSON.parse('{}'), JSON.parse('{}')]; return { ...base, ...update }; }",
-            DiagnosticCode::UnsupportedType,
+            codes::TYPE_MISMATCH,
         ),
     ] {
         let error = api::compile_core(&Program {
@@ -168,10 +272,133 @@ fn parse_and_required_field_errors_have_typed_codes() {
             modules: vec![],
         })
         .unwrap_err();
-        assert_eq!(error.diagnostics[0].code, code, "{error}");
-        assert!(error.diagnostics[0].span.is_some(), "{error}");
-        assert!(!error.diagnostics[0].message.contains("_0"), "{error}");
+        assert_eq!(error.primary().code(), code, "{error}");
+        assert!(error.primary().span().is_some(), "{error}");
+        assert!(!error.primary().message().contains("_0"), "{error}");
     }
+
+    for source in [
+        "export function run(): string { return atob(); }",
+        "export function run(): string { return new URL().href; }",
+    ] {
+        let error = perry_wit::compile_core(source, "args.ts").unwrap_err();
+        assert_eq!(error.primary().kind(), ErrorKind::TypeCheck, "{error}");
+        assert_eq!(error.primary().code(), codes::TYPE_MISMATCH, "{error}");
+    }
+
+    // Argument index, record field, and shape field details survive on user-facing diagnostics.
+    let call_err = perry_wit::compile_core(
+        "function check(a: number, b: number): number { return a + b; }\nexport function run(): number { return check(1, 'x' as any as string); }",
+        "call.ts",
+    )
+    .unwrap_err();
+    assert_eq!(
+        call_err.primary().code(),
+        codes::TYPE_MISMATCH,
+        "{call_err}"
+    );
+    assert!(
+        call_err.to_string().contains("argument 2 of 'check'"),
+        "{call_err}"
+    );
+
+    let record_err = perry_wit::compile_core(
+        "interface Pair { a: number; b: number }\nexport function run(): number { const p: Pair = { a: 1, b: 'x' }; return p.a; }",
+        "record.ts",
+    )
+    .unwrap_err();
+    assert_eq!(
+        record_err.primary().code(),
+        codes::TYPE_MISMATCH,
+        "{record_err}"
+    );
+    assert!(
+        record_err.to_string().contains("record field 'b'"),
+        "{record_err}"
+    );
+
+    let shape_err = perry_wit::compile_core(
+        "interface Bad { count: WeakMap<object, number> }\nexport function run(x: Bad): number { return 0; }",
+        "shape.ts",
+    )
+    .unwrap_err();
+    assert_eq!(
+        shape_err.primary().code(),
+        codes::UNSUPPORTED_TYPE,
+        "{shape_err}"
+    );
+    assert!(
+        shape_err.to_string().contains("field 'count'"),
+        "{shape_err}"
+    );
+}
+
+#[test]
+fn regex_errors_preserve_the_underlying_cause() {
+    let regex_err = perry_wit::compile_core(
+        "export function run(input: string): boolean { return /(/.test(input); }",
+        "regex.ts",
+    )
+    .unwrap_err();
+    assert_eq!(
+        regex_err.primary().code(),
+        codes::UNSUPPORTED_REGEX,
+        "{regex_err}"
+    );
+    assert!(
+        regex_err
+            .primary()
+            .notes()
+            .iter()
+            .any(|note| note.message().contains("unclosed group")),
+        "{regex_err}"
+    );
+}
+
+#[test]
+fn namespace_errors_distinguish_missing_members_from_computed_access() {
+    let helper = &[(
+        "src/helper.ts",
+        "export function present(): number { return 1; }",
+    )];
+    let ns_missing = api::compile_core(&program_with(
+        "src/main.ts",
+        "import * as helper from './helper'; export function run(): number { return helper.missing(); }",
+        helper,
+    ))
+    .unwrap_err();
+    assert_eq!(
+        ns_missing.primary().kind(),
+        ErrorKind::Module,
+        "{ns_missing}"
+    );
+    assert_eq!(
+        ns_missing.primary().code(),
+        codes::UNKNOWN_EXPORT,
+        "{ns_missing}"
+    );
+    assert!(
+        ns_missing.primary().message().contains("missing"),
+        "{ns_missing}"
+    );
+    assert!(ns_missing.primary().span().is_some(), "{ns_missing}");
+
+    let ns_computed = api::compile_core(&program_with(
+        "src/main.ts",
+        "import * as helper from './helper'; export function run(k: string): number { return (helper as any)[k](); }",
+        helper,
+    ))
+    .unwrap_err();
+    assert_eq!(
+        ns_computed.primary().kind(),
+        ErrorKind::Unsupported,
+        "{ns_computed}"
+    );
+    assert_eq!(
+        ns_computed.primary().code(),
+        codes::UNSUPPORTED_CONSTRUCT,
+        "{ns_computed}"
+    );
 }
 
 /// Unsupported source forms are rejected with their exact message.
@@ -185,43 +412,47 @@ fn unsupported_forms_have_exact_diagnostics() {
     let iteration = |expression: &str| {
         format!("export function run():number {{for(const value of {expression}){{}} return 0;}}")
     };
-    const IN_RUN: &str = "\n  lowering function run";
-    const IN_F: &str = "\n  lowering function f";
-    const IN_TEST: &str = "\n  lowering function test";
-    const REGEX_CONST: &str =
-        "CodegenFailure: lowering function test to wasm\n  lowering perry.regex_const\n  ";
+    const REGEX_CONST: &str = "case.ts:1:8: error[unsupported-regex]: ";
     let cases = [
-        (iteration("new Headers()"), format!("case.ts:1:8: UnsupportedExpression: synchronous for...of requires a dense typed array or string; this receiver has no supported iterator{IN_RUN}")),
-        (iteration("new URLSearchParams()"), format!("case.ts:1:8: UnsupportedExpression: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported{IN_RUN}")),
-        ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), format!("case.ts:1:40: UnsupportedExpression: String.prototype.replaceAll called with a non-global RegExp argument{IN_RUN}")),
-        ("class A {} class B extends A {} export function run(): number { return 0; }".into(), "UnsupportedExpression: class B extends A: class inheritance is not supported yet".into()),
-        (regex("/a/g"), format!("case.ts:1:55: UnsupportedExpression: Regex search supports only the u and s flags{IN_TEST}")),
+        (iteration("new Headers()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; this receiver has no supported iterator".into()),
+        (iteration("new URLSearchParams()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported".into()),
+        ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), "case.ts:1:40: error[unsupported-construct]: String.prototype.replaceAll called with a non-global RegExp argument".into()),
+        ("class A {} class B extends A {} export function run(): number { return 0; }".into(), "error[unsupported-construct]: class B extends A: class inheritance is not supported yet".into()),
+        (regex("/a/g"), "case.ts:1:55: error[unsupported-construct]: Regex search supports only the u and s flags".into()),
         (regex("/\\u{61}/"), format!("{REGEX_CONST}Braced Unicode regex escapes require the u flag")),
         (regex("/(?=a)/"), format!("{REGEX_CONST}Regex lookaround and inline flags are unsupported")),
         (regex("/(a)\\1/"), format!("{REGEX_CONST}Unsupported regex escape: \\1")),
         (regex("/(a)(b)(c)(d)(e)(f)(g)(h)(i)/"), format!("{REGEX_CONST}Regex has 9 capture groups; at most 8 are supported")),
         (regex("/(a{300})/"), format!("{REGEX_CONST}Regex capture program exceeds 256 states")),
-        (regex("(input === 'x' ? /a/g : /a/)"), format!("case.ts:1:55: UnsupportedExpression: regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag{IN_TEST}")),
+        (regex("(input === 'x' ? /a/g : /a/)"), "case.ts:1:55: error[unsupported-construct]: regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag".into()),
         (regex("/\\uD800/u"), format!("{REGEX_CONST}Unpaired surrogate in regex escape")),
-        (regex("new RegExp(input)"), format!("case.ts:1:55: UnsupportedExpression: RegExp construction is unsupported; use a bounded regex literal{IN_TEST}")),
-        ("export function test(): boolean { return /a/ === /a/; }".into(), format!("case.ts:1:8: UnsupportedExpression: regex object identity is outside the literal matching profile{IN_TEST}")),
-        ("export function run(x: number): number { return x ** (2 ** x); }".into(), format!("case.ts:1:55: UnsupportedOperator: MIR backend does not support operator Pow yet{IN_RUN}")),
-        ("function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }".into(), "case.ts:1:1: UnsupportedExpression: generator function count is not supported yet".into()),
-        ("export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }".into(), format!("case.ts:1:48: UnsupportedExpression: MIR backend does not support unresolved generic type WeakMap{IN_RUN}")),
-        ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), format!("case.ts:2:10: UnsupportedExpression: indirect calls through local or parameter bindings are not supported yet; call a declared module function directly{IN_RUN}")),
-        ("export function run(s: string): number {\n  return (s as any).byteLength;\n}".into(), format!("case.ts:2:10: UnsupportedExpression: property byteLength is not supported on string yet{IN_RUN}")),
-        ("export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}".into(), format!("case.ts:2:10: UnsupportedExpression: operator Pow on bigint and bigint is not supported yet{IN_RUN}")),
-        ("export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }".into(), format!("case.ts:1:38: UnsupportedExpression: Temporal.ZonedDateTime.from is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now{IN_F}")),
-        ("export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }".into(), format!("case.ts:1:47: UnsupportedExpression: Temporal add duration field hours is not supported; use years, months, weeks, or days{IN_F}")),
-        ("export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }".into(), format!("case.ts:1:47: UnsupportedExpression: property hour is not supported on Temporal.PlainDate yet{IN_F}")),
-        ("export function run(): number {\n  return (performance as any).mark();\n}".into(), format!("case.ts:2:10: UnsupportedExpression: performance.mark is not supported yet{IN_RUN}")),
+        (regex("new RegExp(input)"), "case.ts:1:55: error[unsupported-construct]: RegExp construction is unsupported; use a bounded regex literal".into()),
+        ("export function test(): boolean { return /a/ === /a/; }".into(), "case.ts:1:8: error[unsupported-construct]: regex object identity is outside the literal matching profile".into()),
+        ("export function run(x: number): number { return x ** (2 ** x); }".into(), "case.ts:1:55: error[unsupported-operator]: operator Pow is not supported yet".into()),
+        ("function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }".into(), "case.ts:1:1: error[unsupported-construct]: generator function count is not supported yet".into()),
+        ("export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }".into(), "case.ts:1:48: error[unsupported-type]: unresolved generic type WeakMap is not supported yet".into()),
+        ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), "case.ts:2:10: error[unsupported-construct]: indirect calls through local or parameter bindings are not supported yet; call a declared module function directly".into()),
+        ("export function run(s: string): number {\n  return (s as any).byteLength;\n}".into(), "case.ts:2:10: error[unsupported-construct]: property byteLength is not supported on string yet".into()),
+        ("export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}".into(), "case.ts:2:10: error[unsupported-operator]: operator Pow on bigint and bigint is not supported yet".into()),
+        ("export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }".into(), "case.ts:1:38: error[unsupported-construct]: Temporal.ZonedDateTime.from is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now".into()),
+        ("export function f(s: string): string { return Temporal.PlainDate.from(s).add({ hours: 1 }).toString(); }".into(), "case.ts:1:47: error[unsupported-construct]: Temporal add duration field hours is not supported; use years, months, weeks, or days".into()),
+        ("export function f(s: string): number { return Temporal.PlainDate.from(s).hour; }".into(), "case.ts:1:47: error[unsupported-construct]: property hour is not supported on Temporal.PlainDate yet".into()),
+        ("export function run(): number {\n  return (performance as any).mark();\n}".into(), "case.ts:2:10: error[unsupported-construct]: performance.mark is not supported yet".into()),
+        ("enum Color { A }\nexport function run(): number { return 0; }".into(), "case.ts:1:1: error[unsupported-construct]: TypeScript enum declarations are not supported yet; use a union of string or number literals instead".into()),
     ];
     let mismatches: Vec<String> = cases
         .iter()
         .filter_map(|(source, expected)| {
             let actual = match perry_wit::compile_core(source, "case.ts") {
                 Ok(_) => "<compiled>".to_owned(),
-                Err(error) => format!("{error:#}"),
+                Err(error) => {
+                    assert_ne!(
+                        error.primary().kind(),
+                        ErrorKind::Internal,
+                        "{source}\n  => {error:#}"
+                    );
+                    format!("{error:#}")
+                }
             };
             (actual != *expected).then(|| format!("{source}\n  => {actual:?}"))
         })
@@ -255,17 +486,8 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
     let throwing =
         program("export async function run():Promise<number> {throw new Error('broken');}");
     let error = api::compile(&throwing, &bare_wit, &Options::default()).unwrap_err();
-    assert_eq!(
-        error.diagnostics[0].code,
-        DiagnosticCode::MissingErrorChannel
-    );
-    assert!(
-        error.diagnostics[0]
-            .help
-            .as_ref()
-            .unwrap()
-            .contains("async")
-    );
+    assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
+    assert!(error.primary().help().unwrap().contains("async"));
     api::compile(&throwing, &stderr_wit, &Options::default()).unwrap();
     for source in [
         "export async function run() {try{throw new Error('handled');}catch(e){return 7;}}",
@@ -280,10 +502,7 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
         &bare_wit,
         &Options::default(),
     ).unwrap_err();
-    assert_eq!(
-        error.diagnostics[0].code,
-        DiagnosticCode::MissingErrorChannel
-    );
+    assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
 }
 
 #[test]
@@ -323,45 +542,105 @@ world app {
     };
     let check = |source: &str, code, line, needle: &str| {
         let err = api::compile(
-            &Program {
-                source: Source {
-                    name: Some("src/main.ts".into()),
-                    contents: source.as_bytes().to_vec(),
-                },
-                modules: vec![],
-            },
+            &program_with("src/main.ts", source, &[]),
             &wit,
             &Options::default(),
         )
         .unwrap_err();
-        let diag = &err.diagnostics[0];
-        assert_eq!(diag.code, code, "{diag}");
-        assert_eq!(diag.span.as_ref().unwrap().start_line, line, "{diag}");
+        let diag = err.primary();
+        assert_eq!(diag.code(), code, "{diag}");
+        assert_eq!(diag.span().unwrap().start_line, line, "{diag}");
         assert!(diag.to_string().contains(needle), "{diag}");
     };
 
     check(
         "// header\nfunction run(id: bigint): Promise<bigint> { return Promise.resolve(id); }",
-        DiagnosticCode::ExportMismatch,
+        codes::MISSING_EXPORT,
         2,
         "Add the 'export' keyword to function 'run'",
     );
     check(
         "// header\nexport async function run(id: number): Promise<bigint> { return 1n; }",
-        DiagnosticCode::ExportMismatch,
+        codes::CONTRACT_MISMATCH,
         2,
         "bigint",
     );
     check(
         "// header\nexport function run(id: bigint): bigint { return id; }",
-        DiagnosticCode::ExportMismatch,
+        codes::ASYNC_MISMATCH,
         2,
         "Add 'async'",
     );
     check(
         "import { ping } from 'test:mismatch/host';\nexport async function run(id: bigint): Promise<bigint> {\n  const x = (ping as any)(1);\n  return id;\n}",
-        DiagnosticCode::ImportSignatureMismatch,
+        codes::CONTRACT_MISMATCH,
         3,
         "expects 2 arguments, got 1",
     );
+}
+
+#[test]
+fn every_kind_has_a_fixture() {
+    let temp = tempfile::tempdir().unwrap();
+    let wit = Wit {
+        application: b"package test:kinds; world app { export run: func() -> f64; }"
+            .as_slice()
+            .into(),
+        dependencies: vec![],
+    };
+    let program = |source: &str| Program {
+        source: source.as_bytes().into(),
+        modules: vec![],
+    };
+
+    let kinds: std::collections::HashSet<_> = codes::ALL.iter().map(|code| code.kind()).collect();
+    for kind in kinds {
+        let error = match kind {
+            ErrorKind::InvalidInput => api::compile_core(&Program {
+                source: b"export function run(): number { return 1; }"
+                    .as_slice()
+                    .into(),
+                modules: vec![Module {
+                    name: "../escape.ts".into(),
+                    contents: vec![],
+                }],
+            })
+            .unwrap_err(),
+            ErrorKind::Io => {
+                perry_wit::compile_file(&temp.path().join("missing.ts"), &CompileOptions::default())
+                    .unwrap_err()
+            }
+            ErrorKind::Wit => api::compile(
+                &program("export function run(): number { return 1; }"),
+                &Wit {
+                    application: b"not valid wit".as_slice().into(),
+                    dependencies: vec![],
+                },
+                &Options::default(),
+            )
+            .unwrap_err(),
+            ErrorKind::Syntax => api::compile_core(&program("export function {")).unwrap_err(),
+            ErrorKind::Module => {
+                api::compile_core(&program("export { run } from './missing';")).unwrap_err()
+            }
+            ErrorKind::TypeCheck => {
+                api::compile_core(&program("export function run(x) { return x; }")).unwrap_err()
+            }
+            ErrorKind::Unsupported => api::compile_core(&program(
+                "export function run(x: number): number { return x ** (2 ** x); }",
+            ))
+            .unwrap_err(),
+            ErrorKind::Contract => api::compile(
+                &program("export function other(): number { return 1; }"),
+                &wit,
+                &Options::default(),
+            )
+            .unwrap_err(),
+            ErrorKind::Internal => perry_wit::CompileError::from(perry_wit::Diagnostic::new(
+                codes::INTERNAL,
+                "synthetic internal error",
+            )),
+        };
+        assert_eq!(error.primary().kind(), kind, "{error}");
+    }
 }

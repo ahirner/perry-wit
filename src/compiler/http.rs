@@ -9,8 +9,8 @@
 //! export runs until the host has read it.
 use super::{Compiled, emit_component, lower};
 use crate::component;
-use anyhow::{Context as _, Result};
 use perry_codegen::boundary::{AbiType, Export, ExportKind, Flat};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_internal};
 use pliron::context::Context;
 use wit_parser::{
     Resolve, Type, TypeDefKind, WorldId, WorldItem,
@@ -116,7 +116,11 @@ pub(crate) fn compile(
     )?;
     let (resolve, package) =
         component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;
-    let world = resolve.select_world(&[package], Some("handler"))?;
+    let world = resolve
+        .select_world(&[package], Some("handler"))
+        .map_err(|err| {
+            Diagnostic::internal_from("selecting embedded handler world", err.as_ref())
+        })?;
     let (key, interface) = resolve.worlds[world]
         .exports
         .iter()
@@ -124,10 +128,12 @@ pub(crate) fn compile(
             WorldItem::Interface { id, .. } => Some((key, *id)),
             _ => None,
         })
-        .context("the handler world exports wasi:http/handler")?;
+        .ok_or_else(|| Diagnostic::internal("the handler world exports wasi:http/handler"))?;
     let name = resolve.name_world_key(key);
     let handle = &resolve.interfaces[interface].functions["handle"];
-    let result = handle.result.context("handle returns a result")?;
+    let result = handle
+        .result
+        .ok_or_else(|| Diagnostic::internal("handle returns a result"))?;
     let exports = vec![Export {
         core_name: format!("{name}#handle"),
         function: "__perryHttpHandle".into(),
@@ -181,7 +187,9 @@ fn internal_error(resolve: &Resolve, result: &Type) -> Result<u32> {
         match &resolve.types[id].kind {
             TypeDefKind::Type(inner) => ty = *inner,
             TypeDefKind::Result(result) if !in_error => {
-                ty = result.err.context("handle's result has an error type")?;
+                ty = result
+                    .err
+                    .ok_or_else(|| Diagnostic::internal("handle's result has an error type"))?;
                 in_error = true;
             }
             TypeDefKind::Variant(variant) => {
@@ -190,10 +198,10 @@ fn internal_error(resolve: &Resolve, result: &Type) -> Result<u32> {
                     .iter()
                     .position(|case| case.name == "internal-error")
                     .map(|index| index as u32)
-                    .context("error-code has internal-error");
+                    .ok_or_else(|| Diagnostic::internal("error-code has internal-error"));
             }
             _ => break,
         }
     }
-    anyhow::bail!("handle's error type is not error-code")
+    bail_internal!("handle's error type is not error-code")
 }

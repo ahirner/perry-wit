@@ -3,8 +3,8 @@
 wit_bindgen::generate!({ path: "wit/compiler", world: "compiler" });
 
 use exports::perry::compiler::api::{
-    Artifact, CompileOptions, Compiled, ComponentOutput, Diagnostic, DiagnosticCode,
-    DiagnosticSeverity, Guest, Module, Program, Source, SourceSpan, WitInput, WitPackage,
+    Artifact, CompileOptions, Compiled, ComponentOutput, Diagnostic, ErrorKind, Guest, Module,
+    Note, Program, Source, SourceSpan, WitInput, WitPackage,
 };
 use perry_wit::api;
 
@@ -51,65 +51,56 @@ impl From<WitInput> for api::Wit {
     }
 }
 
-impl From<perry_wit::PerryDiagnostic> for Diagnostic {
-    fn from(diagnostic: perry_wit::PerryDiagnostic) -> Self {
-        Self {
-            code: match diagnostic.code {
-                perry_wit::DiagnosticCode::ParseError => DiagnosticCode::ParseError,
-                perry_wit::DiagnosticCode::UnsupportedOperator => {
-                    DiagnosticCode::UnsupportedOperator
-                }
-                perry_wit::DiagnosticCode::UnsupportedSpread => DiagnosticCode::UnsupportedSpread,
-                perry_wit::DiagnosticCode::MissingTypeAnnotation => {
-                    DiagnosticCode::MissingTypeAnnotation
-                }
-                perry_wit::DiagnosticCode::UnsupportedType => DiagnosticCode::UnsupportedType,
-                perry_wit::DiagnosticCode::UnsupportedExpression => {
-                    DiagnosticCode::UnsupportedExpression
-                }
-                perry_wit::DiagnosticCode::IncompatibleRecordLayout => {
-                    DiagnosticCode::IncompatibleRecordLayout
-                }
-                perry_wit::DiagnosticCode::MissingRequiredField => {
-                    DiagnosticCode::MissingRequiredField
-                }
-                perry_wit::DiagnosticCode::AbsenceMismatch => DiagnosticCode::AbsenceMismatch,
-                perry_wit::DiagnosticCode::InterfaceMismatch => DiagnosticCode::InterfaceMismatch,
-                perry_wit::DiagnosticCode::ExportMismatch => DiagnosticCode::ExportMismatch,
-                perry_wit::DiagnosticCode::ImportSignatureMismatch => {
-                    DiagnosticCode::ImportSignatureMismatch
-                }
-                perry_wit::DiagnosticCode::ModuleResolution => DiagnosticCode::ModuleResolution,
-                perry_wit::DiagnosticCode::InvalidInput => DiagnosticCode::InvalidInput,
-                perry_wit::DiagnosticCode::WitResolution => DiagnosticCode::WitResolution,
-                perry_wit::DiagnosticCode::CodegenFailure => DiagnosticCode::CodegenFailure,
-                perry_wit::DiagnosticCode::MissingErrorChannel => {
-                    DiagnosticCode::MissingErrorChannel
-                }
-                perry_wit::DiagnosticCode::Io => DiagnosticCode::Io,
-                perry_wit::DiagnosticCode::InternalCompilerError => {
-                    DiagnosticCode::InternalCompilerError
-                }
-            },
-            severity: match diagnostic.severity {
-                perry_wit::DiagnosticSeverity::Error => DiagnosticSeverity::Error,
-                perry_wit::DiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
-                perry_wit::DiagnosticSeverity::Info => DiagnosticSeverity::Info,
-            },
-            message: diagnostic.message,
-            span: diagnostic.span.map(|span| SourceSpan {
-                file: span.file.to_string_lossy().into_owned(),
-                start_line: span.start_line,
-                start_column: span.start_column,
-                end_line: span.end_line,
-                end_column: span.end_column,
-                start_byte: span.start_byte as u64,
-                end_byte: span.end_byte as u64,
-            }),
-            notes: diagnostic.notes,
-            help: diagnostic.help,
+impl From<perry_wit::ErrorKind> for ErrorKind {
+    fn from(kind: perry_wit::ErrorKind) -> Self {
+        match kind {
+            perry_wit::ErrorKind::InvalidInput => Self::InvalidInput,
+            perry_wit::ErrorKind::Io => Self::Io,
+            perry_wit::ErrorKind::Wit => Self::Wit,
+            perry_wit::ErrorKind::Syntax => Self::Syntax,
+            perry_wit::ErrorKind::Module => Self::Module,
+            perry_wit::ErrorKind::TypeCheck => Self::TypeCheck,
+            perry_wit::ErrorKind::Unsupported => Self::Unsupported,
+            perry_wit::ErrorKind::Contract => Self::Contract,
+            perry_wit::ErrorKind::Internal => Self::Internal,
         }
     }
+}
+
+fn to_source_span(span: &perry_wit::SourceSpan) -> SourceSpan {
+    SourceSpan {
+        file: span.file.to_string_lossy().into_owned(),
+        start_line: span.start_line,
+        start_column: span.start_column,
+        end_line: span.end_line,
+        end_column: span.end_column,
+        start_byte: span.start_byte as u64,
+        end_byte: span.end_byte as u64,
+    }
+}
+
+impl From<perry_wit::Diagnostic> for Diagnostic {
+    fn from(diagnostic: perry_wit::Diagnostic) -> Self {
+        Self {
+            kind: diagnostic.kind().into(),
+            code: diagnostic.code().name().to_owned(),
+            message: diagnostic.message().to_owned(),
+            span: diagnostic.span().map(to_source_span),
+            notes: diagnostic
+                .notes()
+                .iter()
+                .map(|note| Note {
+                    message: note.message().to_owned(),
+                    span: note.span().map(to_source_span),
+                })
+                .collect(),
+            help: diagnostic.help().map(str::to_owned),
+        }
+    }
+}
+
+fn into_wit_errors(error: perry_wit::CompileError) -> Vec<Diagnostic> {
+    vec![error.into_primary().into()]
 }
 
 struct Compiler;
@@ -135,11 +126,10 @@ impl Guest for Compiler {
             }),
             allocation_report: compiled.allocation_report,
         })
-        .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
+        .map_err(into_wit_errors)
     }
     fn compile_core(program: Program) -> Result<Vec<u8>, Vec<Diagnostic>> {
-        api::compile_core(&program.into())
-            .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
+        api::compile_core(&program.into()).map_err(into_wit_errors)
     }
     fn generate_sdk(
         wit: WitInput,
@@ -155,7 +145,7 @@ impl Guest for Compiler {
                     })
                     .collect()
             })
-            .map_err(|error| error.diagnostics.into_iter().map(Into::into).collect())
+            .map_err(into_wit_errors)
     }
 }
 

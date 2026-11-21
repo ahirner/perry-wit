@@ -5,7 +5,7 @@ pub mod wit;
 
 use std::{borrow::Cow, path::Path};
 
-use anyhow::{Context, Result};
+use perry_wit_diagnostics::{Diagnostic, Result};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 
 /// Embeds WIT contract metadata into a core WebAssembly module and encodes it into a component.
@@ -13,13 +13,11 @@ pub fn embed_and_encode(
     core_wasm: &[u8],
     wit_dir: &Path,
     world_name: Option<&str>,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>, crate::CompileError> {
     let (resolve, pkg_id) = wit::resolve_wit(wit_dir)?;
-    let world_id = resolve
-        .select_world(&[pkg_id], world_name)
-        .with_context(|| format!("selecting world {:?}", world_name))?;
+    let world_id = wit::select_world(&resolve, pkg_id, world_name)?;
 
-    encode_resolved(core_wasm, &resolve, world_id)
+    encode_resolved(core_wasm, &resolve, world_id).map_err(Into::into)
 }
 
 /// Encode the resolved world directly. Modules using promise signals carry the
@@ -37,18 +35,19 @@ pub(crate) fn encode_resolved(
         (core_wasm.to_vec(), Cow::Borrowed(resolve))
     };
     embed_component_metadata(&mut core, &resolve, world, StringEncoding::UTF8, false)
-        .context("embedding component metadata")?;
+        .map_err(|err| Diagnostic::internal_from("embedding component metadata", err.as_ref()))?;
     let component = ComponentEncoder::default()
         .module(&core)
-        .context("configuring component encoder")?
+        .map_err(|err| Diagnostic::internal_from("configuring component encoder", err.as_ref()))?
         .validate(true)
         .encode()
-        .context("encoding component")?;
+        .map_err(|err| Diagnostic::internal_from("encoding component", err.as_ref()))?;
     let component = if signals {
         reactions::hide(&component)?
     } else {
         component
     };
-    crate::audit::validate_guest(&component).context("validating stackless component")?;
+    crate::audit::validate_guest(&component)
+        .map_err(|err| err.with_internal_context("validating stackless component"))?;
     Ok(component)
 }

@@ -6,12 +6,12 @@ use crate::{
     repr::{Carriers, Repr, repr},
     values::is_numeric_type,
 };
-use anyhow::{Result, anyhow, bail};
 use perry_abi::{OMITTED_BITS, UNDEFINED_BITS, layout::numeric};
 use perry_mir::{
     AggregateViewOp, ErrorKind, IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp,
     ToNumberOp, ToStringOp, UndefinedOp, UnwrapOp, WrapOp, absence,
 };
+use perry_wit_diagnostics::{Diagnostic, Result, bail_internal};
 use pliron::{
     context::{Context, Ptr},
     operation::Operation,
@@ -51,7 +51,9 @@ impl AbsentKind {
             Repr::F64 => Sentinel::FloatBits(float),
             Repr::Bool => Sentinel::Word(boolean),
             Repr::Ref => Sentinel::Word(reference),
-            Repr::I32 | Repr::I64 => bail!("optional fixed-width integer has no representation"),
+            Repr::I32 | Repr::I64 => {
+                bail_internal!("optional fixed-width integer has no representation")
+            }
         })
     }
 }
@@ -248,9 +250,9 @@ impl FunctionLowering<'_, '_> {
         target: TypeHandle,
     ) -> Result<()> {
         let from = absence(ctx, source)
-            .ok_or_else(|| anyhow!("optional cast from a non-optional type"))?;
-        let to =
-            absence(ctx, target).ok_or_else(|| anyhow!("optional cast to a non-optional type"))?;
+            .ok_or_else(|| Diagnostic::internal("optional cast from a non-optional type"))?;
+        let to = absence(ctx, target)
+            .ok_or_else(|| Diagnostic::internal("optional cast to a non-optional type"))?;
         if from == to {
             return Ok(());
         }

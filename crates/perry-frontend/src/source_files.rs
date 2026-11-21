@@ -1,6 +1,7 @@
 //! Filesystem acquisition for the native and WASI command adapters.
 
-use anyhow::{Context, Result, ensure};
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::{Diagnostic, codes, ensure_diag, internal};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -15,8 +16,9 @@ pub fn load(source: &str, entry: &str) -> Result<BTreeMap<String, String>> {
     let mut visited = BTreeSet::new();
     while let Some((identity, mut ancestors)) = pending.pop() {
         let canonical = identity.canonicalize().unwrap_or_else(|_| identity.clone());
-        ensure!(
+        ensure_diag!(
             !ancestors.contains(&canonical),
+            codes::CYCLIC_IMPORT,
             "cyclic module import: {}",
             identity.display()
         );
@@ -29,7 +31,7 @@ pub fn load(source: &str, entry: &str) -> Result<BTreeMap<String, String>> {
         } else {
             sources
                 .get(identity.to_string_lossy().as_ref())
-                .with_context(|| format!("Missing queued source: {}", identity.display()))?
+                .ok_or_else(|| internal!("Missing queued source: {}", identity.display()))?
         };
         let module = crate::hir_compat::parse(text, &identity.to_string_lossy())?;
         for import in super::modules::imports(&module) {
@@ -42,8 +44,8 @@ pub fn load(source: &str, entry: &str) -> Result<BTreeMap<String, String>> {
             if sources.contains_key(path.to_string_lossy().as_ref()) {
                 continue;
             }
-            let contents =
-                fs::read_to_string(&path).with_context(|| format!("Reading {}", path.display()))?;
+            let contents = fs::read_to_string(&path)
+                .map_err(|err| Diagnostic::io(format!("Reading {}", path.display()), &err))?;
             sources.insert(path.to_string_lossy().into_owned(), contents);
             pending.push((path, ancestors.clone()));
         }

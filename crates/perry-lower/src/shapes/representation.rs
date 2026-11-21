@@ -40,18 +40,21 @@ impl Shapes<'_> {
                 Ok(PromiseType::get(ctx, settled).into())
             }
             HirType::Unknown => Ok(perry_mir::JsonType::get(ctx).into()),
-            HirType::Any => Err(LowerError::new(ShapeError::MissingTypeAnnotation).into()),
+            HirType::Any => Err(missing_type_annotation()),
             HirType::Generic { base, type_args } => {
                 if base == "WitInput" {
                     let [inner] = type_args.as_slice() else {
-                        bail!("WitInput needs one type argument");
+                        bail_diag!(codes::TYPE_MISMATCH, "WitInput needs one type argument");
                     };
                     let inner = self.value_type(ctx, inner)?;
                     return self.input_type(ctx, inner);
                 }
                 if matches!(base.as_str(), "Map" | "ReadonlyMap") && !self.is_user_type(base) {
                     let [k, v] = type_args.as_slice() else {
-                        bail!("{base} needs key and value type arguments");
+                        bail_diag!(
+                            codes::TYPE_MISMATCH,
+                            "{base} needs key and value type arguments"
+                        );
                     };
                     return self.map_type(ctx, k, v);
                 }
@@ -62,19 +65,28 @@ impl Shapes<'_> {
                 }
                 if base == "Record" && !self.is_user_type(base) {
                     let [k, v] = type_args.as_slice() else {
-                        bail!("Record needs key and value type arguments");
+                        bail_diag!(
+                            codes::TYPE_MISMATCH,
+                            "Record needs key and value type arguments"
+                        );
                     };
                     return self.dict_source_type(ctx, k, v);
                 }
                 if matches!(base.as_str(), "Set" | "ReadonlySet") && !self.is_user_type(base) {
                     let [element] = type_args.as_slice() else {
-                        bail!("{base} needs one element type argument");
+                        bail_diag!(
+                            codes::TYPE_MISMATCH,
+                            "{base} needs one element type argument"
+                        );
                     };
                     return self.set_type(ctx, element);
                 }
                 if matches!(base.as_str(), "ReadonlyArray" | "Array") && !self.is_user_type(base) {
                     let [element] = type_args.as_slice() else {
-                        bail!("{base} needs one element type argument");
+                        bail_diag!(
+                            codes::TYPE_MISMATCH,
+                            "{base} needs one element type argument"
+                        );
                     };
                     let element = self.value_type(ctx, element)?;
                     return Ok(ArrayType::get(ctx, element).into());
@@ -110,8 +122,9 @@ impl Shapes<'_> {
             }
             HirType::Object(object) => {
                 if let Some(val_ty) = &object.index_signature {
-                    ensure!(
+                    ensure_diag!(
                         object.properties.is_empty(),
+                        codes::UNSUPPORTED_TYPE,
                         "index signatures are outside the closed-record profile when combined with fixed properties"
                     );
                     return self.dict_source_type(ctx, &HirType::String, val_ty);
@@ -129,10 +142,7 @@ impl Shapes<'_> {
                     .into())
             }
             HirType::Function(_) | HirType::Symbol | HirType::TypeVar(_) => {
-                Err(LowerError::new(ShapeError::UnsupportedType {
-                    ty: format!("{ty:?}"),
-                })
-                .into())
+                bail_diag!(codes::UNSUPPORTED_TYPE, "type {ty:?} is not supported yet")
             }
         }
     }
@@ -172,7 +182,10 @@ impl Shapes<'_> {
         if let Some(absence) = absence {
             let inner = match defined.as_slice() {
                 [defined] => self.value_type(ctx, defined.hir(ctx))?,
-                [] => bail!("an absence-only union needs a declared value type"),
+                [] => bail_diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "an absence-only union needs a declared value type"
+                ),
                 defined => self.union_type_ids(ctx, defined)?,
             };
             return Ok(OptionalType::get_with(ctx, inner, absence).into());
@@ -196,15 +209,19 @@ impl Shapes<'_> {
                 } else {
                     self.value_type(ctx, hir)?
                 };
-                ensure!(
+                ensure_diag!(
                     self.class_of_type(ctx, ty).is_none(),
+                    codes::UNSUPPORTED_TYPE,
                     "finite value unions require plain record alternatives"
                 );
-                let tag = perry_mir::value_tag(ctx, ty)
-                    .context("finite value unions support numbers, strings, booleans and one plain record shape")?;
+                let tag = perry_mir::value_tag(ctx, ty).ok_or_else(|| Diagnostic::new(
+                    codes::UNSUPPORTED_TYPE,
+                    "finite value unions support numbers, strings, booleans and one plain record shape",
+                ))?;
                 if let Some((_, payload)) = cases.iter().find(|(name, _)| name == tag) {
-                    ensure!(
+                    ensure_diag!(
                         *payload == Some(ty),
+                        codes::UNSUPPORTED_TYPE,
                         "finite value unions require one shape per JavaScript type"
                     );
                 } else {
@@ -217,9 +234,12 @@ impl Shapes<'_> {
         let records = members
             .iter()
             .map(|&ty| {
-                resolver
-                    .record(ty, 0)
-                    .context("unions other than tagged object types are not supported yet")
+                resolver.record(ty, 0).ok_or_else(|| {
+                    Diagnostic::new(
+                        codes::UNSUPPORTED_TYPE,
+                        "unions other than tagged object types are not supported yet",
+                    )
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         if !records.is_empty()
@@ -240,11 +260,12 @@ impl Shapes<'_> {
         ctx: &Context,
         alternatives: &[Vec<(String, TypeId, bool)>],
     ) -> Result<TypeHandle> {
-        ensure!(
+        ensure_diag!(
             alternatives.len() == 2
                 || (alternatives.len() == 1
                     && alternatives[0].len() == 1
                     && alternatives[0][0].0 == "ok"),
+            codes::UNSUPPORTED_TYPE,
             "a tagged result needs exactly two alternatives"
         );
         let mut value_arg = None;
@@ -254,18 +275,23 @@ impl Shapes<'_> {
                 match p_name.as_str() {
                     "ok" => {}
                     "value" => {
-                        ensure!(
+                        ensure_diag!(
                             value_arg.replace(*prop_ty).is_none(),
+                            codes::UNSUPPORTED_TYPE,
                             "result payload value appears in both alternatives"
                         );
                     }
                     "error" => {
-                        ensure!(
+                        ensure_diag!(
                             error_arg.replace(*prop_ty).is_none(),
+                            codes::UNSUPPORTED_TYPE,
                             "result payload error appears in both alternatives"
                         );
                     }
-                    _ => bail!("result alternatives only contain ok, value and error"),
+                    _ => bail_diag!(
+                        codes::UNSUPPORTED_TYPE,
+                        "result alternatives only contain ok, value and error"
+                    ),
                 }
             }
         }
@@ -296,7 +322,10 @@ impl Shapes<'_> {
                 match p_name.as_str() {
                     "tag" => {
                         let HirType::StringLiteral(lit) = ty.hir(ctx) else {
-                            bail!("union members need a literal `tag`");
+                            bail_diag!(
+                                codes::UNSUPPORTED_TYPE,
+                                "union members need a literal `tag`"
+                            );
                         };
                         tag = Some(lit.clone());
                     }
@@ -304,10 +333,20 @@ impl Shapes<'_> {
                     _ => invalid = true,
                 }
             }
-            let tag = tag.context("union members need a literal `tag`")?;
-            ensure!(!invalid, "union members have `tag` and `val` only");
-            ensure!(
+            let tag = tag.ok_or_else(|| {
+                Diagnostic::new(
+                    codes::UNSUPPORTED_TYPE,
+                    "union members need a literal `tag`",
+                )
+            })?;
+            ensure_diag!(
+                !invalid,
+                codes::UNSUPPORTED_TYPE,
+                "union members have `tag` and `val` only"
+            );
+            ensure_diag!(
                 !cases.iter().any(|(name, _)| name == &tag),
+                codes::TYPE_MISMATCH,
                 "variant tags must be distinct"
             );
             let payload = val_arg
@@ -355,7 +394,10 @@ impl Shapes<'_> {
                 self.input_type(ctx, inner)
             }
             crate::hir::Foreign::Function(_) => {
-                bail!("foreign function cannot be used as a value type")
+                bail_diag!(
+                    codes::TYPE_MISMATCH,
+                    "foreign function cannot be used as a value type"
+                )
             }
         }
     }

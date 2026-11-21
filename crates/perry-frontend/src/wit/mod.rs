@@ -2,11 +2,11 @@
 mod types;
 
 use crate::hir::{Foreign, FunctionType, Type as HirType};
-use anyhow::{Context, Result};
 use perry_contract::{
     names::{NamedType, canonical_type, to_camel_case, to_pascal_case},
     types::Input,
 };
+use perry_wit_diagnostics::{Diagnostic, Result};
 use std::collections::HashMap;
 use wit_parser::{Function, Resolve, TypeId, WorldId};
 
@@ -83,7 +83,8 @@ impl WorldTypes {
         name: &str,
         exported: bool,
     ) -> Result<Vec<ResourceHelper>> {
-        let resource = source_type(resolve, id).context("resource has no WIT declaration name")?;
+        let resource = source_type(resolve, id)
+            .ok_or_else(|| Diagnostic::internal("resource has no WIT declaration name"))?;
         let suffix = to_pascal_case(name);
         let mut helpers = vec![(
             format!("drop{suffix}"),

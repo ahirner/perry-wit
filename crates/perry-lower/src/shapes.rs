@@ -1,11 +1,14 @@
 //! Map frontend declarations and record identities to MIR representations.
 //!
 //! Frontend record identities map to carriers; object construction evaluates fields in source order.
-use crate::{LowerError, ShapeError};
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use crate::{
+    Diagnostic, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
+    missing_type_annotation, unsupported,
+};
 use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
-use perry_mir::{ArrayType, OptionalType, PromiseType, RecordKind, RecordType, StringType};
-use pliron::printable::Printable as _;
+use perry_mir::{
+    ArrayType, OptionalType, PlironResultExt as _, PromiseType, RecordKind, RecordType, StringType,
+};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::Context,
@@ -31,7 +34,7 @@ fn fresh_record(
     kind: RecordKind,
     fields: Option<Vec<(String, TypeHandle)>>,
 ) -> Result<TypedHandle<RecordType>> {
-    RecordType::fresh(ctx, kind, fields).map_err(|error| anyhow!("{}", error.disp(ctx)))
+    RecordType::fresh(ctx, kind, fields).to_diag(ctx)
 }
 
 /// The runtime carrier type of a binding, paired with its declared WIT integer domain when
@@ -97,7 +100,8 @@ pub(super) struct Shapes<'h> {
 }
 
 pub(super) fn identifier(name: &str) -> Result<Identifier> {
-    Identifier::try_from(name.to_string()).map_err(|_| anyhow!("{name} is not a MIR identifier"))
+    Identifier::try_from(name.to_string())
+        .map_err(|_| unsupported!("{name} is not a valid identifier"))
 }
 
 impl<'h> Shapes<'h> {
@@ -161,12 +165,11 @@ impl<'h> Shapes<'h> {
 
     pub(super) fn annotate_local(
         &self,
-        error: anyhow::Error,
+        error: Diagnostic,
         id: perry_frontend::hir::types::LocalId,
-    ) -> anyhow::Error {
+    ) -> Diagnostic {
         match self.local_source_spans.get(&id) {
-            Some(span) => crate::diagnostics::annotate(
-                error,
+            Some(span) => error.with_fallback_span(
                 self.metadata
                     .locations
                     .offset_span(span.start, span.end.saturating_sub(span.start)),
@@ -177,19 +180,40 @@ impl<'h> Shapes<'h> {
 
     pub(super) fn annotate_byte_offset(
         &self,
-        error: anyhow::Error,
+        error: Diagnostic,
         byte_offset: u32,
         len: u32,
-    ) -> anyhow::Error {
-        crate::diagnostics::annotate(error, self.metadata.locations.offset_span(byte_offset, len))
+    ) -> Diagnostic {
+        error.with_fallback_span(self.metadata.locations.offset_span(byte_offset, len))
     }
 
-    pub(super) fn annotate_call(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        crate::diagnostics::annotate(error, self.metadata.locations.call_span(byte_offset))
+    fn annotate_site(
+        &self,
+        error: Diagnostic,
+        span: Option<perry_wit_diagnostics::SourceSpan>,
+    ) -> Diagnostic {
+        let Some(site) = span else {
+            return error;
+        };
+        match error.span() {
+            None => error.with_span(site),
+            Some(inner)
+                if inner.file != site.file
+                    || inner.start_byte < site.start_byte
+                    || inner.end_byte > site.end_byte =>
+            {
+                error.with_spanned_note(site, "called from here")
+            }
+            Some(_) => error,
+        }
     }
 
-    pub(super) fn annotate_member(&self, error: anyhow::Error, byte_offset: u32) -> anyhow::Error {
-        crate::diagnostics::annotate(error, self.metadata.locations.member_span(byte_offset))
+    pub(super) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
+        self.annotate_site(error, self.metadata.locations.call_span(byte_offset))
+    }
+
+    pub(super) fn annotate_member(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
+        self.annotate_site(error, self.metadata.locations.member_span(byte_offset))
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {
@@ -235,7 +259,7 @@ impl<'h> Shapes<'h> {
             let kind = record.kind();
             let fields = record
                 .fields()
-                .map_err(|_| anyhow!("opaque input record"))?
+                .map_err(|_| Diagnostic::internal("opaque input record"))?
                 .to_vec();
             drop(deref);
             let mapped = fresh_record(ctx, kind, None)?;
@@ -246,7 +270,7 @@ impl<'h> Shapes<'h> {
                 .collect::<Result<_>>()?;
             let name = mapped.deref(ctx).name().clone();
             RecordType::get_kind(ctx, name, Some(fields), kind)
-                .map_err(|e| anyhow!("{}", e.disp(ctx)))?
+                .to_diag(ctx)?
                 .into()
         } else {
             ty
@@ -342,9 +366,8 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        self.resolve_named(ctx, name).map_err(|error| {
-            crate::diagnostics::annotate(error, self.metadata.locations.type_span(name))
-        })
+        self.resolve_named(ctx, name)
+            .map_err(|error| error.with_fallback_span(self.metadata.locations.type_span(name)))
     }
 
     fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
@@ -373,7 +396,7 @@ impl<'h> Shapes<'h> {
         if user {
             return self.generic(ctx, name, &[]);
         }
-        bail!("type {name} is not supported by the MIR backend yet")
+        bail_diag!(codes::UNSUPPORTED_TYPE, "type {name} is not supported yet")
     }
 
     /// Reserve recursive identity before resolving source fields.
@@ -421,7 +444,7 @@ impl<'h> Shapes<'h> {
                     int_ty.into()
                 } else {
                     self.value_type(ctx, ty)
-                        .with_context(|| format!("field {field}"))?
+                        .map_err(|err| err.with_note(format!("in field '{field}'")))?
                 };
                 let ty = if *optional {
                     OptionalType::get(ctx, ty).into()
@@ -439,7 +462,7 @@ impl<'h> Shapes<'h> {
         let record = match reserved {
             Some(record) => {
                 let name = record.deref(ctx).name().clone();
-                RecordType::get(ctx, name, Some(typed)).map_err(|e| anyhow!("{}", e.disp(ctx)))
+                RecordType::get(ctx, name, Some(typed)).to_diag(ctx)
             }
             None if let Some(record) = self.records.borrow().get(&identity) => Ok(*record),
             None if identity.is_nominal() => fresh_record(ctx, RecordKind::Object, Some(typed)),
@@ -472,7 +495,7 @@ impl<'h> Shapes<'h> {
         kind: RecordKind,
         fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        RecordType::structural(ctx, kind, fields).map_err(|error| anyhow!("{}", error.disp(ctx)))
+        RecordType::structural(ctx, kind, fields).to_diag(ctx)
     }
 
     /// Field names, in source order, of a synthesized object-literal shape.

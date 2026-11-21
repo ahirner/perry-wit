@@ -7,8 +7,8 @@ use crate::{
     repr::i32_type,
     values::{self, Carriers},
 };
-use anyhow::{Context as _, Result};
-use perry_mir::CaughtOp;
+use perry_mir::{CaughtOp, PlironResultExt as _};
+use perry_wit_diagnostics::Result;
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
@@ -49,7 +49,7 @@ pub(crate) struct FunctionLowering<'s, 'e> {
     /// so the results dominate the code after it.
     pub(crate) landing: Option<(Ptr<BasicBlock>, Vec<TypeHandle>)>,
     /// The frame, when lowering the step function of an async function.
-    pub(crate) frame: Option<async_split::Frame>,
+    pub(crate) frame: Option<&'s mut async_split::Frame>,
     /// The runtime's table of one-character ASCII strings, once loaded.
     pub(crate) ascii_strings: Option<Value>,
     /// Root stack length at entry, restored on every exit.
@@ -102,7 +102,11 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
     ) -> Result<FuncOp> {
         let symbol = mir.get_symbol_name(ctx);
         let throws = state.may_throw(&symbol);
-        let effects = state.program_facts.function_summary(ctx, mir)?.effects;
+        let effects = state
+            .program_facts
+            .function_summary(ctx, mir)
+            .to_diag(ctx)?
+            .effects;
         let (mir_params, mir_results) = crate::analysis::function_signature(ctx, mir)?;
         let params = values::signature(ctx, mir_params)?;
         let results = values::signature(ctx, mir_results)?;
@@ -193,8 +197,10 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
                     args.extend(types.iter().copied());
                     self.landing = Some((self.new_block(ctx, args), types));
                 }
-                let lowered = self.op(ctx, op).with_context(|| {
-                    format!("lowering {}", Operation::get_op_dyn(op, ctx).get_opid())
+                let lowered = self.op(ctx, op).map_err(|err| {
+                    let op_dyn = Operation::get_op_dyn(op, ctx);
+                    err.with_fallback_span(perry_mir::source_span(ctx, op_dyn.as_ref()))
+                        .with_internal_context(format!("lowering {}", op_dyn.get_opid()))
                 });
                 let landing = self.landing.take();
                 lowered?;

@@ -6,8 +6,9 @@ use crate::{
     repr::{Carriers, Repr, repr},
     runtime::{Runtime, W},
 };
-use anyhow::{Context as _, Result, bail, ensure};
-use perry_mir::{Intrinsic, NumericType, absence};
+use perry_mir::{Intrinsic, NumericType, PlironResultExt as _, absence};
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::{bail_unsupported, codes, ensure_diag, internal};
 use pliron::{
     builtin::types::{FP64Type, IntegerType, Signedness},
     context::{Context, Ptr},
@@ -39,9 +40,10 @@ impl FunctionLowering<'_, '_> {
         Ok(self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, buffer]))
     }
 
-    fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
-        ensure!(
+    pub(crate) fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
+        ensure_diag!(
             self.state.can_import(interface),
+            codes::CONTRACT_MISMATCH,
             "{what} needs the WIT world to import {interface}"
         );
         Ok(())
@@ -272,8 +274,9 @@ impl FunctionLowering<'_, '_> {
                     vec![args[0], args[1], table, count, source_table, source_count],
                 );
                 if intrinsic == Intrinsic::JsonOrderCopy {
-                    let record = TypedHandle::<perry_mir::RecordType>::from_handle(target_ty, ctx)?;
-                    let fields = record.deref(ctx).fields()?.to_vec();
+                    let record = TypedHandle::<perry_mir::RecordType>::from_handle(target_ty, ctx)
+                        .to_diag(ctx)?;
+                    let fields = record.deref(ctx).fields().to_diag(ctx)?.to_vec();
                     for (name, ty) in fields {
                         if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
                             let (offset, _) = Self::record_type_field_slot(ctx, record, &name)?;
@@ -399,7 +402,7 @@ impl FunctionLowering<'_, '_> {
                 Some(self.runtime(ctx, Runtime::StdJsonFromScalar, vec![kind, truth]))
             }
             Intrinsic::JsonSerialize => {
-                bail!("JSON.stringify of parsed JSON values is not supported yet")
+                bail_unsupported!("JSON.stringify of parsed JSON values is not supported yet")
             }
             Intrinsic::WritableStdout | Intrinsic::WritableStderr => {
                 let (interface, fd) = if intrinsic == Intrinsic::WritableStdout {
@@ -475,8 +478,8 @@ impl FunctionLowering<'_, '_> {
                     }
                     _ => {}
                 }
-                let function = Runtime::for_intrinsic(other).with_context(|| {
-                    format!("intrinsic {} has no runtime lowering", other.name())
+                let function = Runtime::for_intrinsic(other).ok_or_else(|| {
+                    internal!("intrinsic {} has no runtime lowering", other.name())
                 })?;
                 let result = self.call_runtime(ctx, function, args);
                 // Runtime results as `number | undefined` come as bits.

@@ -1,13 +1,15 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
 use crate::hir_compat::parse;
-use anyhow::{Context, Result, bail, ensure};
 use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::{
+    Diagnostic, Result, bail_diag, bail_unsupported, codes, diag, ensure_unsupported, unsupported,
+};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
 };
-use swc_common::{DUMMY_SP, GLOBALS, Globals, Mark, SyntaxContext};
+use swc_common::{DUMMY_SP, GLOBALS, Globals, Mark, SyntaxContext, util::take::Take};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
@@ -37,7 +39,7 @@ pub(crate) fn load<'s>(
     });
     if !needs_graph {
         let mut locations = crate::hir_compat::Locations::default();
-        locations.add(PathBuf::from(file), source, 0);
+        locations.add(PathBuf::from(file), source)?;
         return Ok(Loaded {
             module: initial,
             locations,
@@ -50,10 +52,8 @@ pub(crate) fn load<'s>(
             loaded: BTreeMap::new(),
             active: BTreeSet::new(),
             body: Vec::new(),
-            functions: BTreeMap::new(),
             types: BTreeSet::new(),
             next: 0,
-            next_span: 0,
             locations: crate::hir_compat::Locations::default(),
             entry_path: normalize(Path::new(file)),
             entry_source: source,
@@ -62,46 +62,38 @@ pub(crate) fn load<'s>(
         let exports = graph.module(&path, initial)?;
         // An exported function that nothing else names is renamed in place; one that the
         // graph also calls, or exports twice, keeps its binding and gets an exported copy.
-        let mut uses = Uses::default();
-        for item in &graph.body {
-            item.visit_with(&mut uses);
-        }
-        let mut exported: HashMap<&str, usize> = HashMap::new();
-        for binding in exports.values() {
-            *exported.entry(binding).or_default() += 1;
-        }
-        let mut renamed = Vec::new();
-        let mut copies = Vec::new();
+        let mut bindings = ExportBindings::default();
         for (name, binding) in &exports {
-            if graph.types.contains(binding) {
-                continue;
-            }
-            let index = *graph.functions.get(binding).with_context(|| {
-                format!("Component export '{name}' requires a named function declaration")
-            })?;
-            let ident = ast::Ident::new(name.as_str().into(), DUMMY_SP, SyntaxContext::empty());
-            if uses.0.get(binding) == Some(&1) && exported[binding.as_str()] == 1 {
-                renamed.push((index, ident));
-            } else {
-                copies.push((index, ident));
+            if !graph.types.contains(binding) {
+                bindings.0.entry(binding).or_default().names.push(name);
             }
         }
-        for (index, ident) in copies {
-            let mut function = graph.function(index)?.clone();
-            function.ident = ident;
-            graph.body.push(export_function(function));
+        graph.body.visit_with(&mut bindings);
+        let mut copies = BTreeMap::new();
+        for item in graph.body.iter_mut().rev() {
+            if let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) = item
+                && let Some(binding) = bindings.0.remove(function.ident.sym.as_str())
+            {
+                if let [name] = binding.names.as_slice()
+                    && binding.occurrences == 1
+                {
+                    *item = export_function(function.take(), name);
+                } else {
+                    for name in binding.names {
+                        copies.insert(name, export_function(function.clone(), name));
+                    }
+                }
+            }
         }
-        for (index, ident) in renamed {
-            let item = std::mem::replace(
-                &mut graph.body[index],
-                ast::ModuleItem::Stmt(ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP })),
-            );
-            let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(mut function))) = item else {
-                bail!("module item {index} is not a function declaration");
-            };
-            function.ident = ident;
-            graph.body[index] = export_function(function);
+        if let Some(name) = bindings
+            .0
+            .into_values()
+            .flat_map(|binding| binding.names)
+            .min()
+        {
+            bail_unsupported!("Component export '{name}' requires a named function declaration");
         }
+        graph.body.extend(copies.into_values());
         let mut module = ast::Module {
             body: graph.body,
             ..Default::default()
@@ -156,7 +148,7 @@ fn local(name: &str) -> bool {
 }
 
 pub(crate) fn candidates(parent: &Path, name: &str) -> Result<Vec<PathBuf>> {
-    ensure!(local(name), "Re-exports require a local TypeScript module");
+    ensure_unsupported!(local(name), "Re-exports require a local TypeScript module");
     let path = normalize(&parent.parent().unwrap_or(Path::new("")).join(name));
     let mut candidates = vec![path.clone()];
     if path.extension().is_none() {
@@ -193,11 +185,10 @@ fn resolve(parent: &Path, name: &str, sources: &BTreeMap<String, String>) -> Res
         .into_iter()
         .find(|path| sources.contains_key(path.to_string_lossy().as_ref()))
         .ok_or_else(|| {
-            perry_wit_diagnostics::PerryDiagnostic::error(
-                perry_wit_diagnostics::DiagnosticCode::ModuleResolution,
+            Diagnostic::new(
+                codes::UNRESOLVED_MODULE,
                 format!("Cannot resolve '{name}' from {}", parent.display()),
             )
-            .into()
         })
 }
 
@@ -223,34 +214,29 @@ struct Graph<'a, 'f> {
     loaded: BTreeMap<PathBuf, Exports>,
     active: BTreeSet<PathBuf>,
     body: Vec<ast::ModuleItem>,
-    functions: BTreeMap<String, usize>,
     types: BTreeSet<String>,
     next: usize,
-    next_span: u32,
     locations: crate::hir_compat::Locations<'a>,
     entry_path: PathBuf,
     entry_source: &'a str,
 }
 impl Graph<'_, '_> {
-    /// The function declaration recorded at `index` of the body.
-    fn function(&self, index: usize) -> Result<&ast::FnDecl> {
-        match &self.body[index] {
-            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) => Ok(function),
-            _ => bail!("module item {index} is not a function declaration"),
-        }
-    }
-
     fn dependency(&mut self, parent: &Path, source: &ast::Str) -> Result<PathBuf> {
         let path = resolve(parent, &source.value.to_string_lossy(), self.sources)
             .map_err(|error| self.locations.annotate(error, source.span))?;
         if self.loaded.contains_key(&path) {
             return Ok(path);
         }
-        ensure!(
-            !self.active.contains(&path),
-            "Cyclic local module imports are unsupported: {}",
-            path.display()
-        );
+        if self.active.contains(&path) {
+            return Err(self.locations.annotate(
+                diag!(
+                    codes::CYCLIC_IMPORT,
+                    "Cyclic local module imports are unsupported: {}",
+                    path.display()
+                ),
+                source.span,
+            ));
+        }
         let source = &self.sources[path.to_string_lossy().as_ref()];
         let module = parse(source, &path.to_string_lossy())?;
         let exports = self.module(&path, module)?;
@@ -260,31 +246,22 @@ impl Graph<'_, '_> {
     fn module(&mut self, path: &Path, mut module: ast::Module) -> Result<Exports> {
         wit_imports(&mut module, self.foreign, path, self.sources);
         // Each parser invocation owns a source map; give merged bindings disjoint spans.
-        struct Rebase {
-            offset: u32,
-            end: u32,
-        }
+        struct Rebase(u32);
         impl VisitMut for Rebase {
             fn visit_mut_span(&mut self, span: &mut swc_common::Span) {
                 if !span.is_dummy() {
-                    span.lo.0 += self.offset;
-                    span.hi.0 += self.offset;
-                    self.end = self.end.max(span.hi.0);
+                    span.lo.0 += self.0;
+                    span.hi.0 += self.0;
                 }
             }
         }
-        let mut rebase = Rebase {
-            offset: self.next_span,
-            end: self.next_span,
-        };
         let text = if path == self.entry_path {
             self.entry_source
         } else {
             &self.sources[path.to_string_lossy().as_ref()]
         };
-        self.locations.add(path.to_owned(), text, self.next_span);
-        module.visit_mut_with(&mut rebase);
-        self.next_span = rebase.end + 1;
+        let offset = self.locations.add(path.to_owned(), text)?;
+        module.visit_mut_with(&mut Rebase(offset));
         super::hir_compat::validate(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
@@ -343,10 +320,6 @@ impl Graph<'_, '_> {
             };
             item.visit_mut_with(&mut renamer);
             match &item {
-                ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) => {
-                    self.functions
-                        .insert(function.ident.sym.to_string(), self.body.len());
-                }
                 ast::ModuleItem::Stmt(ast::Stmt::Decl(
                     decl @ (ast::Decl::TsInterface(_)
                     | ast::Decl::TsTypeAlias(_)
@@ -368,8 +341,8 @@ impl Graph<'_, '_> {
             }
             self.body.push(item);
         }
-        if let Some(error) = renamer.error {
-            return Err(error);
+        if let Some((error, span)) = renamer.error {
+            return Err(self.locations.annotate(error, span));
         }
         self.active.remove(path);
         Ok(exports)
@@ -385,18 +358,13 @@ fn bind_module<'a>(
     let mut exports = Exports::new();
     for item in &module.body {
         match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) => {
-                for id in declared(&export.decl)? {
-                    ensure!(
-                        !id.sym.starts_with("__perry_"),
-                        "Reserved compiler name in source"
-                    );
-                    names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
-                }
-            }
-            ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
+                decl,
+                ..
+            }))
+            | ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
                 for id in declared(decl)? {
-                    ensure!(
+                    ensure_unsupported!(
                         !id.sym.starts_with("__perry_"),
                         "Reserved compiler name in source"
                     );
@@ -417,8 +385,9 @@ fn bind_module<'a>(
                                     named.local.to_id(),
                                     dependency
                                         .get(original)
-                                        .with_context(|| {
-                                            format!(
+                                        .ok_or_else(|| {
+                                            diag!(
+                                                codes::UNKNOWN_EXPORT,
                                                 "Module '{}' has no export '{original}'",
                                                 import.src.value.to_string_lossy()
                                             )
@@ -427,9 +396,12 @@ fn bind_module<'a>(
                                 );
                             }
                             ast::ImportSpecifier::Namespace(namespace) => {
-                                namespaces.insert(namespace.local.to_id(), dependency);
+                                namespaces.insert(
+                                    namespace.local.to_id(),
+                                    (import.src.value.to_string_lossy().into_owned(), dependency),
+                                );
                             }
-                            _ => bail!("Local modules require named imports"),
+                            _ => bail_unsupported!("Local modules require named imports"),
                         }
                     }
                 } else {
@@ -456,7 +428,7 @@ fn bind_module<'a>(
                 let dependency = export.src.as_ref().map(|source| dependency_exports(source));
                 for specifier in &export.specifiers {
                     let ast::ExportSpecifier::Named(named) = specifier else {
-                        bail!("Only named local re-exports are supported");
+                        bail_unsupported!("Only named local re-exports are supported");
                     };
                     let original = named.orig.atom();
                     let original_str: &str = original.as_ref();
@@ -467,7 +439,9 @@ fn bind_module<'a>(
                     } else {
                         None
                     }
-                    .with_context(|| format!("Unknown export '{original_str}'"))?;
+                    .ok_or_else(|| {
+                        diag!(codes::UNKNOWN_EXPORT, "Unknown export '{original_str}'")
+                    })?;
                     let exported = named
                         .exported
                         .as_ref()
@@ -482,7 +456,9 @@ fn bind_module<'a>(
             }
             ast::ModuleItem::ModuleDecl(
                 ast::ModuleDecl::ExportDefaultDecl(_) | ast::ModuleDecl::ExportDefaultExpr(_),
-            ) => bail!("Component modules use named function exports, not default exports"),
+            ) => bail_unsupported!(
+                "Component modules use named function exports, not default exports"
+            ),
             _ => {}
         }
     }
@@ -503,7 +479,13 @@ fn insert_export(exports: &mut Exports, name: String, binding: String) -> Result
             entry.insert(binding);
             Ok(())
         }
-        Entry::Occupied(entry) => bail!("Ambiguous export '{}'", entry.key()),
+        Entry::Occupied(entry) => {
+            bail_diag!(
+                codes::AMBIGUOUS_EXPORT,
+                "Ambiguous export '{}'",
+                entry.key()
+            )
+        }
     }
 }
 fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
@@ -517,18 +499,20 @@ fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
             .iter()
             .map(|decl| {
                 let ast::Pat::Ident(id) = &decl.name else {
-                    bail!("Module bindings require named identifiers");
+                    bail_unsupported!("Module bindings require named identifiers");
                 };
                 Ok(&id.id)
             })
             .collect::<Result<Vec<_>>>()?,
-        _ => bail!("Static modules support functions, type declarations, and constant bindings"),
+        _ => bail_unsupported!(
+            "Static modules support functions, type declarations, and constant bindings"
+        ),
     })
 }
 struct Rename<'a> {
     names: HashMap<ast::Id, String>,
-    namespaces: HashMap<ast::Id, &'a Exports>,
-    error: Option<anyhow::Error>,
+    namespaces: HashMap<ast::Id, (String, &'a Exports)>,
+    error: Option<(Diagnostic, swc_common::Span)>,
 }
 impl VisitMut for Rename<'_> {
     fn visit_mut_import_named_specifier(&mut self, import: &mut ast::ImportNamedSpecifier) {
@@ -553,22 +537,37 @@ impl VisitMut for Rename<'_> {
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
         if let ast::Expr::Member(member) = expression
             && let ast::Expr::Ident(namespace) = member.obj.as_ref()
-            && let Some(exports) = self.namespaces.get(&namespace.to_id())
+            && let Some((specifier, exports)) = self.namespaces.get(&namespace.to_id())
         {
-            let name = match &member.prop {
-                ast::MemberProp::Ident(id) => Some(id.sym.as_ref()),
-                _ => None,
-            };
-            if let Some(binding) = name.and_then(|name| exports.get(name)) {
-                *expression = ast::Expr::Ident(ast::Ident::new(
-                    binding.clone().into(),
-                    DUMMY_SP,
-                    SyntaxContext::empty(),
-                ));
-            } else {
-                self.error.get_or_insert_with(|| {
-                    anyhow::anyhow!("Local namespaces require a declared static member")
-                });
+            match &member.prop {
+                ast::MemberProp::Ident(id) => {
+                    let name: &str = id.sym.as_ref();
+                    if let Some(binding) = exports.get(name) {
+                        *expression = ast::Expr::Ident(ast::Ident::new(
+                            binding.as_str().into(),
+                            DUMMY_SP,
+                            SyntaxContext::empty(),
+                        ));
+                    } else {
+                        self.error.get_or_insert_with(|| {
+                            (
+                                diag!(
+                                    codes::UNKNOWN_EXPORT,
+                                    "Module '{specifier}' has no export '{name}'"
+                                ),
+                                member.span,
+                            )
+                        });
+                    }
+                }
+                _ => {
+                    self.error.get_or_insert_with(|| {
+                        (
+                            unsupported!("Local namespaces require a declared static member"),
+                            member.span,
+                        )
+                    });
+                }
             }
             return;
         }
@@ -576,27 +575,39 @@ impl VisitMut for Rename<'_> {
     }
     fn visit_mut_ident(&mut self, id: &mut ast::Ident) {
         if let Some(name) = self.names.get(&id.to_id()) {
-            id.sym = name.clone().into();
+            id.sym = name.as_str().into();
         } else if self.namespaces.contains_key(&id.to_id()) {
             self.error.get_or_insert_with(|| {
-                anyhow::anyhow!("Local namespaces may only be used for static member access")
+                (
+                    unsupported!("Local namespaces may only be used for static member access"),
+                    id.span,
+                )
             });
         }
     }
 }
-fn export_function(function: ast::FnDecl) -> ast::ModuleItem {
+fn export_function(mut function: ast::FnDecl, name: &str) -> ast::ModuleItem {
+    function.ident = ast::Ident::new(name.into(), DUMMY_SP, SyntaxContext::empty());
     ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
         span: DUMMY_SP,
         decl: ast::Decl::Fn(function),
     }))
 }
 
-/// How often each identifier occurs, declarations included.
 #[derive(Default)]
-struct Uses(HashMap<String, usize>);
-impl Visit for Uses {
+struct ExportBinding<'a> {
+    names: Vec<&'a str>,
+    occurrences: usize,
+}
+
+#[derive(Default)]
+struct ExportBindings<'a>(HashMap<&'a str, ExportBinding<'a>>);
+
+impl Visit for ExportBindings<'_> {
     fn visit_ident(&mut self, ident: &ast::Ident) {
-        *self.0.entry(ident.sym.to_string()).or_default() += 1;
+        if let Some(binding) = self.0.get_mut(ident.sym.as_str()) {
+            binding.occurrences += 1;
+        }
     }
 }
 

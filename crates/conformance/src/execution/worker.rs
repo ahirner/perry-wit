@@ -223,13 +223,13 @@ fn resolve_handler_world() -> Result<&'static (wit_parser::Resolve, wit_parser::
         std::result::Result<(wit_parser::Resolve, wit_parser::WorldId), String>,
     > = OnceLock::new();
     let cached = HANDLER.get_or_init(|| {
-        perry_wit::component::wit::resolve_wit(
-            &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
-        )
-        .and_then(|(resolve, package)| {
+        (|| -> Result<_> {
+            let (resolve, package) = perry_wit::component::wit::resolve_wit(
+                &Path::new(env!("CARGO_MANIFEST_DIR")).join("wit/handler"),
+            )?;
             let world = resolve.select_world(&[package], Some("handler"))?;
             Ok((resolve, world))
-        })
+        })()
         .map_err(|error| format!("{error:#}"))
     });
     match cached {

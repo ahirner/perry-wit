@@ -15,6 +15,7 @@ enum ClassReceiver {
     Constructor(Value),
 }
 
+#[derive(Clone, Copy)]
 pub(super) enum ClassExpansion<'s> {
     Callable(&'s Function),
     Fields(&'s perry_frontend::hir::ir::Class),
@@ -43,13 +44,13 @@ impl<'s> FunctionBuilder<'s> {
         if recursive {
             match expansion {
                 ClassExpansion::Callable(func) => {
-                    bail!(
+                    bail_unsupported!(
                         "recursive inline class call to {owner_class}.{} is not supported yet",
                         func.name
                     )
                 }
                 ClassExpansion::Fields(_) => {
-                    bail!(
+                    bail_unsupported!(
                         "recursive inline field initialization of class {owner_class} is not supported yet"
                     )
                 }
@@ -58,7 +59,16 @@ impl<'s> FunctionBuilder<'s> {
         self.class_expansions.push(expansion);
         let result = lower(self, ctx);
         self.class_expansions.pop();
-        result
+        result.map_err(|error| {
+            let locations = &self.shapes.metadata.locations;
+            let member_span = match expansion {
+                ClassExpansion::Callable(func) => {
+                    locations.function_span(&format!("{owner_class}::{}", func.name))
+                }
+                ClassExpansion::Fields(_) => None,
+            };
+            error.with_fallback_span(member_span.or_else(|| locations.type_span(owner_class)))
+        })
     }
 
     /// `new ClassName<type_args>(args)` for a user-defined class.
@@ -75,7 +85,7 @@ impl<'s> FunctionBuilder<'s> {
             .classes
             .named
             .get_key_value(class_name)
-            .with_context(|| format!("unknown class {class_name}"))?;
+            .ok_or_else(|| unsupported!("unknown class {class_name}"))?;
         let mut pre_evaluated: Option<Vec<Value>> = None;
         let (rec_ty, effective_args) = if !type_args.is_empty() {
             let ty = self.shapes.generic(ctx, class_name, type_args)?;
@@ -130,11 +140,11 @@ impl<'s> FunctionBuilder<'s> {
         };
 
         let rec = TypedHandle::<RecordType>::from_handle(rec_ty, ctx)
-            .map_err(|_| anyhow!("expected class record for {class_name}"))?;
+            .map_err(|_| internal!("expected class record for {class_name}"))?;
         let field_defs: Vec<(String, TypeHandle)> = rec
             .deref(ctx)
             .fields()
-            .context("incomplete class record")?
+            .map_err(|_| Diagnostic::internal("incomplete class record"))?
             .to_vec();
         let mut init_operands = Vec::with_capacity(field_defs.len());
         for (field, field_ty) in &field_defs {
@@ -152,7 +162,7 @@ impl<'s> FunctionBuilder<'s> {
             let (index, _) = rec
                 .deref(ctx)
                 .field(&field.name)
-                .with_context(|| format!("missing field {} on {class_name}", field.name))?;
+                .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
             order.push_unique(index as u32);
         }
         let instance = self.emit_value(ctx, |ctx| {
@@ -204,7 +214,7 @@ impl<'s> FunctionBuilder<'s> {
         } else if let Some(zero) = self.zero_value_for_type(ctx, ty) {
             Ok(zero)
         } else {
-            bail!(
+            bail_unsupported!(
                 "class {class_name} field {field} has no placeholder before its constructor assignment"
             )
         }
@@ -221,10 +231,10 @@ impl<'s> FunctionBuilder<'s> {
             .classes
             .named
             .get_key_value(class_name)
-            .with_context(|| format!("unknown class {class_name}"))?;
+            .ok_or_else(|| internal!("unknown class {class_name}"))?;
         let rec_val = self.load(ctx, this_slot)?;
         let rec = TypedHandle::<RecordType>::from_handle(rec_val.get_type(ctx), ctx)
-            .map_err(|_| anyhow!("expected class record"))?;
+            .map_err(|_| Diagnostic::internal("expected class record"))?;
         let saved_this = self.this_slot.replace(this_slot);
         let res = self.with_class_expansion(
             ctx,
@@ -238,7 +248,7 @@ impl<'s> FunctionBuilder<'s> {
                     let (_, field_ty) = rec
                         .deref(ctx)
                         .field(&field.name)
-                        .with_context(|| format!("missing field {} on {class_name}", field.name))?;
+                        .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
                     let val = this.expression_with(ctx, init_expr, Some(field_ty))?;
                     let val = this.fit(ctx, val, field_ty)?;
                     let target = this.load(ctx, this_slot)?;
@@ -254,9 +264,11 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     pub(super) fn class_this(&mut self, ctx: &mut Context) -> Result<Value> {
-        let slot = self.this_slot.context(
-            "'this' is only supported inside class constructors, methods, and accessors",
-        )?;
+        let slot = self.this_slot.ok_or_else(|| {
+            Diagnostic::unsupported(
+                "'this' is only supported inside class constructors, methods, and accessors",
+            )
+        })?;
         self.load(ctx, slot)
     }
 
@@ -288,7 +300,12 @@ impl<'s> FunctionBuilder<'s> {
         let (owner_class, func) = self
             .shapes
             .class_static_method(class_name, method)
-            .with_context(|| format!("static method {class_name}.{method} not found"))?;
+            .ok_or_else(|| {
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "static method {class_name}.{method} not found"
+                )
+            })?;
         self.inline_class_callable(
             ctx,
             owner_class,
@@ -305,10 +322,12 @@ impl<'s> FunctionBuilder<'s> {
         class_name: &str,
         field: &str,
     ) -> Result<Value> {
-        let (id, _) = self
-            .shapes
-            .static_field(class_name, field)
-            .with_context(|| format!("static field {class_name}.{field} not found"))?;
+        let (id, _) = self.shapes.static_field(class_name, field).ok_or_else(|| {
+            diag!(
+                codes::TYPE_MISMATCH,
+                "static field {class_name}.{field} not found"
+            )
+        })?;
         self.load_local(ctx, id)
     }
 
@@ -319,10 +338,12 @@ impl<'s> FunctionBuilder<'s> {
         field: &str,
         value: &'s Expr,
     ) -> Result<Value> {
-        let (id, _) = self
-            .shapes
-            .static_field(class_name, field)
-            .with_context(|| format!("static field {class_name}.{field} not found"))?;
+        let (id, _) = self.shapes.static_field(class_name, field).ok_or_else(|| {
+            diag!(
+                codes::TYPE_MISMATCH,
+                "static field {class_name}.{field} not found"
+            )
+        })?;
         self.local_set(ctx, id, value)
     }
 
@@ -365,7 +386,7 @@ impl<'s> FunctionBuilder<'s> {
             ClassArguments::Expressions(&[]),
             ClassReceiver::Instance(slot),
         )?
-        .context("class getter produced no value")
+        .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "class getter produced no value"))
     }
 
     pub(super) fn class_setter_call(
@@ -425,7 +446,7 @@ impl<'s> FunctionBuilder<'s> {
         args: ClassArguments<'_, 's>,
         receiver: ClassReceiver,
     ) -> Result<Option<Value>> {
-        ensure!(
+        ensure_unsupported!(
             !func.is_async && !func.is_generator,
             "async or generator class methods are not supported yet"
         );
@@ -465,9 +486,13 @@ impl<'s> FunctionBuilder<'s> {
                 )
             };
             let value = if param.is_rest {
-                let rest_ty = param_ty.context("rest parameter must have array type")?;
+                let rest_ty = param_ty.ok_or_else(|| {
+                    Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")
+                })?;
                 let element = TypedHandle::<ArrayType>::from_handle(rest_ty, ctx)
-                    .map_err(|_| anyhow!("rest parameter must have array type"))?
+                    .map_err(|_| {
+                        Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")
+                    })?
                     .deref(ctx)
                     .element();
                 let mut items = Vec::new();

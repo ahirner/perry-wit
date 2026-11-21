@@ -1,8 +1,8 @@
 //! Whole-module analyses over MIR functions: reachability and a
 //! deterministic value order.
 use crate::Exports;
-use anyhow::{Context as _, Result, anyhow};
-use perry_mir::{AsyncCallOp, CallOp, LiveValues, ProgramFacts, is_exported};
+use perry_mir::{AsyncCallOp, CallOp, LiveValues, PlironResultExt as _, ProgramFacts, is_exported};
+use perry_wit_diagnostics::{Diagnostic, Result};
 use pliron::{
     builtin::{
         op_interfaces::{OneRegionInterface, SymbolOpInterface},
@@ -13,7 +13,6 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    printable::Printable,
     value::Value,
 };
 use std::{
@@ -35,17 +34,15 @@ pub(super) fn module_analyses<'a>(
     let op = module.get_operation();
     analyses
         .get_analysis::<ProgramFacts>(op, ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
-    analyses
-        .get_analysis::<LiveValues>(op, ctx)
-        .map_err(|error| anyhow!("{}", error.disp(ctx)))?;
+        .to_diag(ctx)?;
+    analyses.get_analysis::<LiveValues>(op, ctx).to_diag(ctx)?;
     Ok(ModuleAnalyses {
         facts: analyses
             .try_get_analysis::<ProgramFacts>(op)
-            .context("computed program facts are missing")?,
+            .ok_or_else(|| Diagnostic::internal("computed program facts are missing"))?,
         live: analyses
             .try_get_analysis::<LiveValues>(op)
-            .context("computed liveness is missing")?,
+            .ok_or_else(|| Diagnostic::internal("computed liveness is missing"))?,
     })
 }
 
@@ -117,6 +114,18 @@ pub(crate) fn function_values(ctx: &Context, function: &FuncOp) -> Vec<Value> {
     values
 }
 
+pub(crate) fn function_type(
+    ctx: &Context,
+    function: &FuncOp,
+) -> Result<pliron::r#type::TypedHandle<pliron::builtin::types::FunctionType>> {
+    use perry_mir::PlironResultExt as _;
+    pliron::r#type::TypedHandle::<pliron::builtin::types::FunctionType>::from_handle(
+        pliron::r#type::Typed::get_type(function, ctx),
+        ctx,
+    )
+    .to_diag(ctx)
+}
+
 pub(crate) fn function_signature(
     ctx: &Context,
     function: &FuncOp,
@@ -125,11 +134,7 @@ pub(crate) fn function_signature(
     Vec<pliron::r#type::TypeHandle>,
 )> {
     use pliron::builtin::type_interfaces::FunctionTypeInterface;
-    let ty = pliron::r#type::TypedHandle::<pliron::builtin::types::FunctionType>::from_handle(
-        pliron::r#type::Typed::get_type(function, ctx),
-        ctx,
-    )
-    .map_err(|_| anyhow::anyhow!("function type"))?;
+    let ty = function_type(ctx, function)?;
     let ty = ty.deref(ctx);
     Ok((ty.arg_types(), ty.res_types()))
 }

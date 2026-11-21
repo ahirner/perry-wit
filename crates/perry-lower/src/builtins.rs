@@ -19,14 +19,14 @@ impl<'s> FunctionBuilder<'s> {
         }
         if method == hir_compat::Method::Iteration && matches!(object, Expr::UrlSearchParamsNew(_))
         {
-            bail!(
+            bail_unsupported!(
                 "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
             );
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
         if method == hir_compat::Method::Iteration {
-            ensure!(
+            ensure_unsupported!(
                 matches!(kind(ctx, receiver)?, Kind::Array | Kind::String)
                     || crate::collections::is_collection_or_view_record(
                         ctx,
@@ -43,7 +43,7 @@ impl<'s> FunctionBuilder<'s> {
             return self.class_method_call(ctx, receiver, owner_class, &type_args, func, args);
         }
         if method == hir_compat::Method::Push {
-            ensure!(
+            ensure_unsupported!(
                 kind(ctx, receiver)? == Kind::Array,
                 "push requires a dense array receiver"
             );
@@ -52,7 +52,7 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(call) = Call::parse(Receiver::of(ctx, receiver)?, method, args)? {
             return call.lower(self, ctx, receiver);
         }
-        bail!(
+        bail_unsupported!(
             "method {method} is not supported on {} yet",
             kind(ctx, receiver)?.label()
         )
@@ -91,7 +91,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 Kind::Regex => {
                     if all && !Self::regex_global(ctx, search_val)? {
-                        bail!(
+                        bail_unsupported!(
                             "String.prototype.replaceAll called with a non-global RegExp argument"
                         );
                     }
@@ -101,7 +101,11 @@ impl<'s> FunctionBuilder<'s> {
                         vec![receiver, search_val, repl_val],
                     )
                 }
-                _ => bail!("string.{method} requires a string or literal regex search pattern"),
+                _ => {
+                    bail_unsupported!(
+                        "string.{method} requires a string or literal regex search pattern"
+                    )
+                }
             }
         })
     }
@@ -189,7 +193,7 @@ impl<'s> FunctionBuilder<'s> {
             "RangeError" => (ErrorKind::RangeError, 2),
             "ReferenceError" => (ErrorKind::ReferenceError, 6),
             "SyntaxError" => (ErrorKind::SyntaxError, 7),
-            other => bail!("instanceof {other} is not supported yet"),
+            other => bail_unsupported!("instanceof {other} is not supported yet"),
         };
         Ok(match kind(ctx, value)? {
             Kind::Json => {
@@ -208,7 +212,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(match kind(ctx, value)? {
             Kind::BigInt => value,
             Kind::Number => self.intrinsic(ctx, Intrinsic::BigIntFromNumber, vec![value]),
-            _ => bail!(
+            _ => bail_unsupported!(
                 "BigInt conversion requires a number or bigint in the 64-bit transport profile"
             ),
         })
@@ -218,7 +222,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn number_coerce(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.arithmetic(ctx, value);
-        ensure!(
+        ensure_unsupported!(
             kind(ctx, value)? != Kind::ValueUnion,
             "narrow the value union before numeric conversion"
         );
@@ -226,7 +230,7 @@ impl<'s> FunctionBuilder<'s> {
             Kind::BigInt => self.intrinsic(ctx, Intrinsic::BigIntToNumber, vec![value]),
             Kind::String => self.intrinsic(ctx, Intrinsic::StringToNumber, vec![value]),
             Kind::Number => value,
-            _ => bail!("Number conversion requires a number, bigint or string"),
+            _ => bail_unsupported!("Number conversion requires a number, bigint or string"),
         })
     }
 
@@ -266,7 +270,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<()> {
         let arr = self.expression(ctx, array)?;
         let arr = self.defined(ctx, arr)?;
-        ensure!(
+        ensure_unsupported!(
             kind(ctx, arr)? == Kind::Array,
             "Math.max/min spread requires an array"
         );
@@ -315,15 +319,16 @@ impl<'s> FunctionBuilder<'s> {
                 self.intrinsic(ctx, Intrinsic::BytesNew, vec![value])
             }
             Kind::Array => {
-                ensure!(
+                ensure_diag!(
                     value.get_type(ctx) == numbers,
+                    codes::TYPE_MISMATCH,
                     "Uint8Array sources must be number arrays"
                 );
                 self.intrinsic(ctx, Intrinsic::BytesFromArray, vec![value])
             }
             Kind::ByteBuffer => self.intrinsic(ctx, Intrinsic::BytesFromBuffer, vec![value]),
             Kind::Bytes => self.intrinsic(ctx, Intrinsic::BytesCopy, vec![value]),
-            _ => bail!("new Uint8Array takes a length, a number[] or a Uint8Array"),
+            _ => bail_unsupported!("new Uint8Array takes a length, a number[] or a Uint8Array"),
         })
     }
 
@@ -370,7 +375,7 @@ impl<'s> FunctionBuilder<'s> {
         };
         let mut stream = self.boolean(ctx, false);
         for (name, value) in self.init_fields(options)? {
-            ensure!(
+            ensure_unsupported!(
                 name == "stream",
                 "unsupported TextDecoder.decode option {name}"
             );

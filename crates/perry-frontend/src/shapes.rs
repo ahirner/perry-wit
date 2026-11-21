@@ -1,6 +1,6 @@
 //! Resolved source declarations and canonical HIR type identities.
-use anyhow::{Context as _, Result, anyhow, ensure};
 use perry_hir::types::Type as HirType;
+use perry_wit_diagnostics::Result;
 use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub mod generics;

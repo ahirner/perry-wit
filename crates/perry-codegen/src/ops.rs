@@ -6,20 +6,21 @@ use crate::{
     repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use perry_mir::{
     ArrayType, AsyncCallOp, AwaitOp, BinaryOp as MirBinaryOp, BrOp as MirBrOp, CallOp as MirCallOp,
     Combinator, CompareKind, CompareOp as MirCompareOp, ConcatOp, CondBrOp as MirCondBrOp,
-    ErrorKind, IntrinsicOp, JsonStringifyOp, NumericCastOp, PromiseCombinatorOp, PromiseRejectedOp,
-    PromiseResolvedOp, PromiseType, ReturnOp as MirReturnOp, SettledField, SettledFieldOp,
-    SettledType, StringConstOp, StringLenOp, StringType, TimerOp, UndefOp,
+    ErrorKind, IntrinsicOp, JsonStringifyOp, NumericCastOp, PlironResultExt as _,
+    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType,
+    ReturnOp as MirReturnOp, SettledField, SettledFieldOp, SettledType, StringConstOp, StringLenOp,
+    StringType, TimerOp, UndefOp,
 };
+use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, bail_unsupported, ensure_internal};
 use pliron::{
     builtin::{
         attributes::{FPDoubleAttr, IntegerAttr},
         op_interfaces::BranchOpInterface,
         ops::ConstantOp,
-        types::FP64Type,
+        types::{FP64Type, Signedness},
     },
     context::{Context, Ptr},
     op::Op,
@@ -44,12 +45,13 @@ impl FunctionLowering<'_, '_> {
             let ty = TypedHandle::<perry_mir::SlotType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
-            )?
+            )
+            .to_diag(ctx)?
             .deref(ctx)
             .value();
             let name = global.name(ctx);
             let address = if let Some(&(address, existing)) = self.state.globals.get(&name) {
-                ensure!(
+                ensure_internal!(
                     existing == ty,
                     "module binding {name} has conflicting types"
                 );
@@ -102,7 +104,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(constant) = Operation::get_op::<perry_mir::BigIntConstOp>(op, ctx) {
             let magnitude = constant
                 .get_attr_perry_integer_value(ctx)
-                .context("BigInt constant without a magnitude")?
+                .ok_or_else(|| Diagnostic::internal("BigInt constant without a magnitude"))?
                 .value();
             let mut bytes = vec![0; magnitude.bw().div_ceil(32).max(2) * 4 + 8];
             magnitude.to_u8_slice(&mut bytes[8..]);
@@ -112,7 +114,8 @@ impl FunctionLowering<'_, '_> {
             // The runtime header holds low 64 bits, sign, then high-limb count.
             bytes.copy_within(8..16, 0);
             bytes[8..12].fill(0);
-            let extra_len = u32::try_from((bytes.len() - 16) / 4)?;
+            let extra_len = u32::try_from((bytes.len() - 16) / 4)
+                .map_err(|_| Diagnostic::internal("BigInt literal exceeds maximum length"))?;
             bytes[12..16].copy_from_slice(&extra_len.to_le_bytes());
             let address = self.state.data.append(8, &bytes);
             let value = self.i32_const(ctx, address as i32);
@@ -122,7 +125,7 @@ impl FunctionLowering<'_, '_> {
         if let Some(constant) = Operation::get_op::<ConstantOp>(op, ctx) {
             let attr = constant
                 .get_attr_builtin_constant_value(ctx)
-                .ok_or_else(|| anyhow!("constant without value"))?;
+                .ok_or_else(|| Diagnostic::internal("constant without value"))?;
             if let Some(&number) = attr.downcast_ref::<perry_mir::NumericConstant>() {
                 drop(attr);
                 let value = self.numeric_constant(ctx, number);
@@ -134,11 +137,12 @@ impl FunctionLowering<'_, '_> {
                 drop(attr);
                 self.f64_const(ctx, value)
             } else if let Some(int) = attr.downcast_ref::<IntegerAttr>() {
-                let ty = int.get_type().into();
+                let (width, signed) = {
+                    let ty = int.get_type().deref(ctx);
+                    (ty.width(), ty.signedness() != Signedness::Unsigned)
+                };
                 let bits: APInt = int.clone().into();
                 drop(attr);
-                let (width, signed) =
-                    crate::numeric::integer(ctx, ty).expect("integer attribute type");
                 if width == 64 {
                     self.i64_const(ctx, bits.to_u64())
                 } else {
@@ -150,7 +154,7 @@ impl FunctionLowering<'_, '_> {
                     self.i32_const(ctx, value)
                 }
             } else {
-                bail!("unsupported constant")
+                bail_internal!("unsupported constant")
             };
             self.define(ctx, op, value);
             return Ok(());
@@ -199,7 +203,7 @@ impl FunctionLowering<'_, '_> {
                 match kind {
                     CompareKind::Eq => equal,
                     CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![equal]),
-                    _ => bail!("narrow the value union before ordered comparisons"),
+                    _ => bail_unsupported!("narrow the value union before ordered comparisons"),
                 }
             } else if let Some(inner) = optional_inner(ctx, mir_ty)
                 && repr(ctx, inner)? == Repr::F64
@@ -216,7 +220,7 @@ impl FunctionLowering<'_, '_> {
                 match kind {
                     CompareKind::Eq => eq,
                     CompareKind::Ne => self.num(ctx, NumOpcode::I32Eqz, vec![eq]),
-                    other => bail!("ordered comparison {other:?} on number | undefined"),
+                    other => bail_internal!("ordered comparison {other:?} on number | undefined"),
                 }
             } else if inner.deref(ctx).is::<StringType>()
                 || inner.deref(ctx).is::<perry_mir::BigIntType>()
@@ -304,9 +308,9 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if Operation::get_op::<MirReturnOp>(op, ctx).is_some() {
-            if self.frame.is_some() {
+            if let Some(frame) = self.frame.as_deref().map(|f| f.frame) {
                 let value = op.deref(ctx).operands().next();
-                return self.settle_return(ctx, value);
+                return self.settle_return(ctx, frame, value);
             }
             let mut values = self.flatten_operands(ctx, op, 0)?;
             if self.throws {
@@ -343,7 +347,7 @@ impl FunctionLowering<'_, '_> {
             if callee_throws {
                 let status = *values
                     .last()
-                    .ok_or_else(|| anyhow!("throwing call has no status result"))?;
+                    .ok_or_else(|| Diagnostic::internal("throwing call has no status result"))?;
                 let throw = self.throw_target(ctx, status);
                 let next = self.new_block(ctx, vec![]);
                 self.cond_br(ctx, status, throw, (next, vec![]));
@@ -355,7 +359,7 @@ impl FunctionLowering<'_, '_> {
             let address = {
                 let text = constant
                     .get_attr_perry_string_value(ctx)
-                    .ok_or_else(|| anyhow!("string constant without value"))?;
+                    .ok_or_else(|| Diagnostic::internal("string constant without value"))?;
                 self.state.data.string(text.as_ref())
             };
             let value = self.i32_const(ctx, address as i32);
@@ -421,9 +425,11 @@ impl FunctionLowering<'_, '_> {
                 let array = TypedHandle::<ArrayType>::from_handle(
                     op.deref(ctx).get_operand(0).get_type(ctx),
                     ctx,
-                )?;
+                )
+                .to_diag(ctx)?;
                 let element = array.deref(ctx).element();
-                let payload = TypedHandle::<PromiseType>::from_handle(element, ctx)?
+                let payload = TypedHandle::<PromiseType>::from_handle(element, ctx)
+                    .to_diag(ctx)?
                     .deref(ctx)
                     .value();
                 let references = self.i32_const(ctx, i32::from(repr(ctx, payload)? == Repr::Ref));
@@ -452,7 +458,8 @@ impl FunctionLowering<'_, '_> {
             let payload = TypedHandle::<PromiseType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
-            )?
+            )
+            .to_diag(ctx)?
             .deref(ctx)
             .value();
             let promise = self.new_promise(ctx, payload)?;
@@ -477,15 +484,17 @@ impl FunctionLowering<'_, '_> {
                 }
                 field => {
                     let ty = op.deref(ctx).get_result(0).get_type(ctx);
-                    let inner = optional_inner(ctx, ty)
-                        .ok_or_else(|| anyhow!("settled field needs an optional result"))?;
+                    let inner = optional_inner(ctx, ty).ok_or_else(|| {
+                        Diagnostic::internal("settled field needs an optional result")
+                    })?;
                     let loaded = self.load(ctx, slot_kind(ctx, inner)?, promise, VALUE);
                     let undefined = self.undefined(ctx, ty)?;
                     if field == SettledField::Value {
                         let source = TypedHandle::<SettledType>::from_handle(
                             op.deref(ctx).get_operand(0).get_type(ctx),
                             ctx,
-                        )?
+                        )
+                        .to_diag(ctx)?
                         .deref(ctx)
                         .value();
                         if optional_inner(ctx, source).is_some() {
@@ -519,7 +528,8 @@ impl FunctionLowering<'_, '_> {
             let payload = TypedHandle::<PromiseType>::from_handle(
                 op.deref(ctx).get_result(0).get_type(ctx),
                 ctx,
-            )?
+            )
+            .to_diag(ctx)?
             .deref(ctx)
             .value();
             let promise = self.new_promise(ctx, payload)?;
@@ -541,6 +551,6 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         let name = Operation::get_op_dyn(op, ctx).get_opid().to_string();
-        bail!("{name} has no lowering to wasm (did canonicalize run?)")
+        bail_internal!("{name} has no lowering to wasm (did canonicalize run?)")
     }
 }

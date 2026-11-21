@@ -97,7 +97,7 @@ impl<'s> FunctionBuilder<'s> {
         if !self.shapes.metadata.sparse_arrays {
             return self.element_at(ctx, array, index);
         }
-        let op = ArrayGetOp::new(ctx, array, index)?;
+        let op = ArrayGetOp::new(ctx, array, index).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
@@ -160,7 +160,7 @@ impl<'s> FunctionBuilder<'s> {
                 IntegerType::get(ctx, 32, Signedness::Signless).into(),
             )
         });
-        let op = ArrayAtOp::new(ctx, array, at)?;
+        let op = ArrayAtOp::new(ctx, array, at).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
     pub(crate) fn array_for_each(

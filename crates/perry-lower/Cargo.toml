@@ -10,7 +10,6 @@ perry-mir.workspace = true
 perry-frontend.workspace = true
 perry-wit-diagnostics.workspace = true
 pliron.workspace = true
-anyhow.workspace = true
 
 [lints]
 workspace = true

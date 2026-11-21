@@ -1,6 +1,6 @@
 //! In-process component custom section stripping.
 
-use anyhow::Result;
+use perry_wit_diagnostics::{Diagnostic, Result};
 use std::convert::Infallible;
 use wasm_encoder::{
     Component, Module,
@@ -37,6 +37,8 @@ pub(crate) fn component(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut component = Component::new();
     let mut parser = Parser::new(0);
     parser.set_features(WasmFeatures::all());
-    Strip.parse_component(&mut component, parser, bytes)?;
+    Strip
+        .parse_component(&mut component, parser, bytes)
+        .map_err(|err| Diagnostic::internal_from("stripping component custom sections", &err))?;
     Ok(component.finish())
 }

@@ -1,11 +1,11 @@
 //! The boundary for source facts and compiler-generated forms that Perry HIR erases.
 use crate::modules;
-use anyhow::{Context as _, Result, anyhow, bail};
 use perry_hir::{
     ir::{CompareOp, Expr, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
 };
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
 use std::collections::{HashMap, HashSet};
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
@@ -18,6 +18,7 @@ pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;
+pub(crate) use locations::display_name;
 pub use locations::{Locations, non_null_assertion};
 mod methods;
 mod names;
@@ -58,7 +59,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         regex::fold(&mut ast, unresolved);
         let constructors = constructors::preserve(&mut ast, unresolved)?;
         streams::preserve_options(&mut ast, unresolved)?;
-        Ok::<_, anyhow::Error>(constructors)
+        Ok::<_, Diagnostic>(constructors)
     })?;
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
@@ -66,17 +67,18 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     classes::preserve_field_types(&mut ast);
     locations.preserve_expressions(&mut ast);
     let mut module = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
-        let span = error
-            .downcast_ref::<perry_hir::error::LowerError>()
-            .and_then(|error| error.span);
-        let diagnostic = PerryDiagnostic::error(
-            DiagnosticCode::UnsupportedExpression,
-            format!("failed to lower {identity}: {error:#}"),
-        );
-        let error = diagnostic.into();
+        let lower_error = error.downcast_ref::<perry_hir::error::LowerError>();
+        let span = lower_error.and_then(|error| error.span);
+        let detail = format!("{error:#}");
+        let code = if lower_error.is_some() {
+            codes::UNSUPPORTED_CONSTRUCT
+        } else {
+            classify_hir_error(&detail)
+        };
+        let diagnostic = Diagnostic::new(code, format!("failed to lower {identity}: {detail}"));
         match span {
-            Some(span) => locations.annotate(error, span),
-            None => error,
+            Some(span) => locations.annotate(diagnostic, span),
+            None => diagnostic,
         }
     })?;
     constructors.collect_types(&mut module)?;
@@ -97,6 +99,29 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
 }
 
 struct SparseArrays(bool);
+
+fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
+    if message.starts_with("SyntaxError:") {
+        codes::PARSE_ERROR
+    } else if message.starts_with("for-of pattern head not pre-resolved")
+        || message.starts_with("lower_body_stmt: unhandled statement variant")
+        || message.starts_with("__perry_declared_keys")
+    {
+        codes::INTERNAL
+    } else if (message.contains(" requires ")
+        && (message.contains("argument") || message.contains("initializer")))
+        || message.starts_with("Assignment to undeclared variable")
+        || message.starts_with("Invalid assignment target pattern")
+        || message.starts_with("Invalid binding pattern")
+        || message.starts_with("Rest pattern outside")
+        || message.starts_with("Update expression only supports")
+        || message.starts_with("Private name brand check is only supported")
+    {
+        codes::TYPE_MISMATCH
+    } else {
+        codes::UNSUPPORTED_CONSTRUCT
+    }
+}
 
 impl swc_ecma_visit::Visit for SparseArrays {
     fn visit_array_lit(&mut self, array: &perry_parser::swc_ecma_ast::ArrayLit) {
@@ -234,7 +259,7 @@ pub fn error_class(code: u32) -> Result<ErrorClass> {
         2 => ErrorClass::Range,
         3 => ErrorClass::Reference,
         4 => ErrorClass::Syntax,
-        _ => bail!("unsupported Error constructor kind {code}"),
+        _ => bail_internal!("unsupported Error constructor kind {code}"),
     })
 }
 

@@ -1,5 +1,6 @@
-use anyhow::{Context as _, Result, bail, ensure};
 use perry_hir::ir::Expr;
+use perry_wit_diagnostics::Result;
+use perry_wit_diagnostics::{bail_unsupported, ensure_internal, unsupported};
 
 pub fn init_fields<'h, 'e>(
     init: Option<&'e Expr>,
@@ -11,13 +12,13 @@ pub fn init_fields<'h, 'e>(
         Some(Expr::New {
             class_name, args, ..
         }) => {
-            let names = literal_fields(class_name).context(NOT_LITERAL)?;
-            ensure!(
+            let names = literal_fields(class_name).ok_or_else(|| unsupported!("{NOT_LITERAL}"))?;
+            ensure_internal!(
                 names.len() == args.len(),
                 "init object arity differs from its shape"
             );
             Ok(names.iter().copied().zip(args).collect())
         }
-        Some(_) => bail!(NOT_LITERAL),
+        Some(_) => bail_unsupported!("{NOT_LITERAL}"),
     }
 }

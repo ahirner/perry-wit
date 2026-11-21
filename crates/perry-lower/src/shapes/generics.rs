@@ -55,8 +55,11 @@ impl<'s> Shapes<'s> {
         let arg_ids = TypeId::intern_slice(ctx, arguments);
         if !self.is_user_type(base) {
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
-                let expanded = resolver.utility_type(base, &arg_ids, 0).with_context(|| {
-                    format!("MIR backend could not resolve utility type {base}")
+                let expanded = resolver.utility_type(base, &arg_ids, 0).ok_or_else(|| {
+                    diag!(
+                        codes::UNSUPPORTED_TYPE,
+                        "could not resolve utility type {base}"
+                    )
                 })?;
                 return self.value_type(ctx, expanded.hir(ctx));
             }
@@ -68,8 +71,11 @@ impl<'s> Shapes<'s> {
                 let properties = resolver
                     .named(base, &key.1, false, Query::Record, 0)
                     .and_then(|(view, _)| view.properties(ctx))
-                    .with_context(|| {
-                        format!("MIR backend could not resolve utility type {base}")
+                    .ok_or_else(|| {
+                        diag!(
+                            codes::UNSUPPORTED_TYPE,
+                            "could not resolve utility type {base}"
+                        )
                     })?;
                 let ty: TypeHandle = self
                     .source_record(
@@ -87,8 +93,11 @@ impl<'s> Shapes<'s> {
                 return Ok(ty);
             }
         }
-        let (identity, declaration) = Declaration::find(self, base).with_context(|| {
-            format!("MIR backend does not support unresolved generic type {base}")
+        let (identity, declaration) = Declaration::find(self, base).ok_or_else(|| {
+            diag!(
+                codes::UNSUPPORTED_TYPE,
+                "unresolved generic type {base} is not supported yet"
+            )
         })?;
         let mut key = (identity, arg_ids);
         if key.1.len() == declaration.parameters().len()
@@ -107,30 +116,32 @@ impl<'s> Shapes<'s> {
                 return Ok(*ty);
             }
         }
-        ensure!(
+        ensure_diag!(
             self.pending.borrow().len() < 128,
+            codes::UNSUPPORTED_TYPE,
             "generic type instantiation expands indefinitely: {base}"
         );
         let mut remaining = usize::MAX;
         let ty = match declaration {
             Declaration::Interface(_) | Declaration::Class(_) => {
                 if let Declaration::Interface(interface) = declaration {
-                    ensure!(
+                    ensure_unsupported!(
                         interface.methods.is_empty(),
                         "interface {base}: methods are not supported yet"
                     );
                 }
                 let nominal = matches!(declaration, Declaration::Class(_));
-                let properties = resolver
-                    .fields(declaration, &bindings, 0)
-                    .with_context(|| {
-                        let subject = if nominal {
-                            "fields of class"
-                        } else {
-                            "inherited properties of interface"
-                        };
-                        format!("failed to resolve {subject} {base}")
-                    })?;
+                let properties = resolver.fields(declaration, &bindings, 0).ok_or_else(|| {
+                    let subject = if nominal {
+                        "fields of class"
+                    } else {
+                        "inherited properties of interface"
+                    };
+                    diag!(
+                        codes::UNSUPPORTED_TYPE,
+                        "failed to resolve {subject} {base}"
+                    )
+                })?;
                 let ty: TypeHandle = self
                     .source_record(
                         ctx,
@@ -164,8 +175,9 @@ impl<'s> Shapes<'s> {
                     )?
                     .into()
                 } else {
-                    ensure!(
+                    ensure_diag!(
                         !self.pending.borrow().contains_key(&key),
+                        codes::TYPE_MISMATCH,
                         "nonproductive recursive type alias {base}"
                     );
                     self.pending

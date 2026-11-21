@@ -82,8 +82,9 @@ impl<'s> FunctionBuilder<'s> {
         len: Value,
     ) -> Result<Value> {
         let bound = self.arithmetic(ctx, bound);
-        ensure!(
+        ensure_diag!(
             kind(ctx, bound)? == Kind::Number,
+            codes::TYPE_MISMATCH,
             "a number is required here"
         );
         let trunc = self.integer_or_infinity(ctx, bound)?;

@@ -10,18 +10,19 @@ impl FunctionLowering<'_, '_> {
         op: Ptr<Operation>,
         binding: &str,
     ) -> Result<()> {
-        let import = self
-            .state
-            .bindings
-            .get(binding)
-            .copied()
-            .ok_or_else(|| anyhow!("WIT import {binding} is absent from the selected world"))?;
+        let import = self.state.bindings.get(binding).copied().ok_or_else(|| {
+            diag!(
+                codes::CONTRACT_MISMATCH,
+                "WIT import {binding} is absent from the selected world"
+            )
+        })?;
         if let ImportKind::Resource { key, operation } = import.kind {
             return self.resource_helper(ctx, op, key, operation);
         }
         let operands: Vec<_> = op.deref(ctx).operands().collect();
-        ensure!(
+        ensure_diag!(
             operands.len() == import.params.len(),
+            codes::CONTRACT_MISMATCH,
             "WIT import argument count mismatch"
         );
         let values = operands
@@ -210,12 +211,12 @@ impl FunctionLowering<'_, '_> {
         op: Ptr<Operation>,
         binding: &str,
     ) -> Result<()> {
-        let import = self
-            .state
-            .bindings
-            .get(binding)
-            .copied()
-            .ok_or_else(|| anyhow!("WIT import {binding} is absent from the selected world"))?;
+        let import = self.state.bindings.get(binding).copied().ok_or_else(|| {
+            diag!(
+                codes::CONTRACT_MISMATCH,
+                "WIT import {binding} is absent from the selected world"
+            )
+        })?;
         let transfer = self.operand(ctx, op, 0)?;
         let mir = op.deref(ctx).get_result(0).get_type(ctx);
         let value = if let Some(abi) = &import.result {
@@ -321,7 +322,7 @@ impl FunctionLowering<'_, '_> {
                 self.discard_resource(ctx, *key, handle);
             }
             AbiType::ByteStream | AbiType::OkHandle { .. } => {
-                bail!("resource-bearing async imports need an ownership binding")
+                bail_unsupported!("resource-bearing async imports need an ownership binding")
             }
             _ => {}
         }

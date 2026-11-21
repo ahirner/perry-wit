@@ -4,16 +4,18 @@ use super::*;
 impl<'s> FunctionBuilder<'s> {
     /// `setTimeout(delay?, value?)` from `node:timers/promises`.
     pub(super) fn timer(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
-        ensure!(
+        ensure_diag!(
             args.len() <= 3,
+            codes::TYPE_MISMATCH,
             "setTimeout takes a delay, a value and options"
         );
         let delay = match args.first() {
             Some(delay) => {
                 let value = self.expression(ctx, delay)?;
                 let value = self.arithmetic(ctx, value);
-                ensure!(
+                ensure_diag!(
                     kind(ctx, value)? == Kind::Number,
+                    codes::TYPE_MISMATCH,
                     "setTimeout delay must be a number"
                 );
                 value
@@ -47,7 +49,7 @@ impl<'s> FunctionBuilder<'s> {
                     Expr::Object(fields) if fields.len() == 1 && fields[0].0 == "signal" => {
                         &fields[0].1
                     }
-                    _ => bail!("setTimeout options must be a literal {{ signal }}"),
+                    _ => bail_unsupported!("setTimeout options must be a literal {{ signal }}"),
                 };
                 Some(self.typed_operand(ctx, signal, Kind::Abort, "an AbortSignal")?)
             }
@@ -63,11 +65,19 @@ impl<'s> FunctionBuilder<'s> {
         args: &'s [Expr],
     ) -> Result<Value> {
         if class == "Headers" {
-            ensure!(args.len() <= 1, "new Headers takes one init");
+            ensure_diag!(
+                args.len() <= 1,
+                codes::TYPE_MISMATCH,
+                "new Headers takes one init"
+            );
             return self.headers_init(ctx, args.first());
         }
         let (first, init) = (args.first(), args.get(1));
-        ensure!(args.len() <= 2, "{class} takes two arguments");
+        ensure_diag!(
+            args.len() <= 2,
+            codes::TYPE_MISMATCH,
+            "{class} takes two arguments"
+        );
         let fields = self.init_fields(init)?;
         let field = |name: &str| fields.iter().find(|(n, _)| *n == name).map(|(_, e)| *e);
         for (name, _) in &fields {
@@ -76,7 +86,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 &["method", "headers", "body"]
             };
-            ensure!(
+            ensure_unsupported!(
                 known.contains(name),
                 "{class} init field {name} is not supported yet"
             );
@@ -98,7 +108,8 @@ impl<'s> FunctionBuilder<'s> {
             let operands = vec![body, text, status, status_text, headers];
             return Ok(self.intrinsic(ctx, Intrinsic::ResponseNew, operands));
         }
-        let url = first.context("new Request needs a URL")?;
+        let url = first
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "new Request needs a URL"))?;
         let url = self.typed_operand(ctx, url, Kind::String, "a URL string")?;
         let method = match field("method") {
             Some(expr) => self.typed_operand(ctx, expr, Kind::String, "a method string")?,
@@ -117,14 +128,15 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     pub(super) fn fetch(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
-        ensure!(
+        ensure_diag!(
             (1..=2).contains(&args.len()),
+            codes::TYPE_MISMATCH,
             "fetch takes a URL and optional init"
         );
         let url = self.url_string(ctx, &args[0])?;
         let fields = self.init_fields(args.get(1))?;
         for (name, _) in &fields {
-            ensure!(
+            ensure_unsupported!(
                 matches!(*name, "method" | "headers" | "body"),
                 "fetch init field {name} is not supported yet"
             );
@@ -150,7 +162,7 @@ impl<'s> FunctionBuilder<'s> {
             && !matches!(expr, Expr::Undefined | Expr::New { .. })
         {
             let value = self.expression(ctx, expr)?;
-            ensure!(
+            ensure_unsupported!(
                 kind(ctx, value)? == Kind::Headers,
                 "headers init must be an object literal or Headers"
             );
@@ -196,7 +208,7 @@ impl<'s> FunctionBuilder<'s> {
                 let encoded = self.intrinsic(ctx, Intrinsic::TextEncode, vec![value]);
                 (encoded, true)
             }
-            _ => bail!("bodies are strings and Uint8Arrays yet"),
+            _ => bail_unsupported!("bodies are strings and Uint8Arrays yet"),
         };
         Ok((self.optional(ctx, value), text))
     }
@@ -210,9 +222,9 @@ impl<'s> FunctionBuilder<'s> {
         args: Option<&'s [Expr]>,
     ) -> Result<Value> {
         crate::methods::Call::member(crate::methods::Receiver::of(ctx, receiver)?, name, args)?
-            .with_context(|| format!("{name} is not supported on this receiver"))?
+            .ok_or_else(|| unsupported!("{name} is not supported on this receiver"))?
             .lower(self, ctx, receiver)?
-            .context("web members produce a value")
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "web members produce a value"))
     }
 
     /// `fetch(url, { method, headers, body })` as Perry HIR desugars a literal init.
@@ -244,7 +256,7 @@ impl<'s> FunctionBuilder<'s> {
         let intrinsic = match args {
             [Expr::ProcessStdout] => Intrinsic::WritableStdout,
             [Expr::ProcessStderr] => Intrinsic::WritableStderr,
-            _ => bail!("Writable.toWeb supports process.stdout and process.stderr"),
+            _ => bail_unsupported!("Writable.toWeb supports process.stdout and process.stderr"),
         };
         Ok(self.intrinsic(ctx, intrinsic, vec![]))
     }
@@ -275,7 +287,9 @@ impl<'s> FunctionBuilder<'s> {
         builtin: Builtin,
         args: &'s [Expr],
     ) -> Result<Value> {
-        let path = args.first().context("a path is required")?;
+        let path = args
+            .first()
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "a path is required"))?;
         let path = self.typed_operand(ctx, path, Kind::String, "a path string")?;
         let (intrinsic, operands) = match builtin {
             Builtin::ReadFile => {
@@ -293,7 +307,11 @@ impl<'s> FunctionBuilder<'s> {
                     {
                         true
                     }
-                    Some(_) => bail!("readFile supports no options but the 'utf8' encoding yet"),
+                    Some(_) => {
+                        bail_unsupported!(
+                            "readFile supports no options but the 'utf8' encoding yet"
+                        )
+                    }
                 };
                 let intrinsic = if text {
                     Intrinsic::FsReadText
@@ -303,18 +321,18 @@ impl<'s> FunctionBuilder<'s> {
                 (intrinsic, vec![path])
             }
             Builtin::WriteFile => {
-                ensure!(args.len() == 2, "writeFile options are not supported yet");
+                ensure_unsupported!(args.len() == 2, "writeFile options are not supported yet");
                 let data = self.expression(ctx, &args[1])?;
                 let data = self.defined(ctx, data)?;
                 let intrinsic = match kind(ctx, data)? {
                     Kind::String => Intrinsic::FsWriteText,
                     Kind::Bytes => Intrinsic::FsWriteBytes,
-                    _ => bail!("writeFile writes strings and Uint8Arrays"),
+                    _ => bail_unsupported!("writeFile writes strings and Uint8Arrays"),
                 };
                 (intrinsic, vec![path, data])
             }
             other => {
-                ensure!(
+                ensure_unsupported!(
                     args.len() == 1,
                     "{other:?} options are not supported yet (recursive, withFileTypes)"
                 );

@@ -12,9 +12,9 @@ use std::{
     fmt,
 };
 
-use anyhow::Result;
 use parsed::ParsedModule;
 use perry_codegen::HELPER_MODULE;
+use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal, internal};
 use wasm_encoder::reencode::{self, Reencode};
 use wasm_encoder::{
     CodeSection, ConstExpr, ExportKind, ExportSection, FunctionSection, GlobalSection,
@@ -33,46 +33,9 @@ mod type_compaction;
 use libraries::{HelperMemory, Library, LibraryId, Relocations, align_to};
 pub(crate) use type_compaction::compact;
 
-#[derive(Debug)]
-pub(crate) enum LinkError {
-    UnknownCanonicalPlaceholder(String),
-    MalformedCanonicalPlaceholder(String),
-    UnsupportedCoreImports,
-    MissingStreamAnchor,
-    TableOverflow(&'static str),
-    MissingHelperExport(String),
-    MissingHelperIndex(String),
-    Reencode(String),
-    Validation(wasmparser::BinaryReaderError),
+pub(super) fn wasm_err(err: impl fmt::Display) -> Diagnostic {
+    internal!("{err}")
 }
-
-impl fmt::Display for LinkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownCanonicalPlaceholder(name) => {
-                write!(f, "unknown canonical placeholder {name}")
-            }
-            Self::MalformedCanonicalPlaceholder(name) => {
-                write!(f, "malformed canonical placeholder {name}")
-            }
-            Self::UnsupportedCoreImports => {
-                f.write_str("core helper linking requires defined memory, tables and globals")
-            }
-            Self::MissingStreamAnchor => {
-                f.write_str("byte streams need a WIT function with a stream<u8> in the world")
-            }
-            Self::TableOverflow(msg) => f.write_str(msg),
-            Self::MissingHelperExport(entry) => write!(f, "missing helper export {entry}"),
-            Self::MissingHelperIndex(entry) => {
-                write!(f, "missing assigned index for helper entry {entry}")
-            }
-            Self::Reencode(msg) => f.write_str(msg),
-            Self::Validation(err) => write!(f, "Validating linked Wasm output: {err:?}"),
-        }
-    }
-}
-
-impl std::error::Error for LinkError {}
 
 struct CoreRelocations<'a> {
     functions: &'a BTreeMap<u32, u32>,
@@ -103,10 +66,10 @@ const CANON_MODULE: &str = "perry:canon";
 
 impl StreamAnchor {
     /// The concrete import for placeholder `name` (`[async-lower][stream-read]u8`, …).
-    fn resolve(&self, name: &str) -> Result<(String, String), LinkError> {
+    fn resolve(&self, name: &str) -> Result<(String, String)> {
         let base = name
             .strip_suffix("u8")
-            .ok_or_else(|| LinkError::UnknownCanonicalPlaceholder(name.to_owned()))?;
+            .ok_or_else(|| internal!("unknown canonical placeholder {name}"))?;
         let (prefix, builtin) = match base.strip_prefix("[async-lower]") {
             Some(rest) => ("[async-lower]", rest),
             None => ("", base),
@@ -114,7 +77,7 @@ impl StreamAnchor {
         let builtin = builtin
             .strip_prefix('[')
             .and_then(|b| b.strip_suffix(']'))
-            .ok_or_else(|| LinkError::MalformedCanonicalPlaceholder(name.to_owned()))?;
+            .ok_or_else(|| internal!("malformed canonical placeholder {name}"))?;
         Ok((
             self.module.clone(),
             format!("{prefix}[{builtin}-{}]{}", self.index, self.function),
@@ -151,9 +114,10 @@ pub(crate) fn link_helpers_with(
     if helper_imports.is_empty() && !export_realloc {
         return Ok((core_wasm, 0));
     }
-    if !core.other_imports.is_empty() {
-        return Err(LinkError::UnsupportedCoreImports.into());
-    }
+    ensure_internal!(
+        core.other_imports.is_empty(),
+        "core helper linking requires defined memory, tables and globals"
+    );
     let next_import_func_idx = core.imports.len() as u32;
 
     let collectible = helper_imports
@@ -218,7 +182,11 @@ pub(crate) fn link_helpers_with(
             }
             let (module, name) = if module == CANON_MODULE {
                 let (module, name) = streams
-                    .ok_or(LinkError::MissingStreamAnchor)?
+                    .ok_or_else(|| {
+                        Diagnostic::unsupported(
+                            "byte streams need a WIT function with a stream<u8> in the world",
+                        )
+                    })?
                     .resolve(name)?;
                 (Cow::Owned(module), Cow::Owned(name))
             } else {
@@ -254,7 +222,7 @@ pub(crate) fn link_helpers_with(
     // Determine existing static data extent from core module
     let mut existing_data_end = 1024u32;
     for seg in core.data.iter().cloned().flatten() {
-        let seg = seg?;
+        let seg = seg.map_err(wasm_err)?;
         if let wasmparser::DataKind::Active { offset_expr, .. } = &seg.kind {
             let mut reader = offset_expr.get_operators_reader();
             if let Ok(wasmparser::Operator::I32Const { value }) = reader.read() {
@@ -276,10 +244,11 @@ pub(crate) fn link_helpers_with(
         .into_iter()
         .flatten()
         .next()
-        .transpose()?
+        .transpose()
+        .map_err(wasm_err)?
         .map_or(0, |table| table.ty.initial);
     let mut current_table_size = u32::try_from(original_table_size)
-        .map_err(|_| LinkError::TableOverflow("core table exceeds table32"))?;
+        .map_err(|_| Diagnostic::internal("core table exceeds table32"))?;
     let mut lib_placements = Vec::new();
     for prep in &prepared_libs {
         let memory_base = helper_memory.place(&prep.lib, Some(&prep.reachable))?;
@@ -287,7 +256,7 @@ pub(crate) fn link_helpers_with(
         let table_base = align_to(current_table_size, prep.lib.table_alignment)?;
         current_table_size = table_base
             .checked_add(prep.lib.table_size)
-            .ok_or(LinkError::TableOverflow("helper table exceeds table32"))?;
+            .ok_or_else(|| Diagnostic::internal("helper table exceeds table32"))?;
 
         lib_placements.push(LibPlacement {
             memory_base,
@@ -337,12 +306,12 @@ pub(crate) fn link_helpers_with(
                 .lib
                 .exports
                 .get(entry)
-                .ok_or_else(|| LinkError::MissingHelperExport((*entry).to_owned()))?;
+                .ok_or_else(|| internal!("missing helper export {entry}"))?;
             let new_idx = prep
                 .helper_defined_indices
                 .get(orig_idx)
                 .copied()
-                .ok_or_else(|| LinkError::MissingHelperIndex((*entry).to_owned()))?;
+                .ok_or_else(|| internal!("missing assigned index for helper entry {entry}"))?;
             entry_index.insert((prep.id, *entry), new_idx);
             for (old_h_idx, h_name, _) in &helper_imports {
                 if h_name == entry {
@@ -363,7 +332,7 @@ pub(crate) fn link_helpers_with(
                 let target = entry_index
                     .get(&(LibraryId::for_entry(name)?, name))
                     .copied()
-                    .ok_or_else(|| LinkError::MissingHelperIndex(name.to_owned()))?;
+                    .ok_or_else(|| internal!("missing assigned index for helper entry {name}"))?;
                 prep.helper_defined_indices.insert(orig, target);
             }
         }
@@ -465,7 +434,7 @@ pub(crate) fn link_helpers_with(
 
     let mut new_tables = wasm_encoder::TableSection::new();
     for (index, table) in core.tables.iter().cloned().flatten().enumerate() {
-        let mut table = table?;
+        let mut table = table.map_err(wasm_err)?;
         if index == 0 {
             let initial = table.ty.initial.max(u64::from(current_table_size));
             table.ty.maximum = table
@@ -475,16 +444,16 @@ pub(crate) fn link_helpers_with(
                     maximum
                         .checked_add(initial - table.ty.initial)
                         .filter(|maximum| table.ty.table64 || *maximum <= u64::from(u32::MAX))
-                        .ok_or(LinkError::TableOverflow(
-                            "Helper function table exceeds its address space",
-                        ))
+                        .ok_or_else(|| {
+                            Diagnostic::internal("Helper function table exceeds its address space")
+                        })
                 })
                 .transpose()?;
             table.ty.initial = initial;
         }
         core_reloc
             .parse_table(&mut new_tables, table)
-            .map_err(|error| LinkError::Reencode(error.to_string()))?;
+            .map_err(wasm_err)?;
     }
     if new_tables.is_empty() && current_table_size != 0 {
         new_tables.table(wasm_encoder::TableType {
@@ -502,15 +471,11 @@ pub(crate) fn link_helpers_with(
     if let Some(memories) = core.memories.take() {
         let mut new_mems = wasm_encoder::MemorySection::new();
         for (index, memory) in memories.into_iter().enumerate() {
-            let mut memory = memory?;
+            let mut memory = memory.map_err(wasm_err)?;
             if index == 0 && needs_stack {
                 memory.initial = memory.initial.max(u64::from(stack_top.div_ceil(65_536)));
             }
-            new_mems.memory(
-                core_reloc
-                    .memory_type(memory)
-                    .map_err(|error| LinkError::Reencode(error.to_string()))?,
-            );
+            new_mems.memory(core_reloc.memory_type(memory).map_err(wasm_err)?);
         }
         module.section(&new_mems);
     }
@@ -518,14 +483,14 @@ pub(crate) fn link_helpers_with(
         let mut new_tags = wasm_encoder::TagSection::new();
         core_reloc
             .parse_tag_section(&mut new_tags, tags)
-            .map_err(|error| LinkError::Reencode(error.to_string()))?;
+            .map_err(wasm_err)?;
         module.section(&new_tags);
     }
     let mut new_globs = GlobalSection::new();
     if let Some(globals) = core.globals.take() {
         core_reloc
             .parse_global_section(&mut new_globs, globals)
-            .map_err(|error| LinkError::Reencode(error.to_string()))?;
+            .map_err(wasm_err)?;
     }
     if needs_stack {
         new_globs.global(
@@ -546,7 +511,7 @@ pub(crate) fn link_helpers_with(
     if let Some(exports) = core.exports.take() {
         core_reloc
             .parse_export_section(&mut new_exports, exports)
-            .map_err(|error| LinkError::Reencode(error.to_string()))?;
+            .map_err(wasm_err)?;
     }
     if export_realloc {
         new_exports.export(
@@ -577,7 +542,7 @@ pub(crate) fn link_helpers_with(
     if let Some(elements) = core.elements.take() {
         core_reloc
             .parse_element_section(&mut new_elems, elements)
-            .map_err(|error| LinkError::Reencode(error.to_string()))?;
+            .map_err(wasm_err)?;
     }
     for (prep, placement) in prepared_libs.iter().zip(lib_placements.iter()) {
         for &(slot, orig_func) in &prep.lib.elements {
@@ -599,7 +564,7 @@ pub(crate) fn link_helpers_with(
     if let Some(data) = core.data.take() {
         core_reloc
             .parse_data_section(&mut new_data, data)
-            .map_err(|error| LinkError::Reencode(error.to_string()))?;
+            .map_err(wasm_err)?;
     }
     for ((prep, placement), folded) in prepared_libs.iter().zip(&lib_placements).zip(&folded) {
         let mut append = |offset: u32, contents: &[u8]| {
@@ -638,9 +603,9 @@ pub(crate) fn link_helpers_with(
     for section in &core.custom {
         if section.name() == "name" {
             for subsection in wasmparser::NameSectionReader::new(section.data_reader()) {
-                if let wasmparser::Name::Function(names) = subsection? {
+                if let wasmparser::Name::Function(names) = subsection.map_err(wasm_err)? {
                     for name in names {
-                        let name = name?;
+                        let name = name.map_err(wasm_err)?;
                         if let Some(&index) = old_to_new_func_index.get(&name.index) {
                             functions.insert(index, Cow::Borrowed(name.name));
                         }
@@ -672,7 +637,7 @@ pub(crate) fn link_helpers_with(
     let result = module.finish();
     Validator::new()
         .validate_all(&result)
-        .map_err(LinkError::Validation)?;
+        .map_err(|err| internal!("Validating linked Wasm output: {err:?}"))?;
     Ok((result, current_helper_func_idx - helper_func_start_idx))
 }
 

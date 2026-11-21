@@ -2,21 +2,18 @@ use pliron::{builtin::ops::ModuleOp, context::Context, op::Op, printable::Printa
 use std::collections::HashMap;
 
 /// Lower a source without foreign (WIT) types.
-fn lower_without_foreign(ctx: &mut Context, source: &str, file: &str) -> anyhow::Result<ModuleOp> {
+fn lower_without_foreign(
+    ctx: &mut Context,
+    source: &str,
+    file: &str,
+) -> perry_wit_diagnostics::Result<ModuleOp> {
     crate::lower_source(ctx, source, file, &HashMap::new())
 }
 
-fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::PerryDiagnostic {
-    let error = lower_without_foreign(&mut Context::new(), source, file)
+fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::Diagnostic {
+    lower_without_foreign(&mut Context::new(), source, file)
         .err()
-        .expect("rejection");
-    match crate::LowerError::try_from_anyhow(error) {
-        Ok(error) => error.into(),
-        Err(error) => perry_wit_diagnostics::PerryDiagnostic::from_error(
-            error,
-            perry_wit_diagnostics::DiagnosticCode::UnsupportedExpression,
-        ),
-    }
+        .expect("rejection")
 }
 
 /// Verify diagnostic source spans alongside the message table in `diagnostics_test`.
@@ -30,7 +27,7 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
         ),
         (
             "export function run(value) { return value; }",
-            "the value type cannot be inferred for the MIR backend",
+            "the value type cannot be inferred",
             (1, 21),
         ),
         (
@@ -45,8 +42,8 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
         ),
     ] {
         let diagnostic = rejection(source, "case.ts");
-        assert_eq!(diagnostic.message, message);
-        let span = diagnostic.span.expect("source location");
+        assert_eq!(diagnostic.message(), message);
+        let span = diagnostic.span().expect("source location");
         assert_eq!((span.start_line, span.start_column), location);
     }
 
@@ -56,10 +53,10 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
     ] {
         let diagnostic = rejection(source, "reader-assertion.ts");
         assert_eq!(
-            diagnostic.code,
-            perry_wit_diagnostics::DiagnosticCode::UnsupportedType,
+            diagnostic.code(),
+            perry_wit_diagnostics::codes::TYPE_MISMATCH,
         );
-        assert!(diagnostic.span.is_some());
+        assert!(diagnostic.span().is_some());
     }
 }
 
@@ -115,10 +112,11 @@ fn nullable_property_guards_follow_control_flow() {
             .expect(&source);
         let diagnostic = error
             .err
-            .downcast_ref::<perry_wit_diagnostics::PerryDiagnostic>()
+            .downcast_ref::<perry_wit_diagnostics::Diagnostic>()
             .unwrap_or_else(|| panic!("{source}\n{}", error.disp(ctx)));
         assert_eq!(
-            diagnostic.message, "property access receiver is possibly null",
+            diagnostic.message(),
+            "property access receiver is possibly null",
             "{source}"
         );
     }
@@ -139,7 +137,7 @@ export function run(): number {
 }"#;
     let diagnostic = rejection(source, "narrowing.ts");
     assert_eq!(
-        diagnostic.message,
+        diagnostic.message(),
         "narrow a heterogeneous variant by its tag before reading val"
     );
 }
@@ -165,7 +163,8 @@ export function escaped(x: number): number { const cell: Cell = { value: x }; sa
 }
 
 #[test]
-fn generic_collections_keep_concrete_payloads() -> anyhow::Result<()> {
+fn generic_collections_keep_concrete_payloads()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
     use pliron::{
         builtin::{
             op_interfaces::SymbolOpInterface, type_interfaces::FunctionTypeInterface,
@@ -317,12 +316,12 @@ fn recursive_class_calls_have_located_diagnostics() {
         let source =
             format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
         let diagnostic = rejection(&source, "classes.ts");
-        let message = &diagnostic.message;
+        let message = diagnostic.message();
         assert!(
             message.contains("recursive inline") && message.contains(target),
             "{source}\n{diagnostic:?}"
         );
-        let span = diagnostic.span.expect("source location");
+        let span = diagnostic.span().expect("source location");
         assert_eq!(span.file.to_string_lossy(), "classes.ts");
         assert!(span.end_byte > span.start_byte, "{source}\n{span:?}");
     }

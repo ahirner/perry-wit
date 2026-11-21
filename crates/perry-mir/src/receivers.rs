@@ -1,7 +1,7 @@
 //! Compile-time proof that property receivers lowering marked are not `null`. The unwrap keeps
 //! its runtime check; a read the dominating branches do not prove is a located compile error.
 use crate::{SourceSpan, aggregates::functions, facts::guards::GuardedFacts, optional::UnwrapOp};
-use perry_wit_diagnostics::{DiagnosticCode, PerryDiagnostic};
+use perry_wit_diagnostics::{Diagnostic, codes};
 use pliron::{
     builtin::{
         attributes::UnitAttr,
@@ -39,17 +39,15 @@ pub(crate) fn has_marker(ctx: &Context, op: &dyn Op, key: &pliron::identifier::I
         .is_some()
 }
 
-fn violation(ctx: &Context, unwrap: &UnwrapOp) -> PerryDiagnostic {
-    let span = crate::source_span(ctx, unwrap).or_else(|| {
-        let function = unwrap.get_operation().deref(ctx).get_parent_op(ctx)?;
-        crate::source_span(ctx, &Operation::get_op::<FuncOp>(function, ctx)?)
-    });
-    PerryDiagnostic::error(
-        DiagnosticCode::UnsupportedExpression,
+fn violation(ctx: &Context, function: &FuncOp, unwrap: &UnwrapOp) -> Diagnostic {
+    let span = crate::source_span(ctx, unwrap).or_else(|| crate::source_span(ctx, function));
+    let diagnostic = Diagnostic::new(
+        codes::POSSIBLY_NULL_RECEIVER,
         "property access receiver is possibly null",
     )
     .with_optional_span(span)
-    .with_help("Check the receiver before accessing its properties, or use optional chaining.")
+    .with_help("Check the receiver before accessing its properties, or use optional chaining.");
+    crate::attach_caller_notes(ctx, function, diagnostic)
 }
 
 pub(crate) fn check_receivers(
@@ -91,7 +89,7 @@ pub(crate) fn check_receivers(
         let mut guards = GuardedFacts::new(ctx, &facts, &function);
         for (block, unwrap) in receivers {
             if guards.may_be_null_at(&mut dominance, block, unwrap.get_operand(ctx)) {
-                return pliron::input_err_noloc!(violation(ctx, &unwrap));
+                return pliron::input_err_noloc!(violation(ctx, &function, &unwrap));
             }
         }
     }
