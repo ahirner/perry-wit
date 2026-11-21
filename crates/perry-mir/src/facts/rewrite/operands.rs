@@ -261,6 +261,14 @@ fn operand_types(
             };
             value.set_type(ctx, ty);
         }
+    } else if crate::is_any::<(crate::GlobalLoadOp, crate::StoreOp)>(ctx, original) {
+        let slot = operand_ty(ctx, 0);
+        expected[0] = slot;
+        if let Some(stored) = expected.get_mut(1) {
+            *stored = TypedHandle::<crate::SlotType>::from_handle(slot, ctx)?
+                .deref(ctx)
+                .value();
+        }
     } else if Operation::get_op::<AwaitOp>(original, ctx).is_some() {
         let promise = operand_ty(ctx, 0);
         let payload = TypedHandle::<PromiseType>::from_handle(promise, ctx)?

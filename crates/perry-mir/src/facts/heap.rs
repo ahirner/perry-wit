@@ -57,6 +57,7 @@ pub(super) struct HeapFacts {
     cells: Vec<Cell>,
     objects: Vec<Object>,
     summaries: HashMap<TypeHandle, usize>,
+    globals: HashMap<Identifier, usize>,
 }
 
 impl HeapFacts {
@@ -147,6 +148,10 @@ pub(super) fn aggregate(ctx: &Context, ty: TypeHandle) -> bool {
     ty.is::<RecordType>() || ty.is::<ArrayType>()
 }
 
+fn global(ctx: &Context, slot: Value) -> Option<Identifier> {
+    Some(Operation::get_op::<crate::GlobalOp>(slot.defining_op()?, ctx)?.name(ctx))
+}
+
 impl Solver {
     /// A new cell of type `ty`: a slot of object `owner`, or an SSA value or result.
     fn heap_cell(&mut self, ty: TypeHandle, owner: Option<usize>) -> usize {
@@ -164,15 +169,32 @@ impl Solver {
     }
 
     fn heap_value(&mut self, ctx: &Context, id: usize, value: Value) -> Option<usize> {
-        if !aggregate(ctx, value.get_type(ctx)) {
+        let ty = value.get_type(ctx);
+        if !aggregate(ctx, ty) {
             return None;
         }
         if let Some(&cell) = self.analysis.states[id].heap_values.get(&value) {
             return Some(cell);
         }
-        let cell = self.heap_cell(value.get_type(ctx), None);
+        let cell = if let Some(op) = value.defining_op()
+            && Operation::is_op::<crate::GlobalLoadOp>(op, ctx)
+            && let Some(name) = global(ctx, op.deref(ctx).get_operand(0))
+        {
+            self.global_cell(name, ty)
+        } else {
+            self.heap_cell(ty, None)
+        };
         self.analysis.states[id].heap_values.insert(value, cell);
         Some(cell)
+    }
+
+    fn global_cell(&mut self, name: Identifier, ty: TypeHandle) -> usize {
+        if let Some(&cell) = self.analysis.heap.globals.get(&name) {
+            return cell;
+        }
+        let cell = self.heap_cell(ty, None);
+        self.analysis.heap.globals.insert(name, cell);
+        cell
     }
 
     fn heap_object(&mut self, ctx: &Context, ty: TypeHandle, open: bool) -> Result<usize> {

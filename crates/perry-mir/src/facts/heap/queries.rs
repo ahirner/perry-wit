@@ -127,11 +127,6 @@ struct Interference<'a> {
     calls: HashMap<usize, bool>,
 }
 
-/// The module binding a global slot names.
-fn global(ctx: &Context, slot: Value) -> Option<Identifier> {
-    Some(Operation::get_op::<crate::GlobalOp>(slot.defining_op()?, ctx)?.name(ctx))
-}
-
 impl Interference<'_> {
     fn invalidates(&mut self, op: Ptr<Operation>) -> bool {
         let (state, aliases) = match &self.tracked {

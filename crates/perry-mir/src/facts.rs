@@ -759,11 +759,15 @@ impl Analysis for ProgramFacts {
             summary_contexts: HashMap::new(),
             work: Worklist::default(),
         };
-        let has_integer_constraints = solver
+        let persistent = solver
             .analysis
             .bodies
-            .values()
-            .any(|body| body.has_integer_constraints);
+            .keys()
+            .any(|name| name.as_ref() == crate::globals::INITIALIZER);
+        let has_integer_constraints = solver.analysis.bodies.values().any(|body| {
+            body.has_integer_constraints
+                || persistent && wit_signature(ctx, &body.function).is_some()
+        });
         for function in functions {
             let name = function.get_symbol_name(ctx);
             let ty = solver.analysis.bodies[&name].signature;
@@ -786,20 +790,13 @@ impl Analysis for ProgramFacts {
             if signature.is_none() && !(has_integer_constraints && is_entry(ctx, &function)) {
                 continue;
             }
-            let key = if let Some(signature) = signature {
-                let (args, results) = integer_signature(ctx, signature);
-                Key::new(name, args, results, true)
-            } else {
-                // Unconstrained entry results keep their representation.
-                let (args, results) = integer_signature(ctx, ty);
-                let mut key = Key::new(name, args, results, true);
-                for result in &mut key.results {
-                    if *result == ResultDomain::Inferred {
-                        *result = ResultDomain::Original;
-                    }
+            let (args, results) = integer_signature(ctx, signature.unwrap_or(ty));
+            let mut key = Key::new(name, args, results, true);
+            for result in &mut key.results {
+                if *result == ResultDomain::Inferred {
+                    *result = ResultDomain::Original;
                 }
-                key
-            };
+            }
             let id = solver.context(ctx, key)?;
             solver.analysis.roots.push((function, id));
         }

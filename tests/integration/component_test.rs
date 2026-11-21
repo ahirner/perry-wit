@@ -216,6 +216,28 @@ fn sparse_lists_lower_holes_to_options_and_reject_required_elements() -> Result<
 }
 
 #[test]
+fn persistent_aliases_share_one_layout_across_specialized_exports() -> Result<()> {
+    let mut component = Instance::compile(
+        "package test:persistent; world boundary {
+            export write-next: func(key: u32) -> f64;
+            export overwrite: func(value: f64) -> f64;
+            export read-key: func(key: u32) -> f64;
+        }",
+        include_str!("../../crates/conformance/cases/persistent_aggregates.ts"),
+    )?;
+    let wide = f64::from(u32::MAX) + 1.0;
+    component.check("write-next", (u32::MAX,), &wide)?;
+    component.check("read-key", (u32::MAX,), &wide)?;
+    component.check("overwrite", (0.5,), &0.5)?;
+    component.check("write-next", (0u32,), &1.0)?;
+    component.check("read-key", (u32::MAX,), &0.5)?;
+    component.check("overwrite", (-0.0,), &-0.0)?;
+    let stored = component.call::<_, f64>("read-key", (0u32,))?;
+    assert_eq!(stored.to_bits(), (-0.0f64).to_bits());
+    Ok(())
+}
+
+#[test]
 fn exact_integer_transport_in_nested_results_and_options() -> Result<()> {
     boundary!(
         r#"package test:integers;

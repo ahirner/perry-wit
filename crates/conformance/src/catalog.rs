@@ -690,6 +690,7 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         specification: "https://tc39.es/ecma262/",
         domain: "Product of flat/nested/self-recursive/mutually-recursive/array-bearing records, multi-field/list/option WIT exports, float/NaN/-0.0/int-arith/wide-parseInt value sources, branch joins, shared helpers, array concat/spread, and >32-origin summarization",
         partitions: &[
+            "persistent-record-map-aliases",
             "self-recursive-wide-parseint-and-float",
             "nested-record-option-boundary-special-values-and-overflow",
         ],

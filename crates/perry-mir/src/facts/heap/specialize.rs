@@ -12,6 +12,14 @@ impl ProgramFacts {
         value: Value,
     ) -> Result<Option<TypeHandle>> {
         let ty = value.get_type(ctx);
+        if let Some(name) = global(ctx, value)
+            && let Some(&cell) = self.heap.globals.get(&name)
+        {
+            let inner = self.heap.cells[cell].ty;
+            return Ok(self
+                .specialized_cell_type(ctx, inner, cell)?
+                .map(|layout| crate::SlotType::get(ctx, layout).into()));
+        }
         if aggregate(ctx, ty)
             && !ty.deref(ctx).is::<PromiseType>()
             && let Some(&cell) = self.states[id].heap_values.get(&value)
