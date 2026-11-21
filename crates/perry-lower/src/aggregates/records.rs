@@ -1,5 +1,6 @@
 //! Ordered record assembly preserves field presence independently of storage order.
 use super::*;
+use crate::hir::ir::ObjectPart;
 use std::{
     borrow::Cow,
     iter::{empty, once},
@@ -332,7 +333,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(crate) fn record_object_spread(
         &mut self,
         ctx: &mut Context,
-        parts: &'s [(Option<String>, Expr)],
+        parts: &'s [ObjectPart],
         first_evaluated: Option<Value>,
         expected: Option<TypedHandle<RecordType>>,
     ) -> Result<Value> {
@@ -343,10 +344,9 @@ impl<'s> FunctionBuilder<'s> {
                         .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
                 })
                 .or_else(|| {
-                    parts.iter().find_map(|(key, value)| {
-                        key.is_none()
-                            .then(|| self.peek_record_type(ctx, value))
-                            .flatten()
+                    parts.iter().find_map(|part| match part {
+                        ObjectPart::Spread(value) => self.peek_record_type(ctx, value),
+                        _ => None,
                     })
                 })
         });
@@ -355,8 +355,9 @@ impl<'s> FunctionBuilder<'s> {
             fields: Vec::new(),
         };
         let mut sources = Vec::new();
-        for (index, (key, expr)) in parts.iter().enumerate() {
-            if let Some(key) = key {
+        for (index, part) in parts.iter().enumerate() {
+            let expr = part.value();
+            if let Some(key) = hir_compat::static_property(part) {
                 sources.push(RecordSource::Insert(key));
                 assembly.write(
                     self,

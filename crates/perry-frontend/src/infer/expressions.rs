@@ -462,8 +462,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             let mut single_spread_named: Option<String> = None;
             let mut spread_count = 0usize;
             let mut all_spreads_typed = true;
-            for (key, val_expr) in parts {
-                if let Some(key) = key {
+            for part in parts {
+                let val_expr = part.value();
+                if let Some(key) = hir_compat::static_property(part) {
                     let val_ty = expression(val_expr, env);
                     let (ty, optional) = match (val_expr, props.remove(key)) {
                         (Expr::Null, Some(existing)) => {
@@ -476,13 +477,15 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                         _ => (val_ty, false),
                     };
                     props.insert(
-                        key.clone(),
+                        key.to_owned(),
                         perry_hir::types::PropertyInfo {
                             ty,
                             optional,
                             readonly: false,
                         },
                     );
+                } else if part.defines_key() {
+                    return HirType::Any;
                 } else {
                     spread_count += 1;
                     let src_ty = strip_nullish(expression(val_expr, env)).0;
