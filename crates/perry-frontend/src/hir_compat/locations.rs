@@ -67,7 +67,6 @@ struct SourceFile<'s> {
 pub struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
-    deferred_bindings: HashSet<u32>,
     calls: HashMap<u32, Span>,
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
@@ -77,10 +76,6 @@ pub struct Locations<'s> {
 }
 
 impl<'s> Locations<'s> {
-    pub fn binding_starts_undefined(&self, start: u32) -> bool {
-        self.deferred_bindings.contains(&start)
-    }
-
     /// Preserve operator spans and non-null assertions as inert sequences before HIR erases them.
     pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module) {
         struct Preserver<'a>(&'a mut Vec<Span>);
@@ -355,13 +350,6 @@ impl<'s> Locations<'s> {
                 function.visit_children_with(self);
             }
             fn visit_var_declarator(&mut self, decl: &ast::VarDeclarator) {
-                if decl.init.is_none()
-                    && let ast::Pat::Ident(binding) = &decl.name
-                {
-                    self.locations
-                        .deferred_bindings
-                        .insert(binding.id.span.lo.0);
-                }
                 if let (ast::Pat::Ident(ident), Some(init)) = (&decl.name, &decl.init) {
                     let info = match &**init {
                         ast::Expr::Arrow(arrow) => Some(FunctionInfo {

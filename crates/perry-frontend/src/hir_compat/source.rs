@@ -6,17 +6,23 @@ use std::collections::HashSet;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
+#[derive(Default)]
+pub(crate) struct BindingSpans {
+    pub inferred: HashSet<(u32, u32)>,
+    pub deferred: HashSet<u32>,
+}
+
 /// Validate string literals / `String.fromCodePoint` and collect untyped variable bindings in one pass.
 pub(crate) fn validate(
     module: &ast::Module,
     locations: &locations::Locations<'_>,
-) -> Result<HashSet<(u32, u32)>> {
+) -> Result<BindingSpans> {
     #[derive(Default)]
     struct Analyzer {
         invalid: Option<Span>,
         code_point_arity: Option<Span>,
         enum_decl: Option<Span>,
-        bindings: HashSet<(u32, u32)>,
+        bindings: BindingSpans,
     }
     impl Visit for Analyzer {
         fn visit_ts_enum_decl(&mut self, decl: &ast::TsEnumDecl) {
@@ -46,8 +52,23 @@ pub(crate) fn validate(
             }
             call.visit_children_with(self);
         }
+        fn visit_for_head(&mut self, head: &ast::ForHead) {
+            if let ast::ForHead::VarDecl(var) = head {
+                // Iteration initializes the binding. Nested patterns can still contain declarations.
+                for declaration in &var.decls {
+                    declaration.visit_children_with(self);
+                }
+            } else {
+                head.visit_children_with(self);
+            }
+        }
         fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
-            collect_pat(&declaration.name, &mut self.bindings);
+            if declaration.init.is_none()
+                && let ast::Pat::Ident(binding) = &declaration.name
+            {
+                self.bindings.deferred.insert(binding.id.span.lo.0);
+            }
+            collect_pat(&declaration.name, &mut self.bindings.inferred);
             declaration.visit_children_with(self);
         }
     }

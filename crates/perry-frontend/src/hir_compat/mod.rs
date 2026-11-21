@@ -36,6 +36,7 @@ pub use methods::{Method, method};
 pub struct Metadata<'s> {
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
+    pub deferred_binding_starts: HashSet<u32>,
     pub constructors: Constructors,
     pub sparse_arrays: bool,
 }
@@ -85,13 +86,19 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     let inferred_bindings = module
         .local_source_spans
         .iter()
-        .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
+        .filter_map(|(id, span)| {
+            spans
+                .inferred
+                .contains(&(span.start, span.end))
+                .then_some(*id)
+        })
         .collect();
     Ok(LoweredHir {
         module,
         metadata: Metadata {
             locations,
             inferred_bindings,
+            deferred_binding_starts: spans.deferred,
             constructors,
             sparse_arrays: sparse.0,
         },

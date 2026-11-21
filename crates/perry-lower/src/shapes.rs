@@ -282,7 +282,7 @@ impl<'h> Shapes<'h> {
     pub(super) fn deferred_binding(&self, id: perry_frontend::hir::types::LocalId) -> bool {
         self.local_source_spans
             .get(&id)
-            .is_some_and(|span| self.metadata.locations.binding_starts_undefined(span.start))
+            .is_some_and(|span| self.metadata.deferred_binding_starts.contains(&span.start))
     }
 
     pub(super) fn deferred_storage(
