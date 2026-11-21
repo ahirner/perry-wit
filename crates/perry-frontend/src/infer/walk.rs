@@ -117,6 +117,7 @@ pub(super) fn visit_stmt<V: Visitor>(statement: &mut Stmt, visit: &mut V) -> Res
             body,
             catch,
             finally,
+            ..
         } => {
             visit_body(body, visit)?;
             if let Some(catch) = catch {
@@ -381,6 +382,7 @@ pub(super) fn scan<'sink>(
                 body,
                 catch,
                 finally,
+                ..
             } => {
                 scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 if let Some(catch) = catch {
