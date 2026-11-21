@@ -203,10 +203,10 @@ pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId
 pub(super) fn resolve_locals(
     statements: &mut [Stmt],
     mut env: FunctionEnv<'_>,
-    returned: Option<&mut Vec<HirType>>,
+    mut returned: Option<&mut dyn FnMut(HirType)>,
 ) {
     let mut bindings = HashMap::new();
-    scan(statements, &mut env, returned, Some(&mut bindings));
+    scan(statements, &mut env, &mut returned, Some(&mut bindings));
     locals_mut(statements, &mut |id, ty| {
         if let Some(inferred) = bindings.remove(&id) {
             *ty = inferred;
@@ -283,7 +283,7 @@ fn reader_kind(ty: &HirType, env: &FunctionEnv<'_>) -> Option<Kind> {
 pub(super) fn scan(
     statements: &[Stmt],
     env: &mut FunctionEnv<'_>,
-    mut returned: Option<&mut Vec<HirType>>,
+    returned: &mut Option<&mut dyn FnMut(HirType)>,
     mut bindings: Option<&mut HashMap<LocalId, HirType>>,
 ) {
     for statement in statements {
@@ -341,7 +341,7 @@ pub(super) fn scan(
             }
             Stmt::Return(value) => {
                 if let Some(returned) = returned.as_deref_mut() {
-                    returned.push(
+                    returned(
                         value
                             .as_ref()
                             .map_or(HirType::Void, |value| expression(value, env)),
@@ -353,63 +353,48 @@ pub(super) fn scan(
                 else_branch,
                 ..
             } => {
-                scan(
-                    then_branch,
-                    env,
-                    returned.as_deref_mut(),
-                    bindings.as_deref_mut(),
-                );
+                scan(then_branch, env, returned, bindings.as_deref_mut());
                 if let Some(body) = else_branch {
-                    scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                    scan(body, env, returned, bindings.as_deref_mut());
                 }
             }
             Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                scan(body, env, returned, bindings.as_deref_mut());
             }
             Stmt::For { init, body, .. } => {
                 if let Some(init) = init {
                     scan(
                         std::slice::from_ref(init),
                         env,
-                        returned.as_deref_mut(),
+                        returned,
                         bindings.as_deref_mut(),
                     );
                 }
-                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                scan(body, env, returned, bindings.as_deref_mut());
             }
             Stmt::Try {
                 body,
                 catch,
                 finally,
             } => {
-                scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                scan(body, env, returned, bindings.as_deref_mut());
                 if let Some(catch) = catch {
-                    scan(
-                        &catch.body,
-                        env,
-                        returned.as_deref_mut(),
-                        bindings.as_deref_mut(),
-                    );
+                    scan(&catch.body, env, returned, bindings.as_deref_mut());
                 }
                 if let Some(body) = finally {
-                    scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
+                    scan(body, env, returned, bindings.as_deref_mut());
                 }
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    scan(
-                        &case.body,
-                        env,
-                        returned.as_deref_mut(),
-                        bindings.as_deref_mut(),
-                    );
+                    scan(&case.body, env, returned, bindings.as_deref_mut());
                 }
             }
             Stmt::Labeled { body, .. } => {
                 scan(
                     std::slice::from_ref(body),
                     env,
-                    returned.as_deref_mut(),
+                    returned,
                     bindings.as_deref_mut(),
                 );
             }
