@@ -106,3 +106,64 @@ fn collect_pat(pat: &ast::Pat, out: &mut HashSet<(u32, u32)>) {
         _ => {}
     }
 }
+
+pub(crate) struct PrivateParameters {
+    pub indices: Vec<usize>,
+    pub references: HashSet<u32>,
+}
+
+/// Record the source position of every resolved reference, including shorthand properties and callbacks.
+pub(super) fn private_parameters(module: &ast::Module) -> HashMap<String, PrivateParameters> {
+    struct Uses(HashMap<ast::Id, PrivateParameters>);
+    impl Visit for Uses {
+        fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
+            decl.function.visit_with(self);
+        }
+        fn visit_ident(&mut self, ident: &ast::Ident) {
+            if let Some(function) = self.0.get_mut(&ident.to_id()) {
+                function.references.insert(ident.span.lo.0);
+            }
+        }
+    }
+    let mut uses = Uses(HashMap::new());
+    for item in &module.body {
+        let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(decl))) = item else {
+            continue;
+        };
+        if decl.function.type_params.is_some() {
+            continue;
+        }
+        let mut indices = Vec::new();
+        if !decl
+            .function
+            .params
+            .iter()
+            .all(|p| matches!(&p.pat, ast::Pat::Ident(binding) if !binding.id.optional))
+        {
+            continue;
+        }
+        for (index, param) in decl.function.params.iter().enumerate() {
+            if matches!(&param.pat, ast::Pat::Ident(binding) if binding.type_ann.is_none()) {
+                indices.push(index);
+            }
+        }
+        if !indices.is_empty() {
+            uses.0.insert(
+                decl.ident.to_id(),
+                PrivateParameters {
+                    indices,
+                    references: HashSet::new(),
+                },
+            );
+        }
+    }
+    if !uses.0.is_empty() {
+        module.visit_with(&mut uses);
+    }
+    uses.0
+        .into_iter()
+        .filter_map(|((name, _), entry)| {
+            (!entry.references.is_empty()).then(|| (name.to_string(), entry))
+        })
+        .collect()
+}

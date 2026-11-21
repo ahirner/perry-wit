@@ -21,6 +21,31 @@ fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
 }
 
 #[test]
+fn unannotated_parameter_evidence_requires_a_closed_set_of_direct_calls() {
+    let local = "function inc(x) { return x + 1; } export function run(n:number):number { return inc(6) + inc(n); }";
+    let typed = local.replace("inc(x)", "inc(x: number)");
+    assert_eq!(
+        perry_wit::compile_core(local, "local.ts").unwrap(),
+        perry_wit::compile_core(&typed, "local.ts").unwrap()
+    );
+    for source in [
+        "export function id(x) { return x; } export function run(): number { return id(1); }",
+        "function id(x) { return x; } export function run():number { [1].map(id); return id(1); }",
+        "function id(x) { return x; } export function run():number { return [1].map(n => id(n))[0]; }",
+        "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
+        "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }",
+        "function first(x) { return next(x); } function next(x:number):number { return x ? first(x-1) : 0; } export function run():number { return first(3); }",
+    ] {
+        let error = perry_wit::compile_core(source, "closed.ts").unwrap_err();
+        assert_eq!(
+            error.primary().code(),
+            codes::MISSING_TYPE_ANNOTATION,
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
 fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let helper = "// é🙂\r\nexport function helper(value) { return value; }";
     let mut program = program_with(
@@ -29,7 +54,18 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         &[("src/helper.ts", helper)],
     );
     program.source.contents.extend([b' '; 512]);
+    let inferred = api::compile_core(&program).unwrap();
+    let annotated = helper.replace("helper(value)", "helper(value: number)");
+    program.modules[0].contents = annotated.into_bytes();
+    assert_eq!(inferred, api::compile_core(&program).unwrap());
+    program.modules[0].contents = helper.as_bytes().to_vec();
+    let end = program.source.contents.len();
+    program
+        .source
+        .contents
+        .extend_from_slice(b"\nhelper('string');");
     let error = api::compile_core(&program).unwrap_err();
+    program.source.contents.truncate(end);
     let diagnostic = error.primary();
     assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION);
     let span = diagnostic.span().expect("declaration span");

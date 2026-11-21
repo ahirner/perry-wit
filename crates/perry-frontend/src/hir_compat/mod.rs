@@ -18,8 +18,8 @@ pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;
-pub(crate) use locations::display_name;
 pub use locations::{Locations, non_null_assertion};
+pub(crate) use locations::{body_calls, display_name};
 mod methods;
 mod names;
 mod parser;
@@ -28,6 +28,7 @@ mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
 mod source;
+pub(crate) use source::PrivateParameters;
 pub(crate) use source::validate;
 mod streams;
 pub use constructors::{Constructor, Constructors};
@@ -43,6 +44,7 @@ pub struct Metadata<'s> {
 pub(crate) struct LoweredHir<'s> {
     pub module: HirModule,
     pub metadata: Metadata<'s>,
+    pub private_parameters: HashMap<String, PrivateParameters>,
 }
 
 pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {
@@ -61,6 +63,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
+    let private_parameters = source::private_parameters(&ast);
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
@@ -89,6 +92,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         .collect();
     Ok(LoweredHir {
         module,
+        private_parameters,
         metadata: Metadata {
             locations,
             inferred_bindings,
