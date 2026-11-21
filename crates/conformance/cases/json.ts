@@ -286,6 +286,16 @@ parsedOrder.z = undefined;
 parsedOrder.z = 7;
 console.log("parsed-order", JSON.stringify(parsedOrder));
 console.log("spread-order", JSON.stringify({ before: 0, ...parsedOrder, a: 8, after: 9 }));
+const overridden = { ...{ a: 1 }, ["a"]: 4, b: 2 };
+console.log("computed-spread-order", JSON.stringify(overridden));
+let defaultCalls = 0;
+function nextDefault(): number { defaultCalls++; return 7; }
+let valueWithDefault: number = 1;
+const missingDefault: { valueWithDefault?: number } = {};
+({ valueWithDefault = nextDefault() } = missingDefault);
+const firstDefault = valueWithDefault;
+({ valueWithDefault = nextDefault() } = { valueWithDefault: 0 });
+console.log("shorthand-assignment-default", firstDefault, valueWithDefault, defaultCalls);
 const { m: removedOrder, ...restOrder } = parsedOrder;
 console.log("rest-order", removedOrder, JSON.stringify(restOrder));
 console.log("numeric-order", JSON.stringify({ z: 1, "10": 10, a: 2, "2": 2, "01": 3 }));
