@@ -75,6 +75,7 @@ fn completions(statements: &[Stmt]) -> u8 {
                 body,
                 catch,
                 finally,
+                ..
             } => {
                 let body =
                     completions(body) | catch.as_ref().map_or(0, |catch| completions(&catch.body));
