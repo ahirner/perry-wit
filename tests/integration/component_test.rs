@@ -923,7 +923,7 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
          export function bytes(value:Uint8Array) {if(value.length>0)value[0]=65;return value;}
          export function inferred(value: string) { return [value, value]; }
          export function parts(value: string): WitInput<Uint8Array>[] {
-             const values: string[] = [value, ''];
+             const values: string[] = [value];
              const alias = values;
              alias[1] = value;
              return values;
@@ -933,7 +933,7 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
         world,
         false,
     )?;
-    for (name, sites) in [("parts", 1), ("inferred", 1), ("send", 2)] {
+    for (name, sites) in [("parts", 2), ("inferred", 1), ("send", 2)] {
         assert!(
             compiled
                 .allocation_report
