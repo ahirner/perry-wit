@@ -4,6 +4,7 @@ use perry_hir::{
     ir::{CompareOp, Expr, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
 };
+use perry_parser::swc_ecma_ast::{ModuleDecl, ModuleItem};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
 use std::collections::{HashMap, HashSet};
@@ -52,6 +53,19 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     let mut locations = loaded.locations;
     locations.collect(&ast);
     let spans = source::validate(&ast, &locations)?;
+    for item in &ast.body {
+        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item
+            && !import.type_only
+            && (import.specifiers.is_empty()
+                || import
+                    .specifiers
+                    .iter()
+                    .any(|specifier| !specifier.is_type_only()))
+        {
+            crate::BuiltinModule::resolve(&import.src.value.to_string_lossy())
+                .map_err(|error| locations.annotate(error, import.src.span))?;
+        }
+    }
     let mut constructors = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));

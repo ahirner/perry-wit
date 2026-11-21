@@ -110,8 +110,14 @@ impl<'s> FunctionBuilder<'s> {
                 id, name, ty, init, ..
             } => {
                 self.iteration.register_binding(*id, name, init.as_ref());
-                self.binding(ctx, *id, ty, init.as_ref())
-                    .map_err(|error| self.shapes.annotate_local(error, *id))?;
+                self.binding(ctx, *id, ty, init.as_ref()).map_err(|error| {
+                    let error = if error.code() == codes::MISSING_TYPE_ANNOTATION {
+                        error.with_note(format!("in binding '{name}'"))
+                    } else {
+                        error
+                    };
+                    self.shapes.annotate_local(error, *id)
+                })?;
             }
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;

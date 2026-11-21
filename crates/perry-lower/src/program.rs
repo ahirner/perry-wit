@@ -1,5 +1,6 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
+use perry_frontend::BuiltinModule;
 
 pub(super) struct ParamSig<'s> {
     pub(super) source: &'s perry_frontend::hir::ir::Param,
@@ -66,31 +67,11 @@ pub(super) fn build_module(
     let mut builtins: HashMap<&str, Builtin> = HashMap::new();
     for import in &hir.imports {
         let source = import.source.as_str();
-        let module = match source {
-            "timers/promises" | "node:timers/promises" => Some(BuiltinModule::Timers),
-            "fs/promises" | "node:fs/promises" => Some(BuiltinModule::Fs),
-            "stream" | "node:stream" => Some(BuiltinModule::Stream),
-            "perry:http-server" => Some(BuiltinModule::HttpServer),
-            _ => None,
+        let Some(module) = BuiltinModule::resolve(source)
+            .map_err(|error| error.with_fallback_span(locations.import_span(source)))?
+        else {
+            continue;
         };
-        let builtin = source.starts_with("node:")
-            || matches!(
-                source,
-                "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
-            );
-        if matches!(source, "fs" | "node:fs") {
-            return Err(unsupported!(
-                "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
-            )
-            .with_fallback_span(locations.import_span(source)));
-        }
-        if module.is_none() && builtin {
-            return Err(unsupported!(
-                "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
-            )
-            .with_fallback_span(locations.import_span(source)));
-        }
-        let Some(module) = module else { continue };
         for specifier in &import.specifiers {
             let perry_frontend::hir::ir::ImportSpecifier::Named { imported, local } = specifier
             else {
@@ -280,15 +261,6 @@ fn hir_module_name(hir: &HirModule) -> String {
     } else {
         name
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BuiltinModule {
-    Timers,
-    Fs,
-    Stream,
-    /// `perry:http-server`: the services the compiler's `wasi:http/handler` adapter uses.
-    HttpServer,
 }
 
 /// A function imported from a built-in module.

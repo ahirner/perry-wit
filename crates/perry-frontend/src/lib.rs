@@ -81,3 +81,37 @@ pub fn load_sources<'s>(
 pub fn is_identifier(name: &str) -> bool {
     perry_parser::swc_ecma_ast::Ident::verify_symbol(name).is_ok()
 }
+
+/// Host modules with lowerings in the P3 compiler.
+#[derive(Clone, Copy)]
+pub enum BuiltinModule {
+    Timers,
+    Fs,
+    Stream,
+    HttpServer,
+}
+
+impl BuiltinModule {
+    pub fn resolve(source: &str) -> Result<Option<Self>> {
+        if source == "perry:http-server" {
+            return Ok(Some(Self::HttpServer));
+        }
+        let name = source.strip_prefix("node:").unwrap_or(source);
+        Ok(Some(match name {
+            "timers/promises" => Self::Timers,
+            "fs/promises" => Self::Fs,
+            "stream" => Self::Stream,
+            "fs" => {
+                return Err(perry_wit_diagnostics::unsupported!(
+                    "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
+                ));
+            }
+            _ if source.starts_with("node:") || perry_hir::ir::is_node_builtin_module(name) => {
+                return Err(perry_wit_diagnostics::unsupported!(
+                    "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
+                ));
+            }
+            _ => return Ok(None),
+        }))
+    }
+}

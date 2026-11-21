@@ -32,6 +32,13 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let error = api::compile_core(&program).unwrap_err();
     let diagnostic = error.primary();
     assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION);
+    assert!(
+        diagnostic
+            .notes()
+            .iter()
+            .any(|n| n.message().contains("parameter 'value' of 'helper'")),
+        "{diagnostic}"
+    );
     let span = diagnostic.span().expect("declaration span");
     assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
     assert_eq!(span.start_line, 2);
@@ -39,6 +46,20 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     assert!(diagnostic.help().is_some());
     assert!(std::error::Error::source(&error).is_some());
 
+    let local = "export function run():number { const missing = new Map(); return 0; }";
+    let error = api::compile_core(&program_with("local.ts", local, &[])).unwrap_err();
+    let diag = error.primary();
+    assert_eq!(diag.code(), codes::MISSING_TYPE_ANNOTATION, "{diag}");
+    assert!(
+        diag.notes()
+            .iter()
+            .any(|note| note.message().contains("binding 'missing'")),
+        "{diag}"
+    );
+    assert!(
+        diag.span()
+            .is_some_and(|span| span.file.to_string_lossy() == "local.ts")
+    );
     let helper =
         "// é🙂\r\nexport function helper(value:number):number {\r\n return value ** 1;\r\n}";
     program.modules[0].contents = helper.as_bytes().to_vec();
@@ -78,6 +99,31 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let span = parse_error.primary().span().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));
+}
+
+#[test]
+fn unsupported_node_import_points_to_the_original_module_specifier() {
+    for module in ["path", "node:path"] {
+        let source = format!(
+            "import {{ join }} from '{module}';\nexport function run() {{ return join('a', 'b'); }}"
+        );
+        let error = api::compile_core(&program_with("input.ts", &source, &[])).unwrap_err();
+        let diag = error.primary();
+        assert_eq!(diag.code(), codes::UNSUPPORTED_CONSTRUCT, "{diag}");
+        assert!(diag.message().contains(module), "{diag}");
+        let span = diag.span().unwrap();
+        assert_eq!(
+            &source[span.start_byte..span.end_byte],
+            format!("'{module}'")
+        );
+        assert_eq!(span.file.to_string_lossy(), "input.ts");
+    }
+    api::compile_core(&program_with(
+        "types.ts",
+        "import type {ParsedPath} from 'path'; export function run():number{return 1;}",
+        &[],
+    ))
+    .unwrap();
 }
 
 #[test]
@@ -483,6 +529,15 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
         source: source.as_bytes().into(),
         modules: vec![],
     };
+    let source = "export async function run():Promise<number> {\n  console.error('diagnose');\n  return 1;\n}";
+    let err = api::compile(&program(source), &bare_wit, &Options::default()).unwrap_err();
+    let diag = err.primary();
+    assert!(diag.message().contains("stderr"), "{diag}");
+    let span = diag.span().expect("console call span");
+    assert_eq!(
+        &source[span.start_byte..span.end_byte],
+        "console.error('diagnose')"
+    );
     let throwing =
         program("export async function run():Promise<number> {throw new Error('broken');}");
     let error = api::compile(&throwing, &bare_wit, &Options::default()).unwrap_err();

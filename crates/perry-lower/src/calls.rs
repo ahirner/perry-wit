@@ -178,7 +178,12 @@ impl<'s> FunctionBuilder<'s> {
                 other => bail_unsupported!("console.{other} is not supported yet"),
             };
             let line = self.console_line(ctx, args)?;
-            self.call_intrinsic(ctx, intrinsic, vec![line]);
+            let print = self.emit(ctx, |ctx| {
+                perry_mir::IntrinsicOp::new(ctx, intrinsic, vec![line])
+            });
+            if let Some(span) = self.shapes.metadata.locations.call_span(byte_offset) {
+                perry_mir::set_source_span(ctx, &print, &span);
+            }
             return Ok(None);
         }
         if let Expr::PropertyGet {
