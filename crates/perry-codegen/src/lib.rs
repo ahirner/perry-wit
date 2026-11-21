@@ -73,7 +73,7 @@ const DATA_BASE: u32 = 16;
 const MONOTONIC_CLOCK: &str = "wasi:clocks/monotonic-clock@0.3.0";
 
 /// How functions are exported.
-pub enum Exports {
+pub enum Exports<'a> {
     /// Export every exported TypeScript function under its own name, with the core signature of its
     /// MIR type plus the exception status, as one task per call. An async function's export
     /// runs through settled awaits and returns its value and status, while pending host suspension
@@ -83,10 +83,12 @@ pub enum Exports {
     RawChecked,
     /// Canonical-ABI exports of a WIT world, and the interfaces the world imports.
     Canonical {
+        /// Drive source promises with P2 pollables behind synchronous WIT exports.
+        p2: bool,
         /// Test-only forced collection and reclamation poisoning at existing safe points.
         memory_checks: bool,
         exports: Vec<boundary::Export>,
-        imports: Vec<String>,
+        imports: &'a [String],
         bindings: Vec<boundary::Import>,
         resources: Vec<boundary::ResourceDefinition>,
     },
@@ -97,7 +99,7 @@ pub enum Exports {
 pub fn compile(
     ctx: &mut Context,
     mir: &ModuleOp,
-    exports: &Exports,
+    exports: &Exports<'_>,
     analyses: &mut AnalysisManager,
 ) -> Result<Vec<u8>> {
     let (wasm, data, memory) = module::lower(ctx, mir, exports, analyses)?;

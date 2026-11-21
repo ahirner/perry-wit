@@ -5,16 +5,17 @@ import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 
 /**
- * Read the repository license and embedded Rust crate notices (`Perry-MIT.txt`, `anyhow-MIT.txt`).
+ * Read the repository license and embedded Rust crate notices.
  *
  * @param {string} repositoryDir
  * @param {string} heading
  */
 export async function compilerNotices(repositoryDir, heading) {
-  const [apache, perryMit, anyhowMit] = await Promise.all([
+  const [apache, perryMit, anyhowMit, wasip2Mit] = await Promise.all([
     readFile(join(repositoryDir, 'LICENSE'), 'utf8'),
     readFile(join(repositoryDir, 'licenses/Perry-MIT.txt'), 'utf8'),
     readFile(join(repositoryDir, 'licenses/anyhow-MIT.txt'), 'utf8'),
+    readFile(join(repositoryDir, 'licenses/wasip2-MIT.txt'), 'utf8'),
   ]);
   return [
     heading,
@@ -26,6 +27,9 @@ export async function compilerNotices(repositoryDir, heading) {
     '',
     'anyhow (version pinned in Cargo.lock)',
     anyhowMit.trimEnd(),
+    '',
+    'wasip2 bindings and WIT (version pinned in runtime/Cargo.lock)',
+    wasip2Mit.trimEnd(),
     '',
   ].join('\n');
 }

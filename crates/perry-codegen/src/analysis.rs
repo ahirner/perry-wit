@@ -59,7 +59,7 @@ pub(crate) fn function_ops(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operatio
 pub(crate) fn reachable_functions(
     ctx: &Context,
     module: &ModuleOp,
-    exports: &Exports,
+    exports: &Exports<'_>,
 ) -> Vec<FuncOp> {
     let functions = module_functions(ctx, module);
     let indices: HashMap<_, _> = functions
