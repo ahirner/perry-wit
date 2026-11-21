@@ -1,10 +1,9 @@
 //! Bind Perry's internal asynchronous runtime protocol to native P2 helpers.
 //! The resulting core module imports only the P2 ABI; no P3 component is nested or adapted.
-use super::wasm_err;
+use perry_contract::target::Target;
 use perry_wit_diagnostics::{Result, codes, ensure_diag};
-use std::borrow::Cow;
 
-pub(super) fn helper(module: &str, name: &str) -> Option<&'static str> {
+fn helper(module: &str, name: &str) -> Option<&'static str> {
     if module == "$root" {
         return Some(match name {
             "[context-get-0]" => "p2_context_get",
@@ -112,117 +111,78 @@ fn future(name: &str) -> Option<&'static str> {
     })
 }
 
-pub(super) fn external(module: &str) -> Cow<'_, str> {
+fn external(module: &str) -> &str {
     match module {
-        "wasi:cli/environment@0.3.0" => "wasi:cli/environment@0.2.12".into(),
-        "wasi:clocks/monotonic-clock@0.3.0" => "wasi:clocks/monotonic-clock@0.2.12".into(),
-        "wasi:clocks/system-clock@0.3.0" => "wasi:clocks/wall-clock@0.2.12".into(),
-        "wasi:random/random@0.3.0" => "wasi:random/random@0.2.12".into(),
-        "wasi:random/insecure@0.3.0" => "wasi:random/insecure@0.2.12".into(),
-        "wasi:filesystem/preopens@0.3.0" => "wasi:filesystem/preopens@0.2.12".into(),
-        "wasi:filesystem/types@0.3.0" => "wasi:filesystem/types@0.2.12".into(),
-        other => Cow::Borrowed(other),
+        "wasi:cli/environment@0.3.0" => "wasi:cli/environment@0.2.12",
+        "wasi:clocks/monotonic-clock@0.3.0" => "wasi:clocks/monotonic-clock@0.2.12",
+        "wasi:clocks/system-clock@0.3.0" => "wasi:clocks/wall-clock@0.2.12",
+        "wasi:random/random@0.3.0" => "wasi:random/random@0.2.12",
+        "wasi:random/insecure@0.3.0" => "wasi:random/insecure@0.2.12",
+        "wasi:filesystem/preopens@0.3.0" => "wasi:filesystem/preopens@0.2.12",
+        "wasi:filesystem/types@0.3.0" => "wasi:filesystem/types@0.2.12",
+        other => other,
     }
 }
 
-/// In a component that mixes WASI generations, bind each runtime import of a WASI 0.3
-/// interface the world lacks to the WASI 0.2 interface it imports instead. Code generation
-/// admits only functions with the same synchronous signature in both generations.
-pub(crate) fn fallback(core: &[u8], interfaces: &[String]) -> Result<Vec<u8>> {
-    use wasm_encoder::reencode::{Error, Reencode};
-    struct Fallback<'a>(&'a [String]);
-    impl Reencode for Fallback<'_> {
-        type Error = std::convert::Infallible;
-        fn parse_import_section(
-            &mut self,
-            section: &mut wasm_encoder::ImportSection,
-            reader: wasmparser::ImportSectionReader<'_>,
-        ) -> Result<(), Error<Self::Error>> {
-            for import in reader.into_imports() {
-                let import = import?;
-                let mut module: &str = import.module;
-                if !self.0.iter().any(|name| name == module) {
-                    let pinned = external(module);
-                    if let Some(base) = pinned.strip_suffix("@0.2.12")
-                        && pinned.as_ref() != module
-                        && let Some(name) = self
-                            .0
-                            .iter()
-                            .find(|name| name.starts_with(&format!("{base}@0.2.")))
-                    {
-                        module = name;
-                    }
-                }
-                section.import(module, import.name, self.entity_type(import.ty)?);
-            }
-            Ok(())
+/// Resolve Perry's runtime imports against the interfaces of the selected WIT world.
+pub(crate) struct RuntimeImports<'a> {
+    pub(crate) target: Target,
+    pub(crate) interfaces: &'a [String],
+}
+
+impl RuntimeImports<'_> {
+    pub(crate) const RAW: Self = Self {
+        target: Target::P3,
+        interfaces: &[],
+    };
+
+    pub(super) fn helper<'a>(&self, module: &str, name: &'a str) -> Option<&'a str> {
+        if module == perry_codegen::HELPER_MODULE {
+            Some(name)
+        } else if self.target == Target::P2 {
+            helper(module, name)
+        } else {
+            None
         }
     }
-    if !interfaces
-        .iter()
-        .any(|name| name.starts_with("wasi:") && name.contains("@0.2."))
-    {
-        return Ok(core.to_vec());
-    }
-    let mut module = wasm_encoder::Module::new();
-    Fallback(interfaces)
-        .parse_core_module(&mut module, wasmparser::Parser::new(0), core)
-        .map_err(wasm_err)?;
-    Ok(module.finish())
-}
 
-/// The bindings use pinned P2 WIT; honor an authored compatible 0.2 patch version.
-pub(crate) fn versions(core: &[u8], interfaces: &[String]) -> Result<Vec<u8>> {
-    use wasm_encoder::reencode::{Error, Reencode};
-    for payload in wasmparser::Parser::new(0).parse_all(core) {
-        if let wasmparser::Payload::ImportSection(section) = payload.map_err(wasm_err)? {
-            for import in section.into_imports() {
-                let import = import.map_err(wasm_err)?;
+    pub(super) fn module<'a>(&'a self, module: &'a str, name: &str) -> Result<&'a str> {
+        let pinned = external(module);
+        let fallback = match self.target {
+            Target::P2 => {
                 ensure_diag!(
-                    import.module != "wasi:io/poll@0.2.12"
-                        || interfaces
+                    pinned != "wasi:io/poll@0.2.12"
+                        || self
+                            .interfaces
                             .iter()
                             .any(|name| name.starts_with("wasi:io/poll@0.2.")),
                     codes::CONTRACT_MISMATCH,
                     "async TypeScript in a P2 world requires wasi:io/poll; import wasi:io/poll@0.2.12 or include wasi:cli/imports@0.2.12"
                 );
                 ensure_diag!(
-                    !matches!(import.module, "$root" | "[export]$root" | "perry:canon")
-                        && !(import.module.starts_with("wasi:") && import.module.contains("@0.3.")),
+                    !matches!(pinned, "$root" | "[export]$root" | "perry:canon")
+                        && !(pinned.starts_with("wasi:") && pinned.contains("@0.3.")),
                     codes::UNSUPPORTED_CONSTRUCT,
-                    "P2 backend does not support runtime import {}#{}; use a P3 world for this capability",
-                    import.module,
-                    import.name
+                    "P2 backend does not support runtime import {module}#{name}; use a P3 world for this capability"
                 );
+                pinned
             }
-        }
-    }
-    struct Versions<'a>(&'a [String]);
-    impl Reencode for Versions<'_> {
-        type Error = std::convert::Infallible;
-        fn parse_import_section(
-            &mut self,
-            section: &mut wasm_encoder::ImportSection,
-            reader: wasmparser::ImportSectionReader<'_>,
-        ) -> Result<(), Error<Self::Error>> {
-            for import in reader.into_imports() {
-                let import = import?;
-                let base = import.module.strip_suffix("@0.2.12");
-                let module = base
-                    .and_then(|base| {
-                        self.0
-                            .iter()
-                            .find(|s| s.starts_with(&format!("{base}@0.2.")))
-                    })
-                    .map_or(import.module, String::as_str);
-                section.import(module, import.name, self.entity_type(import.ty)?);
+            Target::P3 if pinned == module || self.interfaces.iter().any(|name| name == module) => {
+                return Ok(module);
             }
-            Ok(())
-        }
+            Target::P3 => module,
+        };
+        let Some(base) = pinned.strip_suffix("@0.2.12") else {
+            return Ok(fallback);
+        };
+        Ok(self
+            .interfaces
+            .iter()
+            .find(|interface| {
+                interface
+                    .strip_prefix(base)
+                    .is_some_and(|suffix| suffix.starts_with("@0.2."))
+            })
+            .map_or(fallback, String::as_str))
     }
-    let mut module = wasm_encoder::Module::new();
-    Versions(interfaces)
-        .parse_core_module(&mut module, wasmparser::Parser::new(0), core)
-        .map_err(wasm_err)?;
-    Ok(module.finish())
 }

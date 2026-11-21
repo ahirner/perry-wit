@@ -5,6 +5,34 @@ mod memory;
 mod time;
 
 #[test]
+fn direct_runtime_imports_bind_to_the_world_without_linking_helpers() -> anyhow::Result<()> {
+    use super::{RuntimeImports, canonical::Requirements, link_helpers_with};
+    use perry_contract::target::Target;
+
+    let native = "wasi:clocks/system-clock@0.3.0";
+    let older = "wasi:clocks/wall-clock@0.2.9";
+    let core = wat::parse_str(format!(r#"(module (import "{native}" "now" (func)))"#))?;
+    for (target, interfaces, expected) in [
+        (Target::P2, vec![older.into()], older),
+        (Target::P3, vec![older.into()], older),
+        (Target::P3, vec![native.into(), older.into()], native),
+    ] {
+        let (linked, helpers) = link_helpers_with(
+            core.clone(),
+            None,
+            &Requirements::default(),
+            &RuntimeImports {
+                target,
+                interfaces: &interfaces,
+            },
+        )?;
+        assert_eq!(helpers, 0);
+        assert_eq!(ParsedModule::parse(&linked)?.imports[0].0, expected);
+    }
+    Ok(())
+}
+
+#[test]
 fn callbacks_invoked_by_another_library_keep_their_dependencies() -> anyhow::Result<()> {
     let bytes = wat::parse_str(
         r#"(module

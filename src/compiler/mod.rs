@@ -172,8 +172,8 @@ pub(super) fn emit_component(
     strip_unused_stdio: bool,
 ) -> Result<Compiled> {
     let imports = bind::imports(resolve, world);
-    let p2 =
-        perry_contract::target::for_world(resolve, world) == perry_contract::target::Target::P2;
+    let target = perry_contract::target::for_world(resolve, world);
+    let p2 = target == perry_contract::target::Target::P2;
     let streams = bind::stream_anchor(resolve, world);
     let (mut has_stdout, mut stderr) = (false, false);
     for name in &imports {
@@ -184,27 +184,25 @@ pub(super) fn emit_component(
         stderr |= usable && name.starts_with("wasi:cli/stderr@");
     }
     let stdout = has_stdout && uses_stdout(ctx, mir);
-    let exports = Exports::Canonical {
+    let abi = Exports::Canonical {
         p2,
         memory_checks,
         exports,
-        imports,
+        imports: &imports,
         bindings,
         resources,
     };
-    let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &exports, analyses)?;
-    let core = perry_codegen::compile(ctx, mir, &exports, analyses)?;
+    let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &abi, analyses)?;
+    let core = perry_codegen::compile(ctx, mir, &abi, analyses)?;
     let (mut core, helpers) = finish(
         core,
         streams.as_ref(),
         &link::canonical::Requirements::for_world(resolve, world),
-        p2,
+        &link::RuntimeImports {
+            target,
+            interfaces: &imports,
+        },
     )?;
-    core = if p2 {
-        link::p2::versions(&core, &bind::imports(resolve, world))?
-    } else {
-        link::p2::fallback(&core, &bind::imports(resolve, world))?
-    };
     if strip_unused_stdio {
         core = link::raw::available_stdio(core, stdout, stderr)?;
     }
@@ -239,7 +237,12 @@ pub(crate) fn compile_core_sources(
         Exports::Raw
     };
     let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
-    let (core, _) = finish(core, None, &link::canonical::Requirements::default(), false)?;
+    let (core, _) = finish(
+        core,
+        None,
+        &link::canonical::Requirements::default(),
+        &link::RuntimeImports::RAW,
+    )?;
     link::raw::without_p3(core)
 }
 
@@ -266,9 +269,9 @@ fn finish(
     core: Vec<u8>,
     streams: Option<&link::StreamAnchor>,
     canonical: &link::canonical::Requirements,
-    p2: bool,
+    runtime: &link::RuntimeImports,
 ) -> Result<(Vec<u8>, u32)> {
-    let (core, helpers) = link::link_helpers_for_target(core, streams, canonical, p2)
+    let (core, helpers) = link::link_helpers_with(core, streams, canonical, runtime)
         .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
     let core = link::compact(&core)
         .map_err(|err| err.with_internal_context("interning core function signatures"))?;
