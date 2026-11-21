@@ -37,6 +37,16 @@ function replaceFields(pair: Pair): void {
   console.log(left === right, pair.left[0].length, pair.right[0].length);
 }
 
+interface Link<T> { values: T[]; next?: Link<T> }
+
+function checkCycle(): void {
+  const link: Link<string> = { values: ["test"] };
+  link.next = link;
+  const view: Link<WitInput<Uint8Array>> = link;
+  if (view.next) view.next.values[0] = new Uint8Array(3);
+  console.log(link.values[0].length);
+}
+
 function check(): void {
   const pair: Pair = { left: ["é"], right: ["a"] };
   replaceFields(pair);
@@ -72,3 +82,4 @@ function check(): void {
 }
 
 check();
+checkCycle();
