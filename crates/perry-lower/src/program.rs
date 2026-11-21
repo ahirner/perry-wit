@@ -165,6 +165,17 @@ pub(super) fn build_module(
                 .with_note(format!("in return type of '{display_name}'"));
             locations.annotate_caller(error, &function.name)
         })?;
+        let result_carrier = result_carrier.map(|declared| {
+            metadata
+                .terminal_results
+                .get(&function.id)
+                .filter(|_| foreign::byte_list_input(ctx, declared))
+                .and_then(|source| shapes.settled_type(ctx, source).ok())
+                .filter(|actual| {
+                    *actual != declared && foreign::accepts_input(ctx, declared, *actual)
+                })
+                .unwrap_or(declared)
+        });
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
             .flatten();

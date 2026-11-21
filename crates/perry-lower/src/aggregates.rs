@@ -146,24 +146,52 @@ impl<'s> FunctionBuilder<'s> {
         self.record_literal(ctx, names, args, expected, RecordKind::Object)
     }
 
-    /// `[…]`, with the element type from `expected` or from the items.
+    pub(super) fn input_expression(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        expected: TypeHandle,
+    ) -> Result<Value> {
+        if let Expr::Array(items, _) = expr
+            && foreign::byte_list_input(ctx, expected)
+            && expected.deref(ctx).is::<ArrayType>()
+        {
+            self.array_literal(ctx, items, Some(expected), true)
+        } else {
+            self.expression_with(ctx, expr, Some(expected))
+        }
+    }
+
+    /// A canonical sink accepts a homogeneous source element type directly.
     pub(super) fn array_literal(
         &mut self,
         ctx: &mut Context,
         items: &'s [Expr],
         expected: Option<TypeHandle>,
+        canonical: bool,
     ) -> Result<Value> {
-        let element = expected
+        let mut element = expected
             .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, present_type(ctx, ty)))
             .map(|array| array.deref(ctx).element());
         let mut values = Vec::with_capacity(items.len());
         for item in items {
-            let value = self.expression_with(ctx, item, element)?;
             let value = match element {
-                Some(element) => self.fit(ctx, value, element)?,
-                None => value,
+                Some(element) if canonical => self.input_expression(ctx, item, element)?,
+                Some(element) => {
+                    let value = self.expression_with(ctx, item, Some(element))?;
+                    self.fit(ctx, value, element)?
+                }
+                None => self.expression(ctx, item)?,
             };
             values.push(value);
+        }
+        if canonical && let (Some(expected), Some(first)) = (element, values.first()) {
+            let actual = first.get_type(ctx);
+            if values.iter().all(|item| item.get_type(ctx) == actual)
+                && foreign::accepts_input(ctx, expected, actual)
+            {
+                element = Some(actual);
+            }
         }
         let element = match (element, values.split_first()) {
             (Some(element), _) => element,

@@ -280,7 +280,7 @@ impl<'s> FunctionBuilder<'s> {
             let mut values = Vec::new();
             for (arg, (_, ty, _)) in args.iter().zip(&signature.params) {
                 let ty = self.shapes.value_type(ctx, ty)?;
-                let value = self.expression_with(ctx, arg, Some(ty))?;
+                let value = self.input_expression(ctx, arg, ty)?;
                 let actual = value.get_type(ctx);
                 let value = if foreign::accepts_input(ctx, ty, actual) {
                     value

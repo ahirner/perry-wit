@@ -904,23 +904,72 @@ fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
 #[test]
 fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()> {
     let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("reuse.wit", "package test:reuse; world reuse {export text:func(value:string)->list<u8>;export bytes:func(value:list<u8>)->list<u8>;}")?;
+    let package = resolve.push_str(
+        "reuse.wit",
+        "package test:reuse; interface collector { receive: func(parts: list<list<u8>>); } world reuse {
+        import collector;
+        export text: func(value: string) -> list<u8>;
+        export bytes: func(value: list<u8>) -> list<u8>;
+        export parts: func(value: string) -> list<list<u8>>;
+        export inferred: func(value: string) -> list<list<u8>>;
+        export send: func(value: string);
+    }",
+    )?;
     let world = resolve.select_world(&[package], Some("reuse"))?;
     let compiled = compile_for_world(
-        "export function text(value:string) {return value;} export function bytes(value:Uint8Array) {if(value.length>0)value[0]=65;return value;}",
+        "import { receive } from 'test:reuse/collector';
+         export function send(value: string): void { receive([value, value]); }
+         export function text(value:string) {return value;}
+         export function bytes(value:Uint8Array) {if(value.length>0)value[0]=65;return value;}
+         export function inferred(value: string) { return [value, value]; }
+         export function parts(value: string): WitInput<Uint8Array>[] {
+             const values: string[] = [value, ''];
+             const alias = values;
+             alias[1] = value;
+             return values;
+         }",
         "reuse.ts",
         &resolve,
         world,
         false,
     )?;
+    for (name, sites) in [("parts", 1), ("inferred", 1), ("send", 2)] {
+        assert!(
+            compiled
+                .allocation_report
+                .contains(&format!("{name}: {sites} allocation sites;")),
+            "{}",
+            compiled.allocation_report
+        );
+    }
     let engine = Engine::default();
     let module = wasmtime::Module::new(&engine, compiled.core)?;
-    let mut store = Store::new(&engine, ());
-    let instance = wasmtime::Instance::new(&mut store, &module, &[])?;
+    let mut store = Store::new(&engine, (0usize, 0usize));
+    let mut linker = wasmtime::Linker::new(&engine);
+    linker.func_wrap(
+        "test:reuse/collector",
+        "receive",
+        |mut caller: wasmtime::Caller<'_, (usize, usize)>, list: i32, count: i32| {
+            assert_eq!(count, 2);
+            let memory = caller.get_export("memory").unwrap().into_memory().unwrap();
+            for i in 0..2 {
+                assert_eq!(
+                    descriptor(memory.data(&caller), list as usize + 8 * i),
+                    *caller.data()
+                );
+            }
+        },
+    )?;
+    let instance = linker.instantiate(&mut store, &module)?;
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let allocate =
         instance.get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, "cabi_realloc")?;
-    for name in ["text", "bytes"] {
+    fn descriptor(data: &[u8], at: usize) -> (usize, usize) {
+        let word = |at| u32::from_le_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+        (word(at), word(at + 4))
+    }
+    let send = instance.get_typed_func::<(i32, i32), ()>(&mut store, "send")?;
+    for name in ["text", "bytes", "parts", "inferred"] {
         let run = instance.get_typed_func::<(i32, i32), i32>(&mut store, name)?;
         let post = instance.get_typed_func::<i32, ()>(&mut store, &format!("cabi_post_{name}"))?;
         for text in ["ASCII", "Grüße 漢字😀"] {
@@ -928,20 +977,27 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
             memory.write(&mut store, input as usize, text.as_bytes())?;
             let output = run.call(&mut store, (input, text.len() as i32))? as usize;
             let data = memory.data(&store);
-            let returned =
-                u32::from_le_bytes(data[output..output + 4].try_into().unwrap()) as usize;
-            let len = u32::from_le_bytes(data[output + 4..output + 8].try_into().unwrap()) as usize;
-            assert_eq!(
-                returned, input as usize,
-                "{name} made an extra guest payload copy"
-            );
-            assert_eq!(len, text.len());
-            let mut expected = text.as_bytes().to_vec();
-            if name == "bytes" {
-                expected[0] = b'A';
+            let expected = (input as usize, text.len());
+            let result = descriptor(data, output);
+            if matches!(name, "parts" | "inferred") {
+                assert_eq!(result.1, 2);
+                assert_eq!(descriptor(data, result.0), expected);
+                assert_eq!(descriptor(data, result.0 + 8), expected);
+            } else {
+                assert_eq!(result, expected, "{name} made an extra guest payload copy");
             }
-            assert_eq!(&data[returned..returned + len], expected);
+            let mut contents = text.as_bytes().to_vec();
+            if name == "bytes" {
+                contents[0] = b'A';
+            }
+            assert_eq!(&data[expected.0..expected.0 + expected.1], contents);
             post.call(&mut store, output as i32)?;
+            if name == "parts" {
+                let input = allocate.call(&mut store, (0, 0, 1, text.len() as i32))?;
+                memory.write(&mut store, input as usize, text.as_bytes())?;
+                *store.data_mut() = (input as usize, text.len());
+                send.call(&mut store, (input, text.len() as i32))?;
+            }
         }
     }
     Ok(())

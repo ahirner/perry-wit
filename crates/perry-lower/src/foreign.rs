@@ -2,6 +2,13 @@
 use super::*;
 use perry_mir::{ForeignOp, Phase};
 
+pub(super) fn byte_list_input(ctx: &Context, mut ty: TypeHandle) -> bool {
+    while let Some(array) = ty.deref(ctx).downcast_ref::<ArrayType>() {
+        ty = array.element();
+    }
+    ty.deref(ctx).is::<perry_mir::ByteInputType>()
+}
+
 /// Whether `actual` is structurally compatible with outbound import parameter type `expected`.
 pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHandle) -> bool {
     fn accepts(

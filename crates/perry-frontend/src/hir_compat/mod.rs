@@ -2,7 +2,7 @@
 use crate::modules;
 use perry_hir::{
     ir::{CompareOp, Expr, Module as HirModule, Stmt},
-    types::{LocalId, Type as HirType},
+    types::{FuncId, LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
@@ -38,6 +38,8 @@ pub struct Metadata<'s> {
     pub inferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
     pub sparse_arrays: bool,
+    /// Uniform source results consumed exclusively by a WIT export.
+    pub terminal_results: HashMap<FuncId, HirType>,
 }
 
 pub(crate) struct LoweredHir<'s> {
@@ -94,6 +96,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             inferred_bindings,
             constructors,
             sparse_arrays: sparse.0,
+            terminal_results: Default::default(),
         },
     })
 }

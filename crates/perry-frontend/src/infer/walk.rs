@@ -200,9 +200,13 @@ pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId
     let Ok(()) = visit_body(statements, &mut Locals(visit));
 }
 
-pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {
+pub(super) fn resolve_locals(
+    statements: &mut [Stmt],
+    mut env: FunctionEnv<'_>,
+    returned: Option<&mut Vec<HirType>>,
+) {
     let mut bindings = HashMap::new();
-    scan(statements, &mut env, None, Some(&mut bindings));
+    scan(statements, &mut env, returned, Some(&mut bindings));
     locals_mut(statements, &mut |id, ty| {
         if let Some(inferred) = bindings.remove(&id) {
             *ty = inferred;

@@ -229,7 +229,7 @@ pub(crate) fn unresolved_types(
     hir: &mut HirModule,
     metadata: &hir_compat::Metadata<'_>,
     foreign: &HashMap<String, crate::hir::Foreign>,
-) {
+) -> HashMap<FuncId, HirType> {
     let inferred = &metadata.inferred_bindings;
     let locations = &metadata.locations;
     let decls = shapes::Declarations::new(
@@ -363,7 +363,7 @@ pub(crate) fn unresolved_types(
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let env = inference.function(&module_env, &hir.classes, &mut locals);
-        walk::resolve_locals(&mut hir.init, env);
+        walk::resolve_locals(&mut hir.init, env, None);
     }
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     let max_iters = hir.functions.len() + hir.classes.len();
@@ -449,7 +449,8 @@ pub(crate) fn unresolved_types(
         module_env = perry_hir::HirTypeEnv::from_module(hir);
     }
     let env = inference.function(&module_env, &hir.classes, &mut locals);
-    walk::resolve_locals(&mut hir.init, env);
+    walk::resolve_locals(&mut hir.init, env, None);
+    let mut terminal = HashMap::new();
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
         let env = inference.function_with_params(
@@ -458,7 +459,20 @@ pub(crate) fn unresolved_types(
             &mut locals,
             &function.params,
         );
-        walk::resolve_locals(&mut function.body, env);
+        let mut returned = Vec::new();
+        let annotated = function.is_exported
+            && locations.has_explicit_return(&function.name)
+            && function
+                .return_type
+                .any(&mut |ty| matches!(ty, HirType::Generic { .. } | HirType::Named(_)));
+        walk::resolve_locals(&mut function.body, env, annotated.then_some(&mut returned));
+        if let Some(source) = returned.pop()
+            && returned.iter().all(|other| other == &source)
+            && !crate::completion::returns_optional(&function.body)
+            && source != function.return_type
+        {
+            terminal.insert(function.id, source);
+        }
     }
     for class_idx in 0..hir.classes.len() {
         module_env.set_current_class(Some(hir.classes[class_idx].name.clone()));
@@ -477,7 +491,7 @@ pub(crate) fn unresolved_types(
                     &mut locals,
                     &method.params,
                 );
-                walk::resolve_locals(&mut body, env);
+                walk::resolve_locals(&mut body, env, None);
             }
             if let Some(method) =
                 shapes::class_functions_mut(&mut hir.classes[class_idx]).nth(fn_idx)
@@ -487,4 +501,12 @@ pub(crate) fn unresolved_types(
         }
     }
     module_env.set_current_class(None);
+    if !terminal.is_empty() {
+        perry_hir::tdz_check::for_each_module_expr(hir, &mut |expr| {
+            if let Expr::FuncRef(id) = expr {
+                terminal.remove(id);
+            }
+        });
+    }
+    terminal
 }

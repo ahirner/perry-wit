@@ -523,7 +523,7 @@ impl<'s> FunctionBuilder<'s> {
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
                 self.record_literal(ctx, &names, items, expected, RecordKind::Tuple)?
             }
-            Expr::Array(items, _) => self.array_literal(ctx, items, expected)?,
+            Expr::Array(items, _) => self.array_literal(ctx, items, expected, false)?,
             Expr::ArraySpread(items) => self.array_spread(ctx, items, expected)?,
             Expr::ArrayFrom(iterable, _) => self.array_from(ctx, iterable, None, expected)?,
             Expr::ArrayFromMapped {

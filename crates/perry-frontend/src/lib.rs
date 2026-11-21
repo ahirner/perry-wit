@@ -66,7 +66,8 @@ pub fn load_sources<'s>(
         .metadata
         .locations
         .record_call_origins(&lowered.module);
-    infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
+    lowered.metadata.terminal_results =
+        infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
     if !lowered.metadata.sparse_arrays {
         lowered.metadata.sparse_arrays =
             infer::deletes_array_elements(ctx, &lowered.module, &lowered.metadata, foreign);
