@@ -175,27 +175,26 @@ fn infer_body_return(
     env: &mut FunctionEnv<'_>,
     decls: &shapes::Declarations<'_>,
 ) -> bool {
-    let mut returned = Vec::new();
-    walk::scan(body, env, Some(&mut returned), None);
-    if is_async {
-        for ty in &mut returned {
+    let mut types = Vec::new();
+    let mut unresolved = false;
+    let mut collect = |mut ty| {
+        if is_async {
             while let HirType::Promise(inner) = ty {
-                *ty = std::mem::replace(inner.as_mut(), HirType::Void);
+                ty = *inner;
             }
         }
-    }
-    if returned
-        .iter()
-        .any(|ty| matches!(ty, HirType::Any | HirType::Unknown))
-    {
+        if matches!(ty, HirType::Any | HirType::Unknown) {
+            unresolved = true;
+        } else if !unresolved {
+            push_return_type(&mut types, ty, decls);
+        }
+    };
+    walk::scan(body, env, &mut Some(&mut collect), None);
+    if unresolved {
         return false;
     }
     if crate::completion::returns_optional(body) {
-        returned.push(HirType::Void);
-    }
-    let mut types = Vec::new();
-    for ty in returned {
-        push_return_type(&mut types, ty, decls);
+        push_return_type(&mut types, HirType::Void, decls);
     }
     let ty = match types.as_slice() {
         [] => HirType::Void,
@@ -459,15 +458,20 @@ pub(crate) fn unresolved_types(
             &mut locals,
             &function.params,
         );
-        let mut returned = Vec::new();
+        let mut observed = None;
+        let mut unanimous = true;
+        let mut observe = |ty| match &observed {
+            Some(previous) => unanimous &= previous == &ty,
+            None => observed = Some(ty),
+        };
         let annotated = function.is_exported
             && locations.has_explicit_return(&function.name)
             && function
                 .return_type
                 .any(&mut |ty| matches!(ty, HirType::Generic { .. } | HirType::Named(_)));
-        walk::resolve_locals(&mut function.body, env, annotated.then_some(&mut returned));
-        if let Some(source) = returned.pop()
-            && returned.iter().all(|other| other == &source)
+        walk::resolve_locals(&mut function.body, env, annotated.then_some(&mut observe));
+        if let Some(source) = observed
+            && unanimous
             && !crate::completion::returns_optional(&function.body)
             && source != function.return_type
         {

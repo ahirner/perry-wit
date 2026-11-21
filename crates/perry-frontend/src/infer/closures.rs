@@ -40,8 +40,18 @@ pub(super) fn infer_closure_return(
         let prev = env.locals.insert(second.id, HirType::Number);
         saved.push((second.id, prev));
     }
-    let mut returned = Vec::new();
-    walk::scan(body, env, Some(&mut returned), None);
+    let mut first = None;
+    walk::scan(
+        body,
+        env,
+        &mut Some(&mut |ty| {
+            if first.is_none() && !matches!(ty, HirType::Any | HirType::Unknown | HirType::Void)
+            {
+                first = Some(ty);
+            }
+        }),
+        None,
+    );
     for (id, prev) in saved.into_iter().rev() {
         if let Some(prev) = prev {
             env.locals.insert(id, prev);
@@ -49,16 +59,10 @@ pub(super) fn infer_closure_return(
             env.locals.remove(&id);
         }
     }
-    let ret = returned
-        .into_iter()
-        .find(|ty| !matches!(ty, HirType::Any | HirType::Unknown | HirType::Void))
-        .unwrap_or(HirType::Any);
-    if matches!(ret, HirType::Any | HirType::Unknown) {
-        HirType::Any
-    } else if flat {
-        ret
-    } else {
-        HirType::Array(Box::new(ret))
+    match first {
+        None => HirType::Any,
+        Some(ty) if flat => ty,
+        Some(ty) => HirType::Array(Box::new(ty)),
     }
 }
 pub(super) fn infer_array_closure_return(
