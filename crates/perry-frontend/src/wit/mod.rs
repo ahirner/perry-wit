@@ -65,16 +65,8 @@ impl WorldTypes {
         })
     }
 
-    pub fn import_function(
-        &mut self,
-        module: &str,
-        function: &Function,
-        signature: Result<FunctionType>,
-    ) -> String {
-        let binding = format!("{module}#{}", to_camel_case(&function.name));
-        self.foreign
-            .insert(binding.clone(), Foreign::Function(signature));
-        binding
+    pub fn import_function(&mut self, binding: String, signature: Result<FunctionType>) {
+        self.foreign.insert(binding, Foreign::Function(signature));
     }
 
     pub fn resource_helpers(

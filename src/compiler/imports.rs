@@ -1,6 +1,7 @@
 //! Canonical bindings for the functions exposed by the frontend's WIT source view.
 use super::bind::abi_type;
 use perry_codegen::boundary::Import;
+use perry_contract::names::to_camel_case;
 use perry_frontend::wit::WorldTypes;
 use perry_wit_diagnostics::{Result, codes, diag};
 use wit_parser::{Resolve, WorldId};
@@ -14,6 +15,7 @@ pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes
             "$root".into()
         };
         let function = entry.function;
+        let binding = format!("{module}#{}", to_camel_case(&function.name));
         let signature = || -> Result<_> {
             let params = function
                 .params
@@ -36,11 +38,11 @@ pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes
         let (params, result, source) = match signature() {
             Ok(parts) => parts,
             Err(reason) => {
-                types.import_function(&module, function, Err(reason));
+                types.import_function(binding, Err(reason));
                 continue;
             }
         };
-        let binding = types.import_function(&module, function, Ok(source));
+        types.import_function(binding.clone(), Ok(source));
         imports.push(Import {
             binding,
             module,
