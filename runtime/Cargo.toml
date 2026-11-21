@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["abi", "sys", "core", "std", "web", "fs", "text", "normalization", "fetch", "number", "decimal", "json", "time", "p2-sys", "p2", "p2-io", "p2-http", "p2-fs"]
+members = ["abi", "sys", "core", "std", "web", "fs", "text", "normalization", "fetch", "number", "decimal", "json", "time", "p2-sys", "p2", "p2-io", "p2-http"]
 
 [workspace.dependencies]
 perry-p2-sys = { path = "p2-sys" }

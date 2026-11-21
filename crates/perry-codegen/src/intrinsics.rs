@@ -469,6 +469,10 @@ impl FunctionLowering<'_, '_> {
                     Intrinsic::Fetch => {
                         self.needs_import("wasi:http/client@0.3.0", "fetch")?;
                         self.needs_import("wasi:http/types@0.3.0", "fetch")?;
+                        perry_wit_diagnostics::ensure_unsupported!(
+                            !self.state.p2,
+                            "outgoing fetch requires a WASI 0.3 world"
+                        );
                         self.state.uses_fetch = true;
                         self.state.uses_streams = true;
                     }
@@ -496,6 +500,10 @@ impl FunctionLowering<'_, '_> {
                     | Intrinsic::FsRmdir => {
                         self.needs_import("wasi:filesystem/types@0.3.0", "node:fs")?;
                         self.needs_import("wasi:filesystem/preopens@0.3.0", "node:fs")?;
+                        perry_wit_diagnostics::ensure_unsupported!(
+                            !self.state.p2,
+                            "node:fs requires a WASI 0.3 world"
+                        );
                         self.state.uses_fs = true;
                     }
                     _ => {}

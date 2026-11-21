@@ -65,18 +65,12 @@ return storage until `cabi_post_<export>`. The post-return function drops backen
 resources before freeing the task. P3 retains native `task.return` and callbacks.
 
 The linker binds internal async runtime calls to `runtime/p2` for P2 output.
-That crate manages guest waitables and polls native `wasi:io/poll` resources.
-Separate `p2-http`, `p2-io` and `p2-fs` artifacts implement outgoing HTTP,
-stdout/stderr and filesystem operations. Their Rust allocations use canonical
-pins so they survive guest collection; dropping an owner releases its pin.
-Only reachable helper functions are linked. P2 HTTP sends requests before
-waiting, resolves responses at headers, and uses native input streams for bodies.
-Filesystem operations use P2's synchronous descriptor API.
-
-P2 output contains synchronous component imports/exports and no P3 canonical
-async builtins. The linker rejects unsupported P3 runtime imports in a P2 build.
-Integration tests instantiate P2 components with Component Model async disabled;
-the existing P3 suite continues to exercise native async behavior.
+It registers clock subscriptions and polls guest waitables with `wasi:io/poll`.
+`p2-io` adapts stdout and stderr to the shared output queue. `p2-http` adapts
+native input streams and trailer completion to the shared body reader.
+The linker includes reachable helpers and resolves synchronous services against
+the selected world's interface versions. Native integration tests exercise P2
+exports with Component Model async disabled.
 
 ## Aggregate inference
 

@@ -30,7 +30,7 @@ fn start(id: u32, stderr: bool) -> u32 {
     } else {
         wasip2::cli::stdout::get_stdout()
     });
-    output.completion = sys::completion(8, false);
+    output.completion = sys::completion(8);
     output.completion
 }
 #[unsafe(no_mangle)]

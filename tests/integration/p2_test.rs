@@ -1,15 +1,9 @@
 //! P2 output must instantiate with native Component Model async disabled.
 use crate::{
-    http_fixture::{HttpFixture, Reply},
     wasi_host::{self, Host},
     world::Compiler,
 };
 use anyhow::Result;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
-use std::time::{Duration, Instant};
 use wasmtime::{
     Config, Engine, Store,
     component::{Component, Instance, Linker},
@@ -38,36 +32,31 @@ fn the_selected_world_controls_the_target_for_identical_source() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn filesystem_roundtrip_and_errors() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let mut wasi = WasiCtx::builder();
-    wasi.preopened_dir(root.path(), "/", wasmtime_wasi::FsPerms::ReadWrite)?;
-    let source = r#"
-import { readFile, writeFile, stat, readdir, mkdir, unlink, rmdir } from 'node:fs/promises';
-export async function run(_: string) {
-  await mkdir('sub');
-  await writeFile('sub/data', 'héllo');
-  const text = await readFile('sub/data', 'utf8');
-  const size = (await stat('sub/data')).size;
-  const directory = (await stat('sub')).isDirectory();
-  const count = (await readdir('sub')).length;
-  await unlink('sub/data');
-  await rmdir('sub');
-  let missing = false;
-  try { await readFile('missing', 'utf8'); }
-  catch (e) { if (e instanceof Error) missing = e.message.startsWith('ENOENT:'); }
-  return text + '|' + size + '|' + directory + '|' + count + '|' + missing;
-}
-"#;
-    let (mut store, instance) = instance(WIT, source, Host::new(wasi.build())).await?;
-    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
-    for _ in 0..3 {
-        let (value,) = run.call_async(&mut store, ("",)).await?;
-        assert_eq!(value, "héllo|6|true|1|true");
-        assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+#[test]
+fn p2_reports_services_that_require_p3() {
+    for (body, service) in [
+        ("await fetch(url);", "outgoing fetch"),
+        ("await readFile(url, 'utf8');", "node:fs"),
+    ] {
+        let source = format!(
+            "import {{ readFile }} from 'node:fs/promises';
+export async function run(url: string) {{ {body} return url; }}"
+        );
+        let error = Compiler::Standard
+            .component(WIT, "test", "services.ts", &source)
+            .unwrap_err();
+        let error = error
+            .downcast_ref::<perry_wit::CompileError>()
+            .unwrap()
+            .primary();
+        assert_eq!(error.code(), perry_wit::codes::UNSUPPORTED_CONSTRUCT);
+        assert!(
+            error
+                .message()
+                .contains(&format!("{service} requires a WASI 0.3 world")),
+            "{error}"
+        );
     }
-    Ok(())
 }
 
 async fn instance(wit: &str, source: &str, host: Host) -> Result<(Store<Host>, Instance)> {
@@ -123,8 +112,6 @@ export async function run(text: string) {
   const values = await Promise.all([later(text), later('other')]);
   return values[0] + '|' + values[1];
 }
-
-
 "#;
     let (mut store, instance) = instance(WIT, source, Host::default()).await?;
     let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
@@ -168,121 +155,6 @@ export async function run(text:string) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn fetch_fans_out_before_waiting_for_responses() -> Result<()> {
-    let active = Arc::new(AtomicUsize::new(0));
-    let peak = Arc::new(AtomicUsize::new(0));
-    let started = Arc::new(AtomicUsize::new(0));
-    let (a, p, s) = (active.clone(), peak.clone(), started.clone());
-    let server = HttpFixture::new(move |_| {
-        p.fetch_max(a.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
-        s.fetch_add(1, Ordering::SeqCst);
-        let until = Instant::now() + Duration::from_secs(3);
-        while s.load(Ordering::SeqCst) < 4 && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        a.fetch_sub(1, Ordering::SeqCst);
-        Reply::Body(200, "12345678".into())
-    });
-    let source = r#"
-async function get(url: string): Promise<number> { const response = await fetch(url); return (await response.text()).length; }
-export async function run(url: string) {
-  const values = await Promise.all([get(url + '/0'), get(url + '/1'), get(url + '/2'), get(url + '/3')]);
-  return '' + (values[0] + values[1] + values[2] + values[3]);
-}
-"#;
-    let (mut store, instance) = instance(WIT, source, Host::default()).await?;
-    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
-    let (value,) = run
-        .call_async(&mut store, (&format!("http://{}", server.address),))
-        .await?;
-    assert_eq!(value, "32");
-    assert_eq!(peak.load(Ordering::SeqCst), 4);
-    assert_eq!(server.requests.lock().unwrap().len(), 4);
-    assert!(store.data().table.is_empty());
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn fetch_resolves_at_headers_and_streams_the_body() -> Result<()> {
-    let released = Arc::new(AtomicBool::new(false));
-    let gate = released.clone();
-    let server = HttpFixture::new(move |request| {
-        if request.target == "/release" {
-            gate.store(true, Ordering::Release);
-            Reply::Body(200, "ok".into())
-        } else {
-            Reply::GatedResponse(
-                201,
-                vec![("x-answer".into(), "yes".into())],
-                vec![b'x'; 25_000],
-                gate.clone(),
-            )
-        }
-    });
-    let source = r#"
-export async function run(url: string) {
-  const first = await fetch(url + '/body');
-  const release = await fetch(url + '/release');
-  await release.text();
-  const text = await first.text();
-  return first.status + '|' + first.headers.get('x-answer') + '|' + text.length;
-}
-"#;
-    let (mut store, instance) = instance(WIT, source, Host::default()).await?;
-    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
-    let (value,) = tokio::time::timeout(
-        Duration::from_secs(10),
-        run.call_async(&mut store, (&format!("http://{}", server.address),)),
-    )
-    .await??;
-    assert_eq!(value, "201|yes|25000");
-    assert!(store.data().table.is_empty());
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn post_body_headers_and_truncated_response_errors() -> Result<()> {
-    let server = HttpFixture::new(|request| {
-        if request.target == "/broken" {
-            Reply::TruncatedBody(b"short".to_vec(), 100)
-        } else {
-            Reply::Body(
-                200,
-                format!(
-                    "{}|{}",
-                    request.method,
-                    String::from_utf8_lossy(&request.body)
-                ),
-            )
-        }
-    });
-    let source = r#"
-export async function run(url: string) {
-  const response = await fetch(url, { method: 'POST', headers: { 'X-Token': ' abc ' }, body: 'héllo' });
-  const text = await response.text();
-  let failed = false;
-  try { const broken = await fetch(url + '/broken'); await broken.text(); }
-  catch (e) { if (e instanceof TypeError) failed = true; }
-  return text + '|' + failed;
-}
-"#;
-    let (mut store, instance) = instance(WIT, source, Host::default()).await?;
-    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
-    let (value,) = run
-        .call_async(&mut store, (&format!("http://{}", server.address),))
-        .await?;
-    assert_eq!(value, "POST|héllo|true");
-    assert!(
-        server.requests.lock().unwrap()[0]
-            .headers
-            .iter()
-            .any(|(k, v)| k == "x-token" && v == "abc")
-    );
-    assert!(store.data().table.is_empty());
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn p2_commands_and_sync_console_exports() -> Result<()> {
     let stdout = MemoryOutputPipe::new(1 << 20);
     let host = Host::new(WasiCtx::builder().stdout(stdout.clone()).build());
@@ -310,30 +182,6 @@ async fn p2_commands_and_sync_console_exports() -> Result<()> {
     let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
     assert_eq!(run.call_async(&mut store, ("sync",)).await?.0, "sync");
     assert_eq!(&stdout.contents()[..], b"sync\n");
-    assert!(store.data().table.is_empty());
-    Ok(())
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn large_upload_and_cancelled_body_release_resources() -> Result<()> {
-    let server = HttpFixture::new(|request| Reply::Body(200, request.body.len().to_string()));
-    let source = r#"
-export async function run(url: string): Promise<string> {
-  const response = await fetch(url, {method:'POST', body:'abc'.repeat(40000)});
-  const length = await response.text();
-  const unused = await fetch(url);
-  const body = unused.body;
-  if (body !== null) await body.cancel();
-  return length;
-}
-"#;
-    let (mut store, instance) = instance(WIT, source, Host::default()).await?;
-    let run = instance.get_typed_func::<(&str,), (String,)>(&mut store, "run")?;
-    let url = format!("http://{}", server.address);
-    let (value,) =
-        tokio::time::timeout(Duration::from_secs(10), run.call_async(&mut store, (&url,)))
-            .await??;
-    assert_eq!(value, "120000");
     assert!(store.data().table.is_empty());
     Ok(())
 }

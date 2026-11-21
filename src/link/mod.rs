@@ -157,11 +157,7 @@ pub(crate) fn link_helpers_with(
     }
     let mut selected = BTreeMap::new();
     while let Some((id, entry)) = pending.pop_first() {
-        if matches!(
-            id,
-            LibraryId::P2 | LibraryId::P2Io | LibraryId::P2Http | LibraryId::P2Fs
-        ) && !export_realloc
-        {
+        if matches!(id, LibraryId::P2 | LibraryId::P2Io | LibraryId::P2Http) && !export_realloc {
             export_realloc = true;
             pending.insert((LibraryId::Runtime, "perry_cabi_realloc"));
         }
@@ -169,10 +165,8 @@ pub(crate) fn link_helpers_with(
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
                 let mut lib = Library::parse(id.for_memory(collectible))?;
-                lib.external_callbacks = matches!(
-                    id,
-                    LibraryId::P2 | LibraryId::P2Io | LibraryId::P2Http | LibraryId::P2Fs
-                );
+                lib.external_callbacks =
+                    matches!(id, LibraryId::P2 | LibraryId::P2Io | LibraryId::P2Http);
                 let type_base = new_types.len();
                 for ty in &lib.module.types {
                     new_types.ty().func_type(ty);

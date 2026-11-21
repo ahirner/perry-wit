@@ -1,4 +1,4 @@
-//! Cooperative P2 scheduler. Only `wasi:io/poll` crosses the component boundary.
+//! Drive the shared task scheduler with P2 pollables.
 #![no_std]
 extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
@@ -79,7 +79,7 @@ pub(crate) extern "C" fn p2_join(handle: u32, set: u32) {
 pub(crate) extern "C" fn p2_future_new() -> u64 {
     let mut operation = Operation::new(EVENT_FUTURE_READ, 0);
     operation.refs = 2;
-    let id = unsafe { p2_register(Box::into_raw(Box::new(operation))) };
+    let id = operation.register();
     u64::from(id) | (u64::from(id) << 32)
 }
 #[unsafe(no_mangle)]
@@ -173,6 +173,6 @@ pub(crate) extern "C" fn p2_wait_for(duration: u64) -> u32 {
         duration,
     ));
     operation.step = Some(timer_step);
-    let id = unsafe { p2_register(Box::into_raw(Box::new(operation))) };
+    let id = operation.register();
     id << 4
 }

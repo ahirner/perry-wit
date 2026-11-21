@@ -46,7 +46,7 @@ export async function run(url:string):Promise<{{value:number,trace:number[]}}> {
 }
 fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     check_equivalence(case, evidence)?;
-    let (Case::Fetch(case) | Case::P2Fetch(case)) = case else {
+    let Case::Fetch(case) = case else {
         anyhow::bail!("Fetch checker requires Fetch input")
     };
     let Outcome::Values { observations, .. } = &evidence.component else {
@@ -66,20 +66,15 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
     );
     Ok(())
 }
-fn fetch_contract(id: &'static str, byob: bool, p2: bool) -> Contract {
+fn fetch_contract(id: &'static str, byob: bool) -> Contract {
     let case = move |bytes, status, limit, truncated| {
-        let case = FetchCase {
+        Case::Fetch(FetchCase {
             bytes,
             status,
             limit,
             truncated,
             byob,
-        };
-        if p2 {
-            Case::P2Fetch(case)
-        } else {
-            Case::Fetch(case)
-        }
+        })
     };
     Contract::new(
         id,
@@ -125,13 +120,9 @@ fn fetch_contract(id: &'static str, byob: bool, p2: bool) -> Contract {
 }
 
 pub(crate) fn contract() -> Contract {
-    fetch_contract("web.fetch.bounded_body", false, false)
+    fetch_contract("web.fetch.bounded_body", false)
 }
 
 pub(crate) fn byob_contract() -> Contract {
-    fetch_contract("web.fetch.bounded_byob_body", true, false)
-}
-
-pub(crate) fn p2_contract() -> Contract {
-    fetch_contract("wasi.p2.fetch", false, true)
+    fetch_contract("web.fetch.bounded_byob_body", true)
 }

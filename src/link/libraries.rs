@@ -32,14 +32,12 @@ pub(crate) const WEB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/
 const P2: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2.wasm"));
 const P2_IO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-io.wasm"));
 const P2_HTTP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-http.wasm"));
-const P2_FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-fs.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {
     P2,
     P2Io,
     P2Http,
-    P2Fs,
     Runtime,
     Std,
     Fs,
@@ -61,7 +59,6 @@ impl LibraryId {
         Ok(match entry {
             entry if entry.starts_with("p2_io_") => Self::P2Io,
             entry if entry.starts_with("p2_http_") => Self::P2Http,
-            entry if entry.starts_with("p2_fs_") => Self::P2Fs,
             entry if entry.starts_with("p2_") => Self::P2,
             entry if entry.starts_with("perry_") || entry == "cabi_realloc" => Self::Runtime,
             "std_parse_float" | "std_string_to_number" => Self::Decimal,
@@ -96,7 +93,6 @@ impl LibraryId {
             Self::P2 => P2,
             Self::P2Io => P2_IO,
             Self::P2Http => P2_HTTP,
-            Self::P2Fs => P2_FS,
             Self::Runtime => RUNTIME,
             Self::Std => STD,
             Self::Fs => FS,

@@ -13,7 +13,6 @@ mod emit;
 mod fetch;
 mod handler;
 mod inferred_aggregates;
-mod p2;
 mod scaling;
 mod strategies;
 mod streams;

@@ -38,9 +38,6 @@ fn helper(module: &str, name: &str) -> Option<&'static str> {
             _ => return future(name),
         });
     }
-    if module == "wasi:http/client@0.3.0" && name == "[async-lower]send" {
-        return Some("p2_http_send");
-    }
     if module == "perry:canon" {
         return Some(match name {
             "[async-lower][stream-read]u8" => "p2_http_read",
@@ -49,48 +46,8 @@ fn helper(module: &str, name: &str) -> Option<&'static str> {
             _ => return None,
         });
     }
-    if module == "wasi:http/types@0.3.0" {
-        return Some(match name {
-            "[constructor]fields" => "p2_http_fields_new",
-            "[method]fields.append" => "p2_http_fields_append",
-            "[method]fields.copy-all" => "p2_http_fields_entries",
-            "[resource-drop]fields" => "p2_http_fields_drop",
-            "[static]request.new" => "p2_http_request_new",
-            "[method]request.set-method" => "p2_http_set_method",
-            "[method]request.set-scheme" => "p2_http_set_scheme",
-            "[method]request.set-authority" => "p2_http_set_authority",
-            "[method]request.set-path-with-query" => "p2_http_set_path",
-            "[method]response.get-status-code" => "p2_http_status",
-            "[method]response.get-headers" => "p2_http_headers",
-            "[static]response.consume-body" => "p2_http_consume",
-            "[stream-new-0][static]request.new" => "p2_http_contents_new",
-            "[async-lower][stream-write-0][static]request.new" => "p2_http_contents_write",
-            "[stream-drop-writable-0][static]request.new" => "p2_http_contents_drop",
-            "[stream-cancel-write-0][static]request.new" => "p2_cancel",
-            name if name.ends_with("request.new") || name.ends_with("response.consume-body") => {
-                return future(name);
-            }
-            _ => return None,
-        });
-    }
-    if module == "wasi:filesystem/types@0.3.0" {
-        return Some(match name {
-            "[async-lower][method]descriptor.open-at" => "p2_fs_open",
-            "[async-lower][method]descriptor.stat-at" => "p2_fs_stat",
-            "[async-lower][method]descriptor.create-directory-at" => "p2_fs_mkdir",
-            "[async-lower][method]descriptor.remove-directory-at" => "p2_fs_rmdir",
-            "[async-lower][method]descriptor.unlink-file-at" => "p2_fs_unlink",
-            "[method]descriptor.read-via-stream" => "p2_fs_read_stream",
-            "[method]descriptor.write-via-stream" => "p2_fs_write_stream",
-            "[method]descriptor.read-directory" => "p2_fs_directory",
-            "[stream-new-0][method]descriptor.write-via-stream" => "p2_fs_write_new",
-            "[async-lower][stream-write-0][method]descriptor.write-via-stream" => "p2_fs_write",
-            "[async-lower][stream-read-0][method]descriptor.read-via-stream" => "p2_fs_read",
-            "[async-lower][stream-read-0][method]descriptor.read-directory" => "p2_fs_entries",
-            name if name.starts_with("[stream-drop-") => "p2_fs_drop_stream",
-            name if name.starts_with("[stream-cancel-") => "p2_cancel",
-            _ => return future(name),
-        });
+    if module == "wasi:http/types@0.3.0" && name == "[static]response.consume-body" {
+        return Some("p2_http_consume");
     }
     None
 }
@@ -118,8 +75,6 @@ fn external(module: &str) -> &str {
         "wasi:clocks/system-clock@0.3.0" => "wasi:clocks/wall-clock@0.2.12",
         "wasi:random/random@0.3.0" => "wasi:random/random@0.2.12",
         "wasi:random/insecure@0.3.0" => "wasi:random/insecure@0.2.12",
-        "wasi:filesystem/preopens@0.3.0" => "wasi:filesystem/preopens@0.2.12",
-        "wasi:filesystem/types@0.3.0" => "wasi:filesystem/types@0.2.12",
         other => other,
     }
 }

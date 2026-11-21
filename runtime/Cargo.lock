@@ -200,14 +200,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perry-p2-fs"
-version = "0.1.0"
-dependencies = [
- "perry-p2-sys",
- "wasip2",
-]
-
-[[package]]
 name = "perry-p2-http"
 version = "0.1.0"
 dependencies = [

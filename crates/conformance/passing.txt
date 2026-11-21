@@ -63,9 +63,3 @@ web.streams.byob_reader
 web.fetch.bounded_byob_body
 ecma.aggregate.specialization
 ecma.collection.iterators
-
-wasi.p2.fetch
-wasi.p2.promises
-wasi.p2.filesystem
-wasi.p2.reject_mixed_wait
-wasi.p2.require_poll
