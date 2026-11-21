@@ -107,20 +107,25 @@ fn collect_pat(pat: &ast::Pat, out: &mut HashSet<(u32, u32)>) {
     }
 }
 
+pub(crate) type PrivateFunctions = HashMap<swc_atoms::Atom, PrivateParameters>;
+
 pub(crate) struct PrivateParameters {
+    scope: swc_common::SyntaxContext,
     pub indices: Vec<usize>,
     pub references: HashSet<u32>,
 }
 
 /// Record the source position of every resolved reference, including shorthand properties and callbacks.
-pub(super) fn private_parameters(module: &ast::Module) -> HashMap<String, PrivateParameters> {
-    struct Uses(HashMap<ast::Id, PrivateParameters>);
+pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
+    struct Uses(PrivateFunctions);
     impl Visit for Uses {
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
             decl.function.visit_with(self);
         }
         fn visit_ident(&mut self, ident: &ast::Ident) {
-            if let Some(function) = self.0.get_mut(&ident.to_id()) {
+            if let Some(function) = self.0.get_mut(&ident.sym)
+                && function.scope == ident.ctxt
+            {
                 function.references.insert(ident.span.lo.0);
             }
         }
@@ -149,8 +154,9 @@ pub(super) fn private_parameters(module: &ast::Module) -> HashMap<String, Privat
         }
         if !indices.is_empty() {
             uses.0.insert(
-                decl.ident.to_id(),
+                decl.ident.sym.clone(),
                 PrivateParameters {
+                    scope: decl.ident.ctxt,
                     indices,
                     references: HashSet::new(),
                 },
@@ -160,10 +166,6 @@ pub(super) fn private_parameters(module: &ast::Module) -> HashMap<String, Privat
     if !uses.0.is_empty() {
         module.visit_with(&mut uses);
     }
+    uses.0.retain(|_, entry| !entry.references.is_empty());
     uses.0
-        .into_iter()
-        .filter_map(|((name, _), entry)| {
-            (!entry.references.is_empty()).then(|| (name.to_string(), entry))
-        })
-        .collect()
 }

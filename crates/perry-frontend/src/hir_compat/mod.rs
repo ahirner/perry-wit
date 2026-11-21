@@ -28,8 +28,8 @@ mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
 mod source;
-pub(crate) use source::PrivateParameters;
 pub(crate) use source::validate;
+pub(crate) use source::{PrivateFunctions, PrivateParameters};
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
@@ -44,7 +44,7 @@ pub struct Metadata<'s> {
 pub(crate) struct LoweredHir<'s> {
     pub module: HirModule,
     pub metadata: Metadata<'s>,
-    pub private_parameters: HashMap<String, PrivateParameters>,
+    pub private_parameters: PrivateFunctions,
 }
 
 pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {

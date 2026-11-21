@@ -11,7 +11,7 @@ pub(crate) fn private_parameters(
     ctx: &Context,
     module: &mut HirModule,
     metadata: &hir_compat::Metadata<'_>,
-    mut private_parameters: HashMap<String, hir_compat::PrivateParameters>,
+    mut private_parameters: hir_compat::PrivateFunctions,
     foreign: &HashMap<String, crate::hir::Foreign>,
 ) {
     if private_parameters.is_empty() {
@@ -19,7 +19,9 @@ pub(crate) fn private_parameters(
     }
     let mut candidates = HashMap::new();
     for function in module.functions.iter().filter(|f| !f.is_exported) {
-        let Some(mut source) = private_parameters.remove(&function.name) else {
+        let Some(mut source) =
+            private_parameters.remove(&swc_atoms::Atom::from(function.name.as_str()))
+        else {
             continue;
         };
         source.indices.retain(|&i| {
