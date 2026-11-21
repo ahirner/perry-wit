@@ -273,6 +273,7 @@ const RECEIVERS = new Map([
   ['SearchParams', 'URLSearchParams'], ['ByobReader', 'ReadableStreamBYOBReader'],
   ['Response', 'Response'], ['Request', 'Request'],
   ['Writable', 'WritableStream'], ['Readable', 'ReadableStream'], ['Headers', 'Headers'],
+  ['HeaderEntries', 'Headers iterator'], ['HeaderStrings', 'Headers iterator'],
   ['Encoder', 'TextEncoder'], ['Decoder', 'TextDecoder'],
   ['Number', 'number'], ['String', 'string'], ['Array', 'Array'], ['Bytes', 'Uint8Array'], ['Stats', 'fs.Stats'],
   ['Regex', 'RegExp'], ['Abort', 'AbortController'], ['Writer', 'WritableStreamDefaultWriter'],
