@@ -74,7 +74,10 @@ pub(crate) fn export(
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
     if scope == Scope::Task {
-        b.task_enter(ctx);
+        let task = b.task_enter(ctx);
+        if b.state.p2 && b.state.uses_io {
+            b.host_void(ctx, EffectHost::ContextSet0, vec![task]);
+        }
     }
     let initialization = b.initialization_status(ctx);
     let mut call_results = mir_results
@@ -168,6 +171,9 @@ pub(crate) fn export(
     };
     b.commit_resources(ctx);
     b.finish_resources(ctx);
+    if scope == Scope::Task && b.state.p2 && b.state.uses_io {
+        p2_effect(&mut b, ctx, "p2_io_flush", vec![]);
+    }
     b.ret(ctx, returned);
     let state = b.state;
     crate::module::append_export(ctx, state, &glue, lowered, &export.core_name);
@@ -181,6 +187,9 @@ pub(crate) fn export(
     let post = FuncOp::new(ctx, identifier(&post_name), post_ty);
     set_export(ctx, &post, &post_name);
     let mut b = FunctionLowering::glue(state, ctx, &post);
+    if b.state.p2 && b.state.uses_io {
+        p2_effect(&mut b, ctx, "p2_close", vec![]);
+    }
     b.task_free(ctx);
     b.ret(ctx, vec![]);
     b.state.wasm.append_operation(ctx, post.get_operation(), 0);
@@ -201,6 +210,7 @@ fn async_export(
     (module, wit_name): &(String, String),
     command: bool,
 ) -> Result<()> {
+    let blocking = state.p2;
     let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
     let completion = export
         .result
@@ -225,7 +235,17 @@ fn async_export(
             .map(AbiType::flat)
             .unwrap_or_default()
     };
-    let indirect = result_flat.len() > MAX_FLAT_PARAMS;
+    let indirect = result_flat.len() > if blocking { 1 } else { MAX_FLAT_PARAMS };
+    let returned_type = if indirect {
+        Some(Flat::I32)
+    } else {
+        result_flat.first().copied()
+    };
+    let return_slot = if blocking {
+        state.data.append(8, &[0; 8])
+    } else {
+        0
+    };
     let task_return = EffectHost::TaskReturn(
         module.clone(),
         wit_name.clone(),
@@ -376,9 +396,19 @@ fn async_export(
                     b.flat_i32s(ctx, flat, &[one, case, one, data, len], &mut values)?;
                 }
                 b.close_web_handles(ctx, true);
-                b.host_void(ctx, task_return.clone(), values);
+                return_result(
+                    &mut b,
+                    ctx,
+                    task_return.clone(),
+                    blocking,
+                    return_slot,
+                    returned_type,
+                    values,
+                );
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
-                b.task_free(ctx);
+                if !blocking {
+                    b.task_free(ctx);
+                }
                 let exit = b.i32_const(ctx, EXIT);
                 b.ret(ctx, vec![exit]);
             } else {
@@ -434,7 +464,15 @@ fn async_export(
             let after = b.new_block(ctx, vec![]);
             b.cond_br(ctx, returned, (after, vec![]), (first, vec![]));
             b.block = first;
-            b.host_void(ctx, task_return.clone(), std::mem::take(&mut flat));
+            return_result(
+                &mut b,
+                ctx,
+                task_return.clone(),
+                blocking,
+                return_slot,
+                returned_type,
+                std::mem::take(&mut flat),
+            );
             b.runtime_void(ctx, Runtime::WebServeMarkReturned, vec![]);
             b.br(ctx, after, vec![]);
             b.block = after;
@@ -448,10 +486,20 @@ fn async_export(
         b.commit_resources(ctx);
         b.finish_resources(ctx);
         if !b.state.uses_http_server {
-            b.host_void(ctx, task_return, flat);
+            return_result(
+                &mut b,
+                ctx,
+                task_return,
+                blocking,
+                return_slot,
+                returned_type,
+                flat,
+            );
         }
         b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
-        b.task_free(ctx);
+        if !blocking {
+            b.task_free(ctx);
+        }
         let exit = b.i32_const(ctx, EXIT);
         b.ret(ctx, vec![exit]);
         b.state
@@ -464,7 +512,9 @@ fn async_export(
     let params: Vec<_> = flat_params.iter().map(|f| flat_type(ctx, *f)).collect();
     let lift_ty = FunctionType::get(ctx, params, vec![i32]);
     let lift = FuncOp::new(ctx, identifier(&lift_name), lift_ty);
-    set_export(ctx, &lift, &lift_name);
+    if !blocking {
+        set_export(ctx, &lift, &lift_name);
+    }
     {
         let mut flat: Vec<Value> = lift.get_entry_block(ctx).deref(ctx).arguments().collect();
         flat.reverse();
@@ -503,7 +553,9 @@ fn async_export(
     let callback_name = format!("[callback]{lift_name}");
     let callback_ty = FunctionType::get(ctx, vec![i32; 3], vec![i32]);
     let callback = FuncOp::new(ctx, identifier(&callback_name), callback_ty);
-    set_export(ctx, &callback, &callback_name);
+    if !blocking {
+        set_export(ctx, &callback, &callback_name);
+    }
     {
         let args: Vec<Value> = callback
             .get_entry_block(ctx)
@@ -578,7 +630,117 @@ fn async_export(
             .wasm
             .append_operation(ctx, callback.get_operation(), 0);
     }
+    if blocking {
+        let params = flat_params.iter().map(|f| flat_type(ctx, *f)).collect();
+        let results: Vec<_> = returned_type
+            .into_iter()
+            .map(|f| flat_type(ctx, f))
+            .collect();
+        let ty = FunctionType::get(ctx, params, results.clone());
+        let wrapper = FuncOp::new(ctx, identifier(&export.core_name), ty);
+        set_export(ctx, &wrapper, &export.core_name);
+        let mut b = FunctionLowering::glue(state, ctx, &wrapper);
+        let args = wrapper
+            .get_entry_block(ctx)
+            .deref(ctx)
+            .arguments()
+            .collect();
+        let call = CallOp::new(ctx, identifier(&lift_name), args, vec![i32]);
+        let code = b.result(ctx, call.get_operation());
+        let waiting = b.new_block(ctx, vec![i32]);
+        let poll = b.new_block(ctx, vec![]);
+        let done = b.new_block(ctx, vec![]);
+        b.br(ctx, waiting, vec![code]);
+        b.block = waiting;
+        let code = waiting.deref(ctx).get_argument(0);
+        b.cond_br(ctx, code, (poll, vec![]), (done, vec![]));
+        b.block = poll;
+        let four = b.i32_const(ctx, 4);
+        let set = b.num(ctx, NumOpcode::I32ShrU, vec![code, four]);
+        let area = p2_value(&mut b, ctx, "p2_poll", vec![set]);
+        let args = [0, 4, 8]
+            .into_iter()
+            .map(|offset| b.load(ctx, MemKind::I32, area, offset))
+            .collect();
+        let call = CallOp::new(ctx, identifier(&callback_name), args, vec![i32]);
+        let next = b.result(ctx, call.get_operation());
+        b.br(ctx, waiting, vec![next]);
+        b.block = done;
+        let returned = returned_type
+            .map(|ty| {
+                let area = b.i32_const(ctx, return_slot as i32);
+                b.load(ctx, ty.mem_kind(), area, 0)
+            })
+            .into_iter()
+            .collect();
+        b.ret(ctx, returned);
+        b.state
+            .wasm
+            .append_operation(ctx, wrapper.get_operation(), 0);
+
+        // Synchronous canonical lifting reads strings/lists before post-return frees them.
+        let name = format!("cabi_post_{}", export.core_name);
+        let post_ty = FunctionType::get(ctx, results, vec![]);
+        let post = FuncOp::new(ctx, identifier(&name), post_ty);
+        set_export(ctx, &post, &name);
+        let mut b = FunctionLowering::glue(state, ctx, &post);
+        p2_effect(&mut b, ctx, "p2_close", vec![]);
+        b.task_free(ctx);
+        b.ret(ctx, vec![]);
+        b.state.wasm.append_operation(ctx, post.get_operation(), 0);
+    }
     Ok(())
+}
+
+fn p2_value(
+    b: &mut FunctionLowering<'_, '_>,
+    ctx: &mut Context,
+    name: &str,
+    args: Vec<Value>,
+) -> Value {
+    b.host(
+        ctx,
+        ValueHost::Foreign(
+            crate::host::Foreign {
+                module: crate::HELPER_MODULE.into(),
+                name: name.into(),
+                params: vec![Flat::I32; args.len()],
+            },
+            Flat::I32,
+        ),
+        args,
+    )
+}
+
+fn p2_effect(b: &mut FunctionLowering<'_, '_>, ctx: &mut Context, name: &str, args: Vec<Value>) {
+    b.host_void(
+        ctx,
+        EffectHost::Foreign(crate::host::Foreign {
+            module: crate::HELPER_MODULE.into(),
+            name: name.into(),
+            params: vec![Flat::I32; args.len()],
+        }),
+        args,
+    );
+}
+
+fn return_result(
+    b: &mut FunctionLowering<'_, '_>,
+    ctx: &mut Context,
+    host: EffectHost,
+    blocking: bool,
+    slot: u32,
+    ty: Option<Flat>,
+    values: Vec<Value>,
+) {
+    if blocking {
+        if let Some(ty) = ty {
+            let address = b.i32_const(ctx, slot as i32);
+            b.store(ctx, ty.mem_kind(), address, 0, values[0]);
+        }
+    } else {
+        b.host_void(ctx, host, values);
+    }
 }
 
 impl FunctionLowering<'_, '_> {

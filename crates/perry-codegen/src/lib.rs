@@ -83,6 +83,8 @@ pub enum Exports {
     RawChecked,
     /// Canonical-ABI exports of a WIT world, and the interfaces the world imports.
     Canonical {
+        /// Drive source promises with P2 pollables behind synchronous WIT exports.
+        p2: bool,
         /// Test-only forced collection and reclamation poisoning at existing safe points.
         memory_checks: bool,
         exports: Vec<boundary::Export>,

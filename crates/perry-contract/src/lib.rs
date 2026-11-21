@@ -2,6 +2,7 @@
 
 pub mod export_names;
 pub mod names;
+pub mod target;
 pub mod types;
 
 use wit_parser::{Function, InterfaceId, Resolve, World, WorldItem, WorldKey};

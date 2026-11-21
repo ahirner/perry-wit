@@ -1,0 +1,16 @@
+[package]
+workspace = ".."
+name = "perry-p2-io"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+perry-p2-sys.workspace = true
+wasip2.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.perry]
+artifacts = [{ name = "p2-io", profile = "release" }]

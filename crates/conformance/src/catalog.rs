@@ -69,6 +69,52 @@ pub struct CatalogEntry {
 
 pub(crate) static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
+        id: "wasi.p2.fetch",
+        description: "Native P2 HTTP preserves bounded response-body semantics",
+        specification: "https://fetch.spec.whatwg.org/",
+        domain: "Repeated calls, binary bodies up to 256 bytes, HTTP 200/404, consumer limits, stream cancellation and truncated responses",
+        partitions: &[
+            "empty",
+            "binary-exact-limit",
+            "non-success-status",
+            "overflow-cancellation",
+            "completion-error",
+        ],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
+        id: "wasi.p2.promises",
+        description: "P2 synchronous exports drive async TypeScript and overlapping timers",
+        specification: "https://github.com/WebAssembly/wasi-io",
+        domain: "Repeated synchronous canonical calls, Promise.all ordering, zero and 0–5 ms delays, and the numeric boundary corpus",
+        partitions: &["ready", "overlapping"],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
+        id: "wasi.p2.filesystem",
+        description: "Filesystem promises run against native P2 descriptors",
+        specification: "https://github.com/WebAssembly/wasi-filesystem",
+        domain: "Repeated UTF-8 file roundtrips, stat, directory enumeration, deletion and missing-file errors under a preopened directory",
+        partitions: &["roundtrip-and-error"],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
+        id: "wasi.p2.reject_mixed_wait",
+        description: "A world mixing P2 WASI with P3 async exports is a P3 component, whose waiting services need WASI 0.3 interfaces",
+        specification: "https://github.com/WebAssembly/component-model",
+        domain: "A timer awaited behind an asynchronous WIT export whose world imports only the P2 monotonic clock",
+        partitions: &["p2-timer-p3-export"],
+        expected_outcomes: &[ExpectedOutcome::CompilerRejection],
+    },
+    CatalogEntry {
+        id: "wasi.p2.require_poll",
+        description: "Async P2 implementations declare their event-loop capability",
+        specification: "https://github.com/WebAssembly/wasi-io",
+        domain: "Async TypeScript implementing a synchronous world without wasi:io/poll",
+        partitions: &["async-source-without-poll"],
+        expected_outcomes: &[ExpectedOutcome::CompilerRejection],
+    },
+    CatalogEntry {
         id: "ecma.number.arithmetic",
         description: "IEEE arithmetic and evaluation order",
         specification: "https://tc39.es/ecma262/",
@@ -719,7 +765,7 @@ const NAMESPACES: [(&str, &str); 4] = [
     ("ecma", "ECMAScript"),
     ("web", "Web Platform"),
     ("node", "Node.js"),
-    ("wasi", "WASI 0.3 Host"),
+    ("wasi", "WASI Host"),
 ];
 
 /// The position in [NAMESPACES] of the namespace contract `id` belongs to.

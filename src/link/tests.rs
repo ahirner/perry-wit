@@ -5,6 +5,35 @@ mod memory;
 mod time;
 
 #[test]
+fn callbacks_invoked_by_another_library_keep_their_dependencies() -> anyhow::Result<()> {
+    let bytes = wat::parse_str(
+        r#"(module
+        (import "env" "memory" (memory 1))
+        (import "env" "__table_base" (global $table-base i32))
+        (import "env" "__indirect_function_table" (table 1 funcref))
+        (import "host" "complete" (func $complete))
+        (func $step (call $complete))
+        (elem (global.get $table-base) func $step)
+        (func (export "register") (result i32) (global.get $table-base)))"#,
+    )?;
+    let mut library = Library::parse(&bytes)?;
+    let empty = std::collections::BTreeSet::new();
+    let ordinary = library.reachable(["register"], &empty, &empty)?;
+    assert!(
+        !ordinary.contains(&0),
+        "no local indirect call reaches the host"
+    );
+    library.external_callbacks = true;
+    let callbacks = library.reachable(["register"], &empty, &empty)?;
+    assert!(
+        callbacks.contains(&0),
+        "the externally invoked callback needs its host import"
+    );
+    assert!(callbacks.contains(&1));
+    Ok(())
+}
+
+#[test]
 fn linked_sections_keep_references_initialization_and_passive_segments() -> anyhow::Result<()> {
     let core = wat::parse_str(
         r#"(module

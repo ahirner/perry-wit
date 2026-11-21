@@ -29,9 +29,17 @@ pub(crate) const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runt
 pub(crate) const STD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/std.wasm"));
 pub(crate) const FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/fs.wasm"));
 pub(crate) const WEB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/web.wasm"));
+const P2: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2.wasm"));
+const P2_IO: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-io.wasm"));
+const P2_HTTP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-http.wasm"));
+const P2_FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/p2-fs.wasm"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LibraryId {
+    P2,
+    P2Io,
+    P2Http,
+    P2Fs,
     Runtime,
     Std,
     Fs,
@@ -51,6 +59,10 @@ pub(crate) enum LibraryId {
 impl LibraryId {
     pub(crate) fn for_entry(entry: &str) -> Result<Self> {
         Ok(match entry {
+            entry if entry.starts_with("p2_io_") => Self::P2Io,
+            entry if entry.starts_with("p2_http_") => Self::P2Http,
+            entry if entry.starts_with("p2_fs_") => Self::P2Fs,
+            entry if entry.starts_with("p2_") => Self::P2,
             entry if entry.starts_with("perry_") || entry == "cabi_realloc" => Self::Runtime,
             "std_parse_float" | "std_string_to_number" => Self::Decimal,
             "number_format" => Self::Number,
@@ -81,6 +93,10 @@ impl LibraryId {
 
     pub(crate) fn bytes(self) -> &'static [u8] {
         match self {
+            Self::P2 => P2,
+            Self::P2Io => P2_IO,
+            Self::P2Http => P2_HTTP,
+            Self::P2Fs => P2_FS,
             Self::Runtime => RUNTIME,
             Self::Std => STD,
             Self::Fs => FS,
@@ -181,6 +197,8 @@ pub(crate) struct Library<'a> {
     pub(crate) elements: Vec<(u32, u32)>,
     pub(crate) table_size: u32,
     pub(crate) table_alignment: u32,
+    /// The P2 scheduler invokes backend callbacks across library boundaries.
+    pub(crate) external_callbacks: bool,
 }
 
 struct HelperCalls<'a> {
@@ -440,6 +458,7 @@ impl<'a> Library<'a> {
             elements: vec![],
             table_size: 0,
             table_alignment: 1,
+            external_callbacks: false,
         };
         ensure_internal!(
             library
@@ -660,6 +679,9 @@ impl<'a> Library<'a> {
             self.initializers()
                 .filter(|f| !folded_initializers.contains(f)),
         );
+        if self.external_callbacks {
+            pending.extend(self.elements.iter().map(|&(_, function)| function));
+        }
         let mut reachable = BTreeSet::new();
         while let Some(function) = pending.pop() {
             if selected.contains(&function) || !reachable.insert(function) {

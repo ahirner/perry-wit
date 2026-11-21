@@ -92,6 +92,8 @@ pub(super) fn exports(
     resolve: &Resolve,
     world_id: WorldId,
 ) -> Result<Vec<Export>> {
+    let p2 =
+        perry_contract::target::for_world(resolve, world_id) == perry_contract::target::Target::P2;
     let world = &resolve.worlds[world_id];
     perry_contract::export_names::validate_implementation_names(resolve, world)
         .map_err(|e| Diagnostic::new(crate::codes::CONTRACT_MISMATCH, e.to_string()))?;
@@ -145,7 +147,8 @@ pub(super) fn exports(
             .with_help(help));
         };
         let expected_async = function.kind.is_async();
-        if perry_mir::is_async(ctx, mir_function) != expected_async {
+        let is_async = perry_mir::is_async(ctx, mir_function);
+        if is_async != expected_async && !(p2 && is_async) {
             let help = if expected_async {
                 format!(
                     "Add 'async' to 'export async function {implementation}(...)' so it matches the WIT export."
@@ -175,7 +178,7 @@ pub(super) fn exports(
             .map(|ty| abi_type(resolve, ty))
             .transpose()?;
         // Async exports return through `task.return`, imported from `[export]<interface>`.
-        let kind = if expected_async {
+        let kind = if is_async {
             let module = match entry.interface {
                 Some(_) => format!("[export]{}", resolve.name_world_key(entry.key)),
                 None => "[export]$root".to_string(),

@@ -321,7 +321,7 @@ pub(super) fn run_node_oracle(
                 status: 0,
             }
         }
-        Case::Fetch(f) => {
+        Case::Fetch(f) | Case::P2Fetch(f) => {
             fs::write(&payload_path, &f.bytes)?;
             OracleCaseMeta {
                 kind: "fetch",

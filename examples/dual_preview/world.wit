@@ -1,0 +1,13 @@
+package example:dual-preview;
+
+world p2 {
+  include wasi:cli/imports@0.2.12;
+  import wasi:http/outgoing-handler@0.2.12;
+  export sizes: func(first: string, second: string) -> result<u32, string>;
+}
+
+world p3 {
+  include wasi:cli/imports@0.3.0;
+  import wasi:http/client@0.3.0;
+  export sizes: async func(first: string, second: string) -> result<u32, string>;
+}

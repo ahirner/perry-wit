@@ -41,8 +41,27 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(crate) fn needs_import(&self, interface: &str, what: &str) -> Result<()> {
+        if self.state.can_import(interface) {
+            return Ok(());
+        }
+        // The world mixes WASI generations, so the component uses the P3 ABI, where a
+        // waiting service cannot be driven by WASI 0.2 pollables.
+        if let Some(p2) = self.state.p2_counterpart(interface) {
+            perry_wit_diagnostics::bail_diag!(
+                codes::CONTRACT_MISMATCH,
+                "{what} needs the WIT world to import {interface}: the world mixes WASI 0.2 with native async, and {what} cannot wait on {p2} in such a component"
+            );
+        }
+        perry_wit_diagnostics::bail_diag!(
+            codes::CONTRACT_MISMATCH,
+            "{what} needs the WIT world to import {interface}"
+        )
+    }
+
+    /// Require a service that never waits, which also binds the WASI 0.2 interface.
+    fn needs_sync_import(&self, interface: &str, what: &str) -> Result<()> {
         ensure_diag!(
-            self.state.can_import(interface),
+            self.state.can_import_sync(interface),
             codes::CONTRACT_MISMATCH,
             "{what} needs the WIT world to import {interface}"
         );
@@ -427,22 +446,25 @@ impl FunctionLowering<'_, '_> {
             other => {
                 match other {
                     Intrinsic::EnvGet | Intrinsic::EnvKeys => {
-                        self.needs_import("wasi:cli/environment@0.3.0", "process.env")?;
+                        self.needs_sync_import("wasi:cli/environment@0.3.0", "process.env")?;
                     }
                     Intrinsic::PerformanceNow => {
-                        self.needs_import(MONOTONIC_CLOCK, "performance.now()")?;
+                        self.needs_sync_import(MONOTONIC_CLOCK, "performance.now()")?;
                     }
                     Intrinsic::DateNow => {
-                        self.needs_import("wasi:clocks/system-clock@0.3.0", "Date.now()")?;
+                        self.needs_sync_import("wasi:clocks/system-clock@0.3.0", "Date.now()")?;
                     }
                     Intrinsic::MathRandom => {
-                        self.needs_import("wasi:random/insecure@0.3.0", "Math.random()")?;
+                        self.needs_sync_import("wasi:random/insecure@0.3.0", "Math.random()")?;
                     }
                     Intrinsic::RandomUuid => {
-                        self.needs_import("wasi:random/random@0.3.0", "crypto.randomUUID()")?;
+                        self.needs_sync_import("wasi:random/random@0.3.0", "crypto.randomUUID()")?;
                     }
                     Intrinsic::BytesFillRandom => {
-                        self.needs_import("wasi:random/random@0.3.0", "crypto.getRandomValues()")?;
+                        self.needs_sync_import(
+                            "wasi:random/random@0.3.0",
+                            "crypto.getRandomValues()",
+                        )?;
                     }
                     Intrinsic::Fetch => {
                         self.needs_import("wasi:http/client@0.3.0", "fetch")?;

@@ -4,6 +4,7 @@
 //! replacing them with linked and relocated functions from the embedded `#![no_std]` Rust
 //! instance runtime and standard libraries.
 
+pub(crate) mod p2;
 pub(crate) mod raw;
 
 use std::{
@@ -88,14 +89,15 @@ impl StreamAnchor {
 /// Link runtime and standard-library calls for standalone core-module tests.
 #[cfg(test)]
 fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
-    Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
+    Ok(link_helpers_for_target(core_wasm, None, &canonical::Requirements::default(), false)?.0)
 }
 
 /// Link runtime and standard-library calls and rewrite canonical stream placeholders for `core_wasm`.
-pub(crate) fn link_helpers_with(
+pub(crate) fn link_helpers_for_target(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
     canonical: &canonical::Requirements,
+    p2: bool,
 ) -> Result<(Vec<u8>, u32)> {
     let mut core = ParsedModule::parse(&core_wasm)?;
     let mut export_realloc = canonical.export_realloc;
@@ -104,11 +106,25 @@ pub(crate) fn link_helpers_with(
     let mut old_to_new_func_index = BTreeMap::new();
     for (index, &(module, name, ty)) in core.imports.iter().enumerate() {
         export_realloc |= canonical.import(module, name);
-        if module == HELPER_MODULE {
-            helper_imports.push((index as u32, name, ty));
+        if let Some(helper) = if module == HELPER_MODULE {
+            Some(name)
+        } else if p2 {
+            p2::helper(module, name)
+        } else {
+            None
+        } {
+            helper_imports.push((index as u32, helper, ty));
         } else {
             old_to_new_func_index.insert(index as u32, external_imports.len() as u32);
-            external_imports.push((Cow::Borrowed(module), Cow::Borrowed(name), ty));
+            external_imports.push((
+                if p2 {
+                    p2::external(module)
+                } else {
+                    Cow::Borrowed(module)
+                },
+                Cow::Borrowed(name),
+                ty,
+            ));
         }
     }
     if helper_imports.is_empty() && !export_realloc {
@@ -146,10 +162,22 @@ pub(crate) fn link_helpers_with(
     }
     let mut selected = BTreeMap::new();
     while let Some((id, entry)) = pending.pop_first() {
+        if matches!(
+            id,
+            LibraryId::P2 | LibraryId::P2Io | LibraryId::P2Http | LibraryId::P2Fs
+        ) && !export_realloc
+        {
+            export_realloc = true;
+            pending.insert((LibraryId::Runtime, "perry_cabi_realloc"));
+        }
         let prep = match selected.entry(id) {
             std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::btree_map::Entry::Vacant(entry) => {
-                let lib = Library::parse(id.for_memory(collectible))?;
+                let mut lib = Library::parse(id.for_memory(collectible))?;
+                lib.external_callbacks = matches!(
+                    id,
+                    LibraryId::P2 | LibraryId::P2Io | LibraryId::P2Http | LibraryId::P2Fs
+                );
                 let type_base = new_types.len();
                 for ty in &lib.module.types {
                     new_types.ty().func_type(ty);
@@ -172,8 +200,14 @@ pub(crate) fn link_helpers_with(
             .reachable([entry], &BTreeSet::new(), &prep.reachable)?;
         for &orig in reachable.range(..prep.lib.module.imports.len() as u32) {
             let (module, name, ty) = prep.lib.module.imports[orig as usize];
-            if module == HELPER_MODULE {
-                pending.insert((LibraryId::for_entry(name)?, name));
+            if let Some(helper) = if module == HELPER_MODULE {
+                Some(name)
+            } else if p2 {
+                p2::helper(module, name)
+            } else {
+                None
+            } {
+                pending.insert((LibraryId::for_entry(helper)?, helper));
                 continue;
             }
             if !export_realloc && canonical.import(module, name) {
@@ -190,7 +224,14 @@ pub(crate) fn link_helpers_with(
                     .resolve(name)?;
                 (Cow::Owned(module), Cow::Owned(name))
             } else {
-                (Cow::Borrowed(module), Cow::Borrowed(name))
+                (
+                    if p2 {
+                        p2::external(module)
+                    } else {
+                        Cow::Borrowed(module)
+                    },
+                    Cow::Borrowed(name),
+                )
             };
             let index = match external_imports
                 .iter()
@@ -247,7 +288,10 @@ pub(crate) fn link_helpers_with(
         .transpose()
         .map_err(wasm_err)?
         .map_or(0, |table| table.ty.initial);
-    let mut current_table_size = u32::try_from(original_table_size)
+    // Rust uses zero for `None` in optional function pointers. A dynamically linked
+    // helper's first real function must therefore never relocate to table slot zero.
+    let reserved_null = u64::from(prepared_libs.iter().any(|prep| prep.lib.table_size != 0));
+    let mut current_table_size = u32::try_from(original_table_size.max(reserved_null))
         .map_err(|_| Diagnostic::internal("core table exceeds table32"))?;
     let mut lib_placements = Vec::new();
     for prep in &prepared_libs {
@@ -328,7 +372,13 @@ pub(crate) fn link_helpers_with(
             .filter(|&&orig| orig < prep.lib.module.imports.len() as u32)
         {
             let (module, name, _) = prep.lib.module.imports[orig as usize];
-            if module == HELPER_MODULE {
+            if let Some(name) = if module == HELPER_MODULE {
+                Some(name)
+            } else if p2 {
+                p2::helper(module, name)
+            } else {
+                None
+            } {
                 let target = entry_index
                     .get(&(LibraryId::for_entry(name)?, name))
                     .copied()

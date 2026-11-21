@@ -275,11 +275,27 @@ fn equivalence(
     evidence: &Evidence,
 ) -> Result<()> {
     match (case, oracle, component) {
-        (Case::Reject { diagnostic, .. }, _, Outcome::Compile(message)) => ensure!(
+        (
+            Case::Reject { diagnostic, .. }
+            | Case::P2 {
+                diagnostic: Some(diagnostic),
+                ..
+            },
+            _,
+            Outcome::Compile(message),
+        ) => ensure!(
             !diagnostic.is_empty() && message.contains(diagnostic),
             "unexpected rejection: {message}"
         ),
-        (Case::Reject { .. }, _, _) => bail!("expected compiler diagnostic: {evidence:?}"),
+        (
+            Case::Reject { .. }
+            | Case::P2 {
+                diagnostic: Some(_),
+                ..
+            },
+            _,
+            _,
+        ) => bail!("expected compiler diagnostic: {evidence:?}"),
         (
             _,
             Outcome::Values {
@@ -473,7 +489,14 @@ impl Executor {
             link_handler_types(directory)?;
         }
         crate::scaling::override_inputs(case, directory)?;
-        if !matches!(case, Case::Reject { .. }) {
+        if !matches!(
+            case,
+            Case::Reject { .. }
+                | Case::P2 {
+                    diagnostic: Some(_),
+                    ..
+                }
+        ) {
             self.schedule_typecheck(case, &path, source, directory)?;
         }
         Ok(())
@@ -512,7 +535,14 @@ impl Executor {
 
     fn run_oracle(&self, case: &Case, directory: &Path) -> Result<Outcome> {
         let path = directory.join("case.ts");
-        if matches!(case, Case::Reject { .. }) {
+        if matches!(
+            case,
+            Case::Reject { .. }
+                | Case::P2 {
+                    diagnostic: Some(_),
+                    ..
+                }
+        ) {
             Ok(Outcome::Compile("expected source-domain rejection".into()))
         } else if let Case::Aggregate(agg) = case
             && agg.uses_wide_exact_int()

@@ -1,6 +1,6 @@
 # Perry-WIT Architecture
 
-Perry-WIT compiles static TypeScript into WASI 0.3 components through Perry HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron).
+Perry-WIT compiles static TypeScript into WASI 0.2 and 0.3 components through Perry HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron).
 
 ## Pipeline
 
@@ -21,7 +21,7 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 | 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
 | 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, emits Canonical ABI marshalling, and links referenced runtime and standard-library functions. |
-| 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. |
+| 7. Component encoding | WASI 0.2 or 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each P3 async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. P2 wraps the internal callbacks in synchronous exports. |
 
 Top-level statements collect into one function: the `wasi:cli/run` body in a command-only module, or a one-time initializer that `wasi:cli/run` and every export await before running. Module bindings persist across calls.
 
@@ -50,6 +50,33 @@ The compiler workspace separates these responsibilities:
 | `perry-wit` | Loads WIT, binds exports, links runtime artifacts and encodes components. |
 
 The frontend returns a read-only program and metadata. Record identity and function instance specialization belong to this stage. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the compiler stages below it.
+
+## Component target
+
+`perry-contract::target` selects P2 or P3 from the selected world's WASI versions
+and async types. Unselected worlds do not affect the choice. Contract binding
+allows an async TypeScript implementation of a synchronous P2 export. P3 keeps
+its existing native async export contract.
+
+Both targets share MIR coroutine splitting and Promise scheduling. For P2,
+codegen wraps the internal ramp/callback pair in a synchronous canonical export.
+It drives completion events until the result is ready, and retains the task and
+return storage until `cabi_post_<export>`. The post-return function drops backend
+resources before freeing the task. P3 retains native `task.return` and callbacks.
+
+The linker binds internal async runtime calls to `runtime/p2` for P2 output.
+That crate manages guest waitables and polls native `wasi:io/poll` resources.
+Separate `p2-http`, `p2-io` and `p2-fs` artifacts implement outgoing HTTP,
+stdout/stderr and filesystem operations. Their Rust allocations use canonical
+pins so they survive guest collection; dropping an owner releases its pin.
+Only reachable helper functions are linked. P2 HTTP sends requests before
+waiting, resolves responses at headers, and uses native input streams for bodies.
+Filesystem operations use P2's synchronous descriptor API.
+
+P2 output contains synchronous component imports/exports and no P3 canonical
+async builtins. The linker rejects unsupported P3 runtime imports in a P2 build.
+Integration tests instantiate P2 components with Component Model async disabled;
+the existing P3 suite continues to exercise native async behavior.
 
 ## Aggregate inference
 

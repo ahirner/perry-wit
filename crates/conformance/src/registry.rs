@@ -37,6 +37,7 @@ pub enum Case {
     InferredAggregate(crate::inferred_aggregates::AggregateCase),
     Stream(crate::streams::StreamCase),
     Fetch(crate::fetch::FetchCase),
+    P2Fetch(crate::fetch::FetchCase),
     Handler(crate::handler::HandlerCase),
     Fault {
         program: Program,
@@ -45,6 +46,12 @@ pub enum Case {
     Function {
         source: String,
         asynchronous: bool,
+    },
+    /// An explicit P2 world, including target-boundary rejection witnesses.
+    P2 {
+        source: String,
+        wit: String,
+        diagnostic: Option<String>,
     },
     Command {
         source: String,
@@ -68,7 +75,11 @@ pub enum Case {
 impl Case {
     pub(crate) fn expected_outcome(&self) -> ExpectedOutcome {
         match self {
-            Self::Reject { .. } => ExpectedOutcome::CompilerRejection,
+            Self::Reject { .. }
+            | Self::P2 {
+                diagnostic: Some(_),
+                ..
+            } => ExpectedOutcome::CompilerRejection,
             Self::Fault { .. } => ExpectedOutcome::InjectedFaultDetection,
             Self::Scaling { .. } => ExpectedOutcome::BoundedGrowth,
             _ => ExpectedOutcome::EquivalentExecution,
@@ -146,6 +157,7 @@ impl Case {
             Self::Lifecycle(_)
             | Self::Stream(_)
             | Self::Fetch(_)
+            | Self::P2Fetch(_)
             | Self::Handler(_)
             | Self::Scaling { .. }
             | Self::InferredAggregate(_) => false,
@@ -160,11 +172,12 @@ impl Case {
             Self::Collection(case) => case.source(),
             Self::InferredAggregate(case) => case.source(),
             Self::Stream(case) => case.source(),
-            Self::Fetch(case) => case.source(),
+            Self::Fetch(case) | Self::P2Fetch(case) => case.source(),
             Self::Handler(case) => case.source(),
             Self::Program(program) | Self::Fault { program, .. } => program.source(),
             Self::Lifecycle(actions) => crate::transitions::source(actions),
             Self::Function { source, .. }
+            | Self::P2 { source, .. }
             | Self::Command { source, .. }
             | Self::Reject { source, .. }
             | Self::Scaling { source, .. } => source.clone(),
@@ -174,7 +187,12 @@ impl Case {
         match self {
             Self::Program(program) | Self::Fault { program, .. } => program.form.is_async(),
             Self::Function { asynchronous, .. } => *asynchronous,
-            Self::Lifecycle(_) | Self::Stream(_) | Self::Fetch(_) | Self::Handler(_) => true,
+            Self::Lifecycle(_)
+            | Self::Stream(_)
+            | Self::Fetch(_)
+            | Self::P2Fetch(_)
+            | Self::Handler(_)
+            | Self::P2 { .. } => true,
             _ => false,
         }
     }
@@ -706,6 +724,7 @@ export function run(x: number): {value: number, trace: number[]} {
     contracts.extend(crate::scaling::contracts());
     contracts.push(crate::aggregates::contract());
     contracts.push(crate::collections::contract());
+    contracts.splice(0..0, crate::p2::contracts());
     let mut ids = std::collections::HashSet::new();
     for contract in &contracts {
         ensure!(

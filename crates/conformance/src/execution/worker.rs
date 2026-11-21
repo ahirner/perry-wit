@@ -252,6 +252,10 @@ fn compile_component_cached(
         _ => FactLimits::Default,
     };
     let wit_source = match case {
+        Case::P2Fetch(_) => WIT.replace("x: f64", "url: string").replace(
+            "world generated {", "world generated { include wasi:cli/imports@0.2.12; import wasi:http/outgoing-handler@0.2.12;"
+        ),
+        Case::P2 { wit, .. } => wit.clone(),
         Case::Handler(_) => "@handler".to_owned(),
         Case::Aggregate(agg) => agg.wit_signature.wit_world(),
         Case::Stream(_) => async_wit().replace("x: f64", "input: stream<u8>"),
@@ -272,7 +276,16 @@ fn compile_component_cached(
         return cached.clone();
     }
     let built = (|| -> ComponentCacheValue {
-        let compiled = if matches!(case, Case::Handler(_)) {
+        let compiled = if matches!(case, Case::P2 { .. } | Case::P2Fetch(_)) {
+            let (resolve, package) =
+                perry_wit::component::wit::resolve_source("p2.wit", &wit_source)
+                    .map_err(|e| Outcome::Compile(format!("{e:#}")))?;
+            let world = resolve
+                .select_world(&[package], Some("generated"))
+                .map_err(|e| Outcome::Compile(format!("{e:#}")))?;
+            compile_for_world(source, &path.to_string_lossy(), &resolve, world, true)
+                .map_err(|e| Outcome::Compile(format!("{e:#}")))?
+        } else if matches!(case, Case::Handler(_)) {
             let (resolve, world) =
                 resolve_handler_world().map_err(|e| Outcome::Compile(format!("{e:#}")))?;
             fact_limits
@@ -472,7 +485,12 @@ async fn observations(
         .max(1);
     store.set_epoch_deadline(epoch_ticks);
     let mut linker = Linker::new(engine);
-    wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    if matches!(case, Case::P2 { .. } | Case::P2Fetch(_)) {
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+        wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)?;
+    } else {
+        wasmtime_wasi::p3::add_to_linker(&mut linker)?;
+    }
     if matches!(case, Case::Fetch(_) | Case::Handler(_)) {
         wasmtime_wasi_http::p3::add_to_linker(&mut linker)?;
     }
@@ -503,7 +521,9 @@ async fn observations(
         let instance = linker.instantiate_async(&mut store, component).await?;
         match case {
             Case::Stream(case) => stream_calls(&mut store, &instance, case, fuel).await?,
-            Case::Fetch(case) => fetch_calls(&mut store, &instance, case, fuel).await?,
+            Case::Fetch(case) | Case::P2Fetch(case) => {
+                fetch_calls(&mut store, &instance, case, fuel).await?
+            }
             _ => number_calls(&mut store, &instance, artifacts, fault, case, fuel).await?,
         }
     };

@@ -1,0 +1,13 @@
+[package]
+workspace = ".."
+name = "perry-p2-sys"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+perry-rt-sys.workspace = true
+wasip2.workspace = true
+
+[lints]
+workspace = true
