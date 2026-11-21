@@ -6,6 +6,27 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
         let mut rest = statements;
         while let Some((first, tail)) = rest.split_first() {
+            if let Some(cursor) = self.iteration.tuple_cursor(rest) {
+                let value = self.expression(ctx, cursor.source)?;
+                if !cursor.on_empty.is_empty() {
+                    let empty = self.is_nullish(ctx, value)?;
+                    let fallback = self.new_block(ctx, "iterator_fallback");
+                    let ready = self.new_block(ctx, "iterator_ready");
+                    self.branch(ctx, empty, fallback, ready);
+                    self.switch_to(fallback);
+                    for effect in cursor.on_empty {
+                        self.effect(ctx, effect)?;
+                    }
+                    self.jump(ctx, ready);
+                    self.switch_to(ready);
+                }
+                self.bind_iterator_value(ctx, cursor.id, value);
+                self.statements(ctx, cursor.setup)?;
+                let done = self.is_nullish(ctx, value)?;
+                self.bind_iterator_value(ctx, cursor.done, done);
+                rest = cursor.rest;
+                continue;
+            }
             rest = match self.iteration.element(rest) {
                 Some(element) => {
                     let value = self.conditional(
@@ -15,10 +36,7 @@ impl<'s> FunctionBuilder<'s> {
                         element.value,
                         None,
                     )?;
-                    let slot = self.entry_slot(ctx, value.get_type(ctx));
-                    self.store(ctx, slot, value);
-                    self.variant_guards.assign(element.id);
-                    self.locals.insert(element.id, LocalBinding::plain(slot));
+                    self.bind_iterator_value(ctx, element.id, value);
                     let done = self.condition(ctx, element.condition)?;
                     let done = self.choose(
                         ctx,
@@ -348,6 +366,13 @@ impl<'s> FunctionBuilder<'s> {
             _ => bail_unsupported!("this statement form is not supported yet"),
         }
         Ok(())
+    }
+
+    fn bind_iterator_value(&mut self, ctx: &mut Context, id: LocalId, value: Value) {
+        let slot = self.entry_slot(ctx, value.get_type(ctx));
+        self.store(ctx, slot, value);
+        self.variant_guards.assign(id);
+        self.locals.insert(id, LocalBinding::plain(slot));
     }
 
     pub(super) fn binding(

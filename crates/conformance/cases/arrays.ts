@@ -199,3 +199,17 @@ function nestedConstructorInference(n: number): number {
     return pair.value + pair.extra + inferred.size + inferredMap.size;
 }
 for (const n of [0, 7]) console.log("nested-constructors", nestedConstructorInference(n));
+
+function destructuredLookup(key: string): void {
+    const pairs: [string, number][] = [["", 0], ["other", 2]];
+    let searches = 0;
+    let fallbacks = 0;
+    const [name, value = 17] = pairs.find(([label]) => {
+        searches++;
+        return label === key;
+    }) ?? (fallbacks++, []);
+    const [, second] = pairs.find(([label]) => label === key) ?? [];
+    console.log(name === undefined, value, second === undefined, searches, fallbacks);
+}
+destructuredLookup("");
+destructuredLookup("missing");

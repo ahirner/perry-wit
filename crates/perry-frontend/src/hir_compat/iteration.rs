@@ -8,6 +8,16 @@ pub struct Iteration {
     positions: HashMap<LocalId, usize>,
 }
 
+/// An optional tuple consumed immediately by the compiler-owned iterator, with an empty fallback.
+pub struct TupleCursor<'a> {
+    pub id: LocalId,
+    pub source: &'a Expr,
+    pub on_empty: &'a [Expr],
+    pub setup: &'a [Stmt],
+    pub done: LocalId,
+    pub rest: &'a [Stmt],
+}
+
 pub enum RecordExpr<'a> {
     Value(&'a Expr),
     RequireObject(&'a Expr),
@@ -44,7 +54,74 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
     }
 }
 
+fn initialized(statement: &Stmt) -> Option<(LocalId, &HirType, &Expr)> {
+    let Stmt::Let {
+        id,
+        ty,
+        init: Some(value),
+        ..
+    } = statement
+    else {
+        return None;
+    };
+    Some((*id, ty, value))
+}
+
 impl Iteration {
+    pub fn tuple_cursor<'a>(&mut self, statements: &'a [Stmt]) -> Option<TupleCursor<'a>> {
+        let [source, test, setup @ ..] = statements else {
+            return None;
+        };
+        let (
+            id,
+            HirType::Tuple(_),
+            Expr::Logical {
+                op: perry_hir::ir::LogicalOp::Coalesce,
+                left,
+                right,
+            },
+        ) = initialized(source)?
+        else {
+            return None;
+        };
+        let (guard, _, test) = initialized(test)?;
+        let (fallback, on_empty) = match &**right {
+            Expr::Sequence(parts) => parts.split_last()?,
+            other => (other, &[][..]),
+        };
+        if !matches!(fallback, Expr::Array(items, _) if items.is_empty()) {
+            return None;
+        }
+        let ("arrayRecordNeedsIterator", [Expr::LocalSet(target, value), ..]) = runtime(test)?
+        else {
+            return None;
+        };
+        if *target != id || !matches!(&**value, Expr::LocalGet(source) if *source == id) {
+            return None;
+        }
+        // The iterator protocol has one mutable done flag following its index, payload and next method.
+        let (setup, rest) = setup.split_at_checked(3)?;
+        let (_, _, payload) = initialized(&setup[1])?;
+        if !matches!(runtime(payload), Some(("arrayRecordPayload", [Expr::LocalGet(source), ..])) if *source == id)
+        {
+            return None;
+        }
+        let (state, rest) = rest.split_first()?;
+        let (done, HirType::Boolean, Expr::Bool(false)) = initialized(state)? else {
+            return None;
+        };
+        self.guards.insert(guard);
+        self.released.extend([id, guard]);
+        Some(TupleCursor {
+            id,
+            source: left,
+            on_empty,
+            setup,
+            done,
+            rest,
+        })
+    }
+
     pub fn register_binding(&mut self, id: LocalId, name: &str, init: Option<&Expr>) {
         if matches!(
             init.and_then(runtime),
