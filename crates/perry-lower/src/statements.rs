@@ -361,6 +361,7 @@ impl<'s> FunctionBuilder<'s> {
                 body,
                 catch,
                 finally,
+                ..
             } => self.try_(ctx, body, catch.as_ref(), finally.as_deref())?,
             Stmt::PreallocateBoxes { .. } | Stmt::PreallocateTdzBoxes(_) => {}
             _ => bail_unsupported!("this statement form is not supported yet"),
