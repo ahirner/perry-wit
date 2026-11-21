@@ -355,14 +355,13 @@ impl Solver {
         }
         self.analysis.heap.cells[from].readers.insert(reader);
         let mut previous = None;
-        while let Some(object) = self.next_object(from, previous) {
-            previous = Some(object);
-            self.add_object(ctx, to, object)?;
-        }
-        let mut previous = None;
         while let Some(object) = self.next_layout_object(from, previous) {
             previous = Some(object);
-            self.add_layout_object(to, object);
+            if self.analysis.heap.cells[from].objects.contains(&object) {
+                self.add_object(ctx, to, object)?;
+            } else {
+                self.add_layout_object(to, object);
+            }
         }
         Ok(())
     }
