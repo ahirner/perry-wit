@@ -1,4 +1,4 @@
-//! Numeric layout specialization of aggregate types from converged slot domains.
+//! Physical aggregate layouts from converged slot facts.
 use super::*;
 use pliron::identifier::Legaliser;
 use std::fmt::Write;
@@ -111,9 +111,20 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> Result<Option<TypeHandle>> {
-        let nodes = LayoutPlanner::nodes(ctx, &self.heap, ty, cell, Lossless::All);
+        self.cell_layout(ctx, ty, cell, LayoutRule::Numeric, &mut |_, _| {})
+    }
+
+    pub(super) fn cell_layout(
+        &self,
+        ctx: &Context,
+        ty: TypeHandle,
+        cell: usize,
+        rule: LayoutRule,
+        record: &mut dyn FnMut(TypeHandle, TypeHandle),
+    ) -> Result<Option<TypeHandle>> {
+        let nodes = LayoutPlanner::nodes(ctx, &self.heap, ty, cell, rule);
         LayoutPlan::new(nodes)
-            .map(|plan| plan.materialize(ctx, 0, &mut HashMap::new()))
+            .map(|plan| plan.materialize(ctx, 0, &mut HashMap::new(), record))
             .transpose()
     }
 
@@ -124,10 +135,10 @@ impl ProgramFacts {
         ty: TypeHandle,
         cell: usize,
     ) -> pliron::result::Result<()> {
-        let nodes = LayoutPlanner::nodes(ctx, &self.heap, ty, cell, Lossless::Any);
+        let nodes = LayoutPlanner::nodes(ctx, &self.heap, ty, cell, LayoutRule::VerifyNumeric);
         for node in &nodes {
             for (index, &child) in node.children().iter().enumerate() {
-                if !matches!(nodes[child], LayoutNode::Numeric(_)) {
+                if !matches!(nodes[child], LayoutNode::Replace(_)) {
                     continue;
                 }
                 let message = match node {
@@ -181,11 +192,11 @@ fn projected_type(
     Some(crate::types::OptionalType::get_with(ctx, payload, absence).into())
 }
 
-/// Specialization requires unanimous slot agreement and rejects any lossy slot.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Lossless {
-    All,
-    Any,
+pub(super) enum LayoutRule {
+    Numeric,
+    VerifyNumeric,
+    Source,
 }
 
 /// One heap walk supplies both the specialization graph and the lossless verifier.
@@ -196,7 +207,7 @@ struct LayoutPlan {
 
 enum LayoutNode {
     Keep(TypeHandle),
-    Numeric(TypeHandle),
+    Replace(TypeHandle),
     Optional {
         absence: crate::Absence,
         inner: usize,
@@ -213,7 +224,7 @@ impl LayoutNode {
         match self {
             Self::Optional { inner, .. } | Self::Array(inner) => std::slice::from_ref(inner),
             Self::Record { fields, .. } => fields,
-            Self::Keep(_) | Self::Numeric(_) => &[],
+            Self::Keep(_) | Self::Replace(_) => &[],
         }
     }
 }
@@ -221,7 +232,7 @@ impl LayoutNode {
 struct LayoutPlanner<'a> {
     ctx: &'a Context,
     heap: &'a HeapFacts,
-    lossless: Lossless,
+    rule: LayoutRule,
     visiting: HashMap<TypeHandle, usize>,
     nodes: Vec<LayoutNode>,
 }
@@ -231,7 +242,7 @@ impl LayoutPlan {
         let mut pending: Vec<_> = nodes
             .iter()
             .enumerate()
-            .filter_map(|(id, node)| matches!(node, LayoutNode::Numeric(_)).then_some(id))
+            .filter_map(|(id, node)| matches!(node, LayoutNode::Replace(_)).then_some(id))
             .collect();
         if pending.is_empty() {
             return None;
@@ -256,18 +267,19 @@ impl LayoutPlan {
         ctx: &Context,
         node: usize,
         constructed: &mut HashMap<usize, TypeHandle>,
+        record: &mut dyn FnMut(TypeHandle, TypeHandle),
     ) -> Result<TypeHandle> {
         if let Some(&ty) = constructed.get(&node) {
             return Ok(ty);
         }
         match &self.nodes[node] {
-            LayoutNode::Keep(ty) | LayoutNode::Numeric(ty) => Ok(*ty),
+            LayoutNode::Keep(ty) | LayoutNode::Replace(ty) => Ok(*ty),
             LayoutNode::Optional { absence, inner } => {
-                let inner = self.materialize(ctx, *inner, constructed)?;
+                let inner = self.materialize(ctx, *inner, constructed, record)?;
                 Ok(crate::types::OptionalType::get_with(ctx, inner, *absence).into())
             }
             LayoutNode::Array(element) => {
-                let element = self.materialize(ctx, *element, constructed)?;
+                let element = self.materialize(ctx, *element, constructed, record)?;
                 Ok(ArrayType::get(ctx, element).into())
             }
             LayoutNode::Record {
@@ -284,9 +296,10 @@ impl LayoutPlan {
                 let reserved: TypeHandle =
                     RecordType::get_kind(ctx, name.clone(), None, kind)?.into();
                 constructed.insert(node, reserved);
+                record((*ty).into(), reserved);
                 let mut fields = ty.deref(ctx).fields()?.to_vec();
                 for ((_, ty), &child) in fields.iter_mut().zip(children) {
-                    *ty = self.materialize(ctx, child, constructed)?;
+                    *ty = self.materialize(ctx, child, constructed, record)?;
                 }
                 Ok(RecordType::get_kind(ctx, name, Some(fields), kind)?.into())
             }
@@ -299,7 +312,11 @@ impl LayoutPlan {
             return;
         }
         match &self.nodes[node] {
-            LayoutNode::Numeric(_) => out.push('N'),
+            LayoutNode::Replace(ty) => out.push(if crate::is_byte_input(ctx, payload(ctx, *ty)) {
+                'B'
+            } else {
+                'N'
+            }),
             LayoutNode::Optional { absence, inner } => {
                 let _ = write!(out, "O{}_", *absence as u8);
                 self.write_key(ctx, *inner, path, out);
@@ -337,12 +354,12 @@ impl LayoutPlanner<'_> {
         heap: &HeapFacts,
         ty: TypeHandle,
         cell: usize,
-        lossless: Lossless,
+        rule: LayoutRule,
     ) -> Vec<LayoutNode> {
         let mut planner = LayoutPlanner {
             ctx,
             heap,
-            lossless,
+            rule,
             visiting: HashMap::new(),
             nodes: Vec::new(),
         };
@@ -357,6 +374,13 @@ impl LayoutPlanner<'_> {
         }
         let node = self.nodes.len();
         self.nodes.push(LayoutNode::Keep(ty));
+        if self.rule == LayoutRule::Source
+            && self.heap.cells[cell].facts.source_tag
+            && let Some(tagged) = tagged_type(self.ctx, ty)
+        {
+            self.nodes[node] = LayoutNode::Replace(tagged);
+            return node;
+        }
         if objects.is_empty() {
             return node;
         }
@@ -400,7 +424,7 @@ impl LayoutPlanner<'_> {
         ty: TypeHandle,
     ) -> Option<usize> {
         let mut child = None;
-        let mut lossless = self.lossless == Lossless::All;
+        let mut lossless = self.rule == LayoutRule::Numeric;
         for &object in objects {
             let slot = match (&self.heap.objects[object].contents, field) {
                 (Contents::Array { element, .. }, None) => *element,
@@ -414,16 +438,17 @@ impl LayoutPlanner<'_> {
             ));
             child = Some(slot);
             let required = cell.facts.domain.needs_lossless_64();
-            match self.lossless {
-                Lossless::All => lossless &= required,
-                Lossless::Any => lossless |= required,
+            match self.rule {
+                LayoutRule::Numeric => lossless &= required,
+                LayoutRule::VerifyNumeric => lossless |= required,
+                LayoutRule::Source => (),
             }
         }
-        if aggregate(self.ctx, ty) {
+        if self.rule == LayoutRule::Source || aggregate(self.ctx, ty) {
             return Some(self.visit(ty, child?));
         }
         let node = if lossless && let Some(numeric) = numeric_type_for(self.ctx, ty) {
-            LayoutNode::Numeric(numeric)
+            LayoutNode::Replace(numeric)
         } else {
             LayoutNode::Keep(ty)
         };
@@ -454,4 +479,14 @@ fn numeric_type_for(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
     }
     let (value, absence) = crate::optional::optional_parts(ctx, ty)?;
     is_number(value).then(|| crate::types::OptionalType::get_with(ctx, numeric, absence).into())
+}
+
+pub(super) fn tagged_type(ctx: &Context, ty: TypeHandle) -> Option<TypeHandle> {
+    let value = crate::present_type(ctx, ty).deref(ctx);
+    (value.is::<crate::StringType>() || value.is::<crate::BytesType>()).then(|| {
+        let tagged = crate::byte_input(ctx);
+        crate::optional::absence(ctx, ty).map_or(tagged, |absence| {
+            crate::types::OptionalType::get_with(ctx, tagged, absence).into()
+        })
+    })
 }

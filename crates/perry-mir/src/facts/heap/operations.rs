@@ -75,9 +75,36 @@ impl Solver {
     ) -> Result<Option<ValueFacts>> {
         let reader = Work::Operation(id, index);
         let operation = op.deref(ctx);
+        if self.source_storage {
+            if Operation::is_op::<crate::StoreOp>(op, ctx) {
+                let slot = self.source_local(ctx, id, operation.get_operand(0))?;
+                self.write_slot(ctx, id, slot, operation.get_operand(1), reader)?;
+                return Ok(None);
+            }
+            if crate::is_any::<(crate::LoadOp, crate::GlobalLoadOp)>(ctx, op) {
+                let slot = self.source_local(ctx, id, operation.get_operand(0))?;
+                self.analysis.heap.cells[slot].readers.insert(reader);
+                if let Some(result) = self.heap_value(ctx, id, operation.get_result(0)) {
+                    self.copy_aliases(ctx, slot, result, reader)?;
+                }
+                return Ok(Some(self.analysis.heap.cells[slot].facts));
+            }
+        }
         if let Some(input) = kind.aliased_operand() {
             let input = operation.get_operand(input);
-            self.heap_alias(ctx, id, input, id, operation.get_result(0), reader)?;
+            let result = operation.get_result(0);
+            self.heap_alias(ctx, id, input, id, result, reader)?;
+            if Operation::is_op::<crate::SourceViewOp>(op, ctx)
+                && let Some(cell) = self.heap_value(ctx, id, result)
+            {
+                self.require_source_slots(
+                    ctx,
+                    cell,
+                    result.get_type(ctx),
+                    reader,
+                    &mut std::collections::HashSet::new(),
+                )?;
+            }
             return Ok(Some(self.analysis.states[id].value(input)));
         }
         if let OperationKind::Call { .. } = kind

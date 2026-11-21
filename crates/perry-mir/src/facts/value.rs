@@ -122,6 +122,7 @@ pub(super) struct ValueFacts {
     pub(super) range: Range,
     pub(super) outcome: Outcomes,
     pub(super) presence: Presence,
+    pub(super) source_tag: bool,
     expanded: bool,
     /// An integer literal outside the demanded width reached this value on an exact (not
     /// widening) join, so narrowing it would change the value rather than wrap an overflow.
@@ -162,6 +163,12 @@ impl Representation {
 }
 
 impl ValueFacts {
+    pub(super) fn tagged_source() -> Self {
+        Self {
+            source_tag: true,
+            ..Default::default()
+        }
+    }
     pub(super) fn numeric(domain: Fact, range: Range) -> Self {
         Self {
             domain,
@@ -192,12 +199,14 @@ impl ValueFacts {
                 self.presence,
                 self.inexact,
             );
+        let new_tag = other.source_tag && !self.source_tag;
+        self.source_tag |= other.source_tag;
         self.domain = domain;
         self.range = step.range;
         self.outcome = outcome;
         self.presence = presence;
         self.expanded |= step.expanded;
         self.inexact = inexact;
-        (changed, step.widened)
+        (changed || new_tag, step.widened)
     }
 }

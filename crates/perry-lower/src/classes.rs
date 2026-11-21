@@ -493,12 +493,8 @@ impl<'s> FunctionBuilder<'s> {
                         .class_value_type(ctx, owner_class, type_args, &param.ty)?,
                 )
             };
-            let param_ty = param_ty
-                .map(|ty| {
-                    self.shapes
-                        .storage(ctx, shapes::Binding::Local(param.id), ty)
-                })
-                .transpose()?;
+            let param_ty =
+                param_ty.map(|ty| self.shapes.storage(shapes::Binding::Local(param.id), ty));
             let value = if param.is_rest {
                 let rest_ty = param_ty.ok_or_else(|| {
                     Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")

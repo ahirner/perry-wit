@@ -479,11 +479,13 @@ impl Solver {
 
     fn update_slot(&mut self, ctx: &Context, slot: usize, incoming: ValueFacts) {
         let cell = &mut self.analysis.heap.cells[slot];
-        let old = cell.facts.domain;
+        let old = cell.facts;
         let representation =
             Representation::Storage(Integer::from_type(ctx, payload(ctx, cell.ty)));
         if cell.facts.join(incoming, representation).0 {
-            let reconcile = old != cell.facts.domain && cell.facts.domain.needs_lossless_64();
+            let reconcile = (old.domain != cell.facts.domain
+                && cell.facts.domain.needs_lossless_64())
+                || old.source_tag != cell.facts.source_tag;
             self.heap_changed(slot);
             if reconcile {
                 self.reconcile_owner(slot);
@@ -580,6 +582,7 @@ impl Solver {
         let lossless = slots
             .iter()
             .any(|&slot| cells[slot].facts.domain.needs_lossless_64());
+        let source_tag = slots.iter().any(|&s| cells[s].facts.source_tag);
         let summarized = slots.iter().any(|&slot| cells[slot].summarized);
         let children: BTreeSet<usize> = slots
             .iter()
@@ -607,6 +610,9 @@ impl Solver {
             }
         }
         for &slot in slots {
+            if source_tag && !self.analysis.heap.cells[slot].facts.source_tag {
+                self.update_slot(ctx, slot, ValueFacts::tagged_source());
+            }
             for &child in &children {
                 self.add_layout_object(slot, child);
             }

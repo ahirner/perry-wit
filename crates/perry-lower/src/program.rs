@@ -49,18 +49,28 @@ pub(super) fn build_module(
     foreign: &HashMap<String, crate::hir::Foreign>,
     metadata: &hir_compat::Metadata<'_>,
 ) -> Result<ModuleOp> {
-    build_with_storage(ctx, hir, foreign, metadata, shapes::Storage::default())
+    build_with_storage(ctx, hir, foreign, metadata, None)
 }
 
-fn build_with_storage(
+struct SharedLayouts<'s> {
+    bindings: HashMap<shapes::Binding, TypeHandle>,
+    classes: HashMap<TypeHandle, (&'s str, Vec<shapes::TypeId>)>,
+}
+
+fn build_with_storage<'s>(
     ctx: &mut Context,
-    hir: &HirModule,
+    hir: &'s HirModule,
     foreign: &HashMap<String, crate::hir::Foreign>,
     metadata: &hir_compat::Metadata<'_>,
-    storage: shapes::Storage,
+    layouts: Option<SharedLayouts<'s>>,
 ) -> Result<ModuleOp> {
     let locations = &metadata.locations;
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
+    let mut shapes = Shapes::new(module, hir, foreign, metadata);
+    if let Some(layouts) = layouts {
+        shapes.byte_slots = shapes::Storage::Materialized(layouts.bindings);
+        *shapes.class_records.get_mut() = layouts.classes;
+    }
     // Subclass instances flow into base-typed bindings, where methods would bind statically
     // and `instanceof` would read the declared type: reject inheritance instead of miscompiling.
     if let Some((class, base)) = hir
@@ -70,8 +80,6 @@ fn build_with_storage(
     {
         bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
-    let mut shapes = Shapes::new(module, hir, foreign, metadata);
-    shapes.byte_slots = storage;
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<&str, Builtin> = HashMap::new();
@@ -148,8 +156,7 @@ fn build_with_storage(
                     .with_note(format!("in parameter '{}' of '{display_name}'", param.name));
                 locations.annotate_caller(error, &function.name)
             })?;
-            let base_carrier =
-                shapes.storage(ctx, shapes::Binding::Local(param.id), base_carrier)?;
+            let base_carrier = shapes.storage(shapes::Binding::Local(param.id), base_carrier);
             let integer = shapes.integer_type(ctx, &param.ty);
             let carrier = if param.default.is_some() && !function.is_exported {
                 crate::coerce::admitting(ctx, base_carrier, perry_mir::Absence::Undefined)
@@ -192,9 +199,8 @@ fn build_with_storage(
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
             .flatten();
-        let result_carrier = result_carrier
-            .map(|ty| shapes.storage(ctx, shapes::Binding::Result(function.id), ty))
-            .transpose()?;
+        let result_carrier =
+            result_carrier.map(|ty| shapes.storage(shapes::Binding::Result(function.id), ty));
         let result = result_carrier.map(|carrier| BindingType {
             carrier,
             integer: integer_result,
@@ -293,29 +299,41 @@ fn build_with_storage(
         }
         module.append_operation(ctx, func.get_operation(), 0);
     }
-    let shapes::Storage::Source { views, bindings } = &shapes.byte_slots else {
+    let shapes::Storage::Source {
+        has_views,
+        bindings,
+    } = &shapes.byte_slots
+    else {
         return Ok(module);
     };
-    if views.borrow().is_empty() {
+    if !has_views.get() {
         return Ok(module);
     }
     let facts =
-        perry_mir::SourceSlots::solve(ctx, module.get_operation(), &views.borrow()).to_diag(ctx)?;
-    let mut paths_by_binding: HashMap<_, Vec<Vec<usize>>> = HashMap::new();
-    let mut add = |key, value| {
-        for path in facts.paths(ctx, value) {
-            let paths = paths_by_binding.entry(key).or_default();
-            if !paths.iter().any(|p| p == path) {
-                paths.push(path.to_vec());
-            }
+        perry_mir::ProgramFacts::for_source_storage(module.get_operation(), ctx).to_diag(ctx)?;
+    let mut layouts = HashMap::new();
+    let mut register_class = |source, projected| {
+        if let Some(class) = shapes.class_of_type(ctx, source) {
+            shapes.class_records.borrow_mut().insert(projected, class);
         }
     };
-    for &(key, value) in bindings.borrow().iter() {
-        add(key, value);
-    }
-    for (&id, signature) in &signatures {
-        for value in facts.returned(&signature.name) {
-            add(shapes::Binding::Result(id), value);
+    use perry_mir::SourceBinding;
+    let locals = bindings
+        .take()
+        .into_iter()
+        .map(|(key, value)| (key, SourceBinding::Local(value)));
+    let results = signatures.iter().filter_map(|(&id, signature)| {
+        Some((
+            shapes::Binding::Result(id),
+            SourceBinding::Result(&signature.name, signature.result?.carrier),
+        ))
+    });
+    for (key, binding) in locals.chain(results) {
+        if let Some(ty) = facts
+            .source_layout(ctx, binding, &mut register_class)
+            .to_diag(ctx)?
+        {
+            layouts.insert(key, ty);
         }
     }
     Operation::erase(module.get_operation(), ctx);
@@ -324,7 +342,10 @@ fn build_with_storage(
         hir,
         foreign,
         metadata,
-        shapes::Storage::Materialized(paths_by_binding),
+        Some(SharedLayouts {
+            bindings: layouts,
+            classes: shapes.class_records.take(),
+        }),
     )
 }
 

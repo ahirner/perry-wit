@@ -116,7 +116,7 @@ pub use exceptions::{
     set_exit_only,
 };
 pub use facts::{
-    ProgramFacts, SourceSlots, constrain_signature, specialized_implementation, wit_signature,
+    ProgramFacts, SourceBinding, constrain_signature, specialized_implementation, wit_signature,
     with_fact_limits,
 };
 pub use foreign::{ForeignOp, Phase};

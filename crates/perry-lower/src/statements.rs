@@ -384,9 +384,7 @@ impl<'s> FunctionBuilder<'s> {
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
         });
-        let declared = declared
-            .map(|ty| self.shapes.storage(ctx, shapes::Binding::Local(id), ty))
-            .transpose()?;
+        let declared = declared.map(|ty| self.shapes.storage(shapes::Binding::Local(id), ty));
         let expr_expected = integer
             .filter(|int_ty| int_ty.deref(ctx).width() == 64)
             .map(TypeHandle::from)

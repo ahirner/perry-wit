@@ -350,12 +350,11 @@ impl<'s> FunctionBuilder<'s> {
             Ok(self.emit_value(ctx, |ctx| {
                 perry_mir::AggregateViewOp::new(ctx, value, target)
             }))
-        } else if let shapes::Storage::Source { views, .. } = &self.shapes.byte_slots
+        } else if let shapes::Storage::Source { has_views, .. } = &self.shapes.byte_slots
             && perry_mir::can_share_source(ctx, ty, target)
         {
-            let view = self.emit_value(ctx, |ctx| perry_mir::SourceViewOp::new(ctx, value, target));
-            views.borrow_mut().push(view);
-            Ok(view)
+            has_views.set(true);
+            Ok(self.emit_value(ctx, |ctx| perry_mir::SourceViewOp::new(ctx, value, target)))
         } else {
             // A value that never materializes takes any type.
             if self.never_values.contains(&value) {
