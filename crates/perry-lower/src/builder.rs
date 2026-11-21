@@ -602,6 +602,13 @@ impl FunctionBuilder<'_> {
             ConstantOp::new(ctx, Box::new(FPDoubleAttr::from(value)))
         })
     }
+    pub(super) fn string_length(&mut self, ctx: &mut Context, string: Value) -> Value {
+        let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, string));
+        self.emit_value(ctx, |ctx| {
+            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
+        })
+    }
+
     pub(super) fn string(&mut self, ctx: &mut Context, text: &str) -> Value {
         self.emit_value(ctx, |ctx| StringConstOp::new(ctx, text))
     }

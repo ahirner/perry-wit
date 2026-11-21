@@ -1,8 +1,6 @@
 //! How MIR types are represented in Wasm values and memory slots.
 pub(crate) use crate::values::Carriers;
-use perry_mir::{
-    ByteInputType, OptionalType, PromiseType, SlotType, TransferType, is_reference_type,
-};
+use perry_mir::{OptionalType, PromiseType, SlotType, TransferType, is_reference_type};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_internal;
 use pliron::{
@@ -67,7 +65,6 @@ pub(crate) fn repr(ctx: &Context, ty: TypeHandle) -> Result<Repr> {
     }
     if is_reference_type(ctx, ty)
         || deref.is::<PromiseType>()
-        || deref.is::<ByteInputType>()
         || deref.is::<TransferType>()
         || deref.is::<perry_mir::JsonTraversalType>()
         || deref.is::<SlotType>()

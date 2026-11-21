@@ -141,6 +141,7 @@ pub use regex::RegexConstOp;
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
 pub use types::*;
 pub use variants::{
-    VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, value_tag, variant_cases,
+    VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, byte_input, is_byte_input,
+    value_tag, variant_cases,
 };
 pub use views::{AggregateViewOp, can_widen};

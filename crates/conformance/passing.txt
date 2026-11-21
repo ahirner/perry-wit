@@ -24,6 +24,7 @@ node.timers.promises.value
 node.timers.promises.observers
 node.timers.promises.lifecycle
 ecma.json.command
+ecma.array.wit-input-aliases
 ecma.command.arrays
 ecma.command.sparse-arrays
 ecma.command.text

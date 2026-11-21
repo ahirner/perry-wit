@@ -49,7 +49,6 @@ macro_rules! intrinsic_catalog {
                 StringLower = "string_lower" (String) -> (String), Pure, Atomic;
                 StringUpper = "string_upper" (String) -> (String), Pure, Atomic;
                 BytesAt = "bytes_at" (Bytes, Index) -> (NumberOrInteger), Pure, None => ByteValue;
-                BytesByteInput = "bytes_byte_input" (Bytes) -> (ByteInput), Effectful, None;
                 UrlSearchParams = "url_search_params" (Url) -> (SearchParams), Pure, None;
                 EncoderNew = "encoder_new" () -> (Encoder), Pure, None;
                 DecoderFatal = "decoder_fatal" (Decoder) -> (Bool), Pure, None;
@@ -302,7 +301,6 @@ macro_rules! intrinsic_catalog {
                 StdRegexReplace = "std_regex_replace" [RegexReplace = "regex_replace" (String, Regex, String) -> (String), Pure, Atomic;];
                 StdRegexSearch = "std_regex_search" [RegexSearch = "regex_search" (String, Regex) -> (Number), Pure, None;];
                 StdRegexSplit = "std_regex_split" [RegexSplit = "regex_split" (String, Regex) -> (StringArray), Pure, Atomic;];
-                StdStringByteInput = "std_string_byte_input" [StringByteInput = "string_byte_input" (String) -> (ByteInput), Effectful, Conservative;];
                 StdAsciiStrings = "std_ascii_strings" () -> I32;
                 StdStringAt = "std_string_at" [StringAt = "string_at" (String, Number) -> (OptString), Pure, Atomic;];
                 StdStringCharAt = "std_string_char_at" [StringCharAt = "string_char_at" (String, Number) -> (String), Pure, Atomic;];

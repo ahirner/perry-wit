@@ -13,9 +13,10 @@ pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHan
         if expected == actual || !seen.insert((expected, actual)) {
             return true;
         }
+        let byte_input = perry_mir::is_byte_input(ctx, expected);
         let expected = expected.deref(ctx);
         let actual = actual.deref(ctx);
-        if expected.is::<perry_mir::ByteInputType>() {
+        if byte_input {
             return actual.is::<BytesType>() || actual.is::<StringType>();
         }
         if let (Some(a), Some(b)) = (

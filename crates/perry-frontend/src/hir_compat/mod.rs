@@ -38,6 +38,7 @@ pub struct Metadata<'s> {
     pub inferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
     pub sparse_arrays: bool,
+    pub type_references: HashSet<String>,
 }
 
 pub(crate) struct LoweredHir<'s> {
@@ -47,8 +48,8 @@ pub(crate) struct LoweredHir<'s> {
 
 pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {
     let mut ast = loaded.module;
-    let mut sparse = SparseArrays(false);
-    swc_ecma_visit::VisitWith::visit_with(&ast, &mut sparse);
+    let mut syntax = SourceSyntax::default();
+    swc_ecma_visit::VisitWith::visit_with(&ast, &mut syntax);
     let mut locations = loaded.locations;
     locations.collect(&ast);
     let spans = source::validate(&ast, &locations)?;
@@ -93,12 +94,17 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             locations,
             inferred_bindings,
             constructors,
-            sparse_arrays: sparse.0,
+            sparse_arrays: syntax.sparse_arrays,
+            type_references: syntax.type_references,
         },
     })
 }
 
-struct SparseArrays(bool);
+#[derive(Default)]
+struct SourceSyntax {
+    sparse_arrays: bool,
+    type_references: HashSet<String>,
+}
 
 fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
     if message.starts_with("SyntaxError:") {
@@ -123,9 +129,16 @@ fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
     }
 }
 
-impl swc_ecma_visit::Visit for SparseArrays {
+impl swc_ecma_visit::Visit for SourceSyntax {
+    fn visit_ts_type_ref(&mut self, ty: &perry_parser::swc_ecma_ast::TsTypeRef) {
+        if let perry_parser::swc_ecma_ast::TsEntityName::Ident(name) = &ty.type_name {
+            self.type_references.insert(name.sym.to_string());
+        }
+        swc_ecma_visit::VisitWith::visit_children_with(ty, self);
+    }
+
     fn visit_array_lit(&mut self, array: &perry_parser::swc_ecma_ast::ArrayLit) {
-        self.0 |= array.elems.iter().any(Option::is_none);
+        self.sparse_arrays |= array.elems.iter().any(Option::is_none);
         swc_ecma_visit::VisitWith::visit_children_with(array, self);
     }
 }

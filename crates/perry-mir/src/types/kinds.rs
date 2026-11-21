@@ -104,8 +104,6 @@ value_types! {
         /// A numeric value retaining an exact signed/unsigned 64-bit integer or IEEE double.
         /// Converting a narrower integer into this type explicitly widens its domain.
         NumericType => "perry.numeric";
-        /// Read-only outbound WIT byte storage, accepting either UTF-8 strings or mutable bytes.
-        ByteInputType => "perry.byte_input";
         /// Canonical result area and argument owners of a suspended host call.
         TransferType => "perry.transfer";
     }

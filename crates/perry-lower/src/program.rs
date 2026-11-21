@@ -60,7 +60,8 @@ pub(super) fn build_module(
     {
         bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
-    let shapes = Shapes::new(module, hir, foreign, metadata);
+    let mut shapes = Shapes::new(module, hir, foreign, metadata);
+    shapes.plan_byte_slots(ctx, hir)?;
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<&str, Builtin> = HashMap::new();
@@ -137,6 +138,11 @@ pub(super) fn build_module(
                     .with_note(format!("in parameter '{}' of '{display_name}'", param.name));
                 locations.annotate_caller(error, &function.name)
             })?;
+            let base_carrier = shapes
+                .byte_slots
+                .get(&shapes::Binding::Local(param.id))
+                .copied()
+                .unwrap_or(base_carrier);
             let integer = shapes.integer_type(ctx, &param.ty);
             let carrier = if param.default.is_some() && !function.is_exported {
                 crate::coerce::admitting(ctx, base_carrier, perry_mir::Absence::Undefined)
@@ -168,6 +174,11 @@ pub(super) fn build_module(
         let integer_result = (!function.is_async)
             .then(|| shapes.integer_type(ctx, &function.return_type))
             .flatten();
+        let result_carrier = shapes
+            .byte_slots
+            .get(&shapes::Binding::Result(function.id))
+            .copied()
+            .or(result_carrier);
         let result = result_carrier.map(|carrier| BindingType {
             carrier,
             integer: integer_result,

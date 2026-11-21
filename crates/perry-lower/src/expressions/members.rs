@@ -102,12 +102,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.intrinsic(ctx, intrinsic, vec![value])
             }
-            (Kind::String, "length") => {
-                let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
-                self.emit_value(ctx, |ctx| {
-                    NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-                })
-            }
+            (Kind::String, "length") => self.string_length(ctx, value),
             (Kind::Array, field) if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) => {
                 let key = self.string(ctx, field);
                 self.kv_get(ctx, value, key, k_ty, v_ty)?
@@ -238,6 +233,10 @@ impl<'s> FunctionBuilder<'s> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
         let ty = array.get_type(ctx);
+        if perry_mir::is_byte_input(ctx, ty) {
+            let index = self.number_operand(ctx, index)?;
+            return self.byte_input_index(ctx, array, index);
+        }
         match kind(ctx, array)? {
             Kind::String => {
                 let index = self.number_operand(ctx, index)?;

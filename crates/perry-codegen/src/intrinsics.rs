@@ -142,7 +142,7 @@ impl FunctionLowering<'_, '_> {
         let args = self.operands(ctx, op)?;
         let value = match intrinsic {
             Intrinsic::ModuleInitialize => Some(self.initialization_promise(ctx)?),
-            Intrinsic::BytesByteInput | Intrinsic::UrlSearchParams => Some(args[0]),
+            Intrinsic::UrlSearchParams => Some(args[0]),
             Intrinsic::PrintOut | Intrinsic::PrintErr => {
                 let (interface, fd) = if intrinsic == Intrinsic::PrintOut {
                     ("wasi:cli/stdout@0.3.0", 0)

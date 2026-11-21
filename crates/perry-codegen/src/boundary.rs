@@ -530,6 +530,11 @@ impl FunctionLowering<'_, '_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
+        if perry_mir::is_byte_input(ctx, mir_ty) {
+            let ty = perry_mir::StringType::get(ctx).into();
+            let string = self.lift_string(ctx, ty, ptr, len)?;
+            return self.variant_new(ctx, "string", Some((ty, string)));
+        }
         ensure_diag!(
             mir_ty.deref(ctx).is::<perry_mir::StringType>(),
             codes::CONTRACT_MISMATCH,
@@ -550,6 +555,11 @@ impl FunctionLowering<'_, '_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
+        if *element == AbiType::U8 && perry_mir::is_byte_input(ctx, mir_ty) {
+            let ty = perry_mir::BytesType::get(ctx).into();
+            let bytes = self.lift_list(ctx, element, ty, ptr, len)?;
+            return self.variant_new(ctx, "object", Some((ty, bytes)));
+        }
         if *element == AbiType::U8 && mir_ty.deref(ctx).is::<perry_mir::BytesType>() {
             let bytes = self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, ptr]);
             if self.state.collectible {
@@ -713,6 +723,18 @@ impl FunctionLowering<'_, '_> {
         Ok(self.num(ctx, opcode, vec![value]))
     }
 
+    fn byte_input_payload(&mut self, ctx: &mut Context, value: Value) -> (Value, Value) {
+        use perry_abi::layout::variant;
+        let tag = self.load(ctx, MemKind::I32, value, variant::TAG);
+        let string = self.state.data.string("string");
+        let string = self.i32_const(ctx, string as i32);
+        let is_string = self.num(ctx, NumOpcode::I32Eq, vec![tag, string]);
+        (
+            is_string,
+            self.load(ctx, MemKind::I32, value, variant::VALUE),
+        )
+    }
+
     /// Copy a MIR array into a canonical list buffer and return the `(buffer, length)` pair.
     fn lower_list(
         &mut self,
@@ -722,15 +744,33 @@ impl FunctionLowering<'_, '_> {
         value: Value,
     ) -> Result<(Value, Value)> {
         if *element == AbiType::U8 {
+            if perry_mir::is_byte_input(ctx, mir_ty) {
+                let (is_string, payload) = self.byte_input_payload(ctx, value);
+                let text = self.new_block(ctx, vec![]);
+                let bytes = self.new_block(ctx, vec![]);
+                let done = self.new_block(ctx, vec![i32_type(ctx), i32_type(ctx)]);
+                self.cond_br(ctx, is_string, (text, vec![]), (bytes, vec![]));
+                for (block, ty) in [
+                    (text, perry_mir::StringType::get(ctx).into()),
+                    (bytes, perry_mir::BytesType::get(ctx).into()),
+                ] {
+                    self.block = block;
+                    let (ptr, len) = self.lower_list(ctx, element, ty, payload)?;
+                    self.br(ctx, done, vec![ptr, len]);
+                }
+                self.block = done;
+                return Ok((
+                    done.deref(ctx).get_argument(0),
+                    done.deref(ctx).get_argument(1),
+                ));
+            }
             if mir_ty.deref(ctx).is::<perry_mir::StringType>() {
                 return Ok((
                     self.load(ctx, MemKind::I32, value, strings::DATA),
                     self.load(ctx, MemKind::I32, value, strings::LEN),
                 ));
             }
-            if mir_ty.deref(ctx).is::<perry_mir::BytesType>()
-                || mir_ty.deref(ctx).is::<perry_mir::ByteInputType>()
-            {
+            if mir_ty.deref(ctx).is::<perry_mir::BytesType>() {
                 let view = self.runtime(ctx, Runtime::StdBytesBoundary, vec![value]);
                 let data = self.load(ctx, MemKind::I32, view, 4);
                 let len = self.load(ctx, MemKind::I32, view, 0);
@@ -852,11 +892,18 @@ impl FunctionLowering<'_, '_> {
             }
             AbiType::String => {
                 let value = value.scalar()?;
-                ensure_diag!(
-                    mir_ty.deref(ctx).is::<perry_mir::StringType>(),
-                    codes::CONTRACT_MISMATCH,
-                    "WIT string needs a TypeScript string"
-                );
+                let value = if perry_mir::is_byte_input(ctx, mir_ty) {
+                    let (is_string, payload) = self.byte_input_payload(ctx, value);
+                    self.trap_unless(ctx, is_string, true);
+                    payload
+                } else {
+                    ensure_diag!(
+                        mir_ty.deref(ctx).is::<perry_mir::StringType>(),
+                        codes::CONTRACT_MISMATCH,
+                        "WIT string needs a TypeScript string"
+                    );
+                    value
+                };
                 let data = self.load(ctx, MemKind::I32, value, strings::DATA);
                 let len = self.load(ctx, MemKind::I32, value, strings::LEN);
                 target.write(self, ctx, MemKind::I32, 0, data)?;

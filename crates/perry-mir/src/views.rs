@@ -1,7 +1,7 @@
 //! Alias-preserving widening of closed aggregates with identical storage layouts.
 use crate::operation_schema::op_schema;
 use crate::signatures::{Accepts, OutputContract};
-use crate::types::{ArrayType, ByteInputType, BytesType, OptionalType, RecordType, VariantType};
+use crate::types::{ArrayType, OptionalType, RecordType, VariantType};
 use pliron::{
     common_traits::Verify,
     context::Context,
@@ -34,9 +34,6 @@ pub fn can_widen(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool 
                 return false;
             };
             return a.iter().all(|case| b.contains(case));
-        }
-        if a.is::<BytesType>() && b.is::<ByteInputType>() {
-            return true;
         }
         if !a.is::<OptionalType>()
             && let Some(b) = b.downcast_ref::<OptionalType>()

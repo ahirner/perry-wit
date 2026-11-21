@@ -14,6 +14,14 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        let ty = array.get_type(ctx);
+        if ty.deref(ctx).is::<BytesType>() || perry_mir::is_byte_input(ctx, ty) {
+            let index = self.number_operand(ctx, index)?;
+            let value = self.number_operand(ctx, value)?;
+            let bytes = self.fit(ctx, array, BytesType::get(ctx).into())?;
+            self.intrinsic_void(ctx, Intrinsic::BytesSet, vec![bytes, index, value]);
+            return Ok(value);
+        }
         if let Some(record) = perry_mir::typed::<RecordType>(ctx, array.get_type(ctx))
             && record.deref(ctx).kind() == RecordKind::Tuple
         {

@@ -24,8 +24,10 @@ mod collection_types;
 pub(crate) use perry_frontend::shapes::TypeId;
 use perry_frontend::shapes::{Classes, Declarations, RecordId, captured, generics::InstanceKey};
 
+mod byte_slots;
 mod generics;
 mod representation;
+pub(super) use byte_slots::Binding;
 use perry_frontend::shapes::perry_integer_spec;
 use representation::integer_mir_carrier;
 
@@ -96,6 +98,7 @@ pub(super) struct Shapes<'h> {
     /// Resolved nominal instances keyed by declaration identity and type arguments.
     named: RefCell<HashMap<InstanceKey, TypeHandle>>,
     records: RefCell<HashMap<RecordId, TypedHandle<RecordType>>>,
+    pub(super) byte_slots: HashMap<Binding, TypeHandle>,
     inputs: RefCell<HashMap<TypeHandle, TypeHandle>>,
 }
 
@@ -159,6 +162,7 @@ impl<'h> Shapes<'h> {
             pending: RefCell::new(HashMap::new()),
             named: RefCell::new(HashMap::new()),
             records: RefCell::new(HashMap::new()),
+            byte_slots: HashMap::new(),
             inputs: RefCell::new(HashMap::new()),
         }
     }
@@ -234,7 +238,7 @@ impl<'h> Shapes<'h> {
         let deref = ty.deref(ctx);
         let mapped = if deref.is::<perry_mir::BytesType>() {
             drop(deref);
-            perry_mir::ByteInputType::get(ctx).into()
+            perry_mir::byte_input(ctx)
         } else if let Some(array) = deref.downcast_ref::<ArrayType>() {
             let element = array.element();
             drop(deref);

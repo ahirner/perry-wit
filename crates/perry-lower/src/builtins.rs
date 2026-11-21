@@ -25,6 +25,9 @@ impl<'s> FunctionBuilder<'s> {
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
+        if perry_mir::is_byte_input(ctx, receiver.get_type(ctx)) {
+            return self.byte_input_method(ctx, receiver, method.name(), args);
+        }
         if method == hir_compat::Method::Iteration {
             ensure_unsupported!(
                 matches!(kind(ctx, receiver)?, Kind::Array | Kind::String)

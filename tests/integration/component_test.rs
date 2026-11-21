@@ -497,6 +497,7 @@ world boundary {
     record payload { text: list<u8>, parts: list<list<u8>> }
     export encode: func(text: string, bytes: list<u8>, text-first: bool) -> payload;
     export regular: func(bytes: list<u8>) -> payload;
+    export labels: func(values: list<string>, replace: bool) -> list<string>;
 }
 "#
     );
@@ -517,6 +518,12 @@ function make(text: string, bytes: Uint8Array, textFirst: boolean): WitInput<Pay
 }
 export function encode(text: string, bytes: Uint8Array, textFirst: boolean) {
     return make(text, bytes, textFirst);
+}
+export function labels(values: string[], replace: boolean): string[] {
+    const inputs: WitInput<Uint8Array>[] = values;
+    if (replace) inputs[0] = new Uint8Array(1);
+    else inputs.push("漢");
+    return values;
 }
 "#,
     )?;
@@ -539,6 +546,17 @@ export function encode(text: string, bytes: Uint8Array, textFirst: boolean) {
             },
         )?;
     }
+    let labels = ["é"].as_slice();
+    component.check(
+        "labels",
+        (labels, false),
+        &vec!["é".to_owned(), "漢".to_owned()],
+    )?;
+    assert!(
+        component
+            .call::<_, Vec<String>>("labels", (labels, true))
+            .is_err()
+    );
     Ok(())
 }
 
@@ -882,10 +900,22 @@ fn bigint_boundary_rejects_results_outside_transport_range() -> Result<()> {
 #[test]
 fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()> {
     let mut resolve = wit_parser::Resolve::default();
-    let package = resolve.push_str("reuse.wit", "package test:reuse; world reuse {export text:func(value:string)->list<u8>;export bytes:func(value:list<u8>)->list<u8>;}")?;
+    let package = resolve.push_str(
+        "reuse.wit",
+        "package test:reuse; world reuse {
+        export text: func(value: string) -> list<u8>;
+        export bytes: func(value: list<u8>) -> list<u8>;
+        export parts: func(value: string) -> list<list<u8>>;
+    }",
+    )?;
     let world = resolve.select_world(&[package], Some("reuse"))?;
     let compiled = compile_for_world(
-        "export function text(value:string) {return value;} export function bytes(value:Uint8Array) {if(value.length>0)value[0]=65;return value;}",
+        "export function text(value:string) {return value;}
+         export function bytes(value:Uint8Array) {if(value.length>0)value[0]=65;return value;}
+         export function parts(value: string): WitInput<Uint8Array>[] {
+             const values: string[] = [value, value];
+             return values;
+         }",
         "reuse.ts",
         &resolve,
         world,
@@ -898,7 +928,7 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
     let memory = instance.get_memory(&mut store, "memory").unwrap();
     let allocate =
         instance.get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, "cabi_realloc")?;
-    for name in ["text", "bytes"] {
+    for name in ["text", "bytes", "parts"] {
         let run = instance.get_typed_func::<(i32, i32), i32>(&mut store, name)?;
         let post = instance.get_typed_func::<i32, ()>(&mut store, &format!("cabi_post_{name}"))?;
         for text in ["ASCII", "Grüße 漢字😀"] {
@@ -906,19 +936,26 @@ fn canonical_byte_payloads_reuse_input_storage_in_both_directions() -> Result<()
             memory.write(&mut store, input as usize, text.as_bytes())?;
             let output = run.call(&mut store, (input, text.len() as i32))? as usize;
             let data = memory.data(&store);
-            let returned =
-                u32::from_le_bytes(data[output..output + 4].try_into().unwrap()) as usize;
-            let len = u32::from_le_bytes(data[output + 4..output + 8].try_into().unwrap()) as usize;
-            assert_eq!(
-                returned, input as usize,
-                "{name} made an extra guest payload copy"
-            );
-            assert_eq!(len, text.len());
-            let mut expected = text.as_bytes().to_vec();
-            if name == "bytes" {
-                expected[0] = b'A';
+            let descriptor = |at: usize| {
+                let word = |offset| {
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize
+                };
+                (word(at), word(at + 4))
+            };
+            let expected = (input as usize, text.len());
+            let result = descriptor(output);
+            if name == "parts" {
+                assert_eq!(result.1, 2);
+                assert_eq!(descriptor(result.0), expected);
+                assert_eq!(descriptor(result.0 + 8), expected);
+            } else {
+                assert_eq!(result, expected, "{name} made an extra guest payload copy");
             }
-            assert_eq!(&data[returned..returned + len], expected);
+            let mut contents = text.as_bytes().to_vec();
+            if name == "bytes" {
+                contents[0] = b'A';
+            }
+            assert_eq!(&data[expected.0..expected.0 + expected.1], contents);
             post.call(&mut store, output as i32)?;
         }
     }

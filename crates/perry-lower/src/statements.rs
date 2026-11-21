@@ -381,6 +381,12 @@ impl<'s> FunctionBuilder<'s> {
             .resolved()
             .map(|ty| self.active_value_type(ctx, ty))
             .transpose()?;
+        let declared = self
+            .shapes
+            .byte_slots
+            .get(&shapes::Binding::Local(id))
+            .copied()
+            .or(declared);
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
         });

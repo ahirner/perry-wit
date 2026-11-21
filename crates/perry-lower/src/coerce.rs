@@ -303,18 +303,6 @@ impl<'s> FunctionBuilder<'s> {
             });
             return self.fit(ctx, payload, target);
         }
-        if target.deref(ctx).is::<perry_mir::ByteInputType>() {
-            let convert = if ty.deref(ctx).is::<StringType>() {
-                Some(Intrinsic::StringByteInput)
-            } else if ty.deref(ctx).is::<BytesType>() {
-                Some(Intrinsic::BytesByteInput)
-            } else {
-                None
-            };
-            if let Some(convert) = convert {
-                return Ok(self.intrinsic(ctx, convert, vec![value]));
-            }
-        }
         if ty.deref(ctx).is::<JsonType>()
             && ty != target
             && perry_mir::JsonSchema::supports_descriptor(ctx, target)
@@ -447,6 +435,9 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
         let value = self.defined(ctx, value)?;
+        if want == Kind::Bytes && perry_mir::is_byte_input(ctx, value.get_type(ctx)) {
+            return self.fit(ctx, value, BytesType::get(ctx).into());
+        }
         ensure_diag!(
             kind(ctx, value)? == want,
             codes::TYPE_MISMATCH,
