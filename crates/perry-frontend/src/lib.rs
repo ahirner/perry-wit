@@ -30,7 +30,7 @@ pub mod hir {
         Integer { width: u32, signedness: Signedness },
         Resource(u32),
         Input(Box<Foreign>),
-        Function(FunctionType),
+        Function(perry_wit_diagnostics::Result<FunctionType>),
     }
 }
 

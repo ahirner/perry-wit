@@ -304,3 +304,66 @@ async fn detached_imports_acknowledge_cancellation_before_task_cleanup() -> Resu
     }
     Ok(())
 }
+
+#[test]
+fn wit_flags_pack_partial_fields_and_lift_complete_objects() -> Result<()> {
+    use wasmtime::component::Val;
+
+    for width in [1, 8, 9, 16, 17, 32] {
+        let mut names = vec!["first-bit".to_owned()];
+        names.extend((1..width).map(|i| format!("f{i}")));
+        let last = names.last().unwrap();
+        let field = if width == 1 {
+            "firstBit"
+        } else {
+            last.as_str()
+        };
+        let wit = format!("package test:bitset;
+            interface service {{ flags bits {{ {} }} echo: func(value:bits) -> bits; }}
+            world app {{ import service; use service.{{bits}};
+                export relay:func(value:bits)->bits; export partial:func(on:bool)->bits; export empty:func(on:bool)->bits; export bound:func(on:bool)->bits;
+                export rows:func(values:list<bits>)->list<bits>; export unset:func(value:bits)->bool; }}",
+            names.join(", "));
+        let source = format!("import {{echo}} from 'test:bitset/service';
+            import type {{Bits}} from './types/world';
+            export function relay(value:Bits):Bits {{ return echo(value); }}
+            export function partial(on:boolean):Bits {{ return echo({{ {field}:on }}); }}
+            export function bound(on:boolean):Bits {{ const opts = {{ {field}:on, label:'saved' }}; return echo(opts); }}
+            export function empty(on:boolean):Bits {{ if(on) return echo({{}}); return echo({{ {field}:undefined }}); }}
+            export function rows(values:Bits[]):Bits[] {{ return values; }}
+            export function unset(value:Bits):boolean {{ return value.firstBit === false; }}");
+        let bytes = MemoryChecked.component(&wit, "app", "flags.ts", &source)?;
+        let engine = Engine::default();
+        let component = Component::new(&engine, bytes)?;
+        let mut linker = Linker::new(&engine);
+        linker.instance("test:bitset/service")?.func_new(
+            "echo",
+            |_store, _ty, args, results| {
+                results[0] = args[0].clone();
+                Ok(())
+            },
+        )?;
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate(&mut store, &component)?;
+        let mut check = |name: &str, arg: Val, expected: Val| -> Result<()> {
+            let f = instance.get_func(&mut store, name).unwrap();
+            let mut results = [Val::Bool(false)];
+            f.call(&mut store, &[arg], &mut results)?;
+            assert_eq!(results[0], expected, "{width} flags, {name}");
+            Ok(())
+        };
+        let high = Val::Flags(vec![last.clone()]);
+        let none = Val::Flags(Vec::new());
+        check("relay", high.clone(), high.clone())?;
+        check("partial", Val::Bool(true), high.clone())?;
+        check("partial", Val::Bool(false), none.clone())?;
+        check("bound", Val::Bool(true), high.clone())?;
+        check("bound", Val::Bool(false), none.clone())?;
+        check("empty", Val::Bool(true), none.clone())?;
+        check("empty", Val::Bool(false), none.clone())?;
+        check("unset", none.clone(), Val::Bool(true))?;
+        let rows = Val::List(vec![high, none, Val::Flags(names)]);
+        check("rows", rows.clone(), rows)?;
+    }
+    Ok(())
+}

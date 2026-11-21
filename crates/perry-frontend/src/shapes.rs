@@ -173,6 +173,8 @@ fn hash_hir_type<H: std::hash::Hasher>(ty: &HirType, state: &mut H) {
     }
 }
 
+pub type ImportedFunction<'h> = (&'h str, &'h Result<perry_hir::types::FunctionType>);
+
 pub struct Declarations<'h> {
     pub(crate) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
     pub(crate) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
@@ -181,7 +183,7 @@ pub struct Declarations<'h> {
     pub foreign: &'h HashMap<String, crate::hir::Foreign>,
     pub integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub imported_types: HashMap<&'h str, &'h crate::hir::Foreign>,
-    pub foreign_functions: HashMap<&'h str, (&'h str, &'h perry_hir::types::FunctionType)>,
+    pub foreign_functions: HashMap<&'h str, ImportedFunction<'h>>,
 }
 
 impl<'h> Declarations<'h> {

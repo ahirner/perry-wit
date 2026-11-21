@@ -40,6 +40,14 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
                 out.push('}');
                 out
             }
+            Contract::Flags(names) => {
+                let mut out = String::from("{\n");
+                for name in names {
+                    let _ = writeln!(out, "  {name}?: boolean;");
+                }
+                out.push('}');
+                out
+            }
             Contract::Enum(cases) => cases
                 .map(|name| format!("\"{name}\""))
                 .collect::<Vec<_>>()
@@ -371,6 +379,7 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
             );
         }
         TypeDefKind::Record(_)
+        | TypeDefKind::Flags(_)
         | TypeDefKind::Enum(_)
         | TypeDefKind::Variant(_)
         | TypeDefKind::Type(_)
@@ -379,18 +388,11 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
         | TypeDefKind::Tuple(_)
         | TypeDefKind::Result(_) => {
             let value = type_to_ts(names, Input::Definition(type_id));
-            if matches!(td.kind, TypeDefKind::Record(_)) {
+            if matches!(td.kind, TypeDefKind::Record(_) | TypeDefKind::Flags(_)) {
                 let _ = write!(out, "export interface {type_name} {value}\n\n");
             } else {
                 let _ = write!(out, "export type {type_name} = {value};\n\n");
             }
-        }
-        TypeDefKind::Flags(flags) => {
-            let _ = writeln!(out, "export interface {type_name} {{");
-            for f in &flags.flags {
-                let _ = writeln!(out, "  {}?: boolean;", to_camel_case(&f.name));
-            }
-            out.push_str("}\n\n");
         }
         _ => {}
     }

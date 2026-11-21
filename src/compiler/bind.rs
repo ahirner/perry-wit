@@ -321,6 +321,14 @@ pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
                     .map(|(name, ty)| Ok((name, ty?)))
                     .collect::<Result<_>>()?,
             ),
+            Contract::Flags(names) => {
+                perry_wit_diagnostics::ensure_diag!(
+                    (1..=32).contains(&names.len()),
+                    crate::codes::UNSUPPORTED_TYPE,
+                    "WIT flags must contain between 1 and 32 flags"
+                );
+                AbiType::Flags(names.collect())
+            }
             Contract::Enum(cases) => AbiType::Enum(cases.map(str::to_owned).collect()),
             Contract::Variant(cases) => AbiType::Variant(
                 cases

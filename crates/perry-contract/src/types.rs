@@ -13,6 +13,7 @@ pub enum Contract<'a, T> {
     Result { ok: Option<T>, err: Option<T> },
     Tuple(Children<'a, T>),
     Record(Children<'a, (String, T)>),
+    Flags(&'a mut dyn ExactSizeIterator<Item = String>),
     Enum(&'a mut dyn Iterator<Item = &'a str>),
     Variant(Children<'a, (&'a str, Option<T>)>),
     Unsupported(&'static str),
@@ -70,6 +71,14 @@ pub fn convert<T>(
                     .cases
                     .iter()
                     .map(|case| (case.name.as_str(), case.ty.as_ref().map(child))),
+            ));
+        }
+        TypeDefKind::Flags(flags) => {
+            return construct(Contract::Flags(
+                &mut flags
+                    .flags
+                    .iter()
+                    .map(|flag| crate::names::to_camel_case(&flag.name)),
             ));
         }
         TypeDefKind::Enum(enumeration) => {

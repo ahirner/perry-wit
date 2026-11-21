@@ -36,12 +36,28 @@ pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHan
             expected.downcast_ref::<RecordType>(),
             actual.downcast_ref::<RecordType>(),
         ) {
-            let (Ok(a), Ok(b)) = (a.fields(), b.fields()) else {
+            let (Ok(expected_fields), Ok(actual_fields)) = (a.fields(), b.fields()) else {
                 return false;
             };
-            return a.len() == b.len()
-                && a.iter()
-                    .zip(b)
+            if a.kind() == RecordKind::Object && b.kind() == RecordKind::Object {
+                return expected_fields.iter().all(|(name, expected)| {
+                    // Optional WIT flag properties may be absent or hold a plain boolean.
+                    let optional = optional_parts(ctx, *expected)
+                        .filter(|(_, absent)| *absent == perry_mir::Absence::Undefined);
+                    match b.field(name) {
+                        None => optional.is_some(),
+                        Some((_, actual)) => {
+                            accepts(ctx, *expected, actual, seen)
+                                || optional
+                                    .is_some_and(|(present, _)| accepts(ctx, present, actual, seen))
+                        }
+                    }
+                });
+            }
+            return expected_fields.len() == actual_fields.len()
+                && expected_fields
+                    .iter()
+                    .zip(actual_fields)
                     .all(|((an, at), (bn, bt))| an == bn && accepts(ctx, *at, *bt, seen));
         }
         if let (Some(a), Some(b)) = (

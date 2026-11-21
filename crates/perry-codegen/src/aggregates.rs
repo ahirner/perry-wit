@@ -12,7 +12,7 @@ use perry_mir::{
     ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema,
     PlironResultExt as _, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
-use perry_wit_diagnostics::{Diagnostic, Result, codes, diag, ensure_unsupported, internal};
+use perry_wit_diagnostics::{Diagnostic, Result, codes, diag, ensure_unsupported};
 use pliron::{
     builtin::types::FP64Type,
     context::{Context, Ptr},
@@ -655,22 +655,25 @@ impl FunctionLowering<'_, '_> {
         record: TypedHandle<RecordType>,
         field: &str,
     ) -> Result<(u32, TypeHandle)> {
+        Self::find_record_field_slot(ctx, record, field)?.ok_or_else(|| {
+            diag!(
+                codes::CONTRACT_MISMATCH,
+                "TypeScript type {} has no field {field}",
+                record.deref(ctx).name()
+            )
+        })
+    }
+
+    pub(crate) fn find_record_field_slot(
+        ctx: &Context,
+        record: TypedHandle<RecordType>,
+        field: &str,
+    ) -> Result<Option<(u32, TypeHandle)>> {
         let record = record.deref(ctx);
-        let fields = record
-            .fields()
-            .map_err(|_| internal!("record has no field {field}"))?;
-        let (index, (_, field_ty)) = fields
-            .iter()
-            .enumerate()
-            .find(|(_, (name, _))| name == field)
-            .ok_or_else(|| {
-                diag!(
-                    codes::CONTRACT_MISMATCH,
-                    "TypeScript type {} has no field {field}",
-                    record.name()
-                )
-            })?;
-        Ok((record_offset(ctx, &fields[..index]), *field_ty))
+        let fields = record.fields().to_diag(ctx)?;
+        Ok(record
+            .field(field)
+            .map(|(index, ty)| (record_offset(ctx, &fields[..index]), ty)))
     }
 
     fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {

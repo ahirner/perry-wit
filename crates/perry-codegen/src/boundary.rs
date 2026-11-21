@@ -73,6 +73,7 @@ pub enum AbiType {
         ok: Option<Box<AbiType>>,
         err: Option<Box<AbiType>>,
     },
+    Flags(Vec<String>),
     Enum(Vec<String>),
     Variant(Vec<(String, Option<AbiType>)>),
     /// `stream<u8>`: the readable end's handle, a `ReadableStream<Uint8Array>` in TypeScript.
@@ -190,6 +191,7 @@ impl AbiType {
             Self::Option(_) => "option",
             Self::Result { .. } => "result",
             Self::Enum(_) => "enum",
+            Self::Flags(_) => "flags",
             Self::Variant(_) => "variant",
             Self::ByteStream => "stream<u8>",
             Self::Resource { owned: true, .. } => "own",
@@ -226,6 +228,7 @@ impl AbiType {
             | AbiType::S32
             | AbiType::U32
             | AbiType::ByteStream
+            | AbiType::Flags(_)
             | AbiType::Resource { .. } => out.push(Flat::I32),
             AbiType::S64 | AbiType::U64 => out.push(Flat::I64),
             AbiType::F32 => out.push(Flat::F32),
@@ -248,6 +251,7 @@ impl AbiType {
 
     fn alignment(&self) -> u32 {
         match self {
+            AbiType::Flags(names) => flag_word(names).bytes(),
             AbiType::Bool | AbiType::S8 | AbiType::U8 => 1,
             AbiType::S16 | AbiType::U16 => 2,
             AbiType::S32
@@ -268,6 +272,7 @@ impl AbiType {
 
     fn size(&self) -> u32 {
         match self {
+            AbiType::Flags(names) => flag_word(names).bytes(),
             AbiType::Bool | AbiType::S8 | AbiType::U8 => 1,
             AbiType::S16 | AbiType::U16 => 2,
             AbiType::S32
@@ -310,6 +315,14 @@ impl AbiType {
     }
 }
 
+fn flag_word(names: &[String]) -> MemKind {
+    match names.len() {
+        1..=8 => MemKind::I32U8,
+        9..=16 => MemKind::I32U16,
+        _ => MemKind::I32,
+    }
+}
+
 fn align(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
 }
@@ -344,6 +357,15 @@ pub(crate) fn flat_type(ctx: &mut Context, flat: Flat) -> TypeHandle {
 /// Symbol of a canonical-ABI glue function named after a WIT item.
 fn identifier(name: &str) -> Identifier {
     crate::host::symbol(pliron::ident!("wit_"), name)
+}
+
+fn ensure_flag(ctx: &Context, name: &str, field: TypeHandle) -> Result<()> {
+    ensure_diag!(
+        repr(ctx, field)? == Repr::Bool,
+        codes::CONTRACT_MISMATCH,
+        "WIT flag '{name}' needs a TypeScript boolean"
+    );
+    Ok(())
 }
 
 fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> {
@@ -485,6 +507,21 @@ impl FunctionLowering<'_, '_> {
             AbiType::ByteStream => {
                 let handle = source.read(self, ctx, MemKind::I32, 0)?;
                 self.lift_stream(ctx, mir_ty, handle)
+            }
+            AbiType::Flags(names) => {
+                let bits = source.read(self, ctx, flag_word(names), 0)?;
+                let record = self.record_type(ctx, mir_ty)?;
+                let mut values = Vec::with_capacity(names.len());
+                let zero = self.i32_const(ctx, 0);
+                for (bit, name) in names.iter().enumerate() {
+                    let (_, field) = record_field(ctx, record, name)?;
+                    ensure_flag(ctx, name, field)?;
+                    let mask = self.i32_const(ctx, (1u32 << bit) as i32);
+                    let set = self.num(ctx, NumOpcode::I32And, vec![bits, mask]);
+                    let value = self.num(ctx, NumOpcode::I32Ne, vec![set, zero]);
+                    values.push((name.as_str(), value));
+                }
+                self.build_record(ctx, mir_ty, values)
             }
             AbiType::Record(fields) => {
                 let record = self.record_type(ctx, mir_ty)?;
@@ -867,6 +904,26 @@ impl FunctionLowering<'_, '_> {
                 let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
                 target.write(self, ctx, MemKind::I32, 0, buffer)?;
                 target.write(self, ctx, MemKind::I32, 4, len)?;
+            }
+            AbiType::Flags(names) => {
+                let record = self.record_type(ctx, mir_ty)?;
+                let owner = value.scalar()?;
+                let mut bits = self.i32_const(ctx, 0);
+                let one = self.i32_const(ctx, 1);
+                for (bit, name) in names.iter().enumerate() {
+                    let Some((offset, field)) = Self::find_record_field_slot(ctx, record, name)?
+                    else {
+                        continue;
+                    };
+                    ensure_flag(ctx, name, field)?;
+                    let value = self.load_slot_value(ctx, owner, offset, field)?.scalar()?;
+                    // Optional boolean slots encode undefined and omitted separately from true.
+                    let set = self.num(ctx, NumOpcode::I32Eq, vec![value, one]);
+                    let shift = self.i32_const(ctx, bit as i32);
+                    let flag = self.num(ctx, NumOpcode::I32Shl, vec![set, shift]);
+                    bits = self.num(ctx, NumOpcode::I32Or, vec![bits, flag]);
+                }
+                target.write(self, ctx, flag_word(names), 0, bits)?;
             }
             AbiType::Record(fields) => {
                 let value = value.scalar()?;

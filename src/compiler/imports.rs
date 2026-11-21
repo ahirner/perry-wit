@@ -2,6 +2,7 @@
 use super::bind::abi_type;
 use perry_codegen::boundary::Import;
 use perry_frontend::wit::WorldTypes;
+use perry_wit_diagnostics::{Result, codes, diag};
 use wit_parser::{Resolve, WorldId};
 
 pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes) -> Vec<Import> {
@@ -13,25 +14,33 @@ pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes
             "$root".into()
         };
         let function = entry.function;
-        let Ok(params) = function
-            .params
-            .iter()
-            .map(|parameter| abi_type(resolve, &parameter.ty))
-            .collect()
-        else {
-            continue;
+        let signature = || -> Result<_> {
+            let params = function
+                .params
+                .iter()
+                .map(|parameter| abi_type(resolve, &parameter.ty))
+                .collect::<Result<_>>()?;
+            let result = function
+                .result
+                .as_ref()
+                .map(|ty| abi_type(resolve, ty))
+                .transpose()?;
+            let source = WorldTypes::function_type(resolve, function).ok_or_else(|| {
+                diag!(
+                    codes::UNSUPPORTED_TYPE,
+                    "WIT function signature has no supported TypeScript representation"
+                )
+            })?;
+            Ok((params, result, source))
         };
-        let Ok(result) = function
-            .result
-            .as_ref()
-            .map(|ty| abi_type(resolve, ty))
-            .transpose()
-        else {
-            continue;
+        let (params, result, source) = match signature() {
+            Ok(parts) => parts,
+            Err(reason) => {
+                types.import_function(&module, function, Err(reason));
+                continue;
+            }
         };
-        let Some(binding) = types.import_function(resolve, &module, function) else {
-            continue;
-        };
+        let binding = types.import_function(&module, function, Ok(source));
         imports.push(Import {
             binding,
             module,

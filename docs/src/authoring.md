@@ -36,6 +36,8 @@ perry-wit gen-types --wit wit --world task --entry src/index.ts -o .perry/types
 tsc --noEmit -p .perry/types
 ```
 
+WIT flags use objects with optional boolean properties. A guest can pass a subset such as `{ create: true }`. A guest receiving flags sees every declared property as `true` or `false`.
+
 WIT integer types appear as `number` and `bigint`. See [Semantics](semantics.md) for how the compiler uses them.
 
 ## Commands

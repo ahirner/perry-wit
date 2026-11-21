@@ -22,7 +22,9 @@ use std::{
 
 mod collection_types;
 pub(crate) use perry_frontend::shapes::TypeId;
-use perry_frontend::shapes::{Classes, Declarations, RecordId, captured, generics::InstanceKey};
+use perry_frontend::shapes::{
+    Classes, Declarations, ImportedFunction, RecordId, captured, generics::InstanceKey,
+};
 
 mod generics;
 mod representation;
@@ -220,10 +222,7 @@ impl<'h> Shapes<'h> {
         self.function_names.contains(name)
     }
 
-    pub(super) fn foreign_function(
-        &self,
-        local: &str,
-    ) -> Option<(&'h str, &'h perry_frontend::hir::types::FunctionType)> {
+    pub(super) fn foreign_function(&self, local: &str) -> Option<ImportedFunction<'h>> {
         self.decls.foreign_functions.get(local).copied()
     }
 

@@ -38,12 +38,7 @@ impl WorldTypes {
         &self.foreign
     }
 
-    pub fn import_function(
-        &mut self,
-        resolve: &Resolve,
-        module: &str,
-        function: &Function,
-    ) -> Option<String> {
+    pub fn function_type(resolve: &Resolve, function: &Function) -> Option<FunctionType> {
         let params = function
             .params
             .iter()
@@ -62,17 +57,24 @@ impl WorldTypes {
             Some(ty) => types::ty(resolve, Input::Reference(ty))?,
             None => HirType::Void,
         };
+        Some(FunctionType {
+            params,
+            return_type: Box::new(result),
+            is_async: function.kind.is_async(),
+            is_generator: false,
+        })
+    }
+
+    pub fn import_function(
+        &mut self,
+        module: &str,
+        function: &Function,
+        signature: Result<FunctionType>,
+    ) -> String {
         let binding = format!("{module}#{}", to_camel_case(&function.name));
-        self.foreign.insert(
-            binding.clone(),
-            Foreign::Function(FunctionType {
-                params,
-                return_type: Box::new(result),
-                is_async: function.kind.is_async(),
-                is_generator: false,
-            }),
-        );
-        Some(binding)
+        self.foreign
+            .insert(binding.clone(), Foreign::Function(signature));
+        binding
     }
 
     pub fn resource_helpers(
@@ -114,12 +116,12 @@ impl WorldTypes {
                 let binding = format!("{module}#{name}");
                 self.foreign.insert(
                     binding.clone(),
-                    Foreign::Function(FunctionType {
+                    Foreign::Function(Ok(FunctionType {
                         params: vec![("value".into(), input, false)],
                         return_type: Box::new(output),
                         is_async: false,
                         is_generator: false,
-                    }),
+                    })),
                 );
                 ResourceHelper {
                     binding,

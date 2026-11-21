@@ -165,7 +165,7 @@ macro_rules! memory {
             }
 
             /// Access width in bytes, which is also the natural alignment.
-            pub(crate) fn bytes(self) -> u32 {
+            pub fn bytes(self) -> u32 {
                 match self {
                     $(MemKind::$name => $bytes,)*
                 }

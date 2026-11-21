@@ -144,6 +144,21 @@ pub(super) fn ty(resolve: &Resolve, input: Input) -> Option<HirType> {
                         })
                         .collect::<Option<_>>()?,
                 ),
+                Contract::Flags(names) => HirType::Object(ObjectType {
+                    properties: names
+                        .map(|name| {
+                            (
+                                name,
+                                PropertyInfo {
+                                    ty: HirType::Boolean,
+                                    optional: true,
+                                    readonly: false,
+                                },
+                            )
+                        })
+                        .collect(),
+                    ..ObjectType::default()
+                }),
                 Contract::Enum(cases) => HirType::Union(
                     cases
                         .map(|name| HirType::StringLiteral(name.into()))

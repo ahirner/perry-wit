@@ -580,6 +580,42 @@ world app {
 }
 
 #[test]
+fn unsupported_wit_import_reports_the_selected_binding_at_its_call() {
+    let wit = Wit {
+        application: b"package test:bitset;
+            interface host { read-char: func() -> char; take-char: func(value:char); }
+            world app { import host; export run:func()->u32; }"
+            .as_slice()
+            .into(),
+        dependencies: vec![],
+    };
+    let compile = |body: &str| {
+        let source = format!(
+            "import {{readChar as read, takeChar as write}} from 'test:bitset/host';\nexport function run():number {{\n{body}\nreturn 1; }}"
+        );
+        api::compile(
+            &program_with("guest.ts", &source, &[]),
+            &wit,
+            &Options::default(),
+        )
+    };
+    compile("").unwrap();
+    for (call, name) in [("read();", "readChar"), ("write('x');", "takeChar")] {
+        let error = compile(call).unwrap_err();
+        let diagnostic = error.primary();
+        assert_eq!(diagnostic.code(), codes::UNSUPPORTED_TYPE, "{diagnostic}");
+        assert_eq!(diagnostic.span().unwrap().start_line, 3);
+        assert!(diagnostic.to_string().contains("char"), "{diagnostic}");
+        assert!(
+            diagnostic
+                .to_string()
+                .contains(&format!("test:bitset/host#{name}")),
+            "{diagnostic}"
+        );
+    }
+}
+
+#[test]
 fn every_kind_has_a_fixture() {
     let temp = tempfile::tempdir().unwrap();
     let wit = Wit {

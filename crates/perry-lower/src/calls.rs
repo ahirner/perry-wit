@@ -268,6 +268,12 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::ExternFuncRef { name, .. } = callee
             && let Some((binding, signature)) = self.shapes.foreign_function(name)
         {
+            let signature = signature.as_ref().map_err(|reason| {
+                self.shapes.annotate_call(
+                    reason.clone().with_note(format!("in WIT import {binding}")),
+                    byte_offset,
+                )
+            })?;
             if args.len() != signature.params.len() {
                 let error = diag!(
                     codes::CONTRACT_MISMATCH,
