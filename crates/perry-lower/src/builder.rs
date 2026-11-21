@@ -75,6 +75,7 @@ pub(super) const EXIT_STATUS: u64 = 5;
 pub(super) struct LocalBinding {
     pub(super) slot: Value,
     pub(super) integer: Option<TypedHandle<IntegerType>>,
+    pub(super) deferred_write: Option<TypeHandle>,
     pub(super) is_never: bool,
 }
 
@@ -83,6 +84,7 @@ impl LocalBinding {
         Self {
             slot,
             integer: None,
+            deferred_write: None,
             is_never: false,
         }
     }
@@ -171,12 +173,16 @@ impl<'s> FunctionBuilder<'s> {
             .collect();
         globals.sort_by_key(|(id, _)| *id);
         for (id, binding) in globals {
-            let slot = builder.global_slot(ctx, id, binding.carrier)?;
+            let storage = shapes
+                .deferred_storage(ctx, id, binding.carrier)
+                .unwrap_or(binding.carrier);
+            let slot = builder.global_slot(ctx, id, storage)?;
             builder.locals.insert(
                 id,
                 LocalBinding {
                     slot,
                     integer: binding.integer,
+                    deferred_write: (storage != binding.carrier).then_some(binding.carrier),
                     is_never: false,
                 },
             );
@@ -404,11 +410,40 @@ impl<'s> FunctionBuilder<'s> {
         is_integer64(ctx, src.get_type(ctx)).then_some(src)
     }
 
+    pub(super) fn write_type(&self, ctx: &Context, local: LocalBinding) -> Result<BindingType> {
+        let carrier = match local.deferred_write {
+            Some(ty) => ty,
+            None => self.slot_type(ctx, local.slot)?,
+        };
+        Ok(BindingType {
+            carrier,
+            integer: local.integer,
+        })
+    }
+
+    pub(super) fn assign_local(
+        &mut self,
+        ctx: &mut Context,
+        local: LocalBinding,
+        writes: BindingType,
+        value: Value,
+    ) -> Result<Value> {
+        let result = self.fit_binding(ctx, value, writes)?;
+        let stored = if local.deferred_write.is_some() {
+            self.fit(ctx, result, self.slot_type(ctx, local.slot)?)?
+        } else {
+            result
+        };
+        self.store(ctx, local.slot, stored);
+        Ok(result)
+    }
+
     pub(super) fn load_local(&mut self, ctx: &mut Context, id: LocalId) -> Result<Value> {
         let binding = self.local_binding(id)?;
         let loaded = self.load(ctx, binding.slot)?;
         let result = if let Some(int_ty) = binding.integer
             && int_ty.deref(ctx).width() == 64
+            && binding.deferred_write.is_none()
         {
             self.wrap_integer(ctx, loaded, int_ty, loaded.get_type(ctx))
         } else {

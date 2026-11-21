@@ -118,3 +118,41 @@ console.log(catchScope("str"), catchScope(4));
 retain({ shape: { tag: "label", val: "kept" } });
 console.log(retagged(), retainedTag());
 console.log(aliasWrite({ shape: { tag: "circle", val: 2 } }));
+
+function deferredBranch(flag: boolean): string {
+  let value: string;
+  if (flag) value = "left";
+  else value = "right";
+  return value;
+}
+
+function deferredCatch(fail: boolean): string {
+  let value: string;
+  try {
+    if (fail) throw new Error("stop");
+    value = "assigned";
+  } catch {
+    return "caught";
+  }
+  return value;
+}
+
+function deferredLoop(count: number): string {
+  let value: string | undefined;
+  for (let i = 0; i < count; i++) {
+    if (i === 0) continue;
+    value = "seen";
+    break;
+  }
+  return value === undefined ? "unwritten" : value;
+}
+
+function bareRead(write: boolean): boolean {
+  let value;
+  if (write) value = "present";
+  return value === undefined;
+}
+
+console.log(deferredBranch(true), deferredBranch(false));
+console.log(deferredCatch(false), deferredCatch(true), bareRead(false), bareRead(true));
+console.log(deferredLoop(0), deferredLoop(1), deferredLoop(2));

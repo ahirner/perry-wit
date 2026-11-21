@@ -89,6 +89,7 @@ impl<'s> FunctionBuilder<'s> {
             LocalBinding {
                 slot,
                 integer,
+                deferred_write: None,
                 is_never: matches!(param.ty, HirType::Never),
             },
         );

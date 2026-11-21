@@ -279,6 +279,24 @@ impl<'h> Shapes<'h> {
         Ok(mapped)
     }
 
+    pub(super) fn deferred_binding(&self, id: perry_frontend::hir::types::LocalId) -> bool {
+        self.local_source_spans
+            .get(&id)
+            .is_some_and(|span| self.metadata.locations.binding_starts_undefined(span.start))
+    }
+
+    pub(super) fn deferred_storage(
+        &self,
+        ctx: &mut Context,
+        id: perry_frontend::hir::types::LocalId,
+        ty: TypeHandle,
+    ) -> Option<TypeHandle> {
+        (self.deferred_binding(id)
+            && !perry_mir::admits_undefined(ctx, ty)
+            && !ty.deref(ctx).is::<perry_mir::JsonType>())
+        .then(|| crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined))
+    }
+
     pub(super) fn is_explicit_binding(&self, id: perry_frontend::hir::types::LocalId) -> bool {
         self.local_source_spans.contains_key(&id) && !self.metadata.inferred_bindings.contains(&id)
     }

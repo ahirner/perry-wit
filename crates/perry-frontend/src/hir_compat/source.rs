@@ -47,9 +47,7 @@ pub(crate) fn validate(
             call.visit_children_with(self);
         }
         fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
-            if declaration.init.is_some() {
-                collect_pat(&declaration.name, &mut self.bindings);
-            }
+            collect_pat(&declaration.name, &mut self.bindings);
             declaration.visit_children_with(self);
         }
     }

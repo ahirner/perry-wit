@@ -61,6 +61,17 @@ fn unsupported_forms_are_rejected_with_located_diagnostics() {
 }
 
 #[test]
+fn deferred_initialization_preserves_declared_write_types() {
+    for declaration in ["let x: string = undefined;", "let x: string; x = 42;"] {
+        let source = format!("export function run(): void {{ {declaration} }}");
+        assert_eq!(
+            rejection(&source, "writes.ts").code(),
+            perry_wit_diagnostics::codes::TYPE_MISMATCH
+        );
+    }
+}
+
+#[test]
 fn nullable_property_guards_follow_control_flow() {
     for body in [
         "if (values === null) return 0; return values.length;",
