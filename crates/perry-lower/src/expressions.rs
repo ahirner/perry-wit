@@ -419,6 +419,14 @@ impl<'s> FunctionBuilder<'s> {
             }
             .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             Expr::New {
+                class_name,
+                args,
+                byte_offset,
+                ..
+            } if class_name == "DataView" && !self.shapes.is_user_type(class_name) => self
+                .data_view(ctx, args)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+            Expr::New {
                 class_name, args, ..
             } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
                 ensure_diag!(

@@ -229,7 +229,8 @@ macro_rules! intrinsic_catalog {
                 StdBufferLength = "std_buffer_length" [BufferLength = "buffer_length" (ByteBuffer) -> (Number), Effectful, None => UnsignedCount;];
                 StdBytesAdopt = "std_bytes_adopt" (I32, I32) -> I32;
                 StdBytesBoundary = "std_bytes_boundary" (I32) -> I32;
-                StdBytesBuffer = "std_bytes_buffer" [BytesBuffer = "bytes_buffer" (Bytes) -> (ByteBuffer), Pure, None;];
+                StdBytesBuffer = "std_bytes_buffer" [BytesBuffer = "bytes_buffer" (Bytes) -> (ByteBuffer), Pure, None;
+                    DataViewBuffer = "data_view_buffer" (DataView) -> (ByteBuffer), Pure, None;];
                 StdBytesCopy = "std_bytes_copy" [BytesCopy = "bytes_copy" (Bytes) -> (Bytes), Throws, Conservative;];
                 StdBytesFill = "std_bytes_fill" [BytesFill = "bytes_fill" (Bytes, Number, Number, Number) -> (), Throws, Conservative;];
                 StdBytesFillRandom = "std_bytes_fill_random" [BytesFillRandom = "bytes_fill_random" (Bytes) -> (Bytes), Effectful, None;];
@@ -243,6 +244,11 @@ macro_rules! intrinsic_catalog {
                 StdBytesSetFrom = "std_bytes_set_from" [BytesSetFrom = "bytes_set_from" (Bytes, Bytes, Number) -> (), Throws, Conservative;];
                 StdBytesSlice = "std_bytes_slice" [BytesSlice = "bytes_slice" (Bytes, Number, Number) -> (Bytes), Throws, Conservative;];
                 StdBytesSubarray = "std_bytes_subarray" [BytesSubarray = "bytes_subarray" (Bytes, Number, Number) -> (Bytes), Throws, Conservative;];
+                StdDataViewNew = "std_data_view_new" [DataViewNew = "data_view_new" (ByteBuffer, Number, OptNumber) -> (DataView), Throws, Conservative;];
+                StdDataViewOffset = "std_data_view_offset" [DataViewOffset = "data_view_offset" (DataView) -> (Number), Throws, None => UnsignedCount;];
+                StdDataViewLength = "std_data_view_length" [DataViewLength = "data_view_length" (DataView) -> (Number), Throws, None => UnsignedCount;];
+                StdDataViewGetU32 = "std_data_view_get_u32" [DataViewGetU32 = "data_view_get_u32" (DataView, Number, Bool) -> (Number), Throws, None;];
+                StdDataViewSetU32 = "std_data_view_set_u32" [DataViewSetU32 = "data_view_set_u32" (DataView, Number, Number, Bool) -> (), Throws, None;];
                 StdDecoderDecode = "std_decoder_decode" [TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), Throws, Conservative;];
                 StdDecoderValidateLabel = "std_decoder_validate_label" [DecoderValidateLabel = "decoder_validate_label" (String) -> (), Throws, Atomic;];
                 StdDecoderNew = "std_decoder_new" [DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder), Effectful, Conservative;];

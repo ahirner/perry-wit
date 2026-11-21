@@ -154,7 +154,8 @@ impl<'s> FunctionBuilder<'s> {
                 self.append_value(ctx, &op)
             }
             (
-                Kind::Headers
+                Kind::DataView
+                | Kind::Headers
                 | Kind::Response
                 | Kind::Request
                 | Kind::Writable

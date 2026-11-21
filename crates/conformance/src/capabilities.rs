@@ -38,6 +38,23 @@ destination.set(input,2);
 try{destination.set(destination.subarray(1),x);trace.push(1);}catch{trace.push(2);}
 for(let i=0;i<destination.length;i++){const byte=destination[i];if(byte===undefined)throw 91;trace.push(byte);}
 "#;
+const DATA_VIEW: &str = r#"
+const bytes=new Uint8Array(input.length+6);
+bytes.set(input,1);
+const sibling=bytes.subarray(1,5);
+const view=new DataView(sibling.buffer,sibling.byteOffset,sibling.byteLength);
+trace.push(view.getUint32(0,true),view.getUint32(0),view.byteOffset,view.byteLength);
+view.setUint32(0,0x12345678,true);
+trace.push(view.getUint32(0),sibling[0],sibling[3]);
+sibling[2]=0xff;
+trace.push(view.getUint32(0,true));
+view.setUint32(0,-2);
+trace.push(sibling[0],sibling[3]);
+try{view.setUint32(1,42);trace.push(1);}catch{trace.push(2);}
+try{new DataView(bytes.buffer,bytes.length,0).getUint32(0);trace.push(1);}catch{trace.push(2);}
+const length:number|undefined=input.length===0?undefined:0;
+trace.push(new DataView(bytes.buffer,1,length).byteLength,new DataView(bytes.buffer,1,NaN).byteLength);
+"#;
 const RESPONSE: &str = r#"
 const response=new Response(input,{status:201,headers:{'x-test':'bytes'}});
 if(response.status!==201||response.headers.get('x-test')!=='bytes'||response.bodyUsed)throw 90;
@@ -85,6 +102,7 @@ pub(crate) fn contracts() -> Vec<Contract> {
     let mut contracts = Vec::new();
     for (id, operation, asynchronous) in [
         ("ecma.uint8array.set", SET, false),
+        ("ecma.dataview.uint32", DATA_VIEW, false),
         ("web.response.bytes", RESPONSE, true),
         ("web.request.bytes", REQUEST, true),
     ] {

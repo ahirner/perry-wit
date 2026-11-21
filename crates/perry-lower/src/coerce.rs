@@ -87,6 +87,7 @@ impl KindExt for Kind {
             Writer => WriterType,
             Readable => ReadableType,
             ByteBuffer => ByteBufferType,
+            DataView => DataViewType,
             ByobReader => ByobReaderType,
             Reader => ReaderType,
             ReadResult => ReadResultType,

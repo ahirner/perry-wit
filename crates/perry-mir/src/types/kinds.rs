@@ -69,6 +69,8 @@ value_types! {
         ReadableType("perry.readable", ["ReadableStream"]);
         /// A detachable `ArrayBuffer` backing mutable byte views.
         ByteBufferType("perry.byte_buffer", ["ArrayBuffer"]);
+        /// An offset and extent over a detachable byte buffer.
+        DataViewType("perry.data_view", ["DataView"]);
         /// A `ReadableStreamBYOBReader`.
         ByobReaderType("perry.byob_reader", ["ReadableStreamBYOBReader"]);
         /// A `ReadableStreamDefaultReader`.

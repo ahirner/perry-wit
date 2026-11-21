@@ -301,6 +301,27 @@ impl<'s> FunctionBuilder<'s> {
         self.load(ctx, acc_slot)
     }
 
+    pub(super) fn data_view(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
+        let Some((buffer, rest)) = args.split_first() else {
+            bail_diag!(codes::TYPE_MISMATCH, "DataView requires an ArrayBuffer");
+        };
+        let buffer = self.typed_operand(ctx, buffer, Kind::ByteBuffer, "an ArrayBuffer")?;
+        let offset = self.number_or(ctx, rest.first(), 0.0)?;
+        let number = FP64Type::get(ctx).into();
+        let optional = perry_mir::OptionalType::get(ctx, number).into();
+        let length = match rest.get(1) {
+            Some(expr) => {
+                let value = self.expression_with(ctx, expr, Some(optional))?;
+                self.fit(ctx, value, optional)?
+            }
+            None => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, optional)),
+        };
+        for extra in rest.iter().skip(2) {
+            self.effect(ctx, extra)?;
+        }
+        Ok(self.intrinsic(ctx, Intrinsic::DataViewNew, vec![buffer, offset, length]))
+    }
+
     /// `new Uint8Array(source)` or `Uint8Array.from(source)`.
     pub(super) fn bytes_from(
         &mut self,

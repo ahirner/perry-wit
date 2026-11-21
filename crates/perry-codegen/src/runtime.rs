@@ -83,6 +83,7 @@ macro_rules! runtime_functions {
     (@carrier F64) => { W::F64 };
     (@carrier F64Bits) => { W::F64Bits };
     (@carrier Number) => { W::F64 };
+    (@carrier OptNumber) => { W::F64 };
     (@carrier $other:ident) => { W::I32 };
 }
 

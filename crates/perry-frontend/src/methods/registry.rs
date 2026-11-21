@@ -78,6 +78,13 @@ macro_rules! method_catalog {
                 StringToUpperCase "toUpperCase" | "toLocaleUpperCase" String Upstream Method [args:rest] => intrinsic(StringUpper, args, [], Value), "accepts method arguments";
                 StringRepeat "repeat" String Upstream Method [args:rest] => intrinsic(StringRepeat, args, [Number(0.0)], Value), "accepts method arguments";
             }
+            Receiver::Value(Kind::DataView), "DataView" {
+                DataViewGetU32 "getUint32" Number Upstream Method [args:rest] => intrinsic(DataViewGetU32, args, [Number(0.0), Truthy], Value), "accepts an offset and optional endianness";
+                DataViewSetU32 "setUint32" Void Upstream Method [args:rest] => intrinsic(DataViewSetU32, args, [Number(0.0), Number(0.0), Truthy], Undefined), "accepts an offset, value and optional endianness";
+                DataViewBuffer "buffer" Native(Kind::ByteBuffer) Upstream Property [] => intrinsic(DataViewBuffer), "takes no arguments";
+                DataViewOffset "byteOffset" Number Upstream Property [] => intrinsic(DataViewOffset), "takes no arguments";
+                DataViewLength "byteLength" Number Upstream Property [] => intrinsic(DataViewLength), "takes no arguments";
+            }
             Receiver::Value(Kind::Bytes), "Bytes" {
                 BytesSubarray "subarray" Receiver Upstream Method [args:rest] => intrinsic(BytesSubarray, args, [Number(0.0), Number(f64::INFINITY)], Value), "accepts method arguments";
                 BytesSlice "slice" Receiver Always Method [args:rest] => intrinsic(BytesSlice, args, [Number(0.0), Number(f64::INFINITY)], Value), "accepts method arguments";

@@ -1,4 +1,4 @@
-//! `Uint8Array`, `TextEncoder`, and `TextDecoder`.
+//! Byte views and UTF-8 codecs.
 //!
 //! Views share a detachable owner, subarrays preserve offsets, and transfer reuses the payload.
 use crate::{
@@ -101,6 +101,119 @@ pub(crate) unsafe extern "C" fn std_bytes_from_buffer(buffer: *mut u8) -> *mut u
             return core::ptr::null_mut();
         }
         perry_rt_sys::buffer_view(buffer, 0, (*buffer).len)
+    }
+}
+
+/// A DataView shares the same traced owner and view header as Uint8Array.
+#[unsafe(no_mangle)]
+pub(crate) unsafe extern "C" fn std_data_view_new(
+    buffer: *mut perry_rt_sys::ByteBuffer,
+    offset: f64,
+    length: f64,
+) -> *mut u8 {
+    let buffer_len = unsafe { (*buffer).len };
+    let Some(offset) = view_index(offset) else {
+        return ptr::null_mut();
+    };
+    if unsafe { (*buffer).detached } {
+        raise(
+            crate::runtime::TYPE_ERROR,
+            perry_rt_sys::static_text!("Cannot use a detached ArrayBuffer"),
+        );
+        return ptr::null_mut();
+    }
+    let remaining = i64::from(buffer_len) - offset;
+    let length = if length.to_bits() == crate::runtime::UNDEFINED_BITS {
+        remaining
+    } else {
+        integer(length)
+    };
+    if length < 0 || length > remaining {
+        view_range_error();
+        return ptr::null_mut();
+    }
+    unsafe { perry_rt_sys::buffer_view(buffer, offset as u32, length as u32) }
+}
+
+fn view_index(number: f64) -> Option<i64> {
+    let index = integer(number);
+    if (0..=9_007_199_254_740_991).contains(&index) {
+        Some(index)
+    } else {
+        view_range_error();
+        None
+    }
+}
+
+fn view_range_error() {
+    raise(
+        RANGE_ERROR,
+        perry_rt_sys::static_text!("Offset is outside the bounds of the DataView"),
+    );
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_data_view_offset(view: *mut u8) -> f64 {
+    if attached(view) {
+        f64::from(unsafe { (*view.cast::<Bytes>()).offset })
+    } else {
+        0.0
+    }
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_data_view_length(view: *mut u8) -> f64 {
+    if attached(view) {
+        f64::from(unsafe { (*view.cast::<Bytes>()).len })
+    } else {
+        0.0
+    }
+}
+
+fn word_address(view: *mut u8, offset: f64) -> Option<*mut [u8; 4]> {
+    let offset = view_index(offset)?;
+    if !attached(view) {
+        return None;
+    }
+    // The view's bounds are relative to its own data pointer.
+    let view = unsafe { &*view.cast::<Bytes>() };
+    if offset > i64::from(view.len) - 4 {
+        view_range_error();
+        return None;
+    }
+    Some(unsafe { view.data.add(offset as usize).cast() })
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_data_view_get_u32(view: *mut u8, offset: f64, little: u32) -> f64 {
+    let Some(address) = word_address(view, offset) else {
+        return 0.0;
+    };
+    let bytes = unsafe { address.read() };
+    f64::from(if little != 0 {
+        u32::from_le_bytes(bytes)
+    } else {
+        u32::from_be_bytes(bytes)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_data_view_set_u32(
+    view: *mut u8,
+    offset: f64,
+    value: f64,
+    little: u32,
+) {
+    let Some(address) = word_address(view, offset) else {
+        return;
+    };
+    let word = (libm::trunc(value) % 4_294_967_296.0) as i64 as u32;
+    unsafe {
+        address.write(if little != 0 {
+            word.to_le_bytes()
+        } else {
+            word.to_be_bytes()
+        })
     }
 }
 
