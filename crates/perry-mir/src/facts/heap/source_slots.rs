@@ -15,8 +15,11 @@ impl Solver {
             self.heap_cell(ty, None)
         };
         self.analysis.states[id].heap_values.insert(value, cell);
-        // An uninitialized binding still has a declared layout when first seen through a view.
-        if aggregate(ctx, ty) {
+        // An absent value has no allocation to carry the declared shared layout.
+        if crate::optional::absence(ctx, ty).is_some()
+            && aggregate(ctx, ty)
+            && self.analysis.heap.cells[cell].layout_objects.is_empty()
+        {
             let origin = self.heap_object(ctx, ty, false)?;
             self.add_object(ctx, cell, origin)?;
         }
