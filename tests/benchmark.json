@@ -47,8 +47,8 @@
   },
   {
     "workload": "incoming-stream (4 MiB)",
-    "bytes": 38370,
-    "core_bytes": 36522,
+    "bytes": 38374,
+    "core_bytes": 36526,
     "defined_functions": 126,
     "helper_functions": 112,
     "optimization": {
@@ -62,16 +62,16 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5327,
-    "invocation_fuel": 159622570,
+    "initialization_fuel": 5331,
+    "invocation_fuel": 159622474,
     "warm_fuel": 159608218,
     "initial_memory": 65536,
     "memory": 65536
   },
   {
     "workload": "bounded-http-exact (4 MiB)",
-    "bytes": 65601,
-    "core_bytes": 59243,
+    "bytes": 65607,
+    "core_bytes": 59249,
     "defined_functions": 145,
     "helper_functions": 137,
     "optimization": {
@@ -85,7 +85,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5723,
+    "initialization_fuel": 5727,
     "invocation_fuel": 13672219,
     "warm_fuel": 13641067,
     "initial_memory": 65536,
@@ -93,8 +93,8 @@
   },
   {
     "workload": "bounded-http-overflow",
-    "bytes": 65601,
-    "core_bytes": 59243,
+    "bytes": 65607,
+    "core_bytes": 59249,
     "defined_functions": 145,
     "helper_functions": 137,
     "optimization": {
@@ -108,7 +108,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5723,
+    "initialization_fuel": 5727,
     "invocation_fuel": 13661257,
     "warm_fuel": 13630441,
     "initial_memory": 65536,
@@ -116,8 +116,8 @@
   },
   {
     "workload": "unbounded-http-bytes (4 MiB)",
-    "bytes": 64223,
-    "core_bytes": 57141,
+    "bytes": 64229,
+    "core_bytes": 57147,
     "defined_functions": 155,
     "helper_functions": 141,
     "optimization": {
@@ -131,7 +131,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5685,
+    "initialization_fuel": 5689,
     "invocation_fuel": 15999709,
     "warm_fuel": 11447580,
     "initial_memory": 65536,

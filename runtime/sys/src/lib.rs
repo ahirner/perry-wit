@@ -564,6 +564,15 @@ impl Buffer {
         unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
+    pub fn truncate(&mut self, len: usize) {
+        if len < self.len {
+            if !self.shape.is_null() {
+                self.as_mut_slice()[len..].fill(0);
+            }
+            self.len = len;
+        }
+    }
+
     pub fn clear(&mut self) {
         self.len = 0;
     }

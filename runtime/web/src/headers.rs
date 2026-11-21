@@ -47,23 +47,29 @@ impl Headers {
         }
     }
 
-    /// Keep the fields `keep` accepts, in order.
-    fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
-        let mut kept = field_buffer();
-        for (field, (name, _)) in self
-            .fields
-            .as_slice()
-            .as_chunks::<16>()
-            .0
-            .iter()
-            .zip(self.fields())
-        {
-            if keep(name) {
-                kept.extend_from_slice(field);
+    fn update(&mut self, key: &[u8], mut replacement: Option<&[u8]>) {
+        let fields = self.fields.as_mut_slice().as_chunks_mut::<16>().0;
+        let mut kept = 0;
+        let mut matched = false;
+        for index in 0..fields.len() {
+            let mut field = fields[index];
+            if field_parts(&field).0 == key {
+                matched = true;
+                let Some(value) = replacement.take() else {
+                    continue;
+                };
+                field[8..12].copy_from_slice(&(value.as_ptr() as u32).to_le_bytes());
+                field[12..].copy_from_slice(&(value.len() as u32).to_le_bytes());
             }
+            fields[kept] = field;
+            kept += 1;
         }
-        self.fields = kept;
-        self.revision += 1;
+        if matched {
+            self.fields.truncate(kept * 16);
+            self.revision += 1;
+        } else if let Some(value) = replacement {
+            self.push(key, value);
+        }
     }
 }
 
@@ -146,37 +152,7 @@ pub(crate) extern "C" fn web_headers_set(h: *mut u8, key: *mut u8, text: *mut u8
     let Some(text) = value(b"Headers.set", text) else {
         return;
     };
-    let list = headers(h);
-    let mut replaced = field_buffer();
-    let mut found = false;
-    for (field, (name, _)) in list
-        .fields
-        .as_slice()
-        .as_chunks::<16>()
-        .0
-        .iter()
-        .zip(list.fields())
-    {
-        if name != key {
-            replaced.extend_from_slice(field);
-        } else if !found {
-            found = true;
-            for word in [
-                key.as_ptr() as u32,
-                key.len() as u32,
-                text.as_ptr() as u32,
-                text.len() as u32,
-            ] {
-                replaced.extend_from_slice(&word.to_le_bytes());
-            }
-        }
-    }
-    list.fields = replaced;
-    if found {
-        list.revision += 1;
-    } else {
-        list.push(key, text);
-    }
+    headers(h).update(key, Some(text));
 }
 
 /// Implement `headers.get(name)`, returning the matching values joined with `, ` as UTF-8, or null when absent.
@@ -248,7 +224,7 @@ pub(crate) extern "C" fn web_headers_delete(h: *mut u8, key: *mut u8) {
     let Some(key) = name(b"Headers.delete", key) else {
         return;
     };
-    headers(h).retain(|name| name != key);
+    headers(h).update(key, None);
 }
 
 pub(crate) fn set_default(h: *mut u8, key: &'static [u8], text: &'static [u8]) {
