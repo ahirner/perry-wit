@@ -172,6 +172,14 @@ function readChunk(fail: boolean): number {
   return (absent ? 100 : 0) + output[0];
 }
 
+function capturedWrite(change: boolean): number {
+  let value;
+  value = 7;
+  const setText = () => { value = "abc"; };
+  if (change) setText();
+  return typeof value === "string" ? value.length : value;
+}
+
 function bareRead(write: boolean): boolean {
   let value;
   if (write) value = "present";
@@ -181,4 +189,4 @@ function bareRead(write: boolean): boolean {
 console.log(deferredBranch(true), deferredBranch(false));
 console.log(deferredCatch(false), deferredCatch(true), bareRead(false), bareRead(true));
 console.log(deferredLoop(0), deferredLoop(1), deferredLoop(2), deferredIteration());
-console.log(readChunk(false), readChunk(true));
+console.log(readChunk(false), readChunk(true), capturedWrite(false), capturedWrite(true));
