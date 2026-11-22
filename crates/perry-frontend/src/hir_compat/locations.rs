@@ -279,6 +279,12 @@ impl<'s> Locations<'s> {
             .and_then(|info| self.span(info.span))
     }
 
+    pub fn source_at(&self, position: u32) -> Option<&'s str> {
+        let file = self.file_at(position)?;
+        file.source
+            .get((position - file.positions.start()) as usize..)
+    }
+
     pub fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
         self.span(Span::new(
             swc_common::BytePos(start),

@@ -163,6 +163,14 @@ impl<'h> Shapes<'h> {
         }
     }
 
+    pub(super) fn local_name(&self, id: perry_frontend::hir::types::LocalId) -> Option<&str> {
+        let span = self.local_source_spans.get(&id)?;
+        self.metadata
+            .locations
+            .source_at(span.start)?
+            .get(..span.end.checked_sub(span.start)? as usize)
+    }
+
     pub(super) fn annotate_local(
         &self,
         error: Diagnostic,
@@ -277,6 +285,22 @@ impl<'h> Shapes<'h> {
         };
         self.inputs.borrow_mut().insert(ty, mapped);
         Ok(mapped)
+    }
+
+    pub(super) fn deferred_binding(&self, id: perry_frontend::hir::types::LocalId) -> bool {
+        self.metadata.deferred_bindings.contains(&id)
+    }
+
+    pub(super) fn deferred_storage(
+        &self,
+        ctx: &mut Context,
+        id: perry_frontend::hir::types::LocalId,
+        ty: TypeHandle,
+    ) -> Option<TypeHandle> {
+        (self.deferred_binding(id)
+            && !perry_mir::admits_undefined(ctx, ty)
+            && !ty.deref(ctx).is::<perry_mir::JsonType>())
+        .then(|| crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined))
     }
 
     pub(super) fn is_explicit_binding(&self, id: perry_frontend::hir::types::LocalId) -> bool {

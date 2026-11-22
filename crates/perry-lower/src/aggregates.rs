@@ -4,6 +4,19 @@ mod records;
 use super::*;
 
 impl<'s> FunctionBuilder<'s> {
+    pub(super) fn set_byte_index(
+        &mut self,
+        ctx: &mut Context,
+        bytes: Value,
+        index: &'s Expr,
+        value: &'s Expr,
+    ) -> Result<Value> {
+        let index = self.number_operand(ctx, index)?;
+        let value = self.number_operand(ctx, value)?;
+        self.intrinsic_void(ctx, Intrinsic::BytesSet, vec![bytes, index, value]);
+        Ok(value)
+    }
+
     /// Lower `array[index] = value` for arrays and tuples.
     pub(super) fn set_index(
         &mut self,
@@ -14,6 +27,9 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.expression(ctx, object)?;
         let array = self.defined(ctx, array)?;
+        if array.get_type(ctx).deref(ctx).is::<BytesType>() {
+            return self.set_byte_index(ctx, array, index, value);
+        }
         if let Some(record) = perry_mir::typed::<RecordType>(ctx, array.get_type(ctx))
             && record.deref(ctx).kind() == RecordKind::Tuple
         {

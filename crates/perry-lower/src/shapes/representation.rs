@@ -216,7 +216,7 @@ impl Shapes<'_> {
                 );
                 let tag = perry_mir::value_tag(ctx, ty).ok_or_else(|| Diagnostic::new(
                     codes::UNSUPPORTED_TYPE,
-                    "finite value unions support numbers, strings, booleans and one plain record shape",
+                    "finite value unions support numbers, strings, booleans, and one object alternative (a plain record or Uint8Array)",
                 ))?;
                 if let Some((_, payload)) = cases.iter().find(|(name, _)| name == tag) {
                     ensure_diag!(

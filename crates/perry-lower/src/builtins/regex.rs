@@ -162,13 +162,6 @@ impl<'s> FunctionBuilder<'s> {
         let output = self.load(ctx, output)?;
         Ok(self.emit_value(ctx, |ctx| ConcatOp::new(ctx, output, suffix)))
     }
-
-    fn string_length(&mut self, ctx: &mut Context, string: Value) -> Value {
-        let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, string));
-        self.emit_value(ctx, |ctx| {
-            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-        })
-    }
 }
 
 fn static_regex<T: PartialEq>(

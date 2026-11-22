@@ -369,10 +369,26 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(());
         }
         let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
-        let declared = type_state
+        let inferred_storage =
+            self.shapes.deferred_binding(id) && !self.shapes.is_explicit_binding(id);
+        let declared = match type_state
             .resolved()
             .map(|ty| self.active_value_type(ctx, ty))
-            .transpose()?;
+            .transpose()
+        {
+            Err(error) if inferred_storage && error.code() == codes::UNSUPPORTED_TYPE => {
+                let HirType::Union(members) = ty else {
+                    return Err(error);
+                };
+                for member in members {
+                    self.active_value_type(ctx, member)?;
+                }
+                Some(perry_mir::JsonType::get(ctx).into())
+            }
+            result => {
+                result?.or_else(|| inferred_storage.then(|| perry_mir::JsonType::get(ctx).into()))
+            }
+        };
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
         });
@@ -380,9 +396,13 @@ impl<'s> FunctionBuilder<'s> {
             .filter(|int_ty| int_ty.deref(ctx).width() == 64)
             .map(TypeHandle::from)
             .or(declared);
-        let init = init
-            .map(|e| self.expression_with(ctx, e, expr_expected))
-            .transpose()?;
+        let deferred = declared.and_then(|ty| self.shapes.deferred_storage(ctx, id, ty));
+        let init = if deferred.is_some() {
+            None
+        } else {
+            init.map(|e| self.expression_with(ctx, e, expr_expected))
+                .transpose()?
+        };
         if integer.is_none()
             && let Some(value) = init
             && let Some(src) = self.integer64_source(ctx, value)
@@ -410,17 +430,18 @@ impl<'s> FunctionBuilder<'s> {
             ),
         };
         let binding = BindingType { carrier, integer };
+        let storage = deferred.unwrap_or(carrier);
         let slot = if self.shapes.global_ids.contains(&id) {
             self.shapes.globals.borrow_mut().insert(id, binding);
-            self.global_slot(ctx, id, carrier)?
+            self.global_slot(ctx, id, storage)?
         } else {
-            self.entry_slot(ctx, carrier)
+            self.entry_slot(ctx, storage)
         };
         if let Some(value) = init {
             let value = self.fit_binding(ctx, value, binding)?;
             self.store(ctx, slot, value);
-        } else if is_never {
-            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier));
+        } else if is_never || deferred.is_some() {
+            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, storage));
             self.store(ctx, slot, undef);
         }
         // A declaration lowered again (a `finally` body at each exit) binds a new value.
@@ -430,6 +451,7 @@ impl<'s> FunctionBuilder<'s> {
             LocalBinding {
                 slot,
                 integer,
+                deferred_write: deferred.map(|_| carrier),
                 is_never,
             },
         );

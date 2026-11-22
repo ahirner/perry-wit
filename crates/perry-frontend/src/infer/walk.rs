@@ -187,32 +187,60 @@ pub(super) fn function<V: Visitor>(
     visit_body(&mut function.body, visit)
 }
 
-pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId, &mut HirType)) {
-    struct Locals<'a, F>(&'a mut F);
-    impl<F: FnMut(LocalId, &mut HirType)> Visitor for Locals<'_, F> {
-        type Error = std::convert::Infallible;
+struct LocalTypes<F> {
+    visit: F,
+    include_closures: bool,
+}
 
-        fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error> {
-            if let Node::Binding(id, ty) = node {
-                self.0(*id, ty);
-            }
-            Ok(())
+impl<F: FnMut(LocalId, &mut HirType)> Visitor for LocalTypes<F> {
+    type Error = std::convert::Infallible;
+
+    fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error> {
+        if let Node::Binding(id, ty) = node {
+            (self.visit)(*id, ty);
         }
-        fn expression(&mut self, _: &mut Expr) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn expression(&mut self, expr: &mut Expr) -> Result<(), Self::Error> {
+        if self.include_closures {
+            visit_expr(expr, self)
+        } else {
             Ok(())
         }
     }
-    let Ok(()) = visit_body(statements, &mut Locals(visit));
 }
 
-pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {
+pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId, &mut HirType)) {
+    let Ok(()) = visit_body(
+        statements,
+        &mut LocalTypes {
+            visit,
+            include_closures: false,
+        },
+    );
+}
+
+pub(super) fn resolve_locals(
+    statements: &mut [Stmt],
+    mut env: FunctionEnv<'_>,
+    writes: &mut HashMap<LocalId, HirType>,
+) {
     let mut bindings = HashMap::new();
     scan(statements, &mut env, None, Some(&mut bindings));
-    locals_mut(statements, &mut |id, ty| {
-        if let Some(inferred) = bindings.remove(&id) {
+    let include_closures = !writes.is_empty();
+    let visit = |id, ty: &mut HirType| {
+        if let Some(inferred) = writes.remove(&id).or_else(|| bindings.remove(&id)) {
             *ty = inferred;
         }
-    });
+    };
+    let Ok(()) = visit_body(
+        statements,
+        &mut LocalTypes {
+            visit,
+            include_closures,
+        },
+    );
 }
 
 fn reader_kind(ty: &HirType, env: &FunctionEnv<'_>) -> Option<Kind> {

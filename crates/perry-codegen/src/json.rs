@@ -6,17 +6,13 @@ use crate::{
     runtime::Runtime,
 };
 use perry_abi::layout::descriptor::{
-    JSON_DATE, JSON_DICTIONARY, JSON_NUMERIC, JSON_TUPLE, JSON_VALUE, JSON_VARIANT, NULL_ALLOWED,
-    UNDEFINED_ALLOWED,
+    JSON_DICTIONARY, JSON_TUPLE, JSON_VARIANT, NULL_ALLOWED, UNDEFINED_ALLOWED,
 };
 use perry_abi::layout::{descriptor, record};
-use perry_mir::{
-    ArrayType, DateType, ExceptionType, JsonSchema, JsonType, PlironResultExt as _, RecordType,
-    StringType,
-};
+use perry_mir::{ArrayType, JsonSchema, JsonType, PlironResultExt as _, RecordType};
 use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal, unsupported};
 use pliron::{
-    builtin::types::{FP64Type, IntegerType},
+    builtin::types::IntegerType,
     context::{Context, Ptr},
     operation::Operation,
     r#type::{TypeHandle, Typed, TypedHandle},
@@ -76,9 +72,7 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(crate) fn layout_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
-        use perry_abi::layout::descriptor::{
-            ARRAY, BOOLEAN, EXCEPTION, NUMBER, RECORD, SIGNED_INT, STRING, UNSIGNED_INT,
-        };
+        use perry_abi::layout::descriptor::{ARRAY, RECORD};
         if let Some(&address) = self.state.layout_descriptors.get(&ty) {
             return Ok(address);
         }
@@ -209,31 +203,8 @@ impl FunctionLowering<'_, '_> {
                 kind,
             ]
         } else {
-            let kind = if ty.deref(ctx).is::<perry_mir::NumericType>() {
-                JSON_NUMERIC
-            } else if ty.deref(ctx).is::<JsonType>() {
-                JSON_VALUE
-            } else if ty.deref(ctx).is::<perry_mir::BigIntType>() {
-                descriptor::JSON_BIGINT
-            } else if ty.deref(ctx).is::<DateType>() {
-                JSON_DATE
-            } else if ty.deref(ctx).is::<FP64Type>() {
-                NUMBER
-            } else if let Some(int) = ty.deref(ctx).downcast_ref::<IntegerType>() {
-                if int.width() == 1 {
-                    BOOLEAN
-                } else if int.signedness() == pliron::builtin::types::Signedness::Unsigned {
-                    UNSIGNED_INT
-                } else {
-                    SIGNED_INT
-                }
-            } else if ty.deref(ctx).is::<StringType>() {
-                STRING
-            } else if ty.deref(ctx).is::<ExceptionType>() {
-                EXCEPTION
-            } else {
-                return Err(unsupported!("unsupported native cause field type"));
-            };
+            let kind = JsonSchema::scalar_descriptor(ctx, ty)
+                .ok_or_else(|| unsupported!("unsupported native cause field type"))?;
             let width = ty
                 .deref(ctx)
                 .downcast_ref::<IntegerType>()

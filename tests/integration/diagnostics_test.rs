@@ -771,3 +771,24 @@ fn every_kind_has_a_fixture() {
         assert_eq!(error.primary().kind(), kind, "{error}");
     }
 }
+
+#[test]
+fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> anyhow::Result<()> {
+    let source = r#"export function run(flag: boolean): boolean {
+  const bytes = new Uint8Array([5]);
+  let storage;
+  if (flag) storage = bytes;
+  else storage = { marker: 1 };
+  return storage === bytes;
+}"#;
+    let error = perry_wit::compile_core(source, "storage.ts")
+        .err()
+        .context("expected unsupported storage")?;
+    let diagnostic = error.primary();
+    assert_eq!(diagnostic.code(), codes::UNSUPPORTED_TYPE, "{error}");
+    assert!(diagnostic.message().contains("local 'storage'"), "{error}");
+    let span = diagnostic.span().context("missing binding location")?;
+    assert_eq!((span.start_line, span.start_column), (3, 7));
+    assert_eq!(source.get(span.start_byte..span.end_byte), Some("storage"));
+    Ok(())
+}

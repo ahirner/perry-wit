@@ -259,10 +259,7 @@ impl<'s> FunctionBuilder<'s> {
                 value,
             } => {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
-                let index = self.number_operand(ctx, index)?;
-                let value = self.number_operand(ctx, value)?;
-                self.intrinsic_void(ctx, Intrinsic::BytesSet, vec![bytes, index, value]);
-                value
+                self.set_byte_index(ctx, bytes, index, value)?
             }
             Expr::Uint8ArrayLength(array) => {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
@@ -649,15 +646,23 @@ impl<'s> FunctionBuilder<'s> {
         value: &'s Expr,
     ) -> Result<Value> {
         let local = self.local_binding(id)?;
-        let binding = BindingType {
-            carrier: self.slot_type(ctx, local.slot)?,
-            integer: local.integer,
-        };
-        let assigned = self.expression_with(ctx, value, Some(binding.expected_type(ctx)))?;
-        let stored = self.fit_binding(ctx, assigned, binding)?;
-        self.store(ctx, local.slot, stored);
-        self.assignment_narrowing(ctx, id, (value, assigned), binding.carrier);
-        Ok(stored)
+        let writes = self.write_type(ctx, local)?;
+        let assigned = self.expression_with(ctx, value, Some(writes.expected_type(ctx)))?;
+        if writes.carrier.deref(ctx).is::<JsonType>()
+            && self.shapes.deferred_binding(id)
+            && !self.shapes.is_explicit_binding(id)
+            && !perry_mir::JsonSchema::supports_boxing(ctx, assigned.get_type(ctx))
+        {
+            let name = self.shapes.local_name(id).unwrap_or("<unknown>");
+            let kind = kind(ctx, assigned)?.label();
+            bail_diag!(
+                codes::UNSUPPORTED_TYPE,
+                "local '{name}' cannot store {kind} together with its other assigned types"
+            );
+        }
+        let result = self.assign_local(ctx, local, writes, assigned)?;
+        self.assignment_narrowing(ctx, id, (value, assigned), writes.carrier);
+        Ok(result)
     }
 
     /// `++local`, `local--` and their relatives.
@@ -682,12 +687,8 @@ impl<'s> FunctionBuilder<'s> {
             UpdateOp::Decrement => BinaryKind::Sub,
         };
         let new = self.binary(ctx, kind, old, one);
-        let binding = BindingType {
-            carrier: self.slot_type(ctx, local.slot)?,
-            integer: local.integer,
-        };
-        let stored = self.fit_binding(ctx, new, binding)?;
-        self.store(ctx, local.slot, stored);
+        let writes = self.write_type(ctx, local)?;
+        let stored = self.assign_local(ctx, local, writes, new)?;
         self.variant_guards.assign(id);
         Ok(if prefix { stored } else { old })
     }
