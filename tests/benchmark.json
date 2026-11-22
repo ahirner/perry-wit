@@ -24,9 +24,9 @@
   },
   {
     "workload": "io (64 KiB)",
-    "bytes": 46418,
-    "core_bytes": 39889,
-    "defined_functions": 125,
+    "bytes": 46398,
+    "core_bytes": 39869,
+    "defined_functions": 122,
     "helper_functions": 111,
     "optimization": {
       "cleanup_rounds": 2,
@@ -47,9 +47,9 @@
   },
   {
     "workload": "incoming-stream (4 MiB)",
-    "bytes": 38350,
-    "core_bytes": 36502,
-    "defined_functions": 126,
+    "bytes": 38332,
+    "core_bytes": 36485,
+    "defined_functions": 123,
     "helper_functions": 112,
     "optimization": {
       "cleanup_rounds": 5,
@@ -116,9 +116,9 @@
   },
   {
     "workload": "unbounded-http-bytes (4 MiB)",
-    "bytes": 64186,
-    "core_bytes": 57104,
-    "defined_functions": 155,
+    "bytes": 64175,
+    "core_bytes": 57093,
+    "defined_functions": 152,
     "helper_functions": 141,
     "optimization": {
       "cleanup_rounds": 2,

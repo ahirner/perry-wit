@@ -216,6 +216,28 @@ fn sparse_lists_lower_holes_to_options_and_reject_required_elements() -> Result<
 }
 
 #[test]
+fn persistent_aliases_share_one_layout_across_specialized_exports() -> Result<()> {
+    let mut component = Instance::compile(
+        "package test:persistent; world boundary {
+            export write-next: func(key: u32) -> f64;
+            export overwrite: func(value: f64) -> f64;
+            export read-key: func(key: u32) -> f64;
+        }",
+        include_str!("../../crates/conformance/cases/persistent_aggregates.ts"),
+    )?;
+    let wide = f64::from(u32::MAX) + 1.0;
+    component.check("write-next", (u32::MAX,), &wide)?;
+    component.check("read-key", (u32::MAX,), &wide)?;
+    component.check("overwrite", (0.5,), &0.5)?;
+    component.check("write-next", (0u32,), &1.0)?;
+    component.check("read-key", (u32::MAX,), &0.5)?;
+    component.check("overwrite", (-0.0,), &-0.0)?;
+    let stored = component.call::<_, f64>("read-key", (0u32,))?;
+    assert_eq!(stored.to_bits(), (-0.0f64).to_bits());
+    Ok(())
+}
+
+#[test]
 fn exact_integer_transport_in_nested_results_and_options() -> Result<()> {
     boundary!(
         r#"package test:integers;
@@ -994,5 +1016,38 @@ fn static_modules_resolve_aliases_namespaces_and_reexports() -> Result<()> {
     }
     assert_eq!(program.number("run", 5.0), 12.0);
     assert_eq!(program.number("reexported", 5.0), 6.0);
+    Ok(())
+}
+
+#[test]
+fn static_modules_preserve_pattern_bindings_and_property_keys() -> Result<()> {
+    let declarations = r#"
+        let calls = 0;
+        function mark(n: number): number { calls += 1; return n; }
+        const [first, , ...rest] = [mark(1), 2, 3, 4];
+        interface Row { zero: number; absent?: number; nest: { key: number } }
+        const row: Row = { zero: 0, nest: { key: 4 } };
+        const {zero = mark(9), absent = mark(8), nest: {key: renamed}} = row;
+        function score(first: number): number {
+            return calls * 1000 + zero * 100 + absent * 10 + renamed + first + rest.length;
+        }
+    "#;
+    let run = "export function run(__perry_module_0_first: number): number { const __perry_module_1_answer = __perry_module_0_first; return score(__perry_module_1_answer) + first; }";
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("main.ts");
+    let path = path.to_string_lossy();
+    std::fs::write(
+        directory.path().join("helper.ts"),
+        format!("{declarations} export const [answer] = [first]; export {{ score as compute }};"),
+    )?;
+    for source in [
+        format!("{declarations} {run}"),
+        format!("export {{}}; {declarations} {run}"),
+        "import {answer as first, compute as score} from './helper'; ".to_owned() + run,
+    ] {
+        let mut program =
+            crate::core_program::Program::from_wasm(perry_wit::compile_core(&source, &path)?);
+        assert_eq!(program.number("run", 3.0), 2090.0);
+    }
     Ok(())
 }

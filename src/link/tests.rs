@@ -25,6 +25,7 @@ fn direct_runtime_imports_bind_to_the_world_without_linking_helpers() -> anyhow:
                 target,
                 interfaces: &interfaces,
             },
+            |_, _| false,
         )?;
         assert_eq!(helpers, 0);
         assert_eq!(ParsedModule::parse(&linked)?.imports[0].0, expected);
@@ -67,6 +68,9 @@ fn linked_sections_keep_references_initialization_and_passive_segments() -> anyh
         r#"(module
         (type $value (func (result i32)))
         (import "__perry_helper" "json_measure" (func $measure (param i32 i32) (result i64)))
+        (import "__perry_helper" "perry_task_enter" (func $enter (result i32)))
+        (import "__perry_helper" "perry_alloc" (func $alloc (param i32) (result i32)))
+        (import "__perry_helper" "std_bytes_new" (func $bytes (param f64) (result i32)))
         (import "host" "value" (func $host (type $value)))
         (memory (export "memory") 2)
         (table 1 1 funcref)
@@ -76,22 +80,42 @@ fn linked_sections_keep_references_initialization_and_passive_segments() -> anyh
         (elem $functions func $host)
         (data $bytes "K")
         (func $start
+            call $enter drop
             i32.const 8 i32.const 0 i32.const 1 memory.init $bytes data.drop $bytes
             i32.const 0 i32.const 0 i32.const 1 table.init $functions elem.drop $functions
             i32.const 1 global.set $started)
         (start $start)
+        (export "alloc" (func $alloc))
+        (export "bytes" (func $bytes))
         (func (export "run") (result i32)
             i32.const 0 call_indirect (type $value)
             global.get $started i32.add i32.const 8 i32.load8_u i32.add)
         (export "measure" (func $measure)))"#,
     )?;
-    let linked = super::link_helpers(core)?;
+    let (linked, _) = super::link_helpers_with(
+        core,
+        None,
+        &Default::default(),
+        &super::RuntimeImports::RAW,
+        |module, name| module == perry_codegen::HELPER_MODULE && name == "perry_alloc",
+    )?;
     let engine = wasmtime::Engine::default();
     let module = wasmtime::Module::new(&engine, &linked)?;
     let mut linker = wasmtime::Linker::new(&engine);
     linker.func_wrap("host", "value", || 7i32)?;
     let mut store = wasmtime::Store::new(&engine, ());
     let instance = linker.instantiate(&mut store, &module)?;
+    // The guest imports the allocator directly. The byte constructor calls it from a library.
+    let alloc = instance.get_typed_func::<i32, i32>(&mut store, "alloc")?;
+    assert_ne!(alloc.call(&mut store, 8)?, 0);
+    let bytes = instance.get_typed_func::<f64, i32>(&mut store, "bytes")?;
+    let Err(trap) = bytes.call(&mut store, 8.0) else {
+        anyhow::bail!("library call bypassed its selected stub");
+    };
+    assert_eq!(
+        trap.downcast_ref::<wasmtime::Trap>(),
+        Some(&wasmtime::Trap::UnreachableCodeReached)
+    );
     assert_eq!(
         instance
             .get_typed_func::<(), i32>(&mut store, "run")?

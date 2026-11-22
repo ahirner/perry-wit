@@ -4,6 +4,7 @@ use Argument::{Number, Padding, SearchString};
 
 pub(super) enum Argument {
     Number(f64),
+    Truthy,
     Constant(f64),
     SearchString,
     Padding,
@@ -42,6 +43,10 @@ impl IntrinsicCall {
             values.push(match argument {
                 Argument::Constant(value) => builder.number(ctx, *value),
                 Number(default) => builder.number_or(ctx, expr, *default)?,
+                Argument::Truthy => match expr {
+                    Some(expr) => builder.condition(ctx, expr)?,
+                    None => builder.boolean(ctx, false),
+                },
                 SearchString => builder.typed_operand(
                     ctx,
                     expr.ok_or_else(|| {

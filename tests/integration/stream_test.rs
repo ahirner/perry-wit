@@ -12,6 +12,33 @@ use wasmtime_wasi::WasiCtx;
 use crate::wasi_host::{self, Host};
 use crate::{engine::async_engine, output_capture};
 
+#[tokio::test(flavor = "current_thread")]
+async fn imported_byte_stream_reads_through_a_stdout_anchor() -> Result<()> {
+    let bytes = Standard.component(
+        "package test:input;
+         interface input { open: func() -> stream<u8>; }
+         world app { import wasi:cli/stdout@0.3.0; import input; export run: async func() -> result<f64>; }",
+        "app", "input.ts",
+        "import { open } from 'test:input/input';
+         export async function run() { let total = 0; for await (const chunk of open()) {
+             for (let i = 0; i < chunk.length; i++) total += chunk[i];
+         } return total; }",
+    )?;
+    let engine = async_engine()?;
+    let component = wasmtime::component::Component::new(&engine, bytes)?;
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("test:input/input")?
+        .func_wrap("open", |store, ()| {
+            Ok((StreamReader::new(store, vec![2u8, 3, 7])?,))
+        })?;
+    let mut store = Store::new(&engine, ());
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), (std::result::Result<f64, ()>,)>(&mut store, "run")?;
+    assert_eq!(run.call_async(&mut store, ()).await?.0, Ok(12.0));
+    Ok(())
+}
+
 struct BlockedRead {
     acknowledged: std::sync::Arc<std::sync::atomic::AtomicBool>,
     dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,

@@ -39,7 +39,6 @@ struct Inference<'a> {
     ctx: &'a Context,
     decls: &'a shapes::Declarations<'a>,
     metadata: &'a hir_compat::Metadata<'a>,
-    generic_functions: Option<&'a HashMap<FuncId, perry_hir::ir::Function>>,
 }
 
 impl Inference<'_> {
@@ -70,8 +69,6 @@ impl Inference<'_> {
             classes,
             locals,
             metadata: self.metadata,
-            generic_functions: self.generic_functions,
-            instantiated_returns: HashMap::new(),
         }
     }
 }
@@ -100,7 +97,52 @@ fn clear_inferred_type_vars<V>(
     });
 }
 
-fn push_return_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Declarations<'_>) {
+fn deferred_write_types(
+    hir: &HirModule,
+    base: &mut perry_hir::HirTypeEnv,
+    inference: &Inference<'_>,
+) -> HashMap<LocalId, HirType> {
+    let metadata = inference.metadata;
+    if metadata
+        .deferred_bindings
+        .is_disjoint(&metadata.inferred_bindings)
+    {
+        return HashMap::new();
+    }
+    use perry_hir::tdz_check::{for_each_class_expr, for_each_function_expr, for_each_stmts_expr};
+    let mut locals = HashMap::new();
+    let mut writes = HashMap::<LocalId, Vec<HirType>>::new();
+    let mut collect = |expr: &Expr, base: &perry_hir::HirTypeEnv| {
+        let (id, value) = match expr {
+            Expr::LocalSet(id, value) => (id, Some(value.as_ref())),
+            Expr::Update { id, .. } => (id, None),
+            _ => return,
+        };
+        if metadata.deferred_bindings.contains(id) && metadata.inferred_bindings.contains(id) {
+            let mut env = inference.function(base, &hir.classes, &mut locals);
+            let ty = value.map_or(HirType::Any, |value| expression(value, &mut env));
+            push_value_type(writes.entry(*id).or_default(), ty, inference.decls);
+        }
+    };
+    for_each_stmts_expr(&hir.init, &mut |expr| collect(expr, base));
+    for function in &hir.functions {
+        for_each_function_expr(function, &mut |expr| collect(expr, base));
+    }
+    for class in &hir.classes {
+        base.set_current_class(Some(class.name.clone()));
+        for_each_class_expr(class, &mut |expr| collect(expr, base));
+    }
+    base.set_current_class(None);
+    writes
+        .into_iter()
+        .filter_map(|(id, types)| {
+            let ty = joined_type(types)?;
+            is_resolvable_type(&ty).then_some((id, ty))
+        })
+        .collect()
+}
+
+fn push_value_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Declarations<'_>) {
     if matches!(ty, HirType::Never) {
         return;
     }
@@ -108,13 +150,13 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Decla
         let (defined, absences) = strip_nullish(ty);
         if let Some(absence) = absences {
             if defined != HirType::Void {
-                push_return_type(types, defined, decls);
+                push_value_type(types, defined, decls);
             }
             if absence.admits_null() {
-                push_return_type(types, HirType::Null, decls);
+                push_value_type(types, HirType::Null, decls);
             }
             if absence.admits_undefined() {
-                push_return_type(types, HirType::Void, decls);
+                push_value_type(types, HirType::Void, decls);
             }
         } else {
             types.push_unique(defined);
@@ -131,6 +173,23 @@ fn push_return_type(types: &mut Vec<HirType>, ty: HirType, decls: &shapes::Decla
         ty => ty,
     };
     types.push_unique(normalized);
+}
+
+fn joined_type(mut types: Vec<HirType>) -> Option<HirType> {
+    match types.as_slice() {
+        [] => Some(HirType::Void),
+        [_] => types.pop(),
+        _ if types
+            .iter()
+            .filter(|ty| !matches!(ty, HirType::Null | HirType::Void))
+            .count()
+            == 1
+            || types.iter().all(is_resolvable_type) =>
+        {
+            Some(HirType::Union(types))
+        }
+        _ => None,
+    }
 }
 
 fn substitute_type_vars(ty: &mut HirType, bounds: &HashMap<&str, &HirType>) {
@@ -195,21 +254,10 @@ fn infer_body_return(
     }
     let mut types = Vec::new();
     for ty in returned {
-        push_return_type(&mut types, ty, decls);
+        push_value_type(&mut types, ty, decls);
     }
-    let ty = match types.as_slice() {
-        [] => HirType::Void,
-        [_] => types.swap_remove(0),
-        _ if types
-            .iter()
-            .filter(|ty| !matches!(ty, HirType::Null | HirType::Void))
-            .count()
-            == 1 =>
-        {
-            HirType::Union(types)
-        }
-        _ if types.iter().all(is_resolvable_type) => HirType::Union(types),
-        _ => return false,
+    let Some(ty) = joined_type(types) else {
+        return false;
     };
     let inferred = if is_async {
         HirType::Promise(Box::new(ty))
@@ -283,7 +331,6 @@ pub(crate) fn unresolved_types(
         ctx,
         decls: &decls,
         metadata,
-        generic_functions: None,
     };
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
@@ -363,7 +410,7 @@ pub(crate) fn unresolved_types(
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     {
         let env = inference.function(&module_env, &hir.classes, &mut locals);
-        walk::resolve_locals(&mut hir.init, env);
+        walk::resolve_locals(&mut hir.init, env, &mut HashMap::new());
     }
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     let max_iters = hir.functions.len() + hir.classes.len();
@@ -448,8 +495,9 @@ pub(crate) fn unresolved_types(
         }
         module_env = perry_hir::HirTypeEnv::from_module(hir);
     }
+    let mut writes = deferred_write_types(hir, &mut module_env, &inference);
     let env = inference.function(&module_env, &hir.classes, &mut locals);
-    walk::resolve_locals(&mut hir.init, env);
+    walk::resolve_locals(&mut hir.init, env, &mut writes);
     module_env = perry_hir::HirTypeEnv::from_module(hir);
     for function in &mut hir.functions {
         let env = inference.function_with_params(
@@ -458,7 +506,7 @@ pub(crate) fn unresolved_types(
             &mut locals,
             &function.params,
         );
-        walk::resolve_locals(&mut function.body, env);
+        walk::resolve_locals(&mut function.body, env, &mut writes);
     }
     for class_idx in 0..hir.classes.len() {
         module_env.set_current_class(Some(hir.classes[class_idx].name.clone()));
@@ -477,7 +525,7 @@ pub(crate) fn unresolved_types(
                     &mut locals,
                     &method.params,
                 );
-                walk::resolve_locals(&mut body, env);
+                walk::resolve_locals(&mut body, env, &mut writes);
             }
             if let Some(method) =
                 shapes::class_functions_mut(&mut hir.classes[class_idx]).nth(fn_idx)

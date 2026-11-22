@@ -156,20 +156,30 @@ export async function run(text:string) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn p2_commands_and_sync_console_exports() -> Result<()> {
-    let stdout = MemoryOutputPipe::new(1 << 20);
-    let host = Host::new(WasiCtx::builder().stdout(stdout.clone()).build());
     let wit = "package test:p2-command; world test { include wasi:cli/command@0.2.12; }";
-    let (mut store, instance) = instance(wit, "console.log('hello P2');", host).await?;
-    let interface = instance
-        .get_export_index(&mut store, None, "wasi:cli/run@0.2.12")
-        .unwrap();
-    let export = instance
-        .get_export_index(&mut store, Some(&interface), "run")
-        .unwrap();
-    let run = instance.get_typed_func::<(), (Result<(), ()>,)>(&mut store, &export)?;
-    assert!(run.call_async(&mut store, ()).await?.0.is_ok());
-    assert_eq!(&stdout.contents()[..], b"hello P2\n");
-    assert!(store.data().table.is_empty());
+    let stderr_only = "package test:p2-command; world test {
+        import wasi:cli/stderr@0.2.12; import wasi:io/poll@0.2.12; export wasi:cli/run@0.2.12;
+    }";
+    for (world, source, out, err) in [
+        (wit, "console.log('hello P2');", "hello P2\n", ""),
+        (stderr_only, "console.error('error P2');", "", "error P2\n"),
+        (stderr_only, "let value = 1;", "", ""),
+    ] {
+        let stdout = MemoryOutputPipe::new(1024);
+        let stderr = MemoryOutputPipe::new(1024);
+        let host = Host::new(
+            WasiCtx::builder()
+                .stdout(stdout.clone())
+                .stderr(stderr.clone())
+                .build(),
+        );
+        let (mut store, instance) = instance(world, source, host).await?;
+        let command = wasmtime_wasi::p2::bindings::Command::new(&mut store, &instance)?;
+        assert!(command.wasi_cli_run().call_run(&mut store).await?.is_ok());
+        assert_eq!(&stdout.contents()[..], out.as_bytes());
+        assert_eq!(&stderr.contents()[..], err.as_bytes());
+        assert!(store.data().table.is_empty());
+    }
 
     let stdout = MemoryOutputPipe::new(1 << 20);
     let host = Host::new(WasiCtx::builder().stdout(stdout.clone()).build());

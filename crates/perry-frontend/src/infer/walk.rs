@@ -64,10 +64,7 @@ pub(super) fn visit_body<V: Visitor>(
     statements: &mut [Stmt],
     visit: &mut V,
 ) -> Result<(), V::Error> {
-    for statement in statements {
-        visit.statement(statement)?;
-    }
-    Ok(())
+    visit.body(statements)
 }
 
 pub(super) fn visit_stmt<V: Visitor>(statement: &mut Stmt, visit: &mut V) -> Result<(), V::Error> {
@@ -117,6 +114,7 @@ pub(super) fn visit_stmt<V: Visitor>(statement: &mut Stmt, visit: &mut V) -> Res
             body,
             catch,
             finally,
+            ..
         } => {
             visit_body(body, visit)?;
             if let Some(catch) = catch {
@@ -151,6 +149,13 @@ pub(super) trait Visitor: Sized {
 
     fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error>;
 
+    fn body(&mut self, statements: &mut [Stmt]) -> Result<(), Self::Error> {
+        for statement in statements {
+            self.statement(statement)?;
+        }
+        Ok(())
+    }
+
     fn statement(&mut self, statement: &mut Stmt) -> Result<(), Self::Error> {
         visit_stmt(statement, self)
     }
@@ -182,32 +187,60 @@ pub(super) fn function<V: Visitor>(
     visit_body(&mut function.body, visit)
 }
 
-pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId, &mut HirType)) {
-    struct Locals<'a, F>(&'a mut F);
-    impl<F: FnMut(LocalId, &mut HirType)> Visitor for Locals<'_, F> {
-        type Error = std::convert::Infallible;
+struct LocalTypes<F> {
+    visit: F,
+    include_closures: bool,
+}
 
-        fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error> {
-            if let Node::Binding(id, ty) = node {
-                self.0(*id, ty);
-            }
-            Ok(())
+impl<F: FnMut(LocalId, &mut HirType)> Visitor for LocalTypes<F> {
+    type Error = std::convert::Infallible;
+
+    fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error> {
+        if let Node::Binding(id, ty) = node {
+            (self.visit)(*id, ty);
         }
-        fn expression(&mut self, _: &mut Expr) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn expression(&mut self, expr: &mut Expr) -> Result<(), Self::Error> {
+        if self.include_closures {
+            visit_expr(expr, self)
+        } else {
             Ok(())
         }
     }
-    let Ok(()) = visit_body(statements, &mut Locals(visit));
 }
 
-pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {
+pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId, &mut HirType)) {
+    let Ok(()) = visit_body(
+        statements,
+        &mut LocalTypes {
+            visit,
+            include_closures: false,
+        },
+    );
+}
+
+pub(super) fn resolve_locals(
+    statements: &mut [Stmt],
+    mut env: FunctionEnv<'_>,
+    writes: &mut HashMap<LocalId, HirType>,
+) {
     let mut bindings = HashMap::new();
     scan(statements, &mut env, None, Some(&mut bindings));
-    locals_mut(statements, &mut |id, ty| {
-        if let Some(inferred) = bindings.remove(&id) {
+    let include_closures = !writes.is_empty();
+    let visit = |id, ty: &mut HirType| {
+        if let Some(inferred) = writes.remove(&id).or_else(|| bindings.remove(&id)) {
             *ty = inferred;
         }
-    });
+    };
+    let Ok(()) = visit_body(
+        statements,
+        &mut LocalTypes {
+            visit,
+            include_closures,
+        },
+    );
 }
 
 fn reader_kind(ty: &HirType, env: &FunctionEnv<'_>) -> Option<Kind> {
@@ -282,14 +315,44 @@ pub(super) fn scan(
     mut returned: Option<&mut Vec<HirType>>,
     mut bindings: Option<&mut HashMap<LocalId, HirType>>,
 ) {
-    for statement in statements {
+    let mut iteration = hir_compat::Iteration::default();
+    for (index, statement) in statements.iter().enumerate() {
+        if let Stmt::Let {
+            id,
+            init: Some(init),
+            ..
+        } = statement
+        {
+            iteration.guard(*id, init);
+            if let Some(hir_compat::RecordExpr::Value(mut value)) = iteration.expression(init) {
+                while let Some(hir_compat::RecordExpr::Value(inner)) = iteration.expression(value) {
+                    value = inner;
+                }
+                let ty = expression(value, env);
+                env.locals.insert(*id, ty);
+            }
+            if matches!(init, Expr::Undefined)
+                && let Some(element) = iteration.element(&statements[index..])
+            {
+                let ty = expression(element.value, env);
+                let ty = match element.available {
+                    hir_compat::Availability::Known(true) => ty,
+                    hir_compat::Availability::Known(false) => HirType::Void,
+                    hir_compat::Availability::Test(_) => with_absences(ty, Absence::Undefined),
+                };
+                env.locals.insert(element.id, ty);
+            }
+        }
+        let inferred_call = matches!(statement,
+            Stmt::Let { id, init: Some(Expr::Call { callee, .. }), .. }
+                if env.metadata.inferred_bindings.contains(id) && matches!(callee.as_ref(), Expr::FuncRef(_)));
         match statement {
             Stmt::Let {
                 id,
                 ty,
                 init: Some(init),
                 ..
-            } if (matches!(ty, HirType::Any | HirType::Unknown)
+            } if (inferred_call || matches!(ty, HirType::Any | HirType::Unknown)
                 || (ty.any(&mut |ty| matches!(ty, HirType::Any))
                     && (matches!(init, Expr::LocalGet(_))
                         || matches!(init, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::FuncRef(_)))))
@@ -319,7 +382,7 @@ pub(super) fn scan(
                 {
                     bindings.insert(*id, inferred.clone());
                 }
-                if !matches!(inferred, HirType::Any | HirType::Unknown) {
+                if inferred_call || !matches!(inferred, HirType::Any | HirType::Unknown) {
                     env.locals.insert(*id, inferred);
                 }
             }
@@ -377,6 +440,7 @@ pub(super) fn scan(
                 body,
                 catch,
                 finally,
+                ..
             } => {
                 scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 if let Some(catch) = catch {

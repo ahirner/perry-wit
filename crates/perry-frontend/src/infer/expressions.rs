@@ -290,31 +290,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         }
         Expr::StructuredClone { value, .. } => expression(value, env),
         Expr::MapGroupBy { items, key_fn } => methods::map_group_by(items, key_fn, env),
-        Expr::Call {
-            callee,
-            args,
-            type_args,
-            ..
-        } => {
-            if let Expr::FuncRef(id) = callee.as_ref()
-                && let Some(function) = env
-                    .generic_functions
-                    .and_then(|functions| functions.get(id))
-                && let Ok(arguments) = functions::arguments(function, args, type_args, env)
-            {
-                let bindings = function
-                    .type_params
-                    .iter()
-                    .zip(&arguments)
-                    .map(|(parameter, argument)| (parameter.name.as_str(), argument))
-                    .collect();
-                let mut result = function.return_type.clone();
-                substitute_type_vars(&mut result, &bindings);
-                result
-            } else {
-                methods::call(expr, callee, args, env)
-            }
-        }
+        Expr::Call { callee, args, .. } => methods::call(expr, callee, args, env),
         Expr::CallSpread { callee, .. } => match callee.as_ref() {
             Expr::PropertyGet {
                 object, property, ..
@@ -462,8 +438,9 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
             let mut single_spread_named: Option<String> = None;
             let mut spread_count = 0usize;
             let mut all_spreads_typed = true;
-            for (key, val_expr) in parts {
-                if let Some(key) = key {
+            for part in parts {
+                let val_expr = part.value();
+                if let Some(key) = hir_compat::static_property(part) {
                     let val_ty = expression(val_expr, env);
                     let (ty, optional) = match (val_expr, props.remove(key)) {
                         (Expr::Null, Some(existing)) => {
@@ -476,13 +453,15 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                         _ => (val_ty, false),
                     };
                     props.insert(
-                        key.clone(),
+                        key.to_owned(),
                         perry_hir::types::PropertyInfo {
                             ty,
                             optional,
                             readonly: false,
                         },
                     );
+                } else if part.defines_key() {
+                    return HirType::Any;
                 } else {
                     spread_count += 1;
                     let src_ty = strip_nullish(expression(val_expr, env)).0;

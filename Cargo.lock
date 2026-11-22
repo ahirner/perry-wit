@@ -1326,12 +1326,12 @@ version = "0.1.0"
 [[package]]
 name = "perry-abi"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 
 [[package]]
 name = "perry-api-manifest"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 
 [[package]]
 name = "perry-codegen"
@@ -1378,7 +1378,7 @@ dependencies = [
 [[package]]
 name = "perry-diagnostics"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 dependencies = [
  "serde",
  "serde_json",
@@ -1387,7 +1387,7 @@ dependencies = [
 [[package]]
 name = "perry-dispatch"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 
 [[package]]
 name = "perry-frontend"
@@ -1399,6 +1399,7 @@ dependencies = [
  "perry-wit-diagnostics",
  "pliron",
  "serde_json",
+ "swc_atoms",
  "swc_common",
  "swc_ecma_parser",
  "swc_ecma_transforms_base",
@@ -1409,9 +1410,10 @@ dependencies = [
 [[package]]
 name = "perry-hir"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 dependencies = [
  "anyhow",
+ "perry-abi 0.5.1663",
  "perry-api-manifest",
  "perry-diagnostics",
  "perry-dispatch",
@@ -1460,7 +1462,7 @@ dependencies = [
 [[package]]
 name = "perry-parser"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -1501,7 +1503,7 @@ dependencies = [
 [[package]]
 name = "perry-runtime-manifest"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 dependencies = [
  "perry-abi 0.5.1663",
  "perry-dispatch",
@@ -1510,7 +1512,7 @@ dependencies = [
 [[package]]
 name = "perry-ui-model"
 version = "0.5.1663"
-source = "git+https://github.com/PerryTS/perry?rev=0216d8caba4866b780696875f4bac82b77ad2802#0216d8caba4866b780696875f4bac82b77ad2802"
+source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf9acb221836d#9a1ed5a85eb4f915644eb9f5e75bf9acb221836d"
 
 [[package]]
 name = "perry-wit"

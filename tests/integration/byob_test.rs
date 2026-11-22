@@ -35,10 +35,16 @@ export async function sumBytes(input: ReadableStream<Uint8Array>) {
     while (!done) {
         const original = buffer.buffer; const alias = buffer.subarray(1, 2);
         const view = buffer.subarray(2, 8194);
+        const framing = new DataView(original, 2, 4);
         const pending = reader.read(view);
         if (buffer.length !== 0 || alias.length !== 0 || view.length !== 0 || original.byteLength !== 0) throw 91;
         let detached = false; try { new Uint8Array(original); } catch { detached = true; }
-        if (!detached) throw 92;
+        if (!detached || framing.buffer !== original) throw 92;
+        let rejected = 0;
+        try { framing.getUint32(0); } catch { rejected++; }
+        try { framing.setUint32(0, 1); } catch { rejected++; }
+        try { total += framing.byteLength; } catch { rejected++; }
+        if (rejected !== 3) throw 92;
         const result = await pending; const bytes = result.value;
         if (bytes === undefined) throw 93;
         if (bytes.byteOffset !== 2 || bytes.buffer.byteLength !== 8196) throw 94;

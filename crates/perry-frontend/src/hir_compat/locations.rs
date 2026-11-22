@@ -72,6 +72,7 @@ pub struct Locations<'s> {
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
+    pub(crate) generic_templates: Vec<(FuncId, String)>,
     origins: HashMap<String, CallerOrigin>,
 }
 
@@ -279,6 +280,12 @@ impl<'s> Locations<'s> {
             .and_then(|info| self.span(info.span))
     }
 
+    pub fn source_at(&self, position: u32) -> Option<&'s str> {
+        let file = self.file_at(position)?;
+        file.source
+            .get((position - file.positions.start()) as usize..)
+    }
+
     pub fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
         self.span(Span::new(
             swc_common::BytePos(start),
@@ -298,6 +305,21 @@ impl<'s> Locations<'s> {
             .get(&byte_offset)
             .and_then(|span| self.span(*span))
             .or_else(|| self.call_span(byte_offset))
+    }
+
+    pub fn missing_function(&self, id: FuncId) -> Diagnostic {
+        if let Some((_, name)) = self
+            .generic_templates
+            .iter()
+            .find(|(template, _)| *template == id)
+        {
+            Diagnostic::unsupported(format!(
+                "generic function '{}' requires a direct call for specialization",
+                display_name(name)
+            ))
+        } else {
+            Diagnostic::internal("call to an unknown function")
+        }
     }
 
     pub fn type_span(&self, name: &str) -> Option<SourceSpan> {

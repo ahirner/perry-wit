@@ -93,6 +93,21 @@ impl Solver {
         {
             return Ok(None);
         }
+        if Operation::is_op::<crate::GlobalLoadOp>(op, ctx)
+            && global(ctx, operation.get_operand(0)).is_some()
+        {
+            self.heap_value(ctx, id, operation.get_result(0));
+            return Ok(None);
+        }
+        if kind == OperationKind::Mutate(Mutation::Local)
+            && let Some(name) = global(ctx, operation.get_operand(0))
+            && let stored = operation.get_operand(1)
+            && let Some(value) = self.heap_value(ctx, id, stored)
+        {
+            let cell = self.global_cell(name, stored.get_type(ctx));
+            self.copy_aliases(ctx, value, cell, reader)?;
+            return Ok(None);
+        }
         if Operation::is_op::<crate::JsonCopyOp>(op, ctx) {
             // Decoding creates fresh storage with the declared JSON numeric contract.
             // Ordinary numbers may round; fixed-width integer targets remain exact.

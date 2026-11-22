@@ -6,17 +6,23 @@ use std::collections::HashSet;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
+#[derive(Default)]
+pub(crate) struct BindingSpans {
+    pub inferred: HashSet<(u32, u32)>,
+    pub deferred: HashSet<u32>,
+}
+
 /// Validate string literals / `String.fromCodePoint` and collect untyped variable bindings in one pass.
 pub(crate) fn validate(
     module: &ast::Module,
     locations: &locations::Locations<'_>,
-) -> Result<HashSet<(u32, u32)>> {
+) -> Result<BindingSpans> {
     #[derive(Default)]
     struct Analyzer {
         invalid: Option<Span>,
         code_point_arity: Option<Span>,
         enum_decl: Option<Span>,
-        bindings: HashSet<(u32, u32)>,
+        bindings: BindingSpans,
     }
     impl Visit for Analyzer {
         fn visit_ts_enum_decl(&mut self, decl: &ast::TsEnumDecl) {
@@ -46,10 +52,27 @@ pub(crate) fn validate(
             }
             call.visit_children_with(self);
         }
-        fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
-            if declaration.init.is_some() {
-                collect_pat(&declaration.name, &mut self.bindings);
+        fn visit_for_head(&mut self, head: &ast::ForHead) {
+            if let ast::ForHead::VarDecl(var) = head {
+                // Iteration initializes the binding. Nested patterns can still contain declarations.
+                for declaration in &var.decls {
+                    declaration.visit_children_with(self);
+                }
+            } else {
+                head.visit_children_with(self);
             }
+        }
+        fn visit_var_declarator(&mut self, declaration: &ast::VarDeclarator) {
+            if declaration.init.is_none()
+                && let ast::Pat::Ident(binding) = &declaration.name
+            {
+                self.bindings.deferred.insert(binding.id.span.lo.0);
+            }
+            pattern_bindings(&declaration.name, false, &mut |id, annotated| {
+                if !annotated {
+                    self.bindings.inferred.insert((id.span.lo.0, id.span.hi.0));
+                }
+            });
             declaration.visit_children_with(self);
         }
     }
@@ -80,29 +103,145 @@ pub(crate) fn validate(
     Ok(analyzer.bindings)
 }
 
-fn collect_pat(pat: &ast::Pat, out: &mut HashSet<(u32, u32)>) {
+/// Visit the declared names and whether a type annotation covers each binding.
+pub(crate) fn pattern_bindings<'a>(
+    pat: &'a ast::Pat,
+    annotated: bool,
+    visit: &mut impl FnMut(&'a ast::Ident, bool),
+) {
     match pat {
-        ast::Pat::Ident(binding) if binding.type_ann.is_none() => {
-            out.insert((binding.id.span.lo.0, binding.id.span.hi.0));
-        }
-        ast::Pat::Array(arr) if arr.type_ann.is_none() => {
-            for elem in arr.elems.iter().flatten() {
-                collect_pat(elem, out);
+        ast::Pat::Ident(binding) => visit(&binding.id, annotated || binding.type_ann.is_some()),
+        ast::Pat::Array(array) => {
+            for element in array.elems.iter().flatten() {
+                pattern_bindings(element, annotated || array.type_ann.is_some(), visit);
             }
         }
-        ast::Pat::Object(obj) if obj.type_ann.is_none() => {
-            for prop in &obj.props {
+        ast::Pat::Object(object) => {
+            let annotated = annotated || object.type_ann.is_some();
+            for prop in &object.props {
                 match prop {
-                    ast::ObjectPatProp::KeyValue(kv) => collect_pat(&kv.value, out),
-                    ast::ObjectPatProp::Assign(assign) => {
-                        out.insert((assign.key.span.lo.0, assign.key.span.hi.0));
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        pattern_bindings(&kv.value, annotated, visit)
                     }
-                    ast::ObjectPatProp::Rest(rest) => collect_pat(&rest.arg, out),
+                    ast::ObjectPatProp::Assign(assign) => visit(&assign.key.id, annotated),
+                    ast::ObjectPatProp::Rest(rest) => pattern_bindings(&rest.arg, annotated, visit),
                 }
             }
         }
-        ast::Pat::Rest(rest) if rest.type_ann.is_none() => collect_pat(&rest.arg, out),
-        ast::Pat::Assign(assign) => collect_pat(&assign.left, out),
-        _ => {}
+        ast::Pat::Rest(rest) => {
+            pattern_bindings(&rest.arg, annotated || rest.type_ann.is_some(), visit)
+        }
+        ast::Pat::Assign(assign) => pattern_bindings(&assign.left, annotated, visit),
+        ast::Pat::Invalid(_) | ast::Pat::Expr(_) => {}
+    }
+}
+
+pub(super) struct PrivateParameters {
+    scope: swc_common::SyntaxContext,
+    arity: usize,
+    indices: Vec<usize>,
+    called: bool,
+}
+
+type PrivateFunctions = HashMap<swc_atoms::Atom, PrivateParameters>;
+
+/// Retain private declarations used only as the direct callee of fixed-arity calls.
+pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
+    struct Uses {
+        functions: PrivateFunctions,
+    }
+    impl Visit for Uses {
+        fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
+            decl.function.visit_with(self);
+        }
+        fn visit_ident(&mut self, ident: &ast::Ident) {
+            if self
+                .functions
+                .get(&ident.sym)
+                .is_some_and(|f| f.scope == ident.ctxt)
+            {
+                self.functions.remove(&ident.sym);
+            }
+        }
+        fn visit_call_expr(&mut self, call: &ast::CallExpr) {
+            if call.type_args.is_none()
+                && let ast::Callee::Expr(callee) = &call.callee
+                && let ast::Expr::Ident(ident) = &**callee
+                && let Some(function) = self.functions.get_mut(&ident.sym)
+                && function.scope == ident.ctxt
+                && function.arity == call.args.len()
+                && call.args.iter().all(|arg| arg.spread.is_none())
+            {
+                function.called = true;
+                call.args.visit_with(self);
+            } else {
+                call.visit_children_with(self);
+            }
+        }
+    }
+    let mut uses = Uses {
+        functions: HashMap::new(),
+    };
+    'functions: for item in &module.body {
+        let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(decl))) = item else {
+            continue;
+        };
+        if decl.function.type_params.is_some() {
+            continue;
+        }
+        let mut indices = Vec::new();
+        for (index, param) in decl.function.params.iter().enumerate() {
+            let ast::Pat::Ident(binding) = &param.pat else {
+                continue 'functions;
+            };
+            if binding.id.optional {
+                continue 'functions;
+            }
+            if binding.type_ann.is_none() {
+                indices.push(index);
+            }
+        }
+        if !indices.is_empty() {
+            uses.functions.insert(
+                decl.ident.sym.clone(),
+                PrivateParameters {
+                    scope: decl.ident.ctxt,
+                    arity: decl.function.params.len(),
+                    indices,
+                    called: false,
+                },
+            );
+        }
+    }
+    if !uses.functions.is_empty() {
+        module.visit_with(&mut uses);
+    }
+    uses.functions.retain(|_, f| f.called);
+    uses.functions
+}
+
+/// Mark inferred parameters for the same specialization as explicit TypeScript generics.
+pub(super) fn promote_private_parameters(module: &mut HirModule, mut source: PrivateFunctions) {
+    if source.is_empty() {
+        return;
+    }
+    for function in module.functions.iter_mut().filter(|f| !f.is_exported) {
+        if let Some(params) = source.remove(&swc_atoms::Atom::from(function.name.as_str()))
+            && function.params.len() == params.arity
+        {
+            for index in params.indices {
+                if let Some(param) = function.params.get_mut(index)
+                    && matches!(param.ty, HirType::Any | HirType::Unknown)
+                {
+                    let name = format!("@{}", param.name);
+                    param.ty = HirType::TypeVar(name.clone());
+                    function.type_params.push(perry_hir::types::TypeParam {
+                        name,
+                        constraint: None,
+                        default: None,
+                    });
+                }
+            }
+        }
     }
 }

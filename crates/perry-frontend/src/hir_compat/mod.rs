@@ -28,7 +28,7 @@ mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
 mod source;
-pub(crate) use source::validate;
+pub(crate) use source::{pattern_bindings, validate};
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
@@ -36,6 +36,8 @@ pub use methods::{Method, method};
 pub struct Metadata<'s> {
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
+    /// Bindings declared without an initializer.
+    pub deferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
     pub sparse_arrays: bool,
 }
@@ -61,6 +63,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
+    let private_parameters = source::private_parameters(&ast);
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
@@ -81,17 +84,29 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             None => diagnostic,
         }
     })?;
+    source::promote_private_parameters(&mut module, private_parameters);
     constructors.collect_types(&mut module)?;
     let inferred_bindings = module
         .local_source_spans
         .iter()
-        .filter_map(|(id, span)| spans.contains(&(span.start, span.end)).then_some(*id))
+        .filter_map(|(id, span)| {
+            spans
+                .inferred
+                .contains(&(span.start, span.end))
+                .then_some(*id)
+        })
+        .collect();
+    let deferred_bindings = module
+        .local_source_spans
+        .iter()
+        .filter_map(|(id, span)| spans.deferred.contains(&span.start).then_some(*id))
         .collect();
     Ok(LoweredHir {
         module,
         metadata: Metadata {
             locations,
             inferred_bindings,
+            deferred_bindings,
             constructors,
             sparse_arrays: sparse.0,
         },
@@ -216,6 +231,19 @@ function builtin() { return new Set<string>(); }
     }
 }
 
+/// A key known without executing a computed property expression.
+pub fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
+    use perry_hir::ir::ObjectPart;
+    match part {
+        ObjectPart::Define(name, _) => Some(name),
+        ObjectPart::Computed { key, .. } => match &**key {
+            Expr::String(name) => Some(name),
+            _ => None,
+        },
+        ObjectPart::Spread(_) => None,
+    }
+}
+
 /// Object fields retained across Perry's duplicate-key and literal-class desugarings.
 pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
     expr: &'s Expr,
@@ -223,7 +251,9 @@ pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
 ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s, F>> {
     let (fields, defined, names, args) = match expr {
         Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
-        Expr::ObjectSpread { parts } if parts.iter().all(|(key, _)| key.is_some()) => {
+        Expr::ObjectSpread { parts }
+            if parts.iter().all(|part| static_property(part).is_some()) =>
+        {
             (&[][..], &parts[..], &[][..], &[][..])
         }
         Expr::New {
@@ -238,7 +268,7 @@ pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
             .chain(
                 defined
                     .iter()
-                    .filter_map(|(name, value)| Some((name.as_deref()?, value))),
+                    .filter_map(|part| Some((static_property(part)?, part.value()))),
             )
             .chain(names.iter().copied().zip(args)),
     )

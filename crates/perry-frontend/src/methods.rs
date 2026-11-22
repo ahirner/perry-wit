@@ -25,6 +25,7 @@ pub enum Kind {
     Writer,
     Readable,
     ByteBuffer,
+    DataView,
     ByobReader,
     Reader,
     ReadResult,
@@ -64,6 +65,7 @@ impl Kind {
             Self::Writer => "WritableStreamDefaultWriter",
             Self::Readable => "ReadableStream",
             Self::ByteBuffer => "ArrayBuffer",
+            Self::DataView => "DataView",
             Self::ByobReader => "ReadableStreamBYOBReader",
             Self::Reader => "ReadableStreamDefaultReader",
             Self::ReadResult => "ReadableStreamReadResult",
@@ -97,6 +99,7 @@ impl Kind {
             "WritableStreamDefaultWriter" => Some(Self::Writer),
             "ReadableStream" => Some(Self::Readable),
             "ArrayBuffer" => Some(Self::ByteBuffer),
+            "DataView" => Some(Self::DataView),
             "ReadableStreamBYOBReader" => Some(Self::ByobReader),
             "ReadableStreamDefaultReader" => Some(Self::Reader),
             "ReadableStreamReadResult" => Some(Self::ReadResult),
@@ -279,6 +282,11 @@ macro_rules! registry {
                     $($(($family, $($name)|+) => Some(Self::$variant),)*)*
                     _ => None,
                 }
+            }
+
+            pub(crate) fn named_property(type_name: &str, name: &str) -> Option<MethodResult> {
+                let receiver = Receiver::Value(Kind::builtin(type_name)?);
+                Self::lookup(receiver, name).filter(|m| m.is_property()).map(Self::result)
             }
 
             pub(crate) fn is_property(self) -> bool {

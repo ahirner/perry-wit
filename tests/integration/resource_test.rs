@@ -26,6 +26,46 @@ struct Counts {
 }
 
 #[test]
+fn explicit_stdout_without_console_reaches_the_host() -> Result<()> {
+    struct OutputStream;
+    let bytes = MemoryChecked.component(
+        r#"package test:output;
+            world app { import wasi:cli/stdout@0.2.0; export run: func(); }
+            package wasi:io@0.2.0 { interface streams { resource output-stream; } }
+            package wasi:cli@0.2.0 {
+                interface stdout { use wasi:io/streams@0.2.0.{output-stream}; get-stdout: func() -> output-stream; }
+            }"#,
+        "app", "output.ts",
+        "import { getStdout } from 'wasi:cli/stdout@0.2.0';
+         import { dropOutputStream } from 'wasi:io/streams@0.2.0';
+         export function run() { dropOutputStream(getStdout()); }",
+    )?;
+    let engine = Engine::default();
+    let component = Component::new(&engine, bytes)?;
+    let mut linker = Linker::new(&engine);
+    linker
+        .instance("wasi:cli/stdout@0.2.0")?
+        .func_wrap("get-stdout", |_, ()| {
+            Ok((Resource::<OutputStream>::new_own(37),))
+        })?;
+    linker.instance("wasi:io/streams@0.2.0")?.resource(
+        "output-stream",
+        ResourceType::host::<OutputStream>(),
+        |mut store, rep| {
+            *store.data_mut() = Some(rep);
+            Ok(())
+        },
+    )?;
+    let mut store = Store::new(&engine, None);
+    let instance = linker.instantiate(&mut store, &component)?;
+    instance
+        .get_typed_func::<(), ()>(&mut store, "run")?
+        .call(&mut store, ())?;
+    assert_eq!(*store.data(), Some(37));
+    Ok(())
+}
+
+#[test]
 fn imported_resources_transfer_borrow_collect_and_rollback() -> Result<()> {
     for (body, expected, drops, reveals, taken) in [
         (

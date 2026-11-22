@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use perry_wit::{
     CompileOptions, ErrorKind, SdkOptions,
     api::{self, Module, Options, Program, Source, Wit},
@@ -21,7 +22,112 @@ fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
 }
 
 #[test]
-fn diagnostics_locate_imported_modules_and_multibyte_columns() {
+fn unannotated_parameter_evidence_requires_a_closed_set_of_direct_calls() -> anyhow::Result<()> {
+    let local = "function inc(x) { return x + 1; } export function run(n:number):number { return inc(6) + inc(n); }";
+    let typed = local.replace("inc(x)", "inc(x: number)");
+    assert_eq!(
+        perry_wit::compile_core(local, "local.ts")?,
+        perry_wit::compile_core(&typed, "local.ts")?
+    );
+    let mixed = "function make<T>(x:T) { return {value:x}; } function get(x) { return x.value; } export function run(n:number):number { return get(make(n)) + get(make('wide')).length; }";
+    let mut program = crate::core_program::Program::new(mixed);
+    assert_eq!(program.number("run", 7.0), 11.0);
+    let recursive = "function first(x) { return next(x); } function next(x:number):number { return x ? first(x-1) : 7; } export function run(n:number):number { return first(n); }";
+    let mut program = crate::core_program::Program::new(recursive);
+    assert_eq!(program.number("run", 4.0), 7.0);
+    let callbacks = r#"
+        function inc(x) { return x + 1; }
+        function size(x) { return x.length; }
+        export function run(n: number): number {
+            const indexes = [[n], [2]].map(row => row.map(v => inc(v))[0]);
+            const words: (string | null)[] = ["abc", null];
+            const lengths = words.map(function(word, index, group: (string | null)[]) {
+                if (word === null) return 0;
+                const width = size(word);
+                return width + inc(index + group.length);
+            });
+            return 100 * indexes[0] + 10 * indexes[1] + lengths[0] + lengths[1];
+        }"#;
+    let mut program = crate::core_program::Program::new(callbacks);
+    assert_eq!(program.number("run", 4.0), 536.0);
+    for source in [
+        "export function id(x) { return x; } export function run(): number { return id(1); }",
+        "function id(x) { return x; } export function run():number { [1].map(id); return id(1); }",
+        "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
+        "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
+        "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }",
+        "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
+    ] {
+        let error = perry_wit::compile_core(source, "closed.ts")
+            .err()
+            .context("expected an unresolved parameter")?;
+        assert_eq!(
+            error.primary().code(),
+            codes::MISSING_TYPE_ANNOTATION,
+            "{source}: {error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn unspecialized_function_values_identify_the_escaped_reference() -> anyhow::Result<()> {
+    for (expr, failing_use) in [
+        ("const f = double; return f(3)", "f(3)"),
+        ("return [1,2].map(double)[0]", "[1,2].map"),
+    ] {
+        let source = format!(
+            "function double<T>(x:T) {{ return x * 2; }} export function run():number {{ {expr}; }}"
+        );
+        let error = perry_wit::compile_core(&source, "escape.ts")
+            .err()
+            .context("expected an unspecialized function value")?;
+        let diagnostic = error.primary();
+        assert_eq!(diagnostic.code(), codes::UNSUPPORTED_CONSTRUCT, "{error}");
+        assert!(diagnostic.message().contains("double"), "{error}");
+        let span = diagnostic.span().context("function reference span")?;
+        assert_eq!(Some(span.start_byte), source.rfind(failing_use));
+        assert_eq!(
+            source.get(span.start_byte..span.end_byte),
+            Some(failing_use)
+        );
+    }
+    let unused = "function id<T>(x:T):T {return x;} function unused():void {const f=id;} export function run(n:number):number {const f=id; return n;}";
+    let mut program = crate::core_program::Program::new(unused);
+    assert_eq!(program.number("run", 2.0), 2.0);
+    let cast = "function double<T>(x:T) { return x*2; } export function run(n:number):number { return (double as (x:number)=>number)(n); }";
+    let mut program = crate::core_program::Program::new(cast);
+    assert_eq!(program.number("run", 3.0), 6.0);
+    Ok(())
+}
+
+#[test]
+fn unresolved_parameter_patterns_keep_the_source_location() -> anyhow::Result<()> {
+    for (pattern, argument) in [("{ w, h }", "{ w:2, h:3 }"), ("[first]", "[1,2]")] {
+        let source = format!(
+            "function probe(n:number, {pattern}) {{ return n; }} export function run(): number {{ return probe(3, {argument}); }}"
+        );
+        let error = perry_wit::compile_core(&source, "pattern.ts")
+            .err()
+            .context("expected an unannotated parameter pattern")?;
+        let diagnostic = error.primary();
+        assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION, "{error}");
+        let span = diagnostic.span().context("parameter pattern span")?;
+        assert_eq!(source.get(span.start_byte..span.end_byte), Some(pattern));
+        assert!(
+            diagnostic
+                .notes()
+                .iter()
+                .any(|note| note.message() == "in parameter 2 of 'probe'"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("__"), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
+fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result<()> {
     let helper = "// é🙂\r\nexport function helper(value) { return value; }";
     let mut program = program_with(
         "src/main.ts",
@@ -29,7 +135,18 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         &[("src/helper.ts", helper)],
     );
     program.source.contents.extend([b' '; 512]);
+    let inferred = api::compile_core(&program).unwrap();
+    let annotated = helper.replace("helper(value)", "helper(value: number)");
+    program.modules[0].contents = annotated.into_bytes();
+    assert_eq!(inferred, api::compile_core(&program).unwrap());
+    program.modules[0].contents = helper.as_bytes().to_vec();
+    let end = program.source.contents.len();
+    program
+        .source
+        .contents
+        .extend_from_slice(b"\nconst escaped = {helper};");
     let error = api::compile_core(&program).unwrap_err();
+    program.source.contents.truncate(end);
     let diagnostic = error.primary();
     assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION);
     let span = diagnostic.span().expect("declaration span");
@@ -66,6 +183,23 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         assert_eq!((span.start_line, span.start_column), (2, 15));
     }
 
+    let destructured = "export const { value: binding } = { value: 7 };";
+    let error = api::compile_core(&program_with(
+        "src/main.ts",
+        "export { binding as run } from './helper';",
+        &[("src/helper.ts", destructured)],
+    ))
+    .err()
+    .context("expected a diagnostic for the re-exported constant")?;
+    let diagnostic = error.primary();
+    assert!(diagnostic.message().contains("Component export 'run'"));
+    let span = diagnostic.span().context("destructured declaration span")?;
+    assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
+    assert_eq!(
+        destructured.get(span.start_byte..span.end_byte),
+        Some("binding")
+    );
+
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
     let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
     assert_eq!(parse_error.primary().code(), codes::PARSE_ERROR);
@@ -78,6 +212,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let span = parse_error.primary().span().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));
+    Ok(())
 }
 
 #[test]
@@ -127,6 +262,68 @@ fn sdk_errors_identify_the_failing_wit_or_output_path() {
 }
 
 #[test]
+fn generic_specialization_budget_is_per_function() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::fmt::Write;
+    let mut source = String::new();
+    for id in 0..257 {
+        writeln!(
+            source,
+            "function id{id}<T>(value: T): T {{ return value; }}"
+        )?;
+    }
+    source.push_str("export function run(): number { let total = 0; ");
+    for id in 0..257 {
+        writeln!(source, "total += id{id}(1);")?;
+    }
+    source.push_str("return total; }");
+    api::compile_core(&program_with("budget.ts", &source, &[]))?;
+
+    // The first recursive call changes the key; the second reuses it.
+    api::compile_core(&program_with(
+        "finite.ts",
+        "function again<T>(value:T, n:number):number { return n<=0 ? 0 : again([0], n-1); } export function run():number {return again(0, 2);}",
+        &[],
+    ))?;
+    let mut finite = String::from(
+        "function count<T>(v:T):number {return 1;} export function run():number {let n=0;",
+    );
+    for id in 0..257 {
+        writeln!(finite, "n += count({{field{id}: 1}});")?;
+    }
+    finite.push_str("return n;}");
+    for (source, function, grows) in [
+        (finite.as_str(), "count", false),
+        (
+            "function grow<T>(value:T):number {return grow([value]);} export function run():number {return grow(1);}",
+            "grow",
+            true,
+        ),
+    ] {
+        let error = api::compile_core(&program_with("budget.ts", source, &[]))
+            .err()
+            .context("expected the per-function specialization budget to be exhausted")?;
+        assert_eq!(error.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
+        assert!(
+            error.to_string().contains(&format!(
+                "256 distinct argument lists reached for {function}"
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .primary()
+                .notes()
+                .iter()
+                .any(|note| note.message().contains("grows type argument T")),
+            grows,
+            "{error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn imported_helpers_report_the_call_chain_across_compiler_phases() {
     const WORKFLOW: &str = "src/work\x1e\x1fflow.ts";
     let assert_caller_note =
@@ -170,6 +367,12 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
             "import { wrap } from './lib';\nexport function run(): number {\n  return wrap('bad');\n}",
             codes::TYPE_MISMATCH,
             "while instantiating 'wrap'",
+        ),
+        (
+            "function missing<T>(): T {throw new Error('missing');}\nexport function middle<T>(x:T) {return missing();}",
+            "import { middle } from './lib';\nexport function run(): number {return middle(1);}",
+            codes::MISSING_TYPE_ANNOTATION,
+            "while instantiating 'middle'",
         ),
         (
             "export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}",
@@ -217,6 +420,33 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
         }),
         "expected intermediate note in src/mid.ts:\n{chain_err}"
     );
+}
+
+#[test]
+fn generic_property_reads_require_a_live_argument_guard() -> anyhow::Result<()> {
+    use anyhow::Context;
+    for body in [
+        "return size(message);",
+        "if (message !== null) { message = null; return size(message); } return 0;",
+        "if (message === null) { return 0; } else { message = null; } return size(message);",
+        "const reset = (): void => { message = null; }; if (message !== null) { reset(); return size(message); } return 0;",
+        "if (message !== undefined) return size(message); return 0;",
+        "return [message].map(v => { if (v === null) return 0; v = null; return size(v); })[0];",
+        "return ['abc'].map((v, i, group: (string | null)[]) => size(group[0]))[0];",
+    ] {
+        let source = format!(
+            "function size<T>(value:T):number {{return value.length;}} export function run(message:string|null):number {{ {body} }}"
+        );
+        let error = api::compile_core(&program_with("guard.ts", &source, &[]))
+            .err()
+            .with_context(|| format!("expected a nullable-property error for {body}"))?;
+        assert_eq!(
+            error.primary().code(),
+            codes::POSSIBLY_NULL_RECEIVER,
+            "{body}: {error}"
+        );
+    }
+    Ok(())
 }
 
 /// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
@@ -485,9 +715,24 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
     };
     let throwing =
         program("export async function run():Promise<number> {throw new Error('broken');}");
-    let error = api::compile(&throwing, &bare_wit, &Options::default()).unwrap_err();
-    assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
-    assert!(error.primary().help().unwrap().contains("async"));
+    let resource_stderr = Wit {
+        application: b"package test:stderr; world app { import wasi:cli/stderr@0.2.0; export run: async func() -> f64; }
+            package wasi:cli@0.2.0 { interface stderr { resource output-stream; get-stderr: func() -> output-stream; } }"
+            .as_slice().into(),
+        dependencies: vec![],
+    };
+    for wit in [&bare_wit, &resource_stderr] {
+        let Err(error) = api::compile(&throwing, wit, &Options::default()) else {
+            panic!("throwing export compiled without a P3 error channel");
+        };
+        assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
+        assert!(
+            error
+                .primary()
+                .help()
+                .is_some_and(|help| help.contains("async"))
+        );
+    }
     api::compile(&throwing, &stderr_wit, &Options::default()).unwrap();
     for source in [
         "export async function run() {try{throw new Error('handled');}catch(e){return 7;}}",
@@ -643,4 +888,25 @@ fn every_kind_has_a_fixture() {
         };
         assert_eq!(error.primary().kind(), kind, "{error}");
     }
+}
+
+#[test]
+fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> anyhow::Result<()> {
+    let source = r#"export function run(flag: boolean): boolean {
+  const bytes = new Uint8Array([5]);
+  let storage;
+  if (flag) storage = bytes;
+  else storage = { marker: 1 };
+  return storage === bytes;
+}"#;
+    let error = perry_wit::compile_core(source, "storage.ts")
+        .err()
+        .context("expected unsupported storage")?;
+    let diagnostic = error.primary();
+    assert_eq!(diagnostic.code(), codes::UNSUPPORTED_TYPE, "{error}");
+    assert!(diagnostic.message().contains("local 'storage'"), "{error}");
+    let span = diagnostic.span().context("missing binding location")?;
+    assert_eq!((span.start_line, span.start_column), (3, 7));
+    assert_eq!(source.get(span.start_byte..span.end_byte), Some("storage"));
+    Ok(())
 }

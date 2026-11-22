@@ -74,6 +74,13 @@ impl<'s> FunctionBuilder<'s> {
         Ok(if prefix { next } else { old })
     }
 
+    pub(crate) fn string_length(&mut self, ctx: &mut Context, string: Value) -> Value {
+        let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, string));
+        self.emit_value(ctx, |ctx| {
+            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
+        })
+    }
+
     /// `object.property`, by the kind of `object`.
     pub(super) fn property_get(
         &mut self,
@@ -102,12 +109,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.intrinsic(ctx, intrinsic, vec![value])
             }
-            (Kind::String, "length") => {
-                let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
-                self.emit_value(ctx, |ctx| {
-                    NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-                })
-            }
+            (Kind::String, "length") => self.string_length(ctx, value),
             (Kind::Array, field) if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) => {
                 let key = self.string(ctx, field);
                 self.kv_get(ctx, value, key, k_ty, v_ty)?
@@ -126,14 +128,6 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::Array, "length") => self.array_length(ctx, value),
             (Kind::Array, "size") => self.collection_size(ctx, value)?,
-            (Kind::Bytes, "buffer") => self.intrinsic(ctx, Intrinsic::BytesBuffer, vec![value]),
-            (Kind::Bytes, "byteOffset") => self.intrinsic(ctx, Intrinsic::BytesOffset, vec![value]),
-            (Kind::ByteBuffer, "byteLength") => {
-                self.intrinsic(ctx, Intrinsic::BufferLength, vec![value])
-            }
-            (Kind::Bytes, "length" | "byteLength") => {
-                self.intrinsic(ctx, Intrinsic::BytesLength, vec![value])
-            }
             (Kind::Json, "length") => self.intrinsic(ctx, Intrinsic::JsonLength, vec![value]),
             (Kind::Json, name) => {
                 let name = self.string(ctx, name);
@@ -154,7 +148,10 @@ impl<'s> FunctionBuilder<'s> {
                 self.append_value(ctx, &op)
             }
             (
-                Kind::Headers
+                Kind::Bytes
+                | Kind::ByteBuffer
+                | Kind::DataView
+                | Kind::Headers
                 | Kind::Response
                 | Kind::Request
                 | Kind::Writable

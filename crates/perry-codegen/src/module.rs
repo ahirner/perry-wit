@@ -468,11 +468,7 @@ fn bind_exports(
             "Await the asynchronous work in the top-level statements, so every entry point waits for it.",
         ));
     }
-    let stderr = state.imports.as_ref().is_some_and(|imports| {
-        imports
-            .iter()
-            .any(|name| name.starts_with("wasi:cli/stderr@"))
-    });
+    let stderr = state.can_import("wasi:cli/stderr@0.3.0");
     let mut resolved = Vec::with_capacity(exports.len());
     for export in exports {
         let &lowered = lowered_functions.get(&export.function).ok_or_else(|| {

@@ -175,15 +175,12 @@ pub(super) fn emit_component(
     let target = perry_contract::target::for_world(resolve, world);
     let p2 = target == perry_contract::target::Target::P2;
     let streams = bind::stream_anchor(resolve, world);
-    let (mut has_stdout, mut stderr) = (false, false);
-    for name in &imports {
-        // A P3 component writes only to WASI 0.3 output streams, even when its world also
-        // imports the WASI 0.2 ones.
-        let usable = p2 || name.contains("@0.3.");
-        has_stdout |= usable && name.starts_with("wasi:cli/stdout@");
-        stderr |= usable && name.starts_with("wasi:cli/stderr@");
-    }
-    let stdout = has_stdout && uses_stdout(ctx, mir);
+    let stdout = !strip_unused_stdio || uses_stdout(ctx, mir);
+    let stderr = !strip_unused_stdio
+        || imports.iter().any(|name| match target {
+            perry_contract::target::Target::P2 => name.starts_with("wasi:cli/stderr@0.2."),
+            perry_contract::target::Target::P3 => name == "wasi:cli/stderr@0.3.0",
+        });
     let abi = Exports::Canonical {
         p2,
         memory_checks,
@@ -194,7 +191,7 @@ pub(super) fn emit_component(
     };
     let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &abi, analyses)?;
     let core = perry_codegen::compile(ctx, mir, &abi, analyses)?;
-    let (mut core, helpers) = finish(
+    let (core, helpers) = finish(
         core,
         streams.as_ref(),
         &link::canonical::Requirements::for_world(resolve, world),
@@ -202,10 +199,12 @@ pub(super) fn emit_component(
             target,
             interfaces: &imports,
         },
+        |module, _| match module {
+            "wasi:cli/stdout@0.3.0" => !stdout,
+            "wasi:cli/stderr@0.3.0" => !stderr,
+            _ => false,
+        },
     )?;
-    if strip_unused_stdio {
-        core = link::raw::available_stdio(core, stdout, stderr)?;
-    }
     use std::fmt::Write as _;
     let _ = writeln!(allocation_report, "Linked helper functions: {helpers}");
     let component = componentize
@@ -242,8 +241,16 @@ pub(crate) fn compile_core_sources(
         None,
         &link::canonical::Requirements::default(),
         &link::RuntimeImports::RAW,
+        |module, name| {
+            name.ends_with(component::reactions::ANCHOR)
+                || (module == "$root"
+                    && matches!(
+                        name,
+                        "[waitable-set-new]" | "[waitable-set-drop]" | "[waitable-join]"
+                    ))
+        },
     )?;
-    link::raw::without_p3(core)
+    Ok(core)
 }
 
 fn lower(
@@ -270,9 +277,11 @@ fn finish(
     streams: Option<&link::StreamAnchor>,
     canonical: &link::canonical::Requirements,
     runtime: &link::RuntimeImports,
+    stub_runtime_import: impl Fn(&str, &str) -> bool,
 ) -> Result<(Vec<u8>, u32)> {
-    let (core, helpers) = link::link_helpers_with(core, streams, canonical, runtime)
-        .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
+    let (core, helpers) =
+        link::link_helpers_with(core, streams, canonical, runtime, stub_runtime_import)
+            .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
     let core = link::compact(&core)
         .map_err(|err| err.with_internal_context("interning core function signatures"))?;
     audit::validate_guest(&core)
