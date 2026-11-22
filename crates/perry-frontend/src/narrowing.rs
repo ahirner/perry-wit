@@ -1,5 +1,6 @@
 //! Facts a branch condition proves about the values read in each arm, recovered from source
 //! guards because Perry HIR carries no flow-sensitive types.
+use crate::Absence;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Stmt, UnaryOp},
     types::LocalId,
@@ -52,14 +53,8 @@ impl<'s> DefinedGuard<'s> {
         let Expr::Compare { op, left, right } = condition else {
             return None;
         };
-        let defined_when = match op {
-            CompareOp::Ne => true,
-            CompareOp::Eq => false,
-            _ => return None,
-        };
-        let tested = match (&**left, &**right) {
-            (tested, Expr::Undefined) | (Expr::Undefined, tested) => tested,
-            _ => return None,
+        let (tested, Absence::Undefined, defined_when) = absence_test(*op, left, right)? else {
+            return None;
         };
         Some(Self {
             path: path(tested)?,
@@ -81,15 +76,65 @@ pub enum Discriminant {
     Tag,
 }
 
+#[derive(Clone, Copy)]
+enum Fact<'s> {
+    Tag(Discriminant, &'s str, bool),
+    Excludes(Absence),
+}
+
 struct Guard<'s> {
     path: Path<'s>,
-    tag: &'s str,
-    equal: bool,
-    discriminant: Discriminant,
+    fact: Fact<'s>,
     killed: bool,
 }
 
-/// The tag guards in effect, appended as conditions narrow and truncated when branches exit.
+fn absence_test<'a>(
+    op: CompareOp,
+    left: &'a Expr,
+    right: &'a Expr,
+) -> Option<(&'a Expr, Absence, bool)> {
+    let (value, state) = match (left, right) {
+        (value, Expr::Null) | (Expr::Null, value) => (value, Absence::Null),
+        (value, Expr::Undefined) | (Expr::Undefined, value) => (value, Absence::Undefined),
+        _ => return None,
+    };
+    Some(match op {
+        CompareOp::Eq => (value, state, false),
+        CompareOp::Ne => (value, state, true),
+        CompareOp::LooseEq => (value, Absence::Both, false),
+        CompareOp::LooseNe => (value, Absence::Both, true),
+        _ => return None,
+    })
+}
+
+fn comparisons<'s>(
+    condition: &'s Expr,
+    truth: bool,
+    visit: &mut impl FnMut(CompareOp, &'s Expr, &'s Expr, bool),
+) {
+    match condition {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => comparisons(operand, !truth, visit),
+        Expr::Logical { op, left, right }
+            if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) =>
+        {
+            comparisons(left, truth, visit);
+            comparisons(right, truth, visit);
+        }
+        Expr::Compare { op, left, right } => visit(*op, left, right, truth),
+        _ => {}
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Branch {
+    depth: usize,
+    kills: usize,
+}
+
+/// The guards in effect, appended as conditions narrow and truncated when branches exit.
 /// An assignment kills the guards on its local in place, so lengths stay valid scope marks.
 #[derive(Default)]
 pub struct Guards<'s> {
@@ -109,55 +154,63 @@ impl<'s> Guards<'s> {
         self.kills.retain(|&index| index < len);
     }
 
-    fn push(&mut self, path: Path<'s>, tag: &'s str, equal: bool, discriminant: Discriminant) {
+    fn push(&mut self, path: Path<'s>, fact: Fact<'s>) {
         self.stack.push(Guard {
             path,
-            tag,
-            equal,
-            discriminant,
+            fact,
             killed: false,
         });
     }
 
-    /// The guards in effect for `path`: each tag and whether the value equals it.
+    fn facts<'a>(&'a self, path: &'a Path<'s>) -> impl Iterator<Item = Fact<'s>> + 'a {
+        self.stack
+            .iter()
+            .filter(move |g| !g.killed && &g.path == path)
+            .map(|g| g.fact)
+    }
+
     pub fn tags<'a>(
         &'a self,
         path: &'a Path<'s>,
         discriminant: Discriminant,
     ) -> impl Iterator<Item = (&'s str, bool)> + 'a {
-        self.stack
-            .iter()
-            .filter(move |guard| {
-                !guard.killed && &guard.path == path && guard.discriminant == discriminant
-            })
-            .map(|guard| (guard.tag, guard.equal))
+        self.facts(path).filter_map(move |fact| match fact {
+            Fact::Tag(d, tag, equal) if d == discriminant => Some((tag, equal)),
+            _ => None,
+        })
     }
 
-    /// Record the guards `condition` establishes where it evaluates to `truth`.
-    pub fn condition(&mut self, condition: &'s Expr, truth: bool) {
-        match condition {
-            Expr::Unary {
-                op: UnaryOp::Not,
-                operand,
-            } => self.condition(operand, !truth),
-            Expr::Logical { op, left, right } => {
-                if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) {
-                    self.condition(left, truth);
-                    self.condition(right, truth);
-                }
+    pub(crate) fn excluded(&self, id: LocalId) -> Option<Absence> {
+        self.facts(&Path::local(id))
+            .filter_map(|fact| match fact {
+                Fact::Excludes(state) => Some(state),
+                _ => None,
+            })
+            .reduce(Absence::join)
+    }
+
+    pub(crate) fn exclude_absences(&mut self, condition: &Expr, truth: bool) {
+        comparisons(condition, truth, &mut |op, left, right, truth| {
+            if let Some((Expr::LocalGet(local), absence, excluded_when)) =
+                absence_test(op, left, right)
+                && truth == excluded_when
+            {
+                self.push(Path::local(*local), Fact::Excludes(absence));
             }
-            Expr::Compare {
-                op: CompareOp::Eq,
-                left,
-                right,
-            } => self.equality(left, right, truth),
-            Expr::Compare {
-                op: CompareOp::Ne,
-                left,
-                right,
-            } => self.equality(left, right, !truth),
-            _ => {}
+        });
+        // A later operand may write a value tested by an earlier operand.
+        if self.depth() != 0 {
+            self.assign_in(&[], [condition], |_| None);
         }
+    }
+
+    /// Record the tag guards `condition` establishes where it evaluates to `truth`.
+    pub fn condition(&mut self, condition: &'s Expr, truth: bool) {
+        comparisons(condition, truth, &mut |op, left, right, truth| match op {
+            CompareOp::Eq => self.equality(left, right, truth),
+            CompareOp::Ne => self.equality(left, right, !truth),
+            _ => {}
+        });
     }
 
     /// Record that `left === right` is `equal` when one side is a tag or `typeof` of a path
@@ -181,7 +234,7 @@ impl<'s> Guards<'s> {
             _ => return,
         };
         if let Some(path) = path(object) {
-            self.push(path, tag.as_str(), equal, discriminant);
+            self.push(path, Fact::Tag(discriminant, tag.as_str(), equal));
         }
     }
 
@@ -198,7 +251,7 @@ impl<'s> Guards<'s> {
     /// After an assignment, `local` holds the alternative whose `discriminant` is `tag`.
     pub fn assign_as(&mut self, local: LocalId, discriminant: Discriminant, tag: &'s str) {
         self.assign(local);
-        self.push(Path::local(local), tag, true, discriminant);
+        self.push(Path::local(local), Fact::Tag(discriminant, tag, true));
     }
 
     /// End the guards on every local a loop or callback body assigns: its later stores
@@ -210,6 +263,9 @@ impl<'s> Guards<'s> {
         expressions: impl IntoIterator<Item = &'e Expr>,
         closure: impl Fn(LocalId) -> Option<&'e Expr>,
     ) {
+        if self.stack.is_empty() {
+            return;
+        }
         let mut scan = Assignments {
             closure,
             entered: Vec::new(),
@@ -224,31 +280,51 @@ impl<'s> Guards<'s> {
         }
     }
 
-    /// A mark for [`Self::revive`].
-    pub fn mark(&self) -> usize {
-        self.kills.len()
-    }
-
-    /// Undo the kills since `mark`, for a branch arm that does not reach the join, and return
-    /// them so that [`Self::kill`] can apply them again. Scopes nest: every truncation inside
-    /// the arm keeps the guards that existed at `mark`, so the kills before it and the indices
-    /// after it stay valid.
-    pub fn revive(&mut self, mark: usize) -> Vec<usize> {
-        let revived = self.kills.split_off(mark);
-        for &index in &revived {
-            self.stack[index].killed = false;
+    pub fn branch(&self) -> Branch {
+        Branch {
+            depth: self.depth(),
+            kills: self.kills.len(),
         }
-        revived
     }
 
-    /// Apply kills returned by [`Self::revive`] again, for an arm that reaches the join.
-    pub fn kill(&mut self, indices: Vec<usize>) {
-        for index in indices {
-            if !self.stack[index].killed {
-                self.stack[index].killed = true;
-                self.kills.push(index);
+    pub fn other_arm(&mut self, branch: Branch) -> Vec<usize> {
+        self.truncate(branch.depth);
+        self.revive(branch.kills)
+    }
+
+    /// Keep writes from arms reaching the join. A single surviving arm retains its condition.
+    pub fn join(
+        &mut self,
+        branch: Branch,
+        then_writes: Vec<usize>,
+        then_reaches: bool,
+        else_reaches: bool,
+    ) -> Option<bool> {
+        self.truncate(branch.depth);
+        if !else_reaches {
+            self.revive(branch.kills);
+        }
+        if then_reaches {
+            for index in then_writes {
+                if let Some(guard) = self.stack.get_mut(index)
+                    && !guard.killed
+                {
+                    guard.killed = true;
+                    self.kills.push(index);
+                }
             }
         }
+        (then_reaches != else_reaches).then_some(then_reaches)
+    }
+
+    fn revive(&mut self, mark: usize) -> Vec<usize> {
+        let revived = self.kills.split_off(mark);
+        for &index in &revived {
+            if let Some(guard) = self.stack.get_mut(index) {
+                guard.killed = false;
+            }
+        }
+        revived
     }
 }
 

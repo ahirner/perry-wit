@@ -188,7 +188,6 @@ impl<'s> FunctionBuilder<'s> {
                 then_branch,
                 else_branch,
             } => {
-                let guards = self.variant_guards.depth();
                 let test = self.condition(ctx, condition)?;
                 let then = self.new_block(ctx, "then");
                 let join = self.new_block(ctx, "join");
@@ -201,13 +200,12 @@ impl<'s> FunctionBuilder<'s> {
                 self.switch_to(then);
                 // Stores in one arm do not reach the other arm, nor the join unless the arm
                 // falls through to it.
-                let arms = self.variant_guards.mark();
+                let arms = self.variant_guards.branch();
                 self.variant_guards.condition(condition, true);
                 self.statements(ctx, then_branch)?;
                 let then_reachable = self.reachable(ctx, self.block);
                 self.jump(ctx, join);
-                self.variant_guards.truncate(guards);
-                let then_stores = self.variant_guards.revive(arms);
+                let then_stores = self.variant_guards.other_arm(arms);
                 let mut else_reachable = true;
                 if let Some(else_branch) = else_branch {
                     self.switch_to(otherwise);
@@ -216,18 +214,11 @@ impl<'s> FunctionBuilder<'s> {
                     else_reachable = self.reachable(ctx, self.block);
                     self.jump(ctx, join);
                 }
-                self.variant_guards.truncate(guards);
-                if !else_reachable {
-                    self.variant_guards.revive(arms);
-                }
-                if then_reachable {
-                    self.variant_guards.kill(then_stores);
-                }
-                if !then_reachable {
-                    self.variant_guards.condition(condition, false);
-                }
-                if !else_reachable {
-                    self.variant_guards.condition(condition, true);
+                if let Some(truth) =
+                    self.variant_guards
+                        .join(arms, then_stores, then_reachable, else_reachable)
+                {
+                    self.variant_guards.condition(condition, truth);
                 }
                 self.switch_to(join);
             }

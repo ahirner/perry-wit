@@ -118,3 +118,25 @@ console.log(catchScope("str"), catchScope(4));
 retain({ shape: { tag: "label", val: "kept" } });
 console.log(retagged(), retainedTag());
 console.log(aliasWrite({ shape: { tag: "circle", val: 2 } }));
+
+const words = ["ab", "cd"];
+let cursor = 0;
+function readWord<T>(input: T[]): T | null {
+  return cursor < input.length ? input[cursor++] : null;
+}
+function writeWord<M extends { length: number, toUpperCase(): string }>(message: M) {
+  if (message.length <= 2) console.log(message.toUpperCase());
+}
+for (let message = readWord(words); message !== null; message = readWord(words)) {
+  writeWord(message);
+}
+let lastWord: string | null = null;
+cursor = 0;
+lastWord = readWord(words);
+if (lastWord !== null) console.log("last word length", measured(lastWord));
+function measured<M extends { length: number }>(message: M) { return message.length; }
+function guardedLength(message: string | null) {
+  if (message === null) return 0;
+  return measured(message);
+}
+console.log("guarded lengths", guardedLength("abc"), guardedLength(null));
