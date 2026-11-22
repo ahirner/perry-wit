@@ -191,6 +191,9 @@ impl Instances<'_> {
         let mut instance = function.clone();
         instance.id = id;
         instance.name = format!("{}_instance_{id}", function.name);
+        if !env.metadata.locations.has_explicit_return(&function.name) {
+            instance.return_type = HirType::Any;
+        }
         instance.type_params.clear();
         instance.is_exported = false;
         // Fresh declarations lie above every source id, so the reference remap leaves them intact.
@@ -535,6 +538,12 @@ pub(crate) fn specialize_functions(
                 Body::Init => {
                     let mut env = inference.function(&base, &hir.classes, &mut locals);
                     instances.body(&mut hir.init, None, &mut env)?;
+                    for (id, ty) in locals.drain() {
+                        if base.local_type(id).is_some_and(incomplete) && !incomplete(&ty) {
+                            base.insert_local(id, ty);
+                            instances.progressed = true;
+                        }
+                    }
                 }
                 Body::Class(index) => {
                     instances.class(index, &mut hir.classes, &mut base, &inference, &mut locals)?
