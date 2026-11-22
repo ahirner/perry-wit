@@ -130,24 +130,10 @@ type PrivateFunctions = HashMap<swc_atoms::Atom, PrivateParameters>;
 pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
     struct Uses {
         functions: PrivateFunctions,
-        in_closure: bool,
-    }
-    impl Uses {
-        fn closure<T: VisitWith<Self>>(&mut self, closure: &T) {
-            let previous = std::mem::replace(&mut self.in_closure, true);
-            closure.visit_children_with(self);
-            self.in_closure = previous;
-        }
     }
     impl Visit for Uses {
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
             decl.function.visit_with(self);
-        }
-        fn visit_fn_expr(&mut self, closure: &ast::FnExpr) {
-            self.closure(closure);
-        }
-        fn visit_arrow_expr(&mut self, closure: &ast::ArrowExpr) {
-            self.closure(closure);
         }
         fn visit_ident(&mut self, ident: &ast::Ident) {
             if self
@@ -159,8 +145,7 @@ pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
             }
         }
         fn visit_call_expr(&mut self, call: &ast::CallExpr) {
-            if !self.in_closure
-                && call.type_args.is_none()
+            if call.type_args.is_none()
                 && let ast::Callee::Expr(callee) = &call.callee
                 && let ast::Expr::Ident(ident) = &**callee
                 && let Some(function) = self.functions.get_mut(&ident.sym)
@@ -177,7 +162,6 @@ pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
     }
     let mut uses = Uses {
         functions: HashMap::new(),
-        in_closure: false,
     };
     'functions: for item in &module.body {
         let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(decl))) = item else {

@@ -295,7 +295,10 @@ impl Instances<'_> {
             Ok(())
         })?;
         walk::scan(body, env, None, None);
-        guards::Calls::new(|expr, guards| self.call(expr, caller, env, guards)).body(body)
+        guards::Calls::new(env, |expr, guards, env| {
+            self.call(expr, caller, env, guards)
+        })
+        .body(body)
     }
 
     fn call(
@@ -352,7 +355,10 @@ impl Instances<'_> {
         caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
-        guards::Calls::new(|expr, guards| self.call(expr, caller, env, guards)).expression(expr)
+        guards::Calls::new(env, |expr, guards, env| {
+            self.call(expr, caller, env, guards)
+        })
+        .expression(expr)
     }
 
     fn callable(
@@ -680,5 +686,9 @@ pub(crate) fn specialize_functions(
             None => error,
         });
     }
+    metadata.locations.generic_templates = templates
+        .into_iter()
+        .map(|(id, function)| (id, function.name))
+        .collect();
     Ok(())
 }

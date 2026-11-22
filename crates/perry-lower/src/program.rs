@@ -132,9 +132,18 @@ pub(super) fn build_module(
                 ));
             }
             let base_carrier = shapes.value_type(ctx, &param.ty).map_err(|error| {
+                let source = hir
+                    .local_source_spans
+                    .get(&param.id)
+                    .and_then(|span| locations.source_at(span.start));
+                let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
+                    format!("{}", idx + 1)
+                } else {
+                    format!("'{}'", param.name)
+                };
                 let error = shapes
                     .annotate_local(error, param.id)
-                    .with_note(format!("in parameter '{}' of '{display_name}'", param.name));
+                    .with_note(format!("in parameter {label} of '{display_name}'"));
                 locations.annotate_caller(error, &function.name)
             })?;
             let integer = shapes.integer_type(ctx, &param.ty);
