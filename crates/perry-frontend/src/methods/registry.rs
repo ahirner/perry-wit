@@ -85,7 +85,13 @@ macro_rules! method_catalog {
                 DataViewOffset "byteOffset" Number Upstream Property [] => intrinsic(DataViewOffset), "takes no arguments";
                 DataViewLength "byteLength" Number Upstream Property [] => intrinsic(DataViewLength), "takes no arguments";
             }
+            Receiver::Value(Kind::ByteBuffer), "ArrayBuffer" {
+                BufferLength "byteLength" Number Upstream Property [] => intrinsic(BufferLength), "takes no arguments";
+            }
             Receiver::Value(Kind::Bytes), "Bytes" {
+                BytesLength "length"|"byteLength" Number Upstream Property [] => intrinsic(BytesLength), "takes no arguments";
+                BytesOffset "byteOffset" Number Upstream Property [] => intrinsic(BytesOffset), "takes no arguments";
+                BytesBuffer "buffer" Native(Kind::ByteBuffer) Upstream Property [] => intrinsic(BytesBuffer), "takes no arguments";
                 BytesSubarray "subarray" Receiver Upstream Method [args:rest] => intrinsic(BytesSubarray, args, [Number(0.0), Number(f64::INFINITY)], Value), "accepts method arguments";
                 BytesSlice "slice" Receiver Always Method [args:rest] => intrinsic(BytesSlice, args, [Number(0.0), Number(f64::INFINITY)], Value), "accepts method arguments";
                 BytesFill "fill" Receiver Upstream Method [args:rest] => intrinsic(BytesFill, args, [Number(0.0), Number(0.0), Number(f64::INFINITY)], Receiver), "accepts method arguments";

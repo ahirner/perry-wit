@@ -178,6 +178,12 @@ function inferredOptionalElements(x: number): number {
 }
 for (const x of [0, 1]) console.log("inferred-optional", x, inferredOptionalElements(x));
 
+function bytesLength(view: Uint8Array) { return view.length; }
+function backingBuffer(view: Uint8Array) { return view.buffer; }
+function backingLength(view: Uint8Array) { return backingBuffer(view).byteLength; }
+const byteWindow = new Uint8Array([10, 20, 30, 40]).subarray(1, 3);
+console.log("inferred byte view", bytesLength(byteWindow), byteWindow.byteOffset, byteWindow.byteLength, backingLength(byteWindow));
+
 const gapValues: number[] = [1, 4];
 const [gapFirst, , gapMissing = 7] = gapValues;
 const [tupleText, tupleCount] = ["ok", 3] as [string, number];
