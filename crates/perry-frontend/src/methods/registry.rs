@@ -12,10 +12,10 @@ macro_rules! method_catalog {
                 ArrayMap "map" Mapped Upstream Method callback(Elements) [callback] => value(array_transform(callback, Transform::Map)), "requires one static callback";
                 ArrayFilter "filter" Receiver Upstream Method callback(Elements) [callback] => value(array_transform(callback, Transform::Filter)), "requires one static callback";
                 ArrayFlatMap "flatMap" FlatMapped Upstream Method callback(Elements) [callback] => value(array_transform(callback, Transform::FlatMap)), "requires one static callback";
-                ArrayFind "find" Element Upstream Method callback(Elements) [callback] => value(array_search(Search::Find(callback, FindResult::Value, Direction::Forward))), "requires one static callback";
-                ArrayFindIndex "findIndex" Number Upstream Method callback(Elements) [callback] => value(array_search(Search::Find(callback, FindResult::Index, Direction::Forward))), "requires one static callback";
-                ArrayFindLast "findLast" Element Always Method callback(Elements) [callback] => value(array_search(Search::Find(callback, FindResult::Value, Direction::Reverse))), "requires one static callback";
-                ArrayFindLastIndex "findLastIndex" Number Always Method callback(Elements) [callback] => value(array_search(Search::Find(callback, FindResult::Index, Direction::Reverse))), "requires one static callback";
+                ArrayFind "find" Element Upstream Method callback(AllIndices) [callback] => value(array_search(Search::Find(callback, FindResult::Value, Direction::Forward))), "requires one static callback";
+                ArrayFindIndex "findIndex" Number Upstream Method callback(AllIndices) [callback] => value(array_search(Search::Find(callback, FindResult::Index, Direction::Forward))), "requires one static callback";
+                ArrayFindLast "findLast" Element Always Method callback(AllIndices) [callback] => value(array_search(Search::Find(callback, FindResult::Value, Direction::Reverse))), "requires one static callback";
+                ArrayFindLastIndex "findLastIndex" Number Always Method callback(AllIndices) [callback] => value(array_search(Search::Find(callback, FindResult::Index, Direction::Reverse))), "requires one static callback";
                 ArraySome "some" Boolean Upstream Method callback(Elements) [callback] => value(array_search(Search::Quantifier(callback, Quantifier::Some))), "requires one static callback";
                 ArrayEvery "every" Boolean Upstream Method callback(Elements) [callback] => value(array_search(Search::Quantifier(callback, Quantifier::Every))), "requires one static callback";
                 ArrayForEach "forEach" Void Always Method callback(Elements) [callback] => value(array_for_each(callback)), "requires one static callback";

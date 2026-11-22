@@ -269,6 +269,7 @@ macro_rules! argument_values {
 #[derive(Clone, Copy)]
 pub(crate) enum Callback {
     Elements,
+    AllIndices,
     Fold,
     Comparator,
     Replacement,

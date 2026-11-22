@@ -104,13 +104,17 @@ pub(super) fn inputs<'a>(
         }
         Expr::ArrayMap { array, callback }
         | Expr::ArrayFlatMap { array, callback }
-        | Expr::ArrayFind { array, callback }
-        | Expr::ArrayFindIndex { array, callback }
         | Expr::ArrayFilter { array, callback }
         | Expr::ArraySome { array, callback }
         | Expr::ArrayEvery { array, callback } => (
             strip_nullish(expression(array, env)).0,
             Callback::Elements,
+            callback.as_mut(),
+            None,
+        ),
+        Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => (
+            strip_nullish(expression(array, env)).0,
+            Callback::AllIndices,
             callback.as_mut(),
             None,
         ),
@@ -145,7 +149,14 @@ pub(super) fn inputs<'a>(
                 HirType::Array(element),
             ]
         }
-        Callback::Elements => vec![(*element).clone(), HirType::Number, HirType::Array(element)],
+        Callback::Elements | Callback::AllIndices => {
+            let value = if matches!(contract, Callback::AllIndices) {
+                with_absences((*element).clone(), Absence::Undefined)
+            } else {
+                (*element).clone()
+            };
+            vec![value, HirType::Number, HirType::Array(element)]
+        }
         Callback::Replacement => unreachable!(),
     };
     Some((callback, inputs))
