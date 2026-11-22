@@ -1,9 +1,12 @@
 //! Concrete function instantiations keyed by structural source types.
-use super::walk::Node;
+use super::walk::{Node, Visitor};
 use super::*;
 use perry_hir::ir::Function;
 use perry_wit_diagnostics::{Diagnostic, codes, diag, ensure_diag};
 use std::collections::VecDeque;
+
+mod guards;
+use crate::narrowing::Guards;
 
 fn incomplete(ty: &HirType) -> bool {
     ty.any(&mut |ty| matches!(ty, HirType::Any | HirType::Unknown | HirType::TypeVar(_)))
@@ -13,6 +16,8 @@ fn arguments(
     function: &Function,
     args: &[Expr],
     explicit: &[HirType],
+    guards: &Guards,
+    captured_writes: &HashSet<LocalId>,
     env: &mut FunctionEnv<'_>,
 ) -> Result<Vec<HirType>> {
     ensure_diag!(
@@ -29,7 +34,8 @@ fn arguments(
         .collect();
     if bindings.len() < function.type_params.len() {
         for (parameter, argument) in function.params.iter().zip(args) {
-            let actual = expression(argument, env);
+            let actual =
+                guards::argument(argument, expression(argument, env), guards, captured_writes);
             unify(&parameter.ty, actual, &function.type_params, &mut bindings);
         }
     }
@@ -148,6 +154,7 @@ fn unify<'a>(
 
 struct Instances<'a> {
     templates: &'a HashMap<FuncId, Function>,
+    captured_writes: HashSet<LocalId>,
     keys: HashMap<FuncId, HashMap<Vec<shapes::TypeId>, FuncId>>,
     blocked: Option<(Diagnostic, Option<String>)>,
     progressed: bool,
@@ -237,6 +244,11 @@ impl Instances<'_> {
             }
         }
         perry_hir::analysis::remap_local_ids_in_stmts(&mut instance.body, &locals);
+        for (&old, &new) in &locals {
+            if self.captured_writes.contains(&old) {
+                self.captured_writes.insert(new);
+            }
+        }
         self.remapped_locals.extend(locals);
         self.pending.push(instance);
         Ok(id)
@@ -277,12 +289,7 @@ impl Instances<'_> {
             Ok(())
         })?;
         walk::scan(body, env, None, None);
-        walk::visit_body(body, &mut |node: Node<'_>| {
-            if let Node::Expression(expr) = node {
-                self.call(expr, caller, env)?;
-            }
-            Ok(())
-        })
+        guards::Calls::new(|expr, guards| self.call(expr, caller, env, guards)).body(body)
     }
 
     fn call(
@@ -290,6 +297,7 @@ impl Instances<'_> {
         expr: &mut Expr,
         caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
+        guards: &Guards,
     ) -> Result<()> {
         if let Expr::Call {
             callee,
@@ -301,7 +309,14 @@ impl Instances<'_> {
             && let Expr::FuncRef(id) = callee.as_mut()
             && let Some(function) = self.templates.get(id)
         {
-            let arguments = match arguments(function, args, type_args, env) {
+            let arguments = match arguments(
+                function,
+                args,
+                type_args,
+                guards,
+                &self.captured_writes,
+                env,
+            ) {
                 Ok(arguments) => arguments,
                 Err(error) if error.code() == codes::MISSING_TYPE_ANNOTATION => {
                     self.blocked.get_or_insert_with(|| {
@@ -331,12 +346,7 @@ impl Instances<'_> {
         caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
-        walk::visit_expr(expr, &mut |node: Node<'_>| {
-            if let Node::Expression(expr) = node {
-                self.call(expr, caller, env)?;
-            }
-            Ok(())
-        })
+        guards::Calls::new(|expr, guards| self.call(expr, caller, env, guards)).expression(expr)
     }
 
     fn callable(
@@ -476,13 +486,39 @@ pub(crate) fn specialize_functions(
     let mut templates = HashMap::new();
     let mut next_function = 0;
     let mut next_local = hir.local_source_spans.keys().copied().max().unwrap_or(0);
-    let mut collect_local = |node: Node<'_>| {
+    let module_vars: HashSet<_> = hir
+        .init
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Let {
+                id, mutable: true, ..
+            } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let mut captured_writes = HashSet::new();
+    let mut collect_local = |node: Node<'_>, module_init: bool| {
+        if !module_init
+            && let Node::Expression(Expr::LocalSet(id, _) | Expr::Update { id, .. }) = &node
+            && module_vars.contains(id)
+        {
+            captured_writes.insert(*id);
+        }
+        if let Node::Expression(Expr::Closure {
+            mutable_captures, ..
+        }) = &node
+        {
+            captured_writes.extend(mutable_captures.iter().copied());
+        }
         if let Node::Binding(id, _) | Node::Local(id) = node {
             next_local = next_local.max(*id);
         }
         Ok(())
     };
-    walk::visit_body(&mut hir.init, &mut collect_local)?;
+    walk::visit_body(&mut hir.init, &mut |node: Node<'_>| {
+        collect_local(node, true)
+    })?;
+    let mut collect_local = |node: Node<'_>| collect_local(node, false);
     for class in &mut hir.classes {
         for function in shapes::class_functions_mut(class) {
             next_function = next_function.max(function.id);
@@ -519,6 +555,7 @@ pub(crate) fn specialize_functions(
     };
     let mut instances = Instances {
         templates: &templates,
+        captured_writes,
         keys: HashMap::new(),
         blocked: None,
         progressed: false,

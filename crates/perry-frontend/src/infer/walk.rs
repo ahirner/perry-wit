@@ -64,10 +64,7 @@ pub(super) fn visit_body<V: Visitor>(
     statements: &mut [Stmt],
     visit: &mut V,
 ) -> Result<(), V::Error> {
-    for statement in statements {
-        visit.statement(statement)?;
-    }
-    Ok(())
+    visit.body(statements)
 }
 
 pub(super) fn visit_stmt<V: Visitor>(statement: &mut Stmt, visit: &mut V) -> Result<(), V::Error> {
@@ -151,6 +148,13 @@ pub(super) trait Visitor: Sized {
     type Error;
 
     fn node(&mut self, node: Node<'_>) -> Result<(), Self::Error>;
+
+    fn body(&mut self, statements: &mut [Stmt]) -> Result<(), Self::Error> {
+        for statement in statements {
+            self.statement(statement)?;
+        }
+        Ok(())
+    }
 
     fn statement(&mut self, statement: &mut Stmt) -> Result<(), Self::Error> {
         visit_stmt(statement, self)

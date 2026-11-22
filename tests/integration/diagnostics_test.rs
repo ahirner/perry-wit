@@ -306,6 +306,31 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
     );
 }
 
+#[test]
+fn generic_property_reads_require_a_live_argument_guard() -> anyhow::Result<()> {
+    use anyhow::Context;
+    for body in [
+        "return size(message);",
+        "if (message !== null) { message = null; return size(message); } return 0;",
+        "if (message === null) { return 0; } else { message = null; } return size(message);",
+        "const reset = (): void => { message = null; }; if (message !== null) { reset(); return size(message); } return 0;",
+        "if (message !== undefined) return size(message); return 0;",
+    ] {
+        let source = format!(
+            "function size<T>(value:T):number {{return value.length;}} export function run(message:string|null):number {{ {body} }}"
+        );
+        let error = api::compile_core(&program_with("guard.ts", &source, &[]))
+            .err()
+            .with_context(|| format!("expected a nullable-property error for {body}"))?;
+        assert_eq!(
+            error.primary().code(),
+            codes::POSSIBLY_NULL_RECEIVER,
+            "{body}: {error}"
+        );
+    }
+    Ok(())
+}
+
 /// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
 /// and rejected control flow is covered by `perry-lower`'s tests.
 #[test]
