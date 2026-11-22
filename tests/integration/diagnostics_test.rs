@@ -127,35 +127,65 @@ fn sdk_errors_identify_the_failing_wit_or_output_path() {
 }
 
 #[test]
-fn generic_specialization_budget_is_per_function() {
+fn generic_specialization_budget_is_per_function() -> anyhow::Result<()> {
+    use anyhow::Context;
     use std::fmt::Write;
     let mut source = String::new();
     for id in 0..257 {
         writeln!(
             source,
             "function id{id}<T>(value: T): T {{ return value; }}"
-        )
-        .unwrap();
+        )?;
     }
     source.push_str("export function run(): number { let total = 0; ");
     for id in 0..257 {
-        writeln!(source, "total += id{id}(1);").unwrap();
+        writeln!(source, "total += id{id}(1);")?;
     }
     source.push_str("return total; }");
-    api::compile_core(&program_with("budget.ts", &source, &[])).unwrap();
+    api::compile_core(&program_with("budget.ts", &source, &[]))?;
 
-    let error = api::compile_core(&program_with(
-        "budget.ts",
-        "function grow<T>(value:T):number { return grow([value]); } export function run():number { return grow(1); }",
+    // The first recursive call changes the key; the second reuses it.
+    api::compile_core(&program_with(
+        "finite.ts",
+        "function again<T>(value:T, n:number):number { return n<=0 ? 0 : again([0], n-1); } export function run():number {return again(0, 2);}",
         &[],
-    )).unwrap_err();
-    assert_eq!(error.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
-    assert!(
-        error
-            .to_string()
-            .contains("256 distinct argument lists reached for grow"),
-        "{error}"
+    ))?;
+    let mut finite = String::from(
+        "function count<T>(v:T):number {return 1;} export function run():number {let n=0;",
     );
+    for id in 0..257 {
+        writeln!(finite, "n += count({{field{id}: 1}});")?;
+    }
+    finite.push_str("return n;}");
+    for (source, function, grows) in [
+        (finite.as_str(), "count", false),
+        (
+            "function grow<T>(value:T):number {return grow([value]);} export function run():number {return grow(1);}",
+            "grow",
+            true,
+        ),
+    ] {
+        let error = api::compile_core(&program_with("budget.ts", source, &[]))
+            .err()
+            .context("expected the per-function specialization budget to be exhausted")?;
+        assert_eq!(error.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
+        assert!(
+            error.to_string().contains(&format!(
+                "256 distinct argument lists reached for {function}"
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .primary()
+                .notes()
+                .iter()
+                .any(|note| note.message().contains("grows type argument T")),
+            grows,
+            "{error}"
+        );
+    }
+    Ok(())
 }
 
 #[test]

@@ -2,7 +2,7 @@
 use super::walk::Node;
 use super::*;
 use perry_hir::ir::Function;
-use perry_wit_diagnostics::{Diagnostic, codes, diag, ensure_diag, ensure_unsupported};
+use perry_wit_diagnostics::{Diagnostic, codes, diag, ensure_diag};
 use std::collections::VecDeque;
 
 fn incomplete(ty: &HirType) -> bool {
@@ -164,7 +164,7 @@ impl Instances<'_> {
         function: &Function,
         arguments: Vec<HirType>,
         call_byte_offset: u32,
-        caller: Option<&str>,
+        caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<FuncId> {
         let key = shapes::TypeId::intern_slice(env.ctx, &arguments);
@@ -172,11 +172,26 @@ impl Instances<'_> {
         if let Some(id) = instances.get(&key) {
             return Ok(*id);
         }
-        ensure_unsupported!(
-            instances.len() < 256,
-            "generic specialization limit of 256 distinct argument lists reached for {}",
-            hir_compat::display_name(&function.name)
-        );
+        if instances.len() >= 256 {
+            let mut error = Diagnostic::unsupported(format!(
+                "generic specialization limit of 256 distinct argument lists reached for {}",
+                hir_compat::display_name(&function.name)
+            ));
+            if let Some((caller, _)) = caller
+                && let Some((previous, _)) = instances.iter().find(|(_, id)| **id == caller)
+            {
+                for ((param, prior), next) in function.type_params.iter().zip(previous).zip(&key) {
+                    if prior != next && next.hir(env.ctx).any(&mut |ty| ty == prior.hir(env.ctx)) {
+                        error = error.with_note(format!(
+                            "this recursive call grows type argument {} by nesting its previous type",
+                            param.name
+                        ));
+                        break;
+                    }
+                }
+            }
+            return Err(error);
+        }
         let id = self.next_function;
         self.next_function = id
             .checked_add(1)
@@ -214,7 +229,7 @@ impl Instances<'_> {
             instance.name.clone(),
             function.name.clone(),
             call_byte_offset,
-            caller.map(str::to_owned),
+            caller.map(|(_, name)| name.to_owned()),
         ));
         for param in &mut instance.params {
             if let Some(default) = &mut param.default {
@@ -248,7 +263,7 @@ impl Instances<'_> {
     fn body(
         &mut self,
         body: &mut [Stmt],
-        caller: Option<&str>,
+        caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
         walk::visit_body(body, &mut |node: Node<'_>| {
@@ -273,7 +288,7 @@ impl Instances<'_> {
     fn call(
         &mut self,
         expr: &mut Expr,
-        caller: Option<&str>,
+        caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
         if let Expr::Call {
@@ -292,7 +307,7 @@ impl Instances<'_> {
                     self.blocked.get_or_insert_with(|| {
                         (
                             env.metadata.locations.annotate_call(error, *byte_offset),
-                            caller.map(str::to_owned),
+                            caller.map(|(_, name)| name.to_owned()),
                         )
                     });
                     return Ok(());
@@ -313,7 +328,7 @@ impl Instances<'_> {
     fn expression(
         &mut self,
         expr: &mut Expr,
-        caller: Option<&str>,
+        caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
         walk::visit_expr(expr, &mut |node: Node<'_>| {
@@ -328,7 +343,7 @@ impl Instances<'_> {
         &mut self,
         params: &mut [perry_hir::ir::Param],
         body: &mut [Stmt],
-        caller: Option<&str>,
+        caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
         for param in params {
@@ -347,37 +362,37 @@ impl Instances<'_> {
         inference: &Inference<'_>,
         locals: &mut HashMap<LocalId, HirType>,
     ) -> Result<()> {
-        base.set_current_class(Some(classes[class_idx].name.clone()));
-        let mut inits: Vec<Expr> = class_initializers(&mut classes[class_idx])
+        let missing_class = || Diagnostic::internal("generic worklist refers to an unknown class");
+        let class = classes.get_mut(class_idx).ok_or_else(missing_class)?;
+        base.set_current_class(Some(class.name.clone()));
+        let mut inits: Vec<Expr> = class_initializers(class)
             .map(|init| std::mem::replace(init, Expr::Undefined))
             .collect();
         for init in &mut inits {
             let mut env = inference.function(base, classes, locals);
             self.expression(init, None, &mut env)?;
         }
-        for (dst, src) in class_initializers(&mut classes[class_idx]).zip(inits) {
+        let class = classes.get_mut(class_idx).ok_or_else(missing_class)?;
+        for (dst, src) in class_initializers(class).zip(inits) {
             *dst = src;
         }
-        let mut class_fns: Vec<(Vec<perry_hir::ir::Param>, Vec<Stmt>)> =
-            shapes::class_functions_mut(&mut classes[class_idx])
-                .map(|target| {
-                    (
-                        std::mem::take(&mut target.params),
-                        std::mem::take(&mut target.body),
-                    )
-                })
-                .collect();
+        let mut class_fns: Vec<_> = shapes::class_functions_mut(class)
+            .map(|target| {
+                (
+                    std::mem::take(&mut target.params),
+                    std::mem::take(&mut target.body),
+                )
+            })
+            .collect();
         for (params, body) in &mut class_fns {
             let mut env = inference.function_with_params(base, classes, locals, params);
             self.callable(params, body, None, &mut env)?;
         }
-        for (target, (params, body)) in
-            shapes::class_functions_mut(&mut classes[class_idx]).zip(class_fns)
-        {
+        let class = classes.get_mut(class_idx).ok_or_else(missing_class)?;
+        for (target, (params, body)) in shapes::class_functions_mut(class).zip(class_fns) {
             target.params = params;
             target.body = body;
         }
-
         base.set_current_class(None);
         Ok(())
     }
@@ -549,7 +564,9 @@ pub(crate) fn specialize_functions(
                     instances.class(index, &mut hir.classes, &mut base, &inference, &mut locals)?
                 }
                 Body::Function(index) => {
-                    let function = &mut hir.functions[index];
+                    let function = hir.functions.get_mut(index).ok_or_else(|| {
+                        Diagnostic::internal("generic worklist refers to an unknown function")
+                    })?;
                     if !function.type_params.is_empty() {
                         continue;
                     }
@@ -562,7 +579,7 @@ pub(crate) fn specialize_functions(
                     instances.callable(
                         &mut function.params,
                         &mut function.body,
-                        Some(&function.name),
+                        Some((function.id, &function.name)),
                         &mut env,
                     )?;
                     if incomplete(&function.return_type) {
