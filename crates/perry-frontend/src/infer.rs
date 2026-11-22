@@ -39,7 +39,6 @@ struct Inference<'a> {
     ctx: &'a Context,
     decls: &'a shapes::Declarations<'a>,
     metadata: &'a hir_compat::Metadata<'a>,
-    generic_functions: Option<&'a HashMap<FuncId, perry_hir::ir::Function>>,
 }
 
 impl Inference<'_> {
@@ -70,8 +69,6 @@ impl Inference<'_> {
             classes,
             locals,
             metadata: self.metadata,
-            generic_functions: self.generic_functions,
-            instantiated_returns: HashMap::new(),
         }
     }
 }
@@ -283,7 +280,6 @@ pub(crate) fn unresolved_types(
         ctx,
         decls: &decls,
         metadata,
-        generic_functions: None,
     };
     let mut locals = HashMap::new();
     let mut module_env = perry_hir::HirTypeEnv::from_module(hir);

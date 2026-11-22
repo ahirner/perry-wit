@@ -328,3 +328,12 @@ console.log("generic-collection", indexById([{id:"a",name:defaultedValue("payloa
 const emptyIndexedRows:{id:string,name:string}[] = [];
 console.log("generic-empty", indexById(emptyIndexedRows).size);
 try { indexById([indexedRow,indexedRow]); } catch(e) { console.log("generic-duplicate", e instanceof Error); }
+
+function readExact<I, N>(input: I, n: N) { return input.slice(0, n); }
+function readMessage<I>(input: I) { return readExact(input, 2); }
+function messageLength<M>(message: M) { return message.length; }
+function headUpper<M>(messages: M) { return messages[0].toUpperCase(); }
+const textMessage = readMessage("abc");
+const listMessage = readMessage([10, 20, 30]);
+console.log("generic-results", messageLength(textMessage), messageLength(listMessage),
+  headUpper([readMessage("xyz")]), listMessage[1]);

@@ -3,8 +3,13 @@ use super::walk::Node;
 use super::*;
 use perry_hir::ir::Function;
 use perry_wit_diagnostics::{Diagnostic, codes, diag, ensure_diag, ensure_unsupported};
+use std::collections::VecDeque;
 
-pub(super) fn arguments(
+fn incomplete(ty: &HirType) -> bool {
+    ty.any(&mut |ty| matches!(ty, HirType::Any | HirType::Unknown | HirType::TypeVar(_)))
+}
+
+fn arguments(
     function: &Function,
     args: &[Expr],
     explicit: &[HirType],
@@ -14,7 +19,7 @@ pub(super) fn arguments(
         explicit.len() <= function.type_params.len(),
         codes::TYPE_MISMATCH,
         "too many type arguments for {}",
-        function.name
+        hir_compat::display_name(&function.name)
     );
     let mut bindings: HashMap<&str, HirType> = function
         .type_params
@@ -35,13 +40,13 @@ pub(super) fn arguments(
             bindings
                 .remove(param.name.as_str())
                 .or_else(|| param.default.as_deref().cloned())
-                .filter(|ty| !contains_type_var(ty) && !matches!(ty, HirType::Any | HirType::Never))
+                .filter(|ty| !incomplete(ty) && !matches!(ty, HirType::Never))
                 .ok_or_else(|| {
                     diag!(
                         codes::MISSING_TYPE_ANNOTATION,
                         "cannot infer type argument {} of {}",
                         param.name,
-                        function.name
+                        hir_compat::display_name(&function.name)
                     )
                 })
         })
@@ -143,7 +148,9 @@ fn unify<'a>(
 
 struct Instances<'a> {
     templates: &'a HashMap<FuncId, Function>,
-    keys: HashMap<(FuncId, Vec<shapes::TypeId>), FuncId>,
+    keys: HashMap<FuncId, HashMap<Vec<shapes::TypeId>, FuncId>>,
+    blocked: Option<(Diagnostic, Option<String>)>,
+    progressed: bool,
     pending: Vec<Function>,
     next_function: FuncId,
     next_local: LocalId,
@@ -160,23 +167,21 @@ impl Instances<'_> {
         caller: Option<&str>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<FuncId> {
-        let key = (
-            function.id,
-            shapes::TypeId::intern_slice(env.ctx, &arguments),
-        );
-        if let Some(id) = self.keys.get(&key) {
+        let key = shapes::TypeId::intern_slice(env.ctx, &arguments);
+        let instances = self.keys.entry(function.id).or_default();
+        if let Some(id) = instances.get(&key) {
             return Ok(*id);
         }
         ensure_unsupported!(
-            self.keys.len() < 256,
-            "generic function instantiation expands indefinitely: {}",
+            instances.len() < 256,
+            "generic specialization limit of 256 distinct argument lists reached for {}",
             hir_compat::display_name(&function.name)
         );
         let id = self.next_function;
         self.next_function = id
             .checked_add(1)
             .ok_or_else(|| Diagnostic::internal("function identifier limit"))?;
-        self.keys.insert(key, id);
+        instances.insert(key, id);
         let bindings = function
             .type_params
             .iter()
@@ -215,24 +220,6 @@ impl Instances<'_> {
         }
         perry_hir::analysis::remap_local_ids_in_stmts(&mut instance.body, &locals);
         self.remapped_locals.extend(locals);
-        if matches!(instance.return_type, HirType::Any | HirType::Unknown) {
-            let locals = instance
-                .params
-                .iter()
-                .map(|param| (param.id, param.ty.clone()))
-                .collect();
-            let caller_locals = std::mem::replace(env.locals, locals);
-            infer_body_return(
-                &instance.body,
-                instance.is_async,
-                &mut instance.return_type,
-                env,
-                env.decls,
-            );
-            *env.locals = caller_locals;
-        }
-        env.instantiated_returns
-            .insert(id, instance.return_type.clone());
         self.pending.push(instance);
         Ok(id)
     }
@@ -296,12 +283,26 @@ impl Instances<'_> {
             && let Expr::FuncRef(id) = callee.as_mut()
             && let Some(function) = self.templates.get(id)
         {
-            let arguments = arguments(function, args, type_args, env)
-                .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
+            let arguments = match arguments(function, args, type_args, env) {
+                Ok(arguments) => arguments,
+                Err(error) if error.code() == codes::MISSING_TYPE_ANNOTATION => {
+                    self.blocked.get_or_insert_with(|| {
+                        (
+                            env.metadata.locations.annotate_call(error, *byte_offset),
+                            caller.map(str::to_owned),
+                        )
+                    });
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(env.metadata.locations.annotate_call(error, *byte_offset));
+                }
+            };
             *id = self
                 .request(function, arguments, *byte_offset, caller, env)
                 .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
             type_args.clear();
+            self.progressed = true;
         }
         Ok(())
     }
@@ -333,6 +334,49 @@ impl Instances<'_> {
             }
         }
         self.body(body, caller, env)
+    }
+
+    fn class(
+        &mut self,
+        class_idx: usize,
+        classes: &mut [perry_hir::ir::Class],
+        base: &mut perry_hir::HirTypeEnv,
+        inference: &Inference<'_>,
+        locals: &mut HashMap<LocalId, HirType>,
+    ) -> Result<()> {
+        base.set_current_class(Some(classes[class_idx].name.clone()));
+        let mut inits: Vec<Expr> = class_initializers(&mut classes[class_idx])
+            .map(|init| std::mem::replace(init, Expr::Undefined))
+            .collect();
+        for init in &mut inits {
+            let mut env = inference.function(base, classes, locals);
+            self.expression(init, None, &mut env)?;
+        }
+        for (dst, src) in class_initializers(&mut classes[class_idx]).zip(inits) {
+            *dst = src;
+        }
+        let mut class_fns: Vec<(Vec<perry_hir::ir::Param>, Vec<Stmt>)> =
+            shapes::class_functions_mut(&mut classes[class_idx])
+                .map(|target| {
+                    (
+                        std::mem::take(&mut target.params),
+                        std::mem::take(&mut target.body),
+                    )
+                })
+                .collect();
+        for (params, body) in &mut class_fns {
+            let mut env = inference.function_with_params(base, classes, locals, params);
+            self.callable(params, body, None, &mut env)?;
+        }
+        for (target, (params, body)) in
+            shapes::class_functions_mut(&mut classes[class_idx]).zip(class_fns)
+        {
+            target.params = params;
+            target.body = body;
+        }
+
+        base.set_current_class(None);
+        Ok(())
     }
 
     fn append(&mut self, functions: &mut Vec<Function>, base: &mut perry_hir::HirTypeEnv) {
@@ -439,6 +483,7 @@ pub(crate) fn specialize_functions(
             if function.is_exported {
                 hir.functions.push(function.clone());
             }
+            base.insert_function_return(function.id, HirType::Any);
             templates.insert(function.id, function);
         }
     }
@@ -453,11 +498,12 @@ pub(crate) fn specialize_functions(
         ctx,
         decls: &decls,
         metadata,
-        generic_functions: Some(&templates),
     };
     let mut instances = Instances {
         templates: &templates,
         keys: HashMap::new(),
+        blocked: None,
+        progressed: false,
         pending: Vec::new(),
         next_function: next_function
             .checked_add(1)
@@ -468,66 +514,84 @@ pub(crate) fn specialize_functions(
         instantiations: Vec::new(),
         remapped_locals: Vec::new(),
     };
+    #[derive(Clone, Copy)]
+    enum Body {
+        Init,
+        Class(usize),
+        Function(usize),
+    }
+    let mut ready = VecDeque::from([Body::Init]);
+    ready.extend((0..hir.classes.len()).map(Body::Class));
+    ready.extend((0..hir.functions.len()).map(Body::Function));
+    let mut waiting = VecDeque::new();
     let mut locals = HashMap::new();
-    {
-        let mut env = inference.function(&base, &hir.classes, &mut locals);
-        instances.body(&mut hir.init, None, &mut env)?;
-    }
-    instances.append(&mut hir.functions, &mut base);
-    for class_idx in 0..hir.classes.len() {
-        base.set_current_class(Some(hir.classes[class_idx].name.clone()));
-        let mut inits: Vec<Expr> = class_initializers(&mut hir.classes[class_idx])
-            .map(|init| std::mem::replace(init, Expr::Undefined))
-            .collect();
-        for init in &mut inits {
-            let mut env = inference.function(&base, &hir.classes, &mut locals);
-            instances.expression(init, None, &mut env)?;
+    let failure = loop {
+        instances.progressed = false;
+        let mut first_error = None;
+        while let Some(body) = ready.pop_front() {
+            let before = hir.functions.len();
+            let mut open_result = false;
+            match body {
+                Body::Init => {
+                    let mut env = inference.function(&base, &hir.classes, &mut locals);
+                    instances.body(&mut hir.init, None, &mut env)?;
+                }
+                Body::Class(index) => {
+                    instances.class(index, &mut hir.classes, &mut base, &inference, &mut locals)?
+                }
+                Body::Function(index) => {
+                    let function = &mut hir.functions[index];
+                    if !function.type_params.is_empty() {
+                        continue;
+                    }
+                    let mut env = inference.function_with_params(
+                        &base,
+                        &hir.classes,
+                        &mut locals,
+                        &function.params,
+                    );
+                    instances.callable(
+                        &mut function.params,
+                        &mut function.body,
+                        Some(&function.name),
+                        &mut env,
+                    )?;
+                    if incomplete(&function.return_type) {
+                        let mut result = HirType::Any;
+                        if instances.blocked.is_none()
+                            && infer_body_return(
+                                &function.body,
+                                function.is_async,
+                                &mut result,
+                                &mut env,
+                                &decls,
+                            )
+                            && !incomplete(&result)
+                        {
+                            base.insert_function_return(function.id, result.clone());
+                            function.return_type = result;
+                            instances.progressed = true;
+                        } else {
+                            open_result = true;
+                        }
+                    }
+                }
+            }
             instances.append(&mut hir.functions, &mut base);
+            ready.extend((before..hir.functions.len()).map(Body::Function));
+            if let Some(error) = instances.blocked.take() {
+                first_error.get_or_insert(error);
+                waiting.push_back(body);
+            } else if open_result {
+                // Newly discovered callees publish results before their callers retry.
+                waiting.push_front(body);
+            }
         }
-        for (dst, src) in class_initializers(&mut hir.classes[class_idx]).zip(inits) {
-            *dst = src;
+        if first_error.is_none() || !instances.progressed {
+            break first_error;
         }
-        let mut class_fns: Vec<(Vec<perry_hir::ir::Param>, Vec<Stmt>)> =
-            shapes::class_functions_mut(&mut hir.classes[class_idx])
-                .map(|target| {
-                    (
-                        std::mem::take(&mut target.params),
-                        std::mem::take(&mut target.body),
-                    )
-                })
-                .collect();
-        for (params, body) in &mut class_fns {
-            let mut env = inference.function_with_params(&base, &hir.classes, &mut locals, params);
-            instances.callable(params, body, None, &mut env)?;
-            instances.append(&mut hir.functions, &mut base);
-        }
-        for (target, (params, body)) in
-            shapes::class_functions_mut(&mut hir.classes[class_idx]).zip(class_fns)
-        {
-            target.params = params;
-            target.body = body;
-        }
-    }
-    base.set_current_class(None);
-    let mut cursor = 0;
-    loop {
-        instances.append(&mut hir.functions, &mut base);
-        let Some(function) = hir.functions.get_mut(cursor) else {
-            break;
-        };
-        cursor += 1;
-        if !function.type_params.is_empty() {
-            continue;
-        }
-        let mut env =
-            inference.function_with_params(&base, &hir.classes, &mut locals, &function.params);
-        instances.callable(
-            &mut function.params,
-            &mut function.body,
-            Some(&function.name),
-            &mut env,
-        )?;
-    }
+        std::mem::swap(&mut ready, &mut waiting);
+    };
     for (old_id, new_id) in instances.remapped_locals {
         if let Some(span) = hir.local_source_spans.get(&old_id).copied() {
             hir.local_source_spans.insert(new_id, span);
@@ -540,6 +604,12 @@ pub(crate) fn specialize_functions(
         metadata
             .locations
             .record_instantiation(instance_name, template_name, byte_offset, caller);
+    }
+    if let Some((error, caller)) = failure {
+        return Err(match caller {
+            Some(caller) => metadata.locations.annotate_caller(error, &caller),
+            None => error,
+        });
     }
     Ok(())
 }

@@ -127,6 +127,38 @@ fn sdk_errors_identify_the_failing_wit_or_output_path() {
 }
 
 #[test]
+fn generic_specialization_budget_is_per_function() {
+    use std::fmt::Write;
+    let mut source = String::new();
+    for id in 0..257 {
+        writeln!(
+            source,
+            "function id{id}<T>(value: T): T {{ return value; }}"
+        )
+        .unwrap();
+    }
+    source.push_str("export function run(): number { let total = 0; ");
+    for id in 0..257 {
+        writeln!(source, "total += id{id}(1);").unwrap();
+    }
+    source.push_str("return total; }");
+    api::compile_core(&program_with("budget.ts", &source, &[])).unwrap();
+
+    let error = api::compile_core(&program_with(
+        "budget.ts",
+        "function grow<T>(value:T):number { return grow([value]); } export function run():number { return grow(1); }",
+        &[],
+    )).unwrap_err();
+    assert_eq!(error.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
+    assert!(
+        error
+            .to_string()
+            .contains("256 distinct argument lists reached for grow"),
+        "{error}"
+    );
+}
+
+#[test]
 fn imported_helpers_report_the_call_chain_across_compiler_phases() {
     const WORKFLOW: &str = "src/work\x1e\x1fflow.ts";
     let assert_caller_note =
@@ -170,6 +202,12 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
             "import { wrap } from './lib';\nexport function run(): number {\n  return wrap('bad');\n}",
             codes::TYPE_MISMATCH,
             "while instantiating 'wrap'",
+        ),
+        (
+            "function missing<T>(): T {throw new Error('missing');}\nexport function middle<T>(x:T) {return missing();}",
+            "import { middle } from './lib';\nexport function run(): number {return middle(1);}",
+            codes::MISSING_TYPE_ANNOTATION,
+            "while instantiating 'middle'",
         ),
         (
             "export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}",
