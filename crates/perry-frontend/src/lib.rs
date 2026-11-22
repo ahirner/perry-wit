@@ -7,6 +7,8 @@ pub use open_types::{TypeState, binding_type, contextual_type};
 mod absence;
 pub mod collections;
 pub mod completion;
+#[allow(dead_code)]
+pub(crate) mod engine;
 pub mod hir_compat;
 mod infer;
 pub mod methods;
