@@ -48,13 +48,14 @@ impl<'s> FunctionBuilder<'s> {
                 !all || global,
                 "String.prototype.replaceAll called with a non-global RegExp argument"
             );
-            let (captures, named) = static_regex(ctx, search, |op| op.captures(ctx))
-                .flatten()
-                .ok_or_else(|| {
-                    Diagnostic::unsupported(
-                        "replacement callbacks require statically known capture arity",
-                    )
-                })?;
+            let (captures, named) = static_regex(ctx, search, |op| {
+                perry_frontend::methods::regex_captures(&op.pattern(ctx))
+            })
+            .ok_or_else(|| {
+                Diagnostic::unsupported(
+                    "replacement callbacks require statically known capture arity",
+                )
+            })?;
             (global, captures, named)
         } else {
             (all, 0, false)

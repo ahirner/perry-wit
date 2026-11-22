@@ -28,7 +28,6 @@ pub(crate) use deletions::deletes_array_elements;
 mod environment;
 mod functions;
 use absence::*;
-use closures::{infer_array_closure_return, infer_closure_return};
 pub(crate) use functions::specialize_functions;
 mod expressions;
 mod methods;
@@ -69,6 +68,7 @@ impl Inference<'_> {
             classes,
             locals,
             metadata: self.metadata,
+            closure_results: None,
         }
     }
 }
@@ -535,4 +535,75 @@ pub(crate) fn unresolved_types(
         }
     }
     module_env.set_current_class(None);
+    // Each round types at least one closure, so the rounds end.
+    loop {
+        let mut module_env = perry_hir::HirTypeEnv::from_module(hir);
+        let typed = crate::hir::emitted_closures(hir)
+            .into_iter()
+            .filter_map(|(id, closure)| match closure {
+                Expr::Closure { return_type, .. } if !closures::open(return_type) => {
+                    Some((id, return_type.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let settled = closure_results(
+            &mut hir.init,
+            &mut hir.functions,
+            &mut hir.classes,
+            &mut module_env,
+            &typed,
+            &inference,
+            &mut locals,
+        );
+        if settled == 0 {
+            break;
+        }
+    }
+}
+
+/// Type every inline closure's result once the storage types it reads are final.
+fn closure_results(
+    init: &mut [Stmt],
+    functions: &mut [perry_hir::ir::Function],
+    classes: &mut [perry_hir::ir::Class],
+    module_env: &mut perry_hir::HirTypeEnv,
+    typed: &HashMap<FuncId, HirType>,
+    inference: &Inference<'_>,
+    locals: &mut HashMap<LocalId, HirType>,
+) -> usize {
+    let mut settled = {
+        let mut env = inference.function(module_env, classes, locals);
+        env.closure_results = Some(typed);
+        closures::results(init, &mut env)
+    };
+    for function in functions {
+        let mut env = inference.function_with_params(module_env, classes, locals, &function.params);
+        env.closure_results = Some(typed);
+        settled += closures::results(&mut function.body, &mut env);
+    }
+    for class_idx in 0..classes.len() {
+        let Some(name) = classes.get(class_idx).map(|class| class.name.clone()) else {
+            break;
+        };
+        module_env.set_current_class(Some(name));
+        let mut functions = Vec::new();
+        if let Some(class) = classes.get_mut(class_idx) {
+            for function in shapes::class_functions_mut(class) {
+                functions.push((function.params.clone(), std::mem::take(&mut function.body)));
+            }
+        }
+        for (params, body) in &mut functions {
+            let mut env = inference.function_with_params(module_env, classes, locals, params);
+            env.closure_results = Some(typed);
+            settled += closures::results(body, &mut env);
+        }
+        if let Some(class) = classes.get_mut(class_idx) {
+            for (function, (_, body)) in shapes::class_functions_mut(class).zip(functions) {
+                function.body = body;
+            }
+        }
+    }
+    module_env.set_current_class(None);
+    settled
 }

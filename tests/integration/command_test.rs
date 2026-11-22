@@ -57,6 +57,42 @@ async fn execute_output(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn callable_instances_preserve_arguments_identity_captures_and_exceptions() -> Result<()> {
+    let run = execute(
+        r#"
+function failure(fn) { try { fn(); return "none"; } catch(e) { return String(e); } }
+function twice(f,x) { return f(f(x)); }
+function inc(n) { return n+1; }
+function apply(f:(n:number)=>number, x:number):number { return f(x); }
+function add(a,b) { return a+b; }
+function upper(s) { return s.toUpperCase(); }
+const alias=inc;
+console.log(failure(()=>{throw new Error("boom");}),failure(()=>1),twice(n=>n+1,1));
+console.log(alias===inc, alias===add, apply(alias,2), [1,2].map(inc).join(","));
+console.log([1,2,3].reduce((acc,v)=>add(acc,v),0), [3,1,2].sort((a,b)=>add(a,-b)).join(","),
+    "a-b".replace(/[a-z]/g,m=>upper(m)));
+function check(condition,message) { if(!condition) throw new Error(message); }
+function contract(value) {
+    let checks=0;
+    function verify(condition,message) { check(condition,message); checks++; }
+    const again=verify;
+    again(true,"ok");
+    const first=failure(()=>again(value>2,"small"));
+    return first+" "+checks;
+}
+console.log(contract(3),contract(1));
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "Error: boom none 3\ntrue false 3 2,3\n6 1,2,3 A-B\nnone 2 Error: small 1\n"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn console_timers_and_exceptions() -> Result<()> {
     let run = execute(
         r#"

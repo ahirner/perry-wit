@@ -134,21 +134,8 @@ impl<'s> FunctionBuilder<'s> {
                             }
                         }
                         None => {
-                            let is_never_expr = match expr {
-                                Expr::LocalGet(id) => {
-                                    self.locals.get(id).is_some_and(|b| b.is_never)
-                                }
-                                Expr::Call { callee, .. } => {
-                                    if let Expr::FuncRef(fid) = callee.as_ref() {
-                                        self.signatures.get(fid).is_some_and(|s| s.returns_never)
-                                    } else {
-                                        false
-                                    }
-                                }
-                                _ => false,
-                            };
                             ensure_diag!(
-                                is_never_expr,
+                                self.returns_no_value(expr),
                                 codes::TYPE_MISMATCH,
                                 "a void function returns a value"
                             );
@@ -349,8 +336,7 @@ impl<'s> FunctionBuilder<'s> {
         ty: &HirType,
         init: Option<&'s Expr>,
     ) -> Result<()> {
-        if let Some(expr @ (Expr::Closure { .. } | Expr::FuncRef(_))) = init {
-            self.closures.insert(id, expr);
+        if matches!(init, Some(Expr::Closure { .. } | Expr::FuncRef(_))) {
             return Ok(());
         }
         if let Some(init) = init
@@ -456,6 +442,17 @@ impl<'s> FunctionBuilder<'s> {
             },
         );
         Ok(())
+    }
+
+    pub(super) fn returns_no_value(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Undefined => true,
+            Expr::LocalGet(id) => self.locals.get(id).is_some_and(|b| b.is_never),
+            Expr::Call { callee, .. } => {
+                matches!(callee.as_ref(),Expr::FuncRef(id) if self.signatures.get(id).is_some_and(|s|s.returns_never || (!s.is_async && s.result.is_none())))
+            }
+            _ => false,
+        }
     }
 
     /// Lower an expression statement evaluated for its side effects, permitting `void` calls.

@@ -5,7 +5,10 @@ use crate::{
     Diagnostic, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
     missing_type_annotation, unsupported,
 };
-use perry_frontend::hir::{ir::Module as HirModule, types::Type as HirType};
+use perry_frontend::hir::{
+    ir::{Expr, Module as HirModule},
+    types::Type as HirType,
+};
 use perry_mir::{
     ArrayType, OptionalType, PlironResultExt as _, PromiseType, RecordKind, RecordType, StringType,
 };
@@ -86,6 +89,7 @@ pub(super) struct Shapes<'h> {
         ),
     >,
     pub(super) class_records: RefCell<HashMap<TypeHandle, (&'h str, Vec<TypeId>)>>,
+    pub(super) lexical_functions: HashMap<perry_frontend::hir::types::FuncId, &'h Expr>,
     function_names: HashSet<&'h str>,
     local_source_spans:
         &'h HashMap<perry_frontend::hir::types::LocalId, perry_frontend::hir::ir::LocalSourceSpan>,
@@ -105,6 +109,13 @@ pub(super) fn identifier(name: &str) -> Result<Identifier> {
 }
 
 impl<'h> Shapes<'h> {
+    pub(super) fn callable(&self, value: &'h Expr) -> &'h Expr {
+        match value {
+            Expr::FuncRef(id) => self.lexical_functions.get(id).copied().unwrap_or(value),
+            _ => value,
+        }
+    }
+
     pub(super) fn new(
         module: pliron::builtin::ops::ModuleOp,
         hir: &'h HirModule,
@@ -153,6 +164,9 @@ impl<'h> Shapes<'h> {
             classes,
             static_fields,
             class_records: RefCell::new(HashMap::new()),
+            lexical_functions: perry_frontend::hir::emitted_closures(hir)
+                .into_iter()
+                .collect(),
             function_names,
             local_source_spans: &hir.local_source_spans,
             metadata,

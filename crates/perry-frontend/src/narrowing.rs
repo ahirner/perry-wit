@@ -3,7 +3,7 @@
 use crate::Absence;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Stmt, UnaryOp},
-    types::LocalId,
+    types::{FuncId, LocalId},
     walker::{stmt_any_expr, walk_expr_children},
 };
 
@@ -255,13 +255,12 @@ impl<'s> Guards<'s> {
     }
 
     /// End the guards on every local a loop or callback body assigns: its later stores
-    /// reach its start on the next iteration. Closures written in the body or bound to a local
-    /// it reads (`closure`) count, since lowering inlines their calls.
+    /// reach its start on the next iteration. Include writes in statically called closures.
     pub fn assign_in<'e>(
         &mut self,
         statements: &[Stmt],
         expressions: impl IntoIterator<Item = &'e Expr>,
-        closure: impl Fn(LocalId) -> Option<&'e Expr>,
+        closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
     ) {
         if self.stack.is_empty() {
             return;
@@ -332,11 +331,11 @@ impl<'s> Guards<'s> {
 struct Assignments<F> {
     closure: F,
     /// Bound closures already scanned, which also ends recursion through self-reference.
-    entered: Vec<LocalId>,
+    entered: Vec<FuncId>,
     assigned: Vec<LocalId>,
 }
 
-impl<'e, F: Fn(LocalId) -> Option<&'e Expr>> Assignments<F> {
+impl<'e, F: Fn(FuncId) -> Option<&'e [Stmt]>> Assignments<F> {
     fn statements(&mut self, statements: &[Stmt]) {
         for statement in statements {
             stmt_any_expr(statement, &mut |expr| {
@@ -349,8 +348,10 @@ impl<'e, F: Fn(LocalId) -> Option<&'e Expr>> Assignments<F> {
     fn expression(&mut self, expr: &Expr) {
         match expr {
             Expr::LocalSet(id, _) | Expr::Update { id, .. } => self.assigned.push(*id),
-            Expr::LocalGet(id) if !self.entered.contains(id) => {
-                if let Some(Expr::Closure { body, .. }) = (self.closure)(*id) {
+            Expr::FuncRef(id) => {
+                if !self.entered.contains(id)
+                    && let Some(body) = (self.closure)(*id)
+                {
                     self.entered.push(*id);
                     self.statements(body);
                 }

@@ -28,12 +28,14 @@ mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
 mod source;
-pub(crate) use source::{pattern_bindings, validate};
+pub(crate) use source::{CallableBindings, pattern_bindings, validate};
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
 
 pub struct Metadata<'s> {
+    pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
+    pub(crate) lifted_captures: HashSet<LocalId>,
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
     /// Bindings declared without an initializer.
@@ -43,6 +45,7 @@ pub struct Metadata<'s> {
 }
 
 pub(crate) struct LoweredHir<'s> {
+    pub callables: CallableBindings,
     pub module: HirModule,
     pub metadata: Metadata<'s>,
 }
@@ -63,7 +66,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
-    let private_parameters = source::private_parameters(&ast);
+    let mut callables = source::callable_bindings(&ast, &mut locations)?;
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
@@ -84,7 +87,6 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             None => diagnostic,
         }
     })?;
-    source::promote_private_parameters(&mut module, private_parameters);
     constructors.collect_types(&mut module)?;
     let inferred_bindings = module
         .local_source_spans
@@ -101,9 +103,27 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         .iter()
         .filter_map(|(id, span)| spans.deferred.contains(&span.start).then_some(*id))
         .collect();
+    callables.invoked = module
+        .local_source_spans
+        .iter()
+        .filter_map(|(id, span)| callables.invoked.contains(&span.start).then_some(*id))
+        .collect();
+    callables.value_uses = module
+        .local_source_spans
+        .iter()
+        .filter_map(|(id, span)| {
+            callables
+                .value_uses
+                .get(&span.start)
+                .map(|value| (*id, *value))
+        })
+        .collect();
     Ok(LoweredHir {
+        callables,
         module,
         metadata: Metadata {
+            inline_callbacks: HashSet::new(),
+            lifted_captures: HashSet::new(),
             locations,
             inferred_bindings,
             deferred_bindings,

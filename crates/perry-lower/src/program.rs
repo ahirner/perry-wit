@@ -8,6 +8,7 @@ pub(super) struct ParamSig<'s> {
 }
 
 pub(super) struct Signature<'s> {
+    pub(super) inline: Option<&'s Function>,
     pub(super) name: Identifier,
     /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
     pub(super) is_async: bool,
@@ -184,6 +185,12 @@ pub(super) fn build_module(
         signatures.insert(
             function.id,
             Signature {
+                inline: (shapes.metadata.inline_callbacks.contains(&function.id)
+                    || function
+                        .captures
+                        .iter()
+                        .any(|id| !shapes.global_ids.contains(id)))
+                .then_some(function),
                 is_async: function.is_async,
                 await_initialization: function.is_exported
                     && function.is_async
@@ -213,6 +220,7 @@ pub(super) fn build_module(
         let settled = BindingType::plain(shapes.settled_type(ctx, &HirType::Void)?);
         let mut entries = vec![(
             Signature {
+                inline: None,
                 name: identifier(if persistent {
                     perry_mir::INITIALIZER
                 } else {
@@ -230,6 +238,7 @@ pub(super) fn build_module(
         if persistent {
             entries.push((
                 Signature {
+                    inline: None,
                     name: identifier(MAIN)?,
                     is_async: true,
                     await_initialization: async_init,
@@ -252,6 +261,12 @@ pub(super) fn build_module(
         }
     }
     for function in &hir.functions {
+        let signature = signatures
+            .get(&function.id)
+            .ok_or_else(|| locations.missing_function(function.id))?;
+        if signature.inline.is_some() {
+            continue;
+        }
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins).map_err(
             |error| {
                 let error = error
@@ -264,7 +279,7 @@ pub(super) fn build_module(
             perry_mir::set_source_span(ctx, &func, &span);
         }
         perry_mir::set_caller_notes(ctx, &func, &locations.caller_notes(&function.name));
-        if let Some((wit_params, wit_results)) = signatures[&function.id].wit_constraints() {
+        if let Some((wit_params, wit_results)) = signature.wit_constraints() {
             perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);
         }
         if function.is_exported {

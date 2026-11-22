@@ -156,10 +156,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
-        let callback_resolved = match callback {
-            Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callback),
-            _ => callback,
-        };
+        let callback_resolved = self.shapes.callable(callback);
         let initial = if let Some(init_expr) = initial {
             let expected_acc = if let Expr::Closure { params, .. } = callback_resolved {
                 params
