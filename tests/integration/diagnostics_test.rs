@@ -572,9 +572,24 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
     };
     let throwing =
         program("export async function run():Promise<number> {throw new Error('broken');}");
-    let error = api::compile(&throwing, &bare_wit, &Options::default()).unwrap_err();
-    assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
-    assert!(error.primary().help().unwrap().contains("async"));
+    let resource_stderr = Wit {
+        application: b"package test:stderr; world app { import wasi:cli/stderr@0.2.0; export run: async func() -> f64; }
+            package wasi:cli@0.2.0 { interface stderr { resource output-stream; get-stderr: func() -> output-stream; } }"
+            .as_slice().into(),
+        dependencies: vec![],
+    };
+    for wit in [&bare_wit, &resource_stderr] {
+        let Err(error) = api::compile(&throwing, wit, &Options::default()) else {
+            panic!("throwing export compiled without a P3 error channel");
+        };
+        assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
+        assert!(
+            error
+                .primary()
+                .help()
+                .is_some_and(|help| help.contains("async"))
+        );
+    }
     api::compile(&throwing, &stderr_wit, &Options::default()).unwrap();
     for source in [
         "export async function run() {try{throw new Error('handled');}catch(e){return 7;}}",

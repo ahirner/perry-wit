@@ -195,6 +195,13 @@ async fn caller_cancellation_releases_output_buffers_and_completion_futures() ->
         let caller = cancellation::cancellation_caller(&worker, false)?;
         wasmparser::Validator::new().validate_all(&caller)?;
         let component = Component::new(&engine, caller)?;
+        assert_eq!(
+            component
+                .component_type()
+                .get_import(&engine, "wasi:cli/stdout@0.3.0")
+                .is_some(),
+            channel == "stdout",
+        );
         for block_at in [BlockAt::Write, BlockAt::Completion] {
             let mut linker = wasi_host::linker(&engine)?;
             let observations = cancellable_output::install(

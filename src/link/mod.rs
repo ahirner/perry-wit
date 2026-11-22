@@ -4,8 +4,6 @@
 //! replacing them with linked and relocated functions from the embedded `#![no_std]` Rust
 //! instance runtime and standard libraries.
 
-pub(crate) mod raw;
-
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
@@ -88,7 +86,13 @@ impl StreamAnchor {
 /// Link runtime and standard-library calls for standalone core-module tests.
 #[cfg(test)]
 fn link_helpers(core_wasm: Vec<u8>) -> Result<Vec<u8>> {
-    Ok(link_helpers_with(core_wasm, None, &canonical::Requirements::default())?.0)
+    Ok(link_helpers_with(
+        core_wasm,
+        None,
+        &canonical::Requirements::default(),
+        |_, _| false,
+    )?
+    .0)
 }
 
 /// Link runtime and standard-library calls and rewrite canonical stream placeholders for `core_wasm`.
@@ -96,6 +100,7 @@ pub(crate) fn link_helpers_with(
     core_wasm: Vec<u8>,
     streams: Option<&StreamAnchor>,
     canonical: &canonical::Requirements,
+    stub_runtime_import: impl Fn(&str, &str) -> bool,
 ) -> Result<(Vec<u8>, u32)> {
     let mut core = ParsedModule::parse(&core_wasm)?;
     let mut export_realloc = canonical.export_realloc;
@@ -131,6 +136,7 @@ pub(crate) fn link_helpers_with(
         helper_defined_indices: BTreeMap<u32, u32>,
         type_base: u32,
         entries: BTreeSet<&'a str>,
+        stubs: Vec<(u32, u32)>,
     }
 
     let mut new_types = TypeSection::new();
@@ -161,6 +167,7 @@ pub(crate) fn link_helpers_with(
                     reachable: BTreeSet::new(),
                     helper_defined_indices: BTreeMap::new(),
                     entries: BTreeSet::new(),
+                    stubs: Vec::new(),
                 })
             }
         };
@@ -174,6 +181,11 @@ pub(crate) fn link_helpers_with(
             let (module, name, ty) = prep.lib.module.imports[orig as usize];
             if module == HELPER_MODULE {
                 pending.insert((LibraryId::for_entry(name)?, name));
+                continue;
+            }
+            // A byte-stream placeholder can resolve to the same import as an unused console branch.
+            if stub_runtime_import(module, name) {
+                prep.stubs.push((orig, prep.type_base + ty));
                 continue;
             }
             if !export_realloc && canonical.import(module, name) {
@@ -210,12 +222,29 @@ pub(crate) fn link_helpers_with(
 
     let num_new_imported_funcs = external_imports.len() as u32;
     let num_core_defined_funcs = core.function_types.len() as u32;
-    let helper_func_start_idx = num_new_imported_funcs + num_core_defined_funcs;
+    let mut new_functions = FunctionSection::new();
+    let mut new_code = CodeSection::new();
+    let mut traps_by_type = BTreeMap::new();
+    for prep in &mut prepared_libs {
+        for &(old, ty) in &prep.stubs {
+            let index = *traps_by_type.entry(ty).or_insert_with(|| {
+                let index = num_new_imported_funcs + new_functions.len();
+                let mut trap = wasm_encoder::Function::new([]);
+                trap.instructions().unreachable().end();
+                new_functions.function(ty);
+                new_code.function(&trap);
+                index
+            });
+            prep.helper_defined_indices.insert(old, index);
+        }
+    }
+    let core_func_start_idx = num_new_imported_funcs + new_functions.len();
+    let helper_func_start_idx = core_func_start_idx + num_core_defined_funcs;
 
     // Map core defined functions
     for i in 0..num_core_defined_funcs {
         let old_func_idx = next_import_func_idx + i;
-        let new_func_idx = num_new_imported_funcs + i;
+        let new_func_idx = core_func_start_idx + i;
         old_to_new_func_index.insert(old_func_idx, new_func_idx);
     }
 
@@ -338,8 +367,6 @@ pub(crate) fn link_helpers_with(
         }
     }
 
-    let mut new_functions = FunctionSection::new();
-    let mut new_code = CodeSection::new();
     let mut core_reloc = CoreRelocations {
         functions: &old_to_new_func_index,
     };
