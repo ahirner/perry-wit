@@ -25,10 +25,7 @@ impl<'s> FunctionBuilder<'s> {
             _ => callback,
         };
         if let Expr::FuncRef(id) = callback {
-            let signature = self
-                .signatures
-                .get(id)
-                .ok_or_else(|| Diagnostic::unsupported("unknown callback"))?;
+            let signature = self.signature(*id)?;
             ensure_unsupported!(
                 !signature.is_async && signature.params.iter().all(|p| !p.source.is_rest),
                 "array callbacks require synchronous functions without rest parameters"

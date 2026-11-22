@@ -135,3 +135,113 @@ pub(crate) fn pattern_bindings<'a>(
         ast::Pat::Invalid(_) | ast::Pat::Expr(_) => {}
     }
 }
+
+pub(super) struct PrivateParameters {
+    scope: swc_common::SyntaxContext,
+    arity: usize,
+    indices: Vec<usize>,
+    called: bool,
+}
+
+type PrivateFunctions = HashMap<swc_atoms::Atom, PrivateParameters>;
+
+/// Retain private declarations used only as the direct callee of fixed-arity calls.
+pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
+    struct Uses {
+        functions: PrivateFunctions,
+    }
+    impl Visit for Uses {
+        fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
+            decl.function.visit_with(self);
+        }
+        fn visit_ident(&mut self, ident: &ast::Ident) {
+            if self
+                .functions
+                .get(&ident.sym)
+                .is_some_and(|f| f.scope == ident.ctxt)
+            {
+                self.functions.remove(&ident.sym);
+            }
+        }
+        fn visit_call_expr(&mut self, call: &ast::CallExpr) {
+            if call.type_args.is_none()
+                && let ast::Callee::Expr(callee) = &call.callee
+                && let ast::Expr::Ident(ident) = &**callee
+                && let Some(function) = self.functions.get_mut(&ident.sym)
+                && function.scope == ident.ctxt
+                && function.arity == call.args.len()
+                && call.args.iter().all(|arg| arg.spread.is_none())
+            {
+                function.called = true;
+                call.args.visit_with(self);
+            } else {
+                call.visit_children_with(self);
+            }
+        }
+    }
+    let mut uses = Uses {
+        functions: HashMap::new(),
+    };
+    'functions: for item in &module.body {
+        let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(decl))) = item else {
+            continue;
+        };
+        if decl.function.type_params.is_some() {
+            continue;
+        }
+        let mut indices = Vec::new();
+        for (index, param) in decl.function.params.iter().enumerate() {
+            let ast::Pat::Ident(binding) = &param.pat else {
+                continue 'functions;
+            };
+            if binding.id.optional {
+                continue 'functions;
+            }
+            if binding.type_ann.is_none() {
+                indices.push(index);
+            }
+        }
+        if !indices.is_empty() {
+            uses.functions.insert(
+                decl.ident.sym.clone(),
+                PrivateParameters {
+                    scope: decl.ident.ctxt,
+                    arity: decl.function.params.len(),
+                    indices,
+                    called: false,
+                },
+            );
+        }
+    }
+    if !uses.functions.is_empty() {
+        module.visit_with(&mut uses);
+    }
+    uses.functions.retain(|_, f| f.called);
+    uses.functions
+}
+
+/// Mark inferred parameters for the same specialization as explicit TypeScript generics.
+pub(super) fn promote_private_parameters(module: &mut HirModule, mut source: PrivateFunctions) {
+    if source.is_empty() {
+        return;
+    }
+    for function in module.functions.iter_mut().filter(|f| !f.is_exported) {
+        if let Some(params) = source.remove(&swc_atoms::Atom::from(function.name.as_str()))
+            && function.params.len() == params.arity
+        {
+            for index in params.indices {
+                if let Some(param) = function.params.get_mut(index)
+                    && matches!(param.ty, HirType::Any | HirType::Unknown)
+                {
+                    let name = format!("@{}", param.name);
+                    param.ty = HirType::TypeVar(name.clone());
+                    function.type_params.push(perry_hir::types::TypeParam {
+                        name,
+                        constraint: None,
+                        default: None,
+                    });
+                }
+            }
+        }
+    }
+}

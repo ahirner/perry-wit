@@ -446,10 +446,7 @@ impl<'s> FunctionBuilder<'s> {
         id: FuncId,
         args: &'s [perry_frontend::hir::CallArg],
     ) -> Result<Value> {
-        let signature = self
-            .signatures
-            .get(&id)
-            .ok_or_else(|| Diagnostic::internal("call to an unknown function"))?;
+        let signature = self.signature(id)?;
         let callee_name = self
             .shapes
             .metadata

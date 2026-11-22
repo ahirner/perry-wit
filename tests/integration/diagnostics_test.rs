@@ -22,6 +22,111 @@ fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
 }
 
 #[test]
+fn unannotated_parameter_evidence_requires_a_closed_set_of_direct_calls() -> anyhow::Result<()> {
+    let local = "function inc(x) { return x + 1; } export function run(n:number):number { return inc(6) + inc(n); }";
+    let typed = local.replace("inc(x)", "inc(x: number)");
+    assert_eq!(
+        perry_wit::compile_core(local, "local.ts")?,
+        perry_wit::compile_core(&typed, "local.ts")?
+    );
+    let mixed = "function make<T>(x:T) { return {value:x}; } function get(x) { return x.value; } export function run(n:number):number { return get(make(n)) + get(make('wide')).length; }";
+    let mut program = crate::core_program::Program::new(mixed);
+    assert_eq!(program.number("run", 7.0), 11.0);
+    let recursive = "function first(x) { return next(x); } function next(x:number):number { return x ? first(x-1) : 7; } export function run(n:number):number { return first(n); }";
+    let mut program = crate::core_program::Program::new(recursive);
+    assert_eq!(program.number("run", 4.0), 7.0);
+    let callbacks = r#"
+        function inc(x) { return x + 1; }
+        function size(x) { return x.length; }
+        export function run(n: number): number {
+            const indexes = [[n], [2]].map(row => row.map(v => inc(v))[0]);
+            const words: (string | null)[] = ["abc", null];
+            const lengths = words.map(function(word, index, group: (string | null)[]) {
+                if (word === null) return 0;
+                const width = size(word);
+                return width + inc(index + group.length);
+            });
+            return 100 * indexes[0] + 10 * indexes[1] + lengths[0] + lengths[1];
+        }"#;
+    let mut program = crate::core_program::Program::new(callbacks);
+    assert_eq!(program.number("run", 4.0), 536.0);
+    for source in [
+        "export function id(x) { return x; } export function run(): number { return id(1); }",
+        "function id(x) { return x; } export function run():number { [1].map(id); return id(1); }",
+        "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
+        "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
+        "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }",
+        "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
+    ] {
+        let error = perry_wit::compile_core(source, "closed.ts")
+            .err()
+            .context("expected an unresolved parameter")?;
+        assert_eq!(
+            error.primary().code(),
+            codes::MISSING_TYPE_ANNOTATION,
+            "{source}: {error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn unspecialized_function_values_identify_the_escaped_reference() -> anyhow::Result<()> {
+    for (expr, failing_use) in [
+        ("const f = double; return f(3)", "f(3)"),
+        ("return [1,2].map(double)[0]", "[1,2].map"),
+    ] {
+        let source = format!(
+            "function double<T>(x:T) {{ return x * 2; }} export function run():number {{ {expr}; }}"
+        );
+        let error = perry_wit::compile_core(&source, "escape.ts")
+            .err()
+            .context("expected an unspecialized function value")?;
+        let diagnostic = error.primary();
+        assert_eq!(diagnostic.code(), codes::UNSUPPORTED_CONSTRUCT, "{error}");
+        assert!(diagnostic.message().contains("double"), "{error}");
+        let span = diagnostic.span().context("function reference span")?;
+        assert_eq!(Some(span.start_byte), source.rfind(failing_use));
+        assert_eq!(
+            source.get(span.start_byte..span.end_byte),
+            Some(failing_use)
+        );
+    }
+    let unused = "function id<T>(x:T):T {return x;} function unused():void {const f=id;} export function run(n:number):number {const f=id; return n;}";
+    let mut program = crate::core_program::Program::new(unused);
+    assert_eq!(program.number("run", 2.0), 2.0);
+    let cast = "function double<T>(x:T) { return x*2; } export function run(n:number):number { return (double as (x:number)=>number)(n); }";
+    let mut program = crate::core_program::Program::new(cast);
+    assert_eq!(program.number("run", 3.0), 6.0);
+    Ok(())
+}
+
+#[test]
+fn unresolved_parameter_patterns_keep_the_source_location() -> anyhow::Result<()> {
+    for (pattern, argument) in [("{ w, h }", "{ w:2, h:3 }"), ("[first]", "[1,2]")] {
+        let source = format!(
+            "function probe(n:number, {pattern}) {{ return n; }} export function run(): number {{ return probe(3, {argument}); }}"
+        );
+        let error = perry_wit::compile_core(&source, "pattern.ts")
+            .err()
+            .context("expected an unannotated parameter pattern")?;
+        let diagnostic = error.primary();
+        assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION, "{error}");
+        let span = diagnostic.span().context("parameter pattern span")?;
+        assert_eq!(source.get(span.start_byte..span.end_byte), Some(pattern));
+        assert!(
+            diagnostic
+                .notes()
+                .iter()
+                .any(|note| note.message() == "in parameter 2 of 'probe'"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("__"), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
 fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result<()> {
     let helper = "// é🙂\r\nexport function helper(value) { return value; }";
     let mut program = program_with(
@@ -30,7 +135,18 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
         &[("src/helper.ts", helper)],
     );
     program.source.contents.extend([b' '; 512]);
+    let inferred = api::compile_core(&program).unwrap();
+    let annotated = helper.replace("helper(value)", "helper(value: number)");
+    program.modules[0].contents = annotated.into_bytes();
+    assert_eq!(inferred, api::compile_core(&program).unwrap());
+    program.modules[0].contents = helper.as_bytes().to_vec();
+    let end = program.source.contents.len();
+    program
+        .source
+        .contents
+        .extend_from_slice(b"\nconst escaped = {helper};");
     let error = api::compile_core(&program).unwrap_err();
+    program.source.contents.truncate(end);
     let diagnostic = error.primary();
     assert_eq!(diagnostic.code(), codes::MISSING_TYPE_ANNOTATION);
     let span = diagnostic.span().expect("declaration span");
@@ -315,6 +431,8 @@ fn generic_property_reads_require_a_live_argument_guard() -> anyhow::Result<()> 
         "if (message === null) { return 0; } else { message = null; } return size(message);",
         "const reset = (): void => { message = null; }; if (message !== null) { reset(); return size(message); } return 0;",
         "if (message !== undefined) return size(message); return 0;",
+        "return [message].map(v => { if (v === null) return 0; v = null; return size(v); })[0];",
+        "return ['abc'].map((v, i, group: (string | null)[]) => size(group[0]))[0];",
     ] {
         let source = format!(
             "function size<T>(value:T):number {{return value.length;}} export function run(message:string|null):number {{ {body} }}"

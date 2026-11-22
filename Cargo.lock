@@ -1399,6 +1399,7 @@ dependencies = [
  "perry-wit-diagnostics",
  "pliron",
  "serde_json",
+ "swc_atoms",
  "swc_common",
  "swc_ecma_parser",
  "swc_ecma_transforms_base",

@@ -4,6 +4,12 @@ use crate::{builder::LocalBinding, hir_compat::RuntimeCall};
 
 impl<'s> FunctionBuilder<'s> {
     /// Bind an argument, evaluating its default only when omitted or undefined.
+    pub(super) fn signature(&self, id: FuncId) -> Result<&'s Signature<'s>> {
+        self.signatures
+            .get(&id)
+            .ok_or_else(|| self.shapes.metadata.locations.missing_function(id))
+    }
+
     pub(super) fn bind_parameter(
         &mut self,
         ctx: &mut Context,
@@ -366,10 +372,7 @@ impl<'s> FunctionBuilder<'s> {
                 ),
             });
         };
-        let signature = self
-            .signatures
-            .get(id)
-            .ok_or_else(|| Diagnostic::internal("call to an unknown function"))?;
+        let signature = self.signature(*id)?;
         let callee_name = self
             .shapes
             .metadata

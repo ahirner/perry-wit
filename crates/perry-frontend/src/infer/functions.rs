@@ -48,12 +48,18 @@ fn arguments(
                 .or_else(|| param.default.as_deref().cloned())
                 .filter(|ty| !incomplete(ty) && !matches!(ty, HirType::Never))
                 .ok_or_else(|| {
-                    diag!(
-                        codes::MISSING_TYPE_ANNOTATION,
-                        "cannot infer type argument {} of {}",
-                        param.name,
-                        hir_compat::display_name(&function.name)
-                    )
+                    let function = hir_compat::display_name(&function.name);
+                    match param.name.strip_prefix('@') {
+                        Some(name) => diag!(
+                            codes::MISSING_TYPE_ANNOTATION,
+                            "cannot infer the type of parameter '{name}' of {function}"
+                        ),
+                        None => diag!(
+                            codes::MISSING_TYPE_ANNOTATION,
+                            "cannot infer type argument {} of {function}",
+                            param.name
+                        ),
+                    }
                 })
         })
         .collect()
@@ -289,7 +295,10 @@ impl Instances<'_> {
             Ok(())
         })?;
         walk::scan(body, env, None, None);
-        guards::Calls::new(|expr, guards| self.call(expr, caller, env, guards)).body(body)
+        guards::Calls::new(env, |expr, guards, env| {
+            self.call(expr, caller, env, guards)
+        })
+        .body(body)
     }
 
     fn call(
@@ -346,7 +355,10 @@ impl Instances<'_> {
         caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<()> {
-        guards::Calls::new(|expr, guards| self.call(expr, caller, env, guards)).expression(expr)
+        guards::Calls::new(env, |expr, guards, env| {
+            self.call(expr, caller, env, guards)
+        })
+        .expression(expr)
     }
 
     fn callable(
@@ -677,5 +689,9 @@ pub(crate) fn specialize_functions(
             None => error,
         });
     }
+    metadata.locations.generic_templates = templates
+        .into_iter()
+        .map(|(id, function)| (id, function.name))
+        .collect();
     Ok(())
 }

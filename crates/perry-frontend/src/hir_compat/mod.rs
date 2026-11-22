@@ -63,6 +63,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
+    let private_parameters = source::private_parameters(&ast);
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
@@ -83,6 +84,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             None => diagnostic,
         }
     })?;
+    source::promote_private_parameters(&mut module, private_parameters);
     constructors.collect_types(&mut module)?;
     let inferred_bindings = module
         .local_source_spans

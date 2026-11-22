@@ -31,12 +31,15 @@ pub(super) fn argument(
     }
 }
 
-pub(super) struct Calls<F> {
+pub(super) struct Calls<'a, 's, F> {
+    env: &'a mut FunctionEnv<'s>,
     guards: Guards<'static>,
     call: F,
 }
 
-impl<F: FnMut(&mut Expr, &Guards) -> Result<()>> Visitor for Calls<F> {
+impl<'s, F: FnMut(&mut Expr, &Guards, &mut FunctionEnv<'s>) -> Result<()>> Visitor
+    for Calls<'_, 's, F>
+{
     type Error = Diagnostic;
 
     fn node(&mut self, node: Node<'_>) -> Result<()> {
@@ -44,7 +47,7 @@ impl<F: FnMut(&mut Expr, &Guards) -> Result<()>> Visitor for Calls<F> {
             if let Expr::LocalSet(id, _) | Expr::Update { id, .. } = expr {
                 self.guards.assign(*id);
             }
-            (self.call)(expr, &self.guards)?;
+            (self.call)(expr, &self.guards, self.env)?;
         }
         Ok(())
     }
@@ -59,6 +62,7 @@ impl<F: FnMut(&mut Expr, &Guards) -> Result<()>> Visitor for Calls<F> {
     }
 
     fn expression(&mut self, expr: &mut Expr) -> Result<()> {
+        closures::bind_array_callback(expr, self.env);
         match expr {
             Expr::Conditional {
                 condition,
@@ -136,9 +140,10 @@ impl<F: FnMut(&mut Expr, &Guards) -> Result<()>> Visitor for Calls<F> {
         Ok(())
     }
 }
-impl<F: FnMut(&mut Expr, &Guards) -> Result<()>> Calls<F> {
-    pub(super) fn new(call: F) -> Self {
+impl<'a, 's, F: FnMut(&mut Expr, &Guards, &mut FunctionEnv<'s>) -> Result<()>> Calls<'a, 's, F> {
+    pub(super) fn new(env: &'a mut FunctionEnv<'s>, call: F) -> Self {
         Self {
+            env,
             guards: Guards::default(),
             call,
         }
