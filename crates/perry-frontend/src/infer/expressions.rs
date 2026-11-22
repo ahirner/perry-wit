@@ -290,31 +290,7 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         }
         Expr::StructuredClone { value, .. } => expression(value, env),
         Expr::MapGroupBy { items, key_fn } => methods::map_group_by(items, key_fn, env),
-        Expr::Call {
-            callee,
-            args,
-            type_args,
-            ..
-        } => {
-            if let Expr::FuncRef(id) = callee.as_ref()
-                && let Some(function) = env
-                    .generic_functions
-                    .and_then(|functions| functions.get(id))
-                && let Ok(arguments) = functions::arguments(function, args, type_args, env)
-            {
-                let bindings = function
-                    .type_params
-                    .iter()
-                    .zip(&arguments)
-                    .map(|(parameter, argument)| (parameter.name.as_str(), argument))
-                    .collect();
-                let mut result = function.return_type.clone();
-                substitute_type_vars(&mut result, &bindings);
-                result
-            } else {
-                methods::call(expr, callee, args, env)
-            }
-        }
+        Expr::Call { callee, args, .. } => methods::call(expr, callee, args, env),
         Expr::CallSpread { callee, .. } => match callee.as_ref() {
             Expr::PropertyGet {
                 object, property, ..
