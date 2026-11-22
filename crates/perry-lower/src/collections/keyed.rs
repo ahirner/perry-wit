@@ -238,8 +238,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 b.entry_fields(ctx, entry)?
             };
-            b.array_callback(ctx, callback, &[v, k, arr])?;
-            Ok(())
+            b.effect_callback(ctx, callback, &[v, k, arr])
         })?;
         let ty = void_type(ctx);
         Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))

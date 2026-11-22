@@ -305,7 +305,7 @@ impl Instances {
                         .params
                         .iter()
                         .find(|p| p.id == *local)
-                        .expect("bound callback parameter");
+                        .ok_or_else(|| Diagnostic::internal("callback parameter binding"))?;
                     return Err(Diagnostic::unsupported(format!(
                         "cannot reassign callback parameter '{}'",
                         param.name

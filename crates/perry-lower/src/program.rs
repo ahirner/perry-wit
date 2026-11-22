@@ -261,7 +261,10 @@ pub(super) fn build_module(
         }
     }
     for function in &hir.functions {
-        if signatures[&function.id].inline.is_some() {
+        let signature = signatures
+            .get(&function.id)
+            .ok_or_else(|| locations.missing_function(function.id))?;
+        if signature.inline.is_some() {
             continue;
         }
         let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins).map_err(
@@ -276,7 +279,7 @@ pub(super) fn build_module(
             perry_mir::set_source_span(ctx, &func, &span);
         }
         perry_mir::set_caller_notes(ctx, &func, &locations.caller_notes(&function.name));
-        if let Some((wit_params, wit_results)) = signatures[&function.id].wit_constraints() {
+        if let Some((wit_params, wit_results)) = signature.wit_constraints() {
             perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);
         }
         if function.is_exported {

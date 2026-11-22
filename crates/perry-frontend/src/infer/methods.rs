@@ -4,6 +4,9 @@ use crate::{
     methods::{Method, MethodResult},
 };
 
+/// The element type `Promise.allSettled` resolves to, as `PromiseSettledResult<T>`.
+pub(super) const SETTLED: &str = "PromiseSettledResult";
+
 pub(super) fn call(
     expr: &Expr,
     callee: &Expr,
@@ -39,6 +42,22 @@ pub(super) fn call(
                 return map_group_by(items, callback, env);
             }
             ("performance", "now") => return HirType::Number,
+            ("Promise", "allSettled") => {
+                let [items] = args else {
+                    return HirType::Any;
+                };
+                let source = strip_nullish(expression(items, env)).0;
+                let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
+                let value = match element {
+                    HirType::Promise(value) => *value,
+                    value => value,
+                };
+                let settled = HirType::Generic {
+                    base: SETTLED.into(),
+                    type_args: vec![value],
+                };
+                return HirType::Promise(Box::new(HirType::Array(Box::new(settled))));
+            }
             _ => {}
         }
     }
@@ -96,6 +115,9 @@ pub(super) fn result<'s>(
                     || matches!(ty, HirType::Unknown | HirType::Any)
                 {
                     ty
+                } else if env.metadata.sparse_arrays {
+                    // `map` keeps holes in a module with sparse arrays, as lowering does.
+                    HirType::Array(Box::new(with_absences(ty, Absence::Undefined)))
                 } else {
                     HirType::Array(Box::new(ty))
                 }

@@ -53,7 +53,12 @@ impl<'s> FunctionBuilder<'s> {
             let json = JsonType::get(ctx).into();
             let json =
                 perry_mir::OptionalType::get_with(ctx, json, perry_mir::Absence::Both).into();
-            let value = self.inline_callback(ctx, replacer, &[key, value], Some(json))?;
+            let value = self.inline_callback(
+                ctx,
+                replacer,
+                &[key, value],
+                Some(crate::inline::InlineResult::Declared(json)),
+            )?;
             self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value))
         } else {
             value

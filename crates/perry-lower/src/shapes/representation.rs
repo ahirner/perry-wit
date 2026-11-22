@@ -63,6 +63,16 @@ impl Shapes<'_> {
                 {
                     return self.collection_view_source_type(ctx, view, type_args);
                 }
+                if base == "PromiseSettledResult" && !self.is_user_type(base) {
+                    let [value] = type_args.as_slice() else {
+                        bail_diag!(
+                            codes::TYPE_MISMATCH,
+                            "PromiseSettledResult needs one type argument"
+                        );
+                    };
+                    let value = self.value_type(ctx, value)?;
+                    return Ok(perry_mir::SettledType::get(ctx, value).into());
+                }
                 if base == "Record" && !self.is_user_type(base) {
                     let [k, v] = type_args.as_slice() else {
                         bail_diag!(

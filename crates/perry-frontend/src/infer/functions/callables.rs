@@ -55,7 +55,7 @@ impl Callables {
         let id = *func_id;
         let mut references = Vec::new();
         perry_hir::analysis::collect_local_refs_expr(expr, &mut references, &mut HashSet::new());
-        self.lifted_captures.extend(references);
+        let lifted = std::mem::replace(expr, Expr::FuncRef(id));
         let Expr::Closure {
             params,
             return_type,
@@ -66,10 +66,13 @@ impl Callables {
             is_strict,
             construct_only,
             ..
-        } = std::mem::replace(expr, Expr::FuncRef(id))
+        } = lifted
         else {
-            unreachable!()
+            // Matched as a closure above.
+            *expr = lifted;
+            return;
         };
+        self.lifted_captures.extend(references);
         self.lifted_captures.extend(captures.iter().copied());
         let mut function = Function {
             id,

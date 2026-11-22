@@ -13,12 +13,25 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_callback(ctx, callback, arguments, None)
     }
 
+    /// Apply a callback whose result the caller discards, as `forEach` does.
+    pub(crate) fn effect_callback(
+        &mut self,
+        ctx: &mut Context,
+        callback: &'s Expr,
+        arguments: &[Value],
+    ) -> Result<()> {
+        self.inline_callback(ctx, callback, arguments, Some(InlineResult::Void))
+            .map(|_| ())
+    }
+
+    /// Apply `callback` to `arguments`. An inline closure stores the `expected` result, or else
+    /// the result type the frontend inferred for it.
     pub(crate) fn inline_callback(
         &mut self,
         ctx: &mut Context,
         callback: &'s Expr,
         arguments: &[Value],
-        expected: Option<TypeHandle>,
+        expected: Option<InlineResult>,
     ) -> Result<Value> {
         let callback = self.shapes.callable(callback);
         if let Expr::FuncRef(id) = callback {
@@ -59,15 +72,18 @@ impl<'s> FunctionBuilder<'s> {
             !is_async && !is_generator && params.iter().all(|p| !p.is_rest),
             "array callbacks must be synchronous; rest parameters are not supported"
         );
-        let declared = match return_type {
-            HirType::Number | HirType::String | HirType::Boolean | HirType::Union(_) => {
-                self.shapes.value_type(ctx, return_type).ok()
+        let result_type = match (expected, return_type) {
+            (Some(result), _) => result,
+            (None, HirType::Void) => InlineResult::Void,
+            (None, ty) => {
+                ensure_diag!(
+                    perry_frontend::contextual_type(ty).is_some(),
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "cannot infer the result type of this callback; annotate its return type"
+                );
+                InlineResult::Declared(self.shapes.value_type(ctx, ty)?)
             }
-            _ => None,
         };
-        let result_type = expected
-            .or(declared)
-            .map_or(InlineResult::Inferred, InlineResult::Declared);
         let slot = self.with_inline_scope(ctx, self.this_slot, |this, ctx| {
             for (index, param) in params.iter().enumerate() {
                 let value = match arguments.get(index) {

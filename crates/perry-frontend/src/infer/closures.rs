@@ -118,6 +118,13 @@ pub(super) fn inputs<'a>(
             callback.as_mut(),
             None,
         ),
+        Expr::ArrayFromMapped {
+            iterable, map_fn, ..
+        } => {
+            let source = strip_nullish(expression(iterable, env)).0;
+            let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
+            return Some((map_fn.as_mut(), vec![element, HirType::Number]));
+        }
         Expr::ArraySort { array, comparator } => (
             strip_nullish(expression(array, env)).0,
             Callback::Comparator,
@@ -138,7 +145,12 @@ pub(super) fn inputs<'a>(
         return None;
     };
     let inputs = match contract {
-        Callback::Comparator => vec![(*element).clone(), *element],
+        // `sort` orders `undefined` elements last without comparing them.
+        Callback::Comparator => {
+            let (defined, absence) = strip_nullish(*element);
+            let defined = with_absences(defined, without_undefined(absence));
+            vec![defined.clone(), defined]
+        }
         Callback::Fold => {
             let accumulator =
                 initial.map_or_else(|| (*element).clone(), |value| expression(value, env));
@@ -157,7 +169,8 @@ pub(super) fn inputs<'a>(
             };
             vec![value, HirType::Number, HirType::Array(element)]
         }
-        Callback::Replacement => unreachable!(),
+        // Replacement callbacks returned their inputs above.
+        Callback::Replacement => return None,
     };
     Some((callback, inputs))
 }
@@ -167,4 +180,112 @@ pub(super) fn bind_callback(expr: &mut Expr, env: &mut FunctionEnv<'_>) {
         bind_inputs(params, inputs, env);
         walk::scan(body, env, None, None);
     }
+}
+
+/// Give every inline closure the result type lowering stores: a callback the result of the inputs
+/// its built-in passes, any other closure the result of its typed parameters, and a closure
+/// without a value `return` `void`. Returns how many closures it typed; a closure calling another
+/// sees that one's result on the next round. Lowering reports a closure whose result stays open.
+pub(super) fn results(statements: &mut [Stmt], env: &mut FunctionEnv<'_>) -> usize {
+    let mut results = Results { env, settled: 0 };
+    let Ok(()) = walk::visit_body(statements, &mut results);
+    results.settled
+}
+
+struct Results<'e, 'a> {
+    env: &'e mut FunctionEnv<'a>,
+    settled: usize,
+}
+
+impl walk::Visitor for Results<'_, '_> {
+    type Error = std::convert::Infallible;
+
+    fn node(&mut self, _: walk::Node<'_>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    // Locals take their types before the statements that read them. An unannotated local whose
+    // binding is still open reads as its initializer here; the binding itself is not rewritten.
+    fn body(&mut self, statements: &mut [Stmt]) -> Result<(), Self::Error> {
+        walk::scan(statements, self.env, None, None);
+        for statement in statements.iter() {
+            if let Stmt::Let {
+                id,
+                ty,
+                init: Some(init),
+                ..
+            } = statement
+                && open(ty)
+                && self.env.metadata.inferred_bindings.contains(id)
+                && self.env.locals.get(id).is_none_or(open)
+            {
+                let inferred = expression(init, self.env);
+                if !open(&inferred) {
+                    self.env.locals.insert(*id, inferred);
+                }
+            }
+        }
+        for statement in statements {
+            self.statement(statement)?;
+        }
+        Ok(())
+    }
+
+    // Parameters bind before the body, so a nested closure sees the enclosing ones; results
+    // settle after it, so an enclosing result sees the nested ones.
+    fn expression(&mut self, expr: &mut Expr) -> Result<(), Self::Error> {
+        if let Some((Expr::Closure { params, .. }, inputs)) = inputs(expr, self.env) {
+            bind_inputs(params, inputs, self.env);
+        }
+        if let Expr::Closure { params, .. } = expr {
+            let declared: Vec<_> = params.iter().map(|param| param.ty.clone()).collect();
+            bind_inputs(params, declared, self.env);
+        }
+        walk::visit_expr(expr, self)?;
+        if let Some((callback, inputs)) = inputs(expr, self.env)
+            && matches!(callback, Expr::Closure { return_type, .. } if open(return_type))
+        {
+            let ty = result(callback, inputs, self.env);
+            self.settled += settle(callback, ty, self.env);
+        }
+        if let Expr::Closure {
+            return_type,
+            body,
+            is_async,
+            ..
+        } = expr
+            && open(return_type)
+        {
+            let mut ty = HirType::Any;
+            infer_body_return(body, *is_async, &mut ty, self.env, self.env.decls);
+            self.settled += settle(expr, ty, self.env);
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn open(ty: &HirType) -> bool {
+    ty.any(&mut |ty| matches!(ty, HirType::Any | HirType::Unknown | HirType::TypeVar(_)))
+}
+
+/// Record `ty` as the closure's result, or `void` when an open body returns no value. Returns 1
+/// when the closure's result became known.
+fn settle(closure: &mut Expr, ty: HirType, env: &mut FunctionEnv<'_>) -> usize {
+    let Expr::Closure {
+        return_type, body, ..
+    } = closure
+    else {
+        return 0;
+    };
+    if !open(&ty) {
+        *return_type = ty;
+        return 1;
+    }
+    let mut returned = Vec::new();
+    walk::scan(body, env, Some(&mut returned), None);
+    if returned.iter().all(|ty| matches!(ty, HirType::Void)) {
+        *return_type = HirType::Void;
+        return 1;
+    }
+    0
 }

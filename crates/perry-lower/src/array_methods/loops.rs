@@ -174,10 +174,7 @@ impl<'s> FunctionBuilder<'s> {
         self.iterate(
             ctx,
             Input::Array(arr, Holes::Skip),
-            |b, ctx, item, idx, _, _| {
-                b.array_callback(ctx, callback, &[item, idx, arr])?;
-                Ok(())
-            },
+            |b, ctx, item, idx, _, _| b.effect_callback(ctx, callback, &[item, idx, arr]),
         )?;
         let ty = void_type(ctx);
         Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))

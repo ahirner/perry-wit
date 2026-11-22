@@ -1,20 +1,19 @@
 //! Return frames for inline callbacks and class callables.
 use super::*;
-use crate::builder::insert_before_terminator;
 use perry_mir::OptionalType;
 
+/// The result an inline body stores. The frontend types every inline callable's result, so
+/// lowering never infers one from the returned values.
+#[derive(Clone, Copy)]
 pub(super) enum InlineResult {
     Void,
-    Inferred,
     Declared(TypeHandle),
 }
 
 pub(super) struct ReturnFrame {
     done: Ptr<BasicBlock>,
+    /// The result slot; `None` for a void body, whose returned values are evaluated for effects.
     slot: Option<Value>,
-    optional: bool,
-    // Empty returns preceding the first typed return need stores once its slot exists.
-    empty_returns: Vec<Ptr<BasicBlock>>,
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -59,24 +58,18 @@ impl<'s> FunctionBuilder<'s> {
         result_type: InlineResult,
     ) -> Result<Option<Value>> {
         let done = self.new_block(ctx, "inline_done");
-        let optional = !matches!(result_type, InlineResult::Void) && returns_optional(body);
         let slot = match result_type {
             InlineResult::Declared(ty) => {
-                let ty = if optional {
+                let ty = if returns_optional(body) {
                     OptionalType::get(ctx, ty).into()
                 } else {
                     ty
                 };
                 Some(self.entry_slot(ctx, ty))
             }
-            _ => None,
+            InlineResult::Void => None,
         };
-        self.inline_returns.push(ReturnFrame {
-            done,
-            slot,
-            optional,
-            empty_returns: Vec::new(),
-        });
+        self.inline_returns.push(ReturnFrame { done, slot });
         let body = hir_compat::strip_synthetic_default_guards(body, params.iter());
         // An inline callback runs once per element.
         self.invalidate_inline_writes(body, []);
@@ -88,37 +81,11 @@ impl<'s> FunctionBuilder<'s> {
                 result = self.inline_return(ctx, None);
             }
         }
-        let frame = self
-            .inline_returns
+        self.inline_returns
             .pop()
             .ok_or_else(|| Diagnostic::internal("inline return frame"))?;
         result?;
-        let slot = match frame.slot {
-            Some(slot) => Some(slot),
-            None if matches!(result_type, InlineResult::Void) || frame.empty_returns.is_empty() => {
-                None
-            }
-            None => {
-                let number = FP64Type::get(ctx).into();
-                let ty = OptionalType::get(ctx, number).into();
-                Some(self.entry_slot(ctx, ty))
-            }
-        };
-        if let Some(slot) = slot
-            && !frame.empty_returns.is_empty()
-        {
-            let ty = self.slot_type(ctx, slot)?;
-            for block in frame.empty_returns {
-                let undefined = UndefinedOp::with_type(ctx, ty);
-                let store = StoreOp::new(ctx, slot, undefined.get_result(ctx));
-                insert_before_terminator(
-                    ctx,
-                    block,
-                    [undefined.get_operation(), store.get_operation()],
-                )?;
-            }
-        }
-        self.switch_to(frame.done);
+        self.switch_to(done);
         Ok(slot)
     }
 
@@ -129,12 +96,12 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         expression: Option<&'s Expr>,
     ) -> Result<()> {
-        let Some(mut frame) = self.inline_returns.pop() else {
+        let Some(frame) = self.inline_returns.pop() else {
             bail_internal!("return outside an inline function")
         };
         // The frame is off the stack only while the result is stored: a `finally` body run
         // below may itself `return` from this frame.
-        let stored = self.store_inline_result(ctx, &mut frame, expression);
+        let stored = self.store_inline_result(ctx, &frame, expression);
         let done = frame.done;
         self.inline_returns.push(frame);
         stored?;
@@ -144,12 +111,11 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    /// Store a returned value in the function's slot, created by the first typed return.
-    /// An untyped `return;` before that is recorded and patched once the slot exists.
+    /// Store a returned value in the body's result slot. A void body evaluates it for effects.
     fn store_inline_result(
         &mut self,
         ctx: &mut Context,
-        frame: &mut ReturnFrame,
+        frame: &ReturnFrame,
         expression: Option<&'s Expr>,
     ) -> Result<()> {
         let expression = if let Some(expr) = expression
@@ -160,39 +126,16 @@ impl<'s> FunctionBuilder<'s> {
         } else {
             expression
         };
-        if frame.slot.is_none() && matches!(expression, None | Some(Expr::Undefined)) {
-            frame.empty_returns.push(self.block);
-            let finally = self.new_block(ctx, "inline_empty_return");
-            self.jump(ctx, finally);
-            self.switch_to(finally);
+        let Some(slot) = frame.slot else {
+            if let Some(expr) = expression {
+                self.effect(ctx, expr)?;
+            }
             return Ok(());
-        }
-        let existing = frame
-            .slot
-            .map(|slot| self.slot_type(ctx, slot).map(|ty| (slot, ty)))
-            .transpose()?;
-        let expected = existing.map(|(_, ty)| ty);
-        let value = match (expression, expected) {
-            (Some(expression), _) => self.expression_with(ctx, expression, expected)?,
-            (None, Some(ty)) => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
-            (None, None) => {
-                let ty = FP64Type::get(ctx).into();
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
-            }
         };
-        let (slot, ty) = match existing {
-            Some(existing) => existing,
-            None => {
-                let value_type = value.get_type(ctx);
-                let ty = if frame.optional {
-                    OptionalType::get(ctx, value_type).into()
-                } else {
-                    value_type
-                };
-                let slot = self.entry_slot(ctx, ty);
-                frame.slot = Some(slot);
-                (slot, ty)
-            }
+        let ty = self.slot_type(ctx, slot)?;
+        let value = match expression {
+            Some(expression) => self.expression_with(ctx, expression, Some(ty))?,
+            None => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
         };
         let value = self.fit(ctx, value, ty)?;
         self.store(ctx, slot, value);

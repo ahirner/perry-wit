@@ -537,13 +537,19 @@ impl<'s> FunctionBuilder<'s> {
                         || matches!(func.return_type, HirType::Void)
                     {
                         InlineResult::Void
-                    } else if perry_frontend::contextual_type(&func.return_type).is_none() {
-                        InlineResult::Inferred
                     } else {
-                        this.shapes
-                            .class_value_type(ctx, owner_class, type_args, &func.return_type)
-                            .ok()
-                            .map_or(InlineResult::Inferred, InlineResult::Declared)
+                        ensure_diag!(
+                            perry_frontend::contextual_type(&func.return_type).is_some(),
+                            codes::MISSING_TYPE_ANNOTATION,
+                            "cannot infer the return type of '{}'; annotate it",
+                            func.name
+                        );
+                        InlineResult::Declared(this.shapes.class_value_type(
+                            ctx,
+                            owner_class,
+                            type_args,
+                            &func.return_type,
+                        )?)
                     };
                     this.inline_body(ctx, &func.body, &func.params, result_type)
                 })?;
