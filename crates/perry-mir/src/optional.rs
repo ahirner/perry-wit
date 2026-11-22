@@ -21,6 +21,7 @@ use pliron::{
 };
 
 pliron::dict_key!(ASSERT_PRESENT, "perry_assert_present");
+pliron::dict_key!(PROVEN_PRESENT, "perry_proven_present");
 
 #[derive(Debug)]
 pub(crate) enum OptionalErr {
@@ -222,7 +223,18 @@ op_schema! {
 }
 
 impl UnwrapOp {
-    /// A property receiver: `null` is a compile error unless `check-null-receivers` proves it
+    pub(crate) fn mark_present(&self, ctx: &mut Context) {
+        self.get_operation()
+            .deref_mut(ctx)
+            .attributes
+            .set(PROVEN_PRESENT.clone(), UnitAttr::new());
+    }
+
+    pub fn proven_present(&self, ctx: &Context) -> bool {
+        crate::receivers::has_marker(ctx, self, &PROVEN_PRESENT)
+    }
+
+    /// A property receiver: `null` is a compile error unless `prove-optional-reads` proves it
     /// excluded at this use. `undefined` keeps the runtime `TypeError`.
     pub fn receiver(
         ctx: &mut Context,

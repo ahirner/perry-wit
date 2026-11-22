@@ -1,5 +1,4 @@
-//! Compile-time proof that property receivers lowering marked are not `null`. The unwrap keeps
-//! its runtime check; a read the dominating branches do not prove is a located compile error.
+//! Prove the absence states at optional reads and diagnose nullable property receivers.
 use crate::{SourceSpan, aggregates::functions, facts::guards::GuardedFacts, optional::UnwrapOp};
 use perry_wit_diagnostics::{Diagnostic, codes};
 use pliron::{
@@ -10,6 +9,7 @@ use pliron::{
     },
     context::{Context, Ptr},
     graph::dominance::DomInfo,
+    irbuild::IRStatus,
     linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
@@ -50,33 +50,11 @@ fn violation(ctx: &Context, function: &FuncOp, unwrap: &UnwrapOp) -> Diagnostic 
     crate::attach_caller_notes(ctx, function, diagnostic)
 }
 
-pub(crate) fn check_receivers(
+pub(crate) fn prove_optional_reads(
     root: Ptr<Operation>,
     ctx: &mut Context,
     analyses: &mut AnalysisManager,
 ) -> Result<PassResult> {
-    let mut checked = Vec::new();
-    for function in functions(root, ctx) {
-        let mut receivers = Vec::new();
-        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-            for op in block.deref(ctx).iter(ctx) {
-                if let Some(unwrap) = Operation::get_op::<UnwrapOp>(op, ctx)
-                    && has_marker(ctx, &unwrap, &REQUIRE_NON_NULL)
-                {
-                    receivers.push((block, unwrap));
-                }
-            }
-        }
-        if !receivers.is_empty() {
-            checked.push((function, receivers));
-        }
-    }
-    let mut result = PassResult::default();
-    result.set_preserved::<crate::ProgramFacts>();
-    result.set_preserved::<DomInfo>();
-    if checked.is_empty() {
-        return Ok(result);
-    }
     analyses.get_analysis::<crate::ProgramFacts>(root, ctx)?;
     analyses.get_analysis::<DomInfo>(root, ctx)?;
     let facts = analyses
@@ -85,13 +63,36 @@ pub(crate) fn check_receivers(
     let mut dominance = analyses
         .try_get_analysis_mut::<DomInfo>(root)
         .expect("dominance");
-    for (function, receivers) in checked {
-        let mut guards = GuardedFacts::new(ctx, &facts, &function);
-        for (block, unwrap) in receivers {
-            if guards.may_be_null_at(&mut dominance, block, unwrap.get_operand(ctx)) {
-                return pliron::input_err_noloc!(violation(ctx, &function, &unwrap));
+    let mut proven = Vec::new();
+    for function in functions(root, ctx) {
+        let mut guards = None;
+        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+            for op in block.deref(ctx).iter(ctx) {
+                let Some(unwrap) = Operation::get_op::<UnwrapOp>(op, ctx) else {
+                    continue;
+                };
+                let guards =
+                    guards.get_or_insert_with(|| GuardedFacts::new(ctx, &facts, &function));
+                let presence = guards.presence_at(&mut dominance, block, unwrap.get_operand(ctx));
+                if !presence.admits(crate::Absence::Both) {
+                    proven.push(unwrap);
+                } else if has_marker(ctx, &unwrap, &REQUIRE_NON_NULL)
+                    && presence.admits(crate::Absence::Null)
+                {
+                    return pliron::input_err_noloc!(violation(ctx, &function, &unwrap));
+                }
             }
         }
+    }
+    let mut result = PassResult::default();
+    result.set_preserved::<DomInfo>();
+    if proven.is_empty() {
+        result.set_preserved::<crate::ProgramFacts>();
+    } else {
+        for unwrap in proven {
+            unwrap.mark_present(ctx);
+        }
+        result.ir_changed = IRStatus::Changed;
     }
     Ok(result)
 }

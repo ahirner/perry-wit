@@ -696,7 +696,8 @@ fn unsupported_forms_have_exact_diagnostics() {
 }
 
 #[test]
-fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() {
+fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() -> anyhow::Result<()>
+{
     let bare_wit = Wit {
         application: b"package test:diagnostics; world app { export run: async func() -> f64; }"
             .as_slice()
@@ -748,6 +749,20 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
         &Options::default(),
     ).unwrap_err();
     assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
+    let optional = Wit {
+        application: b"package test:guard; world app { export run: async func(input: option<string>) -> string; }".as_slice().into(),
+        dependencies: vec![],
+    };
+    let compile = |body: &str| {
+        let source = format!("export async function run(input: string | undefined) {{ {body} }}");
+        api::compile(&program(&source), &optional, &Options::default())
+    };
+    compile("return input ?? 'unset';")?;
+    let Err(error) = compile("return input.length.toString();") else {
+        anyhow::bail!("unguarded optional read compiled without an error channel");
+    };
+    assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
+    Ok(())
 }
 
 #[test]

@@ -128,11 +128,13 @@ impl FunctionLowering<'_, '_> {
             self.define_value(ctx, op, result);
             return Ok(true);
         }
-        if Operation::get_op::<UnwrapOp>(op, ctx).is_some() {
+        if let Some(unwrap) = Operation::get_op::<UnwrapOp>(op, ctx) {
             let mir = op.deref(ctx).get_operand(0);
             let value = self.mapped_value(ctx, mir)?;
-            let absent = self.is_absent(ctx, value, mir.get_type(ctx))?;
-            self.throw_if(ctx, absent, ErrorKind::TypeError);
+            if !unwrap.proven_present(ctx) {
+                let absent = self.is_absent(ctx, value, mir.get_type(ctx))?;
+                self.throw_if(ctx, absent, ErrorKind::TypeError);
+            }
             self.define_value(ctx, op, value);
             return Ok(true);
         }

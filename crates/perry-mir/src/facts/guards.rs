@@ -156,15 +156,14 @@ impl<'a> GuardedFacts<'a> {
         }
     }
 
-    /// Whether `value` may be `null` where an operation in `block` reads it.
-    pub(crate) fn may_be_null_at(
+    /// Possible states of the operand at a particular use.
+    pub(crate) fn presence_at(
         &mut self,
         dominance: &mut DomInfo,
         block: Ptr<BasicBlock>,
         value: Value,
-    ) -> bool {
+    ) -> Presence {
         self.states(dominance, block, value, PRESENCE_DEPTH)
-            .admits(crate::Absence::Null)
     }
 
     /// The states `value` may hold in `block`: its declared states, narrowed through optional
