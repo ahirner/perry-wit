@@ -86,6 +86,12 @@ pub(super) fn result<'s>(
     env: &mut FunctionEnv<'_>,
 ) -> HirType {
     match rule {
+        MethodResult::Native(_)
+        | MethodResult::Nullable(_)
+        | MethodResult::Optional(_)
+        | MethodResult::Number
+        | MethodResult::Boolean
+        | MethodResult::String => rule.fixed_type(),
         MethodResult::Mapped | MethodResult::FlatMapped => {
             argument(0).map_or(HirType::Any, |callback| {
                 infer_array_closure_return(
@@ -149,19 +155,15 @@ pub(super) fn result<'s>(
                 _ => HirType::Any,
             }
         }
-        MethodResult::Native(kind) => native_type(kind),
         MethodResult::Promise(kind) => HirType::Promise(Box::new(native_type(kind))),
         MethodResult::PromiseVoid => HirType::Promise(Box::new(HirType::Void)),
         MethodResult::PromiseJson => HirType::Promise(Box::new(HirType::Unknown)),
-        MethodResult::Nullable(kind) => with_absences(native_type(kind), Absence::Null),
-        MethodResult::Optional(kind) => with_absences(native_type(kind), Absence::Undefined),
         MethodResult::StreamReader => native_type(if argument(0).is_some() {
             Kind::ByobReader
         } else {
             Kind::Reader
         }),
         MethodResult::Void => HirType::Void,
-        MethodResult::String => HirType::String,
         MethodResult::Strings => HirType::Array(Box::new(HirType::String)),
         MethodResult::NullableStrings => with_absences(
             HirType::Array(Box::new(with_absences(HirType::String, Absence::Undefined))),
@@ -181,8 +183,6 @@ pub(super) fn result<'s>(
             iterator_view(source, projection)
                 .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env))
         }
-        MethodResult::Number => HirType::Number,
-        MethodResult::Boolean => HirType::Boolean,
         MethodResult::Duration => HirType::Object(perry_hir::types::ObjectType {
             name: None,
             properties: [
@@ -232,6 +232,20 @@ pub(super) fn map_group_by(items: &Expr, key_fn: &Expr, env: &mut FunctionEnv<'_
     HirType::Generic {
         base: "Map".into(),
         type_args: vec![key, HirType::Array(Box::new(element))],
+    }
+}
+
+impl MethodResult {
+    pub(super) fn fixed_type(self) -> HirType {
+        match self {
+            MethodResult::Native(kind) => native_type(kind),
+            MethodResult::Nullable(kind) => with_absences(native_type(kind), Absence::Null),
+            MethodResult::Optional(kind) => with_absences(native_type(kind), Absence::Undefined),
+            MethodResult::String => HirType::String,
+            MethodResult::Number => HirType::Number,
+            MethodResult::Boolean => HirType::Boolean,
+            _ => HirType::Any,
+        }
     }
 }
 

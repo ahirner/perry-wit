@@ -284,6 +284,11 @@ macro_rules! registry {
                 }
             }
 
+            pub(crate) fn named_property(type_name: &str, name: &str) -> Option<MethodResult> {
+                let receiver = Receiver::Value(Kind::builtin(type_name)?);
+                Self::lookup(receiver, name).filter(|m| m.is_property()).map(Self::result)
+            }
+
             pub(crate) fn is_property(self) -> bool {
                 match self { $($(Self::$variant => registry!(@property $form),)*)* }
             }
