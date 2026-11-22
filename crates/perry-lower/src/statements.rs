@@ -378,14 +378,26 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(());
         }
         let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
-        let declared = type_state
+        let inferred_storage =
+            self.shapes.deferred_binding(id) && !self.shapes.is_explicit_binding(id);
+        let declared = match type_state
             .resolved()
             .map(|ty| self.active_value_type(ctx, ty))
-            .transpose()?;
-        let declared = declared.or_else(|| {
-            (self.shapes.deferred_binding(id) && !self.shapes.is_explicit_binding(id))
-                .then(|| perry_mir::JsonType::get(ctx).into())
-        });
+            .transpose()
+        {
+            Err(error) if inferred_storage && error.code() == codes::UNSUPPORTED_TYPE => {
+                let HirType::Union(members) = ty else {
+                    return Err(error);
+                };
+                for member in members {
+                    self.active_value_type(ctx, member)?;
+                }
+                Some(perry_mir::JsonType::get(ctx).into())
+            }
+            result => {
+                result?.or_else(|| inferred_storage.then(|| perry_mir::JsonType::get(ctx).into()))
+            }
+        };
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
         });

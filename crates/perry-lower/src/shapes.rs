@@ -163,6 +163,14 @@ impl<'h> Shapes<'h> {
         }
     }
 
+    pub(super) fn local_name(&self, id: perry_frontend::hir::types::LocalId) -> Option<&str> {
+        let span = self.local_source_spans.get(&id)?;
+        self.metadata
+            .locations
+            .source_at(span.start)?
+            .get(..span.end.checked_sub(span.start)? as usize)
+    }
+
     pub(super) fn annotate_local(
         &self,
         error: Diagnostic,
@@ -280,7 +288,7 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn deferred_binding(&self, id: perry_frontend::hir::types::LocalId) -> bool {
-        self.metadata.deferred_writes.contains_key(&id)
+        self.metadata.deferred_bindings.contains(&id)
     }
 
     pub(super) fn deferred_storage(

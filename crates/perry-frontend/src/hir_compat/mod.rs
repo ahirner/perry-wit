@@ -36,8 +36,8 @@ pub use methods::{Method, method};
 pub struct Metadata<'s> {
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
-    /// Number of writes to each binding declared without an initializer.
-    pub deferred_writes: HashMap<LocalId, usize>,
+    /// Bindings declared without an initializer.
+    pub deferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
     pub sparse_arrays: bool,
 }
@@ -94,26 +94,17 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
                 .then_some(*id)
         })
         .collect();
-    let mut deferred_writes: HashMap<_, _> = module
+    let deferred_bindings = module
         .local_source_spans
         .iter()
-        .filter_map(|(id, span)| spans.deferred.contains(&span.start).then_some((*id, 0)))
+        .filter_map(|(id, span)| spans.deferred.contains(&span.start).then_some(*id))
         .collect();
-    if !deferred_writes.is_empty() {
-        perry_hir::tdz_check::for_each_module_expr(&module, &mut |expr| {
-            if let Expr::LocalSet(id, _) | Expr::Update { id, .. } = expr
-                && let Some(writes) = deferred_writes.get_mut(id)
-            {
-                *writes += 1;
-            }
-        });
-    }
     Ok(LoweredHir {
         module,
         metadata: Metadata {
             locations,
             inferred_bindings,
-            deferred_writes,
+            deferred_bindings,
             constructors,
             sparse_arrays: sparse.0,
         },

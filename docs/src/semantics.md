@@ -15,7 +15,7 @@ A narrowed read of a property or global that another reference or call has since
 
 ## Arrays
 
-- Arrays (`T[]`) are growable and track element presence separately from `T`, allocating a hole bitset when the array first gets a hole. Elements share one type or a finite union of numbers, strings, booleans and one plain record shape.
+- Arrays (`T[]`) are growable and track element presence separately from `T`, allocating a hole bitset when the array first gets a hole. Elements share one type or a finite union of numbers, strings, booleans and one object alternative (a plain record or `Uint8Array`).
 - Array literals preserve elisions, including trailing holes, and `delete array[i]` turns an in-bounds element into a hole. `in` reports holes as absent, and `Object.keys`, `Object.values`, `Object.entries` and callback methods skip them while visiting present `undefined` elements. `map`, `slice`, `concat`, `reverse` and casts of dynamic values (`error.cause as T[]`) preserve holes, `sort` moves them to the end, and spreads and iterable copies (`[...a]`, `Array.from`, `toReversed`, `toSorted`, `with`) materialize holes as `undefined`. These copies keep the element type, so a hole throws `TypeError` unless `T` or the target element type admits `undefined`.
 - Reading a hole, an index outside the array, or a fractional index yields `undefined`. Storing or passing it where the declared type excludes `undefined` throws `TypeError`.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.

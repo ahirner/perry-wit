@@ -74,6 +74,13 @@ impl<'s> FunctionBuilder<'s> {
         Ok(if prefix { next } else { old })
     }
 
+    pub(crate) fn string_length(&mut self, ctx: &mut Context, string: Value) -> Value {
+        let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, string));
+        self.emit_value(ctx, |ctx| {
+            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
+        })
+    }
+
     /// `object.property`, by the kind of `object`.
     pub(super) fn property_get(
         &mut self,
@@ -102,12 +109,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
                 self.intrinsic(ctx, intrinsic, vec![value])
             }
-            (Kind::String, "length") => {
-                let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
-                self.emit_value(ctx, |ctx| {
-                    NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-                })
-            }
+            (Kind::String, "length") => self.string_length(ctx, value),
             (Kind::Array, field) if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) => {
                 let key = self.string(ctx, field);
                 self.kv_get(ctx, value, key, k_ty, v_ty)?

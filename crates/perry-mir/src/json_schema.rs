@@ -33,6 +33,7 @@ pub enum JsonSchema {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Usage {
+    Box,
     Graph,
     Cursor,
     Reflection,
@@ -41,6 +42,42 @@ enum Usage {
 impl JsonSchema {
     pub fn supports_descriptor(ctx: &Context, root: TypeHandle) -> bool {
         Self::supports_input(ctx, root, Usage::Graph)
+    }
+
+    pub fn supports_boxing(ctx: &Context, root: TypeHandle) -> bool {
+        Self::supports_input(ctx, root, Usage::Box)
+    }
+
+    pub fn scalar_descriptor(ctx: &Context, ty: TypeHandle) -> Option<u32> {
+        use perry_abi::layout::descriptor::{
+            self, BOOLEAN, EXCEPTION, JSON_DATE, JSON_NUMERIC, JSON_VALUE, NUMBER, SIGNED_INT,
+            STRING, UNSIGNED_INT,
+        };
+        Some(if ty.deref(ctx).is::<crate::NumericType>() {
+            JSON_NUMERIC
+        } else if ty.deref(ctx).is::<JsonType>() {
+            JSON_VALUE
+        } else if ty.deref(ctx).is::<crate::BigIntType>() {
+            descriptor::JSON_BIGINT
+        } else if ty.deref(ctx).is::<crate::DateType>() {
+            JSON_DATE
+        } else if ty.deref(ctx).is::<FP64Type>() {
+            NUMBER
+        } else if let Some(int) = ty.deref(ctx).downcast_ref::<IntegerType>() {
+            if int.width() == 1 {
+                BOOLEAN
+            } else if int.signedness() == pliron::builtin::types::Signedness::Unsigned {
+                UNSIGNED_INT
+            } else {
+                SIGNED_INT
+            }
+        } else if ty.deref(ctx).is::<StringType>() {
+            STRING
+        } else if ty.deref(ctx).is::<crate::ExceptionType>() {
+            EXCEPTION
+        } else {
+            return None;
+        })
     }
 
     fn supports_input(ctx: &Context, root: TypeHandle, usage: Usage) -> bool {
@@ -53,7 +90,17 @@ impl JsonSchema {
             if usage != Usage::Reflection && ty.deref(ctx).is::<crate::NumericType>() {
                 continue;
             }
-            match Self::of(ctx, ty) {
+            let schema = if usage == Usage::Box {
+                if Self::scalar_descriptor(ctx, ty).is_some() {
+                    continue;
+                }
+                crate::typed::<RecordType>(ctx, ty)
+                    .map(JsonSchema::Record)
+                    .or_else(|| Self::of(ctx, ty))
+            } else {
+                Self::of(ctx, ty)
+            };
+            match schema {
                 Some(JsonSchema::Number | JsonSchema::Boolean | JsonSchema::String) => {}
                 Some(JsonSchema::Value) if usage != Usage::Reflection => {}
                 Some(JsonSchema::Integer { width, .. })

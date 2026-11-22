@@ -95,7 +95,7 @@ impl<'s> FunctionBuilder<'s> {
                 let ty = ty.deref(ctx);
                 if let Some(record) = ty.downcast_ref::<RecordType>() {
                     record.field(field).map(|(_, ty)| ty)
-                } else if ty.is::<StringType>() && field == "length" {
+                } else if (ty.is::<StringType>() || ty.is::<BytesType>()) && field == "length" {
                     Some(FP64Type::get(ctx).into())
                 } else {
                     None
@@ -126,10 +126,9 @@ impl<'s> FunctionBuilder<'s> {
                 let op = FieldGetOp::new(ctx, payload, field.to_owned()).to_diag(ctx)?;
                 b.field_read(ctx, &op)
             } else if payload.get_type(ctx).deref(ctx).is::<StringType>() && field == "length" {
-                let len = b.emit_value(ctx, |ctx| StringLenOp::new(ctx, payload));
-                Ok(b.emit_value(ctx, |ctx| {
-                    NumericCastOp::new(ctx, len, FP64Type::get(ctx).into())
-                }))
+                Ok(b.string_length(ctx, payload))
+            } else if payload.get_type(ctx).deref(ctx).is::<BytesType>() && field == "length" {
+                Ok(b.intrinsic(ctx, Intrinsic::BytesLength, vec![payload]))
             } else {
                 b.absent_literal(ctx, false, Some(result))
             }

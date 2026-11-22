@@ -622,8 +622,8 @@ pub(crate) fn specialize_functions(
         if let Some(span) = hir.local_source_spans.get(&old_id).copied() {
             hir.local_source_spans.insert(new_id, span);
         }
-        if let Some(&writes) = metadata.deferred_writes.get(&old_id) {
-            metadata.deferred_writes.insert(new_id, writes);
+        if metadata.deferred_bindings.contains(&old_id) {
+            metadata.deferred_bindings.insert(new_id);
         }
         if metadata.inferred_bindings.contains(&old_id) {
             metadata.inferred_bindings.insert(new_id);

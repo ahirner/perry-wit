@@ -126,6 +126,55 @@ function readChunk(fail: boolean): number {
   return (absent ? 100 : 0) + output[0];
 }
 
+class ChunkSource {
+  read(): Uint8Array { return new Uint8Array([9]); }
+  first(flag: boolean): number {
+    let data;
+    if (flag) data = this.read();
+    else data = new Uint8Array([5]);
+    return data[0];
+  }
+}
+
+function joinedBytes(change: boolean): number {
+  let chunk;
+  const initiallyAbsent = chunk === undefined;
+  if (change) chunk = new Uint8Array([7]);
+  else chunk = new Uint8Array([9]);
+  const replace = () => { chunk = new Uint8Array([11]); };
+  if (change) replace();
+  const out = new Uint8Array(1);
+  out.set(chunk);
+  return (initiallyAbsent ? 100 : 0) + out[0];
+}
+
+function joinedLength(bytes: Uint8Array, takeBytes: boolean): number {
+  let value;
+  if (takeBytes) value = bytes;
+  else value = "éé";
+  return value.length;
+}
+
+function joinedIdentity(bytes: Uint8Array, takeBytes: boolean): number {
+  let value;
+  if (takeBytes) value = bytes;
+  else value = "abc";
+  bytes[0] = 41;
+  if (typeof value === "object") {
+    const same = value === bytes;
+    value[0] = value[0] + 1;
+    return (same ? 100 : 0) + bytes[0];
+  }
+  return value.length;
+}
+
+function boxedLength(takeList: boolean): number {
+  let value;
+  if (takeList) value = [1, 2];
+  else value = "abc";
+  return value.length;
+}
+
 function capturedWrite(change: boolean): number {
   let value;
   value = 7;
@@ -144,6 +193,10 @@ console.log(deferredBranch(true), deferredBranch(false));
 console.log(deferredCatch(false), deferredCatch(true), bareRead(false), bareRead(true));
 console.log(deferredLoop(0), deferredLoop(1), deferredLoop(2), deferredIteration());
 console.log(readChunk(false), readChunk(true), capturedWrite(false), capturedWrite(true));
+
+const bytes = new Uint8Array(4);
+console.log(joinedBytes(false), joinedBytes(true), joinedLength(bytes, false), joinedLength(bytes, true), new ChunkSource().first(true));
+console.log(joinedIdentity(bytes, false), joinedIdentity(bytes, true), boxedLength(false), boxedLength(true));
 
 function retagged(): string {
   let shape: Shape = { tag: "circle", val: 1 };

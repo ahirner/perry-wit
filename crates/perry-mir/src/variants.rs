@@ -39,9 +39,10 @@ pub fn value_tag(ctx: &Context, ty: TypeHandle) -> Option<&'static str> {
         .is_some_and(|ty| ty.width() == 1)
     {
         Some("boolean")
-    } else if ty
-        .downcast_ref::<crate::RecordType>()
-        .is_some_and(|ty| ty.kind() == crate::RecordKind::Object)
+    } else if ty.is::<crate::BytesType>()
+        || ty
+            .downcast_ref::<crate::RecordType>()
+            .is_some_and(|ty| ty.kind() == crate::RecordKind::Object)
     {
         Some("object")
     } else {
