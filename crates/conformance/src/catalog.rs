@@ -462,6 +462,14 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
     },
     CatalogEntry {
+        id: "ecma.dataview.uint32",
+        description: "Uint32 framing through a bounded DataView",
+        specification: "https://tc39.es/ecma262/#sec-dataview-objects",
+        domain: "Unaligned and empty views, shared typed-array writes, bounds and byte order",
+        partitions: &["empty", "binary-subview"],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
         id: "web.response.bytes",
         description: "Constructed response snapshot, body use and repeated consumption",
         specification: "https://fetch.spec.whatwg.org/",

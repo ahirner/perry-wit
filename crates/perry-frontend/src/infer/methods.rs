@@ -149,19 +149,15 @@ pub(super) fn result<'s>(
                 _ => HirType::Any,
             }
         }
-        MethodResult::Native(kind) => native_type(kind),
         MethodResult::Promise(kind) => HirType::Promise(Box::new(native_type(kind))),
         MethodResult::PromiseVoid => HirType::Promise(Box::new(HirType::Void)),
         MethodResult::PromiseJson => HirType::Promise(Box::new(HirType::Unknown)),
-        MethodResult::Nullable(kind) => with_absences(native_type(kind), Absence::Null),
-        MethodResult::Optional(kind) => with_absences(native_type(kind), Absence::Undefined),
         MethodResult::StreamReader => native_type(if argument(0).is_some() {
             Kind::ByobReader
         } else {
             Kind::Reader
         }),
         MethodResult::Void => HirType::Void,
-        MethodResult::String => HirType::String,
         MethodResult::Strings => HirType::Array(Box::new(HirType::String)),
         MethodResult::NullableStrings => with_absences(
             HirType::Array(Box::new(with_absences(HirType::String, Absence::Undefined))),
@@ -181,8 +177,6 @@ pub(super) fn result<'s>(
             iterator_view(source, projection)
                 .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env))
         }
-        MethodResult::Number => HirType::Number,
-        MethodResult::Boolean => HirType::Boolean,
         MethodResult::Duration => HirType::Object(perry_hir::types::ObjectType {
             name: None,
             properties: [
@@ -219,6 +213,9 @@ pub(super) fn result<'s>(
             }
             _ => perry_hir::infer_expr_type(expr, env),
         },
+        fixed => fixed
+            .fixed_type()
+            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
     }
 }
 
@@ -232,6 +229,20 @@ pub(super) fn map_group_by(items: &Expr, key_fn: &Expr, env: &mut FunctionEnv<'_
     HirType::Generic {
         base: "Map".into(),
         type_args: vec![key, HirType::Array(Box::new(element))],
+    }
+}
+
+impl MethodResult {
+    pub(super) fn fixed_type(self) -> Option<HirType> {
+        Some(match self {
+            MethodResult::Native(kind) => native_type(kind),
+            MethodResult::Nullable(kind) => with_absences(native_type(kind), Absence::Null),
+            MethodResult::Optional(kind) => with_absences(native_type(kind), Absence::Undefined),
+            MethodResult::String => HirType::String,
+            MethodResult::Number => HirType::Number,
+            MethodResult::Boolean => HirType::Boolean,
+            _ => return None,
+        })
     }
 }
 

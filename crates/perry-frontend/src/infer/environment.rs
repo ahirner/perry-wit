@@ -165,6 +165,10 @@ impl HirTypeFacts for FunctionEnv<'_> {
                     prop.ty.clone(),
                     prop.optional,
                 ))
+            })
+            .or_else(|| {
+                crate::methods::Method::named_property(type_name, property)
+                    .and_then(crate::methods::MethodResult::fixed_type)
             })?;
         Some(self.normalize_owned(ty))
     }

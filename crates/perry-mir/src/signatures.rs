@@ -85,6 +85,7 @@ type_kinds! {
         accepts ty.deref(ctx).downcast_ref::<ArrayType>()
             .is_some_and(|array| Ty::Numeric.matches(ctx, array.element()));
     Bytes = BytesType::get(ctx).into();
+    DataView = crate::types::DataViewType::get(ctx).into();
     ByteBuffer = crate::types::ByteBufferType::get(ctx).into();
     ByobReader = crate::types::ByobReaderType::get(ctx).into();
     ByteInput = crate::types::ByteInputType::get(ctx).into();

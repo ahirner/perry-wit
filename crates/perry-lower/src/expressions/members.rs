@@ -126,14 +126,6 @@ impl<'s> FunctionBuilder<'s> {
             }
             (Kind::Array, "length") => self.array_length(ctx, value),
             (Kind::Array, "size") => self.collection_size(ctx, value)?,
-            (Kind::Bytes, "buffer") => self.intrinsic(ctx, Intrinsic::BytesBuffer, vec![value]),
-            (Kind::Bytes, "byteOffset") => self.intrinsic(ctx, Intrinsic::BytesOffset, vec![value]),
-            (Kind::ByteBuffer, "byteLength") => {
-                self.intrinsic(ctx, Intrinsic::BufferLength, vec![value])
-            }
-            (Kind::Bytes, "length" | "byteLength") => {
-                self.intrinsic(ctx, Intrinsic::BytesLength, vec![value])
-            }
             (Kind::Json, "length") => self.intrinsic(ctx, Intrinsic::JsonLength, vec![value]),
             (Kind::Json, name) => {
                 let name = self.string(ctx, name);
@@ -154,7 +146,10 @@ impl<'s> FunctionBuilder<'s> {
                 self.append_value(ctx, &op)
             }
             (
-                Kind::Headers
+                Kind::Bytes
+                | Kind::ByteBuffer
+                | Kind::DataView
+                | Kind::Headers
                 | Kind::Response
                 | Kind::Request
                 | Kind::Writable
