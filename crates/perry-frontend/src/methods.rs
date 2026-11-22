@@ -308,8 +308,12 @@ macro_rules! registry {
                 match self { $($(Self::$variant => registry!(@property $form),)*)* }
             }
 
-            fn result(self) -> MethodResult {
+            pub(crate) fn result_rule(self) -> MethodResult {
                 match self { $($(Self::$variant => MethodResult::$result $(($result_arg))?,)*)* }
+            }
+
+            fn result(self) -> MethodResult {
+                self.result_rule()
             }
 
             pub(crate) fn inferred(receiver: &HirType, name: &str, property: bool) -> Option<MethodResult> {

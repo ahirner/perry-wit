@@ -1,6 +1,9 @@
 //! Data-oriented monomorphization and type-inference engine over dense indices.
 pub(crate) mod bitset;
 pub(crate) mod boundary;
+pub(crate) mod builtins;
+pub(crate) mod emit;
+pub(crate) mod solve;
 pub(crate) mod types;
 
 #[cfg(test)]
@@ -16,18 +19,22 @@ use types::TypeTable;
 
 /// Execute the new inference engine on a lowered HIR module.
 ///
-/// Milestone 1 builds the dense boundary index and interned type table. Milestones 2-5 add
-/// specialization, storage joins, parameter patterns/classes, and monomorphic emission.
-#[allow(dead_code)]
+/// Phase split: borrows `hir` read-only across boundary indexing, worklist solving, and
+/// monomorphic emission building, then applies the emitted outputs to `hir` and `metadata`.
 pub(crate) fn run_engine(
     ctx: &mut Context,
     hir: &mut HirModule,
     metadata: &mut hir_compat::Metadata<'_>,
     facts: &SourceFacts,
-    _foreign: &HashMap<String, hir::Foreign>,
+    foreign: &HashMap<String, hir::Foreign>,
 ) -> Result<()> {
     let mut types = TypeTable::new();
-    let _index = ModuleIndex::build(ctx, hir, facts, &metadata.locations, &mut types);
+    let emitted = {
+        let index = ModuleIndex::build(ctx, hir, facts, &metadata.locations, &mut types);
+        let solved = solve::solve(ctx, hir, &index, metadata, facts, foreign, &mut types)?;
+        emit::build(ctx, hir, &index, &types, &solved)?
+    };
+    emitted.apply(hir, metadata);
     Ok(())
 }
 
@@ -146,6 +153,18 @@ mod tests {
             oracle::canonical_hir_type(&roundtrip),
             oracle::canonical_hir_type(&hir_u)
         );
+
+        // Verify FlatHashIndex survives multiple rehashes without cycles or lost entries.
+        for i in 0..200u32 {
+            let name = format!("prop_{i}");
+            let id = table.intern_name(&name);
+            assert_eq!(table.intern_name(&name), id);
+        }
+        for i in 0..200u32 {
+            let name = format!("prop_{i}");
+            let id = table.intern_name(&name);
+            assert_eq!(table.name_str(id), name);
+        }
     }
 
     #[test]
@@ -183,14 +202,16 @@ mod tests {
         if !harness.exists() {
             return;
         }
+        let dump = std::env::var_os("PERRY_ORACLE_DUMP").is_some();
         let mut checked_probes = 0usize;
         for dir in ["probe/accept", "probe/plan2", "probe/method"] {
             let path = harness.join(dir);
             let Ok(entries) = std::fs::read_dir(&path) else {
                 continue;
             };
-            for entry in entries.flatten() {
-                let file = entry.path();
+            let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            paths.sort();
+            for file in paths {
                 let ext = file.extension().and_then(|e| e.to_str());
                 if !matches!(ext, Some("js" | "ts")) {
                     continue;
@@ -200,6 +221,26 @@ mod tests {
                 };
                 let label = file.file_name().and_then(|n| n.to_str()).unwrap_or("probe");
                 let report = oracle::compare_source(&src, label, &empty_sources, &empty_foreign);
+                if dump {
+                    eprintln!(
+                        "PROBE {dir}/{label}: old_err={:?} new_err={:?} diffs={}",
+                        report
+                            .old_err
+                            .as_deref()
+                            .map(|s| s.lines().next().unwrap_or("")),
+                        report
+                            .new_err
+                            .as_deref()
+                            .map(|s| s.lines().next().unwrap_or("")),
+                        report.diffs.len()
+                    );
+                    for d in &report.diffs {
+                        eprintln!(
+                            "  [{}] {}: old={:?} new={:?}",
+                            d.category, d.key, d.old, d.new
+                        );
+                    }
+                }
                 assert!(
                     report.template_count >= 1 || report.new_err.is_some(),
                     "{label}: boundary must index at least module init or report a diagnostic"
@@ -212,6 +253,9 @@ mod tests {
         let corpus_tsv = harness.join("corpus/corpus.tsv");
         if let Ok(tsv) = std::fs::read_to_string(&corpus_tsv) {
             let mut checked_corpus = 0usize;
+            let mut corpus_diffs = 0usize;
+            let mut old_only_err = 0usize;
+            let mut new_only_err = 0usize;
             for line in tsv.lines() {
                 let mut cols = line.split('\t');
                 let Some(name) = cols.next() else {
@@ -229,8 +273,43 @@ mod tests {
                 let Ok(src) = std::fs::read_to_string(src_path) else {
                     continue;
                 };
-                let _report = oracle::compare_source(&src, name, &empty_sources, &empty_foreign);
+                let report = oracle::compare_source(&src, name, &empty_sources, &empty_foreign);
+                if dump {
+                    if report.old_err.is_some() && report.new_err.is_none() {
+                        old_only_err += 1;
+                        eprintln!(
+                            "CORPUS {name}: OLD_ERR_ONLY old={:?}",
+                            report
+                                .old_err
+                                .as_deref()
+                                .map(|s| s.lines().next().unwrap_or(""))
+                        );
+                    } else if report.old_err.is_none() && report.new_err.is_some() {
+                        new_only_err += 1;
+                        eprintln!(
+                            "CORPUS {name}: NEW_ERR_ONLY new={:?}",
+                            report
+                                .new_err
+                                .as_deref()
+                                .map(|s| s.lines().next().unwrap_or(""))
+                        );
+                    } else if !report.diffs.is_empty() {
+                        corpus_diffs += 1;
+                        eprintln!("CORPUS {name}: diffs={}", report.diffs.len());
+                        for d in report.diffs.iter().take(6) {
+                            eprintln!(
+                                "  [{}] {}: old={:?} new={:?}",
+                                d.category, d.key, d.old, d.new
+                            );
+                        }
+                    }
+                }
                 checked_corpus += 1;
+            }
+            if dump {
+                eprintln!(
+                    "CORPUS SUMMARY: checked={checked_corpus} old_only_err={old_only_err} new_only_err={new_only_err} with_diffs={corpus_diffs}"
+                );
             }
             assert!(
                 checked_corpus >= 80,

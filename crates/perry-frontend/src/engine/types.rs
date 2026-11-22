@@ -137,14 +137,14 @@ impl Ty {
 const EMPTY_BUCKET: u32 = u32::MAX;
 
 /// Flat intrusive hash table for interning dense indices without per-bucket heap allocations.
-struct FlatHashIndex {
+pub(crate) struct FlatHashIndex {
     buckets: Vec<u32>,
     next: Vec<u32>,
     hashes: Vec<u64>,
 }
 
 impl FlatHashIndex {
-    fn with_capacity(cap: usize) -> Self {
+    pub(crate) fn with_capacity(cap: usize) -> Self {
         let bucket_count = cap.next_power_of_two().max(64);
         Self {
             buckets: vec![EMPTY_BUCKET; bucket_count],
@@ -153,7 +153,7 @@ impl FlatHashIndex {
         }
     }
 
-    fn find(&self, hash: u64, mut eq: impl FnMut(u32) -> bool) -> Option<u32> {
+    pub(crate) fn find(&self, hash: u64, mut eq: impl FnMut(u32) -> bool) -> Option<u32> {
         let mask = self.buckets.len().checked_sub(1)?;
         let mut idx = *self.buckets.get((hash as usize) & mask)?;
         while idx != EMPTY_BUCKET {
@@ -165,8 +165,11 @@ impl FlatHashIndex {
         None
     }
 
-    fn insert(&mut self, id: u32, hash: u64) {
+    pub(crate) fn insert(&mut self, id: u32, hash: u64) {
         let id_usize = id as usize;
+        if (id_usize + 1) * 4 > self.buckets.len() * 3 {
+            self.rehash();
+        }
         if id_usize >= self.next.len() {
             self.next.resize(id_usize + 1, EMPTY_BUCKET);
             self.hashes.resize(id_usize + 1, 0);
@@ -174,12 +177,13 @@ impl FlatHashIndex {
         if let Some(slot) = self.hashes.get_mut(id_usize) {
             *slot = hash;
         }
-        if self.next.len() * 4 > self.buckets.len() * 3 {
-            self.rehash();
-        }
         let mask = self.buckets.len().saturating_sub(1);
         let bucket = (hash as usize) & mask;
         let head = self.buckets.get(bucket).copied().unwrap_or(EMPTY_BUCKET);
+        debug_assert_ne!(
+            head, id,
+            "FlatHashIndex duplicate insert would form a cycle"
+        );
         if let Some(slot) = self.next.get_mut(id_usize) {
             *slot = head;
         }
@@ -780,12 +784,20 @@ impl TypeTable {
                     .map(|&t| self.materialize_hir(ctx, t, class_name))
                     .collect(),
             ),
-            TyKind::Union(span) => HirType::Union(
-                self.union_slice(span)
-                    .iter()
-                    .map(|&t| self.materialize_hir(ctx, t, class_name))
-                    .collect(),
-            ),
+            TyKind::Union(span) => {
+                let mut members: Vec<HirType> = Vec::with_capacity(span.len as usize);
+                for &t in self.union_slice(span) {
+                    let h = self.materialize_hir(ctx, t, class_name);
+                    if !members.contains(&h) {
+                        members.push(h);
+                    }
+                }
+                match members.len() {
+                    0 => HirType::Never,
+                    1 => members.pop().unwrap_or(HirType::Never),
+                    _ => HirType::Union(members),
+                }
+            }
             TyKind::Generic { base, args } => {
                 let base_name = match base.hir(ctx) {
                     HirType::Named(name) => name.clone(),
@@ -827,6 +839,243 @@ impl TypeTable {
                 is_async: false,
                 is_generator: false,
             }),
+        }
+    }
+
+    /// Substitute bound type parameters in `ty` without cloning `HirType` trees.
+    pub(crate) fn substitute(
+        &mut self,
+        ctx: &Context,
+        ty: Ty,
+        bindings: &[(shapes::TypeId, Ty)],
+    ) -> Ty {
+        if bindings.is_empty() {
+            return ty;
+        }
+        match self.kind(ty) {
+            TyKind::TypeVar(id) => {
+                if let HirType::TypeVar(name) = id.hir(ctx) {
+                    for &(param_id, bound) in bindings {
+                        if matches!(param_id.hir(ctx), HirType::Named(p) | HirType::TypeVar(p) if p == name)
+                        {
+                            return bound;
+                        }
+                    }
+                }
+                ty
+            }
+            TyKind::Leaf(id) => {
+                if let HirType::Named(name) = id.hir(ctx) {
+                    for &(param_id, bound) in bindings {
+                        if matches!(param_id.hir(ctx), HirType::Named(p) | HirType::TypeVar(p) if p == name)
+                        {
+                            return bound;
+                        }
+                    }
+                }
+                ty
+            }
+            TyKind::Array(inner) => {
+                let next = self.substitute(ctx, inner, bindings);
+                if next == inner { ty } else { self.array(next) }
+            }
+            TyKind::Promise(inner) => {
+                let next = self.substitute(ctx, inner, bindings);
+                if next == inner {
+                    ty
+                } else {
+                    self.promise(next)
+                }
+            }
+            TyKind::Tuple(span) => {
+                let items: Vec<Ty> = self.tuple_slice(span).to_vec();
+                let mut changed = false;
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let next = self.substitute(ctx, item, bindings);
+                    changed |= next != item;
+                    out.push(next);
+                }
+                if changed { self.tuple(&out) } else { ty }
+            }
+            TyKind::Union(span) => {
+                let items: Vec<Ty> = self.union_slice(span).to_vec();
+                let mut changed = false;
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let next = self.substitute(ctx, item, bindings);
+                    changed |= next != item;
+                    out.push(next);
+                }
+                if changed { self.union(&out) } else { ty }
+            }
+            TyKind::Generic { base, args } => {
+                let items: Vec<Ty> = self.generic_slice(args).to_vec();
+                let mut changed = false;
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let next = self.substitute(ctx, item, bindings);
+                    changed |= next != item;
+                    out.push(next);
+                }
+                if changed {
+                    self.generic(base, &out)
+                } else {
+                    ty
+                }
+            }
+            TyKind::Object { props, index } => {
+                let mut items: Vec<ObjectProp> = self.object_slice(props).to_vec();
+                let mut changed = false;
+                for prop in &mut items {
+                    let next = self.substitute(ctx, prop.ty, bindings);
+                    if next != prop.ty {
+                        prop.ty = next;
+                        changed = true;
+                    }
+                }
+                let next_idx = index.map(|idx| {
+                    let next = self.substitute(ctx, idx, bindings);
+                    changed |= next != idx;
+                    next
+                });
+                if changed {
+                    self.object(&mut items, next_idx)
+                } else {
+                    ty
+                }
+            }
+            _ => ty,
+        }
+    }
+
+    /// Unify a declared parameter type `pattern` against an actual argument type `actual` to bind
+    /// explicit generic type parameters.
+    pub(crate) fn unify(
+        &self,
+        ctx: &Context,
+        pattern: Ty,
+        actual: Ty,
+        type_params: &[shapes::TypeId],
+        bindings: &mut Vec<(shapes::TypeId, Ty)>,
+    ) {
+        if matches!(actual, Ty::BOTTOM | Ty::OPEN | Ty::NEVER) {
+            return;
+        }
+        match (self.kind(pattern), self.kind(actual)) {
+            (TyKind::TypeVar(id), _) => {
+                if let HirType::TypeVar(name) = id.hir(ctx)
+                    && let Some(&tp) = type_params.iter().find(|tp| {
+                        matches!(tp.hir(ctx), HirType::Named(p) | HirType::TypeVar(p) if p == name)
+                    })
+                    && !bindings.iter().any(|(k, _)| *k == tp)
+                {
+                    bindings.push((tp, actual));
+                }
+            }
+            (TyKind::Leaf(id), _) => {
+                if let HirType::Named(name) = id.hir(ctx)
+                    && let Some(&tp) = type_params.iter().find(|tp| {
+                        matches!(tp.hir(ctx), HirType::Named(p) | HirType::TypeVar(p) if p == name)
+                    })
+                    && !bindings.iter().any(|(k, _)| *k == tp)
+                {
+                    bindings.push((tp, actual));
+                }
+            }
+            (TyKind::Array(p), TyKind::Array(a)) | (TyKind::Promise(p), TyKind::Promise(a)) => {
+                self.unify(ctx, p, a, type_params, bindings);
+            }
+            (TyKind::Tuple(p), TyKind::Tuple(a)) => {
+                for (&pt, &at) in self.tuple_slice(p).iter().zip(self.tuple_slice(a)) {
+                    self.unify(ctx, pt, at, type_params, bindings);
+                }
+            }
+            (
+                TyKind::Generic { base: pb, args: pa },
+                TyKind::Generic { base: ab, args: aa },
+            ) if pb == ab => {
+                for (&pt, &at) in self.generic_slice(pa).iter().zip(self.generic_slice(aa)) {
+                    self.unify(ctx, pt, at, type_params, bindings);
+                }
+            }
+            (
+                TyKind::Object {
+                    props: pp,
+                    index: pi,
+                },
+                TyKind::Object {
+                    props: ap,
+                    index: ai,
+                },
+            ) => {
+                let a_slice = self.object_slice(ap);
+                for prop in self.object_slice(pp) {
+                    if let Some(actual_prop) = a_slice.iter().find(|p| p.name == prop.name) {
+                        self.unify(ctx, prop.ty, actual_prop.ty, type_params, bindings);
+                    }
+                }
+                if let (Some(pt), Some(at)) = (pi, ai) {
+                    self.unify(ctx, pt, at, type_params, bindings);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether `actual` is assignable to `expected` under explicit annotation checks.
+    pub(crate) fn accepts(&self, ctx: &Context, expected: Ty, actual: Ty) -> bool {
+        if expected == actual || actual == Ty::NEVER || expected == Ty::DYNAMIC {
+            return true;
+        }
+        if let TyKind::Union(span) = self.kind(actual) {
+            return self
+                .union_slice(span)
+                .iter()
+                .all(|&member| self.accepts(ctx, expected, member));
+        }
+        if let TyKind::Union(span) = self.kind(expected) {
+            return self
+                .union_slice(span)
+                .iter()
+                .any(|&member| self.accepts(ctx, member, actual));
+        }
+        match (self.kind(expected), self.kind(actual)) {
+            (TyKind::Number, TyKind::Int32) => true,
+            (TyKind::String, TyKind::Leaf(id)) => {
+                matches!(id.hir(ctx), HirType::StringLiteral(_))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `needle` occurs structurally inside `haystack` (for growing recursive type args).
+    pub(crate) fn contains_ty(&self, haystack: Ty, needle: Ty) -> bool {
+        if haystack == needle {
+            return true;
+        }
+        match self.kind(haystack) {
+            TyKind::Array(inner) | TyKind::Promise(inner) => self.contains_ty(inner, needle),
+            TyKind::Tuple(span) => self
+                .tuple_slice(span)
+                .iter()
+                .any(|&t| self.contains_ty(t, needle)),
+            TyKind::Union(span) => self
+                .union_slice(span)
+                .iter()
+                .any(|&t| self.contains_ty(t, needle)),
+            TyKind::Generic { args, .. } => self
+                .generic_slice(args)
+                .iter()
+                .any(|&t| self.contains_ty(t, needle)),
+            TyKind::Object { props, index } => {
+                index.is_some_and(|t| self.contains_ty(t, needle))
+                    || self
+                        .object_slice(props)
+                        .iter()
+                        .any(|p| self.contains_ty(p.ty, needle))
+            }
+            _ => false,
         }
     }
 }
