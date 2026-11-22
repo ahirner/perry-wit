@@ -275,7 +275,7 @@ const RECEIVERS = new Map([
   ['Response', 'Response'], ['Request', 'Request'],
   ['Writable', 'WritableStream'], ['Readable', 'ReadableStream'], ['Headers', 'Headers'],
   ['Encoder', 'TextEncoder'], ['Decoder', 'TextDecoder'],
-  ['Number', 'number'], ['String', 'string'], ['Array', 'Array'], ['Bytes', 'Uint8Array'], ['Stats', 'fs.Stats'],
+  ['Number', 'number'], ['String', 'string'], ['Array', 'Array'], ['Bytes', 'Uint8Array'], ['ByteBuffer', 'ArrayBuffer'], ['Stats', 'fs.Stats'],
   ['Regex', 'RegExp'], ['Abort', 'AbortController'], ['Writer', 'WritableStreamDefaultWriter'],
   ['Reader', 'ReadableStreamDefaultReader'], ['ReadResult', 'ReadableStream read result'], ['Date', 'Date'], ['Map', 'Map'],
   ['Set', 'Set'], ['Url', 'URL'], ['DataView', 'DataView'],
