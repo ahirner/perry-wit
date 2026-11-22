@@ -131,7 +131,7 @@ function capturedWrite(change: boolean): number {
   value = 7;
   const setText = () => { value = "abc"; };
   if (change) setText();
-  return typeof value === "string" ? value.length : value;
+  return String(value).length;
 }
 
 function bareRead(write: boolean): boolean {
