@@ -66,6 +66,19 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         assert_eq!((span.start_line, span.start_column), (2, 15));
     }
 
+    let destructured = "export const { value: binding } = { value: 7 };";
+    let error = api::compile_core(&program_with(
+        "src/main.ts",
+        "export { binding as run } from './helper';",
+        &[("src/helper.ts", destructured)],
+    ))
+    .unwrap_err();
+    let diagnostic = error.primary();
+    assert!(diagnostic.message().contains("Component export 'run'"));
+    let span = diagnostic.span().expect("destructured declaration span");
+    assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
+    assert_eq!(&destructured[span.start_byte..span.end_byte], "binding");
+
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
     let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
     assert_eq!(parse_error.primary().code(), codes::PARSE_ERROR);

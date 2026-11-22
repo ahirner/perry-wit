@@ -1,19 +1,19 @@
 //! Resolve a static local module graph before capability and WIT binding.
 
-use crate::hir_compat::parse;
+use crate::hir_compat::{Locations, parse, pattern_bindings};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{
     Diagnostic, Result, bail_diag, bail_unsupported, codes, diag, ensure_unsupported, unsupported,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
 };
-use swc_common::{DUMMY_SP, GLOBALS, Globals, Mark, SyntaxContext, util::take::Take};
-use swc_ecma_transforms_base::resolver;
+use swc_common::{GLOBALS, Globals, Mark, SyntaxContext, util::take::Take};
+use swc_ecma_transforms_base::{hygiene::hygiene, resolver};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
-type Exports = BTreeMap<String, String>;
+type Exports = BTreeMap<String, ast::Ident>;
 
 pub(crate) struct Loaded<'s> {
     pub(crate) module: ast::Module,
@@ -52,7 +52,7 @@ pub(crate) fn load<'s>(
             loaded: BTreeMap::new(),
             active: BTreeSet::new(),
             body: Vec::new(),
-            types: BTreeSet::new(),
+            types: HashSet::new(),
             next: 0,
             locations: crate::hir_compat::Locations::default(),
             entry_path: normalize(Path::new(file)),
@@ -64,15 +64,20 @@ pub(crate) fn load<'s>(
         // graph also calls, or exports twice, keeps its binding and gets an exported copy.
         let mut bindings = ExportBindings::default();
         for (name, binding) in &exports {
-            if !graph.types.contains(binding) {
-                bindings.0.entry(binding).or_default().names.push(name);
+            if !graph.types.contains(&binding.to_id()) {
+                bindings
+                    .0
+                    .entry(binding.to_id())
+                    .or_default()
+                    .names
+                    .push(name);
             }
         }
         graph.body.visit_with(&mut bindings);
         let mut copies = BTreeMap::new();
         for item in graph.body.iter_mut().rev() {
             if let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) = item
-                && let Some(binding) = bindings.0.remove(function.ident.sym.as_str())
+                && let Some(binding) = bindings.0.remove(&function.ident.to_id())
             {
                 if let [name] = binding.names.as_slice()
                     && binding.occurrences == 1
@@ -91,13 +96,18 @@ pub(crate) fn load<'s>(
             .flat_map(|binding| binding.names)
             .min()
         {
-            bail_unsupported!("Component export '{name}' requires a named function declaration");
+            return Err(graph.locations.annotate(
+                unsupported!("Component export '{name}' requires a named function declaration"),
+                exports[name].span,
+            ));
         }
         graph.body.extend(copies.into_values());
         let mut module = ast::Module {
             body: graph.body,
             ..Default::default()
         };
+        // Preserve lexical references when the next resolver reads the flattened module.
+        module.visit_mut_with(&mut hygiene());
         module.visit_mut_with(&mut ClearContexts);
         Ok(Loaded {
             module,
@@ -214,7 +224,7 @@ struct Graph<'a, 'f> {
     loaded: BTreeMap<PathBuf, Exports>,
     active: BTreeSet<PathBuf>,
     body: Vec<ast::ModuleItem>,
-    types: BTreeSet<String>,
+    types: HashSet<ast::Id>,
     next: usize,
     locations: crate::hir_compat::Locations<'a>,
     entry_path: PathBuf,
@@ -300,7 +310,7 @@ impl Graph<'_, '_> {
                 dependencies.insert(&source.value, self.dependency(path, source)?);
             }
         }
-        let (mut renamer, exports) = bind_module(&module, index, |source| {
+        let (mut renamer, exports) = bind_module(&module, index, &self.locations, |source| {
             &self.loaded[&dependencies[&source.value]]
         })?;
         for item in module.body {
@@ -326,14 +336,14 @@ impl Graph<'_, '_> {
                     | ast::Decl::Class(_)),
                 )) => {
                     self.types
-                        .extend(declared(decl)?.into_iter().map(|id| id.sym.to_string()));
+                        .extend(declared(decl)?.into_iter().map(ast::Ident::to_id));
                 }
                 ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
                     for specifier in &import.specifiers {
                         if let ast::ImportSpecifier::Named(named) = specifier
                             && (import.type_only || named.is_type_only)
                         {
-                            self.types.insert(named.local.sym.to_string());
+                            self.types.insert(named.local.to_id());
                         }
                     }
                 }
@@ -351,11 +361,19 @@ impl Graph<'_, '_> {
 fn bind_module<'a>(
     module: &ast::Module,
     index: usize,
+    locations: &Locations<'_>,
     dependency_exports: impl Fn(&ast::Str) -> &'a Exports,
 ) -> Result<(Rename<'a>, Exports)> {
     let mut names = HashMap::new();
     let mut namespaces = HashMap::new();
     let mut exports = Exports::new();
+    let module_binding = |id: &ast::Ident| {
+        ast::Ident::new(
+            format!("__perry_module_{index}_{}", id.sym).into(),
+            id.span,
+            id.ctxt,
+        )
+    };
     for item in &module.body {
         match item {
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
@@ -364,11 +382,11 @@ fn bind_module<'a>(
             }))
             | ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
                 for id in declared(decl)? {
-                    ensure_unsupported!(
-                        !id.sym.starts_with("__perry_"),
-                        "Reserved compiler name in source"
-                    );
-                    names.insert(id.to_id(), format!("__perry_module_{index}_{}", id.sym));
+                    if id.sym.starts_with("__perry_") {
+                        return Err(locations
+                            .annotate(unsupported!("Reserved compiler name in source"), id.span));
+                    }
+                    names.insert(id.to_id(), module_binding(id));
                 }
             }
             ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
@@ -407,10 +425,7 @@ fn bind_module<'a>(
                 } else {
                     for specifier in &import.specifiers {
                         let binding = specifier.local();
-                        names.insert(
-                            binding.to_id(),
-                            format!("__perry_module_{index}_{}", binding.sym),
-                        );
+                        names.insert(binding.to_id(), module_binding(binding));
                     }
                 }
             }
@@ -472,7 +487,7 @@ fn bind_module<'a>(
     ))
 }
 
-fn insert_export(exports: &mut Exports, name: String, binding: String) -> Result<()> {
+fn insert_export(exports: &mut Exports, name: String, binding: ast::Ident) -> Result<()> {
     use std::collections::btree_map::Entry;
     match exports.entry(name) {
         Entry::Vacant(entry) => {
@@ -494,23 +509,20 @@ fn declared(decl: &ast::Decl) -> Result<Vec<&ast::Ident>> {
         ast::Decl::Class(class) => vec![&class.ident],
         ast::Decl::TsInterface(interface) => vec![&interface.id],
         ast::Decl::TsTypeAlias(alias) => vec![&alias.id],
-        ast::Decl::Var(var) => var
-            .decls
-            .iter()
-            .map(|decl| {
-                let ast::Pat::Ident(id) = &decl.name else {
-                    bail_unsupported!("Module bindings require named identifiers");
-                };
-                Ok(&id.id)
-            })
-            .collect::<Result<Vec<_>>>()?,
+        ast::Decl::Var(var) => {
+            let mut names = Vec::new();
+            for declaration in &var.decls {
+                pattern_bindings(&declaration.name, false, &mut |id, _| names.push(id));
+            }
+            names
+        }
         _ => bail_unsupported!(
             "Static modules support functions, type declarations, and constant bindings"
         ),
     })
 }
 struct Rename<'a> {
-    names: HashMap<ast::Id, String>,
+    names: HashMap<ast::Id, ast::Ident>,
     namespaces: HashMap<ast::Id, (String, &'a Exports)>,
     error: Option<(Diagnostic, swc_common::Span)>,
 }
@@ -534,6 +546,28 @@ impl VisitMut for Rename<'_> {
             property.visit_mut_children_with(self);
         }
     }
+    fn visit_mut_object_pat_prop(&mut self, prop: &mut ast::ObjectPatProp) {
+        if let ast::ObjectPatProp::Assign(assign) = prop
+            && self.names.contains_key(&assign.key.to_id())
+        {
+            let binding = assign.key.take();
+            let key = ast::IdentName::new(binding.id.sym.clone(), binding.id.span);
+            let value = match assign.value.take() {
+                Some(default) => ast::Pat::Assign(ast::AssignPat {
+                    span: assign.span,
+                    left: Box::new(binding.into()),
+                    right: default,
+                }),
+                None => binding.into(),
+            };
+            *prop = ast::KeyValuePatProp {
+                key: key.into(),
+                value: Box::new(value),
+            }
+            .into();
+        }
+        prop.visit_mut_children_with(self);
+    }
     fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
         if let ast::Expr::Member(member) = expression
             && let ast::Expr::Ident(namespace) = member.obj.as_ref()
@@ -544,9 +578,9 @@ impl VisitMut for Rename<'_> {
                     let name: &str = id.sym.as_ref();
                     if let Some(binding) = exports.get(name) {
                         *expression = ast::Expr::Ident(ast::Ident::new(
-                            binding.as_str().into(),
-                            DUMMY_SP,
-                            SyntaxContext::empty(),
+                            binding.sym.clone(),
+                            member.span,
+                            binding.ctxt,
                         ));
                     } else {
                         self.error.get_or_insert_with(|| {
@@ -575,7 +609,8 @@ impl VisitMut for Rename<'_> {
     }
     fn visit_mut_ident(&mut self, id: &mut ast::Ident) {
         if let Some(name) = self.names.get(&id.to_id()) {
-            id.sym = name.as_str().into();
+            id.sym = name.sym.clone();
+            id.ctxt = name.ctxt;
         } else if self.namespaces.contains_key(&id.to_id()) {
             self.error.get_or_insert_with(|| {
                 (
@@ -587,9 +622,9 @@ impl VisitMut for Rename<'_> {
     }
 }
 fn export_function(mut function: ast::FnDecl, name: &str) -> ast::ModuleItem {
-    function.ident = ast::Ident::new(name.into(), DUMMY_SP, SyntaxContext::empty());
+    function.ident.sym = name.into();
     ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
-        span: DUMMY_SP,
+        span: function.function.span,
         decl: ast::Decl::Fn(function),
     }))
 }
@@ -601,11 +636,11 @@ struct ExportBinding<'a> {
 }
 
 #[derive(Default)]
-struct ExportBindings<'a>(HashMap<&'a str, ExportBinding<'a>>);
+struct ExportBindings<'a>(HashMap<ast::Id, ExportBinding<'a>>);
 
 impl Visit for ExportBindings<'_> {
     fn visit_ident(&mut self, ident: &ast::Ident) {
-        if let Some(binding) = self.0.get_mut(ident.sym.as_str()) {
+        if let Some(binding) = self.0.get_mut(&ident.to_id()) {
             binding.occurrences += 1;
         }
     }

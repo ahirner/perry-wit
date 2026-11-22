@@ -1018,3 +1018,36 @@ fn static_modules_resolve_aliases_namespaces_and_reexports() -> Result<()> {
     assert_eq!(program.number("reexported", 5.0), 6.0);
     Ok(())
 }
+
+#[test]
+fn static_modules_preserve_pattern_bindings_and_property_keys() -> Result<()> {
+    let declarations = r#"
+        let calls = 0;
+        function mark(n: number): number { calls += 1; return n; }
+        const [first, , ...rest] = [mark(1), 2, 3, 4];
+        interface Row { zero: number; absent?: number; nest: { key: number } }
+        const row: Row = { zero: 0, nest: { key: 4 } };
+        const {zero = mark(9), absent = mark(8), nest: {key: renamed}} = row;
+        function score(first: number): number {
+            return calls * 1000 + zero * 100 + absent * 10 + renamed + first + rest.length;
+        }
+    "#;
+    let run = "export function run(__perry_module_0_first: number): number { const __perry_module_1_answer = __perry_module_0_first; return score(__perry_module_1_answer) + first; }";
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("main.ts");
+    let path = path.to_string_lossy();
+    std::fs::write(
+        directory.path().join("helper.ts"),
+        format!("{declarations} export const [answer] = [first]; export {{ score as compute }};"),
+    )?;
+    for source in [
+        format!("{declarations} {run}"),
+        format!("export {{}}; {declarations} {run}"),
+        "import {answer as first, compute as score} from './helper'; ".to_owned() + run,
+    ] {
+        let mut program =
+            crate::core_program::Program::from_wasm(perry_wit::compile_core(&source, &path)?);
+        assert_eq!(program.number("run", 3.0), 2090.0);
+    }
+    Ok(())
+}

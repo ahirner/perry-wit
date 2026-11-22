@@ -28,7 +28,7 @@ mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
 mod source;
-pub(crate) use source::validate;
+pub(crate) use source::{pattern_bindings, validate};
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
