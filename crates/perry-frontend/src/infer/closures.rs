@@ -1,40 +1,33 @@
 use super::*;
 
-pub(super) fn infer_closure_return(
-    elem_ty: HirType,
+pub(super) fn result(
     callback: &Expr,
+    inputs: impl IntoIterator<Item = HirType>,
     env: &mut FunctionEnv<'_>,
-    flat: bool,
 ) -> HirType {
-    let Expr::Closure {
-        params,
-        return_type,
-        body,
-        ..
-    } = callback
-    else {
-        return HirType::Any;
-    };
-    if !matches!(return_type, HirType::Any | HirType::Unknown) && !contains_type_var(return_type) {
-        return if flat {
-            return_type.clone()
-        } else {
-            HirType::Array(Box::new(return_type.clone()))
-        };
-    }
-    bind_inputs(params, [elem_ty, HirType::Number], env);
-    let mut returned = Vec::new();
-    walk::scan(body, env, Some(&mut returned), None);
-    let ret = returned
-        .into_iter()
-        .find(|ty| !matches!(ty, HirType::Any | HirType::Unknown | HirType::Void))
-        .unwrap_or(HirType::Any);
-    if matches!(ret, HirType::Any | HirType::Unknown) {
-        HirType::Any
-    } else if flat {
-        ret
-    } else {
-        HirType::Array(Box::new(ret))
+    match callback {
+        Expr::FuncRef(id) => env
+            .function_return_type(*id)
+            .cloned()
+            .unwrap_or(HirType::Any),
+        Expr::Closure {
+            params,
+            return_type,
+            body,
+            is_async,
+            ..
+        } => {
+            if !matches!(return_type, HirType::Any | HirType::Unknown)
+                && !contains_type_var(return_type)
+            {
+                return return_type.clone();
+            }
+            bind_inputs(params, inputs, env);
+            let mut result = HirType::Any;
+            infer_body_return(body, *is_async, &mut result, env, env.decls);
+            result
+        }
+        _ => HirType::Any,
     }
 }
 fn bind_inputs(
@@ -56,74 +49,111 @@ fn bind_inputs(
     }
 }
 
-pub(super) fn bind_array_callback(expr: &Expr, env: &mut FunctionEnv<'_>) {
-    use crate::methods::{Call, CallReceiver, Receiver};
-    let (array, call) = match expr {
+/// Source arguments supplied by each built-in, in JavaScript invocation order.
+pub(super) fn inputs<'a>(
+    expr: &'a mut Expr,
+    env: &mut FunctionEnv<'_>,
+) -> Option<(&'a mut Expr, Vec<HirType>)> {
+    use crate::methods::{Callback, Method, Receiver};
+    let (receiver, contract, callback, initial) = match expr {
         Expr::Call { callee, args, .. } => {
-            let (
-                Expr::PropertyGet {
-                    object, property, ..
-                },
-                [Expr::Closure { .. }],
-            ) = (&**callee, args.as_slice())
+            let Expr::PropertyGet {
+                object, property, ..
+            } = callee.as_ref()
             else {
-                return;
+                return None;
             };
-            let Some(call) = Call::parse(
-                Receiver::Value(Kind::Array),
-                hir_compat::method(property).name(),
-                args,
-            )
-            .ok()
-            .flatten() else {
-                return;
+            if !args
+                .iter()
+                .take(2)
+                .any(|arg| matches!(arg, Expr::FuncRef(_) | Expr::Closure { .. }))
+            {
+                return None;
+            }
+            let receiver = strip_nullish(expression(object, env)).0;
+            let kind = match receiver {
+                HirType::String => Kind::String,
+                HirType::Array(_) => Kind::Array,
+                _ => return None,
             };
-            (object.as_ref(), call)
+            let contract =
+                Method::lookup(Receiver::Value(kind), hir_compat::method(property).name())?
+                    .callback()?;
+            let (callback, tail) = args.split_first_mut()?;
+            if let Callback::Replacement = contract {
+                let mut inputs = vec![HirType::String];
+                let captures = match callback {
+                    Expr::RegExp { pattern, .. } => Some(crate::methods::regex_captures(pattern)),
+                    Expr::String(_) => Some((0, false)),
+                    _ => None,
+                };
+                if let Some((count, named)) = captures {
+                    inputs.extend(std::iter::repeat_n(
+                        with_absences(HirType::String, Absence::Undefined),
+                        count,
+                    ));
+                    inputs.extend([HirType::Number, HirType::String]);
+                    if named {
+                        inputs.push(HirType::Unknown);
+                    }
+                }
+                return Some((tail.first_mut()?, inputs));
+            }
+
+            (receiver, contract, callback, tail.first())
         }
-        _ => {
-            let Some((CallReceiver::Expression(array), call)) = Call::expression(expr) else {
-                return;
-            };
-            (array, call)
+        Expr::ArrayMap { array, callback }
+        | Expr::ArrayFlatMap { array, callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback } => (
+            strip_nullish(expression(array, env)).0,
+            Callback::Elements,
+            callback.as_mut(),
+            None,
+        ),
+        Expr::ArraySort { array, comparator } => (
+            strip_nullish(expression(array, env)).0,
+            Callback::Comparator,
+            comparator.as_mut(),
+            None,
+        ),
+        Expr::ArrayToSorted {
+            array, comparator, ..
+        } => (
+            strip_nullish(expression(array, env)).0,
+            Callback::Comparator,
+            comparator.as_deref_mut()?,
+            None,
+        ),
+        _ => return None,
+    };
+    let HirType::Array(element) = receiver else {
+        return None;
+    };
+    let inputs = match contract {
+        Callback::Comparator => vec![(*element).clone(), *element],
+        Callback::Fold => {
+            let accumulator =
+                initial.map_or_else(|| (*element).clone(), |value| expression(value, env));
+            vec![
+                accumulator,
+                (*element).clone(),
+                HirType::Number,
+                HirType::Array(element),
+            ]
         }
+        Callback::Elements => vec![(*element).clone(), HirType::Number, HirType::Array(element)],
+        Callback::Replacement => unreachable!(),
     };
-    let callback = match call {
-        Call::ArrayMap(callback)
-        | Call::ArrayFlatMap(callback)
-        | Call::ArrayFilter(callback)
-        | Call::ArrayFind(callback)
-        | Call::ArrayFindIndex(callback)
-        | Call::ArrayFindLast(callback)
-        | Call::ArrayFindLastIndex(callback)
-        | Call::ArraySome(callback)
-        | Call::ArrayEvery(callback)
-        | Call::ArrayForEach(callback) => callback,
-        _ => return,
-    };
-    let Expr::Closure { params, body, .. } = callback else {
-        return;
-    };
-    let HirType::Array(element) = strip_nullish(expression(array, env)).0 else {
-        return;
-    };
-    let third = params.get(2).map(|_| HirType::Array(element.clone()));
-    bind_inputs(
-        params,
-        [*element, HirType::Number].into_iter().chain(third),
-        env,
-    );
-    walk::scan(body, env, None, None);
+    Some((callback, inputs))
 }
 
-pub(super) fn infer_array_closure_return(
-    array: &Expr,
-    callback: &Expr,
-    env: &mut FunctionEnv<'_>,
-    flat: bool,
-) -> HirType {
-    let element = match strip_nullish(expression(array, env)).0 {
-        HirType::Array(inner) => *inner,
-        _ => HirType::Any,
-    };
-    infer_closure_return(element, callback, env, flat)
+pub(super) fn bind_callback(expr: &mut Expr, env: &mut FunctionEnv<'_>) {
+    if let Some((Expr::Closure { params, body, .. }, inputs)) = inputs(expr, env) {
+        bind_inputs(params, inputs, env);
+        walk::scan(body, env, None, None);
+    }
 }

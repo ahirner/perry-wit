@@ -286,7 +286,11 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         } => {
             let source = strip_nullish(expression(iterable, env)).0;
             let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
-            infer_closure_return(element, map_fn, env, false)
+            HirType::Array(Box::new(closures::result(
+                map_fn,
+                [element, HirType::Number],
+                env,
+            )))
         }
         Expr::StructuredClone { value, .. } => expression(value, env),
         Expr::MapGroupBy { items, key_fn } => methods::map_group_by(items, key_fn, env),
@@ -349,6 +353,12 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                             .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
                     })
                     .unwrap_or_else(|| fallback(env)),
+                HirType::Named(ref base)
+                    if Kind::builtin(base) == Some(Kind::Exception)
+                        && matches!(property.as_str(), "message" | "name") =>
+                {
+                    HirType::String
+                }
                 HirType::Named(base) => env
                     .decls
                     .property_type(env.ctx, &base, &[], property)

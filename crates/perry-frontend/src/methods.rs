@@ -266,9 +266,19 @@ macro_rules! argument_values {
     };
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum Callback {
+    Elements,
+    Fold,
+    Comparator,
+    Replacement,
+}
+
 macro_rules! registry {
+    (@callback $kind:ident) => { Some(Callback::$kind) };
+    (@callback) => { None };
     ($( $family:pat, $class:literal {
-            $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident
+            $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident $(callback($callback:ident))?
                 [$($argument:ident $(:$mode:ident)?),*] => $action:ident $recipe:tt, $requirement:literal;
             )*
         } )*
@@ -282,6 +292,10 @@ macro_rules! registry {
                     $($(($family, $($name)|+) => Some(Self::$variant),)*)*
                     _ => None,
                 }
+            }
+
+            pub(crate) fn callback(self) -> Option<Callback> {
+                match self { $($(Self::$variant => registry!(@callback $($callback)?),)*)* }
             }
 
             pub(crate) fn named_property(type_name: &str, name: &str) -> Option<MethodResult> {
@@ -490,4 +504,34 @@ impl<'s> Call<'s> {
         };
         Some((CallReceiver::Expression(receiver), call))
     }
+}
+
+/// Positional captures and the optional groups argument in a replacement callback.
+pub fn regex_captures(pattern: &str) -> (usize, bool) {
+    let mut chars = pattern.chars().peekable();
+    let mut in_class = false;
+    let mut count = 0;
+    let mut named = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
+            }
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '(' if !in_class => {
+                if chars.peek() != Some(&'?') {
+                    count += 1;
+                } else {
+                    chars.next();
+                    if chars.next() == Some('<') && !matches!(chars.peek(), Some('=' | '!')) {
+                        count += 1;
+                        named = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (count, named)
 }

@@ -62,7 +62,7 @@ impl<'s, F: FnMut(&mut Expr, &Guards, &mut FunctionEnv<'s>) -> Result<()>> Visit
     }
 
     fn expression(&mut self, expr: &mut Expr) -> Result<()> {
-        closures::bind_array_callback(expr, self.env);
+        closures::bind_callback(expr, self.env);
         match expr {
             Expr::Conditional {
                 condition,

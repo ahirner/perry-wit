@@ -5,20 +5,32 @@ use perry_hir::ir::Function;
 use perry_wit_diagnostics::{Diagnostic, codes, diag, ensure_diag};
 use std::collections::VecDeque;
 
+mod callables;
 mod guards;
 use crate::narrowing::Guards;
+use callables::Callables;
+use std::rc::Rc;
 
 fn incomplete(ty: &HirType) -> bool {
     ty.any(&mut |ty| matches!(ty, HirType::Any | HirType::Unknown | HirType::TypeVar(_)))
 }
 
+fn accepts(expected: &HirType, actual: &HirType) -> bool {
+    if expected == actual || matches!(actual, HirType::Never) {
+        return true;
+    }
+    match (expected, actual) {
+        (_, HirType::Union(alternatives)) => alternatives.iter().all(|ty| accepts(expected, ty)),
+        (HirType::Union(alternatives), _) => alternatives.iter().any(|ty| accepts(ty, actual)),
+        (HirType::String, HirType::StringLiteral(_)) | (HirType::Number, HirType::Int32) => true,
+        _ => false,
+    }
+}
+
 fn arguments(
     function: &Function,
-    args: &[Expr],
+    actual: impl IntoIterator<Item = HirType>,
     explicit: &[HirType],
-    guards: &Guards,
-    captured_writes: &HashSet<LocalId>,
-    env: &mut FunctionEnv<'_>,
 ) -> Result<Vec<HirType>> {
     ensure_diag!(
         explicit.len() <= function.type_params.len(),
@@ -33,9 +45,7 @@ fn arguments(
         .map(|(param, argument)| (param.name.as_str(), argument.clone()))
         .collect();
     if bindings.len() < function.type_params.len() {
-        for (parameter, argument) in function.params.iter().zip(args) {
-            let actual =
-                guards::argument(argument, expression(argument, env), guards, captured_writes);
+        for (parameter, actual) in function.params.iter().zip(actual) {
             unify(&parameter.ty, actual, &function.type_params, &mut bindings);
         }
     }
@@ -46,7 +56,10 @@ fn arguments(
             bindings
                 .remove(param.name.as_str())
                 .or_else(|| param.default.as_deref().cloned())
-                .filter(|ty| !incomplete(ty) && !matches!(ty, HirType::Never))
+                .filter(|ty| {
+                    matches!(ty, HirType::Function(_))
+                        || (!incomplete(ty) && !matches!(ty, HirType::Never))
+                })
                 .ok_or_else(|| {
                     let function = hir_compat::display_name(&function.name);
                     match param.name.strip_prefix('@') {
@@ -158,10 +171,24 @@ fn unify<'a>(
     }
 }
 
-struct Instances<'a> {
-    templates: &'a HashMap<FuncId, Function>,
+#[derive(PartialEq, Eq, Hash)]
+struct InstanceKey {
+    types: Vec<shapes::TypeId>,
+    callables: Vec<(usize, FuncId)>,
+}
+
+struct CallArguments {
+    types: Vec<HirType>,
+    callables: Vec<(usize, FuncId)>,
+}
+
+struct Instances {
+    value_uses: HashMap<LocalId, swc_common::Span>,
+    inline_callbacks: HashMap<FuncId, HirType>,
+    callables: Callables,
+    result_contracts: Vec<(FuncId, HirType, String, u32)>,
     captured_writes: HashSet<LocalId>,
-    keys: HashMap<FuncId, HashMap<Vec<shapes::TypeId>, FuncId>>,
+    keys: HashMap<FuncId, HashMap<InstanceKey, FuncId>>,
     blocked: Option<(Diagnostic, Option<String>)>,
     progressed: bool,
     pending: Vec<Function>,
@@ -171,16 +198,20 @@ struct Instances<'a> {
     remapped_locals: Vec<(LocalId, LocalId)>,
 }
 
-impl Instances<'_> {
+impl Instances {
     fn request(
         &mut self,
         function: &Function,
         arguments: Vec<HirType>,
+        callables: Vec<(usize, FuncId)>,
         call_byte_offset: u32,
         caller: Option<(FuncId, &str)>,
         env: &mut FunctionEnv<'_>,
     ) -> Result<FuncId> {
-        let key = shapes::TypeId::intern_slice(env.ctx, &arguments);
+        let key = InstanceKey {
+            types: shapes::TypeId::intern_slice(env.ctx, &arguments),
+            callables,
+        };
         let instances = self.keys.entry(function.id).or_default();
         if let Some(id) = instances.get(&key) {
             return Ok(*id);
@@ -193,7 +224,12 @@ impl Instances<'_> {
             if let Some((caller, _)) = caller
                 && let Some((previous, _)) = instances.iter().find(|(_, id)| **id == caller)
             {
-                for ((param, prior), next) in function.type_params.iter().zip(previous).zip(&key) {
+                for ((param, prior), next) in function
+                    .type_params
+                    .iter()
+                    .zip(&previous.types)
+                    .zip(&key.types)
+                {
                     if prior != next && next.hir(env.ctx).any(&mut |ty| ty == prior.hir(env.ctx)) {
                         error = error.with_note(format!(
                             "this recursive call grows type argument {} by nesting its previous type",
@@ -209,7 +245,7 @@ impl Instances<'_> {
         self.next_function = id
             .checked_add(1)
             .ok_or_else(|| Diagnostic::internal("function identifier limit"))?;
-        instances.insert(key, id);
+
         let bindings = function
             .type_params
             .iter()
@@ -217,9 +253,31 @@ impl Instances<'_> {
             .map(|(param, arg)| (param.name.as_str(), arg))
             .collect();
         let mut instance = function.clone();
+        let mut bound = HashMap::new();
+        for &(index, target) in &key.callables {
+            bound.insert(instance.params[index].id, target);
+            if let Some(callback) = self
+                .callables
+                .templates
+                .get(self.callables.origins.get(&target).unwrap_or(&target))
+            {
+                instance.captures.extend_from_slice(&callback.captures);
+            }
+        }
+        instance.captures.sort_unstable();
+        instance.captures.dedup();
+        for capture in &instance.captures {
+            if let Some(ty) = env.local_type(*capture) {
+                self.callables.captures.insert(*capture, ty.clone());
+            }
+        }
+        instance.params.retain(|p| !bound.contains_key(&p.id));
+        instances.insert(key, id);
         instance.id = id;
         instance.name = format!("{}_instance_{id}", function.name);
-        if !env.metadata.locations.has_explicit_return(&function.name) {
+        if let Some(result) = self.inline_callbacks.get(&function.id) {
+            instance.return_type = result.clone();
+        } else if !env.metadata.locations.has_explicit_return(&function.name) {
             instance.return_type = HirType::Any;
         }
         instance.type_params.clear();
@@ -234,7 +292,34 @@ impl Instances<'_> {
                 }
                 Node::Local(local) => self.rename_local(local, &mut locals)?,
                 Node::Type(ty) => substitute_type_vars(ty, &bindings),
-                Node::Expression(expr) => materialize_constructor(expr, env.metadata, &bindings),
+                Node::Expression(Expr::Closure { func_id, .. }) => {
+                    *func_id = self.next_function;
+                    self.next_function = func_id
+                        .checked_add(1)
+                        .ok_or_else(|| Diagnostic::internal("function identifier limit"))?;
+                }
+                Node::Expression(Expr::LocalSet(local, _) | Expr::Update { id: local, .. })
+                    if bound.contains_key(local) =>
+                {
+                    let param = function
+                        .params
+                        .iter()
+                        .find(|p| p.id == *local)
+                        .expect("bound callback parameter");
+                    return Err(Diagnostic::unsupported(format!(
+                        "cannot reassign callback parameter '{}'",
+                        param.name
+                    )));
+                }
+                Node::Expression(expr) => {
+                    if let Expr::LocalGet(local) = expr
+                        && let Some(target) = bound.get(local)
+                    {
+                        *expr = Expr::FuncRef(*target);
+                    } else {
+                        materialize_constructor(expr, env.metadata, &bindings);
+                    }
+                }
             }
             Ok(())
         })?;
@@ -251,6 +336,12 @@ impl Instances<'_> {
         }
         perry_hir::analysis::remap_local_ids_in_stmts(&mut instance.body, &locals);
         for (&old, &new) in &locals {
+            if let Some(span) = self.value_uses.get(&old).copied() {
+                self.value_uses.insert(new, span);
+            }
+            if self.callables.invoked.contains(&old) {
+                self.callables.invoked.insert(new);
+            }
             if self.captured_writes.contains(&old) {
                 self.captured_writes.insert(new);
             }
@@ -294,6 +385,7 @@ impl Instances<'_> {
             }
             Ok(())
         })?;
+        self.callables.prepare(body, env)?;
         walk::scan(body, env, None, None);
         guards::Calls::new(env, |expr, guards, env| {
             self.call(expr, caller, env, guards)
@@ -308,45 +400,227 @@ impl Instances<'_> {
         env: &mut FunctionEnv<'_>,
         guards: &Guards,
     ) -> Result<()> {
-        if let Expr::Call {
+        let offset = match expr {
+            Expr::Call { byte_offset, .. } => *byte_offset,
+            _ => 0,
+        };
+        if let Some((callback, types)) = closures::inputs(expr, env) {
+            if let Expr::Closure { params, .. } = callback
+                && params.iter().enumerate().all(|(i, p)| {
+                    !incomplete(&p.ty) || types.get(i).is_some_and(|ty| !incomplete(ty))
+                })
+            {
+                let result = closures::result(callback, types.iter().cloned(), env);
+                if !incomplete(&result) {
+                    self.callables.lift(callback, None);
+                    if let Expr::FuncRef(id) = callback {
+                        self.inline_callbacks.insert(*id, result);
+                    }
+                }
+            }
+            if let Expr::FuncRef(id) = callback
+                && let Some(function) = self.callables.templates.get(id).cloned()
+                && let Some(target) = self.resolve(
+                    &function,
+                    CallArguments {
+                        types,
+                        callables: Vec::new(),
+                    },
+                    &[],
+                    offset,
+                    caller,
+                    env,
+                )?
+            {
+                *id = target;
+            }
+        }
+        let Expr::Call {
             callee,
             args,
             type_args,
             byte_offset,
             ..
         } = expr
-            && let Expr::FuncRef(id) = callee.as_mut()
-            && let Some(function) = self.templates.get(id)
+        else {
+            return Ok(());
+        };
+        let Expr::FuncRef(id) = callee.as_mut() else {
+            return Ok(());
+        };
+        let Some(function) = self.callables.templates.get(id).cloned() else {
+            return Ok(());
+        };
+        if function.type_params.iter().any(|p| p.name.starts_with('@'))
+            && args.len() != function.params.len()
         {
-            let arguments = match arguments(
-                function,
-                args,
-                type_args,
-                guards,
-                &self.captured_writes,
-                env,
-            ) {
-                Ok(arguments) => arguments,
-                Err(error) if error.code() == codes::MISSING_TYPE_ANNOTATION => {
-                    self.blocked.get_or_insert_with(|| {
-                        (
-                            env.metadata.locations.annotate_call(error, *byte_offset),
-                            caller.map(|(_, name)| name.to_owned()),
-                        )
-                    });
-                    return Ok(());
-                }
-                Err(error) => {
-                    return Err(env.metadata.locations.annotate_call(error, *byte_offset));
-                }
-            };
-            *id = self
-                .request(function, arguments, *byte_offset, caller, env)
-                .map_err(|error| env.metadata.locations.annotate_call(error, *byte_offset))?;
-            type_args.clear();
-            self.progressed = true;
+            return Err(env.metadata.locations.annotate_call(
+                diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "cannot infer parameters of {} from a call with {} arguments (expected {})",
+                    hir_compat::display_name(&function.name),
+                    args.len(),
+                    function.params.len()
+                ),
+                *byte_offset,
+            ));
         }
+        let mut callables = Vec::new();
+        let actual = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                if let Expr::FuncRef(target) = arg
+                    && let Some(signature) = self.callables.signatures.get(target)
+                {
+                    callables.push((index, *target));
+                    HirType::Function(signature.clone())
+                } else {
+                    guards::argument(arg, expression(arg, env), guards, &self.captured_writes)
+                }
+            })
+            .collect::<Vec<_>>();
+        ensure_diag!(
+            callables
+                .iter()
+                .all(|(index, _)| *index < function.params.len()),
+            codes::TYPE_MISMATCH,
+            "extra callback argument to {}",
+            function.name
+        );
+        for (param, actual) in function.params.iter().zip(&actual) {
+            if matches!(param.ty, HirType::Function(_))
+                && !matches!(actual, HirType::Function(_))
+                && !incomplete(actual)
+            {
+                return Err(env.metadata.locations.annotate_call(
+                    diag!(
+                        codes::TYPE_MISMATCH,
+                        "parameter '{}' of {} requires a statically known function",
+                        param.name,
+                        hir_compat::display_name(&function.name)
+                    ),
+                    *byte_offset,
+                ));
+            }
+        }
+        for (index, target) in &mut callables {
+            let parameter = &function.params[*index];
+            if let Some(span) = self.value_uses.get(&parameter.id) {
+                return Err(env.metadata.locations.annotate(
+                    Diagnostic::unsupported(format!(
+                        "callback '{}' of {} escapes its static call site",
+                        parameter.name,
+                        hir_compat::display_name(&function.name)
+                    )),
+                    *span,
+                ));
+            }
+            let mismatch = || {
+                env.metadata.locations.annotate_call(
+                    diag!(
+                        codes::TYPE_MISMATCH,
+                        "callback does not match parameter '{}' of {}",
+                        parameter.name,
+                        hir_compat::display_name(&function.name)
+                    ),
+                    *byte_offset,
+                )
+            };
+            match &parameter.ty {
+                HirType::Function(expected) => {
+                    let signature = &self.callables.signatures[target];
+                    if signature.is_async != expected.is_async
+                        || signature.is_generator != expected.is_generator
+                        || signature.params.iter().filter(|p| !p.2).count() > expected.params.len()
+                        || !signature
+                            .params
+                            .iter()
+                            .zip(&expected.params)
+                            .all(|((_, a, _), (_, b, _))| incomplete(a) || accepts(a, b))
+                    {
+                        return Err(mismatch());
+                    }
+                    let expected_result = &*expected.return_type;
+                    if let Some(template) = self.callables.templates.get(target).cloned() {
+                        let types = arguments(
+                            &template,
+                            expected.params.iter().map(|(_, ty, _)| ty.clone()),
+                            &[],
+                        )
+                        .map_err(|_| mismatch())?;
+                        let bound =
+                            self.request(&template, types, Vec::new(), *byte_offset, caller, env)?;
+                        self.callables.origins.insert(bound, *target);
+                        self.callables
+                            .signatures
+                            .entry(bound)
+                            .or_insert_with(|| expected.clone());
+                        *target = bound;
+                    }
+                    if !matches!(expected_result, HirType::Void) {
+                        self.result_contracts.push((
+                            *target,
+                            expected_result.clone(),
+                            parameter.name.clone(),
+                            *byte_offset,
+                        ));
+                    }
+                }
+                HirType::TypeVar(_) | HirType::Any | HirType::Unknown => {}
+                HirType::Named(name) if function.type_params.iter().any(|p| &p.name == name) => {}
+                _ => return Err(mismatch()),
+            }
+        }
+        let Some(instance) = self.resolve(
+            &function,
+            CallArguments {
+                types: actual,
+                callables,
+            },
+            type_args,
+            *byte_offset,
+            caller,
+            env,
+        )?
+        else {
+            return Ok(());
+        };
+        args.retain(
+            |arg| !matches!(arg, Expr::FuncRef(id) if self.callables.signatures.contains_key(id)),
+        );
+        *id = instance;
+        type_args.clear();
         Ok(())
+    }
+
+    fn resolve(
+        &mut self,
+        function: &Function,
+        actual: CallArguments,
+        explicit: &[HirType],
+        offset: u32,
+        caller: Option<(FuncId, &str)>,
+        env: &mut FunctionEnv<'_>,
+    ) -> Result<Option<FuncId>> {
+        let arguments = match arguments(function, actual.types, explicit) {
+            Ok(arguments) => arguments,
+            Err(error) if error.code() == codes::MISSING_TYPE_ANNOTATION => {
+                self.blocked.get_or_insert_with(|| {
+                    (
+                        env.metadata.locations.annotate_call(error, offset),
+                        caller.map(|(_, name)| name.to_owned()),
+                    )
+                });
+                return Ok(None);
+            }
+            Err(error) => return Err(env.metadata.locations.annotate_call(error, offset)),
+        };
+        let id = self
+            .request(function, arguments, actual.callables, offset, caller, env)
+            .map_err(|error| env.metadata.locations.annotate_call(error, offset))?;
+        self.progressed = true;
+        Ok(Some(id))
     }
 
     fn expression(
@@ -486,16 +760,13 @@ pub(crate) fn specialize_functions(
     hir: &mut HirModule,
     metadata: &mut hir_compat::Metadata<'_>,
     foreign: &HashMap<String, crate::hir::Foreign>,
+    mut bindings: hir_compat::CallableBindings,
 ) -> Result<()> {
-    if hir
-        .functions
-        .iter()
-        .all(|function| function.type_params.is_empty())
-    {
-        return Ok(());
-    }
     let mut base = perry_hir::HirTypeEnv::from_module(hir);
-    let mut templates = HashMap::new();
+    let mut callables = Callables {
+        invoked: bindings.invoked,
+        ..Default::default()
+    };
     let mut next_function = 0;
     let mut next_local = hir.local_source_spans.keys().copied().max().unwrap_or(0);
     let module_vars: HashSet<_> = hir
@@ -509,6 +780,7 @@ pub(crate) fn specialize_functions(
         })
         .collect();
     let mut captured_writes = HashSet::new();
+    let mut closure_max = 0;
     let mut collect_local = |node: Node<'_>, module_init: bool| {
         if !module_init
             && let Node::Expression(Expr::LocalSet(id, _) | Expr::Update { id, .. }) = &node
@@ -517,9 +789,12 @@ pub(crate) fn specialize_functions(
             captured_writes.insert(*id);
         }
         if let Node::Expression(Expr::Closure {
-            mutable_captures, ..
+            func_id,
+            mutable_captures,
+            ..
         }) = &node
         {
+            closure_max = closure_max.max(*func_id);
             captured_writes.extend(mutable_captures.iter().copied());
         }
         if let Node::Binding(id, _) | Node::Local(id) = node {
@@ -541,16 +816,30 @@ pub(crate) fn specialize_functions(
         }
     }
     for mut function in std::mem::take(&mut hir.functions) {
+        if !function.is_exported
+            && let Some(positions) = bindings.implicit.remove(function.name.as_str())
+        {
+            callables::implicit_parameters(&mut function, |index| positions.contains(&index));
+        }
         next_function = next_function.max(function.id);
         walk::function(&mut function, &mut collect_local)?;
-        if function.type_params.is_empty() {
+        callables
+            .signatures
+            .insert(function.id, callables::signature(&function));
+        if function.type_params.is_empty()
+            && (function.is_exported
+                || !function
+                    .params
+                    .iter()
+                    .any(|p| matches!(p.ty, HirType::Function(_))))
+        {
             hir.functions.push(function);
         } else {
             if function.is_exported {
                 hir.functions.push(function.clone());
             }
             base.insert_function_return(function.id, HirType::Any);
-            templates.insert(function.id, function);
+            callables.templates.insert(function.id, Rc::new(function));
         }
     }
     let decls = shapes::Declarations::new(
@@ -566,13 +855,17 @@ pub(crate) fn specialize_functions(
         metadata,
     };
     let mut instances = Instances {
-        templates: &templates,
+        value_uses: bindings.value_uses,
+        inline_callbacks: HashMap::new(),
+        callables,
+        result_contracts: Vec::new(),
         captured_writes,
         keys: HashMap::new(),
         blocked: None,
         progressed: false,
         pending: Vec::new(),
         next_function: next_function
+            .max(closure_max)
             .checked_add(1)
             .ok_or_else(|| Diagnostic::internal("function identifier limit"))?,
         next_local: next_local
@@ -625,6 +918,11 @@ pub(crate) fn specialize_functions(
                         &mut locals,
                         &function.params,
                     );
+                    for capture in &function.captures {
+                        if let Some(ty) = instances.callables.captures.get(capture) {
+                            env.locals.insert(*capture, ty.clone());
+                        }
+                    }
                     instances.callable(
                         &mut function.params,
                         &mut function.body,
@@ -662,7 +960,7 @@ pub(crate) fn specialize_functions(
                 waiting.push_front(body);
             }
         }
-        if first_error.is_none() || !instances.progressed {
+        if waiting.is_empty() || !instances.progressed {
             break first_error;
         }
         std::mem::swap(&mut ready, &mut waiting);
@@ -689,9 +987,33 @@ pub(crate) fn specialize_functions(
             None => error,
         });
     }
-    metadata.locations.generic_templates = templates
+    for (id, expected, param, offset) in instances.result_contracts {
+        if base
+            .function_return_type(id)
+            .is_none_or(|actual| !accepts(&expected, actual))
+        {
+            return Err(metadata.locations.annotate_call(
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "callback result does not match the declared result of parameter '{param}'"
+                ),
+                offset,
+            ));
+        }
+    }
+    for (template, instantiations) in instances.keys {
+        if instances.inline_callbacks.contains_key(&template) {
+            metadata
+                .inline_callbacks
+                .extend(instantiations.into_values());
+        }
+    }
+    metadata.lifted_captures = instances.callables.lifted_captures;
+    metadata.locations.generic_templates = instances
+        .callables
+        .templates
         .into_iter()
-        .map(|(id, function)| (id, function.name))
+        .map(|(id, function)| (id, Rc::unwrap_or_clone(function).name))
         .collect();
     Ok(())
 }

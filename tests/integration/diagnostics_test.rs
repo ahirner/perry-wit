@@ -22,7 +22,7 @@ fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
 }
 
 #[test]
-fn unannotated_parameter_evidence_requires_a_closed_set_of_direct_calls() -> anyhow::Result<()> {
+fn unannotated_parameters_need_evidence_from_statically_known_calls() -> anyhow::Result<()> {
     let local = "function inc(x) { return x + 1; } export function run(n:number):number { return inc(6) + inc(n); }";
     let typed = local.replace("inc(x)", "inc(x: number)");
     assert_eq!(
@@ -52,7 +52,6 @@ fn unannotated_parameter_evidence_requires_a_closed_set_of_direct_calls() -> any
     assert_eq!(program.number("run", 4.0), 536.0);
     for source in [
         "export function id(x) { return x; } export function run(): number { return id(1); }",
-        "function id(x) { return x; } export function run():number { [1].map(id); return id(1); }",
         "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
         "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
         "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }",
@@ -71,26 +70,14 @@ fn unannotated_parameter_evidence_requires_a_closed_set_of_direct_calls() -> any
 }
 
 #[test]
-fn unspecialized_function_values_identify_the_escaped_reference() -> anyhow::Result<()> {
-    for (expr, failing_use) in [
-        ("const f = double; return f(3)", "f(3)"),
-        ("return [1,2].map(double)[0]", "[1,2].map"),
-    ] {
+fn named_generic_functions_specialize_through_aliases_and_builtin_callbacks() -> anyhow::Result<()>
+{
+    for body in ["const f=double; return f(3);", "return [3].map(double)[0];"] {
         let source = format!(
-            "function double<T>(x:T) {{ return x * 2; }} export function run():number {{ {expr}; }}"
+            "function double<T>(x:T) {{return x*2;}} export function run():number {{ {body} }}"
         );
-        let error = perry_wit::compile_core(&source, "escape.ts")
-            .err()
-            .context("expected an unspecialized function value")?;
-        let diagnostic = error.primary();
-        assert_eq!(diagnostic.code(), codes::UNSUPPORTED_CONSTRUCT, "{error}");
-        assert!(diagnostic.message().contains("double"), "{error}");
-        let span = diagnostic.span().context("function reference span")?;
-        assert_eq!(Some(span.start_byte), source.rfind(failing_use));
-        assert_eq!(
-            source.get(span.start_byte..span.end_byte),
-            Some(failing_use)
-        );
+        let mut program = crate::core_program::Program::new(&source);
+        assert_eq!(program.call("run", &[]).0[0].unwrap_f64(), 6.0);
     }
     let unused = "function id<T>(x:T):T {return x;} function unused():void {const f=id;} export function run(n:number):number {const f=id; return n;}";
     let mut program = crate::core_program::Program::new(unused);
@@ -98,6 +85,72 @@ fn unspecialized_function_values_identify_the_escaped_reference() -> anyhow::Res
     let cast = "function double<T>(x:T) { return x*2; } export function run(n:number):number { return (double as (x:number)=>number)(n); }";
     let mut program = crate::core_program::Program::new(cast);
     assert_eq!(program.number("run", 3.0), 6.0);
+    Ok(())
+}
+
+#[test]
+fn function_arguments_check_declared_results_and_locate_escaping_values() -> anyhow::Result<()> {
+    for (body, at, name) in [
+        ("return () => n;", "() => n", "run"),
+        ("const keep=()=>n; return [keep].length;", "keep]", "keep"),
+        (
+            "const keep=()=>n; return keep === keep;",
+            "keep === keep",
+            "keep",
+        ),
+        (
+            "const a=()=>n, b=()=>n+1; const f=n?a:b; return f();",
+            "a:b",
+            "a",
+        ),
+    ] {
+        let source = format!("export function run(n:number) {{ {body} }}");
+        let err = perry_wit::compile_core(&source, "escape.ts").unwrap_err();
+        let diagnostic = err.primary();
+        assert_eq!(diagnostic.code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
+        assert!(diagnostic.message().contains(name), "{err}");
+        assert_eq!(
+            diagnostic.span().context("escape use")?.start_byte,
+            source.rfind(at).unwrap(),
+            "{err}"
+        );
+    }
+    let source = "function stash(f) {const alias=f; return [alias];} export function run(n:number) {return stash(()=>n).length;}";
+    let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
+    assert_eq!(
+        err.primary()
+            .span()
+            .context("escaping callback parameter")?
+            .start_byte,
+        source.find("alias]").unwrap(),
+        "{err}"
+    );
+    let source = "function use(f:(n:number)=>number):number {return 1;} export function run():number {return use(2);}";
+    let err = perry_wit::compile_core(source, "wrong.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");
+    assert_eq!(
+        err.primary()
+            .span()
+            .context("non-callable argument")?
+            .start_byte,
+        source.find("use(2)").unwrap(),
+        "{err}"
+    );
+    for target in [
+        "function target(x:string):string {return x;}",
+        "function target<T>(x:T):T {return x;}",
+    ] {
+        let source = format!(
+            "function apply(f:(n:number)=>string):number {{return 1;}} {target} export function run():number {{ return apply(target); }}"
+        );
+        let err = perry_wit::compile_core(&source, "type.ts").unwrap_err();
+        assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");
+        assert_eq!(
+            err.primary().span().context("argument use")?.start_byte,
+            source.rfind("apply(target)").unwrap()
+        );
+    }
     Ok(())
 }
 
@@ -296,6 +349,11 @@ fn generic_specialization_budget_is_per_function() -> anyhow::Result<()> {
         (finite.as_str(), "count", false),
         (
             "function grow<T>(value:T):number {return grow([value]);} export function run():number {return grow(1);}",
+            "grow",
+            true,
+        ),
+        (
+            "function grow<T,F>(f:F,x:T):number { return grow(f,[x]); } function inc(n:number):number {return n+1;} export function run():number { return grow(inc,1); }",
             "grow",
             true,
         ),
@@ -749,19 +807,46 @@ fn throwing_exports_require_a_declared_channel_but_catches_and_stderr_succeed() 
         &Options::default(),
     ).unwrap_err();
     assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
+    Ok(())
+}
+
+#[test]
+fn guarded_callback_reads_preserve_raw_status_and_only_require_a_wit_channel_for_real_failures()
+-> anyhow::Result<()> {
     let optional = Wit {
         application: b"package test:guard; world app { export run: async func(input: option<string>) -> string; }".as_slice().into(),
         dependencies: vec![],
     };
     let compile = |body: &str| {
-        let source = format!("export async function run(input: string | undefined) {{ {body} }}");
-        api::compile(&program(&source), &optional, &Options::default())
+        let source = format!(
+            "function invoke(f) {{ return f(); }} export async function run(input: string | undefined):Promise<string> {{ {body} }}"
+        );
+        api::compile(
+            &program_with("guard.ts", &source, &[]),
+            &optional,
+            &Options::default(),
+        )
     };
-    compile("return input ?? 'unset';")?;
-    let Err(error) = compile("return input.length.toString();") else {
-        anyhow::bail!("unguarded optional read compiled without an error channel");
-    };
-    assert_eq!(error.primary().code(), codes::MISSING_ERROR_CHANNEL);
+    compile("return invoke(() => input ?? 'unset');")?;
+    for body in [
+        "return invoke(() => input.length.toString());",
+        "return invoke(() => { if (input === undefined) throw new Error('missing'); return input; });",
+        "if (input !== undefined) { invoke(() => { input = undefined; }); return input.length.toString(); } return 'unset';",
+    ] {
+        let Err(error) = compile(body) else {
+            anyhow::bail!("accepted unhandled failure: {body}");
+        };
+        assert_eq!(
+            error.primary().code(),
+            codes::MISSING_ERROR_CHANNEL,
+            "{body}: {error}"
+        );
+    }
+    let mut program = crate::core_program::Program::new(
+        "function fallback(value:number|undefined):number { return value ?? 7; } export function run(x:number):number { return fallback(x<0 ? undefined : x); }",
+    );
+    assert_eq!(program.throwing("run", -1.), (7., 0));
+    assert_eq!(program.throwing("run", 3.), (3., 0));
     Ok(())
 }
 

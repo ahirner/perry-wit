@@ -3,13 +3,13 @@ use super::*;
 use crate::{builder::LocalBinding, hir_compat::RuntimeCall};
 
 impl<'s> FunctionBuilder<'s> {
-    /// Bind an argument, evaluating its default only when omitted or undefined.
     pub(super) fn signature(&self, id: FuncId) -> Result<&'s Signature<'s>> {
         self.signatures
             .get(&id)
             .ok_or_else(|| self.shapes.metadata.locations.missing_function(id))
     }
 
+    /// Bind an argument, evaluating its default only when omitted or undefined.
     pub(super) fn bind_parameter(
         &mut self,
         ctx: &mut Context,
@@ -336,10 +336,7 @@ impl<'s> FunctionBuilder<'s> {
             let val = self.expression(ctx, arg)?;
             return self.clone_structured_value(ctx, val).map(Some);
         }
-        let callee = match callee {
-            Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callee),
-            _ => callee,
-        };
+        let callee = self.shapes.callable(callee);
         if matches!(callee, Expr::Closure { .. }) {
             let mut arg_vals = Vec::with_capacity(args.len());
             for arg in args {
@@ -451,9 +448,31 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn emit_signature_call(
         &mut self,
         ctx: &mut Context,
-        signature: &Signature<'s>,
+        signature: &'s Signature<'s>,
         values: Vec<Value>,
     ) -> Result<Option<Value>> {
+        if let Some(function) = signature.inline {
+            ensure_unsupported!(
+                !function.is_async && !self.inline_functions.contains(&function.id),
+                "recursive or async calls to capturing function '{}' require a persistent environment",
+                function.name
+            );
+            self.inline_functions.push(function.id);
+            let result = self.with_inline_scope(ctx, self.this_slot, |this, ctx| {
+                for (param, value) in signature.params.iter().zip(values) {
+                    this.bind_parameter(ctx, param.source, Some(value), Some(param.binding))?;
+                }
+                let result = signature
+                    .result
+                    .map_or(crate::inline::InlineResult::Void, |ty| {
+                        crate::inline::InlineResult::Declared(ty.carrier)
+                    });
+                let slot = this.inline_body(ctx, &function.body, &function.params, result)?;
+                slot.map(|slot| this.load(ctx, slot)).transpose()
+            });
+            self.inline_functions.pop();
+            return result;
+        }
         if signature.is_async {
             let result = signature
                 .result

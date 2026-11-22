@@ -66,8 +66,13 @@ impl Constraints {
         id
     }
 
-    fn bindings(mut self) -> HashMap<LocalId, HirType> {
-        let escaped: HashSet<_> = self.escaped.iter().map(|id| self.root(*id)).collect();
+    fn bindings(mut self, lifted_captures: &HashSet<LocalId>) -> HashMap<LocalId, HirType> {
+        let escaped: HashSet<_> = self
+            .escaped
+            .iter()
+            .chain(lifted_captures)
+            .map(|id| self.root(*id))
+            .collect();
         let mut elements: HashMap<LocalId, ObservedValues> = HashMap::new();
         for (id, writes) in std::mem::take(&mut self.writes) {
             let root = self.root(id);
@@ -508,7 +513,7 @@ pub(super) fn resolve(
         collect_local_refs_stmt(statement, &mut escaped, &mut HashSet::new());
     }
     constraints.escaped.extend(escaped);
-    let mut bindings = constraints.bindings();
+    let mut bindings = constraints.bindings(&inference.metadata.lifted_captures);
     let mut changed = false;
     let mut apply = |id: LocalId, ty: &mut HirType| {
         if let Some(inferred) = bindings.remove(&id) {

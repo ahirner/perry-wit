@@ -47,10 +47,10 @@
   },
   {
     "workload": "incoming-stream (4 MiB)",
-    "bytes": 38332,
-    "core_bytes": 36485,
-    "defined_functions": 123,
-    "helper_functions": 112,
+    "bytes": 38270,
+    "core_bytes": 36423,
+    "defined_functions": 122,
+    "helper_functions": 111,
     "optimization": {
       "cleanup_rounds": 5,
       "constraint_visits": 126,
@@ -63,17 +63,17 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5307,
-    "invocation_fuel": 159622613,
-    "warm_fuel": 159608218,
+    "invocation_fuel": 159617493,
+    "warm_fuel": 159603098,
     "initial_memory": 65536,
     "memory": 65536
   },
   {
     "workload": "bounded-http-exact (4 MiB)",
-    "bytes": 65564,
-    "core_bytes": 59206,
-    "defined_functions": 145,
-    "helper_functions": 137,
+    "bytes": 65358,
+    "core_bytes": 59000,
+    "defined_functions": 144,
+    "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
       "constraint_visits": 339,
@@ -86,17 +86,17 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5703,
-    "invocation_fuel": 13672262,
-    "warm_fuel": 13641058,
+    "invocation_fuel": 13650752,
+    "warm_fuel": 13619548,
     "initial_memory": 65536,
     "memory": 4325376
   },
   {
     "workload": "bounded-http-overflow",
-    "bytes": 65564,
-    "core_bytes": 59206,
-    "defined_functions": 145,
-    "helper_functions": 137,
+    "bytes": 65358,
+    "core_bytes": 59000,
+    "defined_functions": 144,
+    "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
       "constraint_visits": 339,
@@ -109,8 +109,8 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5703,
-    "invocation_fuel": 13661300,
-    "warm_fuel": 13630432,
+    "invocation_fuel": 13639818,
+    "warm_fuel": 13608950,
     "initial_memory": 65536,
     "memory": 4325376
   },

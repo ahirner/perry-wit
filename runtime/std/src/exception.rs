@@ -72,6 +72,48 @@ pub(crate) extern "C" fn std_exception_bigint_equal(exception: *mut u8, value: *
     }
 }
 
+/// JavaScript String conversion of a caught value.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_exception_display(exception: *mut u8) -> *mut u8 {
+    use perry_rt_sys::{
+        layout::{exception::*, numeric},
+        static_text,
+    };
+    let (kind, tag, value) = parts(exception);
+    if kind != THROWN_VALUE {
+        let name = std_exception_name(exception);
+        // SAFETY: the exception message and constructor name are live strings.
+        unsafe {
+            let message = crate::runtime::bytes(crate::runtime::exception_message(exception));
+            if message.is_empty() {
+                return name;
+            }
+            let name = crate::runtime::bytes(name);
+            let mut text = crate::runtime::Buffer::new();
+            text.reserve(name.len() + 2 + message.len());
+            text.extend_from_slice(name);
+            text.extend_from_slice(b": ");
+            text.extend_from_slice(message);
+            return text.into_string();
+        }
+    }
+    let ptr = value as usize as *mut u8;
+    match tag {
+        TAG_STRING => ptr,
+        TAG_NUMBER => crate::number::std_number_to_string(numeric::FLOAT, value),
+        // SAFETY: the tag identifies a live bigint.
+        TAG_BIGINT => unsafe { crate::integers::std_bigint_to_string(ptr.cast()) },
+        TAG_JSON => crate::json::std_json_display(ptr),
+        TAG_BOOLEAN => from_static(if value == 0 {
+            static_text!("false")
+        } else {
+            static_text!("true")
+        }),
+        TAG_NULL => from_static(static_text!("null")),
+        _ => from_static(static_text!("undefined")),
+    }
+}
+
 /// Extract a thrown number or raise `TypeError` for any other thrown value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {

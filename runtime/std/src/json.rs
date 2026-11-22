@@ -20,7 +20,7 @@ mod writer;
 
 use perry_rt_sys::number::Number;
 use reflection::native_property;
-pub(crate) use reflection::std_json_strict_equal;
+pub(crate) use reflection::{std_json_display, std_json_strict_equal};
 
 use crate::runtime::{TYPE_ERROR, adopt, from_static, raise, scalars_length};
 

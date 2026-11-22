@@ -25,19 +25,30 @@ impl<'s> FunctionBuilder<'s> {
         lower: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
     ) -> Result<T> {
         let locals = self.locals.scope();
-        let closures = self.closures.scope();
         let saved_this = std::mem::replace(&mut self.this_slot, this_slot);
         let guards = self.variant_guards.depth();
         let finallies = std::mem::take(&mut self.finallies);
         let controls = std::mem::take(&mut self.controls);
         let result = lower(self, ctx);
         self.locals.restore(locals);
-        self.closures.restore(closures);
         self.this_slot = saved_this;
         self.variant_guards.truncate(guards);
         self.finallies = finallies;
         self.controls = controls;
         result
+    }
+
+    pub(super) fn invalidate_inline_writes(
+        &mut self,
+        body: &'s [Stmt],
+        exprs: impl IntoIterator<Item = &'s Expr>,
+    ) {
+        self.variant_guards.assign_in(body, exprs, |id| {
+            if let Some(Expr::Closure { body, .. }) = self.shapes.lexical_functions.get(&id) {
+                return Some(body.as_slice());
+            }
+            self.signatures.get(&id)?.inline.map(|f| f.body.as_slice())
+        });
     }
 
     pub(super) fn inline_body(
@@ -68,9 +79,7 @@ impl<'s> FunctionBuilder<'s> {
         });
         let body = hir_compat::strip_synthetic_default_guards(body, params.iter());
         // An inline callback runs once per element.
-        let closures = &self.closures;
-        self.variant_guards
-            .assign_in(body, [], |id| closures.get(&id).copied());
+        self.invalidate_inline_writes(body, []);
         let mut result = self.statements(ctx, body);
         if result.is_ok() && self.reachable(ctx, self.block) {
             if matches!(result_type, InlineResult::Void) {
@@ -143,6 +152,14 @@ impl<'s> FunctionBuilder<'s> {
         frame: &mut ReturnFrame,
         expression: Option<&'s Expr>,
     ) -> Result<()> {
+        let expression = if let Some(expr) = expression
+            && self.returns_no_value(expr)
+        {
+            self.effect(ctx, expr)?;
+            None
+        } else {
+            expression
+        };
         if frame.slot.is_none() && matches!(expression, None | Some(Expr::Undefined)) {
             frame.empty_returns.push(self.block);
             let finally = self.new_block(ctx, "inline_empty_return");

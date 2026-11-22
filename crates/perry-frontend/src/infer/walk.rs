@@ -444,6 +444,9 @@ pub(super) fn scan(
             } => {
                 scan(body, env, returned.as_deref_mut(), bindings.as_deref_mut());
                 if let Some(catch) = catch {
+                    if let Some((id, _)) = &catch.param {
+                        env.locals.insert(*id, HirType::Named("Error".into()));
+                    }
                     scan(
                         &catch.body,
                         env,

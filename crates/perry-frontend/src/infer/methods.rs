@@ -88,12 +88,17 @@ pub(super) fn result<'s>(
     match rule {
         MethodResult::Mapped | MethodResult::FlatMapped => {
             argument(0).map_or(HirType::Any, |callback| {
-                infer_array_closure_return(
-                    object,
-                    callback,
-                    env,
-                    matches!(rule, MethodResult::FlatMapped),
-                )
+                let element =
+                    shapes::generics::iterated_element(strip_nullish(expression(object, env)).0)
+                        .unwrap_or(HirType::Any);
+                let ty = closures::result(callback, [element, HirType::Number], env);
+                if matches!(rule, MethodResult::FlatMapped)
+                    || matches!(ty, HirType::Unknown | HirType::Any)
+                {
+                    ty
+                } else {
+                    HirType::Array(Box::new(ty))
+                }
             })
         }
         MethodResult::Receiver => expression(object, env),
@@ -222,7 +227,7 @@ pub(super) fn result<'s>(
 pub(super) fn map_group_by(items: &Expr, key_fn: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
     let source = strip_nullish(expression(items, env)).0;
     let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
-    let key = match infer_array_closure_return(items, key_fn, env, true) {
+    let key = match closures::result(key_fn, [element.clone(), HirType::Number], env) {
         HirType::Any | HirType::Unknown => HirType::String,
         other => other,
     };

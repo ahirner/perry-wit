@@ -20,10 +20,7 @@ impl<'s> FunctionBuilder<'s> {
         arguments: &[Value],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let callback = match callback {
-            Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(callback),
-            _ => callback,
-        };
+        let callback = self.shapes.callable(callback);
         if let Expr::FuncRef(id) = callback {
             let signature = self.signature(*id)?;
             ensure_unsupported!(
@@ -39,18 +36,12 @@ impl<'s> FunctionBuilder<'s> {
                     None => self.bind_fixed_arg(ctx, param, None),
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let call = CallOp::new(
-                ctx,
-                signature.name.clone(),
-                values,
-                signature.carrier_results(),
-            );
-            self.append(ctx, &call);
-            return Ok(if signature.result.is_none() {
-                let ty = FP64Type::get(ctx).into();
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
-            } else {
-                call.get_operation().deref(ctx).get_result(0)
+            return Ok(match self.emit_signature_call(ctx, signature, values)? {
+                Some(value) => value,
+                None => {
+                    let ty = FP64Type::get(ctx).into();
+                    self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
+                }
             });
         }
         let Expr::Closure {

@@ -28,7 +28,6 @@ pub(crate) use deletions::deletes_array_elements;
 mod environment;
 mod functions;
 use absence::*;
-use closures::{infer_array_closure_return, infer_closure_return};
 pub(crate) use functions::specialize_functions;
 mod expressions;
 mod methods;
