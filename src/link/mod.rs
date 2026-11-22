@@ -137,6 +137,7 @@ pub(crate) fn link_helpers_with(
         type_base: u32,
         entries: BTreeSet<&'a str>,
         stubs: Vec<(u32, u32)>,
+        helper_calls: Vec<(u32, (LibraryId, &'static str))>,
     }
 
     let mut new_types = TypeSection::new();
@@ -168,6 +169,7 @@ pub(crate) fn link_helpers_with(
                     helper_defined_indices: BTreeMap::new(),
                     entries: BTreeSet::new(),
                     stubs: Vec::new(),
+                    helper_calls: Vec::new(),
                 })
             }
         };
@@ -179,13 +181,15 @@ pub(crate) fn link_helpers_with(
             .reachable([entry], &BTreeSet::new(), &prep.reachable)?;
         for &orig in reachable.range(..prep.lib.module.imports.len() as u32) {
             let (module, name, ty) = prep.lib.module.imports[orig as usize];
-            if module == HELPER_MODULE {
-                pending.insert((LibraryId::for_entry(name)?, name));
-                continue;
-            }
             // A byte-stream placeholder can resolve to the same import as an unused console branch.
             if stub_runtime_import(module, name) {
                 prep.stubs.push((orig, prep.type_base + ty));
+                continue;
+            }
+            if module == HELPER_MODULE {
+                let callee = (LibraryId::for_entry(name)?, name);
+                pending.insert(callee);
+                prep.helper_calls.push((orig, callee));
                 continue;
             }
             if !export_realloc && canonical.import(module, name) {
@@ -351,19 +355,12 @@ pub(crate) fn link_helpers_with(
     }
     // Calls between libraries.
     for prep in &mut prepared_libs {
-        for &orig in prep
-            .reachable
-            .iter()
-            .filter(|&&orig| orig < prep.lib.module.imports.len() as u32)
-        {
-            let (module, name, _) = prep.lib.module.imports[orig as usize];
-            if module == HELPER_MODULE {
-                let target = entry_index
-                    .get(&(LibraryId::for_entry(name)?, name))
-                    .copied()
-                    .ok_or_else(|| internal!("missing assigned index for helper entry {name}"))?;
-                prep.helper_defined_indices.insert(orig, target);
-            }
+        for &(orig, callee) in &prep.helper_calls {
+            let target = entry_index
+                .get(&callee)
+                .copied()
+                .ok_or_else(|| internal!("missing assigned index for helper entry {}", callee.1))?;
+            prep.helper_defined_indices.insert(orig, target);
         }
     }
 
