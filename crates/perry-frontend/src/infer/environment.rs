@@ -168,7 +168,7 @@ impl HirTypeFacts for FunctionEnv<'_> {
             })
             .or_else(|| {
                 crate::methods::Method::named_property(type_name, property)
-                    .map(|rule| rule.fixed_type())
+                    .and_then(crate::methods::MethodResult::fixed_type)
             })?;
         Some(self.normalize_owned(ty))
     }

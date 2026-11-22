@@ -86,12 +86,6 @@ pub(super) fn result<'s>(
     env: &mut FunctionEnv<'_>,
 ) -> HirType {
     match rule {
-        MethodResult::Native(_)
-        | MethodResult::Nullable(_)
-        | MethodResult::Optional(_)
-        | MethodResult::Number
-        | MethodResult::Boolean
-        | MethodResult::String => rule.fixed_type(),
         MethodResult::Mapped | MethodResult::FlatMapped => {
             argument(0).map_or(HirType::Any, |callback| {
                 infer_array_closure_return(
@@ -219,6 +213,9 @@ pub(super) fn result<'s>(
             }
             _ => perry_hir::infer_expr_type(expr, env),
         },
+        fixed => fixed
+            .fixed_type()
+            .unwrap_or_else(|| perry_hir::infer_expr_type(expr, env)),
     }
 }
 
@@ -236,16 +233,16 @@ pub(super) fn map_group_by(items: &Expr, key_fn: &Expr, env: &mut FunctionEnv<'_
 }
 
 impl MethodResult {
-    pub(super) fn fixed_type(self) -> HirType {
-        match self {
+    pub(super) fn fixed_type(self) -> Option<HirType> {
+        Some(match self {
             MethodResult::Native(kind) => native_type(kind),
             MethodResult::Nullable(kind) => with_absences(native_type(kind), Absence::Null),
             MethodResult::Optional(kind) => with_absences(native_type(kind), Absence::Undefined),
             MethodResult::String => HirType::String,
             MethodResult::Number => HirType::Number,
             MethodResult::Boolean => HirType::Boolean,
-            _ => HirType::Any,
-        }
+            _ => return None,
+        })
     }
 }
 
