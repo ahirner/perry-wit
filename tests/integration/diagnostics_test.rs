@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use perry_wit::{
     CompileOptions, ErrorKind, SdkOptions,
     api::{self, Module, Options, Program, Source, Wit},
@@ -21,7 +22,7 @@ fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
 }
 
 #[test]
-fn diagnostics_locate_imported_modules_and_multibyte_columns() {
+fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result<()> {
     let helper = "// é🙂\r\nexport function helper(value) { return value; }";
     let mut program = program_with(
         "src/main.ts",
@@ -66,6 +67,23 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         assert_eq!((span.start_line, span.start_column), (2, 15));
     }
 
+    let destructured = "export const { value: binding } = { value: 7 };";
+    let error = api::compile_core(&program_with(
+        "src/main.ts",
+        "export { binding as run } from './helper';",
+        &[("src/helper.ts", destructured)],
+    ))
+    .err()
+    .context("expected a diagnostic for the re-exported constant")?;
+    let diagnostic = error.primary();
+    assert!(diagnostic.message().contains("Component export 'run'"));
+    let span = diagnostic.span().context("destructured declaration span")?;
+    assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
+    assert_eq!(
+        destructured.get(span.start_byte..span.end_byte),
+        Some("binding")
+    );
+
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
     let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
     assert_eq!(parse_error.primary().code(), codes::PARSE_ERROR);
@@ -78,6 +96,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let span = parse_error.primary().span().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));
+    Ok(())
 }
 
 #[test]
