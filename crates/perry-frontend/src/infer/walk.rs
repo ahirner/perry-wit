@@ -203,19 +203,6 @@ pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId
 
 pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {
     let mut bindings = HashMap::new();
-    if !env.metadata.deferred_writes.is_empty() {
-        perry_hir::tdz_check::for_each_stmts_expr(statements, &mut |expr| {
-            if let Expr::LocalSet(id, value) = expr
-                && env.metadata.deferred_writes.get(id) == Some(&1)
-                && env.metadata.inferred_bindings.contains(id)
-            {
-                let ty = expression(value, &mut env);
-                if is_resolvable_type(&ty) {
-                    bindings.insert(*id, ty);
-                }
-            }
-        });
-    }
     scan(statements, &mut env, None, Some(&mut bindings));
     locals_mut(statements, &mut |id, ty| {
         if let Some(inferred) = bindings.remove(&id) {
@@ -322,6 +309,21 @@ pub(super) fn scan(
                     hir_compat::Availability::Test(_) => with_absences(ty, Absence::Undefined),
                 };
                 env.locals.insert(element.id, ty);
+            }
+        }
+        if let Some(binding_types) = bindings.as_deref_mut()
+            && let Stmt::Expr(Expr::LocalSet(id, value)) = statement
+            && env.metadata.deferred_writes.get(id) == Some(&1)
+            && env.metadata.inferred_bindings.contains(id)
+        {
+            // A storage type can rely on declarations, but local flow facts may describe an earlier assignment.
+            let mut declared = FunctionEnv {
+                locals: &mut HashMap::new(),
+                ..*env
+            };
+            let ty = expression(value, &mut declared);
+            if is_resolvable_type(&ty) {
+                binding_types.insert(*id, ty);
             }
         }
         let inferred_call = matches!(statement,
