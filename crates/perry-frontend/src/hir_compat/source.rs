@@ -227,8 +227,9 @@ pub(super) fn promote_private_parameters(module: &mut HirModule, mut source: Pri
             && function.params.len() == params.arity
         {
             for index in params.indices {
-                let param = &mut function.params[index];
-                if matches!(param.ty, HirType::Any | HirType::Unknown) {
+                if let Some(param) = function.params.get_mut(index)
+                    && matches!(param.ty, HirType::Any | HirType::Unknown)
+                {
                     let name = format!("@{}", param.name);
                     param.ty = HirType::TypeVar(name.clone());
                     function.type_params.push(perry_hir::types::TypeParam {
