@@ -62,13 +62,6 @@ pub fn load_sources<'s>(
     let loaded = modules::load(source, identity, sources, foreign)?;
     let mut lowered = hir_compat::lower(loaded, identity)?;
     infer::specialize_functions(ctx, &mut lowered.module, &mut lowered.metadata, foreign)?;
-    infer::private_parameters(
-        ctx,
-        &mut lowered.module,
-        &lowered.metadata,
-        lowered.private_parameters,
-        foreign,
-    );
     lowered
         .metadata
         .locations

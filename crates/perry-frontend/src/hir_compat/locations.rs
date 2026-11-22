@@ -218,25 +218,23 @@ impl<'s> Locations<'s> {
                 );
             }
         };
-        body_calls(&module.init, true, &mut |id, offset, _| {
-            record(id, offset, None)
-        });
+        body_calls(&module.init, &mut |id, offset| record(id, offset, None));
         for exported in [true, false] {
             for function in module
                 .functions
                 .iter()
                 .filter(|f| f.is_exported == exported)
             {
-                function_calls(function, &mut |id, offset, _| {
+                function_calls(function, &mut |id, offset| {
                     record(id, offset, Some(&function.name))
                 });
             }
         }
-        let mut class_call = |id, offset, _: &[Expr]| record(id, offset, None);
+        let mut class_call = |id, offset| record(id, offset, None);
         for class in &module.classes {
             for field in class.fields.iter().chain(&class.static_fields) {
                 if let Some(init) = &field.init {
-                    expression_calls(init, true, &mut class_call);
+                    expression_calls(init, &mut class_call);
                 }
             }
             for function in crate::shapes::class_functions(class) {
@@ -458,48 +456,34 @@ impl<'s> Locations<'s> {
     }
 }
 
-fn function_calls(function: &Function, visit: &mut impl FnMut(FuncId, u32, &[Expr])) {
+fn function_calls(function: &Function, visit: &mut impl FnMut(FuncId, u32)) {
     for default in function.params.iter().filter_map(|p| p.default.as_ref()) {
-        expression_calls(default, true, visit);
+        expression_calls(default, visit);
     }
-    body_calls(&function.body, true, visit);
+    body_calls(&function.body, visit);
 }
 
-pub(crate) fn body_calls(
-    body: &[Stmt],
-    include_closures: bool,
-    visit: &mut impl FnMut(FuncId, u32, &[Expr]),
-) {
+fn body_calls(body: &[Stmt], visit: &mut impl FnMut(FuncId, u32)) {
     for statement in body {
         stmt_any_expr(statement, &mut |expr| {
-            expression_calls(expr, include_closures, visit);
+            expression_calls(expr, visit);
             false
         });
     }
 }
 
-fn expression_calls(
-    expr: &Expr,
-    include_closures: bool,
-    visit: &mut impl FnMut(FuncId, u32, &[Expr]),
-) {
+fn expression_calls(expr: &Expr, visit: &mut impl FnMut(FuncId, u32)) {
     if let Expr::Closure { body, .. } = expr {
-        if !include_closures {
-            return;
-        }
-        body_calls(body, true, visit);
+        body_calls(body, visit);
     }
-    walk_expr_children(expr, &mut |child| {
-        expression_calls(child, include_closures, visit)
-    });
+    walk_expr_children(expr, &mut |child| expression_calls(child, visit));
     if let Expr::Call {
         callee,
         byte_offset,
-        args,
         ..
     } = expr
         && let Expr::FuncRef(id) = callee.as_ref()
     {
-        visit(*id, *byte_offset, args);
+        visit(*id, *byte_offset);
     }
 }

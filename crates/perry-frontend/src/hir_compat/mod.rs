@@ -18,8 +18,8 @@ pub use calls::{RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;
+pub(crate) use locations::display_name;
 pub use locations::{Locations, non_null_assertion};
-pub(crate) use locations::{body_calls, display_name};
 mod methods;
 mod names;
 mod parser;
@@ -28,8 +28,7 @@ mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
 mod source;
-pub(crate) use source::validate;
-pub(crate) use source::{PrivateFunctions, PrivateParameters};
+pub(crate) use source::{pattern_bindings, validate};
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
@@ -44,7 +43,6 @@ pub struct Metadata<'s> {
 pub(crate) struct LoweredHir<'s> {
     pub module: HirModule,
     pub metadata: Metadata<'s>,
-    pub private_parameters: PrivateFunctions,
 }
 
 pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {
@@ -84,6 +82,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             None => diagnostic,
         }
     })?;
+    source::promote_private_parameters(&mut module, private_parameters);
     constructors.collect_types(&mut module)?;
     let inferred_bindings = module
         .local_source_spans
@@ -92,7 +91,6 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         .collect();
     Ok(LoweredHir {
         module,
-        private_parameters,
         metadata: Metadata {
             locations,
             inferred_bindings,
