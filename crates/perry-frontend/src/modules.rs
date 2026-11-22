@@ -90,15 +90,13 @@ pub(crate) fn load<'s>(
                 }
             }
         }
-        if let Some(name) = bindings
-            .0
-            .into_values()
-            .flat_map(|binding| binding.names)
-            .min()
+        if let Some((name, declaration)) = exports
+            .iter()
+            .find(|(_, declaration)| bindings.0.contains_key(&declaration.to_id()))
         {
             return Err(graph.locations.annotate(
                 unsupported!("Component export '{name}' requires a named function declaration"),
-                exports[name].span,
+                declaration.span,
             ));
         }
         graph.body.extend(copies.into_values());
