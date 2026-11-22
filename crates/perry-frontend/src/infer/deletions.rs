@@ -31,7 +31,6 @@ pub(crate) fn deletes_array_elements(
             ctx,
             decls: &decls,
             metadata,
-            generic_functions: None,
         },
         classes: &module.classes,
     };

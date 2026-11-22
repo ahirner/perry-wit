@@ -147,6 +147,31 @@ function deferredLoop(count: number): string {
   return value === undefined ? "unwritten" : value;
 }
 
+function deferredIteration(): number {
+  let sum = 0;
+  for (const current of [7, 9]) {
+    let stored: number | undefined;
+    if (stored !== undefined) return -1;
+    stored = current;
+    sum += stored;
+  }
+  return sum;
+}
+
+function readChunk(fail: boolean): number {
+  let chunk;
+  const absent = chunk === undefined;
+  try {
+    if (fail) throw new Error("no bytes");
+    chunk = new Uint8Array([7]);
+  } catch {
+    return 0;
+  }
+  const output = new Uint8Array(1);
+  output.set(chunk, 0);
+  return (absent ? 100 : 0) + output[0];
+}
+
 function bareRead(write: boolean): boolean {
   let value;
   if (write) value = "present";
@@ -155,4 +180,5 @@ function bareRead(write: boolean): boolean {
 
 console.log(deferredBranch(true), deferredBranch(false));
 console.log(deferredCatch(false), deferredCatch(true), bareRead(false), bareRead(true));
-console.log(deferredLoop(0), deferredLoop(1), deferredLoop(2));
+console.log(deferredLoop(0), deferredLoop(1), deferredLoop(2), deferredIteration());
+console.log(readChunk(false), readChunk(true));

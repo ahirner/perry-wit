@@ -203,6 +203,19 @@ pub(super) fn locals_mut(statements: &mut [Stmt], visit: &mut impl FnMut(LocalId
 
 pub(super) fn resolve_locals(statements: &mut [Stmt], mut env: FunctionEnv<'_>) {
     let mut bindings = HashMap::new();
+    if !env.metadata.deferred_writes.is_empty() {
+        perry_hir::tdz_check::for_each_stmts_expr(statements, &mut |expr| {
+            if let Expr::LocalSet(id, value) = expr
+                && env.metadata.deferred_writes.get(id) == Some(&1)
+                && env.metadata.inferred_bindings.contains(id)
+            {
+                let ty = expression(value, &mut env);
+                if is_resolvable_type(&ty) {
+                    bindings.insert(*id, ty);
+                }
+            }
+        });
+    }
     scan(statements, &mut env, None, Some(&mut bindings));
     locals_mut(statements, &mut |id, ty| {
         if let Some(inferred) = bindings.remove(&id) {
@@ -283,14 +296,44 @@ pub(super) fn scan(
     mut returned: Option<&mut Vec<HirType>>,
     mut bindings: Option<&mut HashMap<LocalId, HirType>>,
 ) {
-    for statement in statements {
+    let mut iteration = hir_compat::Iteration::default();
+    for (index, statement) in statements.iter().enumerate() {
+        if let Stmt::Let {
+            id,
+            init: Some(init),
+            ..
+        } = statement
+        {
+            iteration.guard(*id, init);
+            if let Some(hir_compat::RecordExpr::Value(mut value)) = iteration.expression(init) {
+                while let Some(hir_compat::RecordExpr::Value(inner)) = iteration.expression(value) {
+                    value = inner;
+                }
+                let ty = expression(value, env);
+                env.locals.insert(*id, ty);
+            }
+            if matches!(init, Expr::Undefined)
+                && let Some(element) = iteration.element(&statements[index..])
+            {
+                let ty = expression(element.value, env);
+                let ty = match element.available {
+                    hir_compat::Availability::Known(true) => ty,
+                    hir_compat::Availability::Known(false) => HirType::Void,
+                    hir_compat::Availability::Test(_) => with_absences(ty, Absence::Undefined),
+                };
+                env.locals.insert(element.id, ty);
+            }
+        }
+        let inferred_call = matches!(statement,
+            Stmt::Let { id, init: Some(Expr::Call { callee, .. }), .. }
+                if env.metadata.inferred_bindings.contains(id) && matches!(callee.as_ref(), Expr::FuncRef(_)));
         match statement {
             Stmt::Let {
                 id,
                 ty,
                 init: Some(init),
                 ..
-            } if (matches!(ty, HirType::Any | HirType::Unknown)
+            } if (inferred_call || matches!(ty, HirType::Any | HirType::Unknown)
                 || (ty.any(&mut |ty| matches!(ty, HirType::Any))
                     && (matches!(init, Expr::LocalGet(_))
                         || matches!(init, Expr::Call { callee, .. } if matches!(callee.as_ref(), Expr::FuncRef(_)))))
@@ -320,7 +363,7 @@ pub(super) fn scan(
                 {
                     bindings.insert(*id, inferred.clone());
                 }
-                if !matches!(inferred, HirType::Any | HirType::Unknown) {
+                if inferred_call || !matches!(inferred, HirType::Any | HirType::Unknown) {
                     env.locals.insert(*id, inferred);
                 }
             }

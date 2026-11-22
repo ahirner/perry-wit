@@ -328,3 +328,17 @@ console.log("generic-collection", indexById([{id:"a",name:defaultedValue("payloa
 const emptyIndexedRows:{id:string,name:string}[] = [];
 console.log("generic-empty", indexById(emptyIndexedRows).size);
 try { indexById([indexedRow,indexedRow]); } catch(e) { console.log("generic-duplicate", e instanceof Error); }
+
+const [messageLimit, ...remainingLimits] = [2, 4, 6];
+function readExact<I extends string | number[], N extends number | undefined>(input: I, n: N) { return input.slice(0, n); }
+function readMessage<I extends string | number[]>(input: I) { return readExact(input, messageLimit); }
+function messageLength<M extends {length: number}>(message: M) { return message.length; }
+function headLength<M extends string | number[]>(messages: M[]) { return messages[0].length; }
+const textMessage = readMessage("abc");
+const listMessage = readMessage([10, 20, 30]);
+console.log("generic-results", messageLength(textMessage), messageLength(listMessage),
+  headLength([readMessage("xyz")]), listMessage[1], remainingLimits.length);
+function forwarded<T>(value: T) { return forwardTarget(value); }
+function forwardTarget<U>(value: U): U { return value; }
+const forwardedLocal = forwarded(2);
+console.log("forwarded-local", forwardedLocal);

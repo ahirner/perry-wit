@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use perry_wit::{
     CompileOptions, ErrorKind, SdkOptions,
     api::{self, Module, Options, Program, Source, Wit},
@@ -21,7 +22,7 @@ fn program_with(name: &str, source: &str, modules: &[(&str, &str)]) -> Program {
 }
 
 #[test]
-fn diagnostics_locate_imported_modules_and_multibyte_columns() {
+fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result<()> {
     let helper = "// é🙂\r\nexport function helper(value) { return value; }";
     let mut program = program_with(
         "src/main.ts",
@@ -66,6 +67,23 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
         assert_eq!((span.start_line, span.start_column), (2, 15));
     }
 
+    let destructured = "export const { value: binding } = { value: 7 };";
+    let error = api::compile_core(&program_with(
+        "src/main.ts",
+        "export { binding as run } from './helper';",
+        &[("src/helper.ts", destructured)],
+    ))
+    .err()
+    .context("expected a diagnostic for the re-exported constant")?;
+    let diagnostic = error.primary();
+    assert!(diagnostic.message().contains("Component export 'run'"));
+    let span = diagnostic.span().context("destructured declaration span")?;
+    assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
+    assert_eq!(
+        destructured.get(span.start_byte..span.end_byte),
+        Some("binding")
+    );
+
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
     let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
     assert_eq!(parse_error.primary().code(), codes::PARSE_ERROR);
@@ -78,6 +96,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() {
     let span = parse_error.primary().span().unwrap();
     assert_eq!(&parse_source[span.start_byte..span.end_byte], "missing");
     assert_eq!((span.start_line, span.start_column), (5, 14));
+    Ok(())
 }
 
 #[test]
@@ -127,6 +146,68 @@ fn sdk_errors_identify_the_failing_wit_or_output_path() {
 }
 
 #[test]
+fn generic_specialization_budget_is_per_function() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use std::fmt::Write;
+    let mut source = String::new();
+    for id in 0..257 {
+        writeln!(
+            source,
+            "function id{id}<T>(value: T): T {{ return value; }}"
+        )?;
+    }
+    source.push_str("export function run(): number { let total = 0; ");
+    for id in 0..257 {
+        writeln!(source, "total += id{id}(1);")?;
+    }
+    source.push_str("return total; }");
+    api::compile_core(&program_with("budget.ts", &source, &[]))?;
+
+    // The first recursive call changes the key; the second reuses it.
+    api::compile_core(&program_with(
+        "finite.ts",
+        "function again<T>(value:T, n:number):number { return n<=0 ? 0 : again([0], n-1); } export function run():number {return again(0, 2);}",
+        &[],
+    ))?;
+    let mut finite = String::from(
+        "function count<T>(v:T):number {return 1;} export function run():number {let n=0;",
+    );
+    for id in 0..257 {
+        writeln!(finite, "n += count({{field{id}: 1}});")?;
+    }
+    finite.push_str("return n;}");
+    for (source, function, grows) in [
+        (finite.as_str(), "count", false),
+        (
+            "function grow<T>(value:T):number {return grow([value]);} export function run():number {return grow(1);}",
+            "grow",
+            true,
+        ),
+    ] {
+        let error = api::compile_core(&program_with("budget.ts", source, &[]))
+            .err()
+            .context("expected the per-function specialization budget to be exhausted")?;
+        assert_eq!(error.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
+        assert!(
+            error.to_string().contains(&format!(
+                "256 distinct argument lists reached for {function}"
+            )),
+            "{error}"
+        );
+        assert_eq!(
+            error
+                .primary()
+                .notes()
+                .iter()
+                .any(|note| note.message().contains("grows type argument T")),
+            grows,
+            "{error}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn imported_helpers_report_the_call_chain_across_compiler_phases() {
     const WORKFLOW: &str = "src/work\x1e\x1fflow.ts";
     let assert_caller_note =
@@ -170,6 +251,12 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
             "import { wrap } from './lib';\nexport function run(): number {\n  return wrap('bad');\n}",
             codes::TYPE_MISMATCH,
             "while instantiating 'wrap'",
+        ),
+        (
+            "function missing<T>(): T {throw new Error('missing');}\nexport function middle<T>(x:T) {return missing();}",
+            "import { middle } from './lib';\nexport function run(): number {return middle(1);}",
+            codes::MISSING_TYPE_ANNOTATION,
+            "while instantiating 'middle'",
         ),
         (
             "export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}",

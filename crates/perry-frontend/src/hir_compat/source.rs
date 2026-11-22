@@ -68,7 +68,11 @@ pub(crate) fn validate(
             {
                 self.bindings.deferred.insert(binding.id.span.lo.0);
             }
-            collect_pat(&declaration.name, &mut self.bindings.inferred);
+            pattern_bindings(&declaration.name, false, &mut |id, annotated| {
+                if !annotated {
+                    self.bindings.inferred.insert((id.span.lo.0, id.span.hi.0));
+                }
+            });
             declaration.visit_children_with(self);
         }
     }
@@ -99,29 +103,35 @@ pub(crate) fn validate(
     Ok(analyzer.bindings)
 }
 
-fn collect_pat(pat: &ast::Pat, out: &mut HashSet<(u32, u32)>) {
+/// Visit the declared names and whether a type annotation covers each binding.
+pub(crate) fn pattern_bindings<'a>(
+    pat: &'a ast::Pat,
+    annotated: bool,
+    visit: &mut impl FnMut(&'a ast::Ident, bool),
+) {
     match pat {
-        ast::Pat::Ident(binding) if binding.type_ann.is_none() => {
-            out.insert((binding.id.span.lo.0, binding.id.span.hi.0));
-        }
-        ast::Pat::Array(arr) if arr.type_ann.is_none() => {
-            for elem in arr.elems.iter().flatten() {
-                collect_pat(elem, out);
+        ast::Pat::Ident(binding) => visit(&binding.id, annotated || binding.type_ann.is_some()),
+        ast::Pat::Array(array) => {
+            for element in array.elems.iter().flatten() {
+                pattern_bindings(element, annotated || array.type_ann.is_some(), visit);
             }
         }
-        ast::Pat::Object(obj) if obj.type_ann.is_none() => {
-            for prop in &obj.props {
+        ast::Pat::Object(object) => {
+            let annotated = annotated || object.type_ann.is_some();
+            for prop in &object.props {
                 match prop {
-                    ast::ObjectPatProp::KeyValue(kv) => collect_pat(&kv.value, out),
-                    ast::ObjectPatProp::Assign(assign) => {
-                        out.insert((assign.key.span.lo.0, assign.key.span.hi.0));
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        pattern_bindings(&kv.value, annotated, visit)
                     }
-                    ast::ObjectPatProp::Rest(rest) => collect_pat(&rest.arg, out),
+                    ast::ObjectPatProp::Assign(assign) => visit(&assign.key.id, annotated),
+                    ast::ObjectPatProp::Rest(rest) => pattern_bindings(&rest.arg, annotated, visit),
                 }
             }
         }
-        ast::Pat::Rest(rest) if rest.type_ann.is_none() => collect_pat(&rest.arg, out),
-        ast::Pat::Assign(assign) => collect_pat(&assign.left, out),
-        _ => {}
+        ast::Pat::Rest(rest) => {
+            pattern_bindings(&rest.arg, annotated || rest.type_ann.is_some(), visit)
+        }
+        ast::Pat::Assign(assign) => pattern_bindings(&assign.left, annotated, visit),
+        ast::Pat::Invalid(_) | ast::Pat::Expr(_) => {}
     }
 }
