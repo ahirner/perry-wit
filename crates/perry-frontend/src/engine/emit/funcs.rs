@@ -1,7 +1,6 @@
 //! Synthetic function-value records, dispatchers, wideners, comparers, and callback wrappers.
 use super::{Emitter, EnvField, RewriteCtx};
 use crate::engine::bitset::BitSet;
-use crate::engine::solve::FuncCoercion;
 use crate::engine::types::{
     CaptureOwner, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
     env_class_name, func_tag,
@@ -443,16 +442,6 @@ impl<'h> Emitter<'h, '_> {
             return Expr::LocalGet(box_id);
         }
         Expr::LocalGet(cap_id)
-    }
-
-    pub(super) fn coercion_of(&self, inst_id: InstanceId, expr: &Expr) -> Option<FuncCoercion> {
-        let key = std::ptr::from_ref(expr) as usize;
-        self.solved
-            .inst_coercions
-            .get(inst_id.index())?
-            .iter()
-            .find(|&&(k, _)| k == key)
-            .map(|&(_, c)| c)
     }
 
     pub(super) fn arm_return_hir(&mut self, inst_id: InstanceId) -> Result<HirType> {

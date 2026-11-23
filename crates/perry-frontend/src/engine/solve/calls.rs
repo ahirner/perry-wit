@@ -331,7 +331,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 inputs.truncate(max_params);
                 let arms_span = self.intern_dispatch_arms(&arms);
                 let input_tys = self.types.tuple(&inputs);
-                self.set_coercion(
+                self.record_site_coercion(
                     s.inst,
                     callback,
                     FuncCoercion::DispatchCallback {
@@ -384,7 +384,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         .owner(ident.capture_owner),
                 )?;
                 let input_tys = self.types.tuple(&inputs);
-                self.set_coercion(
+                self.record_site_coercion(
                     s.inst,
                     callback,
                     FuncCoercion::EnvCallback {

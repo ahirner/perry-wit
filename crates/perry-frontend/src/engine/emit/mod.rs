@@ -2,7 +2,9 @@
 mod funcs;
 use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
-use super::solve::{ClassInst, FuncCoercion, Instance, Receiver, SiteResolution, Solved};
+use super::solve::{
+    ClassInst, FuncCoercion, Instance, Receiver, SiteEntry, SiteResolution, Solved,
+};
 use super::types::{
     CaptureOwner, CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind,
     TypeTable, box_hir, func_tag,
@@ -231,14 +233,10 @@ impl<'h> Emitter<'h, '_> {
         )
     }
 
-    fn site_of(&self, inst_id: InstanceId, expr: &Expr) -> Option<&SiteResolution> {
+    fn site_entry(&self, inst_id: InstanceId, expr: &Expr) -> Option<&SiteEntry> {
         let template = self.solved.instances.get(inst_id)?.template;
         let local_site = self.index.site_of(template, expr)?;
-        self.solved
-            .inst_sites
-            .get(inst_id.index())?
-            .get(local_site)?
-            .as_ref()
+        self.solved.inst_sites.get(inst_id.index())?.get(local_site)
     }
 
     fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
@@ -1125,7 +1123,9 @@ impl<'h> Emitter<'h, '_> {
     }
 
     fn rewrite_expr(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
-        let coercion = self.coercion_of(rctx.inst_id, expr);
+        let site_entry = self.site_entry(rctx.inst_id, expr).cloned();
+        let coercion = site_entry.as_ref().and_then(|e| e.coercion);
+        let resolution = site_entry.and_then(|e| e.resolution);
         if let Some(c) = coercion {
             match c {
                 FuncCoercion::Zero if is_pure_func_expr(expr) => return Ok(Expr::Number(0.0)),
@@ -1135,7 +1135,7 @@ impl<'h> Emitter<'h, '_> {
                 _ => {}
             }
         }
-        let rewritten = self.rewrite_expr_inner(rctx, expr)?;
+        let rewritten = self.rewrite_expr_inner(rctx, expr, resolution)?;
         match coercion {
             Some(FuncCoercion::Zero) => Ok(Expr::Sequence(vec![rewritten, Expr::Number(0.0)])),
             Some(FuncCoercion::Tag(ident)) => {
@@ -1203,8 +1203,13 @@ impl<'h> Emitter<'h, '_> {
         }
     }
 
-    fn rewrite_expr_inner(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
-        if let Some(site) = self.site_of(rctx.inst_id, expr).cloned() {
+    fn rewrite_expr_inner(
+        &mut self,
+        rctx: &RewriteCtx<'_>,
+        expr: &'h Expr,
+        resolution: Option<SiteResolution>,
+    ) -> Result<Expr> {
+        if let Some(site) = resolution {
             match site {
                 SiteResolution::Cell(_) => {}
                 SiteResolution::FoldBool(b) => return Ok(Expr::Bool(b)),

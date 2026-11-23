@@ -427,7 +427,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .get_mut(inst_id.index())
             .and_then(|s| s.get_mut(local_site))
         {
-            *slot = Some(res);
+            slot.resolution = Some(res);
         }
     }
 
@@ -832,7 +832,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_local_tys,
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,
-            inst_coercions: self.inst_coercions,
             inst_captures: self.inst_captures,
             live_instances,
             escaping_env_templates: self.escaping_env_templates,

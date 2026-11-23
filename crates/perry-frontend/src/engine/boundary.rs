@@ -228,11 +228,13 @@ impl<'h> ModuleIndex<'h> {
                 let loc = idx.add_location(ty);
                 static_field_locs.push((scan.types.intern_name(&field.name), loc));
                 if let Some(init) = &field.init {
+                    Self::record_site_expr(&mut scan, init_tid, init);
                     idx.scan_expr(&mut scan, init, init_tid, false);
                 }
             }
             for field in &class.fields {
                 if let Some(init) = &field.init {
+                    Self::record_site_expr(&mut scan, init_tid, init);
                     idx.scan_expr(&mut scan, init, init_tid, false);
                 }
             }
@@ -694,9 +696,14 @@ impl<'h> ModuleIndex<'h> {
                         {
                             *slot = Some(pattern.as_str());
                         }
+                        Self::record_site_expr(scan, owner, init);
                         self.scan_expr(scan, init, owner, in_loop);
                     }
                     scan.defined_locals.insert(*id as usize);
+                }
+                Stmt::Return(Some(val)) => {
+                    Self::record_site_expr(scan, owner, val);
+                    self.scan_expr(scan, val, owner, in_loop);
                 }
                 Stmt::If {
                     condition,
@@ -793,11 +800,33 @@ impl<'h> ModuleIndex<'h> {
                     Self::record_site_expr(scan, owner, arg);
                 }
             }
-            Expr::Array(_, _)
-            | Expr::Object(_)
+            Expr::Array(elems, _) => {
+                Self::record_site_expr(scan, owner, expr);
+                for elem in elems {
+                    Self::record_site_expr(scan, owner, elem);
+                }
+            }
+            Expr::PropertySet { value, .. }
+            | Expr::PutValueSet { value, .. }
+            | Expr::IndexSet { value, .. }
+            | Expr::ArrayPush { value, .. } => {
+                Self::record_site_expr(scan, owner, expr);
+                Self::record_site_expr(scan, owner, value);
+            }
+            Expr::Logical { left, right, .. } => {
+                Self::record_site_expr(scan, owner, left);
+                Self::record_site_expr(scan, owner, right);
+            }
+            Expr::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                Self::record_site_expr(scan, owner, then_expr);
+                Self::record_site_expr(scan, owner, else_expr);
+            }
+            Expr::Object(_)
             | Expr::ObjectSpread { .. }
-            | Expr::PropertySet { .. }
-            | Expr::PutValueSet { .. }
             | Expr::CallSpread { .. }
             | Expr::New { .. }
             | Expr::NewDynamic { .. }
@@ -810,6 +839,7 @@ impl<'h> ModuleIndex<'h> {
             | Expr::TypeOf(_)
             | Expr::FuncRef(_) => Self::record_site_expr(scan, owner, expr),
             Expr::ArrayMap { callback, .. }
+            | Expr::ArrayFlatMap { callback, .. }
             | Expr::ArrayFilter { callback, .. }
             | Expr::ArrayForEach { callback, .. }
             | Expr::ArrayReduce { callback, .. }
@@ -833,9 +863,11 @@ impl<'h> ModuleIndex<'h> {
                 key_fn: callback, ..
             } => Self::record_site_expr(scan, owner, callback),
             Expr::LocalGet(id) => self.record_local_use(*id, owner, false),
-            Expr::LocalSet(id, _) | Expr::Update { id, .. } => {
-                self.record_local_use(*id, owner, true)
+            Expr::LocalSet(id, value) => {
+                Self::record_site_expr(scan, owner, value);
+                self.record_local_use(*id, owner, true);
             }
+            Expr::Update { id, .. } => self.record_local_use(*id, owner, true),
             Expr::ScopedTemp { id, .. } => {
                 self.ensure_local(*id, owner, Ty::OPEN, scan.hir, scan.facts);
             }

@@ -135,6 +135,12 @@ pub(crate) enum SiteResolution {
     FoldBool(bool),
 }
 
+#[derive(Clone, Default, Debug)]
+pub(crate) struct SiteEntry {
+    pub(crate) resolution: Option<SiteResolution>,
+    pub(crate) coercion: Option<FuncCoercion>,
+}
+
 pub(crate) struct Solved {
     pub(crate) init_inst: InstanceId,
     pub(crate) instances: IdxVec<InstanceId, Instance>,
@@ -145,8 +151,7 @@ pub(crate) struct Solved {
     pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
-    pub(crate) inst_sites: Vec<Vec<Option<SiteResolution>>>,
-    pub(crate) inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
+    pub(crate) inst_sites: Vec<Vec<SiteEntry>>,
     pub(crate) inst_captures: Vec<Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
     pub(crate) escaping_env_templates: BitSet,
@@ -309,8 +314,7 @@ struct Solver<'h, 'a> {
     inst_frame_locals: Vec<Vec<Ty>>,
     inst_written: Vec<BitSet>,
     inst_captures: Vec<Vec<LocalId>>,
-    inst_sites: Vec<Vec<Option<SiteResolution>>>,
-    inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
+    inst_sites: Vec<Vec<SiteEntry>>,
     inst_superseded: BitSet,
     escaping_env_templates: BitSet,
     collapsed_closures: BitSet,
@@ -442,7 +446,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_written: Vec::new(),
             inst_captures: Vec::new(),
             inst_sites: Vec::new(),
-            inst_coercions: Vec::new(),
             inst_superseded: BitSet::default(),
             escaping_env_templates: BitSet::default(),
             collapsed_closures: BitSet::default(),
@@ -483,6 +486,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .inst_sites
             .get(inst_id.index())
             .and_then(|s| s.get(local_site))
+            .map(|e| &e.resolution)
         {
             return self.types.cell(*loc, kind);
         }
@@ -492,7 +496,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .get_mut(inst_id.index())
             .and_then(|s| s.get_mut(local_site))
         {
-            *slot = Some(SiteResolution::Cell(loc));
+            slot.resolution = Some(SiteResolution::Cell(loc));
         }
         self.types.cell(loc, kind)
     }
@@ -591,32 +595,21 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut head = 0usize;
         while let Some(&caller) = queue.get(head) {
             head += 1;
-            for res in self
-                .inst_sites
-                .get(caller.index())
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
-                self.for_each_site_target(res, |t| {
-                    if live.insert(t.index()) {
-                        queue.push(t);
-                    }
-                });
-            }
-            for &(_, coercion) in self
-                .inst_coercions
-                .get(caller.index())
-                .into_iter()
-                .flatten()
-            {
-                match coercion {
-                    FuncCoercion::EnvCallback { target, .. } => {
+            for entry in self.inst_sites.get(caller.index()).into_iter().flatten() {
+                if let Some(res) = &entry.resolution {
+                    self.for_each_site_target(res, |t| {
+                        if live.insert(t.index()) {
+                            queue.push(t);
+                        }
+                    });
+                }
+                match entry.coercion {
+                    Some(FuncCoercion::EnvCallback { target, .. }) => {
                         if live.insert(target.index()) {
                             queue.push(target);
                         }
                     }
-                    FuncCoercion::DispatchCallback { arms, .. } => {
+                    Some(FuncCoercion::DispatchCallback { arms, .. }) => {
                         if let Some(slice) = self.dispatch_arms.get(arms.range()) {
                             for &(_, target) in slice {
                                 if live.insert(target.index()) {
@@ -641,7 +634,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 bump_count(&mut self.template_counts, inst.template);
             } else if self.inst_superseded.insert(idx) {
                 if let Some(sites) = self.inst_sites.get_mut(idx) {
-                    sites.fill(None);
+                    sites.fill(SiteEntry::default());
                 }
                 if let Some(reads) = self.inst_reads.get_mut(idx)
                     && !reads.is_empty()
@@ -1096,8 +1089,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.inst_written.push(BitSet::default());
         self.inst_captures.push(inst_caps);
         self.inst_sites
-            .push(vec![None; self.index.site_count(template)]);
-        self.inst_coercions.push(Vec::new());
+            .push(vec![SiteEntry::default(); self.index.site_count(template)]);
         self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
@@ -1586,14 +1578,29 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn set_coercion(&mut self, inst_id: InstanceId, expr: &Expr, c: FuncCoercion) {
-        let key = std::ptr::from_ref(expr) as usize;
-        if let Some(list) = self.inst_coercions.get_mut(inst_id.index()) {
-            if let Some(slot) = list.iter_mut().find(|(k, _)| *k == key) {
-                slot.1 = c;
-            } else {
-                list.push((key, c));
-            }
+    pub(super) fn record_site_coercion(
+        &mut self,
+        inst_id: InstanceId,
+        expr: &Expr,
+        c: FuncCoercion,
+    ) {
+        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
+            return;
+        };
+        let Some(local_site) = self.index.site_of(template, expr) else {
+            debug_assert!(
+                false,
+                "unindexed coercion site in template {}",
+                template.index()
+            );
+            return;
+        };
+        if let Some(slot) = self
+            .inst_sites
+            .get_mut(inst_id.index())
+            .and_then(|s| s.get_mut(local_site))
+        {
+            slot.coercion = Some(c);
         }
     }
 
@@ -1609,7 +1616,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .get_mut(inst_id.index())
             .and_then(|s| s.get_mut(local_site))
         {
-            *slot = None;
+            slot.resolution = None;
         }
     }
 
@@ -1634,7 +1641,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(elem_ty, &self.index.capture_free_templates)
         {
             for a in args {
-                self.set_coercion(inst_id, a, FuncCoercion::Zero);
+                self.record_site_coercion(inst_id, a, FuncCoercion::Zero);
             }
         } else if self.types.is_tagged_func_union(
             elem_ty,
@@ -1678,14 +1685,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
-            self.set_coercion(inst_id, expr, FuncCoercion::Tag(ident));
+            self.record_site_coercion(inst_id, expr, FuncCoercion::Tag(ident));
             return;
         }
         if self.types.is_env_func(src_ty, &self.escaping_env_templates)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
             if !matches!(expr, Expr::Closure { .. }) {
-                self.set_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
+                self.record_site_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
             }
             return;
         }
@@ -1695,7 +1702,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             &self.escaping_env_templates,
         ) && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
         {
-            self.set_coercion(
+            self.record_site_coercion(
                 inst_id,
                 expr,
                 FuncCoercion::Widen {
