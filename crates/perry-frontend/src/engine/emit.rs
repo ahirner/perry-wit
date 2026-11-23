@@ -5,13 +5,13 @@
 use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind};
 use super::solve::{SiteResolution, Solved};
-use super::types::{ClassId, ClassInstId, InstanceId, LocId, TemplateId, Ty, TyKind, TypeTable};
-use crate::hir_compat::{self, Metadata};
+use super::types::{CellKind, ClassInstId, InstanceId, TemplateId, Ty, TyKind, TypeTable};
+use crate::hir_compat::{Locations, Metadata};
 use perry_hir::{
     ir::{Class, ClassField, Expr, Function, Module as HirModule, Param, Stmt},
     types::{FuncId, LocalId, Type as HirType},
 };
-use perry_wit_diagnostics::{Diagnostic, Result};
+use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 use pliron::context::Context;
 use std::collections::HashMap;
 
@@ -63,6 +63,7 @@ pub(crate) fn build(
     ctx: &Context,
     hir: &HirModule,
     index: &ModuleIndex<'_>,
+    locations: &Locations<'_>,
     types: &TypeTable,
     solved: &Solved,
 ) -> Result<Emitted> {
@@ -70,6 +71,7 @@ pub(crate) fn build(
         ctx,
         hir,
         index,
+        locations,
         types,
         solved,
         next_local: index.max_local_id.saturating_add(1),
@@ -96,6 +98,7 @@ struct Emitter<'h, 'a> {
     ctx: &'a Context,
     hir: &'h HirModule,
     index: &'a ModuleIndex<'h>,
+    locations: &'a Locations<'a>,
     types: &'a TypeTable,
     solved: &'a Solved,
     next_local: LocalId,
@@ -114,110 +117,98 @@ impl<'h> Emitter<'h, '_> {
     }
 
     fn materialize(&self, ty: Ty) -> HirType {
-        self.types
-            .materialize_hir(self.ctx, ty, &|cid| self.class_inst_name(cid))
+        self.types.materialize_hir_with(
+            self.ctx,
+            ty,
+            &self.solved.locations,
+            &self.solved.dict_reads,
+            &|cid| self.class_inst_name(cid),
+        )
     }
 
-    /// True when a deferred inferred union cannot be lowered as a finite value union (e.g.
-    /// `number[] | string`) yet every member supports dynamic JSON boxing (excluding native
-    /// byte arrays like `Uint8Array`, class instances, and opaque handles).
-    fn needs_json_union_box(&self, ty: Ty) -> bool {
-        let TyKind::Union(span) = self.types.kind(ty) else {
-            return false;
-        };
-        let members = self.types.union_slice(span);
-        let mut has_non_value_union_member = false;
-        let mut object_alternatives = 0u32;
-        for &member in members {
-            match self.types.kind(member) {
-                TyKind::Null
-                | TyKind::Void
-                | TyKind::Number
-                | TyKind::Int32
-                | TyKind::String
-                | TyKind::Boolean => {}
-                TyKind::Object { .. } => {
-                    object_alternatives += 1;
-                }
-                TyKind::Array(elem) => {
-                    if !self.is_json_boxable(elem) {
-                        return false;
-                    }
-                    has_non_value_union_member = true;
-                }
-                TyKind::Tuple(tspan) => {
-                    if !self
-                        .types
-                        .tuple_slice(tspan)
-                        .iter()
-                        .all(|&t| self.is_json_boxable(t))
-                    {
-                        return false;
-                    }
-                    has_non_value_union_member = true;
-                }
-                _ => return false,
-            }
-        }
-        has_non_value_union_member || object_alternatives > 1
+    fn is_resolved(&self, ty: Ty) -> bool {
+        !self
+            .types
+            .is_open_with(ty, &self.solved.locations, &self.solved.dict_reads)
     }
 
-    fn is_json_boxable(&self, ty: Ty) -> bool {
-        match self.types.kind(ty) {
-            TyKind::Null
-            | TyKind::Void
-            | TyKind::Number
-            | TyKind::Int32
-            | TyKind::String
-            | TyKind::Boolean
-            | TyKind::Dynamic => true,
-            TyKind::Array(elem) => self.is_json_boxable(elem),
-            TyKind::Tuple(span) => self
-                .types
-                .tuple_slice(span)
-                .iter()
-                .all(|&t| self.is_json_boxable(t)),
-            TyKind::Object { props, index } => {
-                index.is_none_or(|t| self.is_json_boxable(t))
-                    && self
-                        .types
-                        .object_slice(props)
-                        .iter()
-                        .all(|p| self.is_json_boxable(p.ty))
-            }
-            TyKind::Union(span) => self
-                .types
-                .union_slice(span)
-                .iter()
-                .all(|&t| self.is_json_boxable(t)),
-            _ => false,
+    fn annotate_local(&self, err: Diagnostic, id: LocalId) -> Diagnostic {
+        match self.hir.local_source_spans.get(&id) {
+            Some(span) => self.locations.annotate(
+                err,
+                swc_common::Span::new(
+                    swc_common::BytePos(span.start),
+                    swc_common::BytePos(span.end),
+                ),
+            ),
+            None => err,
         }
+    }
+
+    fn attach_inst_chain(&self, mut err: Diagnostic, mut inst_id: InstanceId) -> Diagnostic {
+        let mut depth = 0usize;
+        while depth < 16
+            && let Some(inst) = self.solved.instances.get(inst_id.0 as usize)
+        {
+            if inst.template == TemplateId(0) {
+                break;
+            }
+            let Some(caller) = inst.caller else {
+                break;
+            };
+            if inst.call_byte_offset != 0
+                && let Some(view) = self.index.view(inst.template)
+            {
+                let msg = format!("while instantiating '{}'", view.display_name());
+                err = match self.locations.call_span(inst.call_byte_offset) {
+                    Some(note_span) => err.with_spanned_note(note_span, msg),
+                    None => err.with_note(msg),
+                };
+            }
+            inst_id = caller;
+            depth += 1;
+        }
+        err
     }
 
     fn site_of(&self, inst_id: InstanceId, expr: &Expr) -> Option<&SiteResolution> {
-        let addr = std::ptr::from_ref(expr) as usize;
-        let idx = self
-            .solved
-            .sites
-            .binary_search_by_key(&(inst_id.0, addr), |(i, a, _)| (i.0, *a))
-            .ok()?;
-        self.solved.sites.get(idx).map(|(_, _, res)| res)
+        let template = self.solved.instances.get(inst_id.0 as usize)?.template;
+        let local_site = self.index.site_of(template, expr)?;
+        self.solved
+            .inst_sites
+            .get(inst_id.0 as usize)?
+            .get(local_site)?
+            .as_ref()
     }
 
     fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
-        if let Some((_, ty)) = self
-            .solved
-            .module_bindings
-            .iter()
-            .find(|(lid, _)| *lid == id)
-        {
-            return Some(*ty);
+        if let Some(lidx) = self.index.local_idx(id) {
+            if self.index.local_module.contains(lidx.0 as usize) {
+                return self
+                    .solved
+                    .module_local_tys
+                    .get(lidx.0 as usize)
+                    .copied()
+                    .flatten();
+            }
+            if let Some(slot) = self.index.local_frame_slot(lidx)
+                && let Some(inst) = self.solved.instances.get(inst_id.0 as usize)
+                && self.index.local_owner.get(lidx.0 as usize) == Some(&inst.template)
+            {
+                return self
+                    .solved
+                    .inst_frame_locals
+                    .get(inst_id.0 as usize)
+                    .and_then(|frame| frame.get(slot))
+                    .copied();
+            }
         }
         self.solved
-            .instance_locals
+            .inst_local_tys
+            .get(inst_id.0 as usize)?
             .iter()
-            .find(|(i, lid, _)| *i == inst_id && *lid == id)
-            .map(|(_, _, ty)| *ty)
+            .find(|&&(lid, _)| lid == id)
+            .map(|&(_, ty)| ty)
     }
 
     fn fresh_local(
@@ -246,8 +237,8 @@ impl<'h> Emitter<'h, '_> {
         // Only remap locals on a 2nd+ specialization of the same template (so exported and
         // single-instance functions keep original LocalIds and captures match directly).
         let mut seen_templates = BitSet::default();
-        let mut inst_remaps: Vec<HashMap<LocalId, LocalId>> =
-            vec![HashMap::new(); self.solved.instances.len()];
+        let mut inst_remaps: Vec<Option<HashMap<LocalId, LocalId>>> =
+            vec![None; self.solved.instances.len()];
         let mut new_functions = Vec::new();
         for inst_i in 1..self.solved.instances.len() {
             if !self.solved.live_instances.contains(inst_i) {
@@ -262,17 +253,24 @@ impl<'h> Emitter<'h, '_> {
             };
             match view.kind {
                 TemplateKind::Function { .. } | TemplateKind::Closure { .. } => {
-                    let keep_original = view.is_exported || view.name.starts_with("__obj_method_");
+                    let keep_original = view.is_exported
+                        || self
+                            .index
+                            .template_is_obj_method
+                            .contains(inst.template.0 as usize);
                     let remap_locals =
                         !keep_original && !seen_templates.insert(inst.template.0 as usize);
                     let inherited = inst
                         .capture_owner
                         .and_then(|owner| inst_remaps.get(owner.0 as usize))
+                        .and_then(|opt| opt.as_ref())
                         .cloned();
                     let (func, remap) =
                         self.emit_function(inst_id, inst, view, remap_locals, inherited)?;
-                    if let Some(slot) = inst_remaps.get_mut(inst_i) {
-                        *slot = remap;
+                    if !remap.is_empty()
+                        && let Some(slot) = inst_remaps.get_mut(inst_i)
+                    {
+                        *slot = Some(remap);
                     }
                     if inst.is_inline_callback || inst.captures_non_global {
                         self.inline_callbacks.push(func.id);
@@ -303,205 +301,211 @@ impl<'h> Emitter<'h, '_> {
         // 3. Emit classes: keep `__AnonShape_*` object-literal classes as-is, emit concrete
         // monomorphic classes for every instantiated user class, and also emit static-only
         // classes that had static methods or fields reached without `new`.
-        let mut new_classes = Vec::with_capacity(self.hir.classes.len());
-        for class in &self.hir.classes {
-            if hir_compat::is_object_literal(&class.name) {
-                new_classes.push(class.clone());
-            }
-        }
+        let mut new_classes: Vec<Class> = self
+            .hir
+            .classes
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| self.index.hir_class_is_literal.contains(i))
+            .map(|(_, c)| c.clone())
+            .collect();
         let mut emitted_class_ids = BitSet::default();
         for cinst_i in 0..self.solved.class_insts.len() {
-            let cinst_id = ClassInstId(cinst_i as u32);
             let Some(cinst) = self.solved.class_insts.get(cinst_i) else {
                 continue;
             };
             emitted_class_ids.insert(cinst.class.0 as usize);
-            let Some(&hir_idx) = self.index.class_hir_idx.get(cinst.class.0 as usize) else {
-                continue;
-            };
-            let Some(orig) = self.hir.classes.get(hir_idx) else {
+            let Some(orig) = self
+                .index
+                .class_hir_idx
+                .get(cinst.class.0 as usize)
+                .and_then(|&i| self.hir.classes.get(i))
+            else {
                 continue;
             };
             if cinst.emitted_name != orig.name {
                 self.class_origins
                     .push((cinst.emitted_name.clone(), orig.name.clone()));
             }
-            let mut fields = Vec::with_capacity(orig.fields.len());
-            for (f_idx, field) in orig.fields.iter().enumerate() {
-                let loc = LocId(cinst.field_loc_base + f_idx as u32);
-                let resolved = self
-                    .solved
-                    .locations
-                    .get(loc.0 as usize)
-                    .copied()
-                    .unwrap_or(Ty::OPEN);
-                let mut f: ClassField = field.clone();
-                if !self.types.is_open(resolved) {
-                    f.ty = self.materialize(resolved);
-                }
-                if let Some(init) = &field.init {
-                    f.init = Some(self.rewrite_expr(init_inst, init, None)?);
-                }
-                fields.push(f);
-            }
-            let mut static_fields = Vec::with_capacity(orig.static_fields.len());
-            for (f_idx, field) in orig.static_fields.iter().enumerate() {
-                let mut f = field.clone();
-                if let Some((_, _, ty)) = self
-                    .solved
-                    .static_fields
-                    .iter()
-                    .find(|(c, i, _)| *c == cinst.class && *i == f_idx)
-                    && !self.types.is_open(*ty)
-                {
-                    f.ty = self.materialize(*ty);
-                }
-                if let Some(init) = &field.init {
-                    f.init = Some(self.rewrite_expr(init_inst, init, None)?);
-                }
-                static_fields.push(f);
-            }
-
-            let constructor = match cinst.ctor_inst {
-                Some(ctor_id) => {
-                    let inst = self.solved.instances.get(ctor_id.0 as usize);
-                    let view = inst.and_then(|i| self.index.view(i.template));
-                    match (inst, view) {
-                        (Some(inst), Some(view)) => {
-                            let (f, _) = self.emit_function(ctor_id, inst, view, false, None)?;
-                            Some(f)
-                        }
-                        _ => orig.constructor.clone(),
-                    }
-                }
-                None => orig.constructor.clone(),
-            };
-
-            let mut methods = Vec::new();
-            let mut static_methods = Vec::new();
-            let mut getters = Vec::new();
-            let mut setters = Vec::new();
-            for inst_i in 1..self.solved.instances.len() {
-                let inst_id = InstanceId(inst_i as u32);
-                let Some(inst) = self.solved.instances.get(inst_i) else {
-                    continue;
-                };
-                let Some(view) = self.index.view(inst.template) else {
-                    continue;
-                };
-                match view.kind {
-                    TemplateKind::ClassMethod { class, .. }
-                        if class == cinst.class && inst.receiver == Some(cinst_id) =>
-                    {
-                        let (mut m, _) = self.emit_function(inst_id, inst, view, false, None)?;
-                        m.name = inst.emitted_method_name.clone();
-                        methods.push(m);
-                    }
-                    TemplateKind::ClassStaticMethod { class, .. } if class == cinst.class => {
-                        let (mut m, _) = self.emit_function(inst_id, inst, view, false, None)?;
-                        m.name = inst.emitted_method_name.clone();
-                        static_methods.push(m);
-                    }
-                    TemplateKind::ClassGetter {
-                        class, getter_idx, ..
-                    } if class == cinst.class && inst.receiver == Some(cinst_id) => {
-                        let (g, _) = self.emit_function(inst_id, inst, view, false, None)?;
-                        let prop = orig
-                            .getters
-                            .get(getter_idx)
-                            .map_or(view.name, |(n, _)| n.as_str())
-                            .to_owned();
-                        getters.push((prop, g));
-                    }
-                    TemplateKind::ClassSetter {
-                        class, setter_idx, ..
-                    } if class == cinst.class && inst.receiver == Some(cinst_id) => {
-                        let (s, _) = self.emit_function(inst_id, inst, view, false, None)?;
-                        let prop = orig
-                            .setters
-                            .get(setter_idx)
-                            .map_or(view.name, |(n, _)| n.as_str())
-                            .to_owned();
-                        setters.push((prop, s));
-                    }
-                    _ => {}
-                }
-            }
-
-            let mut emitted_class = orig.clone();
-            emitted_class.name = cinst.emitted_name.clone();
-            emitted_class.type_params.clear();
-            emitted_class.fields = fields;
-            emitted_class.static_fields = static_fields;
-            emitted_class.constructor = constructor;
-            emitted_class.methods = methods;
-            emitted_class.static_methods = static_methods;
-            emitted_class.getters = getters;
-            emitted_class.setters = setters;
-            new_classes.push(emitted_class);
+            new_classes.push(self.emit_instantiated_class(init_inst, cinst_i, cinst, orig)?);
         }
-
-        // Emit classes that were never constructed with `new` but have reached static methods/fields.
         for (cid_i, &hir_idx) in self.index.class_hir_idx.iter().enumerate() {
             if emitted_class_ids.contains(cid_i) {
                 continue;
             }
-            let cid = ClassId(cid_i as u32);
             let Some(orig) = self.hir.classes.get(hir_idx) else {
                 continue;
             };
-            let mut static_methods = Vec::new();
-            for inst_i in 1..self.solved.instances.len() {
-                let inst_id = InstanceId(inst_i as u32);
-                let Some(inst) = self.solved.instances.get(inst_i) else {
-                    continue;
-                };
-                let Some(view) = self.index.view(inst.template) else {
-                    continue;
-                };
-                if let TemplateKind::ClassStaticMethod { class, .. } = view.kind
-                    && class == cid
-                {
-                    let (mut m, _) = self.emit_function(inst_id, inst, view, false, None)?;
-                    m.name = inst.emitted_method_name.clone();
-                    static_methods.push(m);
-                }
-            }
+            let static_methods = self.emit_named_methods(
+                self.solved
+                    .class_static_methods
+                    .get(cid_i)
+                    .map_or(&[], Vec::as_slice),
+            )?;
             if static_methods.is_empty()
                 && orig.static_fields.is_empty()
                 && orig.extends_name.is_none()
             {
                 continue;
             }
-            let mut static_fields = Vec::with_capacity(orig.static_fields.len());
-            for (f_idx, field) in orig.static_fields.iter().enumerate() {
-                let mut f = field.clone();
-                if let Some((_, _, ty)) = self
-                    .solved
-                    .static_fields
-                    .iter()
-                    .find(|(c, i, _)| *c == cid && *i == f_idx)
-                    && !self.types.is_open(*ty)
-                {
-                    f.ty = self.materialize(*ty);
-                }
-                if let Some(init) = &field.init {
-                    f.init = Some(self.rewrite_expr(init_inst, init, None)?);
-                }
-                static_fields.push(f);
-            }
-            let mut emitted_class = orig.clone();
-            emitted_class.type_params.clear();
-            emitted_class.constructor = None;
-            emitted_class.methods.clear();
-            emitted_class.getters.clear();
-            emitted_class.setters.clear();
-            emitted_class.static_fields = static_fields;
-            emitted_class.static_methods = static_methods;
-            new_classes.push(emitted_class);
+            let mut cls = orig.clone();
+            cls.type_params.clear();
+            cls.constructor = None;
+            cls.methods.clear();
+            cls.getters.clear();
+            cls.setters.clear();
+            cls.static_fields = self.emit_static_fields(init_inst, cid_i, orig)?;
+            cls.static_methods = static_methods;
+            new_classes.push(cls);
         }
 
         Ok((new_init, new_functions, new_classes))
+    }
+
+    fn emit_instantiated_class(
+        &mut self,
+        init_inst: InstanceId,
+        cinst_i: usize,
+        cinst: &super::solve::ClassInst,
+        orig: &'h Class,
+    ) -> Result<Class> {
+        let mut fields = Vec::with_capacity(orig.fields.len());
+        for (f_idx, field) in orig.fields.iter().enumerate() {
+            let resolved = self.solved.locations[(cinst.field_loc_base + f_idx as u32) as usize];
+            let mut f = field.clone();
+            if self.is_resolved(resolved) {
+                f.ty = self.materialize(resolved);
+            } else if matches!(
+                self.types.kind(resolved),
+                TyKind::Cell {
+                    kind: CellKind::Array,
+                    ..
+                }
+            ) {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "an empty array literal needs a declared element type"
+                )
+                .with_help(format!(
+                    "Add a concrete element type annotation to field '{}'.",
+                    field.name
+                )));
+            } else if resolved == Ty::BOTTOM && matches!(field.ty, HirType::Any | HirType::Unknown)
+            {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "the value type cannot be inferred in field '{}'",
+                    field.name
+                )
+                .with_help(
+                    "Add a concrete type annotation to this binding, parameter, or function return.",
+                ));
+            }
+            if let Some(init) = &field.init {
+                f.init = Some(self.rewrite_expr(init_inst, init, None)?);
+            }
+            fields.push(f);
+        }
+        let constructor = match cinst.ctor_inst {
+            Some(ctor_id)
+                if let Some(inst) = self.solved.instances.get(ctor_id.0 as usize)
+                    && let Some(view) = self.index.view(inst.template) =>
+            {
+                Some(self.emit_function(ctor_id, inst, view, false, None)?.0)
+            }
+            _ => orig.constructor.clone(),
+        };
+        let mut cls = orig.clone();
+        cls.name = cinst.emitted_name.clone();
+        cls.type_params.clear();
+        cls.fields = fields;
+        cls.static_fields = self.emit_static_fields(init_inst, cinst.class.0 as usize, orig)?;
+        cls.constructor = constructor;
+        cls.methods = self.emit_named_methods(
+            self.solved
+                .class_inst_methods
+                .get(cinst_i)
+                .map_or(&[], Vec::as_slice),
+        )?;
+        cls.static_methods = self.emit_named_methods(
+            self.solved
+                .class_static_methods
+                .get(cinst.class.0 as usize)
+                .map_or(&[], Vec::as_slice),
+        )?;
+        cls.getters = self.emit_accessors(
+            self.solved
+                .class_inst_getters
+                .get(cinst_i)
+                .map_or(&[], Vec::as_slice),
+            &orig.getters,
+        )?;
+        cls.setters = self.emit_accessors(
+            self.solved
+                .class_inst_setters
+                .get(cinst_i)
+                .map_or(&[], Vec::as_slice),
+            &orig.setters,
+        )?;
+        Ok(cls)
+    }
+
+    fn emit_static_fields(
+        &mut self,
+        init_inst: InstanceId,
+        cid_i: usize,
+        orig: &'h Class,
+    ) -> Result<Vec<ClassField>> {
+        let mut out = Vec::with_capacity(orig.static_fields.len());
+        let static_tys = self.solved.class_static_field_tys.get(cid_i);
+        for (f_idx, field) in orig.static_fields.iter().enumerate() {
+            let mut f = field.clone();
+            if let Some(&ty) = static_tys.and_then(|tys| tys.get(f_idx))
+                && self.is_resolved(ty)
+            {
+                f.ty = self.materialize(ty);
+            }
+            if let Some(init) = &field.init {
+                f.init = Some(self.rewrite_expr(init_inst, init, None)?);
+            }
+            out.push(f);
+        }
+        Ok(out)
+    }
+
+    fn emit_named_methods(&mut self, ids: &[InstanceId]) -> Result<Vec<Function>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for &inst_id in ids {
+            let inst = &self.solved.instances[inst_id.0 as usize];
+            let Some(view) = self.index.view(inst.template) else {
+                continue;
+            };
+            let (mut m, _) = self.emit_function(inst_id, inst, view, false, None)?;
+            m.name = inst.emitted_method_name.clone();
+            out.push(m);
+        }
+        Ok(out)
+    }
+
+    fn emit_accessors(
+        &mut self,
+        ids: &[(usize, InstanceId)],
+        orig: &[(String, Function)],
+    ) -> Result<Vec<(String, Function)>> {
+        let mut out = Vec::with_capacity(ids.len());
+        for &(acc_idx, inst_id) in ids {
+            let inst = &self.solved.instances[inst_id.0 as usize];
+            let Some(view) = self.index.view(inst.template) else {
+                continue;
+            };
+            let (f, _) = self.emit_function(inst_id, inst, view, false, None)?;
+            let prop = orig
+                .get(acc_idx)
+                .map_or(view.name, |(n, _)| n.as_str())
+                .to_owned();
+            out.push((prop, f));
+        }
+        Ok(out)
     }
 
     fn emit_function(
@@ -518,13 +522,19 @@ impl<'h> Emitter<'h, '_> {
         let mut static_func_params: Vec<(LocalId, FuncId)> = Vec::new();
 
         for (p_idx, param) in view.params.iter().enumerate() {
-            let param_ty = self
+            let param_loc = *self
                 .solved
                 .param_locs
                 .get(inst.param_locs.range())
                 .and_then(|slice| slice.get(p_idx))
-                .and_then(|loc| self.solved.locations.get(loc.0 as usize).copied())
-                .unwrap_or(Ty::OPEN);
+                .ok_or_else(|| {
+                    Diagnostic::internal("emitted function missing parameter location slot")
+                })?;
+            let param_ty = *self
+                .solved
+                .locations
+                .get(param_loc.0 as usize)
+                .ok_or_else(|| Diagnostic::internal("parameter location out of range"))?;
             if let TyKind::Func(ident) = self.types.kind(param_ty) {
                 // Static function parameter: bind to its specialized instance and drop from runtime params.
                 if let Some(target_inst) = self.find_func_identity_instance(ident) {
@@ -533,8 +543,33 @@ impl<'h> Emitter<'h, '_> {
                 continue;
             }
             let mut new_param: Param = param.clone();
-            if !self.types.is_open(param_ty) {
+            if self.is_resolved(param_ty) {
                 new_param.ty = self.materialize(param_ty);
+            } else {
+                let annotated = self
+                    .index
+                    .local_idx(param.id)
+                    .is_some_and(|li| self.index.local_param_annotated.contains(li.0 as usize));
+                if !annotated
+                    && !view.is_exported
+                    && !self
+                        .index
+                        .template_is_obj_method
+                        .contains(inst.template.0 as usize)
+                    && matches!(param.ty, HirType::Any | HirType::Unknown)
+                {
+                    let err = diag!(
+                        codes::MISSING_TYPE_ANNOTATION,
+                        "cannot infer the type of parameter '{}' of '{}'",
+                        param.name,
+                        view.display_name()
+                    )
+                    .with_help(
+                        "Add a concrete type annotation to this binding, parameter, or function return.",
+                    );
+                    let err = self.annotate_local(err, param.id);
+                    return Err(self.attach_inst_chain(err, inst_id));
+                }
             }
             if remap_locals {
                 new_param.id = self.fresh_local(param.id, &mut remap)?;
@@ -546,13 +581,8 @@ impl<'h> Emitter<'h, '_> {
             params.push(new_param);
         }
 
-        let ret_ty = self
-            .solved
-            .locations
-            .get(inst.return_loc.0 as usize)
-            .copied()
-            .unwrap_or(Ty::VOID);
-        let return_type = if !self.types.is_open(ret_ty) {
+        let ret_ty = self.solved.locations[inst.return_loc.0 as usize];
+        let return_type = if self.is_resolved(ret_ty) {
             self.materialize(ret_ty)
         } else {
             view.return_type.clone()
@@ -572,9 +602,11 @@ impl<'h> Emitter<'h, '_> {
         }
 
         let mut captures: Vec<LocalId> = view.captures.to_vec();
-        for (i, cap) in &self.solved.instance_captures {
-            if *i == inst_id && !captures.contains(cap) {
-                captures.push(*cap);
+        if let Some(extra_caps) = self.solved.inst_captures.get(inst_id.0 as usize) {
+            for &cap in extra_caps {
+                if !captures.contains(&cap) {
+                    captures.push(cap);
+                }
             }
         }
         if !remap.is_empty() {
@@ -593,9 +625,14 @@ impl<'h> Emitter<'h, '_> {
                 .and_then(|c| self.solved.instances.get(c.0 as usize))
                 .filter(|c| c.template != TemplateId(0))
                 .map(|c| c.emitted_name.clone());
+            let template_display = if view.name.is_empty() {
+                format!("callback_{}", view.func_id)
+            } else {
+                view.name.to_owned()
+            };
             self.instantiations.push((
                 inst.emitted_name.clone(),
-                view.name.to_owned(),
+                template_display,
                 inst.call_byte_offset,
                 caller_name,
             ));
@@ -625,15 +662,14 @@ impl<'h> Emitter<'h, '_> {
 
     fn find_func_identity_instance(&self, ident: super::types::FuncIdentity) -> Option<FuncId> {
         self.solved
-            .instances
-            .iter()
-            .enumerate()
-            .find(|(idx, i)| {
-                self.solved.live_instances.contains(*idx)
-                    && i.template == ident.template
-                    && i.capture_owner == ident.capture_owner
+            .template_instances
+            .get(ident.template.0 as usize)
+            .and_then(|ids| {
+                ids.iter().find_map(|&inst_id| {
+                    let inst = self.solved.instances.get(inst_id.0 as usize)?;
+                    (inst.capture_owner == ident.capture_owner).then_some(inst.emitted_func_id)
+                })
             })
-            .map(|(_, i)| i.emitted_func_id)
             .or_else(|| self.index.view(ident.template).map(|v| v.func_id))
     }
 
@@ -736,10 +772,11 @@ impl<'h> Emitter<'h, '_> {
                 if let Some(t) = resolved
                     && let TyKind::Func(ident) = self.types.kind(t)
                 {
-                    let target_fid = self
-                        .find_func_identity_instance(ident)
-                        .or_else(|| self.index.view(ident.template).map(|v| v.func_id))
-                        .unwrap_or(0);
+                    let target_fid = self.find_func_identity_instance(ident).ok_or_else(|| {
+                        Diagnostic::internal(format!(
+                            "unresolved function identity for binding '{name}'"
+                        ))
+                    })?;
                     return Ok(Stmt::Let {
                         id: *id,
                         name: name.clone(),
@@ -748,44 +785,56 @@ impl<'h> Emitter<'h, '_> {
                         init: Some(Expr::FuncRef(target_fid)),
                     });
                 }
-                let is_deferred = self
-                    .index
-                    .local_idx(*id)
-                    .is_some_and(|lidx| self.index.local_deferred.contains(lidx.0 as usize));
                 let new_ty = match resolved {
                     Some(t)
-                        if !self.types.is_open(t)
+                        if self.is_resolved(t)
                             && (is_inferred
                                 || matches!(ty, HirType::Any | HirType::Unknown)
                                 || matches!(ty, HirType::Array(e) if matches!(**e, HirType::Any | HirType::Unknown))
                                 || matches!(self.types.kind(t), TyKind::ClassInst(_))) =>
                     {
-                        if is_inferred && is_deferred && self.needs_json_union_box(t) {
-                            HirType::Unknown
-                        } else {
-                            self.materialize(t)
-                        }
+                        self.materialize(t)
+                    }
+                    Some(t)
+                        if is_inferred
+                            && matches!(
+                                self.types.kind(t),
+                                TyKind::Cell {
+                                    kind: CellKind::Array,
+                                    ..
+                                }
+                            ) =>
+                    {
+                        let err = diag!(
+                            codes::MISSING_TYPE_ANNOTATION,
+                            "an empty array literal needs a declared element type"
+                        )
+                        .with_help(
+                            "Add a concrete element type annotation to this binding (e.g. `const xs: number[] = []`).",
+                        );
+                        let err = self.annotate_local(err, *id);
+                        return Err(self.attach_inst_chain(err, inst_id));
                     }
                     _ => ty.clone(),
-                };
-                let new_init = match init {
-                    Some(e) => Some(self.rewrite_expr(inst_id, e, func_params)?),
-                    None => None,
                 };
                 Ok(Stmt::Let {
                     id: *id,
                     name: name.clone(),
                     ty: new_ty,
                     mutable: *mutable,
-                    init: new_init,
+                    init: init
+                        .as_ref()
+                        .map(|e| self.rewrite_expr(inst_id, e, func_params))
+                        .transpose()?,
                 })
             }
             Stmt::Expr(e) => Ok(Stmt::Expr(self.rewrite_expr(inst_id, e, func_params)?)),
             Stmt::Throw(e) => Ok(Stmt::Throw(self.rewrite_expr(inst_id, e, func_params)?)),
-            Stmt::Return(v) => Ok(Stmt::Return(match v {
-                Some(e) => Some(self.rewrite_expr(inst_id, e, func_params)?),
-                None => None,
-            })),
+            Stmt::Return(v) => Ok(Stmt::Return(
+                v.as_ref()
+                    .map(|e| self.rewrite_expr(inst_id, e, func_params))
+                    .transpose()?,
+            )),
             Stmt::If {
                 condition,
                 then_branch,
@@ -793,10 +842,10 @@ impl<'h> Emitter<'h, '_> {
             } => Ok(Stmt::If {
                 condition: self.rewrite_expr(inst_id, condition, func_params)?,
                 then_branch: self.rewrite_stmts(inst_id, then_branch, func_params)?,
-                else_branch: match else_branch {
-                    Some(b) => Some(self.rewrite_stmts(inst_id, b, func_params)?),
-                    None => None,
-                },
+                else_branch: else_branch
+                    .as_deref()
+                    .map(|b| self.rewrite_stmts(inst_id, b, func_params))
+                    .transpose()?,
             }),
             Stmt::While { condition, body } => Ok(Stmt::While {
                 condition: self.rewrite_expr(inst_id, condition, func_params)?,
@@ -812,18 +861,18 @@ impl<'h> Emitter<'h, '_> {
                 update,
                 body,
             } => Ok(Stmt::For {
-                init: match init {
-                    Some(s) => Some(Box::new(self.rewrite_stmt(inst_id, s, func_params)?)),
-                    None => None,
-                },
-                condition: match condition {
-                    Some(e) => Some(self.rewrite_expr(inst_id, e, func_params)?),
-                    None => None,
-                },
-                update: match update {
-                    Some(e) => Some(self.rewrite_expr(inst_id, e, func_params)?),
-                    None => None,
-                },
+                init: init
+                    .as_deref()
+                    .map(|s| self.rewrite_stmt(inst_id, s, func_params).map(Box::new))
+                    .transpose()?,
+                condition: condition
+                    .as_ref()
+                    .map(|e| self.rewrite_expr(inst_id, e, func_params))
+                    .transpose()?,
+                update: update
+                    .as_ref()
+                    .map(|e| self.rewrite_expr(inst_id, e, func_params))
+                    .transpose()?,
                 body: self.rewrite_stmts(inst_id, body, func_params)?,
             }),
             Stmt::Try {
@@ -833,38 +882,40 @@ impl<'h> Emitter<'h, '_> {
                 forof_completion,
             } => Ok(Stmt::Try {
                 body: self.rewrite_stmts(inst_id, body, func_params)?,
-                catch: match catch {
-                    Some(c) => Some(perry_hir::ir::CatchClause {
-                        param: c.param.clone(),
-                        body: self.rewrite_stmts(inst_id, &c.body, func_params)?,
-                    }),
-                    None => None,
-                },
-                finally: match finally {
-                    Some(f) => Some(self.rewrite_stmts(inst_id, f, func_params)?),
-                    None => None,
-                },
+                catch: catch
+                    .as_ref()
+                    .map(|c| {
+                        Ok::<_, Diagnostic>(perry_hir::ir::CatchClause {
+                            param: c.param.clone(),
+                            body: self.rewrite_stmts(inst_id, &c.body, func_params)?,
+                        })
+                    })
+                    .transpose()?,
+                finally: finally
+                    .as_deref()
+                    .map(|f| self.rewrite_stmts(inst_id, f, func_params))
+                    .transpose()?,
                 forof_completion: *forof_completion,
             }),
             Stmt::Switch {
                 discriminant,
                 cases,
-            } => {
-                let mut new_cases = Vec::with_capacity(cases.len());
-                for case in cases {
-                    new_cases.push(perry_hir::ir::SwitchCase {
-                        test: match &case.test {
-                            Some(t) => Some(self.rewrite_expr(inst_id, t, func_params)?),
-                            None => None,
-                        },
-                        body: self.rewrite_stmts(inst_id, &case.body, func_params)?,
-                    });
-                }
-                Ok(Stmt::Switch {
-                    discriminant: self.rewrite_expr(inst_id, discriminant, func_params)?,
-                    cases: new_cases,
-                })
-            }
+            } => Ok(Stmt::Switch {
+                discriminant: self.rewrite_expr(inst_id, discriminant, func_params)?,
+                cases: cases
+                    .iter()
+                    .map(|c| {
+                        Ok(perry_hir::ir::SwitchCase {
+                            test: c
+                                .test
+                                .as_ref()
+                                .map(|t| self.rewrite_expr(inst_id, t, func_params))
+                                .transpose()?,
+                            body: self.rewrite_stmts(inst_id, &c.body, func_params)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            }),
             Stmt::Labeled { label, body } => Ok(Stmt::Labeled {
                 label: label.clone(),
                 body: Box::new(self.rewrite_stmt(inst_id, body, func_params)?),
@@ -886,86 +937,46 @@ impl<'h> Emitter<'h, '_> {
                     target,
                     keep_inline_closure,
                 } => {
+                    let target_inst = self
+                        .solved
+                        .instances
+                        .get(target.0 as usize)
+                        .ok_or_else(|| Diagnostic::internal("missing callback target instance"))?;
                     if !keep_inline_closure {
-                        let fid = self
-                            .solved
-                            .instances
-                            .get(target.0 as usize)
-                            .map_or(0, |i| i.emitted_func_id);
-                        return Ok(Expr::FuncRef(fid));
+                        return Ok(Expr::FuncRef(target_inst.emitted_func_id));
                     }
-                    if let Expr::Closure {
-                        func_id,
-                        params,
-                        body,
-                        captures,
-                        mutable_captures,
-                        captures_this,
-                        captures_new_target,
-                        enclosing_class,
-                        is_async,
-                        is_generator,
-                        is_strict,
-                        is_arrow,
-                        construct_only,
-                        ..
-                    } = expr
-                    {
-                        let ret_ty = self
-                            .solved
-                            .instances
-                            .get(target.0 as usize)
-                            .and_then(|i| {
-                                self.solved.locations.get(i.return_loc.0 as usize).copied()
-                            })
-                            .map_or(HirType::Void, |t| self.materialize(t));
-                        let mut new_params = Vec::with_capacity(params.len());
-                        let param_span = self
-                            .solved
-                            .instances
-                            .get(target.0 as usize)
-                            .map(|i| i.param_locs);
-                        for (i, p) in params.iter().enumerate() {
-                            let mut np = p.clone();
-                            if let Some(span) = param_span
-                                && let Some(loc) = self
-                                    .solved
-                                    .param_locs
-                                    .get(span.range())
-                                    .and_then(|slice| slice.get(i))
-                                && let Some(&ty) = self.solved.locations.get(loc.0 as usize)
-                                && !self.types.is_open(ty)
-                            {
-                                np.ty = self.materialize(ty);
+                    if let Expr::Closure { body, .. } = expr {
+                        let mut out = expr.clone();
+                        if let Expr::Closure {
+                            params,
+                            return_type,
+                            body: out_body,
+                            ..
+                        } = &mut out
+                        {
+                            *return_type = self.materialize(
+                                self.solved.locations[target_inst.return_loc.0 as usize],
+                            );
+                            let plocs = self
+                                .solved
+                                .param_locs
+                                .get(target_inst.param_locs.range())
+                                .unwrap_or(&[]);
+                            for (p, &loc) in params.iter_mut().zip(plocs) {
+                                let ty = self.solved.locations[loc.0 as usize];
+                                if self.is_resolved(ty) {
+                                    p.ty = self.materialize(ty);
+                                }
                             }
-                            new_params.push(np);
+                            *out_body = self.rewrite_stmts(target, body, None)?;
                         }
-                        let new_body = self.rewrite_stmts(target, body, None)?;
-                        return Ok(Expr::Closure {
-                            func_id: *func_id,
-                            params: new_params,
-                            return_type: ret_ty,
-                            body: new_body,
-                            captures: captures.clone(),
-                            mutable_captures: mutable_captures.clone(),
-                            captures_this: *captures_this,
-                            captures_new_target: *captures_new_target,
-                            enclosing_class: enclosing_class.clone(),
-                            is_async: *is_async,
-                            is_generator: *is_generator,
-                            is_strict: *is_strict,
-                            is_arrow: *is_arrow,
-                            construct_only: *construct_only,
-                        });
+                        return Ok(out);
                     }
                 }
                 SiteResolution::CollectionNew { is_map, type_args } => {
-                    let name = if is_map { "\0perry_Map" } else { "\0perry_Set" };
-                    let materialized: Vec<HirType> =
-                        type_args.into_iter().map(|t| self.materialize(t)).collect();
                     return Ok(Expr::New {
-                        class_name: name.into(),
-                        type_args: materialized,
+                        class_name: if is_map { "\0perry_Map" } else { "\0perry_Set" }.into(),
+                        type_args: type_args.into_iter().map(|t| self.materialize(t)).collect(),
                         args: Vec::new(),
                         byte_offset: 0,
                         byte_end: 0,
@@ -980,135 +991,145 @@ impl<'h> Emitter<'h, '_> {
                         .solved
                         .instances
                         .get(target.0 as usize)
-                        .map_or(0, |i| i.emitted_func_id);
-                    if let Expr::Call {
-                        args,
-                        byte_offset,
-                        byte_end,
-                        ..
-                    } = expr
-                    {
-                        let mut new_args = Vec::with_capacity(args.len());
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
-                                continue;
-                            }
-                            new_args.push(self.rewrite_expr(inst_id, arg, func_params)?);
+                        .ok_or_else(|| Diagnostic::internal("missing direct call target instance"))?
+                        .emitted_func_id;
+                    let mut out = expr.clone();
+                    match (expr, &mut out) {
+                        (
+                            Expr::Call { args, .. },
+                            Expr::Call {
+                                callee,
+                                args: out_args,
+                                type_args,
+                                ..
+                            },
+                        ) => {
+                            **callee = Expr::FuncRef(fid);
+                            *out_args = self.rewrite_filtered_args(
+                                inst_id,
+                                args,
+                                strip_arg_mask,
+                                func_params,
+                            )?;
+                            type_args.clear();
+                            return Ok(out);
                         }
-                        return Ok(Expr::Call {
-                            callee: Box::new(Expr::FuncRef(fid)),
-                            args: new_args,
-                            type_args: Vec::new(),
-                            byte_offset: *byte_offset,
-                            byte_end: *byte_end,
-                        });
-                    }
-                    if let Expr::CallSpread {
-                        args,
-                        type_args,
-                        byte_offset,
-                        byte_end,
-                        ..
-                    } = expr
-                    {
-                        let mut new_args = Vec::with_capacity(args.len());
-                        for arg in args {
-                            new_args.push(match arg {
-                                perry_hir::ir::CallArg::Expr(e) => perry_hir::ir::CallArg::Expr(
-                                    self.rewrite_expr(inst_id, e, func_params)?,
-                                ),
-                                perry_hir::ir::CallArg::Spread(e) => {
-                                    perry_hir::ir::CallArg::Spread(self.rewrite_expr(
-                                        inst_id,
-                                        e,
-                                        func_params,
-                                    )?)
+                        (
+                            Expr::CallSpread { args, .. },
+                            Expr::CallSpread {
+                                callee,
+                                args: out_args,
+                                ..
+                            },
+                        ) => {
+                            **callee = Expr::FuncRef(fid);
+                            for (orig_a, out_a) in args.iter().zip(out_args.iter_mut()) {
+                                match (orig_a, out_a) {
+                                    (
+                                        perry_hir::ir::CallArg::Expr(e),
+                                        perry_hir::ir::CallArg::Expr(o),
+                                    )
+                                    | (
+                                        perry_hir::ir::CallArg::Spread(e),
+                                        perry_hir::ir::CallArg::Spread(o),
+                                    ) => *o = self.rewrite_expr(inst_id, e, func_params)?,
+                                    _ => {}
                                 }
-                            });
+                            }
+                            return Ok(out);
                         }
-                        return Ok(Expr::CallSpread {
-                            callee: Box::new(Expr::FuncRef(fid)),
-                            args: new_args,
-                            type_args: type_args.clone(),
-                            byte_offset: *byte_offset,
-                            byte_end: *byte_end,
-                        });
+                        _ => {}
                     }
                 }
                 SiteResolution::MethodCall {
                     target,
                     strip_arg_mask,
                 } => {
-                    if let Expr::Call {
-                        callee,
-                        args,
-                        byte_offset,
-                        byte_end,
-                        ..
-                    } = expr
-                        && let Expr::PropertyGet {
-                            object,
-                            byte_offset: prop_offset,
-                            byte_end: prop_end,
-                            ..
-                        } = callee.as_ref()
-                    {
-                        let method_name = self
-                            .solved
-                            .instances
-                            .get(target.0 as usize)
-                            .map(|i| i.emitted_method_name.clone())
-                            .unwrap_or_default();
-                        let new_obj = self.rewrite_expr(inst_id, object, func_params)?;
-                        let mut new_args = Vec::with_capacity(args.len());
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
-                                continue;
-                            }
-                            new_args.push(self.rewrite_expr(inst_id, arg, func_params)?);
+                    let method_name = self
+                        .solved
+                        .instances
+                        .get(target.0 as usize)
+                        .ok_or_else(|| Diagnostic::internal("missing method call target instance"))?
+                        .emitted_method_name
+                        .clone();
+                    let mut out = expr.clone();
+                    match (expr, &mut out) {
+                        (
+                            Expr::StaticMethodCall { args, .. },
+                            Expr::StaticMethodCall {
+                                method_name: out_name,
+                                args: out_args,
+                                ..
+                            },
+                        ) => {
+                            *out_name = method_name;
+                            *out_args = self.rewrite_filtered_args(
+                                inst_id,
+                                args,
+                                strip_arg_mask,
+                                func_params,
+                            )?;
+                            return Ok(out);
                         }
-                        return Ok(Expr::Call {
-                            callee: Box::new(Expr::PropertyGet {
-                                object: Box::new(new_obj),
-                                property: method_name,
-                                byte_offset: *prop_offset,
-                                byte_end: *prop_end,
-                            }),
-                            args: new_args,
-                            type_args: Vec::new(),
-                            byte_offset: *byte_offset,
-                            byte_end: *byte_end,
-                        });
+                        (
+                            Expr::Call { callee, args, .. },
+                            Expr::Call {
+                                callee: out_callee,
+                                args: out_args,
+                                type_args,
+                                ..
+                            },
+                        ) if matches!(callee.as_ref(), Expr::PropertyGet { .. }) => {
+                            if let (
+                                Expr::PropertyGet { object, .. },
+                                Expr::PropertyGet {
+                                    object: out_obj,
+                                    property,
+                                    ..
+                                },
+                            ) = (callee.as_ref(), out_callee.as_mut())
+                            {
+                                **out_obj = self.rewrite_expr(inst_id, object, func_params)?;
+                                *property = method_name;
+                            }
+                            *out_args = self.rewrite_filtered_args(
+                                inst_id,
+                                args,
+                                strip_arg_mask,
+                                func_params,
+                            )?;
+                            type_args.clear();
+                            return Ok(out);
+                        }
+                        _ => {}
                     }
                 }
                 SiteResolution::ClassNew {
                     class_inst,
                     strip_arg_mask,
                 } => {
-                    if let Expr::New {
-                        args,
-                        byte_offset,
-                        byte_end,
-                        cap_args_appended,
-                        ..
-                    } = expr
-                    {
-                        let name = self.class_inst_name(class_inst).unwrap_or_default();
-                        let mut new_args = Vec::with_capacity(args.len());
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
-                                continue;
-                            }
-                            new_args.push(self.rewrite_expr(inst_id, arg, func_params)?);
+                    if let Expr::New { args, .. } = expr {
+                        let name = self
+                            .class_inst_name(class_inst)
+                            .ok_or_else(|| Diagnostic::internal("missing class instance name"))?;
+                        let mut out = expr.clone();
+                        if let Expr::New {
+                            class_name,
+                            type_args,
+                            args: out_args,
+                            ..
+                        } = &mut out
+                        {
+                            *class_name = name;
+                            type_args.clear();
+                            *out_args = self.rewrite_filtered_args(
+                                inst_id,
+                                args,
+                                strip_arg_mask,
+                                func_params,
+                            )?;
                         }
-                        return Ok(Expr::New {
-                            class_name: name,
-                            type_args: Vec::new(),
-                            args: new_args,
-                            byte_offset: *byte_offset,
-                            byte_end: *byte_end,
-                            cap_args_appended: *cap_args_appended,
-                        });
+                        return Ok(out);
                     }
                 }
             }
@@ -1125,6 +1146,23 @@ impl<'h> Emitter<'h, '_> {
         let mut cloned = expr.clone();
         self.rewrite_expr_children_in_place(inst_id, expr, &mut cloned, func_params)?;
         Ok(cloned)
+    }
+
+    fn rewrite_filtered_args(
+        &mut self,
+        inst_id: InstanceId,
+        args: &'h [Expr],
+        strip_arg_mask: u64,
+        func_params: Option<&[(LocalId, FuncId)]>,
+    ) -> Result<Vec<Expr>> {
+        let mut out = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
+                continue;
+            }
+            out.push(self.rewrite_expr(inst_id, arg, func_params)?);
+        }
+        Ok(out)
     }
 
     fn rewrite_expr_children_in_place(

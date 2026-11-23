@@ -6,15 +6,17 @@
 //! - One CSR compressed reader adjacency `(reader_offsets, reader_instances)` built from recorded
 //!   read dependencies `(LocId, InstanceId)`.
 //! - One `worklist: Vec<InstanceId>` guarded by a `queued: BitSet`.
-//! - One `FlatHashIndex` over `instances` + `instance_args` for `(TemplateId, receiver, args)`.
+//! - Standard `HashMap` tables for interning `(TemplateId, receiver, args)` and `(ClassId, args)`.
+//! - Strictly-local (non-escaping) bindings live in dense per-instance frame slots (`inst_frame_locals`)
+//!   without allocating global locations or CSR dependency edges.
 mod calls;
 mod eval;
 mod expr;
 use super::bitset::BitSet;
-use super::boundary::{AggregateKind, ModuleIndex, SourceFacts, TemplateKind};
-use super::builtins::{self, CallbackContract, MethodResultArgs};
+use super::boundary::{ModuleIndex, SourceFacts, TemplateKind};
+use super::builtins::{self, CallbackContract, MethodResultArgs, PredicateResult};
 use super::types::{
-    ClassId, ClassInstId, FlatHashIndex, FuncIdentity, InstanceId, LocId, LocalIdx, ObjectProp,
+    CellKind, ClassId, ClassInstId, FuncIdentity, InstanceId, LocId, LocalIdx, ObjectProp,
     TemplateId, Ty, TyKind, TySpan, TypeTable,
 };
 use crate::{
@@ -24,6 +26,7 @@ use crate::{
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
 };
+use eval::{callable_arg_mask, constructor_init_expr, first_type_var_name};
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
@@ -31,7 +34,6 @@ use perry_hir::{
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 use pliron::context::Context;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 const INSTANCE_BUDGET: u16 = 256;
 const MAX_WAVES: usize = 512;
@@ -95,27 +97,52 @@ pub(crate) enum SiteResolution {
 }
 
 /// Output of the solver handed to `emit.rs` after borrowing of `&HirModule` ends.
+///
+/// Every lookup table is indexed directly by `InstanceId`, `ClassInstId`, `ClassId`, `TemplateId`,
+/// or `LocalIdx` so emission performs zero linear scans over instances or flat tuple lists.
 pub(crate) struct Solved {
     pub(crate) instances: Vec<Instance>,
     pub(crate) class_insts: Vec<ClassInst>,
     pub(crate) locations: Vec<Ty>,
     /// Per-instance parameter `LocId`s (indexed by `Instance::param_locs`).
     pub(crate) param_locs: Vec<LocId>,
-    /// Per-instance local bindings `(InstanceId, LocalId, Ty)`.
-    pub(crate) instance_locals: Vec<(InstanceId, LocalId, Ty)>,
-    /// Sorted per-instance site resolutions `(InstanceId, expr_addr, SiteResolution)`.
-    pub(crate) sites: Vec<(InstanceId, usize, SiteResolution)>,
-    /// Transitive non-global captured `LocalId`s per instance `(InstanceId, LocalId)`.
-    pub(crate) instance_captures: Vec<(InstanceId, LocalId)>,
-    /// Instances reachable from roots through final-wave sites (prunes stale transient wave clones).
+    /// Per-instance resolved local types (for captured/parameter locals), indexed by `InstanceId`.
+    pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
+    /// Per-instance strictly-local (non-escaping) binding types, indexed by `[inst_id][frame_slot]`.
+    pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
+    /// Per-instance site resolutions, indexed by `[inst_id][local_site]`.
+    pub(crate) inst_sites: Vec<Vec<Option<SiteResolution>>>,
+    /// Per-instance transitive non-global captured `LocalId`s, indexed by `InstanceId`.
+    pub(crate) inst_captures: Vec<Vec<LocalId>>,
+    /// Instances reachable from roots through final-wave sites.
     pub(crate) live_instances: BitSet,
-    /// Module-level resolved binding types `(LocalId, Ty)`.
-    pub(crate) module_bindings: Vec<(LocalId, Ty)>,
-    /// Class static field resolved types `(ClassId, field_idx, Ty)`.
-    pub(crate) static_fields: Vec<(ClassId, usize, Ty)>,
+    /// Module-level resolved binding types, indexed directly by `LocalIdx`.
+    pub(crate) module_local_tys: Vec<Option<Ty>>,
+    /// Class static field resolved types, indexed by `[ClassId][field_idx]`.
+    pub(crate) class_static_field_tys: Vec<Vec<Ty>>,
+    /// Live instance-method instances grouped by `ClassInstId`.
+    pub(crate) class_inst_methods: Vec<Vec<InstanceId>>,
+    /// Live getter instances `(getter_idx, InstanceId)` grouped by `ClassInstId`.
+    pub(crate) class_inst_getters: Vec<Vec<(usize, InstanceId)>>,
+    /// Live setter instances `(setter_idx, InstanceId)` grouped by `ClassInstId`.
+    pub(crate) class_inst_setters: Vec<Vec<(usize, InstanceId)>>,
+    /// Live static-method instances grouped by `ClassId`.
+    pub(crate) class_static_methods: Vec<Vec<InstanceId>>,
+    /// Live instances grouped by `TemplateId` (for O(1) function-identity resolution).
+    pub(crate) template_instances: Vec<Vec<InstanceId>>,
+    /// Empty-object cell `LocId`s whose elements/properties were read (gates non-primitive dicts).
+    pub(crate) dict_reads: BitSet,
     /// Whether `delete` targeted an array-typed expression (making module arrays potentially sparse).
     pub(crate) deletes_array_elements: bool,
 }
+
+type InstanceKey = (
+    TemplateId,
+    Option<ClassInstId>,
+    Option<InstanceId>,
+    Box<[Ty]>,
+    Box<[Ty]>,
+);
 
 struct ResultContract {
     inst: InstanceId,
@@ -139,17 +166,12 @@ struct InstanceReq<'a> {
 struct EvalState<'h> {
     guards: Guards<'h>,
     iteration: hir_compat::Iteration,
+    local_changed: bool,
 }
 
 struct InstanceLocalSlot {
     local: LocalIdx,
     loc: LocId,
-}
-
-struct AggregateSlot {
-    local: LocalIdx,
-    loc: LocId,
-    kind: AggregateKind,
 }
 
 pub(crate) fn solve<'h>(
@@ -204,34 +226,34 @@ struct Solver<'h, 'a> {
     instances: Vec<Instance>,
     instance_args: Vec<Ty>,
     instance_type_args: Vec<Ty>,
-    instance_index: FlatHashIndex,
+    instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: Vec<u16>,
     param_locs: Vec<LocId>,
 
-    /// Per-instance local slots and empty-aggregate slots (indexed by `InstanceId`).
+    /// Per-instance local slots (escaping/param), strictly-local frame slots, sites, and
+    /// refcount/superseded state.
     inst_locals: Vec<Vec<InstanceLocalSlot>>,
-    inst_aggs: Vec<Vec<AggregateSlot>>,
+    inst_frame_locals: Vec<Vec<Ty>>,
     inst_written: Vec<BitSet>,
     inst_captures: Vec<Vec<LocalId>>,
+    inst_sites: Vec<Vec<Option<SiteResolution>>>,
+    inst_refcount: Vec<u32>,
+    inst_superseded: BitSet,
 
-    /// Module-level aggregate slots (indexed by `LocalIdx`).
-    module_aggs: Vec<Option<(LocId, AggregateKind)>>,
-    /// Aggregate `LocId`s whose elements/properties were read (gates non-primitive dict inference).
-    agg_element_reads: BitSet,
+    /// Dict cell `LocId`s whose elements/properties were read (gates non-primitive dict inference).
+    dict_reads: BitSet,
     /// Class static field `LocId`s `(ClassId, field_idx, LocId)`.
     static_field_locs: Vec<(ClassId, usize, LocId)>,
 
     /// Class instances `(ClassId, args) -> ClassInstId`.
     class_insts: Vec<ClassInst>,
     class_args: Vec<Ty>,
-    class_index: FlatHashIndex,
+    class_index: HashMap<(ClassId, Box<[Ty]>), ClassInstId>,
     class_counts: Vec<u32>,
     /// Type-param `shapes::TypeId` cache per template / class (computed once at start).
     template_type_params: Vec<Vec<shapes::TypeId>>,
     class_type_params: Vec<Vec<shapes::TypeId>>,
 
-    /// Recorded per-instance expression resolutions.
-    sites: Vec<(InstanceId, usize, SiteResolution)>,
     /// Deferred callback result contract checks.
     result_contracts: Vec<ResultContract>,
     /// Next fresh `FuncId` for emitted instances.
@@ -251,19 +273,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         types: &'a mut TypeTable,
     ) -> Self {
         let mut locations = index.location_types.clone();
-        // Ensure module-level empty-array / empty-object aggregate bindings start with BOTTOM element loc.
-        let mut module_aggs = vec![None; index.local_count()];
-        for (i, agg) in index.local_empty_agg.iter().enumerate() {
-            if index.local_module.contains(i)
-                && let Some(slot) = module_aggs.get_mut(i)
-            {
-                *slot = *agg;
-            }
-        }
         let mut static_field_locs = Vec::new();
-        for (loc_i, kind) in index.locations.iter().enumerate() {
-            if let super::boundary::LocationKind::StaticField { class, field_idx } = kind {
-                static_field_locs.push((*class, *field_idx, LocId(loc_i as u32)));
+        for (cid_i, fields) in index.class_static_field_locs.iter().enumerate() {
+            for (f_idx, &(_, loc)) in fields.iter().enumerate() {
+                static_field_locs.push((ClassId(cid_i as u32), f_idx, loc));
             }
         }
         // Keep `locations` non-empty.
@@ -324,23 +337,24 @@ impl<'h, 'a> Solver<'h, 'a> {
             instances: Vec::new(),
             instance_args: Vec::new(),
             instance_type_args: Vec::new(),
-            instance_index: FlatHashIndex::with_capacity(64),
+            instance_index: HashMap::with_capacity(64),
             template_counts: vec![0; template_count],
             param_locs: Vec::new(),
             inst_locals: Vec::new(),
-            inst_aggs: Vec::new(),
+            inst_frame_locals: Vec::new(),
             inst_written: Vec::new(),
             inst_captures: Vec::new(),
-            module_aggs,
-            agg_element_reads: BitSet::default(),
+            inst_sites: Vec::new(),
+            inst_refcount: Vec::new(),
+            inst_superseded: BitSet::default(),
+            dict_reads: BitSet::default(),
             static_field_locs,
             class_insts: Vec::new(),
             class_args: Vec::new(),
-            class_index: FlatHashIndex::with_capacity(16),
+            class_index: HashMap::with_capacity(16),
             class_counts: vec![0; class_count],
             template_type_params,
             class_type_params,
-            sites: Vec::new(),
             result_contracts: Vec::new(),
             next_func_id,
             deletes_array_elements: false,
@@ -354,47 +368,21 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn read_loc(&mut self, loc: LocId, reader: InstanceId) -> Ty {
+        debug_assert!((loc.0 as usize) < self.locations.len());
         if self.current_reads.insert(loc.0 as usize) {
             self.deps.push((loc, reader));
             self.csr_dirty = true;
         }
-        self.locations
-            .get(loc.0 as usize)
-            .copied()
-            .unwrap_or(Ty::BOTTOM)
+        self.locations[loc.0 as usize]
     }
 
     fn write_loc(&mut self, loc: LocId, value: Ty) -> bool {
-        if value == Ty::BOTTOM || value == Ty::NEVER {
-            return false;
-        }
         let Some(&old) = self.locations.get(loc.0 as usize) else {
             return false;
         };
-        if old == value {
-            return false;
-        }
-        // Guard against cyclic self-nesting writes (e.g. `const a = []; a.push(a)`):
-        // if `old` is a composite type and `value` strictly nests `old` inside a composite
-        // type, widen to `Ty::OPEN` so the join lattice height stays bounded.
-        let old_is_composite = matches!(
-            self.types.kind(old),
-            TyKind::Array(_)
-                | TyKind::Object { .. }
-                | TyKind::Tuple(_)
-                | TyKind::Generic { .. }
-                | TyKind::Promise(_)
-        );
-        let value = if old_is_composite && self.types.contains_ty(value, old) {
-            Ty::OPEN
-        } else {
-            value
-        };
-        let next = self.types.join(old, value);
+        let next = self.types.join_bounded(old, value);
         if next != old {
-            if let Some(slot) = self.locations.get_mut(loc.0 as usize) {
-                *slot = next;
-            }
+            self.locations[loc.0 as usize] = next;
             self.dirty_locs.insert(loc.0 as usize);
             true
         } else {
@@ -402,17 +390,96 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn set_loc_exact(&mut self, loc: LocId, value: Ty) {
-        if let Some(slot) = self.locations.get_mut(loc.0 as usize)
-            && *slot != value
+    fn is_non_site_root(&self, inst_id: InstanceId) -> bool {
+        let Some(inst) = self.instances.get(inst_id.0 as usize) else {
+            return false;
+        };
+        inst.caller.is_none()
+            || self.index.view(inst.template).is_some_and(|v| {
+                matches!(
+                    v.kind,
+                    TemplateKind::ClassConstructor { .. }
+                        | TemplateKind::ClassGetter { .. }
+                        | TemplateKind::ClassSetter { .. }
+                )
+            })
+            || self
+                .result_contracts
+                .iter()
+                .any(|contract| contract.inst == inst_id)
+    }
+
+    fn site_target(&self, res: &SiteResolution) -> Option<InstanceId> {
+        match *res {
+            SiteResolution::DirectCall { target, .. }
+            | SiteResolution::MethodCall { target, .. }
+            | SiteResolution::Callback { target, .. } => Some(target),
+            SiteResolution::ClassNew { class_inst, .. } => self
+                .class_insts
+                .get(class_inst.0 as usize)
+                .and_then(|c| c.ctor_inst),
+            _ => None,
+        }
+    }
+
+    fn release_site_target(&mut self, caller: InstanceId, target: InstanceId) {
+        if target == caller {
+            return;
+        }
+        let idx = target.0 as usize;
+        if let Some(rc) = self.inst_refcount.get_mut(idx) {
+            *rc = rc.saturating_sub(1);
+            if *rc > 0 {
+                return;
+            }
+        }
+        if self.is_non_site_root(target) || !self.inst_superseded.insert(idx) {
+            return;
+        }
+        if let Some(inst) = self.instances.get(idx)
+            && let Some(slot) = self.template_counts.get_mut(inst.template.0 as usize)
         {
-            *slot = value;
-            self.dirty_locs.insert(loc.0 as usize);
+            *slot = slot.saturating_sub(1);
+        }
+        let outgoing: Vec<InstanceId> = self
+            .inst_sites
+            .get(idx)
+            .map(|sites| {
+                sites
+                    .iter()
+                    .filter_map(|opt| opt.as_ref().and_then(|res| self.site_target(res)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(sites) = self.inst_sites.get_mut(idx) {
+            sites.fill(None);
+        }
+        for child in outgoing {
+            self.release_site_target(target, child);
+        }
+    }
+
+    fn retain_site_target(&mut self, caller: InstanceId, target: InstanceId) {
+        if target == caller {
+            return;
+        }
+        let idx = target.0 as usize;
+        if let Some(rc) = self.inst_refcount.get_mut(idx) {
+            *rc = rc.saturating_add(1);
+        }
+        if self.inst_superseded.contains(idx) {
+            self.inst_superseded.remove(idx);
+            if let Some(inst) = self.instances.get(idx)
+                && let Some(slot) = self.template_counts.get_mut(inst.template.0 as usize)
+            {
+                *slot = slot.saturating_add(1);
+            }
+            self.enqueue(target);
         }
     }
 
     fn enqueue(&mut self, inst: InstanceId) {
-        if self.queued.insert(inst.0 as usize) {
+        if !self.inst_superseded.contains(inst.0 as usize) && self.queued.insert(inst.0 as usize) {
             self.worklist.push(inst);
         }
     }
@@ -471,7 +538,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 continue;
             };
             let is_root = self.index.template_exported.contains(tid_idx)
-                || view.name.starts_with("__obj_method_");
+                || self.index.template_is_obj_method.contains(tid_idx);
             if !is_root {
                 continue;
             }
@@ -480,10 +547,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             let mut arg_tys = Vec::with_capacity(view.params.len());
             for param in view.params {
                 let explicit = self
-                    .hir
-                    .local_source_spans
-                    .get(&param.id)
-                    .is_some_and(|span| self.facts.is_param_annotated(span.start));
+                    .index
+                    .local_idx(param.id)
+                    .is_some_and(|li| self.index.local_param_annotated.contains(li.0 as usize));
                 let mut ty = self.types.intern_hir(self.ctx, &param.ty, explicit);
                 ty = self.types.substitute(self.ctx, ty, &type_bindings);
                 // If an exported parameter is annotated with a generic user class `Box<number>`,
@@ -589,22 +655,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn hash_instance_key(
-        template: TemplateId,
-        receiver: Option<ClassInstId>,
-        capture_owner: Option<InstanceId>,
-        args: &[Ty],
-        explicit_type_args: &[Ty],
-    ) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        template.hash(&mut h);
-        receiver.hash(&mut h);
-        capture_owner.hash(&mut h);
-        args.hash(&mut h);
-        explicit_type_args.hash(&mut h);
-        h.finish()
-    }
-
     fn request_instance(&mut self, req: InstanceReq<'_>) -> Result<InstanceId> {
         let InstanceReq {
             template,
@@ -621,49 +671,55 @@ impl<'h, 'a> Solver<'h, 'a> {
         // declared parameter types so structurally-typed callers (e.g. `{ value: n }` passed to
         // `export function read(cell: Cell)`) reuse the single canonical instance instead of
         // emitting duplicate symbols.
+        let is_monomorphic_plain = self.index.view(template).is_some_and(|view| {
+            matches!(view.kind, TemplateKind::Function { .. })
+                && view.type_params.is_empty()
+                && !args
+                    .iter()
+                    .any(|&t| matches!(self.types.kind(t), TyKind::Func(_)))
+                && view.params.iter().all(|p| {
+                    !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
+                        && !p.is_rest
+                        && p.default.is_none()
+                })
+        });
         let canonical_args_buf: Vec<Ty>;
-        let args = if receiver.is_none()
+        let args = if is_monomorphic_plain
+            && receiver.is_none()
             && capture_owner.is_none()
             && explicit_type_args.is_empty()
-            && !args
-                .iter()
-                .any(|&t| matches!(self.types.kind(t), TyKind::Func(_)))
             && let Some(view) = self.index.view(template)
-            && matches!(view.kind, TemplateKind::Function { .. })
-            && view.type_params.is_empty()
             && !view.params.is_empty()
-            && view.params.iter().all(|p| {
-                !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
-                    && !p.is_rest
-                    && p.default.is_none()
-            }) {
+        {
             let mut declared_args = Vec::with_capacity(view.params.len());
             for param in view.params {
-                let mut ty = self.types.intern_hir(self.ctx, &param.ty, true);
-                ty = self.instantiate_annotated_class(ty, 0, None)?;
-                declared_args.push(ty);
+                let ty = self.types.intern_hir(self.ctx, &param.ty, true);
+                declared_args.push(self.instantiate_annotated_class(ty, 0, None)?);
             }
             canonical_args_buf = declared_args;
             canonical_args_buf.as_slice()
         } else {
             args
         };
-        let hash =
-            Self::hash_instance_key(template, receiver, capture_owner, args, explicit_type_args);
-        if let Some(id) = self.instance_index.find(hash, |idx| {
-            self.instances.get(idx as usize).is_some_and(|inst| {
-                inst.template == template
-                    && inst.receiver == receiver
-                    && inst.capture_owner == capture_owner
-                    && self.instance_args.get(inst.args.range()) == Some(args)
-                    && self.instance_type_args.get(inst.explicit_type_args.range())
-                        == Some(explicit_type_args)
-            })
-        }) {
-            if is_inline_callback && let Some(inst) = self.instances.get_mut(id as usize) {
+        let key: InstanceKey = (
+            template,
+            receiver,
+            capture_owner,
+            args.into(),
+            explicit_type_args.into(),
+        );
+        if let Some(&id) = self.instance_index.get(&key) {
+            if is_inline_callback && let Some(inst) = self.instances.get_mut(id.0 as usize) {
                 inst.is_inline_callback = true;
             }
-            return Ok(InstanceId(id));
+            if self.inst_superseded.contains(id.0 as usize) {
+                self.inst_superseded.remove(id.0 as usize);
+                if let Some(slot) = self.template_counts.get_mut(template.0 as usize) {
+                    *slot = slot.saturating_add(1);
+                }
+                self.enqueue(id);
+            }
+            return Ok(id);
         }
 
         let count = self
@@ -777,10 +833,9 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         for (p_idx, param) in view.params.iter().enumerate() {
             let explicit = self
-                .hir
-                .local_source_spans
-                .get(&param.id)
-                .is_some_and(|span| self.facts.is_param_annotated(span.start));
+                .index
+                .local_idx(param.id)
+                .is_some_and(|li| self.index.local_param_annotated.contains(li.0 as usize));
             let declared = self.types.intern_hir(self.ctx, &param.ty, explicit);
             let declared = self.types.substitute(self.ctx, declared, &type_bindings);
             let bound_ty = if param.is_rest {
@@ -853,19 +908,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         let return_loc = self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM));
 
-        let is_plain_fn = count == 0
-            && matches!(view.kind, TemplateKind::Function { .. })
-            && view.type_params.is_empty()
-            && !args
-                .iter()
-                .any(|&t| matches!(self.types.kind(t), TyKind::Func(_)))
-            && view.params.iter().all(|p| {
-                !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
-                    && !p.is_rest
-                    && p.default.is_none()
-            });
         let keep_original = count == 0
-            && (view.is_exported || view.name.starts_with("__obj_method_") || is_plain_fn);
+            && (view.is_exported
+                || self
+                    .index
+                    .template_is_obj_method
+                    .contains(template.0 as usize)
+                || is_monomorphic_plain);
         let emitted_func_id = if keep_original {
             view.func_id
         } else {
@@ -873,8 +922,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.next_func_id = self.next_func_id.saturating_add(1);
             id
         };
-        let emitted_name = if keep_original || template == TemplateId(0) {
+        let emitted_name = if template == TemplateId(0) {
             view.name.to_owned()
+        } else if keep_original {
+            if view.name.is_empty() {
+                format!("callback_{}", view.func_id)
+            } else {
+                view.name.to_owned()
+            }
         } else if view.name.is_empty() {
             format!("callback_{}_instance_{emitted_func_id}", view.func_id)
         } else {
@@ -915,11 +970,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             emitted_name,
             emitted_method_name,
         });
-        self.instance_index.insert(inst_id.0, hash);
+        self.instance_index.insert(key, inst_id);
         self.inst_locals.push(local_slots);
-        self.inst_aggs.push(Vec::new());
+        self.inst_frame_locals
+            .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
         self.inst_written.push(BitSet::default());
         self.inst_captures.push(inst_caps);
+        self.inst_sites
+            .push(vec![None; self.index.site_count(template)]);
+        self.inst_refcount.push(0);
         self.enqueue(inst_id);
         Ok(inst_id)
     }
@@ -1024,16 +1083,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         byte_offset: u32,
         caller: Option<InstanceId>,
     ) -> Result<ClassInstId> {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        class.hash(&mut h);
-        args.hash(&mut h);
-        let hash = h.finish();
-        if let Some(id) = self.class_index.find(hash, |idx| {
-            self.class_insts.get(idx as usize).is_some_and(|ci| {
-                ci.class == class && self.class_args.get(ci.args.range()) == Some(args)
-            })
-        }) {
-            return Ok(ClassInstId(id));
+        let key: (ClassId, Box<[Ty]>) = (class, args.into());
+        if let Some(&id) = self.class_index.get(&key) {
+            return Ok(id);
         }
         let Some(&hir_idx) = self.index.class_hir_idx.get(class.0 as usize) else {
             return Err(Diagnostic::internal("unknown class index"));
@@ -1090,17 +1142,27 @@ impl<'h, 'a> Solver<'h, 'a> {
             ctor_inst: None,
             emitted_name,
         });
-        self.class_index.insert(cinst_id.0, hash);
+        self.class_index.insert(key, cinst_id);
 
         // Evaluate field initializers in the context of this class instance.
         for (f_idx, field) in hir_class.fields.iter().enumerate() {
             if let Some(init) = &field.init {
-                let mut state = EvalState::default();
-                let init_ty = self.eval_expr(InstanceId(0), Some(cinst_id), init, &mut state)?;
-                let norm = self
-                    .types
-                    .normalize_for_storage(self.ctx, self.decls, init_ty);
-                self.write_loc(LocId(field_loc_base + f_idx as u32), norm);
+                let field_loc = LocId(field_loc_base + f_idx as u32);
+                if matches!(init, Expr::Array(items, _) if items.is_empty())
+                    && self.types.is_open(self.locations[field_loc.0 as usize])
+                {
+                    let elem_loc = self.alloc_loc(Ty::BOTTOM);
+                    let cell = self.types.array_cell(elem_loc);
+                    self.write_loc(field_loc, cell);
+                } else {
+                    let mut state = EvalState::default();
+                    let init_ty =
+                        self.eval_expr(InstanceId(0), Some(cinst_id), init, &mut state)?;
+                    let norm = self
+                        .types
+                        .normalize_for_storage(self.ctx, self.decls, init_ty);
+                    self.write_loc(field_loc, norm);
+                }
             }
         }
 
@@ -1132,57 +1194,72 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     fn run_worklist(&mut self) -> Result<()> {
         for _wave in 0..MAX_WAVES {
-            while self.worklist_head < self.worklist.len() {
+            let wave_end = self.worklist.len();
+            while self.worklist_head < wave_end {
                 let Some(&inst_id) = self.worklist.get(self.worklist_head) else {
                     break;
                 };
                 self.worklist_head += 1;
                 self.queued.remove(inst_id.0 as usize);
+                if self.inst_superseded.contains(inst_id.0 as usize) {
+                    continue;
+                }
                 self.evaluate_instance(inst_id)?;
             }
-            if self.dirty_locs.is_empty() {
-                break;
+            if self.dirty_locs.is_empty() && self.worklist_head >= self.worklist.len() {
+                return Ok(());
             }
-            if self.csr_dirty {
-                self.rebuild_csr();
+            if self.worklist_head > 0 {
+                self.worklist.drain(..self.worklist_head);
+                self.worklist_head = 0;
             }
-            self.worklist.clear();
-            self.worklist_head = 0;
-            let dirty: Vec<usize> = self.dirty_locs.iter().collect();
-            self.dirty_locs.clear();
-            for loc_idx in dirty {
-                let start = self.reader_offsets.get(loc_idx).copied().unwrap_or(0) as usize;
-                let end = self
-                    .reader_offsets
-                    .get(loc_idx + 1)
-                    .copied()
-                    .unwrap_or(start as u32) as usize;
-                if let Some(readers) = self.reader_instances.get(start..end) {
-                    for &reader in readers {
-                        if self.queued.insert(reader.0 as usize) {
-                            self.worklist.push(reader);
+            if !self.dirty_locs.is_empty() {
+                if self.csr_dirty {
+                    self.rebuild_csr();
+                }
+                let dirty: Vec<usize> = self.dirty_locs.iter().collect();
+                self.dirty_locs.clear();
+                for loc_idx in dirty {
+                    let start = self.reader_offsets.get(loc_idx).copied().unwrap_or(0) as usize;
+                    let end = self
+                        .reader_offsets
+                        .get(loc_idx + 1)
+                        .copied()
+                        .unwrap_or(start as u32) as usize;
+                    if let Some(readers) = self.reader_instances.get(start..end) {
+                        for &reader in readers {
+                            if !self.inst_superseded.contains(reader.0 as usize)
+                                && self.queued.insert(reader.0 as usize)
+                            {
+                                self.worklist.push(reader);
+                            }
                         }
                     }
                 }
             }
             if self.worklist.is_empty() {
-                break;
+                return Ok(());
             }
         }
-        Ok(())
+        Err(Diagnostic::unsupported(
+            "type inference did not converge within the worklist wave limit",
+        ))
     }
 
     fn verify_contracts(&self) -> Result<()> {
         for contract in &self.result_contracts {
-            let ret_loc = self
+            let inst = self
                 .instances
                 .get(contract.inst.0 as usize)
-                .map_or(LocId(0), |i| i.return_loc);
-            let actual = self
+                .ok_or_else(|| {
+                    Diagnostic::internal("callback contract references missing instance")
+                })?;
+            let actual = *self
                 .locations
-                .get(ret_loc.0 as usize)
-                .copied()
-                .unwrap_or(Ty::BOTTOM);
+                .get(inst.return_loc.0 as usize)
+                .ok_or_else(|| {
+                    Diagnostic::internal("callback contract references missing return location")
+                })?;
             if !self.types.accepts(self.ctx, contract.expected, actual) {
                 return Err(self.metadata.locations.annotate_call(
                     diag!(
@@ -1196,208 +1273,4 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         Ok(())
     }
-
-    fn finish(mut self) -> Solved {
-        // Deduplicate sites keeping the latest resolution from the final wave.
-        let mut sites = std::mem::take(&mut self.sites);
-        sites.sort_by_key(|(inst, addr, _)| (inst.0, *addr));
-        let mut deduped: Vec<(InstanceId, usize, SiteResolution)> = Vec::with_capacity(sites.len());
-        for entry in sites {
-            if let Some(last) = deduped.last_mut()
-                && last.0 == entry.0
-                && last.1 == entry.1
-            {
-                *last = entry;
-            } else {
-                deduped.push(entry);
-            }
-        }
-
-        // Collect per-instance local resolved types.
-        let mut instance_locals = Vec::new();
-        for (inst_i, slots) in self.inst_locals.iter().enumerate() {
-            let inst_id = InstanceId(inst_i as u32);
-            for slot in slots {
-                if let Some(&hir_id) = self.index.local_ids.get(slot.local.0 as usize) {
-                    let ty = self
-                        .locations
-                        .get(slot.loc.0 as usize)
-                        .copied()
-                        .unwrap_or(Ty::OPEN);
-                    instance_locals.push((inst_id, hir_id, ty));
-                }
-            }
-        }
-
-        // Collect module-level binding types (including empty-array / empty-object joins).
-        let mut module_bindings = Vec::new();
-        for l_idx in self.index.local_module.iter() {
-            let Some(&hir_id) = self.index.local_ids.get(l_idx) else {
-                continue;
-            };
-            let mut ty = self
-                .index
-                .local_loc
-                .get(l_idx)
-                .copied()
-                .flatten()
-                .and_then(|loc| self.locations.get(loc.0 as usize).copied())
-                .unwrap_or(Ty::OPEN);
-            if let Some((agg_loc, agg_kind)) = self.module_aggs.get(l_idx).copied().flatten() {
-                let elem = self
-                    .locations
-                    .get(agg_loc.0 as usize)
-                    .copied()
-                    .unwrap_or(Ty::BOTTOM);
-                if let Some(projected) = self.project_agg_from_elem(agg_loc, agg_kind, elem) {
-                    ty = projected;
-                }
-            }
-            module_bindings.push((hir_id, ty));
-        }
-
-        let static_fields = self
-            .static_field_locs
-            .iter()
-            .map(|&(cid, f_idx, loc)| {
-                let ty = self
-                    .locations
-                    .get(loc.0 as usize)
-                    .copied()
-                    .unwrap_or(Ty::OPEN);
-                (cid, f_idx, ty)
-            })
-            .collect();
-
-        let mut instance_captures = Vec::new();
-        for (inst_i, caps) in self.inst_captures.into_iter().enumerate() {
-            let inst_id = InstanceId(inst_i as u32);
-            for cap in caps {
-                instance_captures.push((inst_id, cap));
-            }
-        }
-
-        let mut live_instances = BitSet::default();
-        let mut live_queue = Vec::new();
-        for (idx, inst) in self.instances.iter().enumerate() {
-            let is_non_site_root = inst.caller.is_none()
-                || self.index.view(inst.template).is_some_and(|v| {
-                    matches!(
-                        v.kind,
-                        TemplateKind::ClassConstructor { .. }
-                            | TemplateKind::ClassStaticMethod { .. }
-                            | TemplateKind::ClassGetter { .. }
-                            | TemplateKind::ClassSetter { .. }
-                    )
-                });
-            if is_non_site_root && live_instances.insert(idx) {
-                live_queue.push(InstanceId(idx as u32));
-            }
-        }
-        for contract in &self.result_contracts {
-            if live_instances.insert(contract.inst.0 as usize) {
-                live_queue.push(contract.inst);
-            }
-        }
-        let mut head = 0usize;
-        while let Some(&caller) = live_queue.get(head) {
-            head += 1;
-            let start = deduped.partition_point(|(i, _, _)| i.0 < caller.0);
-            for (i, _, res) in &deduped[start..] {
-                if *i != caller {
-                    break;
-                }
-                let target = match *res {
-                    SiteResolution::DirectCall { target, .. }
-                    | SiteResolution::MethodCall { target, .. }
-                    | SiteResolution::Callback { target, .. } => Some(target),
-                    SiteResolution::ClassNew { class_inst, .. } => self
-                        .class_insts
-                        .get(class_inst.0 as usize)
-                        .and_then(|c| c.ctor_inst),
-                    _ => None,
-                };
-                if let Some(t) = target
-                    && live_instances.insert(t.0 as usize)
-                {
-                    live_queue.push(t);
-                }
-            }
-        }
-
-        Solved {
-            instances: self.instances,
-            class_insts: self.class_insts,
-            locations: self.locations,
-            param_locs: self.param_locs,
-            instance_locals,
-            sites: deduped,
-            instance_captures,
-            live_instances,
-            module_bindings,
-            static_fields,
-            deletes_array_elements: self.deletes_array_elements,
-        }
-    }
-
-    fn type_may_be_array(&self, ty: Ty) -> bool {
-        match self.types.kind(ty) {
-            TyKind::Array(_) | TyKind::Tuple(_) => true,
-            TyKind::Union(span) => self
-                .types
-                .union_slice(span)
-                .iter()
-                .any(|&m| self.type_may_be_array(m)),
-            _ => false,
-        }
-    }
-}
-
-fn callable_arg_mask(types: &TypeTable, args: &[Ty]) -> u64 {
-    let mut mask = 0u64;
-    for (i, &ty) in args.iter().enumerate() {
-        if i < 64 && matches!(types.kind(ty), TyKind::Func(_)) {
-            mask |= 1u64 << i;
-        }
-    }
-    mask
-}
-
-fn first_type_var_name(ty: &HirType) -> Option<&str> {
-    match ty {
-        HirType::TypeVar(name) => Some(name.as_str()),
-        HirType::Array(inner) | HirType::Promise(inner) => first_type_var_name(inner),
-        HirType::Tuple(items) | HirType::Union(items) => items.iter().find_map(first_type_var_name),
-        HirType::Generic { type_args, .. } => type_args.iter().find_map(first_type_var_name),
-        _ => None,
-    }
-}
-
-fn constructor_init_expr(expr: &Expr) -> Option<&Expr> {
-    if let Expr::New {
-        class_name, args, ..
-    } = expr
-        && matches!(class_name.as_str(), "\0perry_Map" | "\0perry_Set")
-    {
-        return args.first();
-    }
-    let argument = match expr {
-        Expr::NewDynamic { callee, args, .. }
-            if matches!(&**callee, Expr::PropertyGet { object, property, .. }
-                if matches!(&**object, Expr::GlobalGet(0)) && property == "Map") =>
-        {
-            args.first()?
-        }
-        Expr::MapNewFromArray(argument) | Expr::SetNewFromArray(argument) => argument,
-        Expr::New {
-            class_name, args, ..
-        } if matches!(class_name.as_str(), "Map" | "Set") => args.first()?,
-        _ => return None,
-    };
-    let Expr::Sequence(items) = argument else {
-        return None;
-    };
-    let (_, rest) = items.split_first()?;
-    rest.first()
-        .filter(|expr| !matches!(expr, Expr::Undefined | Expr::Null))
 }

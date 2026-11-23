@@ -1,7 +1,335 @@
 //! Call, method, constructor, built-in callback, and host-import resolution.
 use super::*;
 
+struct CallbackSite<'h> {
+    callback: &'h Expr,
+    inputs: Vec<Ty>,
+    contract: CallbackContract,
+    recv_ty: Ty,
+    group_elem: Option<Ty>,
+}
+
 impl<'h, 'a> Solver<'h, 'a> {
+    fn array_cb_site(
+        &mut self,
+        cb: &'h Expr,
+        recv_ty: Ty,
+        elem: Ty,
+        kind: crate::methods::Callback,
+        contract: CallbackContract,
+    ) -> CallbackSite<'h> {
+        let inputs = match kind {
+            crate::methods::Callback::Elements => vec![elem, Ty::NUMBER, recv_ty],
+            crate::methods::Callback::AllIndices => {
+                vec![
+                    self.types.with_absences(elem, Absence::Undefined),
+                    Ty::NUMBER,
+                    recv_ty,
+                ]
+            }
+            crate::methods::Callback::Comparator => {
+                let def = self.types.exclude_absences(elem, Absence::Undefined);
+                vec![def, def]
+            }
+            _ => Vec::new(),
+        };
+        CallbackSite {
+            callback: cb,
+            inputs,
+            contract,
+            recv_ty,
+            group_elem: None,
+        }
+    }
+
+    fn match_builtin_callback(
+        &mut self,
+        inst_id: InstanceId,
+        receiver: Option<ClassInstId>,
+        expr: &'h Expr,
+        state: &mut EvalState<'h>,
+    ) -> Result<Option<Result<CallbackSite<'h>, Ty>>> {
+        use crate::methods::Callback as Cb;
+        let direct_array = match expr {
+            Expr::ArrayMap { array, callback } => Some((
+                array.as_ref(),
+                callback.as_ref(),
+                Cb::Elements,
+                CallbackContract::Mapped {
+                    keep_holes: self.facts.sparse_arrays,
+                },
+            )),
+            Expr::ArrayFlatMap { array, callback } => Some((
+                array.as_ref(),
+                callback.as_ref(),
+                Cb::Elements,
+                CallbackContract::FlatMapped,
+            )),
+            Expr::ArrayFilter { array, callback } => Some((
+                array.as_ref(),
+                callback.as_ref(),
+                Cb::Elements,
+                CallbackContract::Predicate(PredicateResult::Filter),
+            )),
+            Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } => Some((
+                array.as_ref(),
+                callback.as_ref(),
+                Cb::Elements,
+                CallbackContract::Predicate(PredicateResult::Bool),
+            )),
+            Expr::ArrayFind { array, callback } => Some((
+                array.as_ref(),
+                callback.as_ref(),
+                Cb::AllIndices,
+                CallbackContract::Predicate(PredicateResult::Find),
+            )),
+            Expr::ArrayFindIndex { array, callback } => Some((
+                array.as_ref(),
+                callback.as_ref(),
+                Cb::AllIndices,
+                CallbackContract::Predicate(PredicateResult::Index),
+            )),
+            Expr::ArraySort { array, comparator }
+                if !matches!(comparator.as_ref(), Expr::Undefined) =>
+            {
+                Some((
+                    array.as_ref(),
+                    comparator.as_ref(),
+                    Cb::Comparator,
+                    CallbackContract::Comparator,
+                ))
+            }
+            Expr::ArrayToSorted {
+                array,
+                comparator: Some(comparator),
+                ..
+            } if !matches!(comparator.as_ref(), Expr::Undefined) => Some((
+                array.as_ref(),
+                comparator.as_ref(),
+                Cb::Comparator,
+                CallbackContract::Comparator,
+            )),
+            _ => None,
+        };
+        if let Some((array, cb, kind, contract)) = direct_array {
+            let r = self.eval_expr(inst_id, receiver, array, state)?;
+            let r = self.resolve_cell_read(inst_id, r);
+            if r == Ty::BOTTOM {
+                return Ok(Some(Err(Ty::BOTTOM)));
+            }
+            let Some(elem) = builtins::iterated_element(self.ctx, self.types, r) else {
+                return Ok(None);
+            };
+            return Ok(Some(Ok(self.array_cb_site(cb, r, elem, kind, contract))));
+        }
+
+        let group_by_args = match expr {
+            Expr::MapGroupBy { items, key_fn } => Some((items.as_ref(), key_fn.as_ref())),
+            Expr::Call { callee, args, .. }
+                if let Expr::PropertyGet {
+                    object, property, ..
+                } = callee.as_ref()
+                    && let Expr::PropertyGet {
+                        object: global,
+                        property: class,
+                        ..
+                    } = object.as_ref()
+                    && matches!(global.as_ref(), Expr::GlobalGet(_))
+                    && class == "Map"
+                    && hir_compat::method(property).name() == "groupBy"
+                    && let [items, key_fn] = args.as_slice() =>
+            {
+                Some((items, key_fn))
+            }
+            _ => None,
+        };
+        if let Some((items, key_fn)) = group_by_args {
+            let src = self.eval_expr(inst_id, receiver, items, state)?;
+            if src == Ty::BOTTOM {
+                return Ok(Some(Err(Ty::BOTTOM)));
+            }
+            let elem = builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN);
+            return Ok(Some(Ok(CallbackSite {
+                callback: key_fn,
+                inputs: vec![elem, Ty::NUMBER],
+                contract: CallbackContract::GroupKey,
+                recv_ty: src,
+                group_elem: Some(elem),
+            })));
+        }
+
+        if let Expr::ArrayFromMapped {
+            iterable, map_fn, ..
+        } = expr
+        {
+            let src = self.eval_expr(inst_id, receiver, iterable, state)?;
+            if src == Ty::BOTTOM {
+                return Ok(Some(Err(Ty::BOTTOM)));
+            }
+            let length_name = self.types.intern_name("length");
+            let (src_def, _) = self.types.strip_nullish(src);
+            let is_array_like = match self.types.kind(src_def) {
+                TyKind::Object { props, .. } => self
+                    .types
+                    .object_slice(props)
+                    .iter()
+                    .any(|p| p.name == length_name),
+                _ => {
+                    matches!(iterable.as_ref(), Expr::Object(props) if props.iter().any(|(k, _)| k == "length"))
+                }
+            };
+            let elem = if is_array_like {
+                Ty::VOID
+            } else {
+                builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN)
+            };
+            return Ok(Some(Ok(CallbackSite {
+                callback: map_fn.as_ref(),
+                inputs: vec![elem, Ty::NUMBER],
+                contract: CallbackContract::Mapped { keep_holes: false },
+                recv_ty: src,
+                group_elem: None,
+            })));
+        }
+
+        let Expr::Call { callee, args, .. } = expr else {
+            return Ok(None);
+        };
+        let Expr::PropertyGet {
+            object, property, ..
+        } = callee.as_ref()
+        else {
+            return Ok(None);
+        };
+        let method_name = hir_compat::method(property).name();
+        let raw_obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
+        if raw_obj_ty == Ty::BOTTOM {
+            return Ok(Some(Err(Ty::BOTTOM)));
+        }
+        let (raw_stripped, _) = self.types.strip_nullish(raw_obj_ty);
+
+        // Map.forEach / Set.forEach
+        if method_name == "forEach"
+            && let TyKind::Generic { base, args: gargs } = self.types.kind(raw_stripped)
+            && let HirType::Named(base_name) = base.hir(self.ctx)
+            && let Some(cb) = args.first()
+        {
+            let gslice: Vec<Ty> = self.types.generic_slice(gargs).to_vec();
+            let inputs = match (base_name.as_str(), gslice.as_slice()) {
+                ("Map" | "ReadonlyMap", [k, v]) => vec![*v, *k, raw_stripped],
+                ("Set" | "ReadonlySet", [v]) => vec![*v, *v, raw_stripped],
+                _ => return Ok(None),
+            };
+            return Ok(Some(Ok(CallbackSite {
+                callback: cb,
+                inputs,
+                contract: CallbackContract::Void,
+                recv_ty: raw_obj_ty,
+                group_elem: None,
+            })));
+        }
+
+        let Some(cb_kind) = builtins::receiver_of(self.ctx, self.types, raw_stripped)
+            .and_then(|recv| crate::methods::Method::lookup(recv, method_name))
+            .and_then(crate::methods::Method::callback)
+        else {
+            return Ok(None);
+        };
+        let obj_ty = self.resolve_cell_read(inst_id, raw_obj_ty);
+        if obj_ty == Ty::BOTTOM {
+            return Ok(Some(Err(Ty::BOTTOM)));
+        }
+        let (stripped, _) = self.types.strip_nullish(obj_ty);
+        let Some((first_arg, tail)) = args.split_first() else {
+            return Ok(None);
+        };
+
+        if matches!(cb_kind, Cb::Replacement) {
+            let Some(cb) = tail.first() else {
+                return Ok(None);
+            };
+            let cb_ty = self.eval_expr(inst_id, receiver, cb, state)?;
+            if cb_ty == Ty::BOTTOM {
+                return Ok(Some(Err(Ty::BOTTOM)));
+            }
+            if !matches!(self.types.kind(cb_ty), TyKind::Func(_)) {
+                return Ok(None);
+            }
+            let mut inputs = vec![Ty::STRING];
+            let captures = match first_arg {
+                Expr::RegExp { pattern, .. } => Some(crate::methods::regex_captures(pattern)),
+                Expr::LocalGet(id) => self
+                    .index
+                    .local_idx(*id)
+                    .and_then(|li| {
+                        self.index
+                            .local_regex_pattern
+                            .get(li.0 as usize)
+                            .copied()
+                            .flatten()
+                    })
+                    .map(crate::methods::regex_captures),
+                Expr::String(_) => Some((0, false)),
+                _ => None,
+            };
+            if let Some((count, named)) = captures {
+                let opt_str = self.types.with_absences(Ty::STRING, Absence::Undefined);
+                inputs.extend(std::iter::repeat_n(opt_str, count));
+                inputs.extend([Ty::NUMBER, Ty::STRING]);
+                if named {
+                    inputs.push(self.types.object(&[], Some(opt_str)));
+                }
+            }
+            return Ok(Some(Ok(CallbackSite {
+                callback: cb,
+                inputs,
+                contract: CallbackContract::Replacement,
+                recv_ty: obj_ty,
+                group_elem: None,
+            })));
+        }
+
+        if matches!(cb_kind, Cb::Comparator) && matches!(first_arg, Expr::Undefined) {
+            return Ok(None);
+        }
+        let Some(elem) = builtins::iterated_element(self.ctx, self.types, stripped) else {
+            return Ok(None);
+        };
+        if matches!(cb_kind, Cb::Fold) {
+            let acc = match tail.first() {
+                Some(init) => self.eval_expr(inst_id, receiver, init, state)?,
+                None => elem,
+            };
+            if acc == Ty::BOTTOM {
+                return Ok(Some(Err(Ty::BOTTOM)));
+            }
+            return Ok(Some(Ok(CallbackSite {
+                callback: first_arg,
+                inputs: vec![acc, elem, Ty::NUMBER, stripped],
+                contract: CallbackContract::Fold,
+                recv_ty: obj_ty,
+                group_elem: None,
+            })));
+        }
+        let contract = match (cb_kind, method_name) {
+            (Cb::Elements, "forEach") => CallbackContract::Void,
+            (Cb::Elements, "map") => CallbackContract::Mapped {
+                keep_holes: self.facts.sparse_arrays,
+            },
+            (Cb::Elements, "flatMap") => CallbackContract::FlatMapped,
+            (Cb::Elements, "filter") => CallbackContract::Predicate(PredicateResult::Filter),
+            (Cb::Elements, _) => CallbackContract::Predicate(PredicateResult::Bool),
+            (Cb::AllIndices, "findIndex" | "findLastIndex") => {
+                CallbackContract::Predicate(PredicateResult::Index)
+            }
+            (Cb::AllIndices, _) => CallbackContract::Predicate(PredicateResult::Find),
+            _ => CallbackContract::Comparator,
+        };
+        let mut site = self.array_cb_site(first_arg, stripped, elem, cb_kind, contract);
+        site.recv_ty = obj_ty;
+        Ok(Some(Ok(site)))
+    }
+
     pub(super) fn try_eval_builtin_callback(
         &mut self,
         inst_id: InstanceId,
@@ -9,365 +337,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         expr: &'h Expr,
         state: &mut EvalState<'h>,
     ) -> Result<Option<Ty>> {
-        // Pre-evaluate receiver / iterable expressions needed by the callback table.
-        let (callback, mut inputs, contract, recv_ty, map_group_elem) = match expr {
-            Expr::ArrayMap { array, callback } => {
-                let r = self.eval_expr(inst_id, receiver, array, state)?;
-                if r == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let Some(elem) = builtins::iterated_element(self.ctx, self.types, r) else {
-                    return Ok(None);
-                };
-                (
-                    callback.as_ref(),
-                    vec![elem, Ty::NUMBER, r],
-                    CallbackContract::Mapped {
-                        keep_holes: self.facts.sparse_arrays,
-                    },
-                    r,
-                    None,
-                )
-            }
-            Expr::ArrayFlatMap { array, callback } => {
-                let r = self.eval_expr(inst_id, receiver, array, state)?;
-                if r == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let Some(elem) = builtins::iterated_element(self.ctx, self.types, r) else {
-                    return Ok(None);
-                };
-                (
-                    callback.as_ref(),
-                    vec![elem, Ty::NUMBER, r],
-                    CallbackContract::FlatMapped,
-                    r,
-                    None,
-                )
-            }
-            Expr::ArrayFilter { array, callback }
-            | Expr::ArraySome { array, callback }
-            | Expr::ArrayEvery { array, callback } => {
-                let r = self.eval_expr(inst_id, receiver, array, state)?;
-                if r == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let Some(elem) = builtins::iterated_element(self.ctx, self.types, r) else {
-                    return Ok(None);
-                };
-                (
-                    callback.as_ref(),
-                    vec![elem, Ty::NUMBER, r],
-                    CallbackContract::Predicate,
-                    r,
-                    None,
-                )
-            }
-            Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
-                let r = self.eval_expr(inst_id, receiver, array, state)?;
-                if r == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let Some(elem) = builtins::iterated_element(self.ctx, self.types, r) else {
-                    return Ok(None);
-                };
-                let opt = self.types.with_absences(elem, Absence::Undefined);
-                (
-                    callback.as_ref(),
-                    vec![opt, Ty::NUMBER, r],
-                    CallbackContract::Predicate,
-                    r,
-                    None,
-                )
-            }
-            Expr::ArraySort { array, comparator }
-                if !matches!(comparator.as_ref(), Expr::Undefined) =>
-            {
-                let r = self.eval_expr(inst_id, receiver, array, state)?;
-                if r == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let Some(elem) = builtins::iterated_element(self.ctx, self.types, r) else {
-                    return Ok(None);
-                };
-                let def = self.types.exclude_absences(elem, Absence::Undefined);
-                (
-                    comparator.as_ref(),
-                    vec![def, def],
-                    CallbackContract::Comparator,
-                    r,
-                    None,
-                )
-            }
-            Expr::ArrayToSorted {
-                array,
-                comparator: Some(comparator),
-                ..
-            } if !matches!(comparator.as_ref(), Expr::Undefined) => {
-                let r = self.eval_expr(inst_id, receiver, array, state)?;
-                if r == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let Some(elem) = builtins::iterated_element(self.ctx, self.types, r) else {
-                    return Ok(None);
-                };
-                let def = self.types.exclude_absences(elem, Absence::Undefined);
-                (
-                    comparator.as_ref(),
-                    vec![def, def],
-                    CallbackContract::Comparator,
-                    r,
-                    None,
-                )
-            }
-            Expr::ArrayFromMapped {
-                iterable, map_fn, ..
-            } => {
-                let src = self.eval_expr(inst_id, receiver, iterable, state)?;
-                if src == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let length_name = self.types.intern_name("length");
-                let (src_def, _) = self.types.strip_nullish(src);
-                let is_array_like = match self.types.kind(src_def) {
-                    TyKind::Object { props, .. } => self
-                        .types
-                        .object_slice(props)
-                        .iter()
-                        .any(|p| p.name == length_name),
-                    _ => {
-                        matches!(iterable.as_ref(), Expr::Object(props) if props.iter().any(|(k, _)| k == "length"))
-                    }
-                };
-                let elem = if is_array_like {
-                    Ty::VOID
-                } else {
-                    builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN)
-                };
-                (
-                    map_fn.as_ref(),
-                    vec![elem, Ty::NUMBER],
-                    CallbackContract::Mapped { keep_holes: false },
-                    src,
-                    None,
-                )
-            }
-            Expr::MapGroupBy { items, key_fn } => {
-                let src = self.eval_expr(inst_id, receiver, items, state)?;
-                if src == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
-                let elem =
-                    builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN);
-                (
-                    key_fn.as_ref(),
-                    vec![elem, Ty::NUMBER],
-                    CallbackContract::GroupKey,
-                    src,
-                    Some(elem),
-                )
-            }
-            Expr::Call { callee, args, .. } => {
-                let Expr::PropertyGet {
-                    object, property, ..
-                } = callee.as_ref()
-                else {
-                    return Ok(None);
-                };
-                let method_name = hir_compat::method(property).name();
-                // Map.groupBy(items, keyFn)
-                if let Expr::PropertyGet {
-                    object: global,
-                    property: class,
-                    ..
-                } = object.as_ref()
-                    && matches!(global.as_ref(), Expr::GlobalGet(_))
-                    && class == "Map"
-                    && method_name == "groupBy"
-                    && let [items, key_fn] = args.as_slice()
-                {
-                    let src = self.eval_expr(inst_id, receiver, items, state)?;
-                    if src == Ty::BOTTOM {
-                        return Ok(Some(Ty::BOTTOM));
-                    }
-                    let elem =
-                        builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN);
-                    (
-                        key_fn,
-                        vec![elem, Ty::NUMBER],
-                        CallbackContract::GroupKey,
-                        src,
-                        Some(elem),
-                    )
-                } else {
-                    let obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
-                    if obj_ty == Ty::BOTTOM {
-                        return Ok(Some(Ty::BOTTOM));
-                    }
-                    let (stripped, _) = self.types.strip_nullish(obj_ty);
-                    // Map.forEach / Set.forEach
-                    if method_name == "forEach"
-                        && let TyKind::Generic { base, args: gargs } = self.types.kind(stripped)
-                        && let HirType::Named(base_name) = base.hir(self.ctx)
-                        && let Some(cb) = args.first()
-                    {
-                        let gslice: Vec<Ty> = self.types.generic_slice(gargs).to_vec();
-                        match (base_name.as_str(), gslice.as_slice()) {
-                            ("Map" | "ReadonlyMap", [k, v]) => (
-                                cb,
-                                vec![*v, *k, stripped],
-                                CallbackContract::Void,
-                                obj_ty,
-                                None,
-                            ),
-                            ("Set" | "ReadonlySet", [v]) => (
-                                cb,
-                                vec![*v, *v, stripped],
-                                CallbackContract::Void,
-                                obj_ty,
-                                None,
-                            ),
-                            _ => return Ok(None),
-                        }
-                    } else {
-                        let Some(recv_kind) = builtins::receiver_of(self.ctx, self.types, stripped)
-                        else {
-                            return Ok(None);
-                        };
-                        let Some(method) = crate::methods::Method::lookup(recv_kind, method_name)
-                        else {
-                            return Ok(None);
-                        };
-                        let Some(cb_kind) = method.callback() else {
-                            return Ok(None);
-                        };
-                        let Some((first_arg, tail)) = args.split_first() else {
-                            return Ok(None);
-                        };
-                        match cb_kind {
-                            crate::methods::Callback::Replacement => {
-                                let Some(cb) = tail.first() else {
-                                    return Ok(None);
-                                };
-                                let cb_ty = self.eval_expr(inst_id, receiver, cb, state)?;
-                                if cb_ty == Ty::BOTTOM {
-                                    return Ok(Some(Ty::BOTTOM));
-                                }
-                                if !matches!(self.types.kind(cb_ty), TyKind::Func(_)) {
-                                    return Ok(None);
-                                }
-                                let mut in_tys = vec![Ty::STRING];
-                                let captures = match first_arg {
-                                    Expr::RegExp { pattern, .. } => {
-                                        Some(crate::methods::regex_captures(pattern))
-                                    }
-                                    Expr::LocalGet(id) => self
-                                        .index
-                                        .local_idx(*id)
-                                        .and_then(|li| {
-                                            self.index
-                                                .local_regex_pattern
-                                                .get(li.0 as usize)
-                                                .copied()
-                                                .flatten()
-                                        })
-                                        .map(crate::methods::regex_captures),
-                                    Expr::String(_) => Some((0, false)),
-                                    _ => None,
-                                };
-                                if let Some((count, named)) = captures {
-                                    let opt_str =
-                                        self.types.with_absences(Ty::STRING, Absence::Undefined);
-                                    in_tys.extend(std::iter::repeat_n(opt_str, count));
-                                    in_tys.extend([Ty::NUMBER, Ty::STRING]);
-                                    if named {
-                                        let groups = self.types.object(&mut [], Some(opt_str));
-                                        in_tys.push(groups);
-                                    }
-                                }
-                                (cb, in_tys, CallbackContract::Replacement, obj_ty, None)
-                            }
-                            crate::methods::Callback::Elements => {
-                                let Some(elem) =
-                                    builtins::iterated_element(self.ctx, self.types, stripped)
-                                else {
-                                    return Ok(None);
-                                };
-                                let contract = match method_name {
-                                    "forEach" => CallbackContract::Void,
-                                    "map" => CallbackContract::Mapped {
-                                        keep_holes: self.facts.sparse_arrays,
-                                    },
-                                    "flatMap" => CallbackContract::FlatMapped,
-                                    _ => CallbackContract::Predicate,
-                                };
-                                (
-                                    first_arg,
-                                    vec![elem, Ty::NUMBER, stripped],
-                                    contract,
-                                    obj_ty,
-                                    None,
-                                )
-                            }
-                            crate::methods::Callback::AllIndices => {
-                                let Some(elem) =
-                                    builtins::iterated_element(self.ctx, self.types, stripped)
-                                else {
-                                    return Ok(None);
-                                };
-                                let opt = self.types.with_absences(elem, Absence::Undefined);
-                                (
-                                    first_arg,
-                                    vec![opt, Ty::NUMBER, stripped],
-                                    CallbackContract::Predicate,
-                                    obj_ty,
-                                    None,
-                                )
-                            }
-                            crate::methods::Callback::Comparator => {
-                                if matches!(first_arg, Expr::Undefined) {
-                                    return Ok(None);
-                                }
-                                let Some(elem) =
-                                    builtins::iterated_element(self.ctx, self.types, stripped)
-                                else {
-                                    return Ok(None);
-                                };
-                                let def = self.types.exclude_absences(elem, Absence::Undefined);
-                                (
-                                    first_arg,
-                                    vec![def, def],
-                                    CallbackContract::Comparator,
-                                    obj_ty,
-                                    None,
-                                )
-                            }
-                            crate::methods::Callback::Fold => {
-                                let Some(elem) =
-                                    builtins::iterated_element(self.ctx, self.types, stripped)
-                                else {
-                                    return Ok(None);
-                                };
-                                let acc = match tail.first() {
-                                    Some(init) => self.eval_expr(inst_id, receiver, init, state)?,
-                                    None => elem,
-                                };
-                                if acc == Ty::BOTTOM {
-                                    return Ok(Some(Ty::BOTTOM));
-                                }
-                                (
-                                    first_arg,
-                                    vec![acc, elem, Ty::NUMBER, stripped],
-                                    CallbackContract::Fold,
-                                    obj_ty,
-                                    None,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-            _ => return Ok(None),
+        let Some(matched) = self.match_builtin_callback(inst_id, receiver, expr, state)? else {
+            return Ok(None);
+        };
+        let CallbackSite {
+            callback,
+            mut inputs,
+            contract,
+            recv_ty,
+            group_elem: map_group_elem,
+        } = match matched {
+            Ok(site) => site,
+            Err(early) => return Ok(Some(early)),
         };
 
         if inputs.contains(&Ty::BOTTOM) {
@@ -486,37 +467,83 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.types.generic(base, &[key, arr])
                 }
             }
-            CallbackContract::Predicate => match expr {
-                Expr::ArrayFilter { .. } => recv_ty,
-                Expr::ArraySome { .. } | Expr::ArrayEvery { .. } => Ty::BOOLEAN,
-                Expr::ArrayFindIndex { .. } => Ty::NUMBER,
-                Expr::ArrayFind { .. } => {
+            CallbackContract::Predicate(pred) => match pred {
+                PredicateResult::Filter => recv_ty,
+                PredicateResult::Bool => Ty::BOOLEAN,
+                PredicateResult::Index => Ty::NUMBER,
+                PredicateResult::Find => {
                     let elem = builtins::iterated_element(self.ctx, self.types, recv_ty)
                         .unwrap_or(Ty::OPEN);
                     self.types.with_absences(elem, Absence::Undefined)
                 }
-                Expr::Call { callee, .. } => {
-                    if let Expr::PropertyGet { property, .. } = callee.as_ref() {
-                        match hir_compat::method(property).name() {
-                            "filter" => recv_ty,
-                            "some" | "every" => Ty::BOOLEAN,
-                            "findIndex" | "findLastIndex" => Ty::NUMBER,
-                            "find" | "findLast" => {
-                                let elem =
-                                    builtins::iterated_element(self.ctx, self.types, recv_ty)
-                                        .unwrap_or(Ty::OPEN);
-                                self.types.with_absences(elem, Absence::Undefined)
-                            }
-                            _ => Ty::OPEN,
-                        }
-                    } else {
-                        Ty::OPEN
-                    }
-                }
-                _ => Ty::OPEN,
             },
         };
         Ok(Some(result))
+    }
+
+    pub(super) fn eval_args(
+        &mut self,
+        inst_id: InstanceId,
+        receiver: Option<ClassInstId>,
+        args: &'h [Expr],
+        state: &mut EvalState<'h>,
+    ) -> Result<Vec<Ty>> {
+        let mut arg_tys = Vec::with_capacity(args.len());
+        for arg in args {
+            arg_tys.push(self.eval_expr(inst_id, receiver, arg, state)?);
+        }
+        Ok(arg_tys)
+    }
+
+    pub(super) fn dispatch_call_site(
+        &mut self,
+        inst_id: InstanceId,
+        expr: &'h Expr,
+        req: InstanceReq<'_>,
+        is_method: bool,
+        strip_arg_mask: u64,
+    ) -> Result<(InstanceId, Ty)> {
+        let target = self.request_instance(req)?;
+        let res = if is_method {
+            SiteResolution::MethodCall {
+                target,
+                strip_arg_mask,
+            }
+        } else {
+            SiteResolution::DirectCall {
+                target,
+                strip_arg_mask,
+            }
+        };
+        self.record_site(inst_id, expr, res);
+        let ret_loc = self.instances[target.0 as usize].return_loc;
+        Ok((target, self.read_loc(ret_loc, inst_id)))
+    }
+
+    pub(super) fn resolve_class_inst(
+        &mut self,
+        inst_id: InstanceId,
+        stripped: Ty,
+        byte_offset: u32,
+    ) -> Result<Option<ClassInstId>> {
+        match self.types.kind(stripped) {
+            TyKind::ClassInst(cinst_id) => Ok(Some(cinst_id)),
+            TyKind::Leaf(id) => {
+                if let HirType::Named(class_name) = id.hir(self.ctx)
+                    && let Some(cid) = self.index.class_by_name(class_name)
+                {
+                    Ok(Some(self.request_class_inst(
+                        cid,
+                        &[],
+                        byte_offset,
+                        Some(inst_id),
+                    )?))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -532,13 +559,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         state: &mut EvalState<'h>,
     ) -> Result<Ty> {
         // Object literal lowered as `new __AnonShape_N(arg0, arg1, ...)`.
-        if hir_compat::is_object_literal(class_name)
-            && let Some(fields) = self.index.literal_fields(class_name)
-        {
+        let cname_id = self.types.intern_name(class_name);
+        if let Some(fields) = self.index.literal_fields_by_id(cname_id) {
             let mut props = Vec::with_capacity(fields.len());
             for (field, arg) in fields.iter().zip(args) {
-                self.invalidate_agg_expr(inst_id, arg);
                 let ty = self.eval_expr(inst_id, receiver, arg, state)?;
+                self.invalidate_conservative_cell(ty);
                 if let TyKind::Func(ident) = self.types.kind(ty) {
                     self.check_escaping_unannotated_func(ident.template)?;
                 }
@@ -550,17 +576,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                     readonly: false,
                 });
             }
-            return Ok(self.types.object(&mut props, None));
+            return Ok(self.types.object(&props, None));
         }
 
-        let mut arg_tys = Vec::with_capacity(args.len());
-        for arg in args {
-            self.invalidate_agg_expr(inst_id, arg);
-            arg_tys.push(self.eval_expr(inst_id, receiver, arg, state)?);
-        }
+        let arg_tys = self.eval_args(inst_id, receiver, args, state)?;
 
         // User class (explicit generic, implicit generic, or plain class).
-        if let Some(cid) = self.index.class_by_name(class_name) {
+        if let Some(cid) = self.index.class_by_name_id(cname_id) {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
@@ -685,11 +707,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         // 4. Direct or indirect call through a static function identity (`fn(args...)`).
         let callee_ty = self.eval_expr(inst_id, receiver, callee, state)?;
-        let mut arg_tys = Vec::with_capacity(args.len());
-        for arg in args {
-            self.invalidate_agg_expr(inst_id, arg);
-            arg_tys.push(self.eval_expr(inst_id, receiver, arg, state)?);
-        }
+        let arg_tys = self.eval_args(inst_id, receiver, args, state)?;
         if callee_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
             return Ok(Ty::BOTTOM);
         }
@@ -697,6 +715,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         let TyKind::Func(ident) = self.types.kind(callee_ty) else {
             return Ok(Ty::OPEN);
         };
+        for &a in &arg_tys {
+            self.invalidate_conservative_cell(a);
+        }
         let Some(target_view) = self.index.view(ident.template) else {
             return Ok(Ty::OPEN);
         };
@@ -727,7 +748,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
 
         // Check explicit `FunctionType` parameter annotations and escaping callback params!
-        self.check_callback_params(inst_id, target_view, &mut arg_tys, byte_offset)?;
+        self.check_callback_params(inst_id, target_view, &arg_tys, byte_offset)?;
 
         // Bind explicit type arguments (`fn<number>(x)`), substituting active caller type params.
         let explicit_targs: Vec<Ty> = if type_args.is_empty() {
@@ -743,36 +764,30 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .collect()
         };
 
-        let target_inst = self.request_instance(InstanceReq {
-            template: ident.template,
-            receiver: None,
-            capture_owner: ident.capture_owner,
-            args: &arg_tys,
-            explicit_type_args: &explicit_targs,
-            call_byte_offset: byte_offset,
-            caller: Some(inst_id),
-            is_inline_callback: false,
-        })?;
         let strip_mask = callable_arg_mask(self.types, &arg_tys);
-        self.record_site(
+        let (target_inst, ret) = self.dispatch_call_site(
             inst_id,
             expr,
-            SiteResolution::DirectCall {
-                target: target_inst,
-                strip_arg_mask: strip_mask,
+            InstanceReq {
+                template: ident.template,
+                receiver: None,
+                capture_owner: ident.capture_owner,
+                args: &arg_tys,
+                explicit_type_args: &explicit_targs,
+                call_byte_offset: byte_offset,
+                caller: Some(inst_id),
+                is_inline_callback: false,
             },
-        );
+            false,
+            strip_mask,
+        )?;
         // Propagate closure-written locals so reads after `set("hi")` know `v` is initialized (S3).
         if let Some(target_written) = self.inst_written.get(target_inst.0 as usize).cloned()
             && let Some(cur_written) = self.inst_written.get_mut(inst_id.0 as usize)
         {
             cur_written.union_with(&target_written);
         }
-        let ret_loc = self
-            .instances
-            .get(target_inst.0 as usize)
-            .map_or(LocId(0), |i| i.return_loc);
-        Ok(self.read_loc(ret_loc, inst_id))
+        Ok(ret)
     }
 
     pub(super) fn eval_call_spread(
@@ -840,29 +855,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         let TyKind::Func(ident) = self.types.kind(callee_ty) else {
             return Ok(Ty::OPEN);
         };
-        let target_inst = self.request_instance(InstanceReq {
-            template: ident.template,
-            receiver: None,
-            capture_owner: ident.capture_owner,
-            args: &expanded,
-            explicit_type_args: &[],
-            call_byte_offset: 0,
-            caller: Some(inst_id),
-            is_inline_callback: false,
-        })?;
-        self.record_site(
+        for &a in &expanded {
+            self.invalidate_conservative_cell(a);
+        }
+        let (_, ret) = self.dispatch_call_site(
             inst_id,
             expr,
-            SiteResolution::DirectCall {
-                target: target_inst,
-                strip_arg_mask: 0,
+            InstanceReq {
+                template: ident.template,
+                receiver: None,
+                capture_owner: ident.capture_owner,
+                args: &expanded,
+                explicit_type_args: &[],
+                call_byte_offset: 0,
+                caller: Some(inst_id),
+                is_inline_callback: false,
             },
-        );
-        let ret_loc = self
-            .instances
-            .get(target_inst.0 as usize)
-            .map_or(LocId(0), |i| i.return_loc);
-        Ok(self.read_loc(ret_loc, inst_id))
+            false,
+            0,
+        )?;
+        Ok(ret)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -973,62 +985,51 @@ impl<'h, 'a> Solver<'h, 'a> {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
-            if let Some(cid) = self.index.class_by_name(class_name)
-                && let Some(tid) = self.index.class_static_method(cid, name)
+            let cname_id = self.types.intern_name(class_name);
+            let mname_id = self.types.intern_name(name);
+            if let Some(cid) = self.index.class_by_name_id(cname_id)
+                && let Some(tid) = self.index.class_static_method_by_id(cid, mname_id)
             {
-                let target = self.request_instance(InstanceReq {
-                    template: tid,
-                    receiver: None,
-                    capture_owner: None,
-                    args: &arg_tys,
-                    explicit_type_args: &[],
-                    call_byte_offset: byte_offset,
-                    caller: Some(inst_id),
-                    is_inline_callback: false,
-                })?;
                 let strip_mask = callable_arg_mask(self.types, &arg_tys);
-                self.record_site(
+                let (_, ret) = self.dispatch_call_site(
                     inst_id,
                     expr,
-                    SiteResolution::MethodCall {
-                        target,
-                        strip_arg_mask: strip_mask,
+                    InstanceReq {
+                        template: tid,
+                        receiver: None,
+                        capture_owner: None,
+                        args: &arg_tys,
+                        explicit_type_args: &[],
+                        call_byte_offset: byte_offset,
+                        caller: Some(inst_id),
+                        is_inline_callback: false,
                     },
-                );
-                let ret_loc = self
-                    .instances
-                    .get(target.0 as usize)
-                    .map_or(LocId(0), |i| i.return_loc);
-                return Ok(self.read_loc(ret_loc, inst_id));
+                    true,
+                    strip_mask,
+                )?;
+                return Ok(ret);
             }
             return Ok(Ty::OPEN);
         }
 
         let obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
-        let mut arg_tys = Vec::with_capacity(args.len());
-        for arg in args {
-            self.invalidate_agg_expr(inst_id, arg);
-            arg_tys.push(self.eval_expr(inst_id, receiver, arg, state)?);
-        }
+        let arg_tys = self.eval_args(inst_id, receiver, args, state)?;
         if obj_ty == Ty::BOTTOM {
             return Ok(Ty::BOTTOM);
         }
 
-        // Open empty-array `.push(v1, v2, ...)`!
-        if name == "push"
-            && let Expr::LocalGet(id) = object
-            && let Some(lidx) = self.index.local_idx(*id)
-            && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
+        let (stripped_obj, _) = self.types.strip_nullish(obj_ty);
+
+        // Open empty-array `.push(...)` / `.unshift(...)` on `Cell(Array | LocalArray)`.
+        if matches!(name, "push" | "unshift")
+            && let TyKind::Cell { loc, kind } = self.types.kind(stripped_obj)
         {
-            match agg_kind {
-                AggregateKind::Array => {
-                    for &arg_ty in &arg_tys {
-                        self.write_agg_value(agg_loc, arg_ty);
-                    }
+            if kind.is_array() {
+                for &arg_ty in &arg_tys {
+                    self.write_cell(loc, arg_ty);
                 }
-                AggregateKind::Dictionary => {
-                    self.write_loc(agg_loc, Ty::OPEN);
-                }
+            } else {
+                self.write_loc(loc, Ty::OPEN);
             }
             return Ok(Ty::NUMBER);
         }
@@ -1037,68 +1038,66 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(obj_ty);
         }
 
-        let (stripped, _) = self.types.strip_nullish(obj_ty);
+        let stripped = stripped_obj;
 
         // User class method call (`new Box(2).map(...)`, `c.add(2)`, etc.)!
-        let method_cinst = match self.types.kind(stripped) {
-            TyKind::ClassInst(cinst_id) => Some(cinst_id),
-            TyKind::Leaf(id) => {
-                if let HirType::Named(class_name) = id.hir(self.ctx)
-                    && let Some(cid) = self.index.class_by_name(class_name)
-                {
-                    Some(self.request_class_inst(cid, &[], byte_offset, Some(inst_id))?)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
+        let method_cinst = self.resolve_class_inst(inst_id, stripped, byte_offset)?;
+        let mname_id = self.types.intern_name(name);
         if let Some(cinst_id) = method_cinst
             && let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
-            && let Some(method_tid) = self.index.class_method(cinst.class, name)
+            && let Some(method_tid) = self.index.class_method_by_id(cinst.class, mname_id)
         {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
             if let Some(method_view) = self.index.view(method_tid) {
-                self.check_callback_params(inst_id, method_view, &mut arg_tys, byte_offset)?;
+                self.check_callback_params(inst_id, method_view, &arg_tys, byte_offset)?;
             }
-            let target = self.request_instance(InstanceReq {
-                template: method_tid,
-                receiver: Some(cinst_id),
-                capture_owner: None,
-                args: &arg_tys,
-                explicit_type_args: &[],
-                call_byte_offset: byte_offset,
-                caller: Some(inst_id),
-                is_inline_callback: false,
-            })?;
             let strip_mask = callable_arg_mask(self.types, &arg_tys);
-            self.record_site(
+            let (_, ret) = self.dispatch_call_site(
                 inst_id,
                 expr,
-                SiteResolution::MethodCall {
-                    target,
-                    strip_arg_mask: strip_mask,
+                InstanceReq {
+                    template: method_tid,
+                    receiver: Some(cinst_id),
+                    capture_owner: None,
+                    args: &arg_tys,
+                    explicit_type_args: &[],
+                    call_byte_offset: byte_offset,
+                    caller: Some(inst_id),
+                    is_inline_callback: false,
                 },
-            );
-            let ret_loc = self
-                .instances
-                .get(target.0 as usize)
-                .map_or(LocId(0), |i| i.return_loc);
-            return Ok(self.read_loc(ret_loc, inst_id));
+                true,
+                strip_mask,
+            )?;
+            return Ok(ret);
         }
 
         // Built-in method call (Array/String/Bytes/Date/Map/Set/Response/Stream/Temporal/etc.).
         if let Some(rule) =
             builtins::lookup_method_result(self.ctx, self.types, stripped, name, false)
         {
+            let resolved_recv = if matches!(self.types.kind(stripped), TyKind::Cell { .. })
+                && !matches!(
+                    rule,
+                    crate::methods::MethodResult::Number
+                        | crate::methods::MethodResult::Boolean
+                        | crate::methods::MethodResult::String
+                        | crate::methods::MethodResult::Void
+                ) {
+                self.resolve_cell_read(inst_id, obj_ty)
+            } else {
+                obj_ty
+            };
+            if resolved_recv == Ty::BOTTOM {
+                return Ok(Ty::BOTTOM);
+            }
             return Ok(builtins::apply_method_result(
                 self.ctx,
                 self.types,
                 rule,
                 MethodResultArgs {
-                    receiver: obj_ty,
+                    receiver: resolved_recv,
                     arg0: arg_tys.first().copied(),
                     arg0_expr: args.first(),
                     callback_result: None,
@@ -1114,20 +1113,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         caller: InstanceId,
         target_view: &super::super::boundary::TemplateView<'h>,
-        arg_tys: &mut [Ty],
+        arg_tys: &[Ty],
         byte_offset: u32,
     ) -> Result<()> {
         let fn_display = hir_compat::display_name(target_view.name);
-        for (p_idx, (param, actual)) in target_view
-            .params
-            .iter()
-            .zip(arg_tys.iter_mut())
-            .enumerate()
-        {
-            let _ = p_idx;
+        for (param, &actual) in target_view.params.iter().zip(arg_tys.iter()) {
             if let HirType::Function(expected) = &param.ty {
-                let TyKind::Func(ident) = self.types.kind(*actual) else {
-                    if !self.types.is_open(*actual) {
+                let TyKind::Func(ident) = self.types.kind(actual) else {
+                    if !self.types.is_open(actual) {
                         return Err(self.metadata.locations.annotate_call(
                             diag!(
                                 codes::TYPE_MISMATCH,
@@ -1208,7 +1201,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         byte_offset,
                     });
                 }
-            } else if matches!(self.types.kind(*actual), TyKind::Func(_))
+            } else if matches!(self.types.kind(actual), TyKind::Func(_))
                 && let Some(lidx) = self.index.local_idx(param.id)
                 && let Some(span) = self
                     .index
@@ -1306,26 +1299,27 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         for param in view.params {
             let annotated = self
-                .hir
-                .local_source_spans
-                .get(&param.id)
-                .is_some_and(|span| self.facts.is_param_annotated(span.start));
+                .index
+                .local_idx(param.id)
+                .is_some_and(|li| self.index.local_param_annotated.contains(li.0 as usize));
             if !annotated && matches!(param.ty, HirType::Any | HirType::Unknown) {
-                let fn_display = hir_compat::display_name(view.name);
                 let mut err = diag!(
                     codes::MISSING_TYPE_ANNOTATION,
-                    "parameter '{}' of '{fn_display}' needs a type annotation",
-                    param.name
+                    "parameter '{}' of '{}' needs a type annotation",
+                    param.name,
+                    view.display_name()
                 )
                 .with_help(
                     "Add a concrete type annotation to this binding, parameter, or function return.",
                 );
                 if let Some(span) = self.hir.local_source_spans.get(&param.id) {
-                    let swc_span = swc_common::Span::new(
-                        swc_common::BytePos(span.start),
-                        swc_common::BytePos(span.end),
+                    err = self.metadata.locations.annotate(
+                        err,
+                        swc_common::Span::new(
+                            swc_common::BytePos(span.start),
+                            swc_common::BytePos(span.end),
+                        ),
                     );
-                    err = self.metadata.locations.annotate(err, swc_span);
                 }
                 return Err(err);
             }
@@ -1338,18 +1332,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         mut err: Diagnostic,
         mut cursor: InstanceId,
     ) -> Diagnostic {
-        let mut hops = 0usize;
-        while hops < 16 {
-            hops += 1;
+        for _ in 0..16 {
             let Some(inst) = self.instances.get(cursor.0 as usize) else {
                 break;
             };
             if let Some(view) = self.index.view(inst.template)
                 && inst.call_byte_offset != 0
-                && !view.name.is_empty()
             {
-                let display = hir_compat::display_name(view.name);
-                let msg = format!("while instantiating '{display}'");
+                let msg = format!("while instantiating '{}'", view.display_name());
                 err = match self.metadata.locations.call_span(inst.call_byte_offset) {
                     Some(note_span) => err.with_spanned_note(note_span, msg),
                     None => err.with_note(msg),

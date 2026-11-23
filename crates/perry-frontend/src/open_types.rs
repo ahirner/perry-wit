@@ -18,9 +18,6 @@ impl<'t> TypeState<'t> {
 }
 
 pub fn binding_type(ty: &Type, annotated: bool) -> TypeState<'_> {
-    if matches!(ty, Type::Unknown) {
-        return TypeState::Dynamic;
-    }
     if requires_context(ty) || (!annotated && contains_type_var(ty)) {
         if annotated {
             TypeState::Dynamic

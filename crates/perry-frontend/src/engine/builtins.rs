@@ -10,30 +10,44 @@ use crate::{
     shapes::{self, Declarations},
 };
 use perry_hir::{
+    analysis::{HirTypeFacts, infer_expr_type},
     ir::{BinaryOp, Expr, LogicalOp, UnaryOp},
-    types::Type as HirType,
+    types::{FuncId, GlobalId, LocalId, Type as HirType},
 };
 use pliron::context::Context;
+
+struct NoFacts;
+impl HirTypeFacts for NoFacts {
+    fn local_type(&self, _: LocalId) -> Option<&HirType> {
+        None
+    }
+    fn global_type(&self, _: GlobalId) -> Option<&HirType> {
+        None
+    }
+    fn function_return_type(&self, _: FuncId) -> Option<&HirType> {
+        None
+    }
+}
 
 pub(crate) const SETTLED: &str = "PromiseSettledResult";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PredicateResult {
+    Filter,
+    Bool,
+    Index,
+    Find,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CallbackContract {
-    /// Result discarded (`forEach`).
     Void,
-    /// Returns mapped element (`map`, `Array.from`).
     Mapped { keep_holes: bool },
-    /// Returns flattened array (`flatMap`).
     FlatMapped,
-    /// Returns predicate (`filter`, `some`, `every`, `find`, `findIndex`, `findLast`, `findLastIndex`).
-    Predicate,
-    /// Returns comparator number (`sort`, `toSorted`).
+    Predicate(PredicateResult),
     Comparator,
-    /// Returns next accumulator (`reduce`, `reduceRight`).
     Fold,
-    /// Returns replacement string (`replace`, `replaceAll`).
     Replacement,
-    /// Returns map key (`Map.groupBy`).
     GroupKey,
 }
 
@@ -60,6 +74,7 @@ pub(crate) fn normalize_named_integer(
 pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Receiver> {
     match types.kind(ty) {
         TyKind::Array(_) | TyKind::Tuple(_) => Some(Receiver::Value(Kind::Array)),
+        TyKind::Cell { kind, .. } if kind.is_array() => Some(Receiver::Value(Kind::Array)),
         TyKind::String => Some(Receiver::Value(Kind::String)),
         TyKind::Number | TyKind::Int32 => Some(Receiver::Value(Kind::Number)),
         TyKind::Boolean => Some(Receiver::Value(Kind::Boolean)),
@@ -97,22 +112,13 @@ pub(crate) fn lookup_method_result(
     if let Some(recv) = receiver_of(ctx, types, receiver) {
         return Method::lookup(recv, name)
             .filter(|m| m.is_property() == property)
-            .map(method_result_of);
+            .map(Method::result_rule);
     }
     if property {
         return None;
     }
-    // Fall back to unique-result lookup only when receiver is not a known built-in family.
     let hir = types.materialize_hir(ctx, receiver, &|_| None);
     Method::inferred(&hir, name, false)
-}
-
-fn method_result_of(method: Method) -> MethodResult {
-    // Reuse Method::inferred via a direct helper on known receiver; wait: `Method::result` is private.
-    // Call `Method::inferred` using the receiver's canonical HirType or map directly.
-    let _ = method;
-    // Wait: we expose `pub(crate) fn result(self) -> MethodResult` on `Method` in `methods.rs`!
-    method.result_rule()
 }
 
 /// Extract the iterated element type of an array, string, tuple, Set, Map, or typed array.
@@ -386,7 +392,7 @@ pub(crate) fn native_ty(ctx: &Context, types: &mut TypeTable, kind: Kind) -> Ty 
 }
 
 fn duration_ty(types: &mut TypeTable) -> Ty {
-    let mut props = [
+    let props = [
         ("blank", Ty::BOOLEAN),
         ("days", Ty::NUMBER),
         ("months", Ty::NUMBER),
@@ -400,7 +406,7 @@ fn duration_ty(types: &mut TypeTable) -> Ty {
         optional: false,
         readonly: false,
     });
-    types.object(&mut props, None)
+    types.object(&props, None)
 }
 
 /// Infer the result type of a binary operator from its already-typed operands.
@@ -485,249 +491,26 @@ fn is_mixed_string_union(ctx: &Context, types: &TypeTable, ty: Ty) -> bool {
     })
 }
 
-/// Classify a leaf HIR expression directly into [`Ty`] without recursing via `perry_hir`.
-pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) -> Option<Ty> {
-    Some(match expr {
+/// Classify a leaf/intrinsic HIR expression into [`Ty`].
+///
+/// Fast-paths common literals and Perry-WIT nullish/JSON refinements; all remaining leaf
+/// intrinsics reuse `perry_hir::analysis::infer_expr_type` with empty facts.
+pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) -> Ty {
+    match expr {
         Expr::Undefined | Expr::Void(_) => Ty::VOID,
         Expr::Null => Ty::NULL,
-        Expr::Bool(_)
-        | Expr::Compare { .. }
-        | Expr::InstanceOf { .. }
-        | Expr::In { .. }
-        | Expr::Delete(_)
-        | Expr::ObjectIs(_, _)
-        | Expr::ObjectHasOwn(_, _)
-        | Expr::ArrayIsArray(_)
-        | Expr::ArrayIncludes { .. }
-        | Expr::ArraySome { .. }
-        | Expr::ArrayEvery { .. }
-        | Expr::MapHas { .. }
-        | Expr::MapDelete { .. }
-        | Expr::SetHas { .. }
-        | Expr::SetDelete { .. }
-        | Expr::ThisProvenClass(_)
-        | Expr::IsNaN(_)
-        | Expr::IsUndefinedOrBareNan(_)
-        | Expr::IsFinite(_)
-        | Expr::NumberIsNaN(_)
-        | Expr::NumberIsFinite(_)
-        | Expr::NumberIsInteger(_)
-        | Expr::NumberIsSafeInteger(_)
-        | Expr::BooleanCoerce(_)
-        | Expr::TextDecoderFatal(_)
-        | Expr::TextDecoderIgnoreBom(_)
-        | Expr::UrlCanParse(_)
-        | Expr::UrlCanParseWithBase { .. }
-        | Expr::UrlSearchParamsHas { .. } => Ty::BOOLEAN,
-
-        Expr::Integer(_)
-        | Expr::Number(_)
-        | Expr::Update { .. }
-        | Expr::PropertyUpdate { .. }
-        | Expr::IndexUpdate { .. }
-        | Expr::NumberCoerce(_)
-        | Expr::MapSize(_)
-        | Expr::SetSize(_)
-        | Expr::ArrayPush { .. }
-        | Expr::ArrayPushSpread { .. }
-        | Expr::ArrayUnshift { .. }
-        | Expr::ArrayIndexOf { .. }
-        | Expr::ArrayLastIndexOf { .. }
-        | Expr::ArrayFindIndex { .. }
-        | Expr::ArrayFindLastIndex { .. }
-        | Expr::PerformanceNow
-        | Expr::DateNow
-        | Expr::DateGetTime(_)
-        | Expr::DateGetFullYear(_)
-        | Expr::DateGetMonth(_)
-        | Expr::DateGetDate(_)
-        | Expr::DateGetDay(_)
-        | Expr::DateGetHours(_)
-        | Expr::DateGetMinutes(_)
-        | Expr::DateGetSeconds(_)
-        | Expr::DateGetMilliseconds(_)
-        | Expr::DateParse(_)
-        | Expr::DateUtc(_)
-        | Expr::DateGetUtcDay(_)
-        | Expr::DateGetUtcFullYear(_)
-        | Expr::DateGetUtcMonth(_)
-        | Expr::DateGetUtcDate(_)
-        | Expr::DateGetUtcHours(_)
-        | Expr::DateGetUtcMinutes(_)
-        | Expr::DateGetUtcSeconds(_)
-        | Expr::DateGetUtcMilliseconds(_)
-        | Expr::DateSetUtcFullYear { .. }
-        | Expr::DateSetUtcMonth { .. }
-        | Expr::DateSetUtcDate { .. }
-        | Expr::DateSetUtcHours { .. }
-        | Expr::DateSetUtcMinutes { .. }
-        | Expr::DateSetUtcSeconds { .. }
-        | Expr::DateSetUtcMilliseconds { .. }
-        | Expr::DateSetFullYear { .. }
-        | Expr::DateSetMonth { .. }
-        | Expr::DateSetDate { .. }
-        | Expr::DateSetHours { .. }
-        | Expr::DateSetMinutes { .. }
-        | Expr::DateSetSeconds { .. }
-        | Expr::DateSetMilliseconds { .. }
-        | Expr::DateSetTime { .. }
-        | Expr::DateValueOf(_)
-        | Expr::DateGetTimezoneOffset(_)
-        | Expr::MathRandom
-        | Expr::MathFloor(_)
-        | Expr::MathCeil(_)
-        | Expr::MathRound(_)
-        | Expr::MathTrunc(_)
-        | Expr::MathSign(_)
-        | Expr::MathAbs(_)
-        | Expr::MathSqrt(_)
-        | Expr::MathLog(_)
-        | Expr::MathLog2(_)
-        | Expr::MathLog10(_)
-        | Expr::MathLog1p(_)
-        | Expr::MathClz32(_)
-        | Expr::MathSin(_)
-        | Expr::MathCos(_)
-        | Expr::MathTan(_)
-        | Expr::MathAsin(_)
-        | Expr::MathAcos(_)
-        | Expr::MathAtan(_)
-        | Expr::MathAtan2(_, _)
-        | Expr::MathCbrt(_)
-        | Expr::MathFround(_)
-        | Expr::MathF16round(_)
-        | Expr::MathExpm1(_)
-        | Expr::MathHypot(_)
-        | Expr::MathSinh(_)
-        | Expr::MathCosh(_)
-        | Expr::MathTanh(_)
-        | Expr::MathAsinh(_)
-        | Expr::MathAcosh(_)
-        | Expr::MathAtanh(_)
-        | Expr::MathExp(_)
-        | Expr::MathMin(_)
-        | Expr::MathMax(_)
-        | Expr::MathPow(_, _)
-        | Expr::MathImul(_, _)
-        | Expr::MathMinSpread(_)
-        | Expr::MathMaxSpread(_)
-        | Expr::ParseInt { .. }
-        | Expr::ParseFloat(_)
-        | Expr::Uint8ArrayLength(_)
-        | Expr::BufferByteLength { .. }
-        | Expr::BufferLength(_) => Ty::NUMBER,
-
-        // Reading a Uint8Array element can be out-of-bounds (`undefined`) as lowering models.
+        Expr::Bool(_) | Expr::Compare { .. } | Expr::InstanceOf { .. } | Expr::In { .. } => {
+            Ty::BOOLEAN
+        }
+        Expr::Integer(_) | Expr::Number(_) | Expr::Update { .. } => Ty::NUMBER,
+        Expr::BigInt(_) => Ty::BIGINT,
+        Expr::String(_) | Expr::WtfString(_) | Expr::TypeOf(_) => Ty::STRING,
+        // Perry-WIT nullish and JSON refinements over `perry-hir`.
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => {
             types.with_absences(Ty::NUMBER, Absence::Undefined)
         }
-
-        Expr::BigInt(_) | Expr::BigIntCoerce(_) => Ty::BIGINT,
-
-        Expr::String(_)
-        | Expr::WtfString(_)
-        | Expr::TypeOf(_)
-        | Expr::StringCoerce(_)
-        | Expr::TemplateStringCoerce(_)
-        | Expr::ArrayJoin { .. }
-        | Expr::JsonStringify(_)
-        | Expr::JsonStringifyPretty { .. }
-        | Expr::JsonStringifyFull(..)
-        | Expr::CryptoRandomUUID
-        | Expr::StringReplace { .. }
-        | Expr::ErrorMessage(_)
-        | Expr::EncodeURI(_)
-        | Expr::DecodeURI(_)
-        | Expr::EncodeURIComponent(_)
-        | Expr::DecodeURIComponent(_)
-        | Expr::Atob(_)
-        | Expr::Btoa(_)
-        | Expr::TextDecoderEncoding(_)
-        | Expr::TextDecoderDecode { .. }
-        | Expr::UrlGetHref(_)
-        | Expr::UrlGetPathname(_)
-        | Expr::UrlGetProtocol(_)
-        | Expr::UrlGetHost(_)
-        | Expr::UrlGetHostname(_)
-        | Expr::UrlGetPort(_)
-        | Expr::UrlGetSearch(_)
-        | Expr::UrlGetHash(_)
-        | Expr::UrlGetOrigin(_)
-        | Expr::UrlInstanceToString(_)
-        | Expr::UrlInstanceToJSON(_)
-        | Expr::UrlSearchParamsToString(_)
-        | Expr::StringFromCharCode(_)
-        | Expr::StringFromCharCodeSpread(_)
-        | Expr::StringFromCodePoint(_)
-        | Expr::DateToISOString(_)
-        | Expr::DateToString(_)
-        | Expr::DateToDateString(_)
-        | Expr::DateToTimeString(_)
-        | Expr::DateToUTCString(_)
-        | Expr::DateToLocaleString(_)
-        | Expr::DateToLocaleDateString(_)
-        | Expr::DateToLocaleTimeString(_) => Ty::STRING,
-
-        Expr::DateToJSON(_) => types.with_absences(Ty::STRING, Absence::Null),
-        Expr::StringCodePointAt { .. } => types.with_absences(Ty::NUMBER, Absence::Undefined),
         Expr::StringAt { .. } => types.with_absences(Ty::STRING, Absence::Undefined),
-        Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => {
-            types.with_absences(Ty::STRING, Absence::Undefined)
-        }
-        Expr::UrlParse(_) | Expr::UrlParseWithBase { .. } => {
-            let url = types.named(ctx, "URL");
-            types.with_absences(url, Absence::Null)
-        }
-        Expr::UrlSearchParamsGet { .. } => types.with_absences(Ty::STRING, Absence::Null),
-
-        Expr::ObjectKeys(_)
-        | Expr::ForInKeys(_)
-        | Expr::StringSplit(_, _)
-        | Expr::UrlSearchParamsGetAll { .. }
-        | Expr::UrlSearchParamsKeys(_)
-        | Expr::UrlSearchParamsValues(_)
-        | Expr::ProcessArgv => types.array(Ty::STRING),
-
-        Expr::UrlSearchParamsEntries(_) => {
-            let pair = types.tuple(&[Ty::STRING, Ty::STRING]);
-            types.array(pair)
-        }
-
-        Expr::ArrayForEach { .. } | Expr::MapClear(_) | Expr::SetClear(_) => Ty::VOID,
-
-        Expr::SymbolNew(_) | Expr::SymbolFor(_) => Ty::SYMBOL,
-        Expr::RegExp { .. } | Expr::RegExpDynamic { .. } => types.named(ctx, "RegExp"),
-        Expr::DateNew(_) => types.named(ctx, "Date"),
-        Expr::ErrorNew(_) | Expr::ErrorNewWithCause { .. } | Expr::ErrorNewWithOptions { .. } => {
-            types.named(ctx, "Error")
-        }
-        Expr::TypeErrorNew(_) => types.named(ctx, "TypeError"),
-        Expr::RangeErrorNew(_) => types.named(ctx, "RangeError"),
-        Expr::ReferenceErrorNew(_) => types.named(ctx, "ReferenceError"),
-        Expr::SyntaxErrorNew(_) => types.named(ctx, "SyntaxError"),
-        Expr::UrlNew { .. } => types.named(ctx, "URL"),
-        Expr::UrlSearchParamsNew(_) | Expr::UrlGetSearchParams(_) => {
-            types.named(ctx, "URLSearchParams")
-        }
-        Expr::TextEncoderNew => types.named(ctx, "TextEncoder"),
-        Expr::TextDecoderNew { .. } => types.named(ctx, "TextDecoder"),
-        Expr::Uint8ArrayNew(_)
-        | Expr::Uint8ArrayFrom(_)
-        | Expr::BufferAlloc { .. }
-        | Expr::BufferAllocUnsafe(_)
-        | Expr::BufferFrom { .. }
-        | Expr::BufferFromArrayBuffer { .. }
-        | Expr::BufferConcat(_)
-        | Expr::BufferConcatWithLength { .. }
-        | Expr::BufferSlice { .. }
-        | Expr::BufferFill { .. }
-        | Expr::TextEncoderEncode(_)
-        | Expr::CryptoRandomBytes(_) => types.named(ctx, "Uint8Array"),
-
-        Expr::FetchWithOptions { .. } => {
-            let resp = types.named(ctx, "Response");
-            types.promise(resp)
-        }
+        Expr::DateToJSON(_) => types.with_absences(Ty::STRING, Absence::Null),
         Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) | Expr::JsonParseReviver { .. } => {
             Ty::DYNAMIC
         }
@@ -739,8 +522,30 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
                 parsed
             }
         }
-        _ => return None,
-    })
+        _ => {
+            let hir = infer_expr_type(expr, &NoFacts);
+            if matches!(
+                hir,
+                HirType::Any | HirType::Unknown | HirType::Object(_) | HirType::Generic { .. }
+            ) {
+                Ty::OPEN
+            } else {
+                let ty = types.intern_hir(ctx, &hir, false);
+                if types.is_open(ty) { Ty::OPEN } else { ty }
+            }
+        }
+    }
+}
+
+fn dict_value_ty(
+    ctx: &Context,
+    decls: &Declarations<'_>,
+    types: &mut TypeTable,
+    hir: &HirType,
+) -> Option<Ty> {
+    let (_, val_hir) = decls.dict_entry_types(ctx, hir)?;
+    let val_ty = types.intern_hir(ctx, &val_hir, true);
+    Some(types.with_absences(val_ty, Absence::Undefined))
 }
 
 /// Property lookup on built-in, structural object, or declared nominal types.
@@ -760,9 +565,13 @@ pub(crate) fn property_type(
             "input" => Some(Ty::STRING),
             "groups" => {
                 let opt_str = types.with_absences(Ty::STRING, Absence::Undefined);
-                let rec = types.object(&mut [], Some(opt_str));
+                let rec = types.object(&[], Some(opt_str));
                 Some(types.with_absences(rec, Absence::Undefined))
             }
+            _ => None,
+        },
+        TyKind::Cell { kind, .. } if kind.is_array() => match property {
+            "length" | "index" => Some(Ty::NUMBER),
             _ => None,
         },
         TyKind::Object { props, index } => {
@@ -817,9 +626,8 @@ pub(crate) fn property_type(
                 base: base_name.clone(),
                 type_args: arg_hirs,
             };
-            if let Some((_, val_hir)) = decls.dict_entry_types(ctx, &generic_hir) {
-                let val_ty = types.intern_hir(ctx, &val_hir, true);
-                return Some(types.with_absences(val_ty, Absence::Undefined));
+            if let Some(val_ty) = dict_value_ty(ctx, decls, types, &generic_hir) {
+                return Some(val_ty);
             }
             lookup_method_result(ctx, types, stripped, property, true).map(|rule| {
                 apply_method_result(ctx, types, rule, MethodResultArgs::receiver_only(stripped))
@@ -827,10 +635,8 @@ pub(crate) fn property_type(
         }
         TyKind::Leaf(id) => {
             let HirType::Named(base_name) = id.hir(ctx) else {
-                if matches!(id.hir(ctx), HirType::StringLiteral(_)) && property == "length" {
-                    return Some(Ty::NUMBER);
-                }
-                return None;
+                return (matches!(id.hir(ctx), HirType::StringLiteral(_)) && property == "length")
+                    .then_some(Ty::NUMBER);
             };
             if Kind::builtin(base_name) == Some(Kind::Exception) {
                 match property {
@@ -864,23 +670,16 @@ pub(crate) fn property_type(
                     return Some(found);
                 }
             }
-            if let Some((_, val_hir)) =
-                decls.dict_entry_types(ctx, &HirType::Named(base_name.clone()))
+            if let Some(val_ty) =
+                dict_value_ty(ctx, decls, types, &HirType::Named(base_name.clone()))
             {
-                let val_ty = types.intern_hir(ctx, &val_hir, true);
-                return Some(types.with_absences(val_ty, Absence::Undefined));
+                return Some(val_ty);
             }
-            if let Some(rule) = Method::named_property(base_name, property) {
-                return Some(apply_method_result(
-                    ctx,
-                    types,
-                    rule,
-                    MethodResultArgs::receiver_only(stripped),
-                ));
-            }
-            lookup_method_result(ctx, types, stripped, property, true).map(|rule| {
-                apply_method_result(ctx, types, rule, MethodResultArgs::receiver_only(stripped))
-            })
+            Method::named_property(base_name, property)
+                .or_else(|| lookup_method_result(ctx, types, stripped, property, true))
+                .map(|rule| {
+                    apply_method_result(ctx, types, rule, MethodResultArgs::receiver_only(stripped))
+                })
         }
         TyKind::Union(span) => {
             // Property read on a finite value union or discriminated tagged union:
@@ -943,18 +742,11 @@ pub(crate) fn index_type(
             HirType::Named(name) if name == "Uint8Array" => {
                 Some(types.with_absences(Ty::NUMBER, Absence::Undefined))
             }
-            HirType::Named(base) => {
-                if let Some((_, val_hir)) =
-                    decls.dict_entry_types(ctx, &HirType::Named(base.clone()))
-                {
-                    let val_ty = types.intern_hir(ctx, &val_hir, true);
-                    return Some(types.with_absences(val_ty, Absence::Undefined));
-                }
-                if let Some(HirType::Array(elem)) = decls.resolve_foreign_type(base) {
-                    return Some(types.intern_hir(ctx, elem, true));
-                }
-                None
-            }
+            HirType::Named(base) => dict_value_ty(ctx, decls, types, &HirType::Named(base.clone()))
+                .or_else(|| match decls.resolve_foreign_type(base) {
+                    Some(HirType::Array(elem)) => Some(types.intern_hir(ctx, elem, true)),
+                    _ => None,
+                }),
             _ => None,
         },
         TyKind::Object { props, index: idx } => {
@@ -974,16 +766,10 @@ pub(crate) fn index_type(
             let items: Vec<Ty> = types.object_slice(props).iter().map(|p| p.ty).collect();
             (!items.is_empty()).then(|| types.union(&items))
         }
-        TyKind::Generic { .. } => {
-            if let Some(elem) = iterated_element(ctx, types, stripped) {
-                return Some(elem);
-            }
+        TyKind::Generic { .. } => iterated_element(ctx, types, stripped).or_else(|| {
             let hir = types.materialize_hir(ctx, stripped, &|_| None);
-            decls.dict_entry_types(ctx, &hir).map(|(_, val_hir)| {
-                let val_ty = types.intern_hir(ctx, &val_hir, true);
-                types.with_absences(val_ty, Absence::Undefined)
-            })
-        }
+            dict_value_ty(ctx, decls, types, &hir)
+        }),
         _ => None,
     }
 }
@@ -997,74 +783,45 @@ pub(crate) fn static_global_method<'h>(
     args: &'h [Expr],
     eval: &mut impl FnMut(&'h Expr, &mut TypeTable) -> Ty,
 ) -> Option<Ty> {
+    let promise_elem =
+        |types: &mut TypeTable,
+         args: &'h [Expr],
+         eval: &mut dyn FnMut(&'h Expr, &mut TypeTable) -> Ty| {
+            let [items] = args else {
+                return Ok(Ty::OPEN);
+            };
+            if matches!(items, Expr::Array(elems, _) if elems.is_empty()) {
+                return Ok(Ty::VOID);
+            }
+            let src = eval(items, types);
+            if src == Ty::BOTTOM {
+                return Err(Ty::BOTTOM);
+            }
+            let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
+            let unwrapped = unwrap_promise_members(types, elem);
+            Ok(if unwrapped == Ty::NEVER {
+                Ty::VOID
+            } else {
+                unwrapped
+            })
+        };
     match (class, method) {
         ("performance", "now") => Some(Ty::NUMBER),
-        ("Promise", "allSettled") => {
-            let [items] = args else {
-                return Some(Ty::OPEN);
+        ("Promise", "allSettled" | "all" | "race") => {
+            let val = match promise_elem(types, args, eval) {
+                Ok(v) => v,
+                Err(b) => return Some(b),
             };
-            let val = if matches!(items, Expr::Array(elems, _) if elems.is_empty()) {
-                Ty::VOID
-            } else {
-                let src = eval(items, types);
-                if src == Ty::BOTTOM {
-                    return Some(Ty::BOTTOM);
+            let inner = match method {
+                "allSettled" => {
+                    let base = shapes::TypeId::from_owned(ctx, HirType::Named(SETTLED.to_owned()));
+                    let settled = types.generic(base, &[val]);
+                    types.array(settled)
                 }
-                let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
-                let unwrapped = unwrap_promise_members(types, elem);
-                if unwrapped == Ty::NEVER {
-                    Ty::VOID
-                } else {
-                    unwrapped
-                }
+                "all" => types.array(val),
+                _ => val,
             };
-            let settled_base = shapes::TypeId::from_owned(ctx, HirType::Named(SETTLED.to_owned()));
-            let settled = types.generic(settled_base, &[val]);
-            let arr = types.array(settled);
-            Some(types.promise(arr))
-        }
-        ("Promise", "all") => {
-            let [items] = args else {
-                return Some(Ty::OPEN);
-            };
-            let val = if matches!(items, Expr::Array(elems, _) if elems.is_empty()) {
-                Ty::VOID
-            } else {
-                let src = eval(items, types);
-                if src == Ty::BOTTOM {
-                    return Some(Ty::BOTTOM);
-                }
-                let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
-                let unwrapped = unwrap_promise_members(types, elem);
-                if unwrapped == Ty::NEVER {
-                    Ty::VOID
-                } else {
-                    unwrapped
-                }
-            };
-            let arr = types.array(val);
-            Some(types.promise(arr))
-        }
-        ("Promise", "race") => {
-            let [items] = args else {
-                return Some(Ty::OPEN);
-            };
-            let val = if matches!(items, Expr::Array(elems, _) if elems.is_empty()) {
-                Ty::VOID
-            } else {
-                let src = eval(items, types);
-                if src == Ty::BOTTOM {
-                    return Some(Ty::BOTTOM);
-                }
-                let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
-                let unwrapped = unwrap_promise_members(types, elem);
-                if unwrapped == Ty::NEVER {
-                    Ty::VOID
-                } else {
-                    unwrapped
-                }
-            };
-            Some(types.promise(val))
+            Some(types.promise(inner))
         }
         ("Promise", "resolve") => {
             let val = args.first().map_or(Ty::VOID, |a| eval(a, types));

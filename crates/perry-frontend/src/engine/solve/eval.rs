@@ -77,14 +77,29 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut returned = Ty::BOTTOM;
         let mut has_return_value = false;
         let body = hir_compat::strip_synthetic_default_guards(view.body, view.params.iter());
-        self.eval_stmts(
-            inst_id,
-            receiver,
-            body,
-            &mut state,
-            &mut returned,
-            &mut has_return_value,
-        )?;
+        // Converge strictly-local (non-escaping) bindings in place so intra-procedural loops
+        // do not allocate global locations or churn the global worklist/CSR.
+        for _local_pass in 0..8 {
+            state.guards = Guards::default();
+            state.iteration = hir_compat::Iteration::default();
+            state.local_changed = false;
+            returned = Ty::BOTTOM;
+            has_return_value = false;
+            self.eval_stmts(
+                inst_id,
+                receiver,
+                body,
+                &mut state,
+                &mut returned,
+                &mut has_return_value,
+            )?;
+            if !state.local_changed {
+                break;
+            }
+        }
+        if state.local_changed {
+            self.enqueue(inst_id);
+        }
 
         if template == TemplateId(0)
             || matches!(
@@ -118,8 +133,100 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn local_loc_in_instance(
+    pub(super) fn local_frame_slot_in(
+        &self,
+        inst_id: InstanceId,
+        local: LocalIdx,
+    ) -> Option<usize> {
+        let slot = self.index.local_frame_slot(local)?;
+        let owner = self.index.local_owner.get(local.0 as usize).copied()?;
+        let inst_tpl = self.instances.get(inst_id.0 as usize)?.template;
+        (owner == inst_tpl).then_some(slot)
+    }
+
+    pub(super) fn read_local_current(&self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
+        if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
+            return self
+                .inst_frame_locals
+                .get(inst_id.0 as usize)
+                .and_then(|frame| frame.get(slot))
+                .copied();
+        }
+        let loc = self.local_loc_in_instance(inst_id, local)?;
+        Some(self.locations[loc.0 as usize])
+    }
+
+    pub(super) fn read_local_value(&mut self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
+        if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
+            return self
+                .inst_frame_locals
+                .get(inst_id.0 as usize)
+                .and_then(|frame| frame.get(slot))
+                .copied();
+        }
+        let loc = self.local_loc_in_instance(inst_id, local)?;
+        Some(self.read_loc(loc, inst_id))
+    }
+
+    pub(super) fn write_local_value(
         &mut self,
+        inst_id: InstanceId,
+        local: LocalIdx,
+        value: Ty,
+        state: &mut EvalState<'h>,
+    ) {
+        if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
+            if let Some(&old) = self
+                .inst_frame_locals
+                .get(inst_id.0 as usize)
+                .and_then(|frame| frame.get(slot))
+            {
+                let next = self.types.join_bounded(old, value);
+                if next != old {
+                    self.inst_frame_locals[inst_id.0 as usize][slot] = next;
+                    state.local_changed = true;
+                }
+            }
+            return;
+        }
+        let loc = self
+            .local_loc_in_instance(inst_id, local)
+            .unwrap_or_else(|| self.ensure_instance_local(inst_id, local, Ty::BOTTOM));
+        self.write_loc(loc, value);
+    }
+
+    pub(super) fn set_local_fixed(
+        &mut self,
+        inst_id: InstanceId,
+        local: LocalIdx,
+        value: Ty,
+        state: &mut EvalState<'h>,
+    ) {
+        if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
+            if let Some(cell) = self
+                .inst_frame_locals
+                .get_mut(inst_id.0 as usize)
+                .and_then(|frame| frame.get_mut(slot))
+                && *cell != value
+            {
+                *cell = value;
+                state.local_changed = true;
+            }
+            return;
+        }
+        let loc = self
+            .local_loc_in_instance(inst_id, local)
+            .unwrap_or_else(|| self.ensure_instance_local(inst_id, local, value));
+        if let Some(cell) = self.locations.get_mut(loc.0 as usize)
+            && *cell != value
+        {
+            *cell = value;
+            self.dirty_locs.insert(loc.0 as usize);
+        }
+    }
+
+    pub(super) fn local_loc_in_instance(
+        &self,
         inst_id: InstanceId,
         local: LocalIdx,
     ) -> Option<LocId> {
@@ -176,185 +283,67 @@ impl<'h, 'a> Solver<'h, 'a> {
         loc
     }
 
-    pub(super) fn lookup_agg(
-        &self,
-        inst_id: InstanceId,
-        local: LocalIdx,
-    ) -> Option<(LocId, AggregateKind)> {
-        if self.index.local_module.contains(local.0 as usize) {
-            return self.module_aggs.get(local.0 as usize).copied().flatten();
-        }
-        let mut cursor = Some(inst_id);
-        while let Some(cur) = cursor {
-            if let Some(aggs) = self.inst_aggs.get(cur.0 as usize)
-                && let Some(slot) = aggs.iter().find(|s| s.local == local)
-            {
-                return Some((slot.loc, slot.kind));
-            }
-            cursor = self
-                .instances
-                .get(cur.0 as usize)
-                .and_then(|inst| inst.capture_owner);
-        }
-        None
-    }
-
-    pub(super) fn bind_agg(
-        &mut self,
-        inst_id: InstanceId,
-        local: LocalIdx,
-        kind: AggregateKind,
-    ) -> LocId {
-        if let Some((loc, _)) = self.lookup_agg(inst_id, local) {
-            return loc;
-        }
-        let loc = self.alloc_loc(Ty::BOTTOM);
-        if self.index.local_module.contains(local.0 as usize) {
-            if let Some(slot) = self.module_aggs.get_mut(local.0 as usize) {
-                *slot = Some((loc, kind));
-            }
-        } else if let Some(aggs) = self.inst_aggs.get_mut(inst_id.0 as usize) {
-            aggs.push(AggregateSlot { local, loc, kind });
-        }
-        loc
-    }
-
-    pub(super) fn alias_agg(
-        &mut self,
-        inst_id: InstanceId,
-        dst: LocalIdx,
-        loc: LocId,
-        kind: AggregateKind,
-    ) {
-        if self.index.local_module.contains(dst.0 as usize) {
-            if let Some(slot) = self.module_aggs.get_mut(dst.0 as usize) {
-                *slot = Some((loc, kind));
-            }
-        } else if let Some(aggs) = self.inst_aggs.get_mut(inst_id.0 as usize) {
-            if let Some(existing) = aggs.iter_mut().find(|s| s.local == dst) {
-                existing.loc = loc;
-                existing.kind = kind;
-            } else {
-                aggs.push(AggregateSlot {
-                    local: dst,
-                    loc,
-                    kind,
-                });
-            }
+    pub(super) fn invalidate_conservative_cell(&mut self, ty: Ty) {
+        let (stripped, _) = self.types.strip_nullish(ty);
+        if let TyKind::Cell { loc, kind } = self.types.kind(stripped)
+            && kind.is_conservative()
+        {
+            self.write_loc(loc, Ty::OPEN);
         }
     }
 
-    pub(super) fn is_agg_unresolved_value(&self, ty: Ty, nested: bool) -> bool {
-        match self.types.kind(ty) {
-            TyKind::Bottom | TyKind::Open | TyKind::Dynamic | TyKind::TypeVar(_) => true,
-            TyKind::Array(inner) => self.is_agg_unresolved_value(inner, true),
-            TyKind::Tuple(span) => {
-                let items = self.types.tuple_slice(span);
-                let non_uniform = items.windows(2).any(|w| w[0] != w[1]);
-                (nested && non_uniform)
-                    || items.iter().any(|&t| self.is_agg_unresolved_value(t, true))
-            }
-            TyKind::Union(span) => {
-                let members = self.types.union_slice(span);
-                if members
-                    .iter()
-                    .any(|&t| self.is_agg_unresolved_value(t, nested))
-                {
-                    return true;
-                }
-                if nested {
-                    let defined_count = members
-                        .iter()
-                        .filter(|&&m| m != Ty::NULL && m != Ty::VOID)
-                        .count();
-                    defined_count > 1
-                } else {
-                    false
-                }
-            }
-            TyKind::Object { props, index } => {
-                index.is_some_and(|t| self.is_agg_unresolved_value(t, true))
-                    || self
-                        .types
-                        .object_slice(props)
-                        .iter()
-                        .any(|p| self.is_agg_unresolved_value(p.ty, true))
-            }
-            _ => false,
-        }
-    }
-
-    pub(super) fn write_agg_value(&mut self, agg_loc: LocId, val_ty: Ty) {
+    pub(super) fn write_cell(&mut self, elem_loc: LocId, val_ty: Ty) {
         if val_ty == Ty::BOTTOM {
             return;
         }
-        if self.is_agg_unresolved_value(val_ty, false) {
-            self.write_loc(agg_loc, Ty::OPEN);
+        if self.types.contains_cell(val_ty, elem_loc, &self.locations)
+            || self.types.has_nested_unresolved(val_ty, false)
+        {
+            self.write_loc(elem_loc, Ty::OPEN);
         } else {
             let norm = self
                 .types
                 .normalize_for_storage(self.ctx, self.decls, val_ty);
-            self.write_loc(agg_loc, norm);
+            self.write_loc(elem_loc, norm);
         }
     }
 
-    pub(super) fn invalidate_agg_local(&mut self, inst_id: InstanceId, id: LocalId) {
-        if let Some(lidx) = self.index.local_idx(id)
-            && let Some((agg_loc, _)) = self.lookup_agg(inst_id, lidx)
-        {
-            self.write_loc(agg_loc, Ty::OPEN);
-        }
-    }
-
-    pub(super) fn invalidate_agg_expr(&mut self, inst_id: InstanceId, expr: &Expr) {
-        if let Expr::LocalGet(id) = expr {
-            self.invalidate_agg_local(inst_id, *id);
-        }
-    }
-
-    pub(super) fn project_agg_from_elem(
-        &mut self,
-        agg_loc: LocId,
-        agg_kind: AggregateKind,
-        elem: Ty,
-    ) -> Option<Ty> {
-        if elem == Ty::BOTTOM {
-            return None;
-        }
-        match agg_kind {
-            AggregateKind::Array => {
-                if self.types.is_open(elem) || elem == Ty::DYNAMIC {
-                    Some(Ty::OPEN)
-                } else {
-                    Some(self.types.array(elem))
-                }
-            }
-            AggregateKind::Dictionary => {
-                let primitive = matches!(
-                    elem,
-                    Ty::NUMBER | Ty::INT32 | Ty::STRING | Ty::BOOLEAN | Ty::BIGINT
-                );
-                let valid = !self.types.is_open(elem)
-                    && elem != Ty::DYNAMIC
-                    && !matches!(self.types.kind(elem), TyKind::Union(_))
-                    && (!self.agg_element_reads.contains(agg_loc.0 as usize) || primitive);
-                if valid {
-                    Some(self.types.object(&mut [], Some(elem)))
-                } else {
-                    Some(self.types.object(&mut [], None))
-                }
+    pub(super) fn write_cell_indexed(&mut self, obj_def: Ty, idx_ty: Ty, val_ty: Ty) {
+        if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
+            let matches_kind = if kind.is_array() {
+                matches!(idx_ty, Ty::NUMBER | Ty::INT32)
+            } else {
+                idx_ty == Ty::STRING
+            };
+            if matches_kind {
+                self.write_cell(loc, val_ty);
+            } else if idx_ty != Ty::BOTTOM {
+                self.write_loc(loc, Ty::OPEN);
             }
         }
     }
 
-    pub(super) fn project_agg_type(
-        &mut self,
-        inst_id: InstanceId,
-        agg_loc: LocId,
-        agg_kind: AggregateKind,
-    ) -> Option<Ty> {
-        let elem = self.read_loc(agg_loc, inst_id);
-        self.project_agg_from_elem(agg_loc, agg_kind, elem)
+    pub(super) fn resolve_cell_read(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
+        let (stripped, abs) = self.types.strip_nullish(ty);
+        if let TyKind::Cell { loc, kind } = self.types.kind(stripped) {
+            let elem = self.read_loc(loc, inst_id);
+            if kind.is_array() {
+                if elem == Ty::BOTTOM {
+                    return Ty::BOTTOM;
+                }
+                let arr = self.types.array(elem);
+                return self.types.with_absences(arr, abs);
+            }
+            if self
+                .types
+                .is_valid_dict_value(elem, self.dict_reads.contains(loc.0 as usize))
+            {
+                let obj = self.types.object(&[], Some(elem));
+                return self.types.with_absences(obj, abs);
+            }
+            return Ty::OPEN;
+        }
+        ty
     }
 
     pub(super) fn mark_written(&mut self, inst_id: InstanceId, local: LocalIdx) {
@@ -372,8 +361,38 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn record_site(&mut self, inst_id: InstanceId, expr: &Expr, res: SiteResolution) {
-        let addr = std::ptr::from_ref(expr) as usize;
-        self.sites.push((inst_id, addr, res));
+        let Some(inst) = self.instances.get(inst_id.0 as usize) else {
+            return;
+        };
+        let template = inst.template;
+        let Some(local_site) = self.index.site_of(template, expr) else {
+            debug_assert!(
+                false,
+                "unindexed site expression in template {}",
+                template.0
+            );
+            return;
+        };
+        let old_target = self
+            .inst_sites
+            .get(inst_id.0 as usize)
+            .and_then(|sites| sites.get(local_site))
+            .and_then(|opt| opt.as_ref())
+            .and_then(|prev| self.site_target(prev));
+        let new_target = self.site_target(&res);
+        if let Some(sites) = self.inst_sites.get_mut(inst_id.0 as usize)
+            && let Some(slot) = sites.get_mut(local_site)
+        {
+            *slot = Some(res);
+        }
+        if old_target != new_target {
+            if let Some(new_t) = new_target {
+                self.retain_site_target(inst_id, new_t);
+            }
+            if let Some(old_t) = old_target {
+                self.release_site_target(inst_id, old_t);
+            }
+        }
     }
 
     pub(super) fn eval_stmts(
@@ -402,8 +421,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                         let ty = self.eval_expr(inst_id, receiver, value, state)?;
                         if let Some(lidx) = self.index.local_idx(*id) {
-                            let loc = self.ensure_instance_local(inst_id, lidx, Ty::BOTTOM);
-                            self.write_loc(loc, ty);
+                            self.write_local_value(inst_id, lidx, ty, state);
                             self.mark_written(inst_id, lidx);
                         }
                         handled_let = true;
@@ -419,8 +437,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             }
                         };
                         if let Some(lidx) = self.index.local_idx(element.id) {
-                            let loc = self.ensure_instance_local(inst_id, lidx, Ty::BOTTOM);
-                            self.write_loc(loc, ty);
+                            self.write_local_value(inst_id, lidx, ty, state);
                             self.mark_written(inst_id, lidx);
                         }
                         handled_let = true;
@@ -468,14 +485,16 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else {
                     Ty::BOTTOM
                 };
-                let loc = self.ensure_instance_local(inst_id, lidx, initial);
+                if self.local_frame_slot_in(inst_id, lidx).is_none() {
+                    let _ = self.ensure_instance_local(inst_id, lidx, initial);
+                }
                 if !is_inferred
                     && !self.types.is_open(declared)
-                    && let Some(slot) = self.locations.get_mut(loc.0 as usize)
-                    && *slot != declared
+                    && self
+                        .read_local_current(inst_id, lidx)
+                        .is_none_or(|cur| cur == Ty::BOTTOM || cur == Ty::OPEN)
                 {
-                    *slot = declared;
-                    self.dirty_locs.insert(loc.0 as usize);
+                    self.set_local_fixed(inst_id, lidx, declared, state);
                 }
 
                 // Preserve 64-bit WIT integer cast types (e.g. `const wrapped = total as u64`)
@@ -485,41 +504,34 @@ impl<'h, 'a> Solver<'h, 'a> {
                         if matches!(id.hir(self.ctx), HirType::Named(n)
                             if matches!(self.decls.integer_carrier(n), Some(HirType::BigInt))));
                 if is_i64_cast {
-                    self.write_loc(loc, declared);
+                    self.write_local_value(inst_id, lidx, declared, state);
                 }
 
                 if let Some(init_expr) = init {
-                    let open_array = is_inferred
-                        || matches!(self.types.kind(declared), TyKind::Array(e) if e == Ty::OPEN);
+                    let is_explicit_any_array = !is_inferred
+                        && matches!(self.types.kind(declared), TyKind::Array(e) if e == Ty::OPEN);
                     let open_object = is_inferred || declared == Ty::OPEN;
-                    if open_array && matches!(init_expr, Expr::Array(items, _) if items.is_empty())
+                    let cell_kind = if matches!(init_expr, Expr::Array(items, _) if items.is_empty())
                     {
-                        let agg_loc = self.bind_agg(inst_id, lidx, AggregateKind::Array);
-                        if let Some(target) =
-                            self.project_agg_type(inst_id, agg_loc, AggregateKind::Array)
-                        {
-                            self.set_loc_exact(loc, target);
+                        if is_inferred {
+                            Some(CellKind::Array)
+                        } else if is_explicit_any_array {
+                            Some(CellKind::LocalArray)
+                        } else {
+                            None
                         }
-                        self.mark_written(inst_id, lidx);
-                        return Ok(());
-                    }
-                    if open_object && self.index.is_empty_object_expr(init_expr) {
-                        let agg_loc = self.bind_agg(inst_id, lidx, AggregateKind::Dictionary);
-                        if let Some(target) =
-                            self.project_agg_type(inst_id, agg_loc, AggregateKind::Dictionary)
-                        {
-                            self.set_loc_exact(loc, target);
-                        }
-                        self.mark_written(inst_id, lidx);
-                        return Ok(());
-                    }
-                    if let Expr::LocalGet(src_id) = init_expr
-                        && let Some(src_lidx) = self.index.local_idx(*src_id)
-                        && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, src_lidx)
+                    } else if open_object && self.index.is_empty_object_expr(self.types, init_expr)
                     {
-                        self.alias_agg(inst_id, lidx, agg_loc, agg_kind);
-                        if let Some(target) = self.project_agg_type(inst_id, agg_loc, agg_kind) {
-                            self.set_loc_exact(loc, target);
+                        Some(CellKind::Dict)
+                    } else {
+                        None
+                    };
+                    if let Some(kind) = cell_kind {
+                        let cur = self.read_local_current(inst_id, lidx).unwrap_or(Ty::BOTTOM);
+                        if cur == Ty::BOTTOM || cur == Ty::OPEN {
+                            let elem_loc = self.alloc_loc(Ty::BOTTOM);
+                            let cell = self.types.cell(elem_loc, kind);
+                            self.write_local_value(inst_id, lidx, cell, state);
                         }
                         self.mark_written(inst_id, lidx);
                         return Ok(());
@@ -529,12 +541,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.mark_written(inst_id, lidx);
                     }
                     if matches!(self.types.kind(init_ty), TyKind::Func(_)) {
-                        if let Some(slot) = self.locations.get_mut(loc.0 as usize)
-                            && *slot != init_ty
-                        {
-                            *slot = init_ty;
-                            self.dirty_locs.insert(loc.0 as usize);
-                        }
+                        self.set_local_fixed(inst_id, lidx, init_ty, state);
                     } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
                         let is_non_byob_reader_cast = matches!(
                             self.types.kind(declared),
@@ -567,7 +574,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             self.types
                                 .normalize_for_storage(self.ctx, self.decls, init_ty)
                         };
-                        self.write_loc(loc, stored);
+                        self.write_local_value(inst_id, lidx, stored, state);
                     }
                 }
             }
@@ -576,17 +583,18 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             Stmt::Return(value) => {
                 *has_return_value = true;
-                if let Some(Expr::LocalGet(id)) = value
-                    && let Some(lidx) = self.index.local_idx(*id)
-                    && let Some((agg_loc, AggregateKind::Dictionary)) =
-                        self.lookup_agg(inst_id, lidx)
-                {
-                    self.write_loc(agg_loc, Ty::OPEN);
-                }
                 let mut ty = match value {
                     Some(expr) => self.eval_expr(inst_id, receiver, expr, state)?,
                     None => Ty::VOID,
                 };
+                if let TyKind::Cell {
+                    loc,
+                    kind: CellKind::Dict,
+                } = self.types.kind(ty)
+                {
+                    self.write_loc(loc, Ty::OPEN);
+                    ty = self.types.object(&[], None);
+                }
                 let is_async = self
                     .instances
                     .get(inst_id.0 as usize)
@@ -692,8 +700,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         && let Some(lidx) = self.index.local_idx(*id)
                     {
                         let err_ty = self.types.named(self.ctx, "Error");
-                        let loc = self.ensure_instance_local(inst_id, lidx, err_ty);
-                        self.write_loc(loc, err_ty);
+                        self.write_local_value(inst_id, lidx, err_ty, state);
                     }
                     self.eval_stmts(
                         inst_id,
@@ -741,4 +748,214 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         Ok(())
     }
+
+    pub(super) fn finish(mut self) -> Solved {
+        // Compute live instances from roots through per-instance final-wave site tables.
+        let mut live_instances = BitSet::default();
+        let mut live_queue = Vec::new();
+        for idx in 0..self.instances.len() {
+            let inst_id = InstanceId(idx as u32);
+            if !self.inst_superseded.contains(idx)
+                && self.is_non_site_root(inst_id)
+                && live_instances.insert(idx)
+            {
+                live_queue.push(inst_id);
+            }
+        }
+        let mut head = 0usize;
+        while let Some(&caller) = live_queue.get(head) {
+            head += 1;
+            if let Some(sites) = self.inst_sites.get(caller.0 as usize) {
+                for opt in sites {
+                    if let Some(res) = opt
+                        && let Some(t) = self.site_target(res)
+                        && live_instances.insert(t.0 as usize)
+                    {
+                        live_queue.push(t);
+                    }
+                }
+            }
+        }
+
+        // Collect per-instance local resolved types (indexed by InstanceId).
+        let inst_locals = std::mem::take(&mut self.inst_locals);
+        let mut inst_local_tys: Vec<Vec<(LocalId, Ty)>> = Vec::with_capacity(inst_locals.len());
+        for slots in &inst_locals {
+            let mut out = Vec::with_capacity(slots.len());
+            for slot in slots {
+                if let Some(&hir_id) = self.index.local_ids.get(slot.local.0 as usize) {
+                    out.push((hir_id, self.locations[slot.loc.0 as usize]));
+                }
+            }
+            inst_local_tys.push(out);
+        }
+
+        // Collect module-level binding types (indexed directly by LocalIdx).
+        let mut module_local_tys = vec![None; self.index.local_count()];
+        for l_idx in self.index.local_module.iter() {
+            let ty = self
+                .index
+                .local_loc
+                .get(l_idx)
+                .copied()
+                .flatten()
+                .map_or(Ty::OPEN, |loc| self.locations[loc.0 as usize]);
+            if let Some(slot) = module_local_tys.get_mut(l_idx) {
+                *slot = Some(ty);
+            }
+        }
+
+        // Collect class static field resolved types indexed by `[ClassId][field_idx]`.
+        let mut class_static_field_tys: Vec<Vec<Ty>> = self
+            .index
+            .class_hir_idx
+            .iter()
+            .map(|&hir_idx| {
+                let len = self
+                    .hir
+                    .classes
+                    .get(hir_idx)
+                    .map_or(0, |c| c.static_fields.len());
+                vec![Ty::OPEN; len]
+            })
+            .collect();
+        for &(cid, f_idx, loc) in &self.static_field_locs {
+            if let Some(fields) = class_static_field_tys.get_mut(cid.0 as usize)
+                && let Some(slot) = fields.get_mut(f_idx)
+            {
+                *slot = self.locations[loc.0 as usize];
+            }
+        }
+
+        // Group live instances by ClassInstId, ClassId, and TemplateId for O(1) emission.
+        let mut class_inst_methods = vec![Vec::new(); self.class_insts.len()];
+        let mut class_inst_getters = vec![Vec::new(); self.class_insts.len()];
+        let mut class_inst_setters = vec![Vec::new(); self.class_insts.len()];
+        let mut class_static_methods = vec![Vec::new(); self.index.class_hir_idx.len()];
+        let mut template_instances = vec![Vec::new(); self.index.template_count()];
+        for (idx, inst) in self.instances.iter().enumerate() {
+            if !live_instances.contains(idx) {
+                continue;
+            }
+            let inst_id = InstanceId(idx as u32);
+            if let Some(list) = template_instances.get_mut(inst.template.0 as usize) {
+                list.push(inst_id);
+            }
+            let Some(view) = self.index.view(inst.template) else {
+                continue;
+            };
+            match view.kind {
+                TemplateKind::ClassMethod { .. } => {
+                    if let Some(cinst_id) = inst.receiver
+                        && let Some(list) = class_inst_methods.get_mut(cinst_id.0 as usize)
+                    {
+                        list.push(inst_id);
+                    }
+                }
+                TemplateKind::ClassGetter { getter_idx, .. } => {
+                    if let Some(cinst_id) = inst.receiver
+                        && let Some(list) = class_inst_getters.get_mut(cinst_id.0 as usize)
+                    {
+                        list.push((getter_idx, inst_id));
+                    }
+                }
+                TemplateKind::ClassSetter { setter_idx, .. } => {
+                    if let Some(cinst_id) = inst.receiver
+                        && let Some(list) = class_inst_setters.get_mut(cinst_id.0 as usize)
+                    {
+                        list.push((setter_idx, inst_id));
+                    }
+                }
+                TemplateKind::ClassStaticMethod { class, .. } => {
+                    if let Some(list) = class_static_methods.get_mut(class.0 as usize) {
+                        list.push(inst_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Solved {
+            instances: self.instances,
+            class_insts: self.class_insts,
+            locations: self.locations,
+            param_locs: self.param_locs,
+            inst_local_tys,
+            inst_frame_locals: self.inst_frame_locals,
+            inst_sites: self.inst_sites,
+            inst_captures: self.inst_captures,
+            live_instances,
+            module_local_tys,
+            class_static_field_tys,
+            class_inst_methods,
+            class_inst_getters,
+            class_inst_setters,
+            class_static_methods,
+            template_instances,
+            dict_reads: self.dict_reads,
+            deletes_array_elements: self.deletes_array_elements,
+        }
+    }
+
+    pub(super) fn type_may_be_array(&self, ty: Ty) -> bool {
+        match self.types.kind(ty) {
+            TyKind::Array(_) | TyKind::Tuple(_) => true,
+            TyKind::Cell { kind, .. } if kind.is_array() => true,
+            TyKind::Union(span) => self
+                .types
+                .union_slice(span)
+                .iter()
+                .any(|&m| self.type_may_be_array(m)),
+            _ => false,
+        }
+    }
+}
+
+pub(super) fn callable_arg_mask(types: &TypeTable, args: &[Ty]) -> u64 {
+    let mut mask = 0u64;
+    for (i, &ty) in args.iter().enumerate() {
+        if i < 64 && matches!(types.kind(ty), TyKind::Func(_)) {
+            mask |= 1u64 << i;
+        }
+    }
+    mask
+}
+
+pub(super) fn first_type_var_name(ty: &HirType) -> Option<&str> {
+    match ty {
+        HirType::TypeVar(name) => Some(name.as_str()),
+        HirType::Array(inner) | HirType::Promise(inner) => first_type_var_name(inner),
+        HirType::Tuple(items) | HirType::Union(items) => items.iter().find_map(first_type_var_name),
+        HirType::Generic { type_args, .. } => type_args.iter().find_map(first_type_var_name),
+        _ => None,
+    }
+}
+
+pub(super) fn constructor_init_expr(expr: &Expr) -> Option<&Expr> {
+    if let Expr::New {
+        class_name, args, ..
+    } = expr
+        && matches!(class_name.as_str(), "\0perry_Map" | "\0perry_Set")
+    {
+        return args.first();
+    }
+    let argument = match expr {
+        Expr::NewDynamic { callee, args, .. }
+            if matches!(&**callee, Expr::PropertyGet { object, property, .. }
+                if matches!(&**object, Expr::GlobalGet(0)) && property == "Map") =>
+        {
+            args.first()?
+        }
+        Expr::MapNewFromArray(argument) | Expr::SetNewFromArray(argument) => argument,
+        Expr::New {
+            class_name, args, ..
+        } if matches!(class_name.as_str(), "Map" | "Set") => args.first()?,
+        _ => return None,
+    };
+    let Expr::Sequence(items) = argument else {
+        return None;
+    };
+    let (_, rest) = items.split_first()?;
+    rest.first()
+        .filter(|expr| !matches!(expr, Expr::Undefined | Expr::Null))
 }

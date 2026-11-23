@@ -370,17 +370,7 @@ impl<'s> FunctionBuilder<'s> {
                     error.message()
                 ));
             }
-            result => {
-                let resolved = result?;
-                if resolved.is_none()
-                    && inferred_deferred
-                    && matches!(type_state, perry_frontend::TypeState::Dynamic)
-                {
-                    Some(perry_mir::JsonType::get(ctx).into())
-                } else {
-                    resolved
-                }
-            }
+            result => result?,
         };
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
@@ -404,20 +394,20 @@ impl<'s> FunctionBuilder<'s> {
         }
         let is_never = matches!(ty, HirType::Never);
         // Inferred bindings preserve the initializer's absence states.
-        let carrier = match (declared, type_state, init) {
-            (Some(ty), _, Some(value))
+        let carrier = match (declared, init) {
+            (Some(ty), Some(value))
                 if self.shapes.metadata.inferred_bindings.contains(&id)
                     && present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty) =>
             {
                 value.get_type(ctx)
             }
-            (Some(ty), _, _) => ty,
-            (None, perry_frontend::TypeState::Dynamic, Some(value)) => value.get_type(ctx),
-            (None, _, None) if is_never => self.shapes.value_type(ctx, ty)?,
-            (None, perry_frontend::TypeState::Open, _) => {
+            (Some(ty), _) => ty,
+            (None, Some(value)) => value.get_type(ctx),
+            (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
+            (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
                 return Err(missing_type_annotation());
             }
-            (None, _, _) => bail_diag!(
+            (None, None) => bail_diag!(
                 codes::MISSING_TYPE_ANNOTATION,
                 "an untyped binding needs an initializer"
             ),

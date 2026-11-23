@@ -1,4 +1,5 @@
 //! Data-oriented monomorphization and type-inference engine over dense indices.
+pub(crate) mod ast_scan;
 pub(crate) mod bitset;
 pub(crate) mod boundary;
 pub(crate) mod builtins;
@@ -29,7 +30,7 @@ pub(crate) fn run_engine(
     let emitted = {
         let index = ModuleIndex::build(ctx, hir, facts, &metadata.locations, &mut types);
         let solved = solve::solve(ctx, hir, &index, metadata, facts, foreign, &mut types)?;
-        emit::build(ctx, hir, &index, &types, &solved)?
+        emit::build(ctx, hir, &index, &metadata.locations, &types, &solved)?
     };
     emitted.apply(hir, metadata);
     Ok(())
@@ -105,7 +106,7 @@ mod tests {
         let n_a = table.intern_name("a");
         let n_b = table.intern_name("b");
         let o1 = table.object(
-            &mut [
+            &[
                 ObjectProp {
                     name: n_b,
                     ty: Ty::STRING,
@@ -122,7 +123,7 @@ mod tests {
             None,
         );
         let o2 = table.object(
-            &mut [
+            &[
                 ObjectProp {
                     name: n_a,
                     ty: Ty::NUMBER,
@@ -138,7 +139,7 @@ mod tests {
             ],
             None,
         );
-        assert_eq!(o1, o2);
+        assert_ne!(o1, o2);
 
         let hir_u = HirType::Union(vec![HirType::String, HirType::Number, HirType::Void]);
         let interned = table.intern_hir(&ctx, &hir_u, true);

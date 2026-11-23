@@ -40,6 +40,7 @@ pub(crate) fn load<'s>(
     if !needs_graph {
         let mut locations = crate::hir_compat::Locations::default();
         locations.add(PathBuf::from(file), source)?;
+        crate::engine::boundary::validate_ast(&initial, &locations)?;
         return Ok(Loaded {
             module: initial,
             locations,
@@ -270,7 +271,7 @@ impl Graph<'_, '_> {
         };
         let offset = self.locations.add(path.to_owned(), text)?;
         module.visit_mut_with(&mut Rebase(offset));
-        crate::engine::boundary::scan_ast(&module, &self.locations)?;
+        crate::engine::boundary::validate_ast(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
             module.body.retain(|item| {

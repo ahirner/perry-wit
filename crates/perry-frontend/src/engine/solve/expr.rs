@@ -37,13 +37,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(cb_ty);
         }
 
-        // 3. Leaf HIR expressions (numbers, strings, booleans, Math.*, Date.*, Uint8Array.*, etc.).
-        if let Some(leaf) = builtins::leaf_expr_type(self.ctx, self.types, expr) {
-            // Still evaluate child expressions for side effects, calls, and storage writes!
-            self.eval_leaf_children(inst_id, receiver, expr, state)?;
-            return Ok(leaf);
-        }
-
         match expr {
             Expr::LocalGet(id) => self.eval_local_get(inst_id, *id, &state.guards),
             Expr::LocalSet(id, value) => {
@@ -53,29 +46,31 @@ impl<'h, 'a> Solver<'h, 'a> {
                 state.guards.assign(*id);
                 let val_ty = self.eval_expr(inst_id, receiver, value, state)?;
                 if let Some(lidx) = self.index.local_idx(*id) {
-                    if let Some((agg_loc, _)) = self.lookup_agg(inst_id, lidx) {
-                        self.write_loc(agg_loc, Ty::OPEN);
-                    }
-                    if let Some(loc) = self.local_loc_in_instance(inst_id, lidx) {
-                        let existing = self
-                            .locations
-                            .get(loc.0 as usize)
-                            .copied()
-                            .unwrap_or(Ty::BOTTOM);
+                    if let Some(existing) = self.read_local_current(inst_id, lidx) {
                         if matches!(self.types.kind(existing), TyKind::Func(_)) {
                             return Err(Diagnostic::unsupported(
                                 "a reassigned function binding requires a runtime function representation",
                             ));
                         }
-                        if self.index.local_deferred.contains(lidx.0 as usize)
+                        let is_inferred = self.index.local_inferred.contains(lidx.0 as usize)
+                            || !self.hir.local_source_spans.contains_key(id);
+                        if let TyKind::Cell { loc, kind } = self.types.kind(existing) {
+                            self.write_loc(loc, Ty::OPEN);
+                            if kind == CellKind::Dict && is_inferred && val_ty != Ty::BOTTOM {
+                                let norm = self
+                                    .types
+                                    .normalize_for_storage(self.ctx, self.decls, val_ty);
+                                self.set_local_fixed(inst_id, lidx, norm, state);
+                            }
+                        } else if (is_inferred
+                            && self.index.local_deferred.contains(lidx.0 as usize))
                             || self.types.is_open(existing)
-                            || (self.index.local_inferred.contains(lidx.0 as usize)
-                                && matches!(existing, Ty::NULL | Ty::VOID))
+                            || (is_inferred && matches!(existing, Ty::NULL | Ty::VOID))
                         {
                             let norm = self
                                 .types
                                 .normalize_for_storage(self.ctx, self.decls, val_ty);
-                            self.write_loc(loc, norm);
+                            self.write_local_value(inst_id, lidx, norm, state);
                         }
                     }
                     self.mark_written(inst_id, lidx);
@@ -100,7 +95,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ..
             } => {
                 for &cap in captures {
-                    self.invalidate_agg_local(inst_id, cap);
+                    if let Some(lidx) = self.index.local_idx(cap)
+                        && let Some(ty) = self.read_local_current(inst_id, lidx)
+                    {
+                        self.invalidate_conservative_cell(ty);
+                    }
                 }
                 let mut refs = Vec::new();
                 let mut defined = std::collections::HashSet::new();
@@ -117,7 +116,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     perry_hir::analysis::collect_local_refs_stmt(stmt, &mut refs, &mut defined);
                 }
                 for local_id in refs {
-                    self.invalidate_agg_local(inst_id, local_id);
+                    if let Some(lidx) = self.index.local_idx(local_id)
+                        && let Some(ty) = self.read_local_current(inst_id, lidx)
+                    {
+                        self.invalidate_conservative_cell(ty);
+                    }
                 }
                 let Some(tid) = self.index.template_of_func(*func_id) else {
                     return Ok(Ty::OPEN);
@@ -184,8 +187,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::ScopedTemp { id, value, body } => {
                 let val_ty = self.eval_expr(inst_id, receiver, value, state)?;
                 if let Some(lidx) = self.index.local_idx(*id) {
-                    let loc = self.ensure_instance_local(inst_id, lidx, Ty::BOTTOM);
-                    self.write_loc(loc, val_ty);
+                    self.write_local_value(inst_id, lidx, val_ty, state);
                     self.mark_written(inst_id, lidx);
                 }
                 self.eval_expr(inst_id, receiver, body, state)
@@ -243,6 +245,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                         perry_hir::ir::ArrayElement::Spread(e) => {
                             let s = self.eval_expr(inst_id, receiver, e, state)?;
+                            let s = self.resolve_cell_read(inst_id, s);
                             if s == Ty::BOTTOM {
                                 has_bottom = true;
                                 Ty::BOTTOM
@@ -267,6 +270,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             Expr::ArrayFrom(source, _) => {
                 let s = self.eval_expr(inst_id, receiver, source, state)?;
+                let s = self.resolve_cell_read(inst_id, s);
                 if s == Ty::BOTTOM {
                     return Ok(Ty::BOTTOM);
                 }
@@ -281,8 +285,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::Object(fields) => {
                 let mut props = Vec::with_capacity(fields.len());
                 for (name, value) in fields {
-                    self.invalidate_agg_expr(inst_id, value);
                     let vty = self.eval_expr(inst_id, receiver, value, state)?;
+                    self.invalidate_conservative_cell(vty);
                     if let TyKind::Func(ident) = self.types.kind(vty) {
                         self.check_escaping_unannotated_func(ident.template)?;
                     }
@@ -294,7 +298,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         readonly: false,
                     });
                 }
-                Ok(self.types.object(&mut props, None))
+                Ok(self.types.object(&props, None))
             }
             Expr::ObjectSpread { parts } => {
                 self.eval_object_spread(inst_id, receiver, parts, state)
@@ -311,60 +315,21 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if stripped == Ty::DYNAMIC {
                     return Ok(Ty::DYNAMIC);
                 }
-                if let TyKind::Object { props, .. } = self.types.kind(stripped) {
-                    let mut kept: Vec<ObjectProp> = self
-                        .types
-                        .object_slice(props)
-                        .iter()
-                        .copied()
+                if let Some(src_props) = self.object_props_of(stripped) {
+                    let kept: Vec<ObjectProp> = src_props
+                        .into_iter()
                         .filter(|p| {
                             let name = self.types.name_str(p.name);
                             !exclude_keys.iter().any(|k| k == name)
                         })
                         .collect();
-                    return Ok(self.types.object(&mut kept, None));
-                }
-                if matches!(
-                    self.types.kind(stripped),
-                    TyKind::Leaf(_) | TyKind::Generic { .. }
-                ) {
-                    let hir = self.types.materialize_hir(self.ctx, stripped, &|_| None);
-                    if let Some(resolved_props) = self.decls.object_properties(self.ctx, &hir) {
-                        let mut kept: Vec<ObjectProp> = Vec::with_capacity(resolved_props.len());
-                        for (field_name, field_hir, optional) in resolved_props {
-                            if exclude_keys.iter().any(|k| k == &field_name) {
-                                continue;
-                            }
-                            let name = self.types.intern_name(&field_name);
-                            let mut field_ty = self.types.intern_hir(self.ctx, &field_hir, true);
-                            if optional {
-                                field_ty = self.types.with_absences(field_ty, Absence::Undefined);
-                            }
-                            kept.push(ObjectProp {
-                                name,
-                                ty: field_ty,
-                                optional,
-                                readonly: false,
-                            });
-                        }
-                        return Ok(self.types.object(&mut kept, None));
-                    }
+                    return Ok(self.types.object(&kept, None));
                 }
                 Ok(Ty::OPEN)
             }
             Expr::PropertyGet {
                 object, property, ..
-            } => {
-                if let Expr::LocalGet(id) = object.as_ref()
-                    && let Some(lidx) = self.index.local_idx(*id)
-                    && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
-                    && (property != "length" || agg_kind != AggregateKind::Array)
-                    && self.agg_element_reads.insert(agg_loc.0 as usize)
-                {
-                    self.dirty_locs.insert(agg_loc.0 as usize);
-                }
-                self.eval_property_get(inst_id, receiver, object, property, state)
-            }
+            } => self.eval_property_get(inst_id, receiver, object, property, state),
             Expr::PropertySet {
                 object,
                 property,
@@ -373,40 +338,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             } => {
                 let obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
                 let val_ty = self.eval_expr(inst_id, receiver, value, state)?;
-                let norm = self
-                    .types
-                    .normalize_for_storage(self.ctx, self.decls, val_ty);
-                // Write into a class field or setter (`this.field = val` or `obj.field = val`).
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def) {
-                    self.write_class_field(cinst_id, property, norm);
-                    if let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
-                        && let Some(setter_tid) = self.index.class_setter(cinst.class, property)
-                        && norm != Ty::BOTTOM
-                    {
-                        self.request_instance(InstanceReq {
-                            template: setter_tid,
-                            receiver: Some(cinst_id),
-                            capture_owner: None,
-                            args: &[norm],
-                            explicit_type_args: &[],
-                            call_byte_offset: 0,
-                            caller: Some(inst_id),
-                            is_inline_callback: false,
-                        })?;
-                    }
-                }
-                // Write into an open empty-object dictionary (`dict.prop = val`), or invalidate
-                // an open empty array targeted by a string property write (`a['k'] = 2`).
-                if let Expr::LocalGet(id) = object.as_ref()
-                    && let Some(lidx) = self.index.local_idx(*id)
-                    && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
-                {
-                    match agg_kind {
-                        AggregateKind::Dictionary => self.write_agg_value(agg_loc, val_ty),
-                        AggregateKind::Array => {
-                            self.write_loc(agg_loc, Ty::OPEN);
-                        }
+                self.write_class_or_setter(inst_id, obj_def, property, value, val_ty)?;
+                if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
+                    if kind == CellKind::Dict {
+                        self.write_cell(loc, val_ty);
+                    } else {
+                        self.write_loc(loc, Ty::OPEN);
                     }
                 }
                 Ok(val_ty)
@@ -414,23 +352,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::IndexGet { object, index, .. } => {
                 let obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
                 let idx_ty = self.eval_expr(inst_id, receiver, index, state)?;
-                if let Expr::LocalGet(id) = object.as_ref()
-                    && let Some(lidx) = self.index.local_idx(*id)
-                    && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
-                {
-                    if self.agg_element_reads.insert(agg_loc.0 as usize) {
-                        self.dirty_locs.insert(agg_loc.0 as usize);
+                let (obj_def, _) = self.types.strip_nullish(obj_ty);
+                if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
+                    if kind == CellKind::Dict && self.dict_reads.insert(loc.0 as usize) {
+                        self.dirty_locs.insert(loc.0 as usize);
                     }
                     if idx_ty != Ty::BOTTOM {
-                        let matches_kind = match agg_kind {
-                            AggregateKind::Array => matches!(idx_ty, Ty::NUMBER | Ty::INT32),
-                            AggregateKind::Dictionary => idx_ty == Ty::STRING,
+                        let matches_kind = if kind.is_array() {
+                            matches!(idx_ty, Ty::NUMBER | Ty::INT32)
+                        } else {
+                            idx_ty == Ty::STRING
                         };
                         if !matches_kind {
-                            self.write_loc(agg_loc, Ty::OPEN);
+                            self.write_loc(loc, Ty::OPEN);
                         }
                     }
                 }
+                let obj_ty = self.resolve_cell_read(inst_id, obj_ty);
                 if obj_ty == Ty::BOTTOM {
                     return Ok(Ty::BOTTOM);
                 }
@@ -445,83 +383,34 @@ impl<'h, 'a> Solver<'h, 'a> {
                 value,
                 ..
             } => {
-                let _obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
+                let obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
                 let idx_ty = self.eval_expr(inst_id, receiver, index, state)?;
                 let val_ty = self.eval_expr(inst_id, receiver, value, state)?;
-                if let Expr::LocalGet(id) = object.as_ref()
-                    && let Some(lidx) = self.index.local_idx(*id)
-                    && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
-                {
-                    let matches_kind = match agg_kind {
-                        AggregateKind::Array => matches!(idx_ty, Ty::NUMBER | Ty::INT32),
-                        AggregateKind::Dictionary => idx_ty == Ty::STRING,
-                    };
-                    if matches_kind {
-                        self.write_agg_value(agg_loc, val_ty);
-                    } else if idx_ty != Ty::BOTTOM {
-                        self.write_loc(agg_loc, Ty::OPEN);
-                    }
-                }
+                let (obj_def, _) = self.types.strip_nullish(obj_ty);
+                self.write_cell_indexed(obj_def, idx_ty, val_ty);
                 Ok(val_ty)
             }
             Expr::PutValueSet {
-                target,
-                key,
-                value,
-                receiver: recv,
-                ..
+                target, key, value, ..
             } => {
                 let obj_ty = self.eval_expr(inst_id, receiver, target, state)?;
                 let idx_ty = self.eval_expr(inst_id, receiver, key, state)?;
                 let val_ty = self.eval_expr(inst_id, receiver, value, state)?;
-                let norm = self
-                    .types
-                    .normalize_for_storage(self.ctx, self.decls, val_ty);
+                let (obj_def, _) = self.types.strip_nullish(obj_ty);
                 if let Expr::String(field_name) = key.as_ref() {
-                    let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                    if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def) {
-                        self.write_class_field(cinst_id, field_name, norm);
-                        if let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
-                            && let Some(setter_tid) =
-                                self.index.class_setter(cinst.class, field_name)
-                            && norm != Ty::BOTTOM
-                        {
-                            self.request_instance(InstanceReq {
-                                template: setter_tid,
-                                receiver: Some(cinst_id),
-                                capture_owner: None,
-                                args: &[norm],
-                                explicit_type_args: &[],
-                                call_byte_offset: 0,
-                                caller: Some(inst_id),
-                                is_inline_callback: false,
-                            })?;
-                        }
-                    }
+                    self.write_class_or_setter(inst_id, obj_def, field_name, value, val_ty)?;
                 }
-                if let (Expr::LocalGet(id), Expr::LocalGet(rid)) = (target.as_ref(), recv.as_ref())
-                    && id == rid
-                    && let Some(lidx) = self.index.local_idx(*id)
-                    && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
-                {
-                    let matches_kind = match agg_kind {
-                        AggregateKind::Array => matches!(idx_ty, Ty::NUMBER | Ty::INT32),
-                        AggregateKind::Dictionary => idx_ty == Ty::STRING,
-                    };
-                    if matches_kind {
-                        self.write_agg_value(agg_loc, val_ty);
-                    } else if idx_ty != Ty::BOTTOM {
-                        self.write_loc(agg_loc, Ty::OPEN);
-                    }
-                }
+                self.write_cell_indexed(obj_def, idx_ty, val_ty);
                 Ok(val_ty)
             }
             Expr::StaticFieldGet {
                 class_name,
                 field_name,
             } => {
-                if let Some(cid) = self.index.class_by_name(class_name)
-                    && let Some(loc) = self.index.class_static_field_loc(cid, field_name)
+                let cname_id = self.types.intern_name(class_name);
+                let fname_id = self.types.intern_name(field_name);
+                if let Some(cid) = self.index.class_by_name_id(cname_id)
+                    && let Some(loc) = self.index.class_static_field_loc_by_id(cid, fname_id)
                 {
                     return Ok(self.read_loc(loc, inst_id));
                 }
@@ -533,8 +422,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 value,
             } => {
                 let val_ty = self.eval_expr(inst_id, receiver, value, state)?;
-                if let Some(cid) = self.index.class_by_name(class_name)
-                    && let Some(loc) = self.index.class_static_field_loc(cid, field_name)
+                let cname_id = self.types.intern_name(class_name);
+                let fname_id = self.types.intern_name(field_name);
+                if let Some(cid) = self.index.class_by_name_id(cname_id)
+                    && let Some(loc) = self.index.class_static_field_loc_by_id(cid, fname_id)
                 {
                     let norm = self
                         .types
@@ -549,31 +440,35 @@ impl<'h, 'a> Solver<'h, 'a> {
                 args,
                 ..
             } => {
-                let mut arg_tys = Vec::with_capacity(args.len());
-                for arg in args {
-                    arg_tys.push(self.eval_expr(inst_id, receiver, arg, state)?);
-                }
+                let arg_tys = self.eval_args(inst_id, receiver, args, state)?;
                 if arg_tys.contains(&Ty::BOTTOM) {
                     return Ok(Ty::BOTTOM);
                 }
-                if let Some(cid) = self.index.class_by_name(class_name)
-                    && let Some(tid) = self.index.class_static_method(cid, method_name)
+                let cname_id = self.types.intern_name(class_name);
+                let mname_id = self
+                    .types
+                    .intern_name(hir_compat::method(method_name).name());
+                if let Some(cid) = self.index.class_by_name_id(cname_id)
+                    && let Some(tid) = self.index.class_static_method_by_id(cid, mname_id)
                 {
-                    let target = self.request_instance(InstanceReq {
-                        template: tid,
-                        receiver: None,
-                        capture_owner: None,
-                        args: &arg_tys,
-                        explicit_type_args: &[],
-                        call_byte_offset: 0,
-                        caller: Some(inst_id),
-                        is_inline_callback: false,
-                    })?;
-                    let ret_loc = self
-                        .instances
-                        .get(target.0 as usize)
-                        .map_or(LocId(0), |i| i.return_loc);
-                    return Ok(self.read_loc(ret_loc, inst_id));
+                    let strip_mask = callable_arg_mask(self.types, &arg_tys);
+                    let (_, ret) = self.dispatch_call_site(
+                        inst_id,
+                        expr,
+                        InstanceReq {
+                            template: tid,
+                            receiver: None,
+                            capture_owner: None,
+                            args: &arg_tys,
+                            explicit_type_args: &[],
+                            call_byte_offset: 0,
+                            caller: Some(inst_id),
+                            is_inline_callback: false,
+                        },
+                        true,
+                        strip_mask,
+                    )?;
+                    return Ok(ret);
                 }
                 Ok(Ty::OPEN)
             }
@@ -637,10 +532,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     return Ok(Ty::OPEN);
                 }
-                let mut arg_tys = Vec::with_capacity(args.len());
-                for arg in args {
-                    arg_tys.push(self.eval_expr(inst_id, receiver, arg, state)?);
-                }
+                let arg_tys = self.eval_args(inst_id, receiver, args, state)?;
                 if let Some(obj) = object {
                     let obj_ty = self.eval_expr(inst_id, receiver, obj, state)?;
                     if obj_ty == Ty::BOTTOM {
@@ -677,36 +569,27 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(Ty::OPEN)
             }
-            Expr::ObjectValues(object) => {
+            Expr::ObjectValues(object) | Expr::ObjectEntries(object) => {
                 let obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
                 if obj_ty == Ty::BOTTOM {
                     return Ok(Ty::BOTTOM);
                 }
+                let obj_ty = self.resolve_cell_read(inst_id, obj_ty);
                 let (stripped, _) = self.types.strip_nullish(obj_ty);
                 let hir = self.types.materialize_hir(self.ctx, stripped, &|_| None);
-                Ok(self
-                    .decls
-                    .dict_entry_types(self.ctx, &hir)
-                    .map_or(Ty::OPEN, |(_, val)| {
-                        let v = self.types.intern_hir(self.ctx, &val, true);
-                        self.types.array(v)
-                    }))
-            }
-            Expr::ObjectEntries(object) => {
-                let obj_ty = self.eval_expr(inst_id, receiver, object, state)?;
-                if obj_ty == Ty::BOTTOM {
-                    return Ok(Ty::BOTTOM);
-                }
-                let (stripped, _) = self.types.strip_nullish(obj_ty);
-                let hir = self.types.materialize_hir(self.ctx, stripped, &|_| None);
+                let entries = matches!(expr, Expr::ObjectEntries(_));
                 Ok(self
                     .decls
                     .dict_entry_types(self.ctx, &hir)
                     .map_or(Ty::OPEN, |(k, v)| {
-                        let k = self.types.intern_hir(self.ctx, &k, true);
                         let v = self.types.intern_hir(self.ctx, &v, true);
-                        let pair = self.types.tuple(&[k, v]);
-                        self.types.array(pair)
+                        let elem = if entries {
+                            let k = self.types.intern_hir(self.ctx, &k, true);
+                            self.types.tuple(&[k, v])
+                        } else {
+                            v
+                        };
+                        self.types.array(elem)
                     }))
             }
             Expr::ObjectFromEntries(entries) => {
@@ -741,6 +624,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             | Expr::ArrayToSorted { array, .. } => self.eval_expr(inst_id, receiver, array, state),
             Expr::ArrayPop(id) | Expr::ArrayShift(id) => {
                 let arr_ty = self.eval_local_get(inst_id, *id, &state.guards)?;
+                let arr_ty = self.resolve_cell_read(inst_id, arr_ty);
                 if arr_ty == Ty::BOTTOM {
                     return Ok(Ty::BOTTOM);
                 }
@@ -754,6 +638,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::ArrayAt { array, index } => {
                 let arr_ty = self.eval_expr(inst_id, receiver, array, state)?;
                 self.eval_expr(inst_id, receiver, index, state)?;
+                let arr_ty = self.resolve_cell_read(inst_id, arr_ty);
                 if arr_ty == Ty::BOTTOM {
                     return Ok(Ty::BOTTOM);
                 }
@@ -774,44 +659,31 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(inst_id, receiver, value, state)?;
                 Ok(arr_ty)
             }
-            Expr::ArrayKeys(src) | Expr::MapKeys(src) => {
+            Expr::ArrayKeys(src)
+            | Expr::MapKeys(src)
+            | Expr::ArrayValues(src)
+            | Expr::MapValues(src)
+            | Expr::SetValues(src)
+            | Expr::ArrayEntries(src)
+            | Expr::MapEntries(src) => {
                 let s = self.eval_expr(inst_id, receiver, src, state)?;
+                let s = self.resolve_cell_read(inst_id, s);
                 if s == Ty::BOTTOM {
                     return Ok(Ty::BOTTOM);
                 }
-                Ok(builtins::iterator_view(
-                    self.ctx,
-                    self.types,
-                    s,
-                    crate::collections::IteratorMethod::Keys,
+                let iter_method = match expr {
+                    Expr::ArrayKeys(_) | Expr::MapKeys(_) => {
+                        crate::collections::IteratorMethod::Keys
+                    }
+                    Expr::ArrayValues(_) | Expr::MapValues(_) | Expr::SetValues(_) => {
+                        crate::collections::IteratorMethod::Values
+                    }
+                    _ => crate::collections::IteratorMethod::Entries,
+                };
+                Ok(
+                    builtins::iterator_view(self.ctx, self.types, s, iter_method)
+                        .unwrap_or(Ty::OPEN),
                 )
-                .unwrap_or(Ty::OPEN))
-            }
-            Expr::ArrayValues(src) | Expr::MapValues(src) | Expr::SetValues(src) => {
-                let s = self.eval_expr(inst_id, receiver, src, state)?;
-                if s == Ty::BOTTOM {
-                    return Ok(Ty::BOTTOM);
-                }
-                Ok(builtins::iterator_view(
-                    self.ctx,
-                    self.types,
-                    s,
-                    crate::collections::IteratorMethod::Values,
-                )
-                .unwrap_or(Ty::OPEN))
-            }
-            Expr::ArrayEntries(src) | Expr::MapEntries(src) => {
-                let s = self.eval_expr(inst_id, receiver, src, state)?;
-                if s == Ty::BOTTOM {
-                    return Ok(Ty::BOTTOM);
-                }
-                Ok(builtins::iterator_view(
-                    self.ctx,
-                    self.types,
-                    s,
-                    crate::collections::IteratorMethod::Entries,
-                )
-                .unwrap_or(Ty::OPEN))
             }
             Expr::MapGet { map, key } => {
                 let m = self.eval_expr(inst_id, receiver, map, state)?;
@@ -846,23 +718,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(inst_id, receiver, size, state)?;
                 Ok(b)
             }
-            _ => {
-                // Any other expression variant: evaluate children for side effects/writes.
-                self.eval_leaf_children(inst_id, receiver, expr, state)?;
-                Ok(Ty::OPEN)
-            }
-        }
-    }
-
-    pub(super) fn eval_leaf_children(
-        &mut self,
-        inst_id: InstanceId,
-        receiver: Option<ClassInstId>,
-        expr: &'h Expr,
-        state: &mut EvalState<'h>,
-    ) -> Result<()> {
-        match expr {
-            // Check function-identity comparison folding (`f === double`, `keep === keep`).
             Expr::Compare { op, left, right }
                 if matches!(
                     op,
@@ -873,61 +728,27 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let r = self.eval_expr(inst_id, receiver, right, state)?;
                 if let (TyKind::Func(a), TyKind::Func(b)) = (self.types.kind(l), self.types.kind(r))
                 {
-                    for (ident, side) in [(a, left.as_ref()), (b, right.as_ref())] {
-                        if ident.capture_owner.is_some()
-                            || self.index.view(ident.template).is_some_and(|v| {
-                                v.captures.iter().any(|c| {
-                                    self.index.local_idx(*c).is_some_and(|li| {
-                                        !self.index.local_module.contains(li.0 as usize)
-                                    })
-                                })
-                            })
-                        {
-                            let raw_name = self.index.view(ident.template).map_or("", |v| v.name);
-                            let binding_name = if raw_name.is_empty()
-                                && let Expr::LocalGet(lid) = side
-                                && let Some(span) = self.hir.local_source_spans.get(lid)
-                                && let Some(src) = self.metadata.locations.source_at(span.start)
-                            {
-                                src.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
-                                    .next()
-                                    .unwrap_or("closure")
-                            } else if raw_name.is_empty() {
-                                "closure"
-                            } else {
-                                raw_name
-                            };
-                            let err = Diagnostic::unsupported(format!(
-                                "cannot compare capturing function '{binding_name}'"
-                            ));
-                            return Err(match self.facts.callable_comparisons.first() {
-                                Some(&span) => self.metadata.locations.annotate(err, span),
-                                None => err,
-                            });
-                        }
-                    }
-                    let eq = (a.template == b.template)
-                        == matches!(op, CompareOp::Eq | CompareOp::LooseEq);
-                    self.record_site(inst_id, expr, SiteResolution::FoldBool(eq));
+                    self.fold_func_compare(inst_id, expr, *op, a, b, left, right)?;
                 }
-                return Ok(());
+                Ok(Ty::BOOLEAN)
             }
-            // `arr.push(value)` lowered directly to `Expr::ArrayPush { array_id, value }`.
             Expr::ArrayPush {
                 array_id, value, ..
             } => {
                 let val_ty = self.eval_expr(inst_id, receiver, value, state)?;
                 if let Some(lidx) = self.index.local_idx(*array_id)
-                    && let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
+                    && let Some(arr_ty) = self.read_local_value(inst_id, lidx)
                 {
-                    match agg_kind {
-                        AggregateKind::Array => self.write_agg_value(agg_loc, val_ty),
-                        AggregateKind::Dictionary => {
-                            self.write_loc(agg_loc, Ty::OPEN);
+                    let (def, _) = self.types.strip_nullish(arr_ty);
+                    if let TyKind::Cell { loc, kind } = self.types.kind(def) {
+                        if kind.is_array() {
+                            self.write_cell(loc, val_ty);
+                        } else {
+                            self.write_loc(loc, Ty::OPEN);
                         }
                     }
                 }
-                return Ok(());
+                Ok(Ty::NUMBER)
             }
             Expr::Delete(target) => {
                 if let Expr::IndexGet { object, .. } | Expr::PropertyGet { object, .. } =
@@ -937,17 +758,34 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if self.type_may_be_array(obj_ty) {
                         self.deletes_array_elements = true;
                     }
+                } else {
+                    self.eval_children(inst_id, receiver, expr, state)?;
                 }
+                Ok(Ty::BOOLEAN)
             }
             Expr::Update { id, .. } => {
                 state.guards.assign(*id);
                 if let Some(lidx) = self.index.local_idx(*id) {
                     self.mark_written(inst_id, lidx);
                 }
-                return Ok(());
+                Ok(Ty::NUMBER)
             }
-            _ => {}
+            _ => {
+                // Leaf/intrinsic expression: evaluate child expressions for side effects and
+                // delegate typing to `builtins::leaf_expr_type` (reusing `perry-hir`).
+                self.eval_children(inst_id, receiver, expr, state)?;
+                Ok(builtins::leaf_expr_type(self.ctx, self.types, expr))
+            }
         }
+    }
+
+    fn eval_children(
+        &mut self,
+        inst_id: InstanceId,
+        receiver: Option<ClassInstId>,
+        expr: &'h Expr,
+        state: &mut EvalState<'h>,
+    ) -> Result<()> {
         let mut err = None;
         perry_hir::walker::walk_expr_children(expr, &mut |child| {
             if err.is_none()
@@ -962,6 +800,93 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn fold_func_compare(
+        &mut self,
+        inst_id: InstanceId,
+        expr: &'h Expr,
+        op: CompareOp,
+        a: FuncIdentity,
+        b: FuncIdentity,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<()> {
+        for (ident, side) in [(a, left), (b, right)] {
+            if ident.capture_owner.is_some()
+                || self.index.view(ident.template).is_some_and(|v| {
+                    v.captures.iter().any(|c| {
+                        self.index
+                            .local_idx(*c)
+                            .is_some_and(|li| !self.index.local_module.contains(li.0 as usize))
+                    })
+                })
+            {
+                let raw_name = self.index.view(ident.template).map_or("", |v| v.name);
+                let binding_name = if raw_name.is_empty()
+                    && let Expr::LocalGet(lid) = side
+                    && let Some(span) = self.hir.local_source_spans.get(lid)
+                    && let Some(src) = self.metadata.locations.source_at(span.start)
+                {
+                    src.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+                        .next()
+                        .unwrap_or("closure")
+                } else if raw_name.is_empty() {
+                    "closure"
+                } else {
+                    raw_name
+                };
+                let err = Diagnostic::unsupported(format!(
+                    "cannot compare capturing function '{binding_name}'"
+                ));
+                return Err(match self.facts.callable_comparisons.first() {
+                    Some(&span) => self.metadata.locations.annotate(err, span),
+                    None => err,
+                });
+            }
+        }
+        let eq = (a.template == b.template) == matches!(op, CompareOp::Eq | CompareOp::LooseEq);
+        self.record_site(inst_id, expr, SiteResolution::FoldBool(eq));
+        Ok(())
+    }
+
+    fn write_class_or_setter(
+        &mut self,
+        inst_id: InstanceId,
+        obj_def: Ty,
+        property: &str,
+        value: &Expr,
+        val_ty: Ty,
+    ) -> Result<()> {
+        let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def) else {
+            return Ok(());
+        };
+        let norm = self
+            .types
+            .normalize_for_storage(self.ctx, self.decls, val_ty);
+        if matches!(value, Expr::Array(items, _) if items.is_empty()) {
+            self.write_class_field_empty_array(cinst_id, property);
+        } else {
+            self.write_class_field(cinst_id, property, norm);
+        }
+        let prop_id = self.types.intern_name(property);
+        if let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
+            && let Some(setter_tid) = self.index.class_setter_by_id(cinst.class, prop_id)
+            && norm != Ty::BOTTOM
+        {
+            self.request_instance(InstanceReq {
+                template: setter_tid,
+                receiver: Some(cinst_id),
+                capture_owner: None,
+                args: &[norm],
+                explicit_type_args: &[],
+                call_byte_offset: 0,
+                caller: Some(inst_id),
+                is_inline_callback: false,
+            })?;
+        }
+        Ok(())
+    }
+
     pub(super) fn eval_local_get(
         &mut self,
         inst_id: InstanceId,
@@ -971,13 +896,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(lidx) = self.index.local_idx(id) else {
             return Ok(Ty::OPEN);
         };
-        // If `local` aliases an open empty array/object aggregate, read its projected type!
-        if let Some((agg_loc, agg_kind)) = self.lookup_agg(inst_id, lidx)
-            && let Some(agg_ty) = self.project_agg_type(inst_id, agg_loc, agg_kind)
-        {
-            return Ok(agg_ty);
-        }
-        let Some(loc) = self.local_loc_in_instance(inst_id, lidx) else {
+        let Some(mut ty) = self.read_local_value(inst_id, lidx) else {
             return Ok(self
                 .index
                 .local_declared
@@ -985,7 +904,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .copied()
                 .unwrap_or(Ty::OPEN));
         };
-        let mut ty = self.read_loc(loc, inst_id);
         // Deferred local read before any write sees `undefined`.
         if self.index.local_deferred.contains(lidx.0 as usize)
             && self
@@ -1125,8 +1043,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         state: &mut EvalState<'h>,
     ) -> Result<Ty> {
         if let Expr::ClassRef(class_name) = object {
-            if let Some(cid) = self.index.class_by_name(class_name)
-                && let Some(loc) = self.index.class_static_field_loc(cid, property)
+            let cname_id = self.types.intern_name(class_name);
+            let pname_id = self.types.intern_name(property);
+            if let Some(cid) = self.index.class_by_name_id(cname_id)
+                && let Some(loc) = self.index.class_static_field_loc_by_id(cid, pname_id)
             {
                 return Ok(self.read_loc(loc, inst_id));
             }
@@ -1137,27 +1057,35 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
+        if let TyKind::Cell {
+            loc,
+            kind: CellKind::Dict,
+        } = self.types.kind(stripped)
+            && self.dict_reads.insert(loc.0 as usize)
+        {
+            self.dirty_locs.insert(loc.0 as usize);
+        }
+        let obj_ty = if matches!(
+            self.types.kind(stripped),
+            TyKind::Cell {
+                kind: CellKind::Dict,
+                ..
+            }
+        ) {
+            self.resolve_cell_read(inst_id, obj_ty)
+        } else {
+            obj_ty
+        };
+        let (stripped, _) = self.types.strip_nullish(obj_ty);
 
         // Class instance field or getter!
-        let class_inst = match self.types.kind(stripped) {
-            TyKind::ClassInst(cinst_id) => Some(cinst_id),
-            TyKind::Leaf(id) => {
-                if let HirType::Named(name) = id.hir(self.ctx)
-                    && let Some(cid) = self.index.class_by_name(name)
-                {
-                    Some(self.request_class_inst(cid, &[], 0, Some(inst_id))?)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        };
-        if let Some(cinst_id) = class_inst {
+        if let Some(cinst_id) = self.resolve_class_inst(inst_id, stripped, 0)? {
             if let Some(ty) = self.read_class_field(cinst_id, property, inst_id) {
                 return Ok(ty);
             }
+            let pname_id = self.types.intern_name(property);
             if let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
-                && let Some(getter_tid) = self.index.class_getter(cinst.class, property)
+                && let Some(getter_tid) = self.index.class_getter_by_id(cinst.class, pname_id)
             {
                 let target = self.request_instance(InstanceReq {
                     template: getter_tid,
@@ -1169,10 +1097,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     caller: Some(inst_id),
                     is_inline_callback: false,
                 })?;
-                let ret_loc = self
-                    .instances
-                    .get(target.0 as usize)
-                    .map_or(LocId(0), |i| i.return_loc);
+                let ret_loc = self.instances[target.0 as usize].return_loc;
                 return Ok(self.read_loc(ret_loc, inst_id));
             }
         }
@@ -1183,41 +1108,82 @@ impl<'h, 'a> Solver<'h, 'a> {
         )
     }
 
+    fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
+        let cinst = self.class_insts.get(cinst_id.0 as usize)?;
+        let hir_idx = *self.index.class_hir_idx.get(cinst.class.0 as usize)?;
+        let f_idx = self
+            .hir
+            .classes
+            .get(hir_idx)?
+            .fields
+            .iter()
+            .position(|f| f.name == property)?;
+        Some(LocId(cinst.field_loc_base + f_idx as u32))
+    }
+
     pub(super) fn read_class_field(
         &mut self,
         cinst_id: ClassInstId,
         property: &str,
         reader: InstanceId,
     ) -> Option<Ty> {
-        let cinst = self.class_insts.get(cinst_id.0 as usize)?;
-        let hir_idx = *self.index.class_hir_idx.get(cinst.class.0 as usize)?;
-        let class = self.hir.classes.get(hir_idx)?;
-        let f_idx = class.fields.iter().position(|f| f.name == property)?;
-        let loc = LocId(cinst.field_loc_base + f_idx as u32);
-        Some(self.read_loc(loc, reader))
+        Some(self.read_loc(self.class_field_loc(cinst_id, property)?, reader))
     }
 
     pub(super) fn write_class_field(&mut self, cinst_id: ClassInstId, property: &str, value: Ty) {
-        let Some(cinst) = self.class_insts.get(cinst_id.0 as usize) else {
-            return;
-        };
-        let Some(&hir_idx) = self.index.class_hir_idx.get(cinst.class.0 as usize) else {
-            return;
-        };
-        let Some(class) = self.hir.classes.get(hir_idx) else {
-            return;
-        };
-        if let Some(f_idx) = class.fields.iter().position(|f| f.name == property) {
-            let loc = LocId(cinst.field_loc_base + f_idx as u32);
-            let existing = self
-                .locations
-                .get(loc.0 as usize)
-                .copied()
-                .unwrap_or(Ty::BOTTOM);
+        if let Some(loc) = self.class_field_loc(cinst_id, property) {
+            let existing = self.locations[loc.0 as usize];
             if !self.types.is_open(value) || self.types.is_open(existing) {
                 self.write_loc(loc, value);
             }
         }
+    }
+
+    pub(super) fn write_class_field_empty_array(&mut self, cinst_id: ClassInstId, property: &str) {
+        if let Some(loc) = self.class_field_loc(cinst_id, property) {
+            let existing = self.locations[loc.0 as usize];
+            if !matches!(
+                self.types.kind(existing),
+                TyKind::Cell {
+                    kind: CellKind::Array,
+                    ..
+                }
+            ) && self.types.is_open(existing)
+            {
+                let elem_loc = self.alloc_loc(Ty::BOTTOM);
+                let cell = self.types.array_cell(elem_loc);
+                self.write_loc(loc, cell);
+            }
+        }
+    }
+
+    fn object_props_of(&mut self, stripped: Ty) -> Option<Vec<ObjectProp>> {
+        if let TyKind::Object { props, .. } = self.types.kind(stripped) {
+            return Some(self.types.object_slice(props).to_vec());
+        }
+        if matches!(
+            self.types.kind(stripped),
+            TyKind::Leaf(_) | TyKind::Generic { .. }
+        ) {
+            let hir = self.types.materialize_hir(self.ctx, stripped, &|_| None);
+            let resolved_props = self.decls.object_properties(self.ctx, &hir)?;
+            let mut out = Vec::with_capacity(resolved_props.len());
+            for (field_name, field_hir, optional) in resolved_props {
+                let name = self.types.intern_name(&field_name);
+                let mut field_ty = self.types.intern_hir(self.ctx, &field_hir, true);
+                if optional {
+                    field_ty = self.types.with_absences(field_ty, Absence::Undefined);
+                }
+                out.push(ObjectProp {
+                    name,
+                    ty: field_ty,
+                    optional,
+                    readonly: false,
+                });
+            }
+            return Some(out);
+        }
+        None
     }
 
     pub(super) fn eval_object_spread(
@@ -1269,41 +1235,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                     is_dynamic = true;
                     continue;
                 }
-                if let TyKind::Object {
-                    props: src_span, ..
-                } = self.types.kind(stripped)
-                {
-                    let src_props: Vec<ObjectProp> = self.types.object_slice(src_span).to_vec();
+                if let Some(src_props) = self.object_props_of(stripped) {
                     for sp in src_props {
                         if let Some(existing) = props.iter_mut().find(|p| p.name == sp.name) {
                             *existing = sp;
                         } else {
                             props.push(sp);
-                        }
-                    }
-                } else if matches!(
-                    self.types.kind(stripped),
-                    TyKind::Leaf(_) | TyKind::Generic { .. }
-                ) {
-                    let hir = self.types.materialize_hir(self.ctx, stripped, &|_| None);
-                    if let Some(resolved_props) = self.decls.object_properties(self.ctx, &hir) {
-                        for (field_name, field_hir, optional) in resolved_props {
-                            let name = self.types.intern_name(&field_name);
-                            let mut field_ty = self.types.intern_hir(self.ctx, &field_hir, true);
-                            if optional {
-                                field_ty = self.types.with_absences(field_ty, Absence::Undefined);
-                            }
-                            let sp = ObjectProp {
-                                name,
-                                ty: field_ty,
-                                optional,
-                                readonly: false,
-                            };
-                            if let Some(existing) = props.iter_mut().find(|p| p.name == sp.name) {
-                                *existing = sp;
-                            } else {
-                                props.push(sp);
-                            }
                         }
                     }
                 }
@@ -1315,6 +1252,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         if is_dynamic {
             return Ok(Ty::DYNAMIC);
         }
-        Ok(self.types.object(&mut props, None))
+        Ok(self.types.object(&props, None))
     }
 }
