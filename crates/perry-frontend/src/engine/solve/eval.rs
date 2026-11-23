@@ -474,7 +474,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if !matches!(init_expr, Expr::Undefined) {
                         self.mark_written(s.inst, lidx);
                     }
-                    if matches!(self.types.kind(init_ty), TyKind::Func(_)) {
+                    if matches!(self.types.kind(init_ty), TyKind::Func(_))
+                        || self
+                            .types
+                            .is_tagged_func_union(init_ty, &self.index.capture_free_templates)
+                    {
                         self.write_local_value(s, lidx, init_ty);
                     } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
                         let is_kind = |t, k| {
@@ -494,6 +498,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 .normalize_for_storage(self.ctx, self.decls, init_ty)
                         };
                         self.write_local_value(s, lidx, stored);
+                    }
+                    if let Some(cur) = self.read_local_value(s.inst, lidx) {
+                        self.record_coercion(s.inst, init_expr, init_ty, cur);
                     }
                 }
             }
@@ -528,6 +535,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.check_stage1_escaping_func(s.inst, norm, 0)?;
                 s.returned = self.types.join(s.returned, norm);
                 self.check_stage1_escaping_func(s.inst, s.returned, 0)?;
+                if let Some(e) = value {
+                    let dst = self
+                        .instances
+                        .get(s.inst)
+                        .and_then(|i| self.locations.get(i.return_loc).copied())
+                        .map_or(s.returned, |r| self.types.join(r, s.returned));
+                    self.record_coercion(s.inst, e, norm, dst);
+                }
             }
             Stmt::If {
                 condition,
@@ -735,9 +750,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             locations: self.locations,
             param_locs: self.param_locs,
             field_locs: self.field_locs,
+            dispatch_arms: self.dispatch_arms,
             inst_local_tys,
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,
+            inst_coercions: self.inst_coercions,
             inst_captures: self.inst_captures,
             live_instances,
             module_local_tys,

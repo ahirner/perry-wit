@@ -625,6 +625,51 @@ console.log(
 "#,
             "8 10 12 5 hi a 14 true 16 2\n",
         ),
+        (
+            "tagged_function_unions_dispatch_and_callbacks",
+            r#"
+const events = [];
+const handlers = [() => events.push("a"), () => events.push("b")];
+handlers.forEach((h) => h());
+const inc = (x) => x + 1;
+const dbl = (x) => x * 2;
+const pick = (flag) => (flag ? inc : dbl);
+function applyAll(f, xs) { return xs.map(f); }
+const f0 = pick(true);
+const f1 = pick(false);
+let chosen = inc;
+chosen = dbl;
+const dynamicHandlers = [];
+let added = false;
+function addMore() {
+  if (!added) {
+    added = true;
+    dynamicHandlers.push(() => events.push("c"));
+  }
+}
+dynamicHandlers.push(addMore);
+for (let i = 0; i < dynamicHandlers.length; i++) {
+  dynamicHandlers[i]();
+}
+class FnHolder {
+  constructor(f) { this.f = f; }
+  run(x) { return this.f(x); }
+}
+const h1 = new FnHolder(f0);
+const h2 = new FnHolder(f1);
+console.log(
+  events.join(","),
+  f0(3),
+  f1(3),
+  chosen(4),
+  applyAll(f0, [1, 2]).join(","),
+  applyAll(f1, [3]).join(","),
+  h1.run(5),
+  h2.run(5),
+);
+"#,
+            "a,b,c 4 6 8 2,3 6 6 10\n",
+        ),
     ];
     for &(name, source, expected) in cases {
         let run = execute(source).await?;

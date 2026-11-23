@@ -297,6 +297,71 @@ impl<'h, 'a> Solver<'h, 'a> {
             if cb_val == Ty::BOTTOM {
                 return Ok(Some(Ty::BOTTOM));
             }
+            if let Some(idents) = self.types.func_union_members(cb_val) {
+                let mut arms = Vec::with_capacity(idents.len());
+                let mut cb_ret = Ty::BOTTOM;
+                let mut max_params = 0usize;
+                for ident in idents {
+                    let Some(cb_view) = self.index.view(ident.template) else {
+                        return Ok(None);
+                    };
+                    let mut arm_inputs = inputs.clone();
+                    if !cb_view.params.iter().any(|p| p.is_rest)
+                        && arm_inputs.len() > cb_view.params.len()
+                    {
+                        arm_inputs.truncate(cb_view.params.len());
+                    }
+                    max_params = max_params.max(arm_inputs.len());
+                    let cb_inst = self.request_instance(
+                        InstanceReq::new(ident.template, &arm_inputs, Some(s.inst))
+                            .owner(ident.capture_owner),
+                    )?;
+                    if let Some(ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) {
+                        let r = self.read_loc(ret_loc, s.inst);
+                        cb_ret = self.types.join(cb_ret, r);
+                    }
+                    arms.push((ident.template, cb_inst));
+                }
+                inputs.truncate(max_params);
+                let arms_span = self.intern_dispatch_arms(&arms);
+                let input_tys = self.types.tuple(&inputs);
+                self.record_site(
+                    s.inst,
+                    callback,
+                    SiteResolution::DispatchCallback {
+                        callee_ty: cb_val,
+                        arms: arms_span,
+                        input_tys,
+                    },
+                );
+                if let Some(elem) = group_elem {
+                    if cb_ret == Ty::BOTTOM {
+                        return Ok(Some(Ty::BOTTOM));
+                    }
+                    let key = if self.types.is_open(cb_ret) {
+                        Ty::STRING
+                    } else {
+                        cb_ret
+                    };
+                    let arr = self.types.array(elem);
+                    return Ok(Some(self.types.generic(
+                        shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
+                        &[key, arr],
+                    )));
+                }
+                return Ok(Some(builtins::apply_method_result(
+                    self.ctx,
+                    self.types,
+                    rule,
+                    MethodResultArgs {
+                        receiver: recv_ty,
+                        arg0: init_ty,
+                        arg0_expr: None,
+                        callback_result: Some(cb_ret),
+                        sparse_arrays,
+                    },
+                )));
+            }
             let TyKind::Func(ident) = self.types.kind(cb_val) else {
                 return Ok(None);
             };
@@ -634,6 +699,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         if callee_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
             return Ok(Ty::BOTTOM);
         }
+        if let Some(idents) = self.types.func_union_members(callee_ty) {
+            return self.eval_dispatch_call(
+                s,
+                expr,
+                callee_ty,
+                &idents,
+                None,
+                &arg_tys,
+                byte_offset,
+            );
+        }
         let TyKind::Func(ident) = self.types.kind(callee_ty) else {
             return Ok(Ty::OPEN);
         };
@@ -823,8 +899,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
 
-        if matches!(name, "push" | "unshift") && self.push_into_cells(stripped, &arg_tys) {
-            return Ok(Ty::NUMBER);
+        if matches!(name, "push" | "unshift") {
+            let pushed_cell = self.push_into_cells(stripped, &arg_tys);
+            self.coerce_array_write(s.inst, stripped, args, &arg_tys);
+            if pushed_cell {
+                return Ok(Ty::NUMBER);
+            }
         }
         if method == hir_compat::Method::Iteration {
             return Ok(obj_ty);
@@ -865,6 +945,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         } else {
             builtins::property_type(self.ctx, self.decls, self.types, stripped, name)
         };
+        if let Some(prop_ty) = prop_ty
+            && let Some(idents) = self.types.func_union_members(prop_ty)
+        {
+            if arg_tys.contains(&Ty::BOTTOM) {
+                return Ok(Ty::BOTTOM);
+            }
+            return self.eval_dispatch_call(
+                s,
+                expr,
+                prop_ty,
+                &idents,
+                Some(stripped),
+                &arg_tys,
+                byte_offset,
+            );
+        }
         if let Some(prop_ty) = prop_ty
             && let TyKind::Func(ident) = self.types.kind(prop_ty)
         {
@@ -921,6 +1017,60 @@ impl<'h, 'a> Solver<'h, 'a> {
             ));
         }
         Ok(Ty::OPEN)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn eval_dispatch_call(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        callee_ty: Ty,
+        idents: &[FuncIdentity],
+        recv_ty: Option<Ty>,
+        arg_tys: &[Ty],
+        byte_offset: u32,
+    ) -> Result<Ty> {
+        for &a in arg_tys {
+            self.invalidate_conservative_cell(a);
+        }
+        let strip_arg_mask = callable_arg_mask(self.types, arg_tys);
+        let mut arms = Vec::with_capacity(idents.len());
+        let mut ret = Ty::BOTTOM;
+        for &ident in idents {
+            let Some(view) = self.index.view(ident.template) else {
+                return Ok(Ty::OPEN);
+            };
+            self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
+            let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
+            let target = self.request_instance(
+                InstanceReq::new(ident.template, arg_tys, Some(s.inst))
+                    .receiver(recv)
+                    .owner(ident.capture_owner)
+                    .at(byte_offset),
+            )?;
+            if let Some(tw) = self.inst_written.get(target.index()).cloned()
+                && let Some(cw) = self.inst_written.get_mut(s.inst.index())
+            {
+                cw.union_with(&tw);
+            }
+            let r = self.read_loc(self.instances[target].return_loc, s.inst);
+            ret = self.types.join(ret, r);
+            arms.push((ident.template, target));
+        }
+        let arms_span = self.intern_dispatch_arms(&arms);
+        let arg_tuple = self.types.tuple(arg_tys);
+        self.record_site(
+            s.inst,
+            expr,
+            SiteResolution::DispatchCall {
+                callee_ty,
+                arms: arms_span,
+                strip_arg_mask,
+                arg_tys: arg_tuple,
+                recv_ty,
+            },
+        );
+        Ok(ret)
     }
 
     pub(super) fn check_callback_params(

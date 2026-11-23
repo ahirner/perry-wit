@@ -79,12 +79,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
                         let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                        if matches!(self.types.kind(existing), TyKind::Func(_)) {
-                            if existing != val_ty && val_ty != Ty::BOTTOM {
-                                return Err(Diagnostic::unsupported(
-                                    "a reassigned function binding requires a runtime function representation",
-                                ));
-                            }
+                        if matches!(self.types.kind(existing), TyKind::Func(_))
+                            || self
+                                .types
+                                .is_tagged_func_union(existing, &self.index.capture_free_templates)
+                        {
+                            self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                            let joined = self.types.join(existing, val_ty);
+                            self.check_stage1_escaping_func(s.inst, joined, 0)?;
+                            self.write_local_value(s, lidx, val_ty);
                         } else if let TyKind::Cell { loc, kind } = self.types.kind(existing) {
                             if kind == CellKind::Array {
                                 let (def, _) = self.types.strip_nullish(val_ty);
@@ -113,6 +116,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 .normalize_for_storage(self.ctx, self.decls, val_ty);
                             self.write_local_value(s, lidx, norm);
                         }
+                    }
+                    if let Some(cur) = self.read_local_value(s.inst, lidx) {
+                        self.record_coercion(s.inst, value, val_ty, cur);
                     }
                     self.mark_written(s.inst, lidx);
                 }
@@ -185,7 +191,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 let r = self.eval_expr(s, right)?;
                 s.guards.truncate(depth);
-                Ok(builtins::logical_result(self.types, *op, l, r))
+                let res = builtins::logical_result(self.types, *op, l, r);
+                self.record_coercion(s.inst, left, l, res);
+                self.record_coercion(s.inst, right, r, res);
+                Ok(res)
             }
             Expr::Conditional {
                 condition,
@@ -207,7 +216,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                     else_ty = self.types.exclude_absences(else_ty, Absence::Undefined);
                 }
                 s.guards.join(branch, then_writes, true, true);
-                Ok(self.types.join(then_ty, else_ty))
+                let joined = self.types.join(then_ty, else_ty);
+                self.record_coercion(s.inst, then_expr, then_ty, joined);
+                self.record_coercion(s.inst, else_expr, else_ty, joined);
+                Ok(joined)
             }
             Expr::Sequence(parts) => {
                 let mut last = Ty::VOID;
@@ -252,16 +264,26 @@ impl<'h, 'a> Solver<'h, 'a> {
                     return Ok(self.types.tuple(&[*a, *b]));
                 }
                 let joined = elem_tys
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .fold(Ty::BOTTOM, |acc, t| self.types.join(acc, t));
                 self.check_stage1_escaping_func(s.inst, joined, 0)?;
+                let arr_ty = self.types.array(joined);
                 if self
                     .types
                     .is_zero_sized_func(joined, &self.index.capture_free_templates)
                 {
                     self.record_site(s.inst, expr, SiteResolution::ZeroSizedArray);
+                } else if self
+                    .types
+                    .is_tagged_func_union(joined, &self.index.capture_free_templates)
+                {
+                    for (elem, &et) in elements.iter().zip(&elem_tys) {
+                        self.record_coercion(s.inst, elem, et, joined);
+                    }
+                    self.record_site(s.inst, expr, SiteResolution::TaggedArray(arr_ty));
                 }
-                Ok(self.types.array(joined))
+                Ok(arr_ty)
             }
             Expr::ArraySpread(items) => {
                 let (mut joined, mut has_bottom) = (Ty::BOTTOM, false);
@@ -354,14 +376,24 @@ impl<'h, 'a> Solver<'h, 'a> {
             } => {
                 let (obj_ty, val_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, value)?);
                 self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
-                if self
-                    .types
-                    .is_zero_sized_func(val_ty, &self.index.capture_free_templates)
-                {
-                    self.record_site(s.inst, expr, SiteResolution::ZeroSizedFieldSet);
-                }
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
                 self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?;
+                let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
+                    && let Some(loc) = self.class_field_loc(cinst_id, property)
+                {
+                    self.read_loc(loc, s.inst)
+                } else {
+                    val_ty
+                };
+                if self
+                    .types
+                    .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
+                {
+                    self.record_site(s.inst, expr, SiteResolution::ZeroSizedFieldSet);
+                } else {
+                    self.clear_site(s.inst, expr);
+                    self.record_coercion(s.inst, value, val_ty, field_ty);
+                }
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
                     if kind == CellKind::Dict {
                         self.write_cell(loc, val_ty);
@@ -419,15 +451,31 @@ impl<'h, 'a> Solver<'h, 'a> {
                     && let Expr::String(field_name) = index.as_ref()
                 {
                     self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                    self.write_class_or_setter(s.inst, obj_def, field_name, value, val_ty)?;
+                    let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
+                        && let Some(loc) = self.class_field_loc(cinst_id, field_name)
+                    {
+                        self.read_loc(loc, s.inst)
+                    } else {
+                        val_ty
+                    };
                     if self
                         .types
-                        .is_zero_sized_func(val_ty, &self.index.capture_free_templates)
+                        .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
                     {
                         self.record_site(s.inst, expr, SiteResolution::ZeroSizedFieldSet);
+                    } else {
+                        self.clear_site(s.inst, expr);
+                        self.record_coercion(s.inst, value, val_ty, field_ty);
                     }
-                    self.write_class_or_setter(s.inst, obj_def, field_name, value, val_ty)?;
                 }
                 self.write_cell_indexed(obj_def, idx_ty, val_ty);
+                self.coerce_array_write(
+                    s.inst,
+                    obj_def,
+                    std::slice::from_ref(value.as_ref()),
+                    &[val_ty],
+                );
                 Ok(val_ty)
             }
             Expr::StaticFieldGet {
@@ -671,6 +719,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     let def = self.types.strip_nullish(arr_ty).0;
                     self.push_into_cells(def, &[val_ty]);
+                    self.coerce_array_write(
+                        s.inst,
+                        def,
+                        std::slice::from_ref(value.as_ref()),
+                        &[val_ty],
+                    );
                 }
                 Ok(Ty::NUMBER)
             }

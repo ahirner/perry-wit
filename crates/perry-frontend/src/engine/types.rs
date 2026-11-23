@@ -795,6 +795,43 @@ impl TypeTable {
         )
     }
 
+    pub(crate) fn is_tagged_func_union(&self, ty: Ty, capture_free: &BitSet) -> bool {
+        let TyKind::Union(span) = self.kind(ty) else {
+            return false;
+        };
+        let members = self.ty_slice(span);
+        let mut func_count = 0usize;
+        for &m in members {
+            if matches!(m, Ty::NULL | Ty::VOID) {
+                continue;
+            }
+            if self.is_zero_sized_func(m, capture_free) {
+                func_count += 1;
+            } else {
+                return false;
+            }
+        }
+        func_count >= 1
+    }
+
+    pub(crate) fn func_union_members(&self, ty: Ty) -> Option<Vec<FuncIdentity>> {
+        let TyKind::Union(span) = self.kind(ty) else {
+            return None;
+        };
+        let members = self.ty_slice(span);
+        let mut out = Vec::with_capacity(members.len());
+        for &m in members {
+            if matches!(m, Ty::NULL | Ty::VOID) {
+                continue;
+            }
+            match self.kind(m) {
+                TyKind::Func(id) => out.push(id),
+                _ => return None,
+            }
+        }
+        (out.len() >= 2).then_some(out)
+    }
+
     pub(crate) fn has_func(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Func(_) => true,
@@ -994,7 +1031,12 @@ impl TypeTable {
             }
             TyKind::Union(s) => {
                 let ms = self.ty_slice(s);
+                let all_funcs = ms
+                    .iter()
+                    .filter(|&&m| m != Ty::NULL && m != Ty::VOID)
+                    .all(|&m| matches!(self.kind(m), TyKind::Func(_)));
                 (nested
+                    && !all_funcs
                     && ms
                         .iter()
                         .filter(|&&m| m != Ty::NULL && m != Ty::VOID)
@@ -1172,9 +1214,17 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                     .collect(),
             ),
             TyKind::Union(s) => {
+                let slice = self.table.ty_slice(s);
+                let has_func = slice
+                    .iter()
+                    .any(|&m| matches!(self.table.kind(m), TyKind::Func(_)));
                 let mut members = Vec::with_capacity(s.len as usize);
-                for &t in self.table.ty_slice(s) {
-                    let h = self.run(t);
+                for &t in slice {
+                    let h = if has_func && let TyKind::Func(ident) = self.table.kind(t) {
+                        func_tag_hir(ident)
+                    } else {
+                        self.run(t)
+                    };
                     if !members.contains(&h) {
                         members.push(h);
                     }
@@ -1231,4 +1281,26 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
             }),
         }
     }
+}
+
+pub(crate) fn func_tag(template: TemplateId) -> String {
+    format!("fn_{}", template.index())
+}
+
+fn func_tag_hir(ident: FuncIdentity) -> HirType {
+    let mut properties = HashMap::with_capacity(1);
+    properties.insert(
+        "tag".to_owned(),
+        PropertyInfo {
+            ty: HirType::StringLiteral(func_tag(ident.template)),
+            optional: false,
+            readonly: false,
+        },
+    );
+    HirType::Object(ObjectType {
+        name: None,
+        properties,
+        property_order: Some(vec!["tag".to_owned()]),
+        index_signature: None,
+    })
 }

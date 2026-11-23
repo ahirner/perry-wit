@@ -68,12 +68,31 @@ pub(crate) struct ClassInst {
     pub(crate) emitted_name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FuncCoercion {
+    Zero,
+    Tag(TemplateId),
+    Widen { from: Ty, to: Ty },
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum SiteResolution {
     DirectCall {
         target: InstanceId,
         strip_arg_mask: u64,
         pass_receiver: bool,
+    },
+    DispatchCall {
+        callee_ty: Ty,
+        arms: TySpan,
+        strip_arg_mask: u64,
+        arg_tys: Ty,
+        recv_ty: Option<Ty>,
+    },
+    DispatchCallback {
+        callee_ty: Ty,
+        arms: TySpan,
+        input_tys: Ty,
     },
     MethodCall {
         target: InstanceId,
@@ -91,6 +110,7 @@ pub(crate) enum SiteResolution {
         keep_mask: u64,
     },
     ZeroSizedArray,
+    TaggedArray(Ty),
     ZeroSizedFieldSet,
     CollectionNew {
         is_map: bool,
@@ -107,9 +127,11 @@ pub(crate) struct Solved {
     pub(crate) locations: IdxVec<LocId, Ty>,
     pub(crate) param_locs: Vec<LocId>,
     pub(crate) field_locs: Vec<LocId>,
+    pub(crate) dispatch_arms: Vec<(TemplateId, InstanceId)>,
     pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
     pub(crate) inst_sites: Vec<Vec<Option<SiteResolution>>>,
+    pub(crate) inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
     pub(crate) inst_captures: Vec<Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
     pub(crate) module_local_tys: Vec<Option<Ty>>,
@@ -260,11 +282,14 @@ struct Solver<'h, 'a> {
     template_counts: Vec<u16>,
     param_locs: Vec<LocId>,
     field_locs: Vec<LocId>,
+    dispatch_arms: Vec<(TemplateId, InstanceId)>,
+    dispatch_arm_spans: Vec<TySpan>,
     inst_locals: Vec<Vec<InstanceLocalSlot>>,
     inst_frame_locals: Vec<Vec<Ty>>,
     inst_written: Vec<BitSet>,
     inst_captures: Vec<Vec<LocalId>>,
     inst_sites: Vec<Vec<Option<SiteResolution>>>,
+    inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
     inst_superseded: BitSet,
     dict_reads: BitSet,
     self_nested_locs: BitSet,
@@ -385,11 +410,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             template_counts: vec![0; index.views.len()],
             param_locs: Vec::new(),
             field_locs: Vec::new(),
+            dispatch_arms: Vec::new(),
+            dispatch_arm_spans: Vec::new(),
             inst_locals: Vec::new(),
             inst_frame_locals: Vec::new(),
             inst_written: Vec::new(),
             inst_captures: Vec::new(),
             inst_sites: Vec::new(),
+            inst_coercions: Vec::new(),
             inst_superseded: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
@@ -500,15 +528,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             || self.contract_insts.contains(inst_id.index())
     }
 
-    fn site_target(&self, res: &SiteResolution) -> Option<InstanceId> {
+    fn for_each_site_target(&self, res: &SiteResolution, mut f: impl FnMut(InstanceId)) {
         match *res {
             SiteResolution::DirectCall { target, .. }
             | SiteResolution::MethodCall { target, .. }
-            | SiteResolution::Callback { target, .. } => Some(target),
-            SiteResolution::ClassNew { class_inst, .. } => {
-                self.class_insts.get(class_inst)?.ctor_inst
+            | SiteResolution::Callback { target, .. } => f(target),
+            SiteResolution::DispatchCall { arms, .. }
+            | SiteResolution::DispatchCallback { arms, .. } => {
+                for &(_, target) in self.dispatch_arms.get(arms.range()).unwrap_or(&[]) {
+                    f(target);
+                }
             }
-            _ => None,
+            SiteResolution::ClassNew { class_inst, .. } => {
+                if let Some(ctor) = self.class_insts.get(class_inst).and_then(|c| c.ctor_inst) {
+                    f(ctor);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -532,11 +568,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .flatten()
                 .flatten()
             {
-                if let Some(t) = self.site_target(res)
-                    && live.insert(t.index())
-                {
-                    queue.push(t);
-                }
+                self.for_each_site_target(res, |t| {
+                    if live.insert(t.index()) {
+                        queue.push(t);
+                    }
+                });
             }
         }
         live
@@ -990,6 +1026,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.inst_captures.push(inst_caps);
         self.inst_sites
             .push(vec![None; self.index.site_count(template)]);
+        self.inst_coercions.push(Vec::new());
         self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
@@ -1295,6 +1332,121 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
+    pub(super) fn intern_dispatch_arms(&mut self, arms: &[(TemplateId, InstanceId)]) -> TySpan {
+        for &span in &self.dispatch_arm_spans {
+            if self.dispatch_arms.get(span.range()) == Some(arms) {
+                return span;
+            }
+        }
+        let span = TySpan {
+            start: self.dispatch_arms.len() as u32,
+            len: arms.len() as u32,
+        };
+        self.dispatch_arms.extend_from_slice(arms);
+        self.dispatch_arm_spans.push(span);
+        span
+    }
+
+    pub(super) fn set_coercion(&mut self, inst_id: InstanceId, expr: &Expr, c: FuncCoercion) {
+        let key = std::ptr::from_ref(expr) as usize;
+        if let Some(list) = self.inst_coercions.get_mut(inst_id.index()) {
+            if let Some(slot) = list.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = c;
+            } else {
+                list.push((key, c));
+            }
+        }
+    }
+
+    pub(super) fn clear_site(&mut self, inst_id: InstanceId, expr: &Expr) {
+        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
+            return;
+        };
+        let Some(local_site) = self.index.site_of(template, expr) else {
+            return;
+        };
+        if let Some(slot) = self
+            .inst_sites
+            .get_mut(inst_id.index())
+            .and_then(|s| s.get_mut(local_site))
+        {
+            *slot = None;
+        }
+    }
+
+    pub(super) fn coerce_array_write(
+        &mut self,
+        inst_id: InstanceId,
+        arr_def: Ty,
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) {
+        let elem_ty = match self.types.kind(arr_def) {
+            TyKind::Cell { loc, kind } if kind.is_array() => Some(self.read_loc(loc, inst_id)),
+            TyKind::Array(elem) => Some(elem),
+            _ => None,
+        };
+        let Some(elem_ty) = elem_ty else { return };
+        if self
+            .types
+            .is_zero_sized_func(elem_ty, &self.index.capture_free_templates)
+        {
+            for a in args {
+                self.set_coercion(inst_id, a, FuncCoercion::Zero);
+            }
+        } else if self
+            .types
+            .is_tagged_func_union(elem_ty, &self.index.capture_free_templates)
+        {
+            for (a, &at) in args.iter().zip(arg_tys) {
+                self.record_coercion(inst_id, a, at, elem_ty);
+            }
+        }
+    }
+
+    pub(super) fn record_coercion(
+        &mut self,
+        inst_id: InstanceId,
+        expr: &Expr,
+        src_ty: Ty,
+        dst_ty: Ty,
+    ) {
+        if src_ty == Ty::BOTTOM || dst_ty == Ty::BOTTOM {
+            return;
+        }
+        if !self
+            .types
+            .is_tagged_func_union(dst_ty, &self.index.capture_free_templates)
+        {
+            return;
+        }
+        if matches!(expr, Expr::Conditional { .. } | Expr::Logical { .. }) {
+            return;
+        }
+        if self
+            .types
+            .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
+            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        {
+            self.set_coercion(inst_id, expr, FuncCoercion::Tag(ident.template));
+            return;
+        }
+        if self
+            .types
+            .is_tagged_func_union(src_ty, &self.index.capture_free_templates)
+            && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
+        {
+            self.set_coercion(
+                inst_id,
+                expr,
+                FuncCoercion::Widen {
+                    from: src_ty,
+                    to: dst_ty,
+                },
+            );
+        }
+    }
+
     pub(super) fn check_stage1_escaping_func(
         &self,
         inst_id: InstanceId,
@@ -1335,9 +1487,24 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .iter()
                     .any(|&m| matches!(self.types.kind(m), TyKind::Func(_))) =>
             {
-                let mut err = Diagnostic::unsupported(
-                    "joining function values requires a runtime function representation",
-                );
+                if self
+                    .types
+                    .is_tagged_func_union(ty, &self.index.capture_free_templates)
+                {
+                    return Ok(());
+                }
+                let has_capturing = self.types.ty_slice(span).iter().any(|&m| {
+                    matches!(self.types.kind(m), TyKind::Func(_))
+                        && !self
+                            .types
+                            .is_zero_sized_func(m, &self.index.capture_free_templates)
+                });
+                let msg = if has_capturing {
+                    "storing, returning or joining function values with captures requires a runtime environment"
+                } else {
+                    "joining function values with non-function values is not supported yet"
+                };
+                let mut err = Diagnostic::unsupported(msg);
                 if byte_offset != 0 {
                     err = self.metadata.locations.annotate_call(err, byte_offset);
                 }
