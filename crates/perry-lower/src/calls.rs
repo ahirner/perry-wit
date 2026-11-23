@@ -477,6 +477,7 @@ impl<'s> FunctionBuilder<'s> {
             let result = signature
                 .result
                 .ok_or_else(|| Diagnostic::internal("async function must settle one result"))?;
+            self.invalidate_global_guards();
             return Ok(Some(self.emit_value(ctx, |ctx| {
                 AsyncCallOp::new(ctx, signature.name.clone(), values, result.carrier)
             })));
@@ -488,6 +489,7 @@ impl<'s> FunctionBuilder<'s> {
             signature.carrier_results(),
         );
         self.append(ctx, &op);
+        self.invalidate_global_guards();
         let Some(result_ty) = signature.result else {
             return Ok(None);
         };
@@ -499,6 +501,15 @@ impl<'s> FunctionBuilder<'s> {
             self.never_values.insert(value);
         }
         Ok(Some(value))
+    }
+
+    fn invalidate_global_guards(&mut self) {
+        if self.variant_guards.depth() == 0 {
+            return;
+        }
+        for &id in &self.shapes.global_ids {
+            self.variant_guards.assign(id);
+        }
     }
 
     pub(super) fn clone_structured_value(

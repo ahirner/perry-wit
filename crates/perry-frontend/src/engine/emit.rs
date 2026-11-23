@@ -3,7 +3,7 @@ use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
 use super::solve::{ClassInst, Instance, SiteResolution, Solved};
 use super::types::{
-    CellKind, ClassInstId, FuncIdentity, InstanceId, LocId, TemplateId, Ty, TyKind, TypeTable,
+    CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TypeTable,
 };
 use crate::hir_compat::{Locations, Metadata};
 use perry_hir::{
@@ -22,7 +22,7 @@ pub(crate) struct Emitted {
     pub(crate) instantiations: Vec<(String, String, u32, Option<String>)>,
     pub(crate) inline_callbacks: Vec<FuncId>,
     pub(crate) class_origins: Vec<(String, String)>,
-    pub(crate) json_storage_bindings: Vec<LocalId>,
+    pub(crate) json_eligible_bindings: Vec<LocalId>,
     pub(crate) deletes_array_elements: bool,
 }
 
@@ -50,8 +50,8 @@ impl Emitted {
         metadata.inline_callbacks.extend(self.inline_callbacks);
         metadata.class_origins.extend(self.class_origins);
         metadata
-            .json_storage_bindings
-            .extend(self.json_storage_bindings);
+            .json_eligible_bindings
+            .extend(self.json_eligible_bindings);
         metadata.sparse_arrays |= self.deletes_array_elements;
     }
 }
@@ -76,7 +76,7 @@ pub(crate) fn build(
         instantiations: Vec::new(),
         inline_callbacks: Vec::new(),
         class_origins: Vec::new(),
-        json_storage_bindings: Vec::new(),
+        json_eligible_bindings: Vec::new(),
     };
     let (init, functions, classes) = e.build_all()?;
     Ok(Emitted {
@@ -87,7 +87,7 @@ pub(crate) fn build(
         instantiations: e.instantiations,
         inline_callbacks: e.inline_callbacks,
         class_origins: e.class_origins,
-        json_storage_bindings: e.json_storage_bindings,
+        json_eligible_bindings: e.json_eligible_bindings,
         deletes_array_elements: solved.deletes_array_elements,
     })
 }
@@ -104,7 +104,7 @@ struct Emitter<'h, 'a> {
     instantiations: Vec<(String, String, u32, Option<String>)>,
     inline_callbacks: Vec<FuncId>,
     class_origins: Vec<(String, String)>,
-    json_storage_bindings: Vec<LocalId>,
+    json_eligible_bindings: Vec<LocalId>,
 }
 
 struct RewriteCtx<'a> {
@@ -130,10 +130,7 @@ impl<'h> Emitter<'h, '_> {
             .ok_or_else(|| Diagnostic::internal(msg))
     }
     fn class_inst_name(&self, id: ClassInstId) -> Option<String> {
-        self.solved
-            .class_insts
-            .get(id)
-            .map(|c| c.emitted_name.clone())
+        Some(self.solved.class_insts[id].emitted_name.clone())
     }
     fn materialize(&self, ty: Ty) -> HirType {
         self.types.materialize_hir_with(
@@ -177,36 +174,36 @@ impl<'h> Emitter<'h, '_> {
         let local_site = self.index.site_of(template, expr)?;
         self.solved
             .inst_sites
-            .get(inst_id.0 as usize)?
+            .get(inst_id.index())?
             .get(local_site)?
             .as_ref()
     }
 
     fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
         if let Some(lidx) = self.index.local_idx(id) {
-            if self.index.local_module.contains(lidx.0 as usize) {
+            if self.index.local_module.contains(lidx.index()) {
                 return self
                     .solved
                     .module_local_tys
-                    .get(lidx.0 as usize)
+                    .get(lidx.index())
                     .copied()
                     .flatten();
             }
             if let Some(slot) = self.index.local_frame_slot(lidx)
                 && let Some(inst) = self.solved.instances.get(inst_id)
-                && self.index.local_owner.get(lidx.0 as usize) == Some(&inst.template)
+                && self.index.local_owner.get(lidx.index()) == Some(&inst.template)
             {
                 return self
                     .solved
                     .inst_frame_locals
-                    .get(inst_id.0 as usize)?
+                    .get(inst_id.index())?
                     .get(slot)
                     .copied();
             }
         }
         self.solved
             .inst_local_tys
-            .get(inst_id.0 as usize)?
+            .get(inst_id.index())?
             .iter()
             .find(|&&(lid, _)| lid == id)
             .map(|&(_, ty)| ty)
@@ -230,7 +227,7 @@ impl<'h> Emitter<'h, '_> {
     }
 
     fn build_all(&mut self) -> Result<(Vec<Stmt>, Vec<Function>, Vec<Class>)> {
-        let init_inst = InstanceId(0);
+        let init_inst = self.solved.init_inst;
         let new_init = self.rewrite_stmts(&mut RewriteCtx::plain(init_inst), &self.hir.init)?;
 
         let mut seen_templates = BitSet::default();
@@ -238,7 +235,7 @@ impl<'h> Emitter<'h, '_> {
             vec![None; self.solved.instances.len()];
         let mut new_functions = Vec::new();
         for (inst_id, inst) in self.solved.instances.iter_enumerated().skip(1) {
-            if !self.solved.live_instances.contains(inst_id.0 as usize) {
+            if !self.solved.live_instances.contains(inst_id.index()) {
                 continue;
             }
             let Some(view) = self.index.view(inst.template) else {
@@ -248,15 +245,15 @@ impl<'h> Emitter<'h, '_> {
                 continue;
             }
             let keep_original = view.is_exported || view.is_obj_method();
-            let remap_locals = !keep_original && !seen_templates.insert(inst.template.0 as usize);
+            let remap_locals = !keep_original && !seen_templates.insert(inst.template.index());
             let inherited = inst
                 .capture_owner
-                .and_then(|o| inst_remaps.get(o.0 as usize))
+                .and_then(|o| inst_remaps.get(o.index()))
                 .and_then(Option::as_ref)
                 .cloned();
             let (func, remap) = self.emit_function(inst_id, inst, view, remap_locals, inherited)?;
             if !remap.is_empty()
-                && let Some(slot) = inst_remaps.get_mut(inst_id.0 as usize)
+                && let Some(slot) = inst_remaps.get_mut(inst_id.index())
             {
                 *slot = Some(remap);
             }
@@ -290,7 +287,7 @@ impl<'h> Emitter<'h, '_> {
             .collect();
         let mut emitted_classes = BitSet::default();
         for (cinst_i, cinst) in self.solved.class_insts.iter().enumerate() {
-            emitted_classes.insert(cinst.class.0 as usize);
+            emitted_classes.insert(cinst.class.index());
             let Some(orig) = self
                 .index
                 .class(cinst.class)
@@ -304,7 +301,7 @@ impl<'h> Emitter<'h, '_> {
             }
             new_classes.push(self.emit_class(
                 init_inst,
-                cinst.class.0 as usize,
+                cinst.class.index(),
                 Some((cinst_i, cinst)),
                 orig,
             )?);
@@ -364,8 +361,15 @@ impl<'h> Emitter<'h, '_> {
             return Ok(cls);
         };
         cls.name = cinst.emitted_name.clone();
+        let field_locs = self
+            .solved
+            .field_locs
+            .get(cinst.field_locs.range())
+            .unwrap_or(&[]);
         cls.fields = orig.fields.iter().enumerate().map(|(f_idx, field)| {
-            let resolved = self.solved.locations[LocId(cinst.field_loc_base + f_idx as u32)];
+            let resolved = field_locs
+                .get(f_idx)
+                .map_or(Ty::OPEN, |&loc| self.solved.locations[loc]);
             let mut f = field.clone();
             if self.is_resolved(resolved) { f.ty = self.materialize(resolved); }
             else if matches!(self.types.kind(resolved), TyKind::Cell { kind: CellKind::Array, .. }) {
@@ -516,7 +520,7 @@ impl<'h> Emitter<'h, '_> {
         }
 
         let mut captures = view.captures.to_vec();
-        if let Some(extra) = self.solved.inst_captures.get(inst_id.0 as usize) {
+        if let Some(extra) = self.solved.inst_captures.get(inst_id.index()) {
             captures.extend(extra.iter().copied());
         }
         if !remap.is_empty() {
@@ -533,7 +537,7 @@ impl<'h> Emitter<'h, '_> {
             let caller_name = inst
                 .caller
                 .and_then(|c| self.solved.instances.get(c))
-                .filter(|c| c.template != TemplateId(0))
+                .filter(|c| c.template != TemplateId::INIT)
                 .map(|c| c.emitted_name.clone());
             self.instantiations.push((
                 inst.emitted_name.clone(),
@@ -570,7 +574,7 @@ impl<'h> Emitter<'h, '_> {
             .instances
             .iter_enumerated()
             .find_map(|(id, inst)| {
-                (self.solved.live_instances.contains(id.0 as usize)
+                (self.solved.live_instances.contains(id.index())
                     && inst.template == ident.template
                     && inst.capture_owner == ident.capture_owner)
                     .then_some(inst.emitted_func_id)
@@ -607,11 +611,11 @@ impl<'h> Emitter<'h, '_> {
                     || self
                         .index
                         .local_idx(*id)
-                        .is_none_or(|li| self.index.local_inferred.contains(li.0 as usize));
+                        .is_none_or(|li| self.index.local_inferred.contains(li.index()));
                 let is_deferred = self
                     .index
                     .local_idx(*id)
-                    .is_some_and(|li| self.index.local_deferred.contains(li.0 as usize));
+                    .is_some_and(|li| self.index.local_deferred.contains(li.index()));
                 if let Some(t) = resolved
                     && let TyKind::Func(ident) = self.types.kind(t)
                 {
@@ -638,14 +642,14 @@ impl<'h> Emitter<'h, '_> {
                     {
                         if is_inferred
                             && is_deferred
-                            && self.types.needs_json_storage(
+                            && self.types.is_json_encodable(
                                 self.ctx,
                                 t,
                                 self.solved.locations.as_slice(),
                                 &self.solved.dict_reads,
                             )
                         {
-                            self.json_storage_bindings.push(out_id);
+                            self.json_eligible_bindings.push(out_id);
                         }
                         self.materialize(t)
                     }
@@ -765,6 +769,7 @@ impl<'h> Emitter<'h, '_> {
     fn rewrite_expr(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
         if let Some(site) = self.site_of(rctx.inst_id, expr).cloned() {
             match site {
+                SiteResolution::Cell(_) => {}
                 SiteResolution::FoldBool(b) => return Ok(Expr::Bool(b)),
                 SiteResolution::CollectionNew { is_map, type_args } => {
                     return Ok(Expr::New {

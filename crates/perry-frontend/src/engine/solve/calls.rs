@@ -210,7 +210,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .and_then(|li| {
                         self.index
                             .local_regex_pattern
-                            .get(li.0 as usize)
+                            .get(li.index())
                             .copied()
                             .flatten()
                     })
@@ -324,12 +324,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 keep_inline_closure: keep_inline,
             },
         );
-        let cb_ret = self.read_loc(
-            self.instances
-                .get(cb_inst)
-                .map_or(LocId(0), |i| i.return_loc),
-            s.inst,
-        );
+        self.eval_if_fresh(cb_inst)?;
+        let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
+            return Ok(None);
+        };
+        let cb_ret = self.read_loc(cb_ret_loc, s.inst);
 
         if let Some(elem) = group_elem {
             if cb_ret == Ty::BOTTOM {
@@ -388,7 +387,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let ty = self.eval_expr(s, expr)?;
             self.invalidate_conservative_cell(ty);
             if let TyKind::Func(ident) = self.types.kind(ty) {
-                self.check_escaping_unannotated_func(ident.template)?;
+                self.check_escaping_unannotated_func(ident.template, Some(name))?;
             }
             let ty = self.types.normalize_for_storage(self.ctx, self.decls, ty);
             props.push(ObjectProp {
@@ -459,6 +458,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         };
         self.record_site(inst_id, expr, res);
+        self.eval_if_fresh(target)?;
         Ok((
             target,
             self.read_loc(self.instances[target].return_loc, inst_id),
@@ -516,7 +516,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_type_args(s.inst, type_args)
             } else if let Some(tps) = self
                 .class_type_params
-                .get(cid.0 as usize)
+                .get(cid.index())
                 .filter(|t| !t.is_empty())
                 .cloned()
             {
@@ -537,11 +537,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             .map_or(Ty::OPEN, |(_, v)| *v)
                     })
                     .collect()
-            } else if self
-                .index
-                .class_has_implicit_params
-                .contains(cid.0 as usize)
-            {
+            } else if self.index.class_has_implicit_params.contains(cid.index()) {
                 arg_tys.clone()
             } else {
                 Vec::new()
@@ -644,7 +640,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if !target_view.params.iter().any(|p| p.is_rest) && arg_tys.len() > target_view.params.len()
         {
-            self.check_escaping_unannotated_func(ident.template)?;
+            self.check_escaping_unannotated_func(ident.template, None)?;
         }
         self.check_callback_params(s.inst, target_view, &arg_tys, byte_offset)?;
 
@@ -660,8 +656,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             false,
             strip_mask,
         )?;
-        if let Some(tw) = self.inst_written.get(target_inst.0 as usize).cloned()
-            && let Some(cw) = self.inst_written.get_mut(s.inst.0 as usize)
+        if let Some(tw) = self.inst_written.get(target_inst.index()).cloned()
+            && let Some(cw) = self.inst_written.get_mut(s.inst.index())
         {
             cw.union_with(&tw);
         }
@@ -883,13 +879,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 _ => None,
             };
             if func_ident.is_some()
-                && let Some(span) = self.index.local_idx(param.id).and_then(|l| {
-                    self.index
-                        .local_value_use
-                        .get(l.0 as usize)
-                        .copied()
-                        .flatten()
-                })
+                && let Some(span) = self
+                    .index
+                    .local_idx(param.id)
+                    .and_then(|l| self.index.local_value_use.get(l.index()).copied().flatten())
             {
                 return Err(self.metadata.locations.annotate(
                     Diagnostic::unsupported(format!(
@@ -957,7 +950,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             )?;
             let exp_ret = self.types.intern_hir(self.ctx, &expected.return_type, true);
             if exp_ret != Ty::VOID {
-                self.contract_insts.insert(bound_cb.0 as usize);
+                self.contract_insts.insert(bound_cb.index());
                 self.result_contracts.push(ResultContract {
                     inst: bound_cb,
                     expected: exp_ret,
@@ -1032,16 +1025,29 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn check_escaping_unannotated_func(&self, template: TemplateId) -> Result<()> {
+    pub(super) fn check_escaping_unannotated_func(
+        &self,
+        template: TemplateId,
+        context_name: Option<&str>,
+    ) -> Result<()> {
         let Some(view) = self.index.view(template) else {
             return Ok(());
+        };
+        let owner_name = match context_name {
+            Some(name) if view.name.is_empty() => hir_compat::display_name(name).to_owned(),
+            _ => view.display_name(),
         };
         for param in view.params {
             if !self.index.is_param_annotated(param.id)
                 && matches!(param.ty, HirType::Any | HirType::Unknown)
             {
-                let mut err = diag!(codes::MISSING_TYPE_ANNOTATION, "parameter '{}' of '{}' needs a type annotation", param.name, view.display_name())
-                    .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
+                let mut err = diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "parameter '{}' of '{}' needs a type annotation",
+                    param.name,
+                    owner_name
+                )
+                .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
                 if let Some(span) = self.hir.local_source_spans.get(&param.id) {
                     err = self.metadata.locations.annotate(
                         err,

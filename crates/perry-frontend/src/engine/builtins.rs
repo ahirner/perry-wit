@@ -80,7 +80,7 @@ pub(crate) fn lookup_method_result(
             .filter(|m| m.is_property() == property)
             .map(Method::result_rule);
     }
-    if property {
+    if property || matches!(types.kind(receiver), TyKind::ClassInst(_)) {
         return None;
     }
     Method::inferred(

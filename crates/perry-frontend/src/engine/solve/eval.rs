@@ -3,6 +3,15 @@ use super::*;
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn evaluate_instance(&mut self, inst_id: InstanceId) -> Result<()> {
+        let idx = inst_id.index();
+        self.active_insts.insert(idx);
+        let res = self.evaluate_instance_inner(inst_id);
+        self.active_insts.remove(idx);
+        self.evaluated_insts.insert(idx);
+        res
+    }
+
+    fn evaluate_instance_inner(&mut self, inst_id: InstanceId) -> Result<()> {
         let Some(inst) = self.instances.get(inst_id) else {
             return Ok(());
         };
@@ -58,7 +67,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        if template == TemplateId(0) {
+        if template == TemplateId::INIT {
             for (cid, f_idx, loc) in self.static_field_locs.clone() {
                 if let Some(init) = self
                     .index
@@ -80,7 +89,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.enqueue(inst_id);
         }
 
-        if template == TemplateId(0)
+        if template == TemplateId::INIT
             || matches!(
                 view.kind,
                 TemplateKind::ClassConstructor | TemplateKind::ClassSetter(_)
@@ -117,26 +126,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         local: LocalIdx,
     ) -> Option<usize> {
         let slot = self.index.local_frame_slot(local)?;
-        let owner = self.index.local_owner.get(local.0 as usize).copied()?;
+        let owner = self.index.local_owner.get(local.index()).copied()?;
         (owner == self.instances.get(inst_id)?.template).then_some(slot)
-    }
-
-    pub(super) fn read_local_current(&self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
-        if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
-            return self
-                .inst_frame_locals
-                .get(inst_id.0 as usize)?
-                .get(slot)
-                .copied();
-        }
-        Some(self.locations[self.local_loc_in_instance(inst_id, local)?])
     }
 
     pub(super) fn read_local_value(&mut self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
         if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
             return self
                 .inst_frame_locals
-                .get(inst_id.0 as usize)?
+                .get(inst_id.index())?
                 .get(slot)
                 .copied();
         }
@@ -148,7 +146,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
             if let Some(cell) = self
                 .inst_frame_locals
-                .get_mut(s.inst.0 as usize)
+                .get_mut(s.inst.index())
                 .and_then(|f| f.get_mut(slot))
             {
                 let next = self.types.join_bounded(*cell, value);
@@ -165,48 +163,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.write_loc(loc, value);
     }
 
-    pub(super) fn set_local_fixed(&mut self, s: &mut EvalState<'h>, local: LocalIdx, value: Ty) {
-        if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
-            if let Some(cell) = self
-                .inst_frame_locals
-                .get_mut(s.inst.0 as usize)
-                .and_then(|f| f.get_mut(slot))
-                && *cell != value
-            {
-                *cell = value;
-                s.local_changed = true;
-            }
-            return;
-        }
-        let loc = self
-            .local_loc_in_instance(s.inst, local)
-            .unwrap_or_else(|| self.ensure_instance_local(s.inst, local, value));
-        if let Some(cell) = self.locations.get_mut(loc)
-            && *cell != value
-        {
-            *cell = value;
-            self.dirty_locs.insert(loc.0 as usize);
-        }
-    }
-
     pub(super) fn local_loc_in_instance(
         &self,
         inst_id: InstanceId,
         local: LocalIdx,
     ) -> Option<LocId> {
-        if self.index.local_module.contains(local.0 as usize) {
-            return self
-                .index
-                .local_loc
-                .get(local.0 as usize)
-                .copied()
-                .flatten();
+        if self.index.local_module.contains(local.index()) {
+            return self.index.local_loc.get(local.index()).copied().flatten();
         }
         let mut cursor = Some(inst_id);
         while let Some(cur) = cursor {
             if let Some(slot) = self
                 .inst_locals
-                .get(cur.0 as usize)
+                .get(cur.index())
                 .and_then(|sl| sl.iter().find(|s| s.local == local))
             {
                 return Some(slot.loc);
@@ -222,25 +191,20 @@ impl<'h, 'a> Solver<'h, 'a> {
         local: LocalIdx,
         initial: Ty,
     ) -> LocId {
-        if self.index.local_module.contains(local.0 as usize)
-            && let Some(loc) = self
-                .index
-                .local_loc
-                .get(local.0 as usize)
-                .copied()
-                .flatten()
+        if self.index.local_module.contains(local.index())
+            && let Some(loc) = self.index.local_loc.get(local.index()).copied().flatten()
         {
             return loc;
         }
         if let Some(slot) = self
             .inst_locals
-            .get(inst_id.0 as usize)
+            .get(inst_id.index())
             .and_then(|sl| sl.iter().find(|s| s.local == local))
         {
             return slot.loc;
         }
         let loc = self.alloc_loc(initial);
-        if let Some(slots) = self.inst_locals.get_mut(inst_id.0 as usize) {
+        if let Some(slots) = self.inst_locals.get_mut(inst_id.index()) {
             slots.push(InstanceLocalSlot { local, loc });
         }
         loc
@@ -332,7 +296,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 if self
                     .types
-                    .is_valid_dict_value(elem, self.dict_reads.contains(loc.0 as usize))
+                    .is_valid_dict_value(elem, self.dict_reads.contains(loc.index()))
                 {
                     let obj = self.types.object(&[], Some(elem));
                     return self.types.with_absences(obj, abs);
@@ -365,8 +329,8 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn mark_written(&mut self, inst_id: InstanceId, local: LocalIdx) {
         let mut cursor = Some(inst_id);
         while let Some(cur) = cursor {
-            if let Some(w) = self.inst_written.get_mut(cur.0 as usize) {
-                w.insert(local.0 as usize);
+            if let Some(w) = self.inst_written.get_mut(cur.index()) {
+                w.insert(local.index());
             }
             cursor = self.instances.get(cur).and_then(|i| i.capture_owner);
         }
@@ -377,12 +341,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             return;
         };
         let Some(local_site) = self.index.site_of(template, expr) else {
-            debug_assert!(false, "unindexed site in template {}", template.0);
+            debug_assert!(false, "unindexed site in template {}", template.index());
             return;
         };
         if let Some(slot) = self
             .inst_sites
-            .get_mut(inst_id.0 as usize)
+            .get_mut(inst_id.index())
             .and_then(|s| s.get_mut(local_site))
         {
             *slot = Some(res);
@@ -448,7 +412,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     return Ok(());
                 };
                 let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                let is_deferred = self.index.local_deferred.contains(lidx.0 as usize);
+                let is_deferred = self.index.local_deferred.contains(lidx.index());
                 let declared = self.types.intern_hir(self.ctx, ty, !is_inferred);
                 let declared = if !is_inferred {
                     self.instantiate_annotated_class(declared, 0, Some(s.inst))?
@@ -463,13 +427,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if self.local_frame_slot_in(s.inst, lidx).is_none() {
                     let _ = self.ensure_instance_local(s.inst, lidx, initial);
                 }
-                if !is_inferred
-                    && !self.types.is_open(declared)
-                    && self
-                        .read_local_current(s.inst, lidx)
-                        .is_none_or(|c| c == Ty::BOTTOM || c == Ty::OPEN)
-                {
-                    self.set_local_fixed(s, lidx, declared);
+                if !is_inferred && !self.types.is_open(declared) {
+                    self.write_local_value(s, lidx, declared);
                 }
                 let is_i64_cast = is_inferred
                     && matches!(self.types.kind(declared), TyKind::Leaf(id)
@@ -490,6 +449,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             None
                         }
                     } else if (is_inferred || declared == Ty::OPEN)
+                        && !self.index.local_reassigned.contains(lidx.index())
                         && self.index.is_empty_object_expr(self.types, init_expr)
                     {
                         Some(CellKind::Dict)
@@ -497,14 +457,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                         None
                     };
                     if let Some(kind) = cell_kind {
-                        if matches!(
-                            self.read_local_current(s.inst, lidx),
-                            None | Some(Ty::BOTTOM | Ty::OPEN)
-                        ) {
-                            let elem_loc = self.alloc_loc(Ty::BOTTOM);
-                            let cell = self.types.cell(elem_loc, kind);
-                            self.write_local_value(s, lidx, cell);
-                        }
+                        let cell = self.alloc_expr_cell(s.inst, init_expr, kind);
+                        self.write_local_value(s, lidx, cell);
                         self.mark_written(s.inst, lidx);
                         return Ok(());
                     }
@@ -513,7 +467,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.mark_written(s.inst, lidx);
                     }
                     if matches!(self.types.kind(init_ty), TyKind::Func(_)) {
-                        self.set_local_fixed(s, lidx, init_ty);
+                        self.write_local_value(s, lidx, init_ty);
                     } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
                         let is_kind = |t, k| {
                             matches!(self.types.kind(t), TyKind::Leaf(id)
@@ -670,7 +624,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn finish(mut self) -> Solved {
+    pub(super) fn finish(mut self, init_inst: InstanceId) -> Solved {
         let live_instances = self.compute_live_instances();
 
         let inst_local_tys = std::mem::take(&mut self.inst_locals)
@@ -679,10 +633,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 slots
                     .iter()
                     .filter_map(|sl| {
-                        Some((
-                            *self.index.local_ids.get(sl.local.0 as usize)?,
-                            self.locations[sl.loc],
-                        ))
+                        Some((*self.index.local_ids.get(sl.local)?, self.locations[sl.loc]))
                     })
                     .collect()
             })
@@ -718,7 +669,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .collect();
         for &(cid, f_idx, loc) in &self.static_field_locs {
             if let Some(slot) = class_static_field_tys
-                .get_mut(cid.0 as usize)
+                .get_mut(cid.index())
                 .and_then(|f| f.get_mut(f_idx))
             {
                 *slot = self.locations[loc];
@@ -730,7 +681,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut class_inst_setters = vec![Vec::new(); self.class_insts.len()];
         let mut class_static_methods = vec![Vec::new(); self.index.classes.len()];
         for (id, inst) in self.instances.iter_enumerated() {
-            if !live_instances.contains(id.0 as usize) {
+            if !live_instances.contains(id.index()) {
                 continue;
             }
             let Some(view) = self.index.view(inst.template) else {
@@ -739,27 +690,27 @@ impl<'h, 'a> Solver<'h, 'a> {
             match view.kind {
                 TemplateKind::ClassMethod => {
                     if let Some(ci) = inst.receiver
-                        && let Some(list) = class_inst_methods.get_mut(ci.0 as usize)
+                        && let Some(list) = class_inst_methods.get_mut(ci.index())
                     {
                         list.push(id);
                     }
                 }
                 TemplateKind::ClassGetter(getter_idx) => {
                     if let Some(ci) = inst.receiver
-                        && let Some(list) = class_inst_getters.get_mut(ci.0 as usize)
+                        && let Some(list) = class_inst_getters.get_mut(ci.index())
                     {
                         list.push((getter_idx, id));
                     }
                 }
                 TemplateKind::ClassSetter(setter_idx) => {
                     if let Some(ci) = inst.receiver
-                        && let Some(list) = class_inst_setters.get_mut(ci.0 as usize)
+                        && let Some(list) = class_inst_setters.get_mut(ci.index())
                     {
                         list.push((setter_idx, id));
                     }
                 }
                 TemplateKind::ClassStaticMethod(class) => {
-                    if let Some(list) = class_static_methods.get_mut(class.0 as usize) {
+                    if let Some(list) = class_static_methods.get_mut(class.index()) {
                         list.push(id);
                     }
                 }
@@ -768,10 +719,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
 
         Solved {
+            init_inst,
             instances: self.instances,
             class_insts: self.class_insts,
             locations: self.locations,
             param_locs: self.param_locs,
+            field_locs: self.field_locs,
             inst_local_tys,
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,

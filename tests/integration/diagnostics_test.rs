@@ -1013,17 +1013,28 @@ fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> any
 
 #[test]
 fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> anyhow::Result<()> {
-    // Object-literal method diagnostic reports the source method name, never `__obj_method_*`.
-    let obj_method = perry_wit::compile_core(
-        "const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
-        "obj_method.js",
-    )
-    .err()
-    .context("expected missing annotation diagnostic for object method")?;
-    assert_eq!(obj_method.primary().code(), codes::MISSING_TYPE_ANNOTATION);
-    let msg = obj_method.primary().message();
-    assert!(msg.contains("'greet'"), "{obj_method}");
-    assert!(!msg.contains("__obj_method_"), "{obj_method}");
+    // Object-literal method diagnostics report the source method name, never internal synthetic names.
+    for (source, file, expected_name) in [
+        (
+            "const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
+            "obj_method.js",
+            "'greet'",
+        ),
+        (
+            "const counter = { n: 0, bump(by) { this.n += by; } };\nexport function run(): number { counter.bump(1); return counter.n; }\n",
+            "obj_closure_method.js",
+            "'bump'",
+        ),
+    ] {
+        let obj_method = perry_wit::compile_core(source, file)
+            .err()
+            .context("expected missing annotation diagnostic for object method")?;
+        assert_eq!(obj_method.primary().code(), codes::MISSING_TYPE_ANNOTATION);
+        let msg = obj_method.primary().message();
+        assert!(msg.contains(expected_name), "{obj_method}");
+        assert!(!msg.contains("__obj_method_"), "{obj_method}");
+        assert!(!msg.contains("callback_"), "{obj_method}");
+    }
 
     // Polymorphic recursion hits the explicit specialization budget instead of diverging.
     let poly = perry_wit::compile_core(
@@ -1040,13 +1051,28 @@ fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> an
         "{poly}"
     );
 
-    // Self-nested empty array stays unresolved instead of looping or erasing to Any.
-    let self_nest = perry_wit::compile_core(
-        "export function run(): number { const a = []; a.push(a); return a.length; }\n",
-        "self_nest.js",
-    )
-    .err()
-    .context("expected empty array diagnostic")?;
-    assert_eq!(self_nest.primary().code(), codes::MISSING_TYPE_ANNOTATION);
+    // Self-nesting composites (empty arrays, recursive unions, and loops) widen cleanly instead of hanging.
+    for (source, file, expected_code) in [
+        (
+            "export function run(): number { const a = []; a.push(a); return a.length; }\n",
+            "self_nest_array.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+        (
+            "function wrap(n) { return n === 0 ? 0 : [wrap(n - 1)]; }\nexport function run(): number { return JSON.stringify(wrap(2)).length; }\n",
+            "self_nest_union.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+        (
+            "export function run(): number { let x; x = 1; for (let i = 0; i < 3; i++) x = [x]; return JSON.stringify(x).length; }\n",
+            "self_nest_loop.js",
+            codes::TYPE_MISMATCH,
+        ),
+    ] {
+        let self_nest = perry_wit::compile_core(source, file)
+            .err()
+            .context("expected widening diagnostic")?;
+        assert_eq!(self_nest.primary().code(), expected_code, "{self_nest}");
+    }
     Ok(())
 }

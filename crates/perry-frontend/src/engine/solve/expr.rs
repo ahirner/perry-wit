@@ -77,7 +77,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 s.guards.assign(*id);
                 let val_ty = self.eval_expr(s, value)?;
                 if let Some(lidx) = self.index.local_idx(*id) {
-                    if let Some(existing) = self.read_local_current(s.inst, lidx) {
+                    if let Some(existing) = self.read_local_value(s.inst, lidx) {
                         if matches!(self.types.kind(existing), TyKind::Func(_)) {
                             return Err(Diagnostic::unsupported(
                                 "a reassigned function binding requires a runtime function representation",
@@ -85,17 +85,26 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                         let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
                         if let TyKind::Cell { loc, kind } = self.types.kind(existing) {
-                            self.write_loc(loc, Ty::OPEN);
-                            if kind == CellKind::Dict && is_inferred && val_ty != Ty::BOTTOM {
-                                let norm = self
-                                    .types
-                                    .normalize_for_storage(self.ctx, self.decls, val_ty);
-                                self.set_local_fixed(s, lidx, norm);
+                            if kind == CellKind::Array {
+                                let (def, _) = self.types.strip_nullish(val_ty);
+                                match self.types.kind(def) {
+                                    TyKind::Array(elem) => self.write_cell(loc, elem),
+                                    TyKind::Cell { loc: src, kind: sk } if sk.is_array() => {
+                                        let elem = self.read_loc(src, s.inst);
+                                        self.write_cell(loc, elem);
+                                    }
+                                    _ if val_ty != Ty::BOTTOM => {
+                                        self.write_loc(loc, Ty::OPEN);
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                self.write_loc(loc, Ty::OPEN);
                             }
                         } else if (is_inferred
-                            && self.index.local_deferred.contains(lidx.0 as usize))
+                            && (self.index.local_deferred.contains(lidx.index())
+                                || self.index.local_nullish_init.contains(lidx.index())))
                             || self.types.is_open(existing)
-                            || (is_inferred && matches!(existing, Ty::NULL | Ty::VOID))
                         {
                             let norm = self
                                 .types
@@ -142,7 +151,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if let Some(ty) = self
                         .index
                         .local_idx(lid)
-                        .and_then(|l| self.read_local_current(s.inst, l))
+                        .and_then(|l| self.read_local_value(s.inst, l))
                     {
                         self.invalidate_conservative_cell(ty);
                     }
@@ -219,7 +228,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::StructuredClone { value, .. } => self.eval_expr(s, value),
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
-                    return Ok(self.alloc_expr_cell(s.inst, expr));
+                    return Ok(self.alloc_expr_cell(s.inst, expr, CellKind::Array));
                 }
                 let elem_tys = self.eval_args(s, elements)?;
                 if elem_tys.contains(&Ty::BOTTOM) {
@@ -342,8 +351,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let (obj_ty, idx_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, index)?);
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
-                    if kind == CellKind::Dict && self.dict_reads.insert(loc.0 as usize) {
-                        self.dirty_locs.insert(loc.0 as usize);
+                    if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
+                        self.dirty_locs.insert(loc.index());
                     }
                     if idx_ty != Ty::BOTTOM
                         && !(if kind.is_array() {
@@ -754,8 +763,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 ) && self.types.is_open(existing)
                 {
-                    let elem_loc = self.alloc_loc(Ty::BOTTOM);
-                    let cell = self.types.cell(elem_loc, CellKind::Array);
+                    let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array);
                     self.write_loc(loc, cell);
                 }
             } else if !self.types.is_open(norm) || self.types.is_open(existing) {
@@ -785,23 +793,20 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(self
                 .index
                 .local_declared
-                .get(lidx.0 as usize)
+                .get(lidx.index())
                 .copied()
                 .unwrap_or(Ty::OPEN));
         };
-        if self.index.local_deferred.contains(lidx.0 as usize)
+        if self.index.local_deferred.contains(lidx.index())
             && self
                 .inst_written
-                .get(s.inst.0 as usize)
-                .is_none_or(|w| !w.contains(lidx.0 as usize))
+                .get(s.inst.index())
+                .is_none_or(|w| !w.contains(lidx.index()))
             && ty == Ty::BOTTOM
         {
             return Ok(Ty::VOID);
         }
-        if !self
-            .index
-            .local_written_from_closure
-            .contains(lidx.0 as usize)
+        if !self.index.local_written_from_closure.contains(lidx.index())
             && let Some(ex) = s.guards.excluded(id)
         {
             ty = self.types.exclude_absences(ty, ex);
@@ -932,8 +937,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             kind: CellKind::Dict,
         } = self.types.kind(stripped)
         {
-            if self.dict_reads.insert(loc.0 as usize) {
-                self.dirty_locs.insert(loc.0 as usize);
+            if self.dict_reads.insert(loc.index()) {
+                self.dirty_locs.insert(loc.index());
             }
             obj_ty = self.resolve_cell_read(s.inst, obj_ty);
         }
@@ -952,6 +957,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let target = self.request_instance(
                     InstanceReq::new(getter_tid, &[], Some(s.inst)).receiver(Some(cinst_id)),
                 )?;
+                self.eval_if_fresh(target)?;
                 return Ok(self.read_loc(self.instances[target].return_loc, s.inst));
             }
         }
@@ -970,7 +976,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             .fields
             .iter()
             .position(|f| f.name == property)?;
-        Some(LocId(cinst.field_loc_base + f_idx as u32))
+        self.field_locs
+            .get(cinst.field_locs.range())
+            .and_then(|sl| sl.get(f_idx))
+            .copied()
     }
 
     fn object_props_of(&mut self, stripped: Ty) -> Option<Vec<ObjectProp>> {
@@ -1021,7 +1030,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             if let Some(key) = hir_compat::static_property(part) {
                 if let TyKind::Func(ident) = self.types.kind(val_ty) {
-                    self.check_escaping_unannotated_func(ident.template)?;
+                    self.check_escaping_unannotated_func(ident.template, Some(key))?;
                 }
                 let name = self.types.intern_name(key);
                 let norm = self

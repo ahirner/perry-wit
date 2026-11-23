@@ -94,11 +94,11 @@ mod tests {
         assert_eq!(without_undef, u1);
 
         let f1 = table.func(FuncIdentity {
-            template: TemplateId(1),
+            template: TemplateId::test_id(1),
             capture_owner: None,
         });
         let f2 = table.func(FuncIdentity {
-            template: TemplateId(2),
+            template: TemplateId::test_id(2),
             capture_owner: None,
         });
         assert_ne!(f1, f2);
