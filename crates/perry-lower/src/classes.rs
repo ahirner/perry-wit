@@ -77,8 +77,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         class_name: &'s str,
         args: &'s [Expr],
-        type_args: &'s [HirType],
-        expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let (&class_name, &(_, class)) = self
             .shapes
@@ -86,59 +84,7 @@ impl<'s> FunctionBuilder<'s> {
             .named
             .get_key_value(class_name)
             .ok_or_else(|| unsupported!("unknown class {class_name}"))?;
-        let mut pre_evaluated: Option<Vec<Value>> = None;
-        let (rec_ty, effective_args) = if !type_args.is_empty() {
-            let ty = self.shapes.generic(ctx, class_name, type_args)?;
-            let effective = self
-                .shapes
-                .class_of_type(ctx, ty)
-                .map(|(_, a)| a)
-                .unwrap_or_else(|| TypeId::intern_slice(ctx, type_args));
-            (ty, effective)
-        } else if class.type_params.is_empty() {
-            (self.shapes.named(ctx, class_name)?, Vec::new())
-        } else if let Some(exp) = expected.map(|ty| present_type(ctx, ty))
-            && let Some((c, mapped)) = self.shapes.class_of_type(ctx, exp)
-            && c == class_name
-        {
-            (exp, mapped)
-        } else {
-            let mut vals = Vec::with_capacity(args.len());
-            for arg in args {
-                vals.push(self.expression(ctx, arg)?);
-            }
-            let mut arg_tys = Vec::with_capacity(class.type_params.len());
-            for tp in &class.type_params {
-                let inferred = class.constructor.as_ref().and_then(|ctor| {
-                    ctor.params.iter().enumerate().find_map(|(idx, p)| {
-                        if matches!(&p.ty, HirType::TypeVar(n) | HirType::Named(n) if n == &tp.name)
-                            && let Some(&val) = vals.get(idx)
-                        {
-                            mir_type_to_hir(ctx, self.shapes, val.get_type(ctx))
-                        } else {
-                            None
-                        }
-                    })
-                });
-                let arg_ty = inferred.unwrap_or_else(|| {
-                    tp.default
-                        .as_deref()
-                        .or(tp.constraint.as_deref())
-                        .unwrap_or(&HirType::Any)
-                        .clone()
-                });
-                arg_tys.push(arg_ty);
-            }
-            pre_evaluated = Some(vals);
-            let ty = self.shapes.generic(ctx, class_name, &arg_tys)?;
-            let effective = self
-                .shapes
-                .class_of_type(ctx, ty)
-                .map(|(_, a)| a)
-                .unwrap_or_else(|| TypeId::intern_slice(ctx, &arg_tys));
-            (ty, effective)
-        };
-
+        let rec_ty = self.shapes.named(ctx, class_name)?;
         let rec = TypedHandle::<RecordType>::from_handle(rec_ty, ctx)
             .map_err(|_| internal!("expected class record for {class_name}"))?;
         let field_defs: Vec<(String, TypeHandle)> = rec
@@ -179,22 +125,12 @@ impl<'s> FunctionBuilder<'s> {
                 })
         {
             let mut arg_vals = Vec::with_capacity(args.len());
-            for (idx, field) in class.fields.iter().enumerate() {
+            for (field, expr) in class.fields.iter().zip(args) {
                 let (_, field_ty) = rec
                     .deref(ctx)
                     .field(&field.name)
                     .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
-                let val = match pre_evaluated.as_deref() {
-                    Some(vals) => *vals
-                        .get(idx)
-                        .ok_or_else(|| internal!("missing evaluated constructor argument"))?,
-                    None => {
-                        let expr = args
-                            .get(idx)
-                            .ok_or_else(|| internal!("missing constructor argument"))?;
-                        self.expression_with(ctx, expr, Some(field_ty))?
-                    }
-                };
+                let val = self.expression_with(ctx, expr, Some(field_ty))?;
                 arg_vals.push((field.name.as_str(), self.fit(ctx, val, field_ty)?));
             }
             let mut init_operands = Vec::with_capacity(field_defs.len());
@@ -250,23 +186,17 @@ impl<'s> FunctionBuilder<'s> {
         let this_slot = self.entry_slot(ctx, rec_ty);
         self.store(ctx, this_slot, instance);
         if let Some(ctor) = &class.constructor {
-            let args = match pre_evaluated.as_deref() {
-                Some(values) => ClassArguments::Evaluated(values),
-                None => ClassArguments::Expressions(args),
-            };
             self.inline_class_callable(
                 ctx,
                 class_name,
-                &effective_args,
+                &[],
                 ctor,
-                args,
+                ClassArguments::Expressions(args),
                 ClassReceiver::Constructor(this_slot, &pre_initialized),
             )?;
         } else {
-            if pre_evaluated.is_none() {
-                for arg in args {
-                    self.expression(ctx, arg)?;
-                }
+            for arg in args {
+                self.effect(ctx, arg)?;
             }
             self.init_own_class_fields(ctx, class_name, this_slot, &pre_initialized)?;
         }
@@ -669,48 +599,4 @@ impl<'s> FunctionBuilder<'s> {
             },
         )
     }
-}
-
-fn mir_type_to_hir(ctx: &Context, shapes: &Shapes<'_>, ty: TypeHandle) -> Option<HirType> {
-    if let Some((inner, states)) = optional_parts(ctx, ty) {
-        let mut members = vec![mir_type_to_hir(ctx, shapes, inner)?];
-        if states.admits_null() {
-            members.push(HirType::Null);
-        }
-        if states.admits_undefined() {
-            members.push(HirType::Void);
-        }
-        return Some(HirType::Union(members));
-    }
-    if let Some((c_name, c_args)) = shapes.class_of_type(ctx, ty) {
-        return Some(if c_args.is_empty() {
-            HirType::Named(c_name.to_string())
-        } else {
-            HirType::Generic {
-                base: c_name.to_string(),
-                type_args: c_args.into_iter().map(|id| id.hir(ctx).clone()).collect(),
-            }
-        });
-    }
-    if let Some(arr) = perry_mir::typed::<ArrayType>(ctx, ty) {
-        let elem = mir_type_to_hir(ctx, shapes, arr.deref(ctx).element())?;
-        return Some(HirType::Array(Box::new(elem)));
-    }
-    if ty == FP64Type::get(ctx).into() {
-        return Some(HirType::Number);
-    }
-    if let Some(int_ty) = ty.deref(ctx).downcast_ref::<IntegerType>() {
-        return Some(match int_ty.width() {
-            1 => HirType::Boolean,
-            64 => HirType::BigInt,
-            _ => HirType::Number,
-        });
-    }
-    if ty == BigIntType::get(ctx).into() {
-        return Some(HirType::BigInt);
-    }
-    if ty == StringType::get(ctx).into() {
-        return Some(HirType::String);
-    }
-    None
 }

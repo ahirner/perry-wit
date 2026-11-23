@@ -772,9 +772,15 @@ const obj = { first: num("d"), middle: get("e"), last: num("f"), end: get("g") }
 const result = apply(num("h"), get("i"), num("j"));
 const tail = last(num("k"), get("l"));
 only(get("m"));
+let reads = 0;
+function make(n) { return { x:n, f:function(a) { return this.x + a + n; } }; }
+const receiver = make(2);
+function getReceiver() { reads++; return receiver; }
+getReceiver().f(0);
+console.log(getReceiver().f(1), reads);
 console.log(trace, same, distinct, obj.first, obj.end(1), result, tail);
 "#,
-            "abcdefghijklmn true true 2 1 4 2\n",
+            "5 2\nabcdefghijklmn true true 2 1 4 2\n",
         ),
         (
             "loop_let_boxes_nullable_functions_typeof_and_wide_objects",
@@ -897,5 +903,13 @@ console.log(
         assert!(run.ok, "case {name} failed: {}", run.stderr);
         assert_eq!(run.stdout, expected, "case {name} output mismatch");
     }
+    let parameters = (0..64)
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let arguments = (0..64).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let run = execute(&format!("function f({parameters}, cb) {{ return cb(a63); }} console.log(f({arguments}, n => n + 1));")).await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "64\n");
     Ok(())
 }

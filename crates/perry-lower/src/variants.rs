@@ -34,14 +34,17 @@ impl<'s> FunctionBuilder<'s> {
         value
             .defining_op()
             .filter(|&op| Operation::is_op::<VariantNewOp>(op, ctx))?;
-        let Expr::New {
-            class_name, args, ..
-        } = expr
-        else {
-            return None;
+        let tag = match expr {
+            Expr::New {
+                class_name, args, ..
+            } => {
+                let fields = self.shapes.literal_fields(class_name)?;
+                args.get(fields.iter().position(|&name| name == "tag")?)?
+            }
+            Expr::Object(fields) => &fields.iter().find(|(name, _)| name == "tag")?.1,
+            _ => return None,
         };
-        let fields = self.shapes.literal_fields(class_name)?;
-        match args.get(fields.iter().position(|&name| name == "tag")?)? {
+        match tag {
             Expr::String(tag) => Some(tag),
             _ => None,
         }

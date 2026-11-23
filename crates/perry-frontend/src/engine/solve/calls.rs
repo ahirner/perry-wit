@@ -336,7 +336,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                         callee_ty: cb_val,
                         arms: arms_span,
                         arg_tys: input_tys,
-                        strip_arg_mask: 0,
                         recv_ty: None,
                     },
                     0,
@@ -574,13 +573,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             .and_then(|cid| self.index.class(cid))
             .and_then(|c| ClassInfo::find(&c.static_methods, mn))
         {
-            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
                 InstanceReq::new(tid, &arg_tys, Some(s.inst)).at(byte_offset),
                 true,
-                mask,
                 false,
             )?;
             return Ok(ret);
@@ -594,20 +591,20 @@ impl<'h, 'a> Solver<'h, 'a> {
         expr: &'h Expr,
         req: InstanceReq<'_>,
         is_method: bool,
-        strip_arg_mask: u64,
         pass_env: bool,
     ) -> Result<(InstanceId, Ty)> {
+        let argument_types = self.types.tuple(req.args);
         let pass_receiver = matches!(req.receiver, Some(Receiver::Object(_)));
         let target = self.request_instance(req)?;
         let res = if is_method {
             SiteResolution::MethodCall {
                 target,
-                strip_arg_mask,
+                argument_types,
             }
         } else {
             SiteResolution::DirectCall {
                 target,
-                strip_arg_mask,
+                argument_types,
                 pass_receiver,
                 pass_env,
             }
@@ -701,13 +698,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let class_inst =
                 self.request_class_inst(cid, &class_args, byte_offset, Some(s.inst))?;
-            let strip_arg_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
+            let argument_types = self.types.tuple(&arg_tys);
             self.record_site(
                 s.inst,
                 expr,
                 SiteResolution::ClassNew {
                     class_inst,
-                    strip_arg_mask,
+                    argument_types,
                 },
             );
             return Ok(self.types.class_inst(class_inst));
@@ -872,7 +869,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.check_callback_params(s.inst, target_view, &arg_tys, byte_offset)?;
 
         let explicit_targs = self.eval_type_args(s.inst, type_args);
-        let strip_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
         let pass_env = self.is_escaping_env(ident.template, s.inst);
         let (target_inst, ret) = self.dispatch_call_site(
             s.inst,
@@ -882,7 +878,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .type_args(&explicit_targs)
                 .at(byte_offset),
             false,
-            strip_mask,
             pass_env,
         )?;
         if let Some(tw) = self.inst_written.get(target_inst.index()).cloned()
@@ -956,7 +951,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             expr,
             InstanceReq::new(ident.template, &expanded, Some(s.inst)).owner(ident.capture_owner),
             false,
-            0,
             pass_env,
         )?;
         Ok(ret)
@@ -1054,7 +1048,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(view) = self.index.view(method_tid) {
                 self.check_callback_params(s.inst, view, &arg_tys, byte_offset)?;
             }
-            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
@@ -1062,7 +1055,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .receiver(Some(Receiver::Class(cinst_id)))
                     .at(byte_offset),
                 true,
-                mask,
                 false,
             )?;
             return Ok(ret);
@@ -1121,7 +1113,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(Ty::OPEN);
             };
             self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
-            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
             let pass_env = self.is_escaping_env(ident.template, s.inst);
             let (_, ret) = self.dispatch_call_site(
@@ -1132,7 +1123,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .owner(ident.capture_owner)
                     .at(byte_offset),
                 false,
-                mask,
                 pass_env,
             )?;
             return Ok(ret);
@@ -1203,7 +1193,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let strip_arg_mask = self.callable_arg_mask_in(s.inst, arg_tys);
         let mut arms = Vec::with_capacity(idents.len());
         let mut ret = Ty::BOTTOM;
         for &ident in idents {
@@ -1243,7 +1232,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 callee_ty,
                 arms: arms_span,
                 arg_tys: arg_tuple,
-                strip_arg_mask,
                 recv_ty: needs_recv.then_some(recv_ty).flatten(),
             },
             byte_offset,
@@ -1253,7 +1241,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             expr,
             SiteResolution::DispatchCall {
                 helper,
-                strip_arg_mask,
+                argument_types: arg_tuple,
                 needs_recv,
             },
         );

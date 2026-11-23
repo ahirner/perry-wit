@@ -463,6 +463,9 @@ impl<'s> FunctionBuilder<'s> {
         if self.iteration.is_release(expr) {
             return Ok(());
         }
+        if let Expr::ScopedTemp { id, value, body } = expr {
+            return self.with_temp(ctx, *id, value, |this, ctx| this.effect(ctx, body));
+        }
         if let Expr::Sequence(parts) = expr {
             if let Some(span) = self.shapes.metadata.locations.operator_span(parts)
                 && let Some(last) = parts.last()

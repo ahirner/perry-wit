@@ -12,7 +12,7 @@ use perry_hir::{
 };
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 
-impl<'h> Emitter<'h, '_> {
+impl<'h, 'a> Emitter<'h, 'a> {
     pub(super) fn is_boxed_local(&self, id: LocalId) -> bool {
         self.index
             .local_idx(id)
@@ -123,62 +123,54 @@ impl<'h> Emitter<'h, '_> {
             return Ok(name);
         }
         let layout = self.env_layout(ident)?;
-        let mut fields = Vec::with_capacity(layout.len().max(1));
-        let mut params = Vec::with_capacity(layout.len().max(1));
-        let mut body = Vec::with_capacity(layout.len().max(1));
-        if layout.is_empty() {
+        let mut members = Vec::with_capacity(layout.len().max(1));
+        for (cap_id, field, ty, boxed) in layout {
+            let ty = self.materialize(ty)?;
+            let ty = if boxed {
+                box_hir(if self.is_forward_boxed(cap_id) {
+                    Self::admitting_undefined_hir(ty)
+                } else {
+                    ty
+                })
+            } else {
+                ty
+            };
+            members.push((field, ty));
+        }
+        if members.is_empty() {
+            members.push(("_u".to_owned(), HirType::Number));
+        }
+        self.class_with_fields(name, members)
+    }
+
+    pub(super) fn class_with_fields(
+        &mut self,
+        name: String,
+        members: impl IntoIterator<Item = (String, HirType)>,
+    ) -> Result<String> {
+        let mut fields = Vec::new();
+        let mut params = Vec::new();
+        let mut body = Vec::new();
+        for (field, ty) in members {
             let pid = self.fresh_synthetic_local()?;
+            params.push(Self::synth_param(pid, field.clone(), ty.clone()));
+            body.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: field.clone(),
+                value: Box::new(Expr::LocalGet(pid)),
+                byte_offset: 0,
+                byte_end: 0,
+            }));
             fields.push(ClassField {
                 origin: ClassFieldOrigin::Declared,
-                name: "_u".to_owned(),
+                name: field,
                 key_expr: None,
-                ty: HirType::Number,
+                ty,
                 init: None,
                 is_private: false,
                 is_readonly: false,
                 decorators: Vec::new(),
             });
-            params.push(Self::synth_param(pid, "_u".to_owned(), HirType::Number));
-            body.push(Stmt::Expr(Expr::PropertySet {
-                object: Box::new(Expr::This),
-                property: "_u".to_owned(),
-                value: Box::new(Expr::LocalGet(pid)),
-                byte_offset: 0,
-                byte_end: 0,
-            }));
-        } else {
-            for (cap_id, fname, fty, boxed) in layout {
-                let inner = self.materialize(fty)?;
-                let field_ty = if boxed {
-                    let inner = if self.is_forward_boxed(cap_id) {
-                        Self::admitting_undefined_hir(inner)
-                    } else {
-                        inner
-                    };
-                    box_hir(inner)
-                } else {
-                    inner
-                };
-                let pid = self.fresh_synthetic_local()?;
-                fields.push(ClassField {
-                    origin: ClassFieldOrigin::Declared,
-                    name: fname.clone(),
-                    key_expr: None,
-                    ty: field_ty.clone(),
-                    init: None,
-                    is_private: false,
-                    is_readonly: false,
-                    decorators: Vec::new(),
-                });
-                params.push(Self::synth_param(pid, fname.clone(), field_ty));
-                body.push(Stmt::Expr(Expr::PropertySet {
-                    object: Box::new(Expr::This),
-                    property: fname,
-                    value: Box::new(Expr::LocalGet(pid)),
-                    byte_offset: 0,
-                    byte_end: 0,
-                }));
-            }
         }
         let ctor_fid = self.fresh_func_id()?;
         let ctor = Self::synth_function(
@@ -190,7 +182,9 @@ impl<'h> Emitter<'h, '_> {
             false,
         );
         let id = self.next_class_id;
-        self.next_class_id = id.saturating_add(1);
+        self.next_class_id = id
+            .checked_add(1)
+            .ok_or_else(|| Diagnostic::internal("class identifier limit"))?;
         self.synth_classes.push(Class {
             id,
             name: name.clone(),
@@ -325,7 +319,7 @@ impl<'h> Emitter<'h, '_> {
     pub(super) fn dispatch_arms_slice(
         &self,
         span: TySpan,
-    ) -> Result<&[(FuncIdentity, InstanceId)]> {
+    ) -> Result<&'a [(FuncIdentity, InstanceId)]> {
         self.solved
             .dispatch_arms
             .get(span.range())
@@ -339,70 +333,6 @@ impl<'h> Emitter<'h, '_> {
 
     pub(super) fn is_env_template(&self, tid: TemplateId) -> bool {
         self.solved.escaping_env_templates.contains(tid.index())
-    }
-
-    pub(super) fn intern_anon_shape(&mut self, field_names: &[&str]) -> String {
-        let key: Vec<String> = field_names.iter().map(|&n| n.to_owned()).collect();
-        if let Some(existing) = self.synth_shapes.get(&key) {
-            return existing.clone();
-        }
-        let id = self.next_class_id;
-        self.next_class_id = id.saturating_add(1);
-        let name = format!("__AnonShape_e_{id}");
-        let fields = key
-            .iter()
-            .map(|fname| ClassField {
-                origin: ClassFieldOrigin::Declared,
-                name: fname.clone(),
-                key_expr: None,
-                ty: HirType::Any,
-                init: None,
-                is_private: false,
-                is_readonly: false,
-                decorators: Vec::new(),
-            })
-            .collect();
-        self.synth_classes.push(Class {
-            id,
-            name: name.clone(),
-            type_params: Vec::new(),
-            extends: None,
-            extends_name: None,
-            native_extends: None,
-            extends_expr: None,
-            heritage_lexically_shadowed: false,
-            fields,
-            constructor: None,
-            methods: Vec::new(),
-            getters: Vec::new(),
-            setters: Vec::new(),
-            static_accessor_names: Vec::new(),
-            static_accessor_fn_ids: Vec::new(),
-            static_fields: Vec::new(),
-            static_methods: Vec::new(),
-            computed_members: Vec::new(),
-            decorators: Vec::new(),
-            is_exported: false,
-            aliases: Vec::new(),
-            is_nested: false,
-            alloc_width_hint: 0,
-            specialized_from: None,
-            decl_stmt: None,
-        });
-        self.synth_shapes.insert(key, name.clone());
-        name
-    }
-
-    pub(super) fn emit_anon_new(&mut self, field_names: &[&str], args: Vec<Expr>) -> Expr {
-        let class_name = self.intern_anon_shape(field_names);
-        Expr::New {
-            class_name,
-            args,
-            type_args: Vec::new(),
-            byte_offset: 0,
-            byte_end: 0,
-            cap_args_appended: 0,
-        }
     }
 
     pub(super) fn fresh_synthetic_local(&mut self) -> Result<LocalId> {
@@ -422,18 +352,18 @@ impl<'h> Emitter<'h, '_> {
     }
 
     pub(super) fn emit_tag_record(&mut self, ident: FuncIdentity) -> Expr {
-        self.emit_anon_new(&["tag"], vec![Expr::String(func_tag(ident))])
+        Expr::Object(vec![("tag".into(), Expr::String(func_tag(ident)))])
     }
 
     pub(super) fn emit_env_wrapper(&mut self, ident: FuncIdentity, env_expr: Expr) -> Expr {
-        self.emit_anon_new(
-            &["tag", "val"],
-            vec![Expr::String(func_tag(ident)), env_expr],
-        )
+        Expr::Object(vec![
+            ("tag".into(), Expr::String(func_tag(ident))),
+            ("val".into(), env_expr),
+        ])
     }
 
     pub(super) fn emit_box_record(&mut self, val: Expr) -> Expr {
-        self.emit_anon_new(&["v"], vec![val])
+        Expr::Object(vec![("v".into(), val)])
     }
 
     pub(super) fn prop_get(object: Expr, property: &str) -> Expr {
@@ -545,7 +475,9 @@ impl<'h> Emitter<'h, '_> {
                 format!("__cb{i}"),
                 self.materialize(ity)?,
             ));
-            call_args.push(Expr::LocalGet(pid));
+            if !self.erases_argument(ity) {
+                call_args.push(Expr::LocalGet(pid));
+            }
         }
         let call = Self::synth_call(target_fid, call_args, 0, 0);
         let body = if ret_ty == HirType::Void {
@@ -598,17 +530,8 @@ impl<'h> Emitter<'h, '_> {
                 callee_ty,
                 arms,
                 arg_tys,
-                strip_arg_mask,
                 recv_ty,
-            } => self.build_dispatcher(
-                fid,
-                callee_ty,
-                arms,
-                arg_tys,
-                strip_arg_mask,
-                recv_ty,
-                byte_offset,
-            )?,
+            } => self.build_dispatcher(fid, callee_ty, arms, arg_tys, recv_ty, byte_offset)?,
             HelperSpec::Widener { from, to } => self.build_widener(fid, from, to)?,
             HelperSpec::Comparer { left_ty, right_ty } => {
                 self.build_comparer(fid, left_ty, right_ty)?
@@ -672,11 +595,10 @@ impl<'h> Emitter<'h, '_> {
         callee_ty: Ty,
         arms_span: TySpan,
         arg_tys: Ty,
-        strip_arg_mask: u64,
         eff_recv: Option<Ty>,
         call_byte_offset: u32,
     ) -> Result<Function> {
-        let arms = self.dispatch_arms_slice(arms_span)?.to_vec();
+        let arms = self.dispatch_arms_slice(arms_span)?;
         let fn_pid = self.fresh_synthetic_local()?;
         let mut params = vec![Self::synth_param(
             fn_pid,
@@ -696,7 +618,7 @@ impl<'h> Emitter<'h, '_> {
         };
         let mut arg_pids = Vec::new();
         for (i, &aty) in self.types.tuple_slice(arg_tys).iter().enumerate() {
-            if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
+            if self.erases_argument(aty) {
                 continue;
             }
             let pid = self.fresh_synthetic_local()?;
@@ -709,7 +631,7 @@ impl<'h> Emitter<'h, '_> {
         }
         let mut unique_rets: Vec<HirType> = Vec::new();
         let mut any_async = false;
-        for &(ident, target_inst) in &arms {
+        for &(ident, target_inst) in arms {
             if self.index.view(ident.template).is_some_and(|v| v.is_async) {
                 any_async = true;
             }
@@ -744,7 +666,7 @@ impl<'h> Emitter<'h, '_> {
             });
         }
         let mut cases = Vec::with_capacity(arms.len());
-        for &(ident, target_inst) in &arms {
+        for &(ident, target_inst) in arms {
             let target_fid = self
                 .instance(target_inst, "missing dispatch arm instance")?
                 .emitted_func_id;
@@ -765,10 +687,11 @@ impl<'h> Emitter<'h, '_> {
             let max_args = if has_rest {
                 arg_pids.len()
             } else {
-                view.params
+                self.types
+                    .tuple_slice(arg_tys)
                     .iter()
-                    .enumerate()
-                    .filter(|&(i, _)| i >= 64 || (strip_arg_mask & (1u64 << i)) == 0)
+                    .take(view.params.len())
+                    .filter(|&&ty| !self.erases_argument(ty))
                     .count()
             };
             for &pid in arg_pids.iter().take(max_args) {
