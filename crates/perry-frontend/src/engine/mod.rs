@@ -147,7 +147,7 @@ mod tests {
         let roundtrip = table.materialize_hir(&ctx, interned, &|_| None);
         assert!(matches!(roundtrip, HirType::Union(ref members) if members.len() == 3));
 
-        // Verify FlatHashIndex survives multiple rehashes without cycles or lost entries.
+        // Verify name interning roundtrips cleanly across many distinct identifiers.
         for i in 0..200u32 {
             let name = format!("prop_{i}");
             let id = table.intern_name(&name);

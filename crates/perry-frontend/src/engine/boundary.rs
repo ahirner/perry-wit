@@ -1,7 +1,4 @@
 //! Single-pass boundary indexing over Perry HIR.
-//!
-//! Numbers every template (module init, functions, class members, closures), user class,
-//! local binding, site expression, and initial storage location into dense `Vec`s and `BitSet`s.
 pub(crate) use super::ast_scan::{SourceFacts, scan_ast, validate_ast};
 use super::bitset::BitSet;
 use super::types::{ClassId, LocId, LocalIdx, NameId, TemplateId, Ty, TySpan, TypeTable};
@@ -14,7 +11,6 @@ use perry_hir::{
 use pliron::context::Context;
 use swc_common::Span;
 
-/// What declaration a [`TemplateId`] refers to inside the borrowed [`HirModule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TemplateKind {
     ModuleInit,
@@ -52,7 +48,6 @@ pub(crate) enum TemplateKind {
     },
 }
 
-/// Borrowed view of a template declaration inside [`HirModule`], avoiding `Rc` and `Function` clones.
 pub(crate) struct TemplateView<'h> {
     pub(crate) id: TemplateId,
     pub(crate) kind: TemplateKind,
@@ -72,7 +67,7 @@ pub(crate) struct TemplateView<'h> {
     pub(crate) captures_new_target: bool,
 }
 
-impl TemplateView<'_> {
+impl<'h> TemplateView<'h> {
     pub(crate) fn display_name(&self) -> String {
         if self.name.is_empty() {
             format!("callback_{}", self.func_id)
@@ -80,53 +75,76 @@ impl TemplateView<'_> {
             hir_compat::display_name(self.name).to_owned()
         }
     }
+
+    pub(crate) fn raw_name(&self) -> String {
+        if self.name.is_empty() {
+            format!("callback_{}", self.func_id)
+        } else {
+            self.name.to_owned()
+        }
+    }
+
+    fn from_function(kind: TemplateKind, f: &'h Function) -> Self {
+        Self {
+            id: TemplateId(0),
+            kind,
+            name: f.name.as_str(),
+            func_id: f.id,
+            params: &f.params,
+            return_type: &f.return_type,
+            body: &f.body,
+            captures: &f.captures,
+            type_params: &f.type_params,
+            is_async: f.is_async,
+            is_generator: f.is_generator,
+            is_strict: f.is_strict,
+            construct_only: f.construct_only,
+            is_exported: f.is_exported,
+            captures_this: false,
+            captures_new_target: false,
+        }
+    }
 }
 
-/// Dense index of all templates, classes, locals, and initial locations built in one pass.
+pub(crate) struct ClassInfo {
+    pub(crate) hir_idx: usize,
+    pub(crate) name_id: NameId,
+    pub(crate) ctor: Option<TemplateId>,
+    pub(crate) methods: Vec<(NameId, TemplateId)>,
+    pub(crate) static_methods: Vec<(NameId, TemplateId)>,
+    pub(crate) getters: Vec<(NameId, TemplateId)>,
+    pub(crate) setters: Vec<(NameId, TemplateId)>,
+    pub(crate) static_field_locs: Vec<(NameId, LocId)>,
+}
+
+impl ClassInfo {
+    pub(crate) fn find<T: Copy>(table: &[(NameId, T)], name: NameId) -> Option<T> {
+        table.iter().find(|&&(k, _)| k == name).map(|&(_, v)| v)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ModuleIndex<'h> {
-    pub(crate) templates: Vec<TemplateKind>,
     pub(crate) views: Vec<TemplateView<'h>>,
     pub(crate) template_exported: BitSet,
     pub(crate) template_is_closure: BitSet,
     pub(crate) template_is_obj_method: BitSet,
     pub(crate) template_explicit_return: BitSet,
-    /// Dense `FuncId -> TemplateId` table (indexed directly by `FuncId`).
     func_to_template: Vec<Option<TemplateId>>,
-    /// Per-template numbered site count and sorted `(expr_addr, local_site)` slice in `site_entries`.
-    pub(crate) template_site_counts: Vec<usize>,
+    template_site_counts: Vec<usize>,
     template_site_spans: Vec<TySpan>,
     site_entries: Vec<(usize, u32)>,
-    /// User classes (excluding `__AnonShape_` object literal classes): `ClassId -> index in hir.classes`.
-    pub(crate) class_hir_idx: Vec<usize>,
-    pub(crate) class_names: Vec<&'h str>,
-    class_name_ids: Vec<NameId>,
-    pub(crate) class_ctor: Vec<Option<TemplateId>>,
-    pub(crate) class_methods: Vec<Vec<(NameId, TemplateId)>>,
-    pub(crate) class_static_methods: Vec<Vec<(NameId, TemplateId)>>,
-    pub(crate) class_getters: Vec<Vec<(NameId, TemplateId)>>,
-    pub(crate) class_setters: Vec<Vec<(NameId, TemplateId)>>,
-    pub(crate) class_static_field_locs: Vec<Vec<(NameId, LocId)>>,
+    pub(crate) classes: Vec<ClassInfo>,
     pub(crate) class_has_implicit_params: BitSet,
-    /// `hir.classes` indices that are `__AnonShape_*` object-literal classes.
     pub(crate) hir_class_is_literal: BitSet,
-    /// `__AnonShape_*` literal class fields (interned name -> slice of fields).
     literal_classes: Vec<(NameId, &'h [perry_hir::ir::ClassField])>,
-    /// `LocalIdx -> Hir LocalId`.
     pub(crate) local_ids: Vec<LocalId>,
-    /// `LocalIdx -> declaring TemplateId`.
     pub(crate) local_owner: Vec<TemplateId>,
-    /// `LocalIdx -> boundary declared Ty` (interned once).
     pub(crate) local_declared: Vec<Ty>,
-    /// `LocalIdx -> initial LocId` (for module-level bindings).
     pub(crate) local_loc: Vec<Option<LocId>>,
-    /// `LocalIdx -> first escaping parameter value-use span` (if any).
     pub(crate) local_value_use: Vec<Option<Span>>,
-    /// `LocalIdx -> constant RegExp literal pattern` (for `str.replace(regex, cb)`).
     pub(crate) local_regex_pattern: Vec<Option<&'h str>>,
-    /// Dense `Hir LocalId -> LocalIdx` table (indexed directly by `LocalId`).
     local_to_idx: Vec<Option<LocalIdx>>,
-    /// Source-fact bitsets indexed by `LocalIdx`.
     pub(crate) local_inferred: BitSet,
     pub(crate) local_deferred: BitSet,
     pub(crate) local_param: BitSet,
@@ -134,13 +152,9 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) local_module: BitSet,
     pub(crate) local_captured: BitSet,
     pub(crate) local_written_from_closure: BitSet,
-    /// `LocalIdx -> template-local slot` for strictly-local (non-escaping) bindings.
     local_frame_slot: Vec<Option<u32>>,
-    /// Number of strictly-local frame slots per `TemplateId`.
     template_frame_counts: Vec<usize>,
-    /// Initial storage location types numbered at the boundary.
     pub(crate) location_types: Vec<Ty>,
-    /// Maximum `FuncId` and `LocalId` seen in the module (for fresh emission IDs).
     pub(crate) max_func_id: FuncId,
     pub(crate) max_local_id: LocalId,
 }
@@ -157,24 +171,19 @@ impl<'h> ModuleIndex<'h> {
     ) -> Self {
         let max_local_hint = hir.local_source_spans.keys().copied().max().unwrap_or(0);
         let mut idx = Self {
-            templates: Vec::with_capacity(1 + hir.functions.len()),
             views: Vec::with_capacity(1 + hir.functions.len()),
             func_to_template: Vec::with_capacity(hir.functions.len() + 1),
             local_to_idx: vec![None; max_local_hint as usize + 1],
             max_local_id: max_local_hint,
             ..Self::default()
         };
-
-        // Pre-index `__AnonShape_*` object literal classes so empty-object checks work during init scan.
         for (hir_idx, class) in hir.classes.iter().enumerate() {
             if hir_compat::is_object_literal(&class.name) {
                 idx.hir_class_is_literal.insert(hir_idx);
-                let name_id = types.intern_name(&class.name);
-                idx.literal_classes.push((name_id, class.fields.as_slice()));
+                idx.literal_classes
+                    .push((types.intern_name(&class.name), class.fields.as_slice()));
             }
         }
-
-        // TemplateId(0) is always ModuleInit.
         let init_tid = idx.add_template(
             TemplateView {
                 id: TemplateId(0),
@@ -208,46 +217,39 @@ impl<'h> ModuleIndex<'h> {
         };
         idx.scan_stmts(&mut scan, &hir.init, init_tid, true);
 
-        for (hir_idx, function) in hir.functions.iter().enumerate() {
-            idx.max_func_id = idx.max_func_id.max(function.id);
-            let explicit_ret = locations.has_explicit_return(&function.name);
-            let tid = idx.add_function_template(
+        for (hir_idx, f) in hir.functions.iter().enumerate() {
+            idx.register_member(
+                &mut scan,
                 TemplateKind::Function {
                     hir_idx,
-                    func_id: function.id,
+                    func_id: f.id,
                 },
-                function,
-                function.is_exported,
-                explicit_ret,
+                f,
+                f.is_exported,
+                locations.has_explicit_return(&f.name),
             );
-            scan.raw_sites.resize_with(idx.templates.len(), Vec::new);
-            idx.set_func_template(function.id, tid);
-            idx.scan_function(&mut scan, function, tid);
         }
 
         for (hir_idx, class) in hir.classes.iter().enumerate() {
             if idx.hir_class_is_literal.contains(hir_idx) {
                 continue;
             }
-            let cid = ClassId(idx.class_hir_idx.len() as u32);
-            let cname = scan.types.intern_name(&class.name);
-            idx.class_hir_idx.push(hir_idx);
-            idx.class_names.push(class.name.as_str());
-            idx.class_name_ids.push(cname);
-            idx.class_ctor.push(None);
-            idx.class_methods.push(Vec::new());
-            idx.class_static_methods.push(Vec::new());
-            idx.class_getters.push(Vec::new());
-            idx.class_setters.push(Vec::new());
-            idx.class_static_field_locs.push(Vec::new());
-
+            let cid = ClassId(idx.classes.len() as u32);
+            let mut info = ClassInfo {
+                hir_idx,
+                name_id: scan.types.intern_name(&class.name),
+                ctor: None,
+                methods: Vec::new(),
+                static_methods: Vec::new(),
+                getters: Vec::new(),
+                setters: Vec::new(),
+                static_field_locs: Vec::new(),
+            };
             for field in &class.static_fields {
                 let ty = scan.types.intern_hir(scan.ctx, &field.ty, true);
                 let loc = idx.add_location(ty);
-                let fname = scan.types.intern_name(&field.name);
-                if let Some(list) = idx.class_static_field_locs.get_mut(cid.0 as usize) {
-                    list.push((fname, loc));
-                }
+                info.static_field_locs
+                    .push((scan.types.intern_name(&field.name), loc));
                 if let Some(init) = &field.init {
                     idx.scan_expr(&mut scan, init, init_tid);
                 }
@@ -257,9 +259,8 @@ impl<'h> ModuleIndex<'h> {
                     idx.scan_expr(&mut scan, init, init_tid);
                 }
             }
-
             if let Some(ctor) = &class.constructor {
-                let tid = idx.register_member(
+                info.ctor = Some(idx.register_member(
                     &mut scan,
                     TemplateKind::ClassConstructor {
                         class: cid,
@@ -267,8 +268,8 @@ impl<'h> ModuleIndex<'h> {
                     },
                     ctor,
                     false,
-                );
-                idx.class_ctor[cid.0 as usize] = Some(tid);
+                    false,
+                ));
                 if ctor
                     .params
                     .iter()
@@ -277,108 +278,97 @@ impl<'h> ModuleIndex<'h> {
                     idx.class_has_implicit_params.insert(cid.0 as usize);
                 }
             }
-
-            for (method_idx, method) in class.methods.iter().enumerate() {
-                let key = format!("{}::{}", class.name, method.name);
+            for (method_idx, m) in class.methods.iter().enumerate() {
                 let tid = idx.register_member(
                     &mut scan,
                     TemplateKind::ClassMethod {
                         class: cid,
                         method_idx,
-                        func_id: method.id,
+                        func_id: m.id,
                     },
-                    method,
-                    locations.has_explicit_return(&key),
+                    m,
+                    false,
+                    locations.has_explicit_return(&format!("{}::{}", class.name, m.name)),
                 );
-                let mname = scan
-                    .types
-                    .intern_name(hir_compat::method(&method.name).name());
-                idx.class_methods[cid.0 as usize].push((mname, tid));
-                if method
-                    .params
+                info.methods.push((
+                    scan.types.intern_name(hir_compat::method(&m.name).name()),
+                    tid,
+                ));
+                if m.params
                     .iter()
                     .any(|p| idx.param_is_unannotated(scan.hir, scan.facts, p))
                 {
                     idx.class_has_implicit_params.insert(cid.0 as usize);
                 }
             }
-
-            for (method_idx, method) in class.static_methods.iter().enumerate() {
-                let key = format!("{}::{}", class.name, method.name);
+            for (method_idx, m) in class.static_methods.iter().enumerate() {
                 let tid = idx.register_member(
                     &mut scan,
                     TemplateKind::ClassStaticMethod {
                         class: cid,
                         method_idx,
-                        func_id: method.id,
+                        func_id: m.id,
                     },
-                    method,
-                    locations.has_explicit_return(&key),
+                    m,
+                    false,
+                    locations.has_explicit_return(&format!("{}::{}", class.name, m.name)),
                 );
-                let mname = scan
-                    .types
-                    .intern_name(hir_compat::method(&method.name).name());
-                idx.class_static_methods[cid.0 as usize].push((mname, tid));
+                info.static_methods.push((
+                    scan.types.intern_name(hir_compat::method(&m.name).name()),
+                    tid,
+                ));
             }
-
-            for (getter_idx, (name, getter)) in class.getters.iter().enumerate() {
-                let key = format!("{}::get_{name}", class.name);
+            for (getter_idx, (name, g)) in class.getters.iter().enumerate() {
                 let tid = idx.register_member(
                     &mut scan,
                     TemplateKind::ClassGetter {
                         class: cid,
                         getter_idx,
-                        func_id: getter.id,
+                        func_id: g.id,
                     },
-                    getter,
-                    locations.has_explicit_return(&key),
+                    g,
+                    false,
+                    locations.has_explicit_return(&format!("{}::get_{name}", class.name)),
                 );
-                let gname = scan.types.intern_name(name);
-                idx.class_getters[cid.0 as usize].push((gname, tid));
+                info.getters.push((scan.types.intern_name(name), tid));
             }
-
-            for (setter_idx, (name, setter)) in class.setters.iter().enumerate() {
-                let key = format!("{}::set_{name}", class.name);
+            for (setter_idx, (name, s)) in class.setters.iter().enumerate() {
                 let tid = idx.register_member(
                     &mut scan,
                     TemplateKind::ClassSetter {
                         class: cid,
                         setter_idx,
-                        func_id: setter.id,
+                        func_id: s.id,
                     },
-                    setter,
-                    locations.has_explicit_return(&key),
+                    s,
+                    false,
+                    locations.has_explicit_return(&format!("{}::set_{name}", class.name)),
                 );
-                let sname = scan.types.intern_name(name);
-                idx.class_setters[cid.0 as usize].push((sname, tid));
+                info.setters.push((scan.types.intern_name(name), tid));
             }
+            idx.classes.push(info);
         }
 
-        // Pack per-template numbered sites into flat sorted slices for O(1) solver/emitter tables.
-        raw_sites.resize_with(idx.templates.len(), Vec::new);
-        idx.template_site_counts = Vec::with_capacity(idx.templates.len());
-        idx.template_site_spans = Vec::with_capacity(idx.templates.len());
+        raw_sites.resize_with(idx.views.len(), Vec::new);
+        idx.template_site_counts = Vec::with_capacity(idx.views.len());
+        idx.template_site_spans = Vec::with_capacity(idx.views.len());
         for mut list in raw_sites {
             list.sort_unstable_by_key(|&(addr, _)| addr);
-            list.dedup_by_key(|entry| entry.0);
-            let count = list.len();
-            for (local_idx, entry) in list.iter_mut().enumerate() {
-                entry.1 = local_idx as u32;
+            list.dedup_by_key(|e| e.0);
+            for (i, e) in list.iter_mut().enumerate() {
+                e.1 = i as u32;
             }
-            let start = idx.site_entries.len() as u32;
+            let (start, len) = (idx.site_entries.len() as u32, list.len());
             idx.site_entries.extend(list);
-            idx.template_site_counts.push(count);
+            idx.template_site_counts.push(len);
             idx.template_site_spans.push(TySpan {
                 start,
-                len: count as u32,
+                len: len as u32,
             });
         }
 
-        // Assign dense per-template frame slots to strictly-local bindings (non-module,
-        // non-captured, non-parameter) so the solver never allocates global locations or CSR
-        // dependency edges for values that cannot escape their enclosing instance.
         idx.local_frame_slot = vec![None; idx.local_ids.len()];
-        idx.template_frame_counts = vec![0; idx.templates.len()];
+        idx.template_frame_counts = vec![0; idx.views.len()];
         for lidx in 0..idx.local_ids.len() {
             if !idx.local_module.contains(lidx)
                 && !idx.local_captured.contains(lidx)
@@ -390,23 +380,91 @@ impl<'h> ModuleIndex<'h> {
                 idx.local_frame_slot[lidx] = Some(slot as u32);
             }
         }
-
         idx
     }
 
     pub(crate) fn local_frame_slot(&self, local: LocalIdx) -> Option<usize> {
         self.local_frame_slot
-            .get(local.0 as usize)
-            .copied()
-            .flatten()
+            .get(local.0 as usize)?
             .map(|s| s as usize)
     }
-
-    pub(crate) fn template_frame_count(&self, template: TemplateId) -> usize {
+    pub(crate) fn template_frame_count(&self, t: TemplateId) -> usize {
         self.template_frame_counts
-            .get(template.0 as usize)
+            .get(t.0 as usize)
             .copied()
             .unwrap_or(0)
+    }
+    pub(crate) fn site_count(&self, t: TemplateId) -> usize {
+        self.template_site_counts
+            .get(t.0 as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+    pub(crate) fn site_of(&self, t: TemplateId, expr: &Expr) -> Option<usize> {
+        let entries = &self.site_entries[self.template_site_spans.get(t.0 as usize)?.range()];
+        let pos = entries
+            .binary_search_by_key(&(std::ptr::from_ref(expr) as usize), |&(a, _)| a)
+            .ok()?;
+        Some(entries[pos].1 as usize)
+    }
+    pub(crate) fn view(&self, id: TemplateId) -> Option<&TemplateView<'h>> {
+        self.views.get(id.0 as usize)
+    }
+    pub(crate) fn class(&self, id: ClassId) -> Option<&ClassInfo> {
+        self.classes.get(id.0 as usize)
+    }
+    pub(crate) fn class_by_name_id(&self, name: NameId) -> Option<ClassId> {
+        self.classes
+            .iter()
+            .position(|c| c.name_id == name)
+            .map(|i| ClassId(i as u32))
+    }
+    pub(crate) fn literal_fields_by_id(
+        &self,
+        n: NameId,
+    ) -> Option<&'h [perry_hir::ir::ClassField]> {
+        self.literal_classes
+            .iter()
+            .find(|&&(k, _)| k == n)
+            .map(|&(_, f)| f)
+    }
+    pub(crate) fn is_empty_object_expr(&self, types: &mut TypeTable, expr: &Expr) -> bool {
+        match expr {
+            Expr::Object(fields) => fields.is_empty(),
+            Expr::New {
+                class_name, args, ..
+            } if args.is_empty() => {
+                let id = types.intern_name(class_name);
+                self.literal_fields_by_id(id).is_some_and(<[_]>::is_empty)
+            }
+            _ => false,
+        }
+    }
+    pub(crate) fn is_param_annotated(&self, id: LocalId) -> bool {
+        self.local_idx(id)
+            .is_some_and(|li| self.local_param_annotated.contains(li.0 as usize))
+    }
+    pub(crate) fn is_inferred_local(&self, hir: &HirModule, id: LocalId, lidx: LocalIdx) -> bool {
+        self.local_inferred.contains(lidx.0 as usize) || !hir.local_source_spans.contains_key(&id)
+    }
+    pub(crate) fn is_non_global_local(&self, id: LocalId) -> bool {
+        self.local_idx(id)
+            .is_some_and(|li| !self.local_module.contains(li.0 as usize))
+    }
+    pub(crate) fn captures_local(&self, captures: &[LocalId]) -> bool {
+        captures.iter().any(|&c| self.is_non_global_local(c))
+    }
+    pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
+        self.func_to_template.get(id as usize).copied().flatten()
+    }
+    pub(crate) fn local_idx(&self, id: LocalId) -> Option<LocalIdx> {
+        self.local_to_idx.get(id as usize).copied().flatten()
+    }
+    pub(crate) fn template_count(&self) -> usize {
+        self.views.len()
+    }
+    pub(crate) fn local_count(&self) -> usize {
+        self.local_ids.len()
     }
 
     fn set_func_template(&mut self, func_id: FuncId, tid: TemplateId) {
@@ -417,155 +475,6 @@ impl<'h> ModuleIndex<'h> {
         self.func_to_template[idx] = Some(tid);
     }
 
-    pub(crate) fn site_count(&self, template: TemplateId) -> usize {
-        self.template_site_counts
-            .get(template.0 as usize)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn site_of(&self, template: TemplateId, expr: &Expr) -> Option<usize> {
-        let span = *self.template_site_spans.get(template.0 as usize)?;
-        let entries = &self.site_entries[span.range()];
-        let addr = std::ptr::from_ref(expr) as usize;
-        let pos = entries.binary_search_by_key(&addr, |&(a, _)| a).ok()?;
-        Some(entries[pos].1 as usize)
-    }
-
-    pub(crate) fn view(&self, id: TemplateId) -> Option<&TemplateView<'h>> {
-        self.views.get(id.0 as usize)
-    }
-
-    pub(crate) fn class_by_name_id(&self, name: NameId) -> Option<ClassId> {
-        self.class_name_ids
-            .iter()
-            .position(|&n| n == name)
-            .map(|i| ClassId(i as u32))
-    }
-
-    pub(crate) fn class_by_name(&self, name: &str) -> Option<ClassId> {
-        self.class_names
-            .iter()
-            .position(|&n| n == name)
-            .map(|i| ClassId(i as u32))
-    }
-
-    fn lookup_class_entry<T: Copy>(
-        table: &[Vec<(NameId, T)>],
-        class: ClassId,
-        name: NameId,
-    ) -> Option<T> {
-        table
-            .get(class.0 as usize)?
-            .iter()
-            .find(|&&(n, _)| n == name)
-            .map(|&(_, v)| v)
-    }
-
-    pub(crate) fn class_method_by_id(&self, class: ClassId, name: NameId) -> Option<TemplateId> {
-        Self::lookup_class_entry(&self.class_methods, class, name)
-    }
-
-    pub(crate) fn class_static_method_by_id(
-        &self,
-        class: ClassId,
-        name: NameId,
-    ) -> Option<TemplateId> {
-        Self::lookup_class_entry(&self.class_static_methods, class, name)
-    }
-
-    pub(crate) fn class_getter_by_id(&self, class: ClassId, name: NameId) -> Option<TemplateId> {
-        Self::lookup_class_entry(&self.class_getters, class, name)
-    }
-
-    pub(crate) fn class_setter_by_id(&self, class: ClassId, name: NameId) -> Option<TemplateId> {
-        Self::lookup_class_entry(&self.class_setters, class, name)
-    }
-
-    pub(crate) fn class_static_field_loc_by_id(
-        &self,
-        class: ClassId,
-        name: NameId,
-    ) -> Option<LocId> {
-        Self::lookup_class_entry(&self.class_static_field_locs, class, name)
-    }
-
-    pub(crate) fn literal_fields_by_id(
-        &self,
-        name: NameId,
-    ) -> Option<&'h [perry_hir::ir::ClassField]> {
-        self.literal_classes
-            .iter()
-            .find(|&&(n, _)| n == name)
-            .map(|&(_, fields)| fields)
-    }
-
-    pub(crate) fn is_empty_object_expr(&self, types: &mut TypeTable, expr: &Expr) -> bool {
-        match expr {
-            Expr::Object(fields) => fields.is_empty(),
-            Expr::New {
-                class_name, args, ..
-            } => {
-                if !args.is_empty() {
-                    return false;
-                }
-                let name_id = types.intern_name(class_name);
-                self.literal_fields_by_id(name_id)
-                    .is_some_and(<[_]>::is_empty)
-            }
-            _ => false,
-        }
-    }
-
-    pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
-        self.func_to_template.get(id as usize).copied().flatten()
-    }
-
-    pub(crate) fn local_idx(&self, id: LocalId) -> Option<LocalIdx> {
-        self.local_to_idx.get(id as usize).copied().flatten()
-    }
-
-    pub(crate) fn template_count(&self) -> usize {
-        self.templates.len()
-    }
-
-    pub(crate) fn local_count(&self) -> usize {
-        self.local_ids.len()
-    }
-
-    fn add_function_template(
-        &mut self,
-        kind: TemplateKind,
-        function: &'h Function,
-        exported: bool,
-        explicit_return: bool,
-    ) -> TemplateId {
-        let id = TemplateId(self.templates.len() as u32);
-        self.add_template(
-            TemplateView {
-                id,
-                kind,
-                name: function.name.as_str(),
-                func_id: function.id,
-                params: &function.params,
-                return_type: &function.return_type,
-                body: &function.body,
-                captures: &function.captures,
-                type_params: &function.type_params,
-                is_async: function.is_async,
-                is_generator: function.is_generator,
-                is_strict: function.is_strict,
-                construct_only: function.construct_only,
-                is_exported: function.is_exported,
-                captures_this: false,
-                captures_new_target: false,
-            },
-            exported,
-            false,
-            explicit_return,
-        )
-    }
-
     fn add_template(
         &mut self,
         mut view: TemplateView<'h>,
@@ -573,10 +482,9 @@ impl<'h> ModuleIndex<'h> {
         is_closure: bool,
         explicit_return: bool,
     ) -> TemplateId {
-        let id = TemplateId(self.templates.len() as u32);
+        let id = TemplateId(self.views.len() as u32);
         let is_obj_method = view.name.starts_with("__obj_method_");
         view.id = id;
-        self.templates.push(view.kind);
         self.views.push(view);
         if exported {
             self.template_exported.insert(id.0 as usize);
@@ -598,13 +506,20 @@ impl<'h> ModuleIndex<'h> {
         scan: &mut ScanCtx<'h, '_>,
         kind: TemplateKind,
         func: &'h Function,
+        exported: bool,
         explicit_return: bool,
     ) -> TemplateId {
         self.max_func_id = self.max_func_id.max(func.id);
-        let tid = self.add_function_template(kind, func, false, explicit_return);
-        scan.raw_sites.resize_with(self.templates.len(), Vec::new);
+        let tid = self.add_template(
+            TemplateView::from_function(kind, func),
+            exported,
+            false,
+            explicit_return,
+        );
+        scan.raw_sites.resize_with(self.views.len(), Vec::new);
         self.set_func_template(func.id, tid);
-        self.scan_function(scan, func, tid);
+        self.scan_params(scan, &func.params, tid);
+        self.scan_stmts(scan, &func.body, tid, false);
         tid
     }
 
@@ -624,9 +539,7 @@ impl<'h> ModuleIndex<'h> {
     ) -> LocalIdx {
         self.max_local_id = self.max_local_id.max(id);
         let lid = id as usize;
-        if lid < self.local_to_idx.len()
-            && let Some(existing) = self.local_to_idx[lid]
-        {
+        if let Some(existing) = self.local_to_idx.get(lid).copied().flatten() {
             return existing;
         }
         let idx = LocalIdx(self.local_ids.len() as u32);
@@ -640,7 +553,6 @@ impl<'h> ModuleIndex<'h> {
             self.local_to_idx.resize(lid + 1, None);
         }
         self.local_to_idx[lid] = Some(idx);
-
         if let Some(span) = hir.local_source_spans.get(&id) {
             if facts.is_inferred(span.start, span.end) {
                 self.local_inferred.insert(idx.0 as usize);
@@ -651,21 +563,17 @@ impl<'h> ModuleIndex<'h> {
             if facts.is_param_annotated(span.start) {
                 self.local_param_annotated.insert(idx.0 as usize);
             }
-            if let Some(use_span) = facts.param_value_use(span.start)
-                && let Some(slot) = self.local_value_use.get_mut(idx.0 as usize)
-            {
-                *slot = Some(use_span);
+            if let Some(use_span) = facts.param_value_use(span.start) {
+                self.local_value_use[idx.0 as usize] = Some(use_span);
             }
         }
         idx
     }
 
     fn param_is_unannotated(&self, hir: &HirModule, facts: &SourceFacts, param: &Param) -> bool {
-        let annotated = hir
-            .local_source_spans
+        !hir.local_source_spans
             .get(&param.id)
-            .is_some_and(|span| facts.is_param_annotated(span.start));
-        !annotated
+            .is_some_and(|s| facts.is_param_annotated(s.start))
             && matches!(
                 param.ty,
                 perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
@@ -678,7 +586,7 @@ impl<'h> ModuleIndex<'h> {
                 .hir
                 .local_source_spans
                 .get(&param.id)
-                .is_some_and(|span| scan.facts.is_param_annotated(span.start));
+                .is_some_and(|s| scan.facts.is_param_annotated(s.start));
             let ty = scan.types.intern_hir(scan.ctx, &param.ty, explicit);
             let local = self.ensure_local(param.id, owner, ty, scan.hir, scan.facts);
             self.local_param.insert(local.0 as usize);
@@ -686,16 +594,6 @@ impl<'h> ModuleIndex<'h> {
                 self.scan_expr(scan, default, owner);
             }
         }
-    }
-
-    fn scan_function(
-        &mut self,
-        scan: &mut ScanCtx<'h, '_>,
-        function: &'h Function,
-        owner: TemplateId,
-    ) {
-        self.scan_params(scan, &function.params, owner);
-        self.scan_stmts(scan, &function.body, owner, false);
     }
 
     fn scan_stmts(
@@ -712,26 +610,21 @@ impl<'h> ModuleIndex<'h> {
                         .hir
                         .local_source_spans
                         .get(id)
-                        .is_some_and(|span| !scan.facts.is_inferred(span.start, span.end));
+                        .is_some_and(|s| !scan.facts.is_inferred(s.start, s.end));
                     let declared = scan.types.intern_hir(scan.ctx, ty, explicit);
                     let local = self.ensure_local(*id, owner, declared, scan.hir, scan.facts);
                     if is_module_top {
                         self.local_module.insert(local.0 as usize);
-                        let initial = if !explicit || scan.types.is_open(declared) {
+                        let loc = self.add_location(if !explicit || scan.types.is_open(declared) {
                             Ty::BOTTOM
                         } else {
                             declared
-                        };
-                        let loc = self.add_location(initial);
-                        if let Some(slot) = self.local_loc.get_mut(local.0 as usize) {
-                            *slot = Some(loc);
-                        }
+                        });
+                        self.local_loc[local.0 as usize] = Some(loc);
                     }
                     if let Some(init) = init {
-                        if let Expr::RegExp { pattern, .. } = init
-                            && let Some(slot) = self.local_regex_pattern.get_mut(local.0 as usize)
-                        {
-                            *slot = Some(pattern.as_str());
+                        if let Expr::RegExp { pattern, .. } = init {
+                            self.local_regex_pattern[local.0 as usize] = Some(pattern.as_str());
                         }
                         self.scan_expr(scan, init, owner);
                     }
@@ -743,8 +636,8 @@ impl<'h> ModuleIndex<'h> {
                 } => {
                     self.scan_expr(scan, condition, owner);
                     self.scan_stmts(scan, then_branch, owner, false);
-                    if let Some(else_branch) = else_branch {
-                        self.scan_stmts(scan, else_branch, owner, false);
+                    if let Some(b) = else_branch {
+                        self.scan_stmts(scan, b, owner, false);
                     }
                 }
                 Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
@@ -757,14 +650,14 @@ impl<'h> ModuleIndex<'h> {
                     update,
                     body,
                 } => {
-                    if let Some(init) = init {
-                        self.scan_stmts(scan, std::slice::from_ref(init), owner, false);
+                    if let Some(i) = init {
+                        self.scan_stmts(scan, std::slice::from_ref(i), owner, false);
                     }
-                    if let Some(condition) = condition {
-                        self.scan_expr(scan, condition, owner);
+                    if let Some(c) = condition {
+                        self.scan_expr(scan, c, owner);
                     }
-                    if let Some(update) = update {
-                        self.scan_expr(scan, update, owner);
+                    if let Some(u) = update {
+                        self.scan_expr(scan, u, owner);
                     }
                     self.scan_stmts(scan, body, owner, false);
                 }
@@ -782,8 +675,8 @@ impl<'h> ModuleIndex<'h> {
                         }
                         self.scan_stmts(scan, &catch.body, owner, false);
                     }
-                    if let Some(finally) = finally {
-                        self.scan_stmts(scan, finally, owner, false);
+                    if let Some(f) = finally {
+                        self.scan_stmts(scan, f, owner, false);
                     }
                 }
                 Stmt::Switch {
@@ -792,18 +685,18 @@ impl<'h> ModuleIndex<'h> {
                 } => {
                     self.scan_expr(scan, discriminant, owner);
                     for case in cases {
-                        if let Some(test) = &case.test {
-                            self.scan_expr(scan, test, owner);
+                        if let Some(t) = &case.test {
+                            self.scan_expr(scan, t, owner);
                         }
                         self.scan_stmts(scan, &case.body, owner, false);
                     }
                 }
                 Stmt::Labeled { body, .. } => {
-                    self.scan_stmts(scan, std::slice::from_ref(body), owner, false);
+                    self.scan_stmts(scan, std::slice::from_ref(body), owner, false)
                 }
                 other => {
-                    stmt_any_expr(other, &mut |expr| {
-                        self.scan_expr(scan, expr, owner);
+                    stmt_any_expr(other, &mut |e| {
+                        self.scan_expr(scan, e, owner);
                         false
                     });
                 }
@@ -834,9 +727,7 @@ impl<'h> ModuleIndex<'h> {
             | Expr::SetNewFromArray(_)
             | Expr::StaticMethodCall { .. }
             | Expr::Compare { .. }
-            | Expr::FuncRef(_) => {
-                Self::record_site_expr(scan, owner, expr);
-            }
+            | Expr::FuncRef(_) => Self::record_site_expr(scan, owner, expr),
             Expr::ArrayMap { callback, .. }
             | Expr::ArrayFilter { callback, .. }
             | Expr::ArrayForEach { callback, .. }
@@ -859,14 +750,10 @@ impl<'h> ModuleIndex<'h> {
             }
             | Expr::MapGroupBy {
                 key_fn: callback, ..
-            } => {
-                Self::record_site_expr(scan, owner, callback);
-            }
-            Expr::LocalGet(id) => {
-                self.record_local_use(*id, owner, false);
-            }
+            } => Self::record_site_expr(scan, owner, callback),
+            Expr::LocalGet(id) => self.record_local_use(*id, owner, false),
             Expr::LocalSet(id, _) | Expr::Update { id, .. } => {
-                self.record_local_use(*id, owner, true);
+                self.record_local_use(*id, owner, true)
             }
             Expr::ScopedTemp { id, .. } => {
                 self.ensure_local(*id, owner, Ty::OPEN, scan.hir, scan.facts);
@@ -888,7 +775,7 @@ impl<'h> ModuleIndex<'h> {
             } => {
                 Self::record_site_expr(scan, owner, expr);
                 self.max_func_id = self.max_func_id.max(*func_id);
-                let explicit_ret = !matches!(
+                let exp_ret = !matches!(
                     return_type,
                     perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
                 );
@@ -916,20 +803,19 @@ impl<'h> ModuleIndex<'h> {
                     },
                     false,
                     true,
-                    explicit_ret,
+                    exp_ret,
                 );
-                scan.raw_sites.resize_with(self.templates.len(), Vec::new);
+                scan.raw_sites.resize_with(self.views.len(), Vec::new);
                 self.set_func_template(*func_id, tid);
-
                 for &cap in captures {
-                    if let Some(local) = self.local_idx(cap) {
-                        self.local_captured.insert(local.0 as usize);
+                    if let Some(l) = self.local_idx(cap) {
+                        self.local_captured.insert(l.0 as usize);
                     }
                 }
-                for &mcap in mutable_captures {
-                    if let Some(local) = self.local_idx(mcap) {
-                        self.local_captured.insert(local.0 as usize);
-                        self.local_written_from_closure.insert(local.0 as usize);
+                for &cap in mutable_captures {
+                    if let Some(l) = self.local_idx(cap) {
+                        self.local_captured.insert(l.0 as usize);
+                        self.local_written_from_closure.insert(l.0 as usize);
                     }
                 }
                 self.scan_params(scan, params, tid);
@@ -938,21 +824,16 @@ impl<'h> ModuleIndex<'h> {
             }
             _ => {}
         }
-        walk_expr_children(expr, &mut |child| {
-            self.scan_expr(scan, child, owner);
-        });
+        walk_expr_children(expr, &mut |child| self.scan_expr(scan, child, owner));
     }
 
-    fn record_local_use(&mut self, id: LocalId, reader: TemplateId, is_write: bool) {
-        self.max_local_id = self.max_local_id.max(id);
-        let Some(local) = self.local_idx(id) else {
-            return;
-        };
-        let declared_owner = self.local_owner.get(local.0 as usize).copied();
-        if declared_owner.is_some_and(|owner| owner != reader) {
-            self.local_captured.insert(local.0 as usize);
-            if is_write {
-                self.local_written_from_closure.insert(local.0 as usize);
+    fn record_local_use(&mut self, id: LocalId, user_template: TemplateId, is_write: bool) {
+        if let Some(lidx) = self.local_idx(id)
+            && self.local_owner.get(lidx.0 as usize).copied() != Some(user_template)
+        {
+            self.local_captured.insert(lidx.0 as usize);
+            if is_write && self.template_is_closure.contains(user_template.0 as usize) {
+                self.local_written_from_closure.insert(lidx.0 as usize);
             }
         }
     }

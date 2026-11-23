@@ -6,21 +6,14 @@ use std::collections::HashMap;
 use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitWith};
 
-/// Source-level facts extracted in a single pass over the SWC AST before HIR lowering.
 #[derive(Default)]
 pub(crate) struct SourceFacts {
     pub(crate) sparse_arrays: bool,
-    /// Sorted `(start, end)` spans of unannotated variable declarations.
     pub(crate) inferred_spans: Vec<(u32, u32)>,
-    /// Sorted start offsets of `let x;` declarations without an initializer.
     pub(crate) deferred_starts: Vec<u32>,
-    /// Sorted start offsets of explicitly type-annotated parameter bindings.
     pub(crate) param_annotated_starts: Vec<u32>,
-    /// Equality spans involving function/closure expressions, preserved for diagnostics.
     pub(crate) callable_comparisons: Vec<Span>,
-    /// Sorted `(param_start, value_use_span)` pairs for non-call uses of parameter bindings.
     pub(crate) param_value_uses: Vec<(u32, Span)>,
-    /// First escaping closure/function literal found syntactically (name, span).
     pub(crate) escaping_closure: Option<(String, Span)>,
 }
 
@@ -28,26 +21,23 @@ impl SourceFacts {
     pub(crate) fn is_inferred(&self, start: u32, end: u32) -> bool {
         self.inferred_spans.binary_search(&(start, end)).is_ok()
     }
-
     pub(crate) fn is_deferred(&self, start: u32) -> bool {
         self.deferred_starts.binary_search(&start).is_ok()
     }
-
     pub(crate) fn is_param_annotated(&self, start: u32) -> bool {
         self.param_annotated_starts.binary_search(&start).is_ok()
     }
-
     pub(crate) fn param_value_use(&self, start: u32) -> Option<Span> {
         let idx = self
             .param_value_uses
             .binary_search_by_key(&start, |(s, _)| *s)
             .ok()?;
-        self.param_value_uses.get(idx).map(|(_, span)| *span)
+        Some(self.param_value_uses[idx].1)
     }
 }
 
-/// Lightweight per-module syntax validation run before import resolution.
 pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<()> {
+    #[derive(Default)]
     struct SyntaxValidator {
         invalid_surrogate: Option<Span>,
         code_point_arity: Option<Span>,
@@ -60,28 +50,21 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
                 self.enum_decl.get_or_insert(decl.span);
             }
         }
-
         fn visit_str(&mut self, string: &ast::Str) {
             if string.value.as_str().is_none() {
                 self.invalid_surrogate.get_or_insert(string.span);
             }
         }
-
         fn visit_tpl_element(&mut self, text: &ast::TplElement) {
-            if text
-                .cooked
-                .as_ref()
-                .is_some_and(|value| value.as_str().is_none())
-            {
+            if text.cooked.as_ref().is_some_and(|v| v.as_str().is_none()) {
                 self.invalid_surrogate.get_or_insert(text.span);
             }
         }
-
         fn visit_call_expr(&mut self, call: &ast::CallExpr) {
             if let ast::Callee::Expr(callee) = &call.callee
                 && let ast::Expr::Member(member) = callee.as_ref()
-                && matches!(member.obj.as_ref(), ast::Expr::Ident(ident) if ident.sym == "String")
-                && matches!(&member.prop, ast::MemberProp::Ident(ident) if ident.sym == "fromCodePoint")
+                && matches!(member.obj.as_ref(), ast::Expr::Ident(id) if id.sym == "String")
+                && matches!(&member.prop, ast::MemberProp::Ident(id) if id.sym == "fromCodePoint")
                 && (call.args.len() != 1 || call.args[0].spread.is_some())
             {
                 self.code_point_arity.get_or_insert(call.span);
@@ -90,43 +73,33 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
         }
     }
 
-    let mut validator = SyntaxValidator {
-        invalid_surrogate: None,
-        code_point_arity: None,
-        enum_decl: None,
-    };
-    module.visit_with(&mut validator);
-
-    if let Some(span) = validator.invalid_surrogate {
-        return Err(locations.annotate(
-            unsupported!(
-                "lone UTF-16 surrogate in a string literal; Perry strings contain Unicode scalars only"
-            ),
-            span,
-        ));
-    }
-    if let Some(span) = validator.code_point_arity {
-        return Err(locations.annotate(
-            unsupported!("String.fromCodePoint currently requires exactly one scalar argument"),
-            span,
-        ));
-    }
-    if let Some(span) = validator.enum_decl {
-        return Err(locations.annotate(
-            unsupported!(
-                "TypeScript enum declarations are not supported yet; use a union of string or number literals instead"
-            ),
-            span,
-        ));
+    let mut v = SyntaxValidator::default();
+    module.visit_with(&mut v);
+    for (hit, msg) in [
+        (
+            v.invalid_surrogate,
+            "lone UTF-16 surrogate in a string literal; Perry strings contain Unicode scalars only",
+        ),
+        (
+            v.code_point_arity,
+            "String.fromCodePoint currently requires exactly one scalar argument",
+        ),
+        (
+            v.enum_decl,
+            "TypeScript enum declarations are not supported yet; use a union of string or number literals instead",
+        ),
+    ] {
+        if let Some(span) = hit {
+            return Err(locations.annotate(unsupported!("{msg}"), span));
+        }
     }
     Ok(())
 }
 
-/// Analyze the flattened SWC module in one pass: validate escaping closures and record source facts.
 pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<SourceFacts> {
+    #[derive(Default)]
     struct AstScanner {
         facts: SourceFacts,
-        // Boundary-only symbol tables keyed by SWC resolved `Id`, dropped when `scan_ast` returns.
         parameters: HashMap<ast::Id, u32>,
         closures: HashMap<ast::Id, Span>,
         enclosing: Option<swc_atoms::Atom>,
@@ -140,26 +113,19 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                     .insert(binding.id.to_id(), binding.id.span.lo.0);
             }
         }
-
         fn is_closure_expr(&self, expr: &ast::Expr) -> bool {
             match expr {
                 ast::Expr::Ident(id) => self.closures.contains_key(&id.to_id()),
-                ast::Expr::Paren(paren) => self.is_closure_expr(&paren.expr),
+                ast::Expr::Paren(p) => self.is_closure_expr(&p.expr),
                 other => matches!(other, ast::Expr::Arrow(_) | ast::Expr::Fn(_)),
             }
         }
-
         fn visit_callable_position(&mut self, expr: &ast::Expr) {
-            if matches!(expr, ast::Expr::Arrow(_) | ast::Expr::Fn(_)) {
-                expr.visit_children_with(self);
-                return;
-            }
-            if let ast::Expr::Paren(paren) = expr {
-                self.visit_callable_position(&paren.expr);
-                return;
-            }
-            if !matches!(expr, ast::Expr::Ident(_)) {
-                expr.visit_with(self);
+            match expr {
+                ast::Expr::Arrow(_) | ast::Expr::Fn(_) => expr.visit_children_with(self),
+                ast::Expr::Paren(p) => self.visit_callable_position(&p.expr),
+                ast::Expr::Ident(_) => {}
+                _ => expr.visit_with(self),
             }
         }
     }
@@ -169,19 +135,16 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             self.facts.sparse_arrays |= array.elems.iter().any(Option::is_none);
             array.visit_children_with(self);
         }
-
         fn visit_param(&mut self, param: &ast::Param) {
             self.record_param(&param.pat);
             param.visit_children_with(self);
         }
-
         fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
             for pat in &arrow.params {
                 self.record_param(pat);
             }
             arrow.visit_children_with(self);
         }
-
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
             if self.enclosing.is_some() {
                 self.closures.insert(decl.ident.to_id(), decl.ident.span);
@@ -190,7 +153,6 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             decl.function.visit_with(self);
             self.enclosing = prev;
         }
-
         fn visit_for_head(&mut self, head: &ast::ForHead) {
             if let ast::ForHead::VarDecl(var) = head {
                 for decl in &var.decls {
@@ -200,14 +162,13 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                 head.visit_children_with(self);
             }
         }
-
         fn visit_var_decl(&mut self, declaration: &ast::VarDecl) {
             let is_const = declaration.kind == ast::VarDeclKind::Const;
             for decl in &declaration.decls {
                 if decl.init.is_none()
-                    && let ast::Pat::Ident(binding) = &decl.name
+                    && let ast::Pat::Ident(b) = &decl.name
                 {
-                    self.facts.deferred_starts.push(binding.id.span.lo.0);
+                    self.facts.deferred_starts.push(b.id.span.lo.0);
                 }
                 hir_compat::pattern_bindings(&decl.name, false, &mut |id, annotated| {
                     if !annotated {
@@ -216,32 +177,26 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                 });
                 decl.name.visit_with(self);
                 if let Some(init) = &decl.init {
-                    if is_const
-                        && let ast::Pat::Ident(binding) = &decl.name
-                        && self.is_closure_expr(init)
-                    {
-                        let origin = match init.as_ref() {
-                            ast::Expr::Ident(other) => self
-                                .closures
-                                .get(&other.to_id())
-                                .copied()
-                                .unwrap_or(binding.id.span),
-                            _ => binding.id.span,
-                        };
-                        self.closures.insert(binding.id.to_id(), origin);
-                    }
-                    if is_const
-                        && let (ast::Pat::Ident(binding), ast::Expr::Ident(source)) =
-                            (&decl.name, init.as_ref())
-                        && let Some(&origin) = self.parameters.get(&source.to_id())
-                    {
-                        self.parameters.insert(binding.id.to_id(), origin);
+                    if is_const && let ast::Pat::Ident(b) = &decl.name {
+                        if self.is_closure_expr(init) {
+                            let origin = match init.as_ref() {
+                                ast::Expr::Ident(o) => {
+                                    self.closures.get(&o.to_id()).copied().unwrap_or(b.id.span)
+                                }
+                                _ => b.id.span,
+                            };
+                            self.closures.insert(b.id.to_id(), origin);
+                        }
+                        if let ast::Expr::Ident(src) = init.as_ref()
+                            && let Some(&origin) = self.parameters.get(&src.to_id())
+                        {
+                            self.parameters.insert(b.id.to_id(), origin);
+                        }
                     }
                     self.visit_callable_position(init);
                 }
             }
         }
-
         fn visit_expr(&mut self, expr: &ast::Expr) {
             if let ast::Expr::Ident(id) = expr
                 && let Some(&origin) = self.parameters.get(&id.to_id())
@@ -254,7 +209,7 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                         ast::Expr::Ident(id) => format!("function '{}'", id.sym),
                         _ => self.enclosing.as_ref().map_or_else(
                             || "anonymous function".into(),
-                            |name| format!("closure in '{}'", hir_compat::display_name(name)),
+                            |n| format!("closure in '{}'", hir_compat::display_name(n)),
                         ),
                     };
                     (name, expr.span())
@@ -263,7 +218,6 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                 expr.visit_children_with(self);
             }
         }
-
         fn visit_bin_expr(&mut self, expr: &ast::BinExpr) {
             if matches!(
                 expr.op,
@@ -281,10 +235,9 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                 expr.visit_children_with(self);
             }
         }
-
         fn visit_call_expr(&mut self, call: &ast::CallExpr) {
             match &call.callee {
-                ast::Callee::Expr(expr) => self.visit_callable_position(expr),
+                ast::Callee::Expr(e) => self.visit_callable_position(e),
                 callee => callee.visit_with(self),
             }
             for arg in &call.args {
@@ -293,14 +246,8 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
         }
     }
 
-    let mut scanner = AstScanner {
-        facts: SourceFacts::default(),
-        parameters: HashMap::new(),
-        closures: HashMap::new(),
-        enclosing: None,
-    };
+    let mut scanner = AstScanner::default();
     module.visit_with(&mut scanner);
-
     if let Some((name, span)) = scanner.facts.escaping_closure {
         return Err(locations.annotate(
             unsupported!(
@@ -309,7 +256,6 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             span,
         ));
     }
-
     scanner.facts.inferred_spans.sort_unstable();
     scanner.facts.inferred_spans.dedup();
     scanner.facts.deferred_starts.sort_unstable();
@@ -319,22 +265,14 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
     scanner
         .facts
         .param_value_uses
-        .sort_unstable_by_key(|(start, _)| *start);
-    scanner
-        .facts
-        .param_value_uses
-        .dedup_by_key(|(start, _)| *start);
-
+        .sort_unstable_by_key(|(s, _)| *s);
+    scanner.facts.param_value_uses.dedup_by_key(|(s, _)| *s);
     Ok(scanner.facts)
 }
 
 fn record_pattern_annotations(pat: &ast::Pat, inherited: bool, out: &mut Vec<u32>) {
     match pat {
-        ast::Pat::Ident(binding) => {
-            if inherited || binding.type_ann.is_some() {
-                out.push(binding.id.span.lo.0);
-            }
-        }
+        ast::Pat::Ident(b) if inherited || b.type_ann.is_some() => out.push(b.id.span.lo.0),
         ast::Pat::Array(arr) => {
             let ann = inherited || arr.type_ann.is_some();
             if ann {
@@ -354,25 +292,20 @@ fn record_pattern_annotations(pat: &ast::Pat, inherited: bool, out: &mut Vec<u32
                     ast::ObjectPatProp::KeyValue(kv) => {
                         record_pattern_annotations(&kv.value, ann, out)
                     }
-                    ast::ObjectPatProp::Assign(assign) => {
-                        if ann {
-                            out.push(assign.key.id.span.lo.0);
-                        }
-                    }
-                    ast::ObjectPatProp::Rest(rest) => {
-                        record_pattern_annotations(&rest.arg, ann, out)
-                    }
+                    ast::ObjectPatProp::Assign(a) if ann => out.push(a.key.id.span.lo.0),
+                    ast::ObjectPatProp::Rest(r) => record_pattern_annotations(&r.arg, ann, out),
+                    ast::ObjectPatProp::Assign(_) => {}
                 }
             }
         }
-        ast::Pat::Rest(rest) => {
-            let ann = inherited || rest.type_ann.is_some();
+        ast::Pat::Rest(r) => {
+            let ann = inherited || r.type_ann.is_some();
             if ann {
-                out.push(rest.span.lo.0);
+                out.push(r.span.lo.0);
             }
-            record_pattern_annotations(&rest.arg, ann, out);
+            record_pattern_annotations(&r.arg, ann, out);
         }
-        ast::Pat::Assign(assign) => record_pattern_annotations(&assign.left, inherited, out),
-        ast::Pat::Invalid(_) | ast::Pat::Expr(_) => {}
+        ast::Pat::Assign(a) => record_pattern_annotations(&a.left, inherited, out),
+        _ => {}
     }
 }
