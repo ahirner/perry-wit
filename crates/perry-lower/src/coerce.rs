@@ -494,6 +494,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.intrinsic(ctx, Intrinsic::BigIntToString, vec![value])
             }
             Kind::String => value,
+            Kind::Exception => self.intrinsic(ctx, Intrinsic::ExceptionDisplay, vec![value]),
             Kind::Json => self.intrinsic(ctx, Intrinsic::JsonDisplay, vec![value]),
             Kind::Number => self.intrinsic(
                 ctx,

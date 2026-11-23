@@ -4,7 +4,7 @@ use pliron::{context::Context, r#type::TypeHandle};
 
 /// Possible present, null and undefined states; the empty set is an unreachable value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Presence(u8);
+pub(crate) struct Presence(u8);
 
 impl Presence {
     pub(super) const PRESENT: Self = Self(1);
@@ -34,7 +34,7 @@ impl Presence {
     pub(super) fn is_empty(self) -> bool {
         self.0 == 0
     }
-    pub(super) fn admits(self, absence: Absence) -> bool {
+    pub(crate) fn admits(self, absence: Absence) -> bool {
         self.0 & Self::absent(absence).0 != 0
     }
 }

@@ -72,6 +72,7 @@ pub struct Locations<'s> {
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
+    pub(super) callable_comparisons: HashSet<Span>,
     pub(crate) generic_templates: Vec<(FuncId, String)>,
     origins: HashMap<String, CallerOrigin>,
 }
@@ -79,7 +80,7 @@ pub struct Locations<'s> {
 impl<'s> Locations<'s> {
     /// Preserve operator spans and non-null assertions as inert sequences before HIR erases them.
     pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module) {
-        struct Preserver<'a>(&'a mut Vec<Span>);
+        struct Preserver<'a>(&'a mut Vec<Span>, HashSet<Span>);
         impl VisitMut for Preserver<'_> {
             // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
             fn visit_mut_ts_enum_decl(&mut self, _: &mut ast::TsEnumDecl) {}
@@ -88,16 +89,17 @@ impl<'s> Locations<'s> {
                 expr.visit_mut_children_with(self);
                 let (span, token) = match expr {
                     ast::Expr::Bin(binary)
-                        if matches!(
-                            binary.op,
-                            ast::BinaryOp::Exp
-                                | ast::BinaryOp::BitAnd
-                                | ast::BinaryOp::BitOr
-                                | ast::BinaryOp::BitXor
-                                | ast::BinaryOp::LShift
-                                | ast::BinaryOp::RShift
-                                | ast::BinaryOp::ZeroFillRShift
-                        ) =>
+                        if self.1.contains(&binary.span)
+                            || matches!(
+                                binary.op,
+                                ast::BinaryOp::Exp
+                                    | ast::BinaryOp::BitAnd
+                                    | ast::BinaryOp::BitOr
+                                    | ast::BinaryOp::BitXor
+                                    | ast::BinaryOp::LShift
+                                    | ast::BinaryOp::RShift
+                                    | ast::BinaryOp::ZeroFillRShift
+                            ) =>
                     {
                         let token = format!("{OPERATOR}{}", self.0.len());
                         self.0.push(binary.span);
@@ -118,7 +120,10 @@ impl<'s> Locations<'s> {
                 });
             }
         }
-        module.visit_mut_with(&mut Preserver(&mut self.operators));
+        module.visit_mut_with(&mut Preserver(
+            &mut self.operators,
+            std::mem::take(&mut self.callable_comparisons),
+        ));
     }
 
     pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {

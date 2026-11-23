@@ -41,7 +41,7 @@ pub(super) trait CallExt<'s> {
 /// Every catalog row carries a recipe, so each `Call` variant has exactly one arm.
 macro_rules! lower_calls {
     ($( $family:pat, $class:literal {
-        $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident
+        $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident $(callback($callback:ident))?
             [$($argument:ident $(:$mode:ident)?),*] => $action:ident $recipe:tt, $requirement:literal;
         )*
     } )*) => {

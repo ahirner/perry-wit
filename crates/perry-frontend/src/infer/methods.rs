@@ -4,6 +4,9 @@ use crate::{
     methods::{Method, MethodResult},
 };
 
+/// The element type `Promise.allSettled` resolves to, as `PromiseSettledResult<T>`.
+pub(super) const SETTLED: &str = "PromiseSettledResult";
+
 pub(super) fn call(
     expr: &Expr,
     callee: &Expr,
@@ -39,6 +42,22 @@ pub(super) fn call(
                 return map_group_by(items, callback, env);
             }
             ("performance", "now") => return HirType::Number,
+            ("Promise", "allSettled") => {
+                let [items] = args else {
+                    return HirType::Any;
+                };
+                let source = strip_nullish(expression(items, env)).0;
+                let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
+                let value = match element {
+                    HirType::Promise(value) => *value,
+                    value => value,
+                };
+                let settled = HirType::Generic {
+                    base: SETTLED.into(),
+                    type_args: vec![value],
+                };
+                return HirType::Promise(Box::new(HirType::Array(Box::new(settled))));
+            }
             _ => {}
         }
     }
@@ -88,12 +107,20 @@ pub(super) fn result<'s>(
     match rule {
         MethodResult::Mapped | MethodResult::FlatMapped => {
             argument(0).map_or(HirType::Any, |callback| {
-                infer_array_closure_return(
-                    object,
-                    callback,
-                    env,
-                    matches!(rule, MethodResult::FlatMapped),
-                )
+                let element =
+                    shapes::generics::iterated_element(strip_nullish(expression(object, env)).0)
+                        .unwrap_or(HirType::Any);
+                let ty = closures::result(callback, [element, HirType::Number], env);
+                if matches!(rule, MethodResult::FlatMapped)
+                    || matches!(ty, HirType::Unknown | HirType::Any)
+                {
+                    ty
+                } else if env.metadata.sparse_arrays {
+                    // `map` keeps holes in a module with sparse arrays, as lowering does.
+                    HirType::Array(Box::new(with_absences(ty, Absence::Undefined)))
+                } else {
+                    HirType::Array(Box::new(ty))
+                }
             })
         }
         MethodResult::Receiver => expression(object, env),
@@ -222,7 +249,7 @@ pub(super) fn result<'s>(
 pub(super) fn map_group_by(items: &Expr, key_fn: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
     let source = strip_nullish(expression(items, env)).0;
     let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
-    let key = match infer_array_closure_return(items, key_fn, env, true) {
+    let key = match closures::result(key_fn, [element.clone(), HirType::Number], env) {
         HirType::Any | HirType::Unknown => HirType::String,
         other => other,
     };

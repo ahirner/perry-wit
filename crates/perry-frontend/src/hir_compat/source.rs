@@ -3,7 +3,7 @@ use super::*;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::unsupported;
 use std::collections::HashSet;
-use swc_common::Span;
+use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Default)]
@@ -136,52 +136,175 @@ pub(crate) fn pattern_bindings<'a>(
     }
 }
 
-pub(super) struct PrivateParameters {
-    scope: swc_common::SyntaxContext,
-    arity: usize,
-    indices: Vec<usize>,
-    called: bool,
+/// Bindings and source spans whose identities Perry HIR erases.
+#[derive(Default)]
+pub(crate) struct CallableBindings {
+    pub implicit: HashMap<String, Vec<usize>>,
+    pub invoked: HashSet<u32>,
+    pub value_uses: HashMap<u32, Span>,
 }
 
-type PrivateFunctions = HashMap<swc_atoms::Atom, PrivateParameters>;
-
-/// Retain private declarations used only as the direct callee of fixed-arity calls.
-pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
+pub(super) fn callable_bindings(
+    module: &ast::Module,
+    locations: &mut locations::Locations<'_>,
+) -> Result<CallableBindings> {
+    #[derive(Default)]
     struct Uses {
-        functions: PrivateFunctions,
+        declarations: HashMap<ast::Id, Vec<usize>>,
+        escapes: HashSet<ast::Id>,
+        parameters: HashMap<ast::Id, u32>,
+        value_uses: HashMap<u32, Span>,
+        closures: HashMap<ast::Id, Span>,
+        invoked: HashSet<ast::Id>,
+        enclosing: Option<swc_atoms::Atom>,
+        escaping: Option<(String, Span)>,
+        comparisons: HashSet<Span>,
+    }
+    impl Uses {
+        fn parameter(&mut self, pattern: &ast::Pat) {
+            if let ast::Pat::Ident(binding) = pattern {
+                self.parameters
+                    .insert(binding.id.to_id(), binding.id.span.lo.0);
+            }
+        }
+        fn closure(&self, expr: &ast::Expr) -> bool {
+            match expr {
+                ast::Expr::Ident(id) => self.closures.contains_key(&id.to_id()),
+                ast::Expr::Paren(paren) => self.closure(&paren.expr),
+                other => matches!(other, ast::Expr::Arrow(_) | ast::Expr::Fn(_)),
+            }
+        }
+        fn invoke(&mut self, expr: &ast::Expr) {
+            if let ast::Expr::Ident(id) = expr {
+                self.invoked.insert(id.to_id());
+            }
+        }
+        fn callable(&mut self, expr: &ast::Expr) {
+            if matches!(expr, ast::Expr::Arrow(_) | ast::Expr::Fn(_)) {
+                expr.visit_children_with(self);
+                return;
+            }
+            if let ast::Expr::Paren(paren) = expr {
+                self.callable(&paren.expr);
+                return;
+            }
+            if !matches!(expr, ast::Expr::Ident(_)) {
+                expr.visit_with(self);
+            }
+        }
     }
     impl Visit for Uses {
+        fn visit_param(&mut self, param: &ast::Param) {
+            self.parameter(&param.pat);
+            param.visit_children_with(self);
+        }
+        fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
+            for pattern in &arrow.params {
+                self.parameter(pattern);
+            }
+            arrow.visit_children_with(self);
+        }
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
+            if self.enclosing.is_some() {
+                self.closures.insert(decl.ident.to_id(), decl.ident.span);
+            }
+            let enclosing = self.enclosing.replace(decl.ident.sym.clone());
             decl.function.visit_with(self);
+            self.enclosing = enclosing;
+        }
+        fn visit_expr(&mut self, expr: &ast::Expr) {
+            if let ast::Expr::Ident(id) = expr
+                && let Some(origin) = self.parameters.get(&id.to_id())
+            {
+                self.value_uses.entry(*origin).or_insert(id.span);
+            }
+            if self.closure(expr) {
+                self.escaping.get_or_insert_with(|| {
+                    let name = match expr {
+                        ast::Expr::Ident(id) => format!("function '{}'", id.sym),
+                        _ => self.enclosing.as_ref().map_or_else(
+                            || "anonymous function".into(),
+                            |name| format!("closure in '{}'", super::display_name(name)),
+                        ),
+                    };
+                    (name, expr.span())
+                });
+            } else {
+                expr.visit_children_with(self);
+            }
         }
         fn visit_ident(&mut self, ident: &ast::Ident) {
-            if self
-                .functions
-                .get(&ident.sym)
-                .is_some_and(|f| f.scope == ident.ctxt)
-            {
-                self.functions.remove(&ident.sym);
+            if self.declarations.contains_key(&ident.to_id()) {
+                self.escapes.insert(ident.to_id());
+            }
+        }
+        fn visit_var_decl(&mut self, declaration: &ast::VarDecl) {
+            for decl in &declaration.decls {
+                decl.name.visit_with(self);
+                if let Some(init) = &decl.init {
+                    if let ast::Pat::Ident(binding) = &decl.name
+                        && declaration.kind == ast::VarDeclKind::Const
+                        && self.closure(init)
+                    {
+                        let origin = match init.as_ref() {
+                            ast::Expr::Ident(other) => self
+                                .closures
+                                .get(&other.to_id())
+                                .copied()
+                                .unwrap_or(binding.id.span),
+                            _ => binding.id.span,
+                        };
+                        self.closures.insert(binding.id.to_id(), origin);
+                    }
+                    if declaration.kind == ast::VarDeclKind::Const
+                        && let (ast::Pat::Ident(binding), ast::Expr::Ident(source)) =
+                            (&decl.name, init.as_ref())
+                        && let Some(origin) = self.parameters.get(&source.to_id()).copied()
+                    {
+                        self.parameters.insert(binding.id.to_id(), origin);
+                    }
+                    self.callable(init);
+                }
+            }
+        }
+        fn visit_bin_expr(&mut self, expr: &ast::BinExpr) {
+            if matches!(
+                expr.op,
+                ast::BinaryOp::EqEqEq
+                    | ast::BinaryOp::NotEqEq
+                    | ast::BinaryOp::EqEq
+                    | ast::BinaryOp::NotEq
+            ) {
+                self.invoke(&expr.left);
+                self.invoke(&expr.right);
+                if self.closure(&expr.left) || self.closure(&expr.right) {
+                    self.comparisons.insert(expr.span);
+                }
+                self.callable(&expr.left);
+                self.callable(&expr.right);
+            } else {
+                expr.visit_children_with(self);
             }
         }
         fn visit_call_expr(&mut self, call: &ast::CallExpr) {
-            if call.type_args.is_none()
-                && let ast::Callee::Expr(callee) = &call.callee
-                && let ast::Expr::Ident(ident) = &**callee
-                && let Some(function) = self.functions.get_mut(&ident.sym)
-                && function.scope == ident.ctxt
-                && function.arity == call.args.len()
-                && call.args.iter().all(|arg| arg.spread.is_none())
+            if let ast::Callee::Expr(callee) = &call.callee
+                && let ast::Expr::Ident(_) = callee.as_ref()
             {
-                function.called = true;
-                call.args.visit_with(self);
-            } else {
-                call.visit_children_with(self);
+                self.invoke(callee);
+                for arg in &call.args {
+                    self.invoke(&arg.expr);
+                }
+            }
+            match &call.callee {
+                ast::Callee::Expr(expr) => self.callable(expr),
+                callee => callee.visit_with(self),
+            }
+            for arg in &call.args {
+                self.callable(&arg.expr);
             }
         }
     }
-    let mut uses = Uses {
-        functions: HashMap::new(),
-    };
+    let mut uses = Uses::default();
     'functions: for item in &module.body {
         let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(decl))) = item else {
             continue;
@@ -202,46 +325,28 @@ pub(super) fn private_parameters(module: &ast::Module) -> PrivateFunctions {
             }
         }
         if !indices.is_empty() {
-            uses.functions.insert(
-                decl.ident.sym.clone(),
-                PrivateParameters {
-                    scope: decl.ident.ctxt,
-                    arity: decl.function.params.len(),
-                    indices,
-                    called: false,
-                },
-            );
+            uses.declarations.insert(decl.ident.to_id(), indices);
         }
     }
-    if !uses.functions.is_empty() {
-        module.visit_with(&mut uses);
+    module.visit_with(&mut uses);
+    if let Some((name, span)) = uses.escaping {
+        return Err(locations.annotate(unsupported!("{name} escapes its static call site. Storing, returning or joining function values requires a runtime function representation"), span));
     }
-    uses.functions.retain(|_, f| f.called);
-    uses.functions
-}
-
-/// Mark inferred parameters for the same specialization as explicit TypeScript generics.
-pub(super) fn promote_private_parameters(module: &mut HirModule, mut source: PrivateFunctions) {
-    if source.is_empty() {
-        return;
-    }
-    for function in module.functions.iter_mut().filter(|f| !f.is_exported) {
-        if let Some(params) = source.remove(&swc_atoms::Atom::from(function.name.as_str()))
-            && function.params.len() == params.arity
-        {
-            for index in params.indices {
-                if let Some(param) = function.params.get_mut(index)
-                    && matches!(param.ty, HirType::Any | HirType::Unknown)
-                {
-                    let name = format!("@{}", param.name);
-                    param.ty = HirType::TypeVar(name.clone());
-                    function.type_params.push(perry_hir::types::TypeParam {
-                        name,
-                        constraint: None,
-                        default: None,
-                    });
-                }
-            }
-        }
-    }
+    locations.callable_comparisons = uses.comparisons;
+    let implicit = uses
+        .declarations
+        .into_iter()
+        .filter(|(id, _)| !uses.escapes.contains(id))
+        .map(|((name, _), positions)| (name.to_string(), positions))
+        .collect();
+    let invoked = uses
+        .invoked
+        .iter()
+        .filter_map(|id| uses.closures.get(id).map(|span| span.lo.0))
+        .collect();
+    Ok(CallableBindings {
+        implicit,
+        invoked,
+        value_uses: uses.value_uses,
+    })
 }

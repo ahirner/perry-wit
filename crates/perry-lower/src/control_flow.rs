@@ -281,11 +281,7 @@ impl<'s> FunctionBuilder<'s> {
             LoopCondition::Indices(..) => None,
         };
         let guards = self.variant_guards.depth();
-        let closures = &self.closures;
-        self.variant_guards
-            .assign_in(body, tested.into_iter().chain(update), |id| {
-                closures.get(&id).copied()
-            });
+        self.invalidate_inline_writes(body, tested.into_iter().chain(update));
         let lowered = self.loop_body(ctx, condition, update, body, label);
         // The loop exits from its test or a `break`, before narrowings later in its body.
         self.variant_guards.truncate(guards);

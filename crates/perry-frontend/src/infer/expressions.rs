@@ -95,10 +95,21 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 HirType::String
             } else if mixed(&left) || mixed(&right) {
                 HirType::Union(vec![HirType::Number, HirType::String])
+            } else if numeric_operands(&left, &right) {
+                HirType::Number
             } else {
                 perry_hir::infer_expr_type(expr, env)
             }
         }
+        Expr::Binary {
+            op:
+                perry_hir::ir::BinaryOp::Sub
+                | perry_hir::ir::BinaryOp::Mul
+                | perry_hir::ir::BinaryOp::Div
+                | perry_hir::ir::BinaryOp::Mod,
+            left,
+            right,
+        } if numeric_operands(&expression(left, env), &expression(right, env)) => HirType::Number,
         Expr::ScopedTemp { id, value, body } => {
             let val_ty = expression(value, env);
             let prev = if !matches!(val_ty, HirType::Any | HirType::Unknown) {
@@ -286,9 +297,18 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
         } => {
             let source = strip_nullish(expression(iterable, env)).0;
             let element = shapes::generics::iterated_element(source).unwrap_or(HirType::Any);
-            infer_closure_return(element, map_fn, env, false)
+            HirType::Array(Box::new(closures::result(
+                map_fn,
+                [element, HirType::Number],
+                env,
+            )))
         }
         Expr::StructuredClone { value, .. } => expression(value, env),
+        // A promise this module types resolves to its value; others keep Perry HIR's rule.
+        Expr::Await(promise) => match expression(promise, env) {
+            HirType::Promise(value) => *value,
+            _ => perry_hir::infer_expr_type(expr, env),
+        },
         Expr::MapGroupBy { items, key_fn } => methods::map_group_by(items, key_fn, env),
         Expr::Call { callee, args, .. } => methods::call(expr, callee, args, env),
         Expr::CallSpread { callee, .. } => match callee.as_ref() {
@@ -339,6 +359,18 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                 {
                     HirType::Number
                 }
+                HirType::Generic { base, type_args }
+                    if base == methods::SETTLED && !env.decls.is_user_type(&base) =>
+                {
+                    match (property.as_str(), type_args.as_slice()) {
+                        ("status", _) => HirType::String,
+                        ("value", [value]) => with_absences(value.clone(), Absence::Undefined),
+                        ("reason", _) => {
+                            with_absences(HirType::Named("Error".into()), Absence::Undefined)
+                        }
+                        _ => fallback(env),
+                    }
+                }
                 HirType::Generic { base, type_args } => env
                     .decls
                     .property_type(env.ctx, &base, &type_args, property)
@@ -349,6 +381,12 @@ pub(super) fn expression(expr: &Expr, env: &mut FunctionEnv<'_>) -> HirType {
                             .map(|(_, val_ty)| with_absences(val_ty, Absence::Undefined))
                     })
                     .unwrap_or_else(|| fallback(env)),
+                HirType::Named(ref base)
+                    if Kind::builtin(base) == Some(Kind::Exception)
+                        && matches!(property.as_str(), "message" | "name") =>
+                {
+                    HirType::String
+                }
                 HirType::Named(base) => env
                     .decls
                     .property_type(env.ctx, &base, &[], property)
@@ -666,4 +704,20 @@ pub(super) fn iterator_view(source: HirType, method: IteratorMethod) -> Option<H
         })),
         _ => None,
     }
+}
+
+/// An arithmetic operand pair of numbers, booleans, `null` and `undefined`, or unions of them,
+/// which JavaScript converts to numbers. Two `Int32` operands keep Perry HIR's integer rule.
+fn numeric_operands(left: &HirType, right: &HirType) -> bool {
+    let numeric = |ty: &HirType| {
+        matches!(
+            ty,
+            HirType::Number | HirType::Int32 | HirType::Boolean | HirType::Null | HirType::Void
+        )
+    };
+    let operand = |ty: &HirType| match ty {
+        HirType::Union(members) => members.iter().all(numeric),
+        other => numeric(other),
+    };
+    !matches!((left, right), (HirType::Int32, HirType::Int32)) && operand(left) && operand(right)
 }

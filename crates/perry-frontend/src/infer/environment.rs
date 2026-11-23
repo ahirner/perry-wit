@@ -7,6 +7,8 @@ pub(super) struct FunctionEnv<'a> {
     pub(super) classes: &'a [perry_hir::ir::Class],
     pub(super) locals: &'a mut HashMap<LocalId, HirType>,
     pub(super) metadata: &'a hir_compat::Metadata<'a>,
+    /// Results of closures typed so far, which `base` does not record.
+    pub(super) closure_results: Option<&'a HashMap<FuncId, HirType>>,
 }
 
 const NUMBER_TYPE: HirType = HirType::Number;
@@ -108,8 +110,9 @@ impl HirTypeFacts for FunctionEnv<'_> {
     }
 
     fn function_return_type(&self, id: FuncId) -> Option<&HirType> {
-        self.base
-            .function_return_type(id)
+        self.closure_results
+            .and_then(|results| results.get(&id))
+            .or_else(|| self.base.function_return_type(id))
             .map(|ty| self.normalize(ty))
     }
 

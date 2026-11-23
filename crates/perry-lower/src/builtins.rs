@@ -70,13 +70,9 @@ impl<'s> FunctionBuilder<'s> {
         Ok({
             let search_val = self.expression(ctx, search)?;
             let search_val = self.defined(ctx, search_val)?;
-            let callback = match replacement {
-                Expr::LocalGet(id) => self.closures.get(id).copied().unwrap_or(replacement),
-                _ => replacement,
-            };
-            if matches!(callback, Expr::Closure { .. } | Expr::FuncRef(_)) {
+            if matches!(replacement, Expr::Closure { .. } | Expr::FuncRef(_)) {
                 return self
-                    .replace_callback(ctx, receiver, search_val, callback, all)
+                    .replace_callback(ctx, receiver, search_val, replacement, all)
                     .map(Some);
             }
             let repl_val = self.string_operand(ctx, replacement)?;

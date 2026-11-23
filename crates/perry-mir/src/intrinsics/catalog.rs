@@ -252,6 +252,7 @@ macro_rules! intrinsic_catalog {
                 StdDecoderDecode = "std_decoder_decode" [TextDecode = "text_decode" (Decoder, Bytes, Bool) -> (String), Throws, Conservative;];
                 StdDecoderValidateLabel = "std_decoder_validate_label" [DecoderValidateLabel = "decoder_validate_label" (String) -> (), Throws, Atomic;];
                 StdDecoderNew = "std_decoder_new" [DecoderNew = "decoder_new" (Bool, Bool) -> (Decoder), Effectful, Conservative;];
+                StdExceptionDisplay = "std_exception_display" [ExceptionDisplay = "exception_display" (Exception) -> (String), Pure, Conservative;];
                 StdExceptionName = "std_exception_name" [ExceptionName = "exception_name" (Exception) -> (String), Pure, Conservative;];
                 StdExceptionEqual = "std_exception_equal" [ExceptionEqual = "exception_equal" (Exception, Exception) -> (Bool), Pure, None;];
                 StdExceptionBigIntEqual = "std_exception_bigint_equal" [ExceptionBigIntEqual = "exception_bigint_equal" (Exception, BigInt) -> (Bool), Pure, None;];

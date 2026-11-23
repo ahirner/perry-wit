@@ -387,7 +387,9 @@ pub(crate) fn prepare(ctx: &Context, functions: &[FuncOp]) -> Result<Vec<LocalEf
                                     .is_none_or(|def| !Operation::is_op::<StringConstOp>(def, ctx))
                         });
                 if !call && !wait && crate::intrinsics::may_throw(ctx, op) {
-                    effects.failure = local[index].fail(effects.failure, op, true);
+                    let escapes = !Operation::get_op::<crate::UnwrapOp>(op, ctx)
+                        .is_some_and(|unwrap| unwrap.proven_present(ctx));
+                    effects.failure = local[index].fail(effects.failure, op, escapes);
                 }
                 effects.unhandled_await |= wait && !local[index].handled.contains(&op);
                 let allocates = allocation != Allocation::None || async_call;
