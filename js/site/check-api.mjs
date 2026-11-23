@@ -34,7 +34,7 @@ assert.throws(() => compiler.compileCore({ source: "export { run } from './missi
 const helperSource = '// é🙂\r\nexport function helper(value) { return value; }';
 assert.throws(
   () => compiler.compileCore({
-    source: { path: 'src/main.ts', contents: "import { helper } from './helper'; export function run(): number { const escaped = { helper }; return helper(1); }" },
+    source: { path: 'src/main.ts', contents: "import { helper } from './helper'; export { helper }; export function run(): number { return helper(1); }" },
     modules: { 'src/helper.ts': helperSource },
   }),
   error => {
