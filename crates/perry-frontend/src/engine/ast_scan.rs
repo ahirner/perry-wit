@@ -262,7 +262,12 @@ pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
             if matches!(
                 &assign.left,
                 ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(_))
-            ) {
+            ) && (self.is_closure_expr(&assign.right)
+                || matches!(
+                    &*assign.right,
+                    ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
+                ))
+            {
                 self.facts.conditional_spans.push(assign.span);
             }
             assign.visit_children_with(self);

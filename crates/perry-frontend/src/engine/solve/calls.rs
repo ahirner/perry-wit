@@ -732,7 +732,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(res) = self.eval_builtin_import_call(name, args, &arg_tys) {
                 return Ok(res);
             }
+            let is_imported = self.hir.imports.iter().any(|imp| {
+                imp.specifiers.iter().any(|sp| match sp {
+                    perry_hir::ir::ImportSpecifier::Named { local, .. }
+                    | perry_hir::ir::ImportSpecifier::Default { local }
+                    | perry_hir::ir::ImportSpecifier::Namespace { local } => local == name,
+                })
+            });
             if byte_offset != 0
+                && !is_imported
                 && !name.starts_with("js_")
                 && !name.starts_with("__")
                 && arg_tys.iter().any(|&a| self.types.has_func(a))

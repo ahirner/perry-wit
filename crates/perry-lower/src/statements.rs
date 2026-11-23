@@ -463,6 +463,14 @@ impl<'s> FunctionBuilder<'s> {
         if self.iteration.is_release(expr) {
             return Ok(());
         }
+        if let Expr::Sequence(parts) = expr
+            && let Some(span) = self.shapes.metadata.locations.operator_span(parts)
+            && let Some(last) = parts.last()
+        {
+            return self
+                .effect(ctx, last)
+                .map_err(|error| error.with_fallback_span(Some(span)));
+        }
         if let Expr::Call {
             callee,
             args,
