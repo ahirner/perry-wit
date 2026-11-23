@@ -23,8 +23,8 @@ use pliron::{
 mod catalog;
 mod promises;
 pub use promises::{
-    Combinator, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, SettledField,
-    SettledFieldOp,
+    Combinator, PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp, PromiseResolvedOp,
+    PromiseSettleOp, SettleKind, SettledField, SettledFieldOp,
 };
 
 /// Operand kinds: a value kind, or an aggregate kind that names no single MIR type and so
@@ -195,6 +195,7 @@ pub(super) enum IntrinsicErr {
     Stringify,
     Combinator,
     PromiseResult(&'static str),
+    Settle,
     Settled,
 }
 
@@ -210,6 +211,9 @@ impl core::fmt::Display for IntrinsicErr {
                 f.write_str("perry.promise_combinator takes an array of promises of one type")
             }
             Self::PromiseResult(op) => write!(f, "{op} has an invalid promise result type"),
+            Self::Settle => f.write_str(
+                "perry.promise_settle takes a perry.promise and a matching fulfillment value or rejection reason",
+            ),
             Self::Settled => f.write_str("perry.settled_field reads a perry.settled value"),
         }
     }

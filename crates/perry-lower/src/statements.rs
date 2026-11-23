@@ -452,7 +452,8 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Undefined => true,
             Expr::LocalGet(id) => self.locals.get(id).is_some_and(|b| b.is_never),
             Expr::Call { callee, .. } => {
-                matches!(callee.as_ref(),Expr::FuncRef(id) if self.signatures.get(id).is_some_and(|s|s.returns_never || (!s.is_async && s.result.is_none())))
+                matches!(callee.as_ref(), Expr::FuncRef(id) if self.signatures.get(id).is_some_and(|s| s.returns_never || (!s.is_async && s.result.is_none())))
+                    || matches!(callee.as_ref(), Expr::PropertyGet { object, property, .. } if matches!(**object, Expr::GlobalGet(0)) && matches!(property.as_str(), "log" | "info" | "debug" | "error" | "warn"))
             }
             _ => false,
         }
@@ -474,11 +475,12 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::Call {
             callee,
             args,
+            type_args,
             byte_offset,
             ..
         } = expr
         {
-            self.call(ctx, callee, args, *byte_offset)
+            self.call(ctx, callee, args, type_args, *byte_offset)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
         } else if let Expr::StaticMethodCall {
             class_name,

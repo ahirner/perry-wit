@@ -571,6 +571,9 @@ impl Solver {
                 self.require(id, input, Demand::Observed(None));
             }
         }
+        if kind == OperationKind::PromiseSettle {
+            self.require(id, operation.get_operand(1), Demand::Original);
+        }
         if kind == OperationKind::Return {
             let mut changed = false;
             let is_summary = self.is_summary(id);

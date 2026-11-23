@@ -168,10 +168,11 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Call {
                 callee,
                 args,
+                type_args,
                 byte_offset,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset)
+                .call(ctx, callee, args, type_args, *byte_offset)
                 .and_then(|value| {
                     value.ok_or_else(|| {
                         Diagnostic::new(codes::TYPE_MISMATCH, "a void call has no value")

@@ -51,11 +51,11 @@ use perry_mir::{
     ConcatOp, CondBrOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
     ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, Intrinsic, IsNullOp, IsUndefinedOp,
     JsonStringifyOp, JsonType, LoadOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp,
-    PlironResultExt as _, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType,
-    RaiseOp, RecordKind, RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp,
-    StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
-    WrapOp, absence, admits_undefined, may_throw, optional_parts, optional_value, present_type,
-    set_async,
+    PlironResultExt as _, PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp,
+    PromiseResolvedOp, PromiseSettleOp, PromiseType, RaiseOp, RecordKind, RecordType, RethrowOp,
+    ReturnOp, SettledField, SettledFieldOp, StoreOp, StringLenOp, StringType, TimerOp, ToNumberOp,
+    ToStringOp, UndefOp, UndefinedOp, UnwrapOp, WrapOp, absence, admits_undefined, may_throw,
+    optional_parts, optional_value, present_type, set_async,
 };
 use perry_wit_diagnostics::{
     Diagnostic, Result, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag,

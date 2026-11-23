@@ -106,8 +106,64 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         callee: &'s Expr,
         args: &'s [Expr],
+        type_args: &'s [HirType],
         byte_offset: u32,
     ) -> Result<Option<Value>> {
+        if let Expr::ExternFuncRef { name, .. } = callee {
+            match name.as_str() {
+                "\0perry_promise_pending" => {
+                    let settled = match type_args.first() {
+                        Some(ty) => self.shapes.settled_type(ctx, ty)?,
+                        None => void_type(ctx),
+                    };
+                    return Ok(Some(
+                        self.emit_value(ctx, |ctx| PromisePendingOp::new(ctx, settled)),
+                    ));
+                }
+                "\0perry_promise_resolve" => {
+                    let [promise_expr, value_expr] = args else {
+                        bail_internal!("promise resolve expects promise and value");
+                    };
+                    let promise = self.expression(ctx, promise_expr)?;
+                    let settled = perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx))
+                        .ok_or_else(|| internal!("promise resolve expects a promise"))?
+                        .deref(ctx)
+                        .value();
+                    let val = self.expression_with(ctx, value_expr, Some(settled))?;
+                    let val = self.fit(ctx, val, settled)?;
+                    self.emit(ctx, |ctx| {
+                        PromiseSettleOp::new(ctx, perry_mir::SettleKind::Fulfill, promise, val)
+                    });
+                    return Ok(None);
+                }
+                "\0perry_promise_reject" => {
+                    let [promise_expr, reason_expr] = args else {
+                        bail_internal!("promise reject expects promise and reason");
+                    };
+                    let promise = self.expression(ctx, promise_expr)?;
+                    let reason = self.expression(ctx, reason_expr)?;
+                    self.emit(ctx, |ctx| {
+                        PromiseSettleOp::new(ctx, perry_mir::SettleKind::Reject, promise, reason)
+                    });
+                    return Ok(None);
+                }
+                "\0perry_timer" => {
+                    let [delay_expr, signal_expr] = args else {
+                        bail_internal!("timer expects delay and signal");
+                    };
+                    let delay = self.expression(ctx, delay_expr)?;
+                    let delay = self.arithmetic(ctx, delay);
+                    let number = FP64Type::get(ctx).into();
+                    let undef = self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number));
+                    let signal =
+                        self.typed_operand(ctx, signal_expr, Kind::Abort, "an AbortSignal")?;
+                    return Ok(Some(self.emit_value(ctx, |ctx| {
+                        TimerOp::new(ctx, delay, undef, Some(signal))
+                    })));
+                }
+                _ => {}
+            }
+        }
         if let Some(call) = hir_compat::runtime_call(callee, args) {
             return match call {
                 RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
@@ -211,6 +267,14 @@ impl<'s> FunctionBuilder<'s> {
                     };
                 }
                 if class == "Promise" {
+                    if property == "resolve" && args.is_empty() {
+                        let undef = self.emit_value(ctx, |ctx| {
+                            UndefinedOp::new(ctx, FP64Type::get(ctx).into())
+                        });
+                        return Ok(Some(
+                            self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, undef)),
+                        ));
+                    }
                     if let ("resolve" | "reject", [value]) = (property.as_str(), args) {
                         return self.promise_settled(ctx, property, value, None).map(Some);
                     }
