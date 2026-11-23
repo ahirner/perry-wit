@@ -505,19 +505,16 @@ impl<'h, 'a> Solver<'h, 'a> {
         pairs: impl Iterator<Item = (&'b str, &'h Expr)>,
     ) -> Result<Ty> {
         let mut props = Vec::new();
-        let mut keep_mask = 0u64;
         let mut has_zero_sized_func = false;
-        for (idx, (name, expr)) in pairs.enumerate() {
+        for (name, expr) in pairs {
             let ty = self.eval_expr(s, expr)?;
             self.invalidate_conservative_cell(ty);
-            self.check_stage1_escaping_func(s.inst, ty, 0)?;
+            self.check_escaping_func(s.inst, ty, 0, s.current_span)?;
             if self
                 .types
                 .is_zero_sized_func(ty, &self.index.capture_free_templates)
             {
                 has_zero_sized_func = true;
-            } else if idx < 64 {
-                keep_mask |= 1u64 << idx;
             }
             let ty = self.types.normalize_for_storage(self.ctx, self.decls, ty);
             props.push(ObjectProp {
@@ -527,14 +524,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 readonly: false,
             });
         }
+        let obj_ty = self.types.object(&props, None);
         if has_zero_sized_func || matches!(site_expr, Expr::Object(_)) {
-            self.record_site(
-                s.inst,
-                site_expr,
-                SiteResolution::ObjectLiteral { keep_mask },
-            );
+            self.record_site(s.inst, site_expr, SiteResolution::ObjectLiteral(obj_ty));
         }
-        Ok(self.types.object(&props, None))
+        Ok(obj_ty)
     }
 
     pub(super) fn eval_static_method_call(
@@ -600,10 +594,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         };
         self.record_site(inst_id, expr, res);
-        Ok((
-            target,
-            self.read_loc(self.instances[target].return_loc, inst_id),
-        ))
+        let return_loc = self
+            .instances
+            .get(target)
+            .ok_or_else(|| Diagnostic::internal("missing call target instance"))?
+            .return_loc;
+        Ok((target, self.read_loc(return_loc, inst_id)))
     }
 
     pub(super) fn resolve_class_inst(
@@ -736,6 +732,18 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(res) = self.eval_builtin_import_call(name, args, &arg_tys) {
                 return Ok(res);
             }
+            if byte_offset != 0
+                && !name.starts_with("js_")
+                && !name.starts_with("__")
+                && arg_tys.iter().any(|&a| self.types.has_func(a))
+            {
+                return Err(self.metadata.locations.annotate_call(
+                    Diagnostic::unsupported(format!(
+                        "passing a callback to runtime '{name}' requires the runtime to call a guest function"
+                    )),
+                    byte_offset,
+                ));
+            }
             if let Some((_, sig)) = self.decls.foreign_functions.get(name.as_str()) {
                 let ret = self.types.intern_hir(self.ctx, &sig.return_type, true);
                 return Ok(
@@ -760,6 +768,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         if callee_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
             return Ok(Ty::BOTTOM);
         }
+        if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
+            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError);
+            return Ok(Ty::NEVER);
+        }
         if let Some(idents) = self.types.func_union_members(callee_ty) {
             return self.eval_dispatch_call(
                 s,
@@ -771,7 +783,33 @@ impl<'h, 'a> Solver<'h, 'a> {
                 byte_offset,
             );
         }
+        let (stripped_callee, nullish) = self.types.strip_nullish(callee_ty);
+        if nullish.is_some()
+            && let TyKind::Func(ident) = self.types.kind(stripped_callee)
+        {
+            return self.eval_dispatch_call(
+                s,
+                expr,
+                callee_ty,
+                &[ident],
+                None,
+                &arg_tys,
+                byte_offset,
+            );
+        }
         let TyKind::Func(ident) = self.types.kind(callee_ty) else {
+            if !self.types.is_open(callee_ty) && callee_ty != Ty::DYNAMIC {
+                return Err(attach_inst_chain(
+                    &self.instances,
+                    self.index,
+                    &self.metadata.locations,
+                    self.metadata.locations.annotate_call(
+                        diag!(codes::TYPE_MISMATCH, "expression is not callable"),
+                        byte_offset,
+                    ),
+                    s.inst,
+                ));
+            }
             return Ok(Ty::OPEN);
         };
         for &a in &arg_tys {
@@ -1027,6 +1065,25 @@ impl<'h, 'a> Solver<'h, 'a> {
                 byte_offset,
             );
         }
+        if let Some(prop_ty) = prop_ty {
+            let (stripped_prop, nullish) = self.types.strip_nullish(prop_ty);
+            if nullish.is_some()
+                && let TyKind::Func(ident) = self.types.kind(stripped_prop)
+            {
+                if arg_tys.contains(&Ty::BOTTOM) {
+                    return Ok(Ty::BOTTOM);
+                }
+                return self.eval_dispatch_call(
+                    s,
+                    expr,
+                    prop_ty,
+                    &[ident],
+                    Some(stripped),
+                    &arg_tys,
+                    byte_offset,
+                );
+            }
+        }
         if let Some(prop_ty) = prop_ty
             && let TyKind::Func(ident) = self.types.kind(prop_ty)
         {
@@ -1084,6 +1141,24 @@ impl<'h, 'a> Solver<'h, 'a> {
                 },
             ));
         }
+        let is_collection_or_open = self.types.is_open(stripped)
+            || matches!(
+                self.types.kind(stripped),
+                TyKind::Array(_) | TyKind::Cell { .. }
+            )
+            || matches!(self.types.kind(stripped), TyKind::Generic { base, .. }
+                if matches!(base.hir(self.ctx), HirType::Named(n) if matches!(n.as_str(), "Map" | "Set" | "ReadonlyMap" | "ReadonlySet")));
+        if byte_offset != 0
+            && !is_collection_or_open
+            && arg_tys.iter().any(|&a| self.types.has_func(a))
+        {
+            return Err(self.metadata.locations.annotate_call(
+                Diagnostic::unsupported(format!(
+                    "passing a callback to runtime '{name}' requires the runtime to call a guest function"
+                )),
+                byte_offset,
+            ));
+        }
         Ok(Ty::OPEN)
     }
 
@@ -1121,7 +1196,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             {
                 cw.union_with(&tw);
             }
-            let r = self.read_loc(self.instances[target].return_loc, s.inst);
+            let return_loc = self
+                .instances
+                .get(target)
+                .ok_or_else(|| Diagnostic::internal("missing dispatch call target instance"))?
+                .return_loc;
+            let r = self.read_loc(return_loc, s.inst);
             ret = self.types.join(ret, r);
             arms.push((ident, target));
         }
@@ -1136,6 +1216,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 strip_arg_mask,
                 arg_tys: arg_tuple,
                 recv_ty,
+                call_byte_offset: byte_offset,
             },
         );
         Ok(ret)
@@ -1188,7 +1269,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .iter()
                 .filter(|p| p.default.is_none() && !p.is_rest)
                 .count();
-            if cb_view.is_async != expected.is_async
+            if (!cb_view.is_async && expected.is_async)
                 || cb_view.is_generator != expected.is_generator
                 || required > expected.params.len()
             {

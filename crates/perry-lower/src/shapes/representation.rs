@@ -153,7 +153,7 @@ impl Shapes<'_> {
             }
             HirType::Function(_) => bail_diag!(
                 codes::UNSUPPORTED_TYPE,
-                "a function value requires a statically known callee; storing or returning a function is not supported"
+                "unresolved function value type reached lowering"
             ),
             HirType::Symbol | HirType::TypeVar(_) => {
                 bail_diag!(codes::UNSUPPORTED_TYPE, "type {ty:?} is not supported yet")

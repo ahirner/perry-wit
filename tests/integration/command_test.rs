@@ -755,6 +755,61 @@ console.log(
 "#,
             "6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
         ),
+        (
+            "loop_let_boxes_nullable_functions_typeof_and_wide_objects",
+            r#"
+function makeLoopFns() {
+  const fs = [];
+  for (let i = 0; i < 3; i++) {
+    fs.push(() => i);
+    i += 0;
+  }
+  return fs;
+}
+const modLoopFns = [];
+for (let i = 0; i < 3; i++) modLoopFns.push(() => i);
+
+function maybeFn(b) { return b ? () => 1 : null; }
+function runOpt(cb) { if (cb) return cb(2); return 0; }
+const mf1 = maybeFn(true);
+const mf2 = maybeFn(false);
+let ifRes = -1;
+if (mf1) ifRes = mf1();
+let unguardedErr = "none";
+try { mf2(); } catch (e) { unguardedErr = "TypeError"; }
+
+const f0 = () => 1;
+const arr0 = [f0];
+const wide = {
+  p0: 0, p1: 1, p2: 2, p3: 3, p4: 4, p5: 5, p6: 6, p7: 7, p8: 8, p9: 9,
+  p10: 10, p11: 11, p12: 12, p13: 13, p14: 14, p15: 15, p16: 16, p17: 17, p18: 18, p19: 19,
+  p20: 20, p21: 21, p22: 22, p23: 23, p24: 24, p25: 25, p26: 26, p27: 27, p28: 28, p29: 29,
+  p30: 30, p31: 31, p32: 32, p33: 33, p34: 34, p35: 35, p36: 36, p37: 37, p38: 38, p39: 39,
+  p40: 40, p41: 41, p42: 42, p43: 43, p44: 44, p45: 45, p46: 46, p47: 47, p48: 48, p49: 49,
+  p50: 50, p51: 51, p52: 52, p53: 53, p54: 54, p55: 55, p56: 56, p57: 57, p58: 58, p59: 59,
+  p60: 60, p61: 61, p62: 62, p63: 63, p64: 64, p65: 65, p66: 66, p67: 67, p68: 68, p69: 69,
+  m: f0,
+};
+console.log(
+  makeLoopFns().map((f) => f()).join(","),
+  modLoopFns.map((f) => f()).join(","),
+  mf1 ? mf1() : -1,
+  mf2 ? mf2() : -1,
+  ifRes,
+  runOpt((x) => x * 3),
+  runOpt(undefined),
+  unguardedErr,
+  typeof f0,
+  typeof arr0[0],
+  typeof wide.m,
+  typeof mf1,
+  typeof mf2,
+  wide.p69,
+  wide.m(),
+);
+"#,
+            "0,1,2 0,1,2 1 -1 1 6 0 TypeError function function function function object 69 1\n",
+        ),
     ];
     for &(name, source, expected) in cases {
         let run = execute(source).await?;

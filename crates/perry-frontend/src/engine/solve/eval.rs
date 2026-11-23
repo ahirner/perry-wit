@@ -534,9 +534,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
                 let norm = self.types.normalize_for_storage(self.ctx, self.decls, ty);
-                self.check_stage1_escaping_func(s.inst, norm, 0)?;
+                self.check_escaping_func(s.inst, norm, 0, s.current_span)?;
                 s.returned = self.types.join(s.returned, norm);
-                self.check_stage1_escaping_func(s.inst, s.returned, 0)?;
+                self.check_escaping_func(s.inst, s.returned, 0, s.current_span)?;
                 if let Some(e) = value {
                     let dst = self
                         .instances

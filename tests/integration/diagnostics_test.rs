@@ -94,7 +94,7 @@ fn named_generic_functions_specialize_through_aliases_and_builtin_callbacks() ->
 fn function_arguments_check_declared_results_and_locate_escaping_values() -> anyhow::Result<()> {
     for (source, at, needle) in [
         (
-            "function make() { return () => 1; } export function run(): boolean { const a = make(); const b = make(); return a === b; }",
+            "function make() { return () => 1; } export function run(): boolean { const a = make(); const b = make(); const r = a === b; const x = 1; const y = 2; return r && x === y; }",
             "a === b",
             "capture-free closure literal",
         ),
@@ -105,8 +105,13 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
         ),
         (
             "export function run(n: number) { return n ? (() => 1) : 42; }",
-            "(() => 1) : 42",
+            "n ? (() => 1) : 42",
             "joining function values with non-function values",
+        ),
+        (
+            "export function run(): number { const o = { f: () => 1 }; o.f = () => 2; return o.f(); }",
+            "o.f = () => 2",
+            "reassigning function property 'f' on an object literal",
         ),
         (
             "export function run(): number { new Promise((resolve) => resolve(1)); return 1; }",
@@ -121,16 +126,34 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
             diagnostic.message().contains(needle),
             "expected '{needle}' in: {err}"
         );
-        if let Some(span) = diagnostic.span() {
-            assert!(
-                source[span.start_byte..].starts_with(at)
-                    || span.start_byte == source.rfind(at).unwrap_or(span.start_byte),
-                "unexpected span {}..{} for '{at}' in: {err}",
-                span.start_byte,
-                span.end_byte
-            );
-        }
+        assert_eq!(
+            diagnostic.span().context("diagnostic span")?.start_byte,
+            source.rfind(at).unwrap(),
+            "{err}"
+        );
     }
+    let non_callable = "export function run(): number { const x = 1; return x(); }";
+    let err = perry_wit::compile_core(non_callable, "call.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");
+    assert_eq!(
+        err.primary()
+            .span()
+            .context("non-callable span")?
+            .start_byte,
+        non_callable.rfind("x()").unwrap(),
+        "{err}"
+    );
+    let async_mixed = "export function run(): number { const fs = [async () => 1, () => 2]; let n = 0; for (const f of fs) { f(); n++; } return n; }";
+    let err = perry_wit::compile_core(async_mixed, "dispatch.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::UNSUPPORTED_TYPE, "{err}");
+    assert_eq!(
+        err.primary()
+            .span()
+            .context("dispatcher union span")?
+            .start_byte,
+        async_mixed.rfind("f()").unwrap(),
+        "{err}"
+    );
     let source = "function use(f:(n:number)=>number):number {return 1;} export function run():number {return use(2);}";
     let err = perry_wit::compile_core(source, "wrong.ts").unwrap_err();
     assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");
@@ -200,7 +223,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
     program
         .source
         .contents
-        .extend_from_slice(b"\nexport { helper };");
+        .extend_from_slice(b"\nconst escaped = {helper};");
     let error = api::compile_core(&program).unwrap_err();
     program.source.contents.truncate(end);
     let diagnostic = error.primary();

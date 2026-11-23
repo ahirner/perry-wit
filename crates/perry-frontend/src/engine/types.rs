@@ -871,7 +871,7 @@ impl TypeTable {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn materialize_hir_with(
+    pub(crate) fn materialize_hir_with<Err>(
         &self,
         ctx: &Context,
         ty: Ty,
@@ -880,8 +880,8 @@ impl TypeTable {
         capture_free: &super::bitset::BitSet,
         escaping_env: &super::bitset::BitSet,
         class_name: &impl Fn(ClassInstId) -> Option<String>,
-        env_fields: &impl Fn(FuncIdentity) -> Vec<(String, Ty, bool)>,
-    ) -> HirType {
+        env_fields: &impl Fn(FuncIdentity) -> std::result::Result<Vec<(String, Ty, bool)>, Err>,
+    ) -> std::result::Result<HirType, Err> {
         Materializer {
             table: self,
             ctx,
@@ -904,9 +904,18 @@ impl TypeTable {
         class_name: &impl Fn(ClassInstId) -> Option<String>,
     ) -> HirType {
         let empty = super::bitset::BitSet::default();
-        self.materialize_hir_with(ctx, ty, &[], &empty, &empty, &empty, class_name, &|_| {
-            Vec::new()
-        })
+        match self.materialize_hir_with::<std::convert::Infallible>(
+            ctx,
+            ty,
+            &[],
+            &empty,
+            &empty,
+            &empty,
+            class_name,
+            &|_| Ok(Vec::new()),
+        ) {
+            Ok(h) => h,
+        }
     }
 
     pub(crate) fn is_valid_dict_value(&self, elem: Ty, dict_read: bool) -> bool {
@@ -1182,8 +1191,11 @@ struct Materializer<'a, F, E> {
     visiting_funcs: Vec<FuncIdentity>,
 }
 
-impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, Ty, bool)>>
-    Materializer<'_, F, E>
+impl<
+    Err,
+    F: Fn(ClassInstId) -> Option<String>,
+    E: Fn(FuncIdentity) -> std::result::Result<Vec<(String, Ty, bool)>, Err>,
+> Materializer<'_, F, E>
 {
     fn empty_object(index_signature: Option<Box<HirType>>) -> HirType {
         HirType::Object(ObjectType {
@@ -1193,29 +1205,29 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
             index_signature,
         })
     }
-    fn run_cell(&mut self, loc: LocId, ty: Ty) -> HirType {
+    fn run_cell(&mut self, loc: LocId, ty: Ty) -> std::result::Result<HirType, Err> {
         self.visiting.push(loc);
         let hir = self.run(ty);
         self.visiting.pop();
         hir
     }
-    fn run_slot(&mut self, ty: Ty) -> HirType {
+    fn run_slot(&mut self, ty: Ty) -> std::result::Result<HirType, Err> {
         if self.table.is_zero_sized_func(ty, self.capture_free) {
-            HirType::Number
+            Ok(HirType::Number)
         } else {
             self.run(ty)
         }
     }
-    fn func_env_hir(&mut self, ident: FuncIdentity) -> HirType {
+    fn func_env_hir(&mut self, ident: FuncIdentity) -> std::result::Result<HirType, Err> {
         if self.visiting_funcs.contains(&ident) {
-            return func_tag_hir(ident);
+            return Ok(func_tag_hir(ident));
         }
         self.visiting_funcs.push(ident);
-        let fields = (self.env_fields)(ident);
+        let fields = (self.env_fields)(ident)?;
         let mut env_props = HashMap::with_capacity(fields.len());
         let mut env_order = Vec::with_capacity(fields.len());
         for (name, fty, is_boxed) in fields {
-            let inner = self.run(fty);
+            let inner = self.run(fty)?;
             let ty = if is_boxed { box_hir(inner) } else { inner };
             env_order.push(name.clone());
             env_props.insert(
@@ -1251,15 +1263,15 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
                 readonly: false,
             },
         );
-        HirType::Object(ObjectType {
+        Ok(HirType::Object(ObjectType {
             name: None,
             properties,
             property_order: Some(vec!["tag".to_owned(), "val".to_owned()]),
             index_signature: None,
-        })
+        }))
     }
-    fn run(&mut self, ty: Ty) -> HirType {
-        match self.table.kind(ty) {
+    fn run(&mut self, ty: Ty) -> std::result::Result<HirType, Err> {
+        Ok(match self.table.kind(ty) {
             TyKind::Bottom | TyKind::Open => HirType::Any,
             TyKind::Dynamic => HirType::Unknown,
             TyKind::Never => HirType::Never,
@@ -1272,29 +1284,33 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
             TyKind::String => HirType::String,
             TyKind::Symbol => HirType::Symbol,
             TyKind::Leaf(id) | TyKind::TypeVar(id) => id.hir(self.ctx).clone(),
-            TyKind::Array(i) => HirType::Array(Box::new(self.run_slot(i))),
-            TyKind::Promise(i) => HirType::Promise(Box::new(self.run(i))),
+            TyKind::Array(i) => HirType::Array(Box::new(self.run_slot(i)?)),
+            TyKind::Promise(i) => HirType::Promise(Box::new(self.run(i)?)),
             TyKind::Cell { loc, kind } => {
                 if self.visiting.contains(&loc) {
-                    return if kind.is_array() {
+                    return Ok(if kind.is_array() {
                         HirType::Array(Box::new(HirType::Any))
                     } else {
                         Self::empty_object(None)
-                    };
+                    });
                 }
                 let elem = self.locations.get(loc.index()).copied().unwrap_or(Ty::OPEN);
                 if kind.is_array() {
                     let inner = if self.table.is_zero_sized_func(elem, self.capture_free) {
                         HirType::Number
                     } else {
-                        self.run_cell(loc, elem)
+                        self.run_cell(loc, elem)?
                     };
                     HirType::Array(Box::new(inner))
                 } else {
-                    let idx = self
+                    let idx = if self
                         .table
                         .is_valid_dict_value(elem, self.dict_reads.contains(loc.index()))
-                        .then(|| Box::new(self.run_cell(loc, elem)));
+                    {
+                        Some(Box::new(self.run_cell(loc, elem)?))
+                    } else {
+                        None
+                    };
                     Self::empty_object(idx)
                 }
             }
@@ -1303,7 +1319,7 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
                     .ty_slice(s)
                     .iter()
                     .map(|&t| self.run_slot(t))
-                    .collect(),
+                    .collect::<std::result::Result<Vec<_>, Err>>()?,
             ),
             TyKind::Union(s) => {
                 let slice = self.table.ty_slice(s);
@@ -1314,12 +1330,12 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
                 for &t in slice {
                     let h = if has_func && let TyKind::Func(ident) = self.table.kind(t) {
                         if self.escaping_env.contains(ident.template.index()) {
-                            self.func_env_hir(ident)
+                            self.func_env_hir(ident)?
                         } else {
                             func_tag_hir(ident)
                         }
                     } else {
-                        self.run(t)
+                        self.run(t)?
                     };
                     if !members.contains(&h) {
                         members.push(h);
@@ -1341,7 +1357,7 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
                     .ty_slice(args)
                     .iter()
                     .map(|&t| self.run(t))
-                    .collect(),
+                    .collect::<std::result::Result<Vec<_>, Err>>()?,
             },
             TyKind::Object { props, index } => {
                 let mut properties = HashMap::with_capacity(props.len as usize);
@@ -1355,22 +1371,26 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
                     properties.insert(
                         name,
                         PropertyInfo {
-                            ty: self.run(prop.ty),
+                            ty: self.run(prop.ty)?,
                             optional: prop.optional,
                             readonly: prop.readonly,
                         },
                     );
                 }
+                let idx = match index {
+                    Some(t) => Some(Box::new(self.run(t)?)),
+                    None => None,
+                };
                 HirType::Object(ObjectType {
                     name: None,
                     properties,
                     property_order: (!order.is_empty()).then_some(order),
-                    index_signature: index.map(|t| Box::new(self.run(t))),
+                    index_signature: idx,
                 })
             }
             TyKind::ClassInst(inst) => HirType::Named((self.class_name)(inst).unwrap_or_default()),
             TyKind::Func(ident) if self.escaping_env.contains(ident.template.index()) => {
-                self.func_env_hir(ident)
+                self.func_env_hir(ident)?
             }
             TyKind::Func(_) => HirType::Function(perry_hir::types::FunctionType {
                 params: Vec::new(),
@@ -1378,7 +1398,7 @@ impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, T
                 is_async: false,
                 is_generator: false,
             }),
-        }
+        })
     }
 }
 

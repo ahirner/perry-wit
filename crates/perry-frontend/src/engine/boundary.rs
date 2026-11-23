@@ -119,6 +119,7 @@ pub(crate) struct ModuleIndex<'h> {
     local_to_idx: Vec<Option<LocalIdx>>,
     pub(crate) local_inferred: BitSet,
     pub(crate) local_deferred: BitSet,
+    pub(crate) local_for_head: BitSet,
     pub(crate) local_nullish_init: BitSet,
     pub(crate) local_reassigned: BitSet,
     pub(crate) local_param: BitSet,
@@ -498,6 +499,10 @@ impl<'h> ModuleIndex<'h> {
     pub(crate) fn is_inferred_local(&self, hir: &HirModule, id: LocalId, lidx: LocalIdx) -> bool {
         self.local_inferred.contains(lidx.index()) || !hir.local_source_spans.contains_key(&id)
     }
+    pub(crate) fn is_for_head_local(&self, id: LocalId) -> bool {
+        self.local_idx(id)
+            .is_some_and(|li| self.local_for_head.contains(li.index()))
+    }
     pub(crate) fn is_non_global_local(&self, id: LocalId) -> bool {
         self.local_idx(id)
             .is_some_and(|li| !self.local_module.contains(li.index()))
@@ -584,6 +589,9 @@ impl<'h> ModuleIndex<'h> {
             if facts.is_deferred(span.start) {
                 self.local_deferred.insert(idx.index());
             }
+            if facts.is_for_head_let(span.start) {
+                self.local_for_head.insert(idx.index());
+            }
             if facts.is_param_annotated(span.start) {
                 self.local_param_annotated.insert(idx.index());
             }
@@ -640,7 +648,7 @@ impl<'h> ModuleIndex<'h> {
                         .is_some_and(|s| !scan.facts.is_inferred(s.start, s.end));
                     let declared = scan.types.intern_hir(scan.ctx, ty, explicit);
                     let local = self.ensure_local(*id, owner, declared, scan.hir, scan.facts);
-                    if is_module_top {
+                    if is_module_top && !self.local_for_head.contains(local.index()) {
                         self.local_module.insert(local.index());
                         let loc = self.add_location(Ty::BOTTOM);
                         if let Some(slot) = self.local_loc.get_mut(local.index()) {
@@ -768,6 +776,7 @@ impl<'h> ModuleIndex<'h> {
             | Expr::SetNewFromArray(_)
             | Expr::StaticMethodCall { .. }
             | Expr::Compare { .. }
+            | Expr::TypeOf(_)
             | Expr::FuncRef(_) => Self::record_site_expr(scan, owner, expr),
             Expr::ArrayMap { callback, .. }
             | Expr::ArrayFilter { callback, .. }

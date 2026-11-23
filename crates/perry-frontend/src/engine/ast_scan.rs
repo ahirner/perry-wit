@@ -11,9 +11,11 @@ pub(crate) struct SourceFacts {
     pub(crate) sparse_arrays: bool,
     pub(crate) inferred_spans: Vec<(u32, u32)>,
     pub(crate) deferred_starts: Vec<u32>,
+    pub(crate) for_head_let_starts: Vec<u32>,
     pub(crate) param_annotated_starts: Vec<u32>,
     pub(crate) exported_var_starts: Vec<u32>,
     pub(crate) callable_comparisons: Vec<Span>,
+    pub(crate) conditional_spans: Vec<Span>,
     pub(crate) param_value_uses: Vec<(u32, Span)>,
 }
 
@@ -23,6 +25,9 @@ impl SourceFacts {
     }
     pub(crate) fn is_deferred(&self, start: u32) -> bool {
         self.deferred_starts.binary_search(&start).is_ok()
+    }
+    pub(crate) fn is_for_head_let(&self, start: u32) -> bool {
+        self.for_head_let_starts.binary_search(&start).is_ok()
     }
     pub(crate) fn is_param_annotated(&self, start: u32) -> bool {
         self.param_annotated_starts.binary_search(&start).is_ok()
@@ -99,7 +104,7 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
     Ok(())
 }
 
-pub(crate) fn scan_ast(module: &ast::Module, _locations: &Locations<'_>) -> Result<SourceFacts> {
+pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
     #[derive(Default)]
     struct AstScanner {
         facts: SourceFacts,
@@ -182,6 +187,18 @@ pub(crate) fn scan_ast(module: &ast::Module, _locations: &Locations<'_>) -> Resu
             decl.function.visit_with(self);
             self.enclosing_depth -= 1;
         }
+        fn visit_for_stmt(&mut self, stmt: &ast::ForStmt) {
+            if let Some(ast::VarDeclOrExpr::VarDecl(var)) = &stmt.init
+                && var.kind == ast::VarDeclKind::Let
+            {
+                for decl in &var.decls {
+                    hir_compat::pattern_bindings(&decl.name, false, &mut |id, _| {
+                        self.facts.for_head_let_starts.push(id.span.lo.0);
+                    });
+                }
+            }
+            stmt.visit_children_with(self);
+        }
         fn visit_for_head(&mut self, head: &ast::ForHead) {
             if let ast::ForHead::VarDecl(var) = head {
                 for decl in &var.decls {
@@ -237,6 +254,19 @@ pub(crate) fn scan_ast(module: &ast::Module, _locations: &Locations<'_>) -> Resu
             }
             expr.visit_children_with(self);
         }
+        fn visit_cond_expr(&mut self, cond: &ast::CondExpr) {
+            self.facts.conditional_spans.push(cond.span);
+            cond.visit_children_with(self);
+        }
+        fn visit_assign_expr(&mut self, assign: &ast::AssignExpr) {
+            if matches!(
+                &assign.left,
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(_))
+            ) {
+                self.facts.conditional_spans.push(assign.span);
+            }
+            assign.visit_children_with(self);
+        }
         fn visit_bin_expr(&mut self, expr: &ast::BinExpr) {
             if matches!(
                 expr.op,
@@ -245,15 +275,19 @@ pub(crate) fn scan_ast(module: &ast::Module, _locations: &Locations<'_>) -> Resu
                     | ast::BinaryOp::EqEq
                     | ast::BinaryOp::NotEq
             ) {
-                if self.is_closure_expr(&expr.left)
-                    || self.is_closure_expr(&expr.right)
-                    || matches!(
-                        (&*expr.left, &*expr.right),
-                        (
-                            ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_),
-                            ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
-                        )
-                    )
+                let is_undef =
+                    |e: &ast::Expr| matches!(e, ast::Expr::Ident(id) if id.sym == "undefined");
+                if !is_undef(&expr.left)
+                    && !is_undef(&expr.right)
+                    && (self.is_closure_expr(&expr.left)
+                        || self.is_closure_expr(&expr.right)
+                        || matches!(
+                            (&*expr.left, &*expr.right),
+                            (
+                                ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_),
+                                ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
+                            )
+                        ))
                 {
                     self.facts.callable_comparisons.push(expr.span);
                 }
@@ -280,6 +314,8 @@ pub(crate) fn scan_ast(module: &ast::Module, _locations: &Locations<'_>) -> Resu
     scanner.facts.inferred_spans.dedup();
     scanner.facts.deferred_starts.sort_unstable();
     scanner.facts.deferred_starts.dedup();
+    scanner.facts.for_head_let_starts.sort_unstable();
+    scanner.facts.for_head_let_starts.dedup();
     scanner.facts.param_annotated_starts.sort_unstable();
     scanner.facts.param_annotated_starts.dedup();
     scanner.facts.exported_var_starts.sort_unstable();

@@ -102,7 +102,10 @@ pub(crate) enum SiteResolution {
         strip_arg_mask: u64,
         arg_tys: Ty,
         recv_ty: Option<Ty>,
+        call_byte_offset: u32,
     },
+    ThrowTypeError,
+    FuncTypeOf(Ty),
     FuncCompare {
         left_ty: Ty,
         right_ty: Ty,
@@ -120,9 +123,7 @@ pub(crate) enum SiteResolution {
         class_inst: ClassInstId,
         strip_arg_mask: u64,
     },
-    ObjectLiteral {
-        keep_mask: u64,
-    },
+    ObjectLiteral(Ty),
     ZeroSizedArray,
     TaggedArray(Ty),
     ZeroSizedFieldSet,
@@ -225,6 +226,7 @@ struct EvalState<'h> {
     guards: Guards<'h>,
     iteration: hir_compat::Iteration,
     local_changed: bool,
+    current_span: Option<swc_common::Span>,
 }
 
 impl EvalState<'_> {
@@ -237,6 +239,7 @@ impl EvalState<'_> {
             guards: Guards::default(),
             iteration: hir_compat::Iteration::default(),
             local_changed: false,
+            current_span: None,
         }
     }
 }
@@ -554,8 +557,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             | SiteResolution::MethodCall { target, .. }
             | SiteResolution::Callback { target, .. } => f(target),
             SiteResolution::DispatchCall { arms, .. } => {
-                for &(_, target) in self.dispatch_arms.get(arms.range()).unwrap_or(&[]) {
-                    f(target);
+                if let Some(slice) = self.dispatch_arms.get(arms.range()) {
+                    for &(_, target) in slice {
+                        f(target);
+                    }
                 }
             }
             SiteResolution::ClassNew { class_inst, .. } => {
@@ -606,9 +611,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     }
                     FuncCoercion::DispatchCallback { arms, .. } => {
-                        for &(_, target) in self.dispatch_arms.get(arms.range()).unwrap_or(&[]) {
-                            if live.insert(target.index()) {
-                                queue.push(target);
+                        if let Some(slice) = self.dispatch_arms.get(arms.range()) {
+                            for &(_, target) in slice {
+                                if live.insert(target.index()) {
+                                    queue.push(target);
+                                }
                             }
                         }
                     }
@@ -1144,10 +1151,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         caller: Option<InstanceId>,
         call_byte_offset: u32,
     ) -> Diagnostic {
-        let name = self
-            .index
-            .view(template)
-            .map_or("function", |v| hir_compat::display_name(v.name));
+        let name = self.index.view(template).map_or_else(
+            || "function".to_owned(),
+            |v| {
+                let n = hir_compat::display_name(v.name);
+                if n.is_empty() || n.starts_with("callback_") {
+                    "anonymous function".to_owned()
+                } else {
+                    n.to_owned()
+                }
+            },
+        );
         let mut err = Diagnostic::unsupported(format!(
             "generic specialization limit of {INSTANCE_BUDGET} distinct argument lists reached for {name}"
         ));
@@ -1412,7 +1426,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if !self.index.local_module.contains(li)
                         && (self.index.local_reassigned.contains(li)
                             || self.index.local_written_from_closure.contains(li)
-                            || self.index.local_deferred.contains(li))
+                            || self.index.local_deferred.contains(li)
+                            || self.index.local_for_head.contains(li))
                     {
                         self.boxed_locals.insert(li);
                     }
@@ -1524,7 +1539,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         ) {
             return;
         }
-        if matches!(expr, Expr::Conditional { .. } | Expr::Logical { .. }) {
+        let inner = match expr {
+            Expr::Sequence(parts) if self.metadata.locations.operator_span(parts).is_some() => {
+                parts.last().unwrap_or(expr)
+            }
+            _ => expr,
+        };
+        if matches!(inner, Expr::Conditional { .. } | Expr::Logical { .. }) {
             return;
         }
         if self
@@ -1560,17 +1581,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn check_stage1_escaping_func(
+    pub(super) fn check_escaping_func(
         &mut self,
         inst_id: InstanceId,
         ty: Ty,
         byte_offset: u32,
+        span: Option<swc_common::Span>,
     ) -> Result<()> {
         self.mark_escaping_env(inst_id, ty);
-        if let TyKind::Union(span) = self.types.kind(ty)
+        if let TyKind::Union(u_span) = self.types.kind(ty)
             && self
                 .types
-                .ty_slice(span)
+                .ty_slice(u_span)
                 .iter()
                 .any(|&m| matches!(self.types.kind(m), TyKind::Func(_)))
             && !self.types.is_tagged_func_union(
@@ -1584,6 +1606,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             );
             if byte_offset != 0 {
                 err = self.metadata.locations.annotate_call(err, byte_offset);
+            } else if let Some(sp) = span {
+                err = self.metadata.locations.annotate(err, sp);
+            } else if let Some(sp) = self
+                .instances
+                .get(inst_id)
+                .and_then(|i| self.index.view(i.template))
+                .and_then(|v| self.metadata.locations.function_span(v.name))
+            {
+                err = err.with_span(sp);
             }
             return Err(attach_inst_chain(
                 &self.instances,

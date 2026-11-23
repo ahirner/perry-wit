@@ -79,6 +79,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
                         let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
+                        let local_span = self.hir.local_source_spans.get(id).map(|sp| {
+                            swc_common::Span::new(
+                                swc_common::BytePos(sp.start),
+                                swc_common::BytePos(sp.end),
+                            )
+                        });
                         if matches!(self.types.kind(existing), TyKind::Func(_))
                             || self.types.is_tagged_func_union(
                                 existing,
@@ -86,9 +92,19 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 &self.escaping_env_templates,
                             )
                         {
-                            self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                            self.check_escaping_func(
+                                s.inst,
+                                val_ty,
+                                0,
+                                s.current_span.or(local_span),
+                            )?;
                             let joined = self.types.join(existing, val_ty);
-                            self.check_stage1_escaping_func(s.inst, joined, 0)?;
+                            self.check_escaping_func(
+                                s.inst,
+                                joined,
+                                0,
+                                s.current_span.or(local_span),
+                            )?;
                             self.write_local_value(s, lidx, val_ty);
                         } else if let TyKind::Cell { loc, kind } = self.types.kind(existing) {
                             if kind == CellKind::Array {
@@ -112,7 +128,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 || self.index.local_nullish_init.contains(lidx.index())))
                             || self.types.is_open(existing)
                         {
-                            self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                            self.check_escaping_func(
+                                s.inst,
+                                val_ty,
+                                0,
+                                s.current_span.or(local_span),
+                            )?;
                             let norm = self
                                 .types
                                 .normalize_for_storage(self.ctx, self.decls, val_ty);
@@ -195,7 +216,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let r = self.eval_expr(s, right)?;
                 s.guards.truncate(depth);
                 let res = builtins::logical_result(self.types, *op, l, r);
-                self.check_stage1_escaping_func(s.inst, res, 0)?;
+                self.check_escaping_func(s.inst, res, 0, s.current_span)?;
                 self.record_coercion(s.inst, left, l, res);
                 self.record_coercion(s.inst, right, r, res);
                 Ok(res)
@@ -221,12 +242,21 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 s.guards.join(branch, then_writes, true, true);
                 let joined = self.types.join(then_ty, else_ty);
-                self.check_stage1_escaping_func(s.inst, joined, 0)?;
+                self.check_escaping_func(s.inst, joined, 0, s.current_span)?;
                 self.record_coercion(s.inst, then_expr, then_ty, joined);
                 self.record_coercion(s.inst, else_expr, else_ty, joined);
                 Ok(joined)
             }
             Expr::Sequence(parts) => {
+                if let Some(span) = self.metadata.locations.operator_raw_span(parts)
+                    && let Some(last) = parts.last()
+                {
+                    let prev = s.current_span;
+                    s.current_span = Some(span);
+                    let res = self.eval_expr(s, last);
+                    s.current_span = prev;
+                    return res;
+                }
                 let mut last = Ty::VOID;
                 for part in parts {
                     last = self.eval_expr(s, part)?;
@@ -258,7 +288,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     return Ok(Ty::BOTTOM);
                 }
                 for &et in &elem_tys {
-                    self.check_stage1_escaping_func(s.inst, et, 0)?;
+                    self.check_escaping_func(s.inst, et, 0, s.current_span)?;
                 }
                 if let [a, b] = elem_tys.as_slice()
                     && self.types.strip_nullish(*a).0 != self.types.strip_nullish(*b).0
@@ -272,7 +302,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .iter()
                     .copied()
                     .fold(Ty::BOTTOM, |acc, t| self.types.join(acc, t));
-                self.check_stage1_escaping_func(s.inst, joined, 0)?;
+                self.check_escaping_func(s.inst, joined, 0, s.current_span)?;
                 let arr_ty = self.types.array(joined);
                 if self
                     .types
@@ -378,18 +408,27 @@ impl<'h, 'a> Solver<'h, 'a> {
                 object,
                 property,
                 value,
+                byte_offset,
                 ..
             } => {
                 let (obj_ty, val_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, value)?);
-                self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                self.check_escaping_func(s.inst, val_ty, *byte_offset, s.current_span)?;
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
+                let objlit_prop = self.check_objlit_func_write(
+                    s.inst,
+                    obj_def,
+                    property,
+                    val_ty,
+                    *byte_offset,
+                    s.current_span,
+                )?;
                 self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?;
                 let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
                     && let Some(loc) = self.class_field_loc(cinst_id, property)
                 {
                     self.read_loc(loc, s.inst)
                 } else {
-                    val_ty
+                    objlit_prop.unwrap_or(val_ty)
                 };
                 if self
                     .types
@@ -453,17 +492,25 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.eval_expr(s, value)?,
                 );
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                if matches!(expr, Expr::PutValueSet { .. })
+                if let Expr::PutValueSet { byte_offset, .. } = expr
                     && let Expr::String(field_name) = index.as_ref()
                 {
-                    self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                    self.check_escaping_func(s.inst, val_ty, *byte_offset, s.current_span)?;
+                    let objlit_prop = self.check_objlit_func_write(
+                        s.inst,
+                        obj_def,
+                        field_name,
+                        val_ty,
+                        *byte_offset,
+                        s.current_span,
+                    )?;
                     self.write_class_or_setter(s.inst, obj_def, field_name, value, val_ty)?;
                     let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
                         && let Some(loc) = self.class_field_loc(cinst_id, field_name)
                     {
                         self.read_loc(loc, s.inst)
                     } else {
-                        val_ty
+                        objlit_prop.unwrap_or(val_ty)
                     };
                     if self
                         .types
@@ -701,6 +748,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(s, value)?;
                 self.eval_local_get(s, *set_id)
             }
+            Expr::TypeOf(operand) => {
+                let op_ty = self.eval_expr(s, operand)?;
+                if op_ty != Ty::BOTTOM && self.types.has_func(op_ty) {
+                    self.record_site(s.inst, expr, SiteResolution::FuncTypeOf(op_ty));
+                }
+                Ok(Ty::STRING)
+            }
             Expr::Compare { op, left, right }
                 if matches!(
                     op,
@@ -712,7 +766,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     && r != Ty::BOTTOM
                     && (self.types.has_func(l) || self.types.has_func(r))
                 {
-                    self.eval_func_compare(s.inst, expr, *op, l, r, left, right)?;
+                    self.eval_func_compare(s.inst, expr, *op, l, r, left, right, s.current_span)?;
                 }
                 Ok(Ty::BOOLEAN)
             }
@@ -778,6 +832,46 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
+    fn check_objlit_func_write(
+        &mut self,
+        inst_id: InstanceId,
+        obj_def: Ty,
+        property: &str,
+        val_ty: Ty,
+        byte_offset: u32,
+        span: Option<swc_common::Span>,
+    ) -> Result<Option<Ty>> {
+        if !matches!(self.types.kind(obj_def), TyKind::Object { .. }) {
+            return Ok(None);
+        }
+        let prop_ty = builtins::property_type(self.ctx, self.decls, self.types, obj_def, property);
+        let touches_func = !self.types.func_members(val_ty).is_empty()
+            || prop_ty.is_some_and(|p| !self.types.func_members(p).is_empty());
+        if touches_func
+            && val_ty != Ty::BOTTOM
+            && !prop_ty.is_some_and(|p| self.types.accepts(self.ctx, p, val_ty))
+        {
+            let mut err = Diagnostic::unsupported(format!(
+                "reassigning function property '{property}' on an object literal is not supported yet"
+            ));
+            if byte_offset != 0 {
+                if let Some(sp) = self.metadata.locations.member_span(byte_offset) {
+                    err = err.with_span(sp);
+                }
+            } else if let Some(sp) = span {
+                err = self.metadata.locations.annotate(err, sp);
+            }
+            return Err(attach_inst_chain(
+                &self.instances,
+                self.index,
+                &self.metadata.locations,
+                err,
+                inst_id,
+            ));
+        }
+        Ok(prop_ty)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn eval_func_compare(
         &mut self,
@@ -788,6 +882,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         r: Ty,
         left: &Expr,
         right: &Expr,
+        span: Option<swc_common::Span>,
     ) -> Result<()> {
         if matches!(l, Ty::NULL | Ty::VOID) || matches!(r, Ty::NULL | Ty::VOID) {
             return Ok(());
@@ -820,10 +915,17 @@ impl<'h, 'a> Solver<'h, 'a> {
                     let err = Diagnostic::unsupported(
                         "cannot compare a capture-free closure literal that may be evaluated more than once",
                     );
-                    return Err(match self.facts.callable_comparisons.last() {
-                        Some(&span) => self.metadata.locations.annotate(err, span),
+                    let err = match span {
+                        Some(sp) => self.metadata.locations.annotate(err, sp),
                         None => err,
-                    });
+                    };
+                    return Err(attach_inst_chain(
+                        &self.instances,
+                        self.index,
+                        &self.metadata.locations,
+                        err,
+                        inst_id,
+                    ));
                 }
             }
         }
@@ -1152,7 +1254,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 continue;
             }
             if let Some(key) = hir_compat::static_property(part) {
-                self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                self.check_escaping_func(s.inst, val_ty, 0, s.current_span)?;
                 let name = self.types.intern_name(key);
                 let norm = self
                     .types

@@ -1,12 +1,12 @@
 //! Synthetic function-value records, dispatchers, wideners, comparers, and callback wrappers.
 use super::{Emitter, EnvField, RewriteCtx};
 use crate::engine::solve::FuncCoercion;
-use crate::engine::types::{FuncIdentity, InstanceId, TemplateId, Ty, TyKind, func_tag};
+use crate::engine::types::{FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TySpan, func_tag};
 use perry_hir::{
     ir::{Class, ClassField, ClassFieldOrigin, CompareOp, Expr, Function, Param, Stmt, SwitchCase},
     types::{FuncId, LocalId, Type as HirType},
 };
-use perry_wit_diagnostics::{Diagnostic, Result};
+use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn is_boxed_local(&self, id: LocalId) -> bool {
@@ -41,15 +41,30 @@ impl<'h> Emitter<'h, '_> {
         None
     }
 
-    pub(super) fn env_layout(&self, ident: FuncIdentity) -> (Vec<EnvField>, Vec<LocalId>) {
+    pub(super) fn env_layout(&self, ident: FuncIdentity) -> Result<(Vec<EnvField>, Vec<LocalId>)> {
         let caps = self.index.template_captures(ident.template);
         let mut fields = Vec::with_capacity(caps.len());
         let mut self_caps = Vec::new();
         for &cap_id in caps {
-            let cap_ty = ident
+            let cap_ty = match ident
                 .capture_owner
                 .and_then(|o| self.local_ty_in_owner(o, cap_id))
-                .unwrap_or(Ty::OPEN);
+            {
+                Some(ty) => ty,
+                None => {
+                    let err = self.annotate_local(
+                        diag!(
+                            codes::MISSING_TYPE_ANNOTATION,
+                            "the value type cannot be inferred"
+                        ),
+                        cap_id,
+                    );
+                    return Err(match ident.capture_owner {
+                        Some(owner) => self.attach_inst_chain(err, owner),
+                        None => err,
+                    });
+                }
+            };
             if self.is_zero_sized_func(cap_ty) {
                 continue;
             }
@@ -61,10 +76,10 @@ impl<'h> Emitter<'h, '_> {
             let name = format!("c{}", fields.len());
             fields.push((cap_id, name, cap_ty, boxed));
         }
-        (fields, self_caps)
+        Ok((fields, self_caps))
     }
 
-    pub(super) fn materialize(&self, ty: Ty) -> HirType {
+    pub(super) fn materialize(&self, ty: Ty) -> Result<HirType> {
         self.types.materialize_hir_with(
             self.ctx,
             ty,
@@ -74,17 +89,27 @@ impl<'h> Emitter<'h, '_> {
             &self.solved.escaping_env_templates,
             &|cid| self.class_inst_name(cid),
             &|ident| {
-                let (fields, _) = self.env_layout(ident);
-                if fields.is_empty() {
+                let (fields, _) = self.env_layout(ident)?;
+                Ok(if fields.is_empty() {
                     vec![("_u".to_owned(), Ty::NUMBER, false)]
                 } else {
                     fields
                         .into_iter()
                         .map(|(_, name, fty, boxed)| (name, fty, boxed))
                         .collect()
-                }
+                })
             },
         )
+    }
+
+    pub(super) fn dispatch_arms_slice(
+        &self,
+        span: TySpan,
+    ) -> Result<&[(FuncIdentity, InstanceId)]> {
+        self.solved
+            .dispatch_arms
+            .get(span.range())
+            .ok_or_else(|| Diagnostic::internal("dispatch arm span out of range"))
     }
 
     pub(super) fn is_zero_sized_func(&self, ty: Ty) -> bool {
@@ -227,18 +252,15 @@ impl<'h> Emitter<'h, '_> {
             .map(|&(_, c)| c)
     }
 
-    pub(super) fn arm_return_hir(&self, inst_id: InstanceId) -> HirType {
-        let Some(inst) = self.solved.instances.get(inst_id) else {
-            return HirType::Void;
-        };
-        let ret = self
+    pub(super) fn arm_return_hir(&self, inst_id: InstanceId) -> Result<HirType> {
+        let inst = self.instance(inst_id, "missing dispatch arm instance")?;
+        let ret = *self
             .solved
             .locations
             .get(inst.return_loc)
-            .copied()
-            .unwrap_or(Ty::VOID);
+            .ok_or_else(|| Diagnostic::internal("missing dispatch arm return location"))?;
         if matches!(ret, Ty::BOTTOM | Ty::VOID | Ty::NEVER) || self.is_zero_sized_func(ret) {
-            HirType::Void
+            Ok(HirType::Void)
         } else {
             self.materialize(ret)
         }
@@ -316,7 +338,7 @@ impl<'h> Emitter<'h, '_> {
             params.push(Self::synth_param(
                 pid,
                 format!("__cb{i}"),
-                self.materialize(ity),
+                self.materialize(ity)?,
             ));
             call_args.push(Expr::LocalGet(pid));
         }
@@ -345,6 +367,68 @@ impl<'h> Emitter<'h, '_> {
         })
     }
 
+    pub(super) fn intern_throw_type_error(&mut self) -> Result<FuncId> {
+        if let Some(fid) = self.throw_type_error_fn {
+            return Ok(fid);
+        }
+        let fid = self.fresh_func_id()?;
+        let body = vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
+            "callee is not a function".into(),
+        ))))];
+        let func = Self::synth_function(
+            fid,
+            format!("__not_fn_{fid}"),
+            Vec::new(),
+            HirType::Never,
+            body,
+            false,
+        );
+        self.synth_functions.push(func);
+        self.throw_type_error_fn = Some(fid);
+        Ok(fid)
+    }
+
+    pub(super) fn intern_typeof_fn(&mut self, op_ty: Ty) -> Result<FuncId> {
+        if let Some(&fid) = self.typeof_fns.get(&op_ty) {
+            return Ok(fid);
+        }
+        let fid = self.fresh_func_id()?;
+        let pid = self.fresh_synthetic_local()?;
+        let (has_null, has_undef) = self.nullish_flags(op_ty);
+        let mut stmts = Vec::new();
+        if has_null {
+            stmts.push(Self::nullish_guard(
+                pid,
+                Expr::Null,
+                Expr::String("object".into()),
+            ));
+        }
+        if has_undef {
+            stmts.push(Self::nullish_guard(
+                pid,
+                Expr::Undefined,
+                Expr::String("undefined".into()),
+            ));
+        }
+        stmts.push(Stmt::Return(Some(Expr::String("function".into()))));
+        let func = Self::synth_function(
+            fid,
+            format!("__typeof_fn_{fid}"),
+            vec![Self::synth_param(
+                pid,
+                "__v".into(),
+                self.materialize(op_ty)?,
+            )],
+            HirType::String,
+            stmts,
+            false,
+        );
+        self.synth_functions.push(func);
+        self.typeof_fns.insert(op_ty, fid);
+        Ok(fid)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn intern_dispatcher(
         &mut self,
         callee_ty: Ty,
@@ -352,6 +436,7 @@ impl<'h> Emitter<'h, '_> {
         arg_tys: Ty,
         strip_arg_mask: u64,
         recv_ty: Option<Ty>,
+        call_byte_offset: u32,
     ) -> Result<(FuncId, bool)> {
         let needs_recv = recv_ty.is_some()
             && arms
@@ -367,14 +452,14 @@ impl<'h> Emitter<'h, '_> {
         let mut params = vec![Self::synth_param(
             fn_pid,
             "__fn".into(),
-            self.materialize(callee_ty),
+            self.materialize(callee_ty)?,
         )];
         let self_pid = if let Some(rty) = eff_recv {
             let sid = self.fresh_synthetic_local()?;
             params.push(Self::synth_param(
                 sid,
                 "__self".into(),
-                self.materialize(rty),
+                self.materialize(rty)?,
             ));
             Some(sid)
         } else {
@@ -389,7 +474,7 @@ impl<'h> Emitter<'h, '_> {
             params.push(Self::synth_param(
                 pid,
                 format!("__p{i}"),
-                self.materialize(aty),
+                self.materialize(aty)?,
             ));
             arg_pids.push(pid);
         }
@@ -399,7 +484,7 @@ impl<'h> Emitter<'h, '_> {
             if self.index.view(ident.template).is_some_and(|v| v.is_async) {
                 any_async = true;
             }
-            let r = self.arm_return_hir(target_inst);
+            let r = self.arm_return_hir(target_inst)?;
             if !unique_rets.contains(&r) {
                 unique_rets.push(r);
             }
@@ -409,6 +494,26 @@ impl<'h> Emitter<'h, '_> {
             [single] => single.clone(),
             _ => HirType::Union(unique_rets),
         };
+        let (has_null, has_undef) = self.nullish_flags(callee_ty);
+        let mut stmts = Vec::new();
+        if has_null {
+            stmts.push(Stmt::If {
+                condition: Self::eq_expr(Expr::LocalGet(fn_pid), Expr::Null),
+                then_branch: vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
+                    "callee is not a function".into(),
+                ))))],
+                else_branch: None,
+            });
+        }
+        if has_undef {
+            stmts.push(Stmt::If {
+                condition: Self::eq_expr(Expr::LocalGet(fn_pid), Expr::Undefined),
+                then_branch: vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
+                    "callee is not a function".into(),
+                ))))],
+                else_branch: None,
+            });
+        }
         let mut cases = Vec::with_capacity(arms.len());
         for &(ident, target_inst) in arms {
             let target_fid = self
@@ -441,7 +546,7 @@ impl<'h> Emitter<'h, '_> {
                 call_args.push(Expr::LocalGet(pid));
             }
             let call = Self::synth_call(target_fid, call_args, 0, 0);
-            let arm_ret = self.arm_return_hir(target_inst);
+            let arm_ret = self.arm_return_hir(target_inst)?;
             let body = if disp_ret == HirType::Void {
                 vec![Stmt::Expr(call), Stmt::Return(None)]
             } else if arm_ret == HirType::Void {
@@ -454,18 +559,26 @@ impl<'h> Emitter<'h, '_> {
                 body,
             });
         }
-        let switch = Stmt::Switch {
-            discriminant: Self::prop_get(Expr::LocalGet(fn_pid), "tag"),
-            cases,
-        };
-        let func = Self::synth_function(
-            fid,
-            format!("__dispatch_{fid}"),
-            params,
-            disp_ret,
-            vec![switch],
-            any_async,
-        );
+        if arms.len() == 1
+            && let Some(case) = cases.pop()
+        {
+            stmts.extend(case.body);
+        } else {
+            stmts.push(Stmt::Switch {
+                discriminant: Self::prop_get(Expr::LocalGet(fn_pid), "tag"),
+                cases,
+            });
+        }
+        let disp_name = format!("__dispatch_{fid}");
+        if call_byte_offset != 0 {
+            self.instantiations.push((
+                disp_name.clone(),
+                "dispatch".to_owned(),
+                call_byte_offset,
+                None,
+            ));
+        }
+        let func = Self::synth_function(fid, disp_name, params, disp_ret, stmts, any_async);
         self.synth_functions.push(func);
         self.dispatchers.insert(key, fid);
         Ok((fid, needs_recv))
@@ -509,9 +622,9 @@ impl<'h> Emitter<'h, '_> {
             vec![Self::synth_param(
                 pid,
                 "__fn".into(),
-                self.materialize(from),
+                self.materialize(from)?,
             )],
-            self.materialize(to),
+            self.materialize(to)?,
             stmts,
             false,
         );
@@ -596,8 +709,8 @@ impl<'h> Emitter<'h, '_> {
             fid,
             format!("__cmp_{fid}"),
             vec![
-                Self::synth_param(a_pid, "__a".into(), self.materialize(left_ty)),
-                Self::synth_param(b_pid, "__b".into(), self.materialize(right_ty)),
+                Self::synth_param(a_pid, "__a".into(), self.materialize(left_ty)?),
+                Self::synth_param(b_pid, "__b".into(), self.materialize(right_ty)?),
             ],
             HirType::Boolean,
             stmts,
@@ -614,7 +727,7 @@ impl<'h> Emitter<'h, '_> {
         }
         let fid = self.fresh_func_id()?;
         let pid = self.fresh_synthetic_local()?;
-        let hty = self.materialize(ty);
+        let hty = self.materialize(ty)?;
         let func = Self::synth_function(
             fid,
             format!("__cast_{fid}"),
@@ -628,7 +741,7 @@ impl<'h> Emitter<'h, '_> {
         Ok(fid)
     }
 
-    fn nullish_flags(&self, ty: Ty) -> (bool, bool) {
+    pub(super) fn nullish_flags(&self, ty: Ty) -> (bool, bool) {
         match self.types.kind(ty) {
             TyKind::Union(span) => {
                 let s = self.types.ty_slice(span);
