@@ -788,18 +788,6 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 }
 
-pub(super) fn callable_arg_mask(types: &TypeTable, escaping_env: &BitSet, args: &[Ty]) -> u64 {
-    args.iter().enumerate().take(64).fold(0u64, |m, (i, &ty)| {
-        if let TyKind::Func(ident) = types.kind(ty)
-            && !escaping_env.contains(ident.template.index())
-        {
-            m | (1u64 << i)
-        } else {
-            m
-        }
-    })
-}
-
 pub(super) fn first_type_var_name(ty: &HirType) -> Option<&str> {
     match ty {
         HirType::TypeVar(name) => Some(name.as_str()),

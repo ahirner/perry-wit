@@ -17,7 +17,7 @@ use crate::{
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
 };
-use eval::{callable_arg_mask, first_type_var_name};
+use eval::first_type_var_name;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
@@ -93,14 +93,13 @@ pub(crate) enum FuncCoercion {
 pub(crate) enum SiteResolution {
     DirectCall {
         target: InstanceId,
-        strip_arg_mask: u64,
+        argument_types: Ty,
         pass_receiver: bool,
         pass_env: bool,
     },
     DispatchCall {
         callee_ty: Ty,
         arms: TySpan,
-        strip_arg_mask: u64,
         arg_tys: Ty,
         recv_ty: Option<Ty>,
         call_byte_offset: u32,
@@ -114,7 +113,7 @@ pub(crate) enum SiteResolution {
     },
     MethodCall {
         target: InstanceId,
-        strip_arg_mask: u64,
+        argument_types: Ty,
     },
     Callback {
         target: InstanceId,
@@ -122,7 +121,7 @@ pub(crate) enum SiteResolution {
     },
     ClassNew {
         class_inst: ClassInstId,
-        strip_arg_mask: u64,
+        argument_types: Ty,
     },
     ObjectLiteral(Ty),
     ZeroSizedArray,

@@ -1,6 +1,12 @@
 //! Emit expressions from solved call sites and function-value coercions.
 use super::*;
 
+enum CalleeValue {
+    Static,
+    Environment,
+    Tagged,
+}
+
 impl<'h> Emitter<'h, '_> {
     pub(super) fn rewrite_expr(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
         let coercion = self.coercion_of(rctx.inst_id, expr);
@@ -62,7 +68,7 @@ impl<'h> Emitter<'h, '_> {
                     .unwrap_or(0)
                     .min(inputs.len());
                 let (disp_fid, _) =
-                    self.intern_dispatcher(callee_ty, &arm_slice, input_tys, 0, None, 0)?;
+                    self.intern_dispatcher(callee_ty, &arm_slice, input_tys, None, 0)?;
                 let disp_ret = self
                     .synth_functions
                     .iter()
@@ -215,95 +221,50 @@ impl<'h> Emitter<'h, '_> {
                 }
                 SiteResolution::DirectCall {
                     target,
-                    strip_arg_mask,
+                    argument_types,
                     pass_receiver,
                     pass_env,
                 } => {
                     let fid = self
                         .instance(target, "missing direct call target instance")?
                         .emitted_func_id;
-                    let mut out = expr.clone();
-                    match (expr, &mut out) {
-                        (
-                            Expr::Call {
-                                callee: orig_callee,
-                                args,
-                                ..
-                            },
-                            Expr::Call {
-                                callee,
-                                args: out_args,
-                                type_args,
-                                ..
-                            },
-                        ) => {
-                            let arg_ctx = rctx.with_expected(true);
-                            let mut rewritten_args = Vec::new();
-                            let pre_effect = if pass_env {
-                                if pass_receiver
-                                    && let Expr::PropertyGet { object, .. } = orig_callee.as_ref()
-                                {
-                                    rewritten_args.insert(0, self.rewrite_expr(&arg_ctx, object)?);
+                    if let Expr::CallSpread {
+                        args,
+                        type_args,
+                        byte_offset,
+                        byte_end,
+                        ..
+                    } = expr
+                    {
+                        let args = args
+                            .iter()
+                            .map(|arg| match arg {
+                                CallArg::Expr(e) => self.rewrite_expr(rctx, e).map(CallArg::Expr),
+                                CallArg::Spread(e) => {
+                                    self.rewrite_expr(rctx, e).map(CallArg::Spread)
                                 }
-                                let env_arg = if let Expr::LocalGet(id) = orig_callee.as_ref()
-                                    && rctx.self_capture_locals.contains(id)
-                                    && let Some(env_pid) = rctx.env_local
-                                {
-                                    Expr::LocalGet(env_pid)
-                                } else {
-                                    Self::prop_get(self.rewrite_expr(&arg_ctx, orig_callee)?, "val")
-                                };
-                                rewritten_args.insert(0, env_arg);
-                                None
-                            } else if let Expr::PropertyGet { object, .. } = orig_callee.as_ref() {
-                                if pass_receiver {
-                                    rewritten_args.insert(0, self.rewrite_expr(&arg_ctx, object)?);
-                                    None
-                                } else if !is_pure_func_expr(object) {
-                                    Some(self.rewrite_expr(rctx, object)?)
-                                } else {
-                                    None
-                                }
-                            } else if !is_pure_func_expr(orig_callee) {
-                                Some(self.rewrite_expr(rctx, orig_callee)?)
-                            } else {
-                                None
-                            };
-                            let before = self.rewrite_filtered_args(
-                                &arg_ctx,
-                                args,
-                                strip_arg_mask,
-                                &mut rewritten_args,
-                            )?;
-                            **callee = Expr::FuncRef(fid);
-                            *out_args = rewritten_args;
-                            type_args.clear();
-                            let out = sequence(before, out);
-                            return Ok(match pre_effect {
-                                Some(eff) => Expr::Sequence(vec![eff, out]),
-                                None => out,
-                            });
-                        }
-                        (
-                            Expr::CallSpread { args, .. },
-                            Expr::CallSpread {
-                                callee,
-                                args: out_args,
-                                ..
-                            },
-                        ) => {
-                            **callee = Expr::FuncRef(fid);
-                            for (a, o) in args.iter().zip(out_args.iter_mut()) {
-                                let (
-                                    CallArg::Expr(e) | CallArg::Spread(e),
-                                    CallArg::Expr(dst) | CallArg::Spread(dst),
-                                ) = (a, o);
-                                *dst = self.rewrite_expr(rctx, e)?;
-                            }
-                            return Ok(out);
-                        }
-                        _ => {}
+                            })
+                            .collect::<Result<_>>()?;
+                        return Ok(Expr::CallSpread {
+                            callee: Box::new(Expr::FuncRef(fid)),
+                            args,
+                            type_args: type_args.clone(),
+                            byte_offset: *byte_offset,
+                            byte_end: *byte_end,
+                        });
                     }
+                    return self.rewrite_call(
+                        rctx,
+                        expr,
+                        fid,
+                        argument_types,
+                        pass_receiver,
+                        if pass_env {
+                            CalleeValue::Environment
+                        } else {
+                            CalleeValue::Static
+                        },
+                    );
                 }
                 SiteResolution::FuncCompare {
                     left_ty,
@@ -424,7 +385,6 @@ impl<'h> Emitter<'h, '_> {
                 SiteResolution::DispatchCall {
                     callee_ty,
                     arms,
-                    strip_arg_mask,
                     arg_tys,
                     recv_ty,
                     call_byte_offset,
@@ -434,36 +394,17 @@ impl<'h> Emitter<'h, '_> {
                         callee_ty,
                         &arm_slice,
                         arg_tys,
-                        strip_arg_mask,
                         recv_ty,
                         call_byte_offset,
                     )?;
-                    if let Expr::Call {
-                        callee: orig_callee,
-                        args,
-                        byte_offset,
-                        byte_end,
-                        ..
-                    } = expr
-                    {
-                        let arg_ctx = rctx.with_expected(true);
-                        let mut call_args = Vec::with_capacity(args.len() + 2);
-                        call_args.push(self.rewrite_expr(&arg_ctx, orig_callee)?);
-                        if needs_recv && let Expr::PropertyGet { object, .. } = orig_callee.as_ref()
-                        {
-                            call_args.push(self.rewrite_expr(&arg_ctx, object)?);
-                        }
-                        let before = self.rewrite_filtered_args(
-                            &arg_ctx,
-                            args,
-                            strip_arg_mask,
-                            &mut call_args,
-                        )?;
-                        return Ok(sequence(
-                            before,
-                            Self::synth_call(fid, call_args, *byte_offset, *byte_end),
-                        ));
-                    }
+                    return self.rewrite_call(
+                        rctx,
+                        expr,
+                        fid,
+                        arg_tys,
+                        needs_recv,
+                        CalleeValue::Tagged,
+                    );
                 }
                 SiteResolution::TaggedArray(arr_ty) => {
                     if let Expr::Array(elems, _) = expr {
@@ -521,7 +462,7 @@ impl<'h> Emitter<'h, '_> {
                 }
                 SiteResolution::MethodCall {
                     target,
-                    strip_arg_mask,
+                    argument_types,
                 } => {
                     let method_name = self
                         .instance(target, "missing method call target instance")?
@@ -540,7 +481,7 @@ impl<'h> Emitter<'h, '_> {
                             *out_name = method_name;
                             out_args.clear();
                             let before =
-                                self.rewrite_filtered_args(rctx, args, strip_arg_mask, out_args)?;
+                                self.rewrite_filtered_args(rctx, args, argument_types, out_args)?;
                             return Ok(sequence(before, out));
                         }
                         (
@@ -565,7 +506,7 @@ impl<'h> Emitter<'h, '_> {
                                 let effects = self.rewrite_filtered_args(
                                     rctx,
                                     args,
-                                    strip_arg_mask,
+                                    argument_types,
                                     out_args,
                                 )?;
                                 let receiver = self.rewrite_expr(rctx, object)?;
@@ -580,7 +521,7 @@ impl<'h> Emitter<'h, '_> {
                 }
                 SiteResolution::ClassNew {
                     class_inst,
-                    strip_arg_mask,
+                    argument_types,
                 } => {
                     if let Expr::New { args, .. } = expr {
                         let name = self
@@ -598,7 +539,7 @@ impl<'h> Emitter<'h, '_> {
                             type_args.clear();
                             out_args.clear();
                             let before =
-                                self.rewrite_filtered_args(rctx, args, strip_arg_mask, out_args)?;
+                                self.rewrite_filtered_args(rctx, args, argument_types, out_args)?;
                             return Ok(sequence(before, out));
                         }
                     }
@@ -775,6 +716,90 @@ impl<'h> Emitter<'h, '_> {
         }
     }
 
+    fn rewrite_call(
+        &mut self,
+        rctx: &RewriteCtx<'_>,
+        expr: &'h Expr,
+        fid: FuncId,
+        argument_types: Ty,
+        pass_receiver: bool,
+        mode: CalleeValue,
+    ) -> Result<Expr> {
+        let Expr::Call {
+            callee,
+            args,
+            byte_offset,
+            byte_end,
+            ..
+        } = expr
+        else {
+            return Err(Diagnostic::internal(
+                "function call resolution requires a call expression",
+            ));
+        };
+        let ctx = rctx.with_expected(true);
+        let mut operands = Vec::with_capacity(args.len() + 2);
+        let mut effects = Vec::new();
+        let mut binding = None;
+        let callable = if pass_receiver
+            && let Expr::PropertyGet {
+                object, property, ..
+            } = callee.as_ref()
+        {
+            let receiver = self.rewrite_expr(&ctx, object)?;
+            if matches!(mode, CalleeValue::Static) {
+                operands.push(receiver);
+                None
+            } else {
+                let id = self.fresh_synthetic_local()?;
+                binding = Some((id, receiver));
+                operands.push(Expr::LocalGet(id));
+                Some(Self::prop_get(Expr::LocalGet(id), property))
+            }
+        } else if matches!(mode, CalleeValue::Environment)
+            && let Expr::LocalGet(id) = callee.as_ref()
+            && rctx.self_capture_locals.contains(id)
+            && let Some(env_pid) = rctx.env_local
+        {
+            operands.push(Expr::LocalGet(env_pid));
+            None
+        } else if matches!(mode, CalleeValue::Static) {
+            if !is_pure_func_expr(callee) {
+                let operand = match callee.as_ref() {
+                    Expr::PropertyGet { object, .. } => object.as_ref(),
+                    other => other,
+                };
+                effects.push(self.rewrite_expr(rctx, operand)?);
+            }
+            None
+        } else {
+            Some(self.rewrite_expr(&ctx, callee)?)
+        };
+        if let Some(callable) = callable {
+            operands.insert(
+                0,
+                if matches!(mode, CalleeValue::Environment) {
+                    Self::prop_get(callable, "val")
+                } else {
+                    callable
+                },
+            );
+        }
+        effects.extend(self.rewrite_filtered_args(&ctx, args, argument_types, &mut operands)?);
+        let call = sequence(
+            effects,
+            Self::synth_call(fid, operands, *byte_offset, *byte_end),
+        );
+        Ok(match binding {
+            Some((id, value)) => Expr::ScopedTemp {
+                id,
+                value: Box::new(value),
+                body: Box::new(call),
+            },
+            None => call,
+        })
+    }
+
     fn fold_comparison(
         &mut self,
         rctx: &RewriteCtx<'_>,
@@ -812,16 +837,25 @@ impl<'h> Emitter<'h, '_> {
         Ok(effects)
     }
 
+    pub(super) fn erases_argument(&self, ty: Ty) -> bool {
+        matches!(self.types.kind(ty), TyKind::Func(id) if !self.is_env_template(id.template))
+    }
+
     fn rewrite_filtered_args(
         &mut self,
         rctx: &RewriteCtx<'_>,
         args: &'h [Expr],
-        mask: u64,
+        argument_types: Ty,
         values: &mut Vec<Expr>,
     ) -> Result<Vec<Expr>> {
         let mut effects = Vec::new();
         for (i, arg) in args.iter().enumerate() {
-            if i < 64 && mask & (1 << i) != 0 {
+            if self
+                .types
+                .tuple_slice(argument_types)
+                .get(i)
+                .is_some_and(|&ty| self.erases_argument(ty))
+            {
                 if !is_pure_func_expr(arg) {
                     effects.push(self.rewrite_expr(rctx, arg)?);
                 }

@@ -340,7 +340,9 @@ impl<'h> Emitter<'h, '_> {
                 format!("__cb{i}"),
                 self.materialize(ity)?,
             ));
-            call_args.push(Expr::LocalGet(pid));
+            if !self.erases_argument(ity) {
+                call_args.push(Expr::LocalGet(pid));
+            }
         }
         let call = Self::synth_call(target_fid, call_args, 0, 0);
         let body = if ret_ty == HirType::Void {
@@ -434,7 +436,6 @@ impl<'h> Emitter<'h, '_> {
         callee_ty: Ty,
         arms: &[(FuncIdentity, InstanceId)],
         arg_tys: Ty,
-        strip_arg_mask: u64,
         recv_ty: Option<Ty>,
         call_byte_offset: u32,
     ) -> Result<(FuncId, bool)> {
@@ -443,7 +444,7 @@ impl<'h> Emitter<'h, '_> {
                 .iter()
                 .any(|&(ident, _)| self.index.view(ident.template).is_some_and(|v| v.uses_this));
         let eff_recv = needs_recv.then_some(recv_ty).flatten();
-        let key = (callee_ty, arms.to_vec(), arg_tys, strip_arg_mask, eff_recv);
+        let key = (callee_ty, arms.to_vec(), arg_tys, eff_recv);
         if let Some(&fid) = self.dispatchers.get(&key) {
             return Ok((fid, needs_recv));
         }
@@ -467,7 +468,7 @@ impl<'h> Emitter<'h, '_> {
         };
         let mut arg_pids = Vec::new();
         for (i, &aty) in self.types.tuple_slice(arg_tys).iter().enumerate() {
-            if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
+            if self.erases_argument(aty) {
                 continue;
             }
             let pid = self.fresh_synthetic_local()?;
@@ -536,10 +537,11 @@ impl<'h> Emitter<'h, '_> {
             let max_args = if has_rest {
                 arg_pids.len()
             } else {
-                view.params
+                self.types
+                    .tuple_slice(arg_tys)
                     .iter()
-                    .enumerate()
-                    .filter(|&(i, _)| i >= 64 || (strip_arg_mask & (1u64 << i)) == 0)
+                    .take(view.params.len())
+                    .filter(|&&ty| !self.erases_argument(ty))
                     .count()
             };
             for &pid in arg_pids.iter().take(max_args) {

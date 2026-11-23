@@ -123,7 +123,7 @@ pub(crate) fn build(
     })
 }
 
-type DispatcherKey = (Ty, Vec<(FuncIdentity, InstanceId)>, Ty, u64, Option<Ty>);
+type DispatcherKey = (Ty, Vec<(FuncIdentity, InstanceId)>, Ty, Option<Ty>);
 type EnvField = (LocalId, String, Ty, bool);
 
 struct Emitter<'h, 'a> {
