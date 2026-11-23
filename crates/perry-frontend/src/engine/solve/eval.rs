@@ -825,6 +825,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             param_locs: self.param_locs,
             field_locs: self.field_locs,
             dispatch_arms: self.dispatch_arms,
+            helpers: self.helpers,
+            helper_byte_offsets: self.helper_byte_offsets,
             inst_local_tys,
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,

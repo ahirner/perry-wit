@@ -120,6 +120,7 @@ id_type!(
     LocId,
     LocalIdx,
     NameId,
+    HelperId,
 );
 
 impl TemplateId {

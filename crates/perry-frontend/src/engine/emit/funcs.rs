@@ -1,8 +1,9 @@
 //! Synthetic function-value records, dispatchers, wideners, comparers, and callback wrappers.
 use super::{Emitter, EnvField, RewriteCtx};
 use crate::engine::bitset::BitSet;
+use crate::engine::solve::HelperSpec;
 use crate::engine::types::{
-    CaptureOwner, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
+    CaptureOwner, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
     env_class_name, func_tag,
 };
 use perry_hir::{
@@ -303,7 +304,19 @@ impl<'h> Emitter<'h, '_> {
             &self.solved.escaping_env_templates,
         ) && src_ty != dst_ty
         {
-            let fid = self.intern_widener(src_ty, dst_ty)?;
+            let target_spec = HelperSpec::Widener {
+                from: src_ty,
+                to: dst_ty,
+            };
+            let helper = self
+                .solved
+                .helpers
+                .iter_enumerated()
+                .find_map(|(id, &spec)| (spec == target_spec).then_some(id))
+                .ok_or_else(|| {
+                    Diagnostic::internal("missing interned widener for collapsed capture")
+                })?;
+            let fid = self.emit_helper(helper)?;
             return Ok(Self::synth_call(fid, vec![arg], 0, 0));
         }
         Ok(arg)
@@ -559,32 +572,67 @@ impl<'h> Emitter<'h, '_> {
         })
     }
 
-    pub(super) fn intern_throw_type_error(&mut self) -> Result<FuncId> {
-        if let Some(fid) = self.throw_type_error_fn {
+    pub(super) fn emit_helper(&mut self, id: HelperId) -> Result<FuncId> {
+        if let Some(Some(fid)) = self.helper_fids.get(id.index()).copied() {
             return Ok(fid);
         }
+        let spec = *self
+            .solved
+            .helpers
+            .get(id)
+            .ok_or_else(|| Diagnostic::internal("helper id out of range"))?;
+        let byte_offset = self
+            .solved
+            .helper_byte_offsets
+            .get(id.index())
+            .copied()
+            .unwrap_or(0);
         let fid = self.fresh_func_id()?;
+        if let Some(slot) = self.helper_fids.get_mut(id.index()) {
+            *slot = Some(fid);
+        }
+        let func = match spec {
+            HelperSpec::ThrowTypeError => self.build_throw_type_error(fid),
+            HelperSpec::TypeOfFn(op_ty) => self.build_typeof_fn(fid, op_ty)?,
+            HelperSpec::Dispatcher {
+                callee_ty,
+                arms,
+                arg_tys,
+                strip_arg_mask,
+                recv_ty,
+            } => self.build_dispatcher(
+                fid,
+                callee_ty,
+                arms,
+                arg_tys,
+                strip_arg_mask,
+                recv_ty,
+                byte_offset,
+            )?,
+            HelperSpec::Widener { from, to } => self.build_widener(fid, from, to)?,
+            HelperSpec::Comparer { left_ty, right_ty } => {
+                self.build_comparer(fid, left_ty, right_ty)?
+            }
+        };
+        self.synth_functions.push(func);
+        Ok(fid)
+    }
+
+    fn build_throw_type_error(&self, fid: FuncId) -> Function {
         let body = vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
             "callee is not a function".into(),
         ))))];
-        let func = Self::synth_function(
+        Self::synth_function(
             fid,
             format!("__not_fn_{fid}"),
             Vec::new(),
             HirType::Never,
             body,
             false,
-        );
-        self.synth_functions.push(func);
-        self.throw_type_error_fn = Some(fid);
-        Ok(fid)
+        )
     }
 
-    pub(super) fn intern_typeof_fn(&mut self, op_ty: Ty) -> Result<FuncId> {
-        if let Some(&fid) = self.typeof_fns.get(&op_ty) {
-            return Ok(fid);
-        }
-        let fid = self.fresh_func_id()?;
+    fn build_typeof_fn(&mut self, fid: FuncId, op_ty: Ty) -> Result<Function> {
         let pid = self.fresh_synthetic_local()?;
         let (has_null, has_undef) = self.nullish_flags(op_ty);
         let mut stmts = Vec::new();
@@ -603,7 +651,7 @@ impl<'h> Emitter<'h, '_> {
             ));
         }
         stmts.push(Stmt::Return(Some(Expr::String("function".into()))));
-        let func = Self::synth_function(
+        Ok(Self::synth_function(
             fid,
             format!("__typeof_fn_{fid}"),
             vec![Self::synth_param(
@@ -614,32 +662,21 @@ impl<'h> Emitter<'h, '_> {
             HirType::String,
             stmts,
             false,
-        );
-        self.synth_functions.push(func);
-        self.typeof_fns.insert(op_ty, fid);
-        Ok(fid)
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn intern_dispatcher(
+    fn build_dispatcher(
         &mut self,
+        fid: FuncId,
         callee_ty: Ty,
-        arms: &[(FuncIdentity, InstanceId)],
+        arms_span: TySpan,
         arg_tys: Ty,
         strip_arg_mask: u64,
-        recv_ty: Option<Ty>,
+        eff_recv: Option<Ty>,
         call_byte_offset: u32,
-    ) -> Result<(FuncId, bool)> {
-        let needs_recv = recv_ty.is_some()
-            && arms
-                .iter()
-                .any(|&(ident, _)| self.index.view(ident.template).is_some_and(|v| v.uses_this));
-        let eff_recv = needs_recv.then_some(recv_ty).flatten();
-        let key = (callee_ty, arms.to_vec(), arg_tys, strip_arg_mask, eff_recv);
-        if let Some(&fid) = self.dispatchers.get(&key) {
-            return Ok((fid, needs_recv));
-        }
-        let fid = self.fresh_func_id()?;
+    ) -> Result<Function> {
+        let arms = self.dispatch_arms_slice(arms_span)?.to_vec();
         let fn_pid = self.fresh_synthetic_local()?;
         let mut params = vec![Self::synth_param(
             fn_pid,
@@ -672,7 +709,7 @@ impl<'h> Emitter<'h, '_> {
         }
         let mut unique_rets: Vec<HirType> = Vec::new();
         let mut any_async = false;
-        for &(ident, target_inst) in arms {
+        for &(ident, target_inst) in &arms {
             if self.index.view(ident.template).is_some_and(|v| v.is_async) {
                 any_async = true;
             }
@@ -707,7 +744,7 @@ impl<'h> Emitter<'h, '_> {
             });
         }
         let mut cases = Vec::with_capacity(arms.len());
-        for &(ident, target_inst) in arms {
+        for &(ident, target_inst) in &arms {
             let target_fid = self
                 .instance(target_inst, "missing dispatch arm instance")?
                 .emitted_func_id;
@@ -770,17 +807,12 @@ impl<'h> Emitter<'h, '_> {
                 None,
             ));
         }
-        let func = Self::synth_function(fid, disp_name, params, disp_ret, stmts, any_async);
-        self.synth_functions.push(func);
-        self.dispatchers.insert(key, fid);
-        Ok((fid, needs_recv))
+        Ok(Self::synth_function(
+            fid, disp_name, params, disp_ret, stmts, any_async,
+        ))
     }
 
-    pub(super) fn intern_widener(&mut self, from: Ty, to: Ty) -> Result<FuncId> {
-        if let Some(&fid) = self.wideners.get(&(from, to)) {
-            return Ok(fid);
-        }
-        let fid = self.fresh_func_id()?;
+    fn build_widener(&mut self, fid: FuncId, from: Ty, to: Ty) -> Result<Function> {
         let pid = self.fresh_synthetic_local()?;
         let idents = self.types.func_members(from);
         let (has_null, has_undef) = self.nullish_flags(from);
@@ -808,7 +840,7 @@ impl<'h> Emitter<'h, '_> {
             discriminant: Self::prop_get(Expr::LocalGet(pid), "tag"),
             cases,
         });
-        let func = Self::synth_function(
+        Ok(Self::synth_function(
             fid,
             format!("__widen_{fid}"),
             vec![Self::synth_param(
@@ -819,17 +851,10 @@ impl<'h> Emitter<'h, '_> {
             self.materialize(to)?,
             stmts,
             false,
-        );
-        self.synth_functions.push(func);
-        self.wideners.insert((from, to), fid);
-        Ok(fid)
+        ))
     }
 
-    pub(super) fn intern_comparer(&mut self, left_ty: Ty, right_ty: Ty) -> Result<FuncId> {
-        if let Some(&fid) = self.comparers.get(&(left_ty, right_ty)) {
-            return Ok(fid);
-        }
-        let fid = self.fresh_func_id()?;
+    fn build_comparer(&mut self, fid: FuncId, left_ty: Ty, right_ty: Ty) -> Result<Function> {
         let a_pid = self.fresh_synthetic_local()?;
         let b_pid = self.fresh_synthetic_local()?;
         let (a_null, a_undef) = self.nullish_flags(left_ty);
@@ -897,7 +922,7 @@ impl<'h> Emitter<'h, '_> {
             });
         }
         stmts.push(Stmt::Return(Some(Expr::Bool(false))));
-        let func = Self::synth_function(
+        Ok(Self::synth_function(
             fid,
             format!("__cmp_{fid}"),
             vec![
@@ -907,30 +932,7 @@ impl<'h> Emitter<'h, '_> {
             HirType::Boolean,
             stmts,
             false,
-        );
-        self.synth_functions.push(func);
-        self.comparers.insert((left_ty, right_ty), fid);
-        Ok(fid)
-    }
-
-    pub(super) fn intern_caster(&mut self, ty: Ty) -> Result<FuncId> {
-        if let Some(&fid) = self.casters.get(&ty) {
-            return Ok(fid);
-        }
-        let fid = self.fresh_func_id()?;
-        let pid = self.fresh_synthetic_local()?;
-        let hty = self.materialize(ty)?;
-        let func = Self::synth_function(
-            fid,
-            format!("__cast_{fid}"),
-            vec![Self::synth_param(pid, "__v".into(), hty.clone())],
-            hty,
-            vec![Stmt::Return(Some(Expr::LocalGet(pid)))],
-            false,
-        );
-        self.synth_functions.push(func);
-        self.casters.insert(ty, fid);
-        Ok(fid)
+        ))
     }
 
     pub(super) fn nullish_flags(&self, ty: Ty) -> (bool, bool) {

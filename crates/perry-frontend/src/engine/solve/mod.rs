@@ -6,8 +6,8 @@ use super::bitset::BitSet;
 use super::boundary::{ClassInfo, ModuleIndex, SourceFacts, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
-    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, IdxVec, InstanceId, LocId,
-    LocalIdx, ObjectProp, TemplateId, Ty, TyKind, TySpan, TypeTable,
+    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, IdxVec, InstanceId,
+    LocId, LocalIdx, ObjectProp, TemplateId, Ty, TyKind, TySpan, TypeTable,
 };
 use crate::{
     Absence,
@@ -68,17 +68,35 @@ pub(crate) struct ClassInst {
     pub(crate) emitted_name: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum HelperSpec {
+    Dispatcher {
+        callee_ty: Ty,
+        arms: TySpan,
+        arg_tys: Ty,
+        strip_arg_mask: u64,
+        recv_ty: Option<Ty>,
+    },
+    Widener {
+        from: Ty,
+        to: Ty,
+    },
+    Comparer {
+        left_ty: Ty,
+        right_ty: Ty,
+    },
+    TypeOfFn(Ty),
+    ThrowTypeError,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FuncCoercion {
     Zero,
     Tag(FuncIdentity),
     BoxEnv(FuncIdentity),
-    Widen {
-        from: Ty,
-        to: Ty,
-    },
+    Widen(HelperId),
     DispatchCallback {
-        callee_ty: Ty,
+        helper: HelperId,
         arms: TySpan,
         input_tys: Ty,
     },
@@ -97,19 +115,17 @@ pub(crate) enum SiteResolution {
         pass_env: bool,
     },
     DispatchCall {
-        callee_ty: Ty,
-        arms: TySpan,
+        helper: HelperId,
         strip_arg_mask: u64,
-        arg_tys: Ty,
-        recv_ty: Option<Ty>,
-        call_byte_offset: u32,
+        needs_recv: bool,
     },
-    ThrowTypeError,
-    FuncTypeOf(Ty),
+    ThrowTypeError(HelperId),
+    FuncTypeOf(Option<HelperId>),
     FuncCompare {
         left_ty: Ty,
         right_ty: Ty,
         op: CompareOp,
+        helper: Option<HelperId>,
     },
     MethodCall {
         target: InstanceId,
@@ -149,6 +165,8 @@ pub(crate) struct Solved {
     pub(crate) param_locs: Vec<LocId>,
     pub(crate) field_locs: Vec<LocId>,
     pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
+    pub(crate) helpers: IdxVec<HelperId, HelperSpec>,
+    pub(crate) helper_byte_offsets: Vec<u32>,
     pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
     pub(crate) inst_sites: Vec<Vec<SiteEntry>>,
@@ -310,6 +328,9 @@ struct Solver<'h, 'a> {
     field_locs: Vec<LocId>,
     dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     dispatch_arm_spans: Vec<TySpan>,
+    helpers: IdxVec<HelperId, HelperSpec>,
+    helper_index: HashMap<HelperSpec, HelperId>,
+    helper_byte_offsets: Vec<u32>,
     inst_locals: Vec<Vec<InstanceLocalSlot>>,
     inst_frame_locals: Vec<Vec<Ty>>,
     inst_written: Vec<BitSet>,
@@ -445,6 +466,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             field_locs: Vec::new(),
             dispatch_arms: Vec::new(),
             dispatch_arm_spans: Vec::new(),
+            helpers: IdxVec::default(),
+            helper_index: HashMap::with_capacity(16),
+            helper_byte_offsets: Vec::new(),
             inst_locals: Vec::new(),
             inst_frame_locals: Vec::new(),
             inst_written: Vec::new(),
@@ -571,8 +595,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             SiteResolution::DirectCall { target, .. }
             | SiteResolution::MethodCall { target, .. }
             | SiteResolution::Callback { target, .. } => f(target),
-            SiteResolution::DispatchCall { arms, .. } => {
-                if let Some(slice) = self.dispatch_arms.get(arms.range()) {
+            SiteResolution::DispatchCall { helper, .. } => {
+                if let Some(HelperSpec::Dispatcher { arms, .. }) = self.helpers.get(helper)
+                    && let Some(slice) = self.dispatch_arms.get(arms.range())
+                {
                     for &(_, target) in slice {
                         f(target);
                     }
@@ -1445,6 +1471,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         span
     }
 
+    pub(super) fn intern_helper(&mut self, spec: HelperSpec, byte_offset: u32) -> HelperId {
+        if let Some(&id) = self.helper_index.get(&spec) {
+            if byte_offset != 0
+                && let Some(slot) = self.helper_byte_offsets.get_mut(id.index())
+                && *slot == 0
+            {
+                *slot = byte_offset;
+            }
+            return id;
+        }
+        let id = self.helpers.push(spec);
+        self.helper_byte_offsets.push(byte_offset);
+        self.helper_index.insert(spec, id);
+        id
+    }
+
     pub(super) fn collapse_closure(&mut self, tid: TemplateId, owner_tid: TemplateId) {
         if !self.collapsed_closures.insert(tid.index()) {
             return;
@@ -1692,14 +1734,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.is_tagged_func_union_in(src_ty, inst_id)
             && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
         {
-            self.record_site_coercion(
-                inst_id,
-                expr,
-                FuncCoercion::Widen {
+            let helper = self.intern_helper(
+                HelperSpec::Widener {
                     from: src_ty,
                     to: dst_ty,
                 },
+                0,
             );
+            self.record_site_coercion(inst_id, expr, FuncCoercion::Widen(helper));
         }
     }
 

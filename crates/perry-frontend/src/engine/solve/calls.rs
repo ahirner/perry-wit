@@ -331,11 +331,21 @@ impl<'h, 'a> Solver<'h, 'a> {
                 inputs.truncate(max_params);
                 let arms_span = self.intern_dispatch_arms(&arms);
                 let input_tys = self.types.tuple(&inputs);
+                let helper = self.intern_helper(
+                    HelperSpec::Dispatcher {
+                        callee_ty: cb_val,
+                        arms: arms_span,
+                        arg_tys: input_tys,
+                        strip_arg_mask: 0,
+                        recv_ty: None,
+                    },
+                    0,
+                );
                 self.record_site_coercion(
                     s.inst,
                     callback,
                     FuncCoercion::DispatchCallback {
-                        callee_ty: cb_val,
+                        helper,
                         arms: arms_span,
                         input_tys,
                     },
@@ -782,7 +792,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError);
+            let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
+            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError(helper));
             return Ok(Ty::NEVER);
         }
         if let Some(idents) = self.types.func_union_members(callee_ty) {
@@ -1220,16 +1231,27 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let arms_span = self.intern_dispatch_arms(&arms);
         let arg_tuple = self.types.tuple(arg_tys);
+        let needs_recv = recv_ty.is_some()
+            && arms
+                .iter()
+                .any(|&(ident, _)| self.index.view(ident.template).is_some_and(|v| v.uses_this));
+        let helper = self.intern_helper(
+            HelperSpec::Dispatcher {
+                callee_ty,
+                arms: arms_span,
+                arg_tys: arg_tuple,
+                strip_arg_mask,
+                recv_ty: needs_recv.then_some(recv_ty).flatten(),
+            },
+            byte_offset,
+        );
         self.record_site(
             s.inst,
             expr,
             SiteResolution::DispatchCall {
-                callee_ty,
-                arms: arms_span,
+                helper,
                 strip_arg_mask,
-                arg_tys: arg_tuple,
-                recv_ty,
-                call_byte_offset: byte_offset,
+                needs_recv,
             },
         );
         Ok(ret)

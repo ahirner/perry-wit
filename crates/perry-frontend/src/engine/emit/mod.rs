@@ -102,12 +102,7 @@ pub(crate) fn build(
         emitted_env_classes: std::collections::HashSet::new(),
         synth_classes: Vec::new(),
         synth_functions: Vec::new(),
-        dispatchers: HashMap::new(),
-        wideners: HashMap::new(),
-        casters: HashMap::new(),
-        comparers: HashMap::new(),
-        typeof_fns: HashMap::new(),
-        throw_type_error_fn: None,
+        helper_fids: vec![None; solved.helpers.len()],
     };
     let (init, mut functions, mut classes) = e.build_all()?;
     functions.extend(e.synth_functions);
@@ -125,7 +120,6 @@ pub(crate) fn build(
     })
 }
 
-type DispatcherKey = (Ty, Vec<(FuncIdentity, InstanceId)>, Ty, u64, Option<Ty>);
 type EnvField = (LocalId, String, Ty, bool);
 
 struct Emitter<'h, 'a> {
@@ -147,12 +141,7 @@ struct Emitter<'h, 'a> {
     emitted_env_classes: std::collections::HashSet<FuncIdentity>,
     synth_classes: Vec<Class>,
     synth_functions: Vec<Function>,
-    dispatchers: HashMap<DispatcherKey, FuncId>,
-    wideners: HashMap<(Ty, Ty), FuncId>,
-    casters: HashMap<Ty, FuncId>,
-    comparers: HashMap<(Ty, Ty), FuncId>,
-    typeof_fns: HashMap<Ty, FuncId>,
-    throw_type_error_fn: Option<FuncId>,
+    helper_fids: Vec<Option<FuncId>>,
 }
 
 struct RewriteCtx<'a> {
@@ -1146,8 +1135,8 @@ impl<'h> Emitter<'h, '_> {
                 let val_expr = Self::prop_get(rewritten, "val");
                 Ok(self.emit_env_wrapper(ident, val_expr))
             }
-            Some(FuncCoercion::Widen { from, to }) => {
-                let fid = self.intern_widener(from, to)?;
+            Some(FuncCoercion::Widen(helper)) => {
+                let fid = self.emit_helper(helper)?;
                 Ok(Self::synth_call(fid, vec![rewritten], 0, 0))
             }
             Some(FuncCoercion::EnvCallback { target, input_tys }) => {
@@ -1164,7 +1153,7 @@ impl<'h> Emitter<'h, '_> {
                 )
             }
             Some(FuncCoercion::DispatchCallback {
-                callee_ty,
+                helper,
                 arms,
                 input_tys,
             }) => {
@@ -1183,8 +1172,7 @@ impl<'h> Emitter<'h, '_> {
                     .max()
                     .unwrap_or(0)
                     .min(inputs.len());
-                let (disp_fid, _) =
-                    self.intern_dispatcher(callee_ty, &arm_slice, input_tys, 0, None, 0)?;
+                let disp_fid = self.emit_helper(helper)?;
                 let disp_ret = self
                     .synth_functions
                     .iter()
@@ -1227,8 +1215,8 @@ impl<'h> Emitter<'h, '_> {
                         cap_args_appended: 0,
                     });
                 }
-                SiteResolution::ThrowTypeError => {
-                    let fid = self.intern_throw_type_error()?;
+                SiteResolution::ThrowTypeError(helper) => {
+                    let fid = self.emit_helper(helper)?;
                     let call = Self::synth_call(fid, Vec::new(), 0, 0);
                     if let Expr::Call { callee, args, .. } = expr {
                         let mut effects = Vec::new();
@@ -1249,18 +1237,17 @@ impl<'h> Emitter<'h, '_> {
                     }
                     return Ok(call);
                 }
-                SiteResolution::FuncTypeOf(op_ty) => {
+                SiteResolution::FuncTypeOf(helper) => {
                     if let Expr::TypeOf(operand) = expr {
-                        let (has_null, has_undef) = self.nullish_flags(op_ty);
-                        if !has_null && !has_undef {
+                        let Some(helper) = helper else {
                             let s = Expr::String("function".into());
                             return Ok(if is_pure_func_expr(operand) {
                                 s
                             } else {
                                 Expr::Sequence(vec![self.rewrite_expr(rctx, operand)?, s])
                             });
-                        }
-                        let fid = self.intern_typeof_fn(op_ty)?;
+                        };
+                        let fid = self.emit_helper(helper)?;
                         let arg = self.rewrite_expr(rctx, operand)?;
                         return Ok(Self::synth_call(fid, vec![arg], 0, 0));
                     }
@@ -1424,6 +1411,7 @@ impl<'h> Emitter<'h, '_> {
                     left_ty,
                     right_ty,
                     op,
+                    helper,
                 } => {
                     if let Expr::Compare { left, right, .. } = expr {
                         let is_eq = matches!(op, CompareOp::Eq | CompareOp::LooseEq);
@@ -1462,7 +1450,10 @@ impl<'h> Emitter<'h, '_> {
                                 right: Box::new(Self::prop_get(r_rewritten, "val")),
                             });
                         }
-                        let cmp_fid = self.intern_comparer(left_ty, right_ty)?;
+                        let helper_id = helper.ok_or_else(|| {
+                            Diagnostic::internal("missing synthesized comparer helper")
+                        })?;
+                        let cmp_fid = self.emit_helper(helper_id)?;
                         let call = Self::synth_call(cmp_fid, vec![l_rewritten, r_rewritten], 0, 0);
                         return Ok(if is_eq {
                             call
@@ -1526,22 +1517,11 @@ impl<'h> Emitter<'h, '_> {
                     });
                 }
                 SiteResolution::DispatchCall {
-                    callee_ty,
-                    arms,
+                    helper,
                     strip_arg_mask,
-                    arg_tys,
-                    recv_ty,
-                    call_byte_offset,
+                    needs_recv,
                 } => {
-                    let arm_slice = self.dispatch_arms_slice(arms)?.to_vec();
-                    let (fid, needs_recv) = self.intern_dispatcher(
-                        callee_ty,
-                        &arm_slice,
-                        arg_tys,
-                        strip_arg_mask,
-                        recv_ty,
-                        call_byte_offset,
-                    )?;
+                    let fid = self.emit_helper(helper)?;
                     if let Expr::Call {
                         callee: orig_callee,
                         args,
@@ -1576,8 +1556,41 @@ impl<'h> Emitter<'h, '_> {
                         if rctx.has_expected {
                             return Ok(arr);
                         }
-                        let caster = self.intern_caster(arr_ty)?;
-                        return Ok(Self::synth_call(caster, vec![arr], 0, 0));
+                        let arr_hir = self.materialize(arr_ty)?;
+                        let tmp_id = self.fresh_synthetic_local()?;
+                        let closure_fid = self.fresh_func_id()?;
+                        let closure = Expr::Closure {
+                            func_id: closure_fid,
+                            params: Vec::new(),
+                            return_type: arr_hir.clone(),
+                            body: vec![
+                                Stmt::Let {
+                                    id: tmp_id,
+                                    name: "__arr".into(),
+                                    ty: arr_hir,
+                                    mutable: false,
+                                    init: Some(arr),
+                                },
+                                Stmt::Return(Some(Expr::LocalGet(tmp_id))),
+                            ],
+                            captures: Vec::new(),
+                            mutable_captures: Vec::new(),
+                            captures_this: false,
+                            captures_new_target: false,
+                            enclosing_class: None,
+                            is_async: false,
+                            is_generator: false,
+                            is_strict: true,
+                            construct_only: false,
+                            is_arrow: true,
+                        };
+                        return Ok(Expr::Call {
+                            callee: Box::new(closure),
+                            args: Vec::new(),
+                            type_args: Vec::new(),
+                            byte_offset: 0,
+                            byte_end: 0,
+                        });
                     }
                 }
                 SiteResolution::ZeroSizedArray => {

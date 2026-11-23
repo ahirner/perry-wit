@@ -225,11 +225,33 @@ impl<'h, 'a> Solver<'h, 'a> {
                     CaptureOwner::Instance(s.inst)
                 };
                 if self.is_escaping_env(template, s.inst) {
+                    let is_collapsed = matches!(capture_owner, CaptureOwner::Template(_));
                     for &cap_id in self.index.template_captures(template) {
                         if let Some(lidx) = self.index.local_idx(cap_id)
                             && let Some(cap_ty) = self.read_local_value(s.inst, lidx)
                         {
                             self.mark_escaping_env(s.inst, cap_ty);
+                            if is_collapsed
+                                && let Some(cloc) = self
+                                    .collapsed_local_locs
+                                    .get(lidx.index())
+                                    .copied()
+                                    .flatten()
+                            {
+                                let dst_ty = self.read_loc(cloc, s.inst);
+                                if cap_ty != dst_ty
+                                    && self.is_tagged_func_union_in(cap_ty, s.inst)
+                                    && self.is_tagged_func_union_in(dst_ty, s.inst)
+                                {
+                                    self.intern_helper(
+                                        HelperSpec::Widener {
+                                            from: cap_ty,
+                                            to: dst_ty,
+                                        },
+                                        0,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -785,7 +807,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::TypeOf(operand) => {
                 let op_ty = self.eval_expr(s, operand)?;
                 if op_ty != Ty::BOTTOM && self.types.has_func(op_ty) {
-                    self.record_site(s.inst, expr, SiteResolution::FuncTypeOf(op_ty));
+                    let has_nullish = self.types.strip_nullish(op_ty).1.is_some();
+                    let helper =
+                        has_nullish.then(|| self.intern_helper(HelperSpec::TypeOfFn(op_ty), 0));
+                    self.record_site(s.inst, expr, SiteResolution::FuncTypeOf(helper));
                 }
                 Ok(Ty::STRING)
             }
@@ -984,6 +1009,23 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(());
             }
         }
+        let l_zero = self
+            .types
+            .is_zero_sized_func(l, &self.index.capture_free_templates);
+        let r_zero = self
+            .types
+            .is_zero_sized_func(r, &self.index.capture_free_templates);
+        let l_env = self.types.is_env_func(l, &self.escaping_env_templates);
+        let r_env = self.types.is_env_func(r, &self.escaping_env_templates);
+        let helper = (!(l_zero || r_zero || (l_env && r_env && l == r))).then(|| {
+            self.intern_helper(
+                HelperSpec::Comparer {
+                    left_ty: l,
+                    right_ty: r,
+                },
+                0,
+            )
+        });
         self.record_site(
             inst_id,
             expr,
@@ -991,6 +1033,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 left_ty: l,
                 right_ty: r,
                 op,
+                helper,
             },
         );
         Ok(())
