@@ -473,3 +473,125 @@ console.error(failed);
     assert_eq!(run.stderr, "2\n");
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn inference_engine_specializes_generics_classes_cells_and_fixed_points() -> Result<()> {
+    use std::fmt::Write;
+    let mut chain = String::from("function f0(x) { return x + 1; }\n");
+    for i in 1..=300 {
+        writeln!(chain, "function f{i}(x) {{ return f{}(x) + 1; }}", i - 1)?;
+    }
+    chain.push_str("console.log(f300(0));\n");
+
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "static_generic_and_implicit_classes",
+            r#"
+class Util { static wrap(x) { return [x]; } }
+class Box {
+  constructor(v) { this.v = v; }
+  get value() { return this.v; }
+  set value(x) { this.v = x; }
+  map(f) { return f(this.v); }
+}
+class Pair {
+  constructor(a, b) { this.a = a; this.b = b; }
+  swap() { return new Pair(this.b, this.a); }
+}
+const bn = new Box(1);
+const bs = new Box("a");
+bn.value = 5;
+const swapped = new Pair(1, "x").swap();
+console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b);
+"#,
+            "2 a! true true 5 a! x 1\n",
+        ),
+        (
+            "capture_owners_and_mutual_recursion",
+            r#"
+function addAll(k, arr) { return arr.map(x => x + k); }
+function isEven(n) { return n === 0 ? true : isOdd(n - 1); }
+function isOdd(n) { return n === 0 ? false : isEven(n - 1); }
+console.log(addAll(1, [1, 2]).join(","), addAll("s", ["a", "b"]).join(","), isEven(4), isOdd(3));
+"#,
+            "2,3 as,bs true true\n",
+        ),
+        (
+            "empty_array_cells_and_reassignment",
+            r#"
+function fill(list, v) { list.push(v); return list.length; }
+function count(list) { return list.length; }
+function makeList() { return []; }
+class Bag {
+  constructor() { this.items = []; }
+  add(x) { this.items.push(x); }
+}
+const c1 = [];
+const before = count(c1);
+fill(c1, 7);
+const c2 = [];
+fill(c2, "s");
+const f1 = makeList(); f1.push(1);
+const f2 = makeList(); f2.push(2);
+const state = { items: [] }; state.items.push("x");
+const inner = []; inner.push(4);
+const outer = []; outer.push(inner);
+const bagN = new Bag(); bagN.add(2);
+const bagS = new Bag(); bagS.add("k");
+const closed = [];
+const pushClosed = (v) => { closed.push(v); };
+pushClosed(10); pushClosed(20);
+let xs = [];
+function grow() { xs.push(1); }
+function reset() { xs = [2, 3]; }
+grow(); reset();
+console.log(before, c1[0], c2[0], f1[0] + f2[0], state.items[0], outer[0][0], bagN.items[0], bagS.items[0], closed.length, xs.length, xs[0]);
+"#,
+            "0 7 s 3 x 4 2 k 2 2 2\n",
+        ),
+        (
+            "write_order_and_late_dependencies",
+            r#"
+class LateField {
+  constructor() { this.items = []; }
+  size() { return this.items.length; }
+  first() { return this.items[0]; }
+  add(v) { this.items.push(v); }
+}
+const lf = new LateField();
+const beforeSize = lf.size();
+lf.add("a");
+let captured;
+const readCap = () => captured;
+captured = 2;
+let a = null;
+function setA1() { a = "x"; }
+function setA2() { a = 2; }
+setA1(); setA2();
+let b = null;
+function setB2() { b = 2; }
+function setB1() { b = "x"; }
+setB1(); setB2();
+let c = null;
+function late() { return helper(); }
+function helper() { c = 3; return 0; }
+c = "a";
+late();
+let mixed;
+mixed = 1;
+mixed = "a";
+mixed = [1];
+const ordered = { b: 1, a: "x" };
+console.log(beforeSize, lf.size(), lf.first().toUpperCase(), readCap(), typeof a, a, typeof b, b, typeof c, typeof mixed, JSON.stringify(mixed), JSON.stringify(ordered));
+"#,
+            "0 1 A 2 number 2 number 2 number object [1] {\"b\":1,\"a\":\"x\"}\n",
+        ),
+        ("deep_call_chain_300", chain.as_str(), "301\n"),
+    ];
+    for &(name, source, expected) in cases {
+        let run = execute(source).await?;
+        assert!(run.ok, "case {name} failed: {}", run.stderr);
+        assert_eq!(run.stdout, expected, "case {name} output mismatch");
+    }
+    Ok(())
+}

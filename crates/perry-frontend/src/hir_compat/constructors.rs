@@ -14,14 +14,14 @@ enum ConstructorTypes {
     Set(Option<HirType>),
 }
 
-pub enum Constructor<'a> {
+pub enum Constructor<'s, 'e> {
     Map {
-        types: Option<(&'a HirType, &'a HirType)>,
-        init: Option<&'a Expr>,
+        types: Option<(&'s HirType, &'s HirType)>,
+        init: Option<&'e Expr>,
     },
     Set {
-        element: Option<&'a HirType>,
-        init: Option<&'a Expr>,
+        element: Option<&'s HirType>,
+        init: Option<&'e Expr>,
     },
 }
 
@@ -71,7 +71,7 @@ impl Constructors {
         Ok(())
     }
 
-    pub fn get<'a>(&'a self, expr: &'a Expr) -> Option<Constructor<'a>> {
+    pub fn get<'s, 'e: 's>(&'s self, expr: &'e Expr) -> Option<Constructor<'s, 'e>> {
         if let Expr::New {
             class_name,
             type_args,

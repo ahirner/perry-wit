@@ -70,13 +70,13 @@
   },
   {
     "workload": "bounded-http-exact (4 MiB)",
-    "bytes": 65358,
-    "core_bytes": 59000,
+    "bytes": 65348,
+    "core_bytes": 58990,
     "defined_functions": 144,
     "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 339,
+      "constraint_visits": 340,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -85,7 +85,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5703,
+    "initialization_fuel": 5695,
     "invocation_fuel": 13650752,
     "warm_fuel": 13619548,
     "initial_memory": 65536,
@@ -93,13 +93,13 @@
   },
   {
     "workload": "bounded-http-overflow",
-    "bytes": 65358,
-    "core_bytes": 59000,
+    "bytes": 65348,
+    "core_bytes": 58990,
     "defined_functions": 144,
     "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 339,
+      "constraint_visits": 340,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -108,7 +108,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5703,
+    "initialization_fuel": 5695,
     "invocation_fuel": 13639818,
     "warm_fuel": 13608950,
     "initial_memory": 65536,
@@ -180,7 +180,7 @@
     "helper_functions": 10,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 78,
+      "constraint_visits": 83,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -642,7 +642,7 @@
     "helper_functions": 0,
     "optimization": {
       "cleanup_rounds": 4,
-      "constraint_visits": 75,
+      "constraint_visits": 65,
       "numeric_contexts": 8,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -708,7 +708,7 @@
     "helper_functions": 61,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 43,
+      "constraint_visits": 37,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,

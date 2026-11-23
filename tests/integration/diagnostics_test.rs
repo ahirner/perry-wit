@@ -50,11 +50,13 @@ fn unannotated_parameters_need_evidence_from_statically_known_calls() -> anyhow:
         }"#;
     let mut program = crate::core_program::Program::new(callbacks);
     assert_eq!(program.number("run", 4.0), 536.0);
+    let self_recursive = "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }";
+    let mut program = crate::core_program::Program::new(self_recursive);
+    assert_eq!(program.call("run", &[]).0[0].unwrap_f64(), 0.0);
     for source in [
         "export function id(x) { return x; } export function run(): number { return id(1); }",
         "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
         "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
-        "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }",
         "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
     ] {
         let error = perry_wit::compile_core(source, "closed.ts")
@@ -156,10 +158,8 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
 
 #[test]
 fn unresolved_parameter_patterns_keep_the_source_location() -> anyhow::Result<()> {
-    for (pattern, argument) in [("{ w, h }", "{ w:2, h:3 }"), ("[first]", "[1,2]")] {
-        let source = format!(
-            "function probe(n:number, {pattern}) {{ return n; }} export function run(): number {{ return probe(3, {argument}); }}"
-        );
+    for pattern in ["{ w, h }", "[first]"] {
+        let source = format!("export function probe(n:number, {pattern}) {{ return n; }}");
         let error = perry_wit::compile_core(&source, "pattern.ts")
             .err()
             .context("expected an unannotated parameter pattern")?;
@@ -1008,5 +1008,75 @@ fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> any
     let span = diagnostic.span().context("missing binding location")?;
     assert_eq!((span.start_line, span.start_column), (3, 7));
     assert_eq!(source.get(span.start_byte..span.end_byte), Some("storage"));
+    Ok(())
+}
+
+#[test]
+fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> anyhow::Result<()> {
+    // Object-literal method diagnostics report the source method name, never internal synthetic names.
+    for (source, file, expected_name) in [
+        (
+            "const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
+            "obj_method.js",
+            "'greet'",
+        ),
+        (
+            "const counter = { n: 0, bump(by) { this.n += by; } };\nexport function run(): number { counter.bump(1); return counter.n; }\n",
+            "obj_closure_method.js",
+            "'bump'",
+        ),
+    ] {
+        let obj_method = perry_wit::compile_core(source, file)
+            .err()
+            .context("expected missing annotation diagnostic for object method")?;
+        assert_eq!(obj_method.primary().code(), codes::MISSING_TYPE_ANNOTATION);
+        let msg = obj_method.primary().message();
+        assert!(msg.contains(expected_name), "{obj_method}");
+        assert!(!msg.contains("__obj_method_"), "{obj_method}");
+        assert!(!msg.contains("callback_"), "{obj_method}");
+    }
+
+    // Polymorphic recursion hits the explicit specialization budget instead of diverging.
+    let poly = perry_wit::compile_core(
+        "function wrap(x, n) { return n <= 0 ? x : wrap([x], n - 1); }\nexport function run(): number { wrap(1, 3); return 0; }\n",
+        "poly.js",
+    )
+    .err()
+    .context("expected specialization limit diagnostic")?;
+    assert_eq!(poly.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
+    assert!(
+        poly.primary()
+            .message()
+            .contains("generic specialization limit"),
+        "{poly}"
+    );
+
+    // Self-nesting composites (empty arrays, recursive unions, and loops) widen cleanly and explain why.
+    for (source, file, expected_code) in [
+        (
+            "export function run(): number { const a = []; a.push(a); return a.length; }\n",
+            "self_nest_array.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+        (
+            "function wrap(n) { return n === 0 ? 0 : [wrap(n - 1)]; }\nexport function run(): number { return JSON.stringify(wrap(2)).length; }\n",
+            "self_nest_union.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+        (
+            "export function run(): number { let x; x = 1; for (let i = 0; i < 3; i++) x = [x]; return JSON.stringify(x).length; }\n",
+            "self_nest_loop.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+    ] {
+        let self_nest = perry_wit::compile_core(source, file)
+            .err()
+            .context("expected widening diagnostic")?;
+        assert_eq!(self_nest.primary().code(), expected_code, "{self_nest}");
+        assert!(
+            self_nest.to_string().contains("nests itself"),
+            "expected self-nesting explanation in diagnostic: {self_nest}"
+        );
+    }
     Ok(())
 }

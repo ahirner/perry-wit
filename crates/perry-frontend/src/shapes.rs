@@ -5,7 +5,6 @@ use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub mod generics;
 mod globals;
-pub(crate) use globals::class_functions_mut;
 pub use globals::{captured, class_functions};
 mod records;
 pub use records::{Classes, RecordId};

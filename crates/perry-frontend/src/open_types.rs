@@ -1,4 +1,5 @@
 //! Context needed to finish source binding types during elaboration.
+use crate::shapes::HirTypeExt;
 use perry_hir::types::Type;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -17,7 +18,7 @@ impl<'t> TypeState<'t> {
 }
 
 pub fn binding_type(ty: &Type, annotated: bool) -> TypeState<'_> {
-    if requires_context(ty) || (!annotated && crate::infer::contains_type_var(ty)) {
+    if requires_context(ty) || (!annotated && contains_type_var(ty)) {
         if annotated {
             TypeState::Dynamic
         } else {
@@ -26,6 +27,10 @@ pub fn binding_type(ty: &Type, annotated: bool) -> TypeState<'_> {
     } else {
         TypeState::Resolved(ty)
     }
+}
+
+fn contains_type_var(ty: &Type) -> bool {
+    ty.any(&mut |t| matches!(t, Type::TypeVar(_)))
 }
 
 pub fn contextual_type(ty: &Type) -> Option<&Type> {
