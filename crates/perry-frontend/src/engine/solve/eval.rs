@@ -545,11 +545,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.mark_written(s.inst, lidx);
                     }
                     if matches!(self.types.kind(init_ty), TyKind::Func(_))
-                        || self.types.is_tagged_func_union(
-                            init_ty,
-                            &self.index.capture_free_templates,
-                            &self.escaping_env_templates,
-                        )
+                        || self.is_tagged_func_union_in(init_ty, s.inst)
                     {
                         self.write_local_value(s, lidx, init_ty);
                     } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
@@ -863,18 +859,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             _ => false,
         }
     }
-}
-
-pub(super) fn callable_arg_mask(types: &TypeTable, escaping_env: &BitSet, args: &[Ty]) -> u64 {
-    args.iter().enumerate().take(64).fold(0u64, |m, (i, &ty)| {
-        if let TyKind::Func(ident) = types.kind(ty)
-            && !escaping_env.contains(ident.template.index())
-        {
-            m | (1u64 << i)
-        } else {
-            m
-        }
-    })
 }
 
 pub(super) fn first_type_var_name(ty: &HirType) -> Option<&str> {

@@ -371,7 +371,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let TyKind::Func(ident) = self.types.kind(cb_val) else {
                 return Ok(None);
             };
-            if self.escaping_env_templates.contains(ident.template.index()) {
+            if self.is_escaping_env(ident.template, s.inst) {
                 let Some(cb_view) = self.index.view(ident.template) else {
                     return Ok(None);
                 };
@@ -429,10 +429,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(cb_view) = self.index.view(ident.template) else {
             return Ok(None);
         };
-        let caller_is_env = self
-            .instances
-            .get(s.inst)
-            .is_some_and(|i| self.escaping_env_templates.contains(i.template.index()));
+        let caller_tid = self.instances.get(s.inst).map(|i| i.template);
+        let caller_is_env = caller_tid.is_some_and(|t| self.is_escaping_env(t, s.inst));
         let keep_inline = matches!(callback, Expr::Closure { .. })
             && (cb_view.captures_this
                 || cb_view.captures_new_target
@@ -563,7 +561,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .and_then(|cid| self.index.class(cid))
             .and_then(|c| ClassInfo::find(&c.static_methods, mn))
         {
-            let mask = callable_arg_mask(self.types, &self.escaping_env_templates, &arg_tys);
+            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
@@ -690,8 +688,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let class_inst =
                 self.request_class_inst(cid, &class_args, byte_offset, Some(s.inst))?;
-            let strip_arg_mask =
-                callable_arg_mask(self.types, &self.escaping_env_templates, &arg_tys);
+            let strip_arg_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             self.record_site(
                 s.inst,
                 expr,
@@ -861,8 +858,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.check_callback_params(s.inst, target_view, &arg_tys, byte_offset)?;
 
         let explicit_targs = self.eval_type_args(s.inst, type_args);
-        let strip_mask = callable_arg_mask(self.types, &self.escaping_env_templates, &arg_tys);
-        let pass_env = self.escaping_env_templates.contains(ident.template.index());
+        let strip_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
+        let pass_env = self.is_escaping_env(ident.template, s.inst);
         let (target_inst, ret) = self.dispatch_call_site(
             s.inst,
             expr,
@@ -939,7 +936,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in &expanded {
             self.invalidate_conservative_cell(a);
         }
-        let pass_env = self.escaping_env_templates.contains(ident.template.index());
+        let pass_env = self.is_escaping_env(ident.template, s.inst);
         let (_, ret) = self.dispatch_call_site(
             s.inst,
             expr,
@@ -1043,7 +1040,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(view) = self.index.view(method_tid) {
                 self.check_callback_params(s.inst, view, &arg_tys, byte_offset)?;
             }
-            let mask = callable_arg_mask(self.types, &self.escaping_env_templates, &arg_tys);
+            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
@@ -1110,9 +1107,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(Ty::OPEN);
             };
             self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
-            let mask = callable_arg_mask(self.types, &self.escaping_env_templates, &arg_tys);
+            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
-            let pass_env = self.escaping_env_templates.contains(ident.template.index());
+            let pass_env = self.is_escaping_env(ident.template, s.inst);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
@@ -1192,7 +1189,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let strip_arg_mask = callable_arg_mask(self.types, &self.escaping_env_templates, arg_tys);
+        let strip_arg_mask = self.callable_arg_mask_in(s.inst, arg_tys);
         let mut arms = Vec::with_capacity(idents.len());
         let mut ret = Ty::BOTTOM;
         for &ident in idents {

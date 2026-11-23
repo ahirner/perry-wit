@@ -86,11 +86,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             )
                         });
                         if matches!(self.types.kind(existing), TyKind::Func(_))
-                            || self.types.is_tagged_func_union(
-                                existing,
-                                &self.index.capture_free_templates,
-                                &self.escaping_env_templates,
-                            )
+                            || self.is_tagged_func_union_in(existing, s.inst)
                         {
                             self.check_escaping_func(
                                 s.inst,
@@ -228,7 +224,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else {
                     CaptureOwner::Instance(s.inst)
                 };
-                if self.escaping_env_templates.contains(template.index()) {
+                if self.is_escaping_env(template, s.inst) {
                     for &cap_id in self.index.template_captures(template) {
                         if let Some(lidx) = self.index.local_idx(cap_id)
                             && let Some(cap_ty) = self.read_local_value(s.inst, lidx)
@@ -351,11 +347,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .is_zero_sized_func(joined, &self.index.capture_free_templates)
                 {
                     self.record_site(s.inst, expr, SiteResolution::ZeroSizedArray);
-                } else if self.types.is_tagged_func_union(
-                    joined,
-                    &self.index.capture_free_templates,
-                    &self.escaping_env_templates,
-                ) {
+                } else if self.is_tagged_func_union_in(joined, s.inst) {
                     for (elem, &et) in elements.iter().zip(&elem_tys) {
                         self.record_coercion(s.inst, elem, et, joined);
                     }
@@ -940,7 +932,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if !r_members.iter().any(|rm| rm.template == tid) {
                     continue;
                 }
-                if !self.escaping_env_templates.contains(tid.index())
+                if !self.is_escaping_env(tid, inst_id)
                     && self
                         .index
                         .view(tid)

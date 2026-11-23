@@ -16,7 +16,7 @@ use crate::{
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
 };
-use eval::{callable_arg_mask, first_type_var_name};
+use eval::first_type_var_name;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
@@ -317,6 +317,7 @@ struct Solver<'h, 'a> {
     inst_sites: Vec<Vec<SiteEntry>>,
     inst_superseded: BitSet,
     escaping_env_templates: BitSet,
+    template_escape_locs: Vec<LocId>,
     collapsed_closures: BitSet,
     collapsed_local_locs: Vec<Option<LocId>>,
     boxed_locals: BitSet,
@@ -383,6 +384,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         if locations.is_empty() {
             locations.push(Ty::VOID);
         }
+        let template_escape_locs: Vec<LocId> = (0..index.views.len())
+            .map(|_| locations.push(Ty::BOTTOM))
+            .collect();
         let static_field_locs = index
             .classes
             .iter_enumerated()
@@ -448,6 +452,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_sites: Vec::new(),
             inst_superseded: BitSet::default(),
             escaping_env_templates: BitSet::default(),
+            template_escape_locs,
             collapsed_closures: BitSet::default(),
             collapsed_local_locs: vec![None; index.local_count()],
             boxed_locals: BitSet::default(),
@@ -1507,7 +1512,42 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn mark_escaping_env(&mut self, caller: InstanceId, ty: Ty) {
+    pub(super) fn is_escaping_env(&mut self, tid: TemplateId, reader: InstanceId) -> bool {
+        let Some(&loc) = self.template_escape_locs.get(tid.index()) else {
+            return false;
+        };
+        self.read_loc(loc, reader) != Ty::BOTTOM
+    }
+
+    pub(super) fn is_tagged_func_union_in(&mut self, ty: Ty, reader: InstanceId) -> bool {
+        if let TyKind::Union(span) = self.types.kind(ty) {
+            let members: Vec<Ty> = self.types.ty_slice(span).to_vec();
+            for m in members {
+                if let TyKind::Func(ident) = self.types.kind(m) {
+                    let _ = self.is_escaping_env(ident.template, reader);
+                }
+            }
+        }
+        self.types.is_tagged_func_union(
+            ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        )
+    }
+
+    pub(super) fn callable_arg_mask_in(&mut self, reader: InstanceId, args: &[Ty]) -> u64 {
+        let mut mask = 0u64;
+        for (i, &ty) in args.iter().enumerate().take(64) {
+            if let TyKind::Func(ident) = self.types.kind(ty)
+                && !self.is_escaping_env(ident.template, reader)
+            {
+                mask |= 1u64 << i;
+            }
+        }
+        mask
+    }
+
+    pub(super) fn mark_escaping_env(&mut self, _caller: InstanceId, ty: Ty) {
         let members = self.types.func_members(ty);
         for ident in members {
             let tid = ident.template;
@@ -1518,6 +1558,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             if !self.escaping_env_templates.insert(tid.index()) {
                 continue;
+            }
+            if let Some(&loc) = self.template_escape_locs.get(tid.index()) {
+                self.write_loc(loc, Ty::BOOLEAN);
             }
             for &cap_id in self.index.template_captures(tid) {
                 if let Some(lidx) = self.index.local_idx(cap_id) {
@@ -1532,48 +1575,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.boxed_locals.insert(li);
                     }
                 }
-            }
-            self.enqueue(caller);
-            match ident.capture_owner {
-                CaptureOwner::Instance(owner) => {
-                    self.enqueue(owner);
-                    if let Some(grand_caller) = self.instances.get(owner).and_then(|i| i.caller) {
-                        self.enqueue(grand_caller);
-                    }
-                }
-                CaptureOwner::Template(owner_tid) => {
-                    let owners: Vec<InstanceId> = self
-                        .instances
-                        .iter_enumerated()
-                        .filter_map(|(id, inst)| {
-                            (!self.inst_superseded.contains(id.index())
-                                && inst.template == owner_tid)
-                                .then_some(id)
-                        })
-                        .collect();
-                    for id in owners {
-                        self.enqueue(id);
-                    }
-                }
-                CaptureOwner::None => {}
-            }
-            let to_requeue: Vec<InstanceId> =
-                self.instances
-                    .iter_enumerated()
-                    .filter_map(|(id, inst)| {
-                        if self.inst_superseded.contains(id.index()) {
-                            return None;
-                        }
-                        let matches = inst.template == tid
-                            || inst.capture_owner == ident.capture_owner
-                            || self.types.tuple_slice(inst.args).iter().any(|&a| {
-                                self.types.func_members(a).iter().any(|m| m.template == tid)
-                            });
-                        matches.then_some(id)
-                    })
-                    .collect();
-            for id in to_requeue {
-                self.enqueue(id);
             }
         }
     }
@@ -1643,11 +1644,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             for a in args {
                 self.record_site_coercion(inst_id, a, FuncCoercion::Zero);
             }
-        } else if self.types.is_tagged_func_union(
-            elem_ty,
-            &self.index.capture_free_templates,
-            &self.escaping_env_templates,
-        ) {
+        } else if self.is_tagged_func_union_in(elem_ty, inst_id) {
             for (a, &at) in args.iter().zip(arg_tys) {
                 self.record_coercion(inst_id, a, at, elem_ty);
             }
@@ -1664,11 +1661,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if src_ty == Ty::BOTTOM || dst_ty == Ty::BOTTOM {
             return;
         }
-        if !self.types.is_tagged_func_union(
-            dst_ty,
-            &self.index.capture_free_templates,
-            &self.escaping_env_templates,
-        ) {
+        if !self.is_tagged_func_union_in(dst_ty, inst_id) {
             return;
         }
         let inner = match expr {
@@ -1688,19 +1681,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.record_site_coercion(inst_id, expr, FuncCoercion::Tag(ident));
             return;
         }
-        if self.types.is_env_func(src_ty, &self.escaping_env_templates)
-            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        if let TyKind::Func(ident) = self.types.kind(src_ty)
+            && self.is_escaping_env(ident.template, inst_id)
         {
             if !matches!(expr, Expr::Closure { .. }) {
                 self.record_site_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
             }
             return;
         }
-        if self.types.is_tagged_func_union(
-            src_ty,
-            &self.index.capture_free_templates,
-            &self.escaping_env_templates,
-        ) && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
+        if self.is_tagged_func_union_in(src_ty, inst_id)
+            && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
         {
             self.record_site_coercion(
                 inst_id,
@@ -1727,11 +1717,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .ty_slice(u_span)
                 .iter()
                 .any(|&m| matches!(self.types.kind(m), TyKind::Func(_)))
-            && !self.types.is_tagged_func_union(
-                ty,
-                &self.index.capture_free_templates,
-                &self.escaping_env_templates,
-            )
+            && !self.is_tagged_func_union_in(ty, inst_id)
         {
             let mut err = Diagnostic::unsupported(
                 "joining function values with non-function values is not supported yet",
