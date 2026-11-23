@@ -197,7 +197,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
     program
         .source
         .contents
-        .extend_from_slice(b"\nconst escaped = {helper};");
+        .extend_from_slice(b"\nexport { helper };");
     let error = api::compile_core(&program).unwrap_err();
     program.source.contents.truncate(end);
     let diagnostic = error.primary();
