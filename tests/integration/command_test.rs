@@ -402,6 +402,10 @@ setTimeout(60_000);
     assert!(!run.ok);
     assert_eq!(run.stderr, format!("{DETACHED}\n"));
 
+    let run = execute("setTimeout(() => {}, 60_000);").await?;
+    assert!(!run.ok);
+    assert_eq!(run.stderr, format!("{DETACHED}\n"));
+
     let bytes = Standard.component(
         "package test:detached; world boundary {import wasi:clocks/monotonic-clock@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func()->string;}",
         "boundary",
@@ -869,6 +873,85 @@ console.log(
 );
 "#,
             "6 10 5 true false false 11:2 20 1 3 69 22\n",
+        ),
+        (
+            "guest_settled_promises_and_global_timers",
+            r#"
+async function main() {
+  const immediate = await new Promise((resolve) => resolve(41 + 1));
+  const delayed = await new Promise((resolve) => {
+    setTimeout(() => resolve("later"), 5);
+  });
+  const withArgs = await new Promise((resolve) => {
+    setTimeout((a, b) => resolve(a + b), 2, 10, 20);
+  });
+  const caught = await new Promise((_, reject) => {
+    reject(new Error("boom"));
+  }).catch((e) => e.message);
+  const thrown = await new Promise(() => {
+    throw new Error("sync-fail");
+  }).catch((e) => e.message);
+  const chained = await new Promise((resolve) => resolve(3))
+    .then((n) => new Promise((resolve) => setTimeout(() => resolve(n * 4), 2)))
+    .then((n) => n + 1);
+  const log = [];
+  const finOk = await new Promise((resolve) => resolve("ok")).finally(() => {
+    log.push("f1");
+  });
+  const finErr = await new Promise((_, reject) => reject(new Error("bad")))
+    .finally(() => {
+      log.push("f2");
+    })
+    .catch((e) => e.message);
+
+  let cancelledRan = false;
+  const cancelled = setTimeout(() => {
+    cancelledRan = true;
+  }, 50);
+  clearTimeout(cancelled);
+
+  const ticks = await new Promise((resolve) => {
+    let count = 0;
+    let id;
+    id = setInterval(() => {
+      count++;
+      if (count === 3) {
+        clearInterval(id);
+        resolve(count);
+      }
+    }, 2);
+  });
+
+  const thisMatches = await new Promise((resolve) => {
+    let handle;
+    handle = setTimeout(function () {
+      resolve(this === handle);
+    }, 2);
+  });
+
+  const imm = await new Promise((resolve) => {
+    setImmediate((v) => resolve(v), "imm");
+  });
+
+  console.log(
+    immediate,
+    delayed,
+    withArgs,
+    caught,
+    thrown,
+    chained,
+    finOk,
+    finErr,
+    log.join(","),
+    cancelledRan,
+    ticks,
+    thisMatches,
+    imm,
+  );
+}
+await main();
+"#,
+            "42 later 30 boom sync-fail 13 ok bad f1,f2 false 3 true imm\n",
         ),
     ];
     for &(name, source, expected) in cases {
