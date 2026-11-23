@@ -1197,7 +1197,11 @@ impl<'h> Emitter<'h, '_> {
         if let Some(site) = self.site_of(rctx.inst_id, expr).cloned() {
             match site {
                 SiteResolution::Cell(_) => {}
-                SiteResolution::FoldBool(b) => return Ok(Expr::Bool(b)),
+                SiteResolution::FoldBool(b) => {
+                    if let Expr::Compare { left, right, .. } = expr {
+                        return self.fold_comparison(rctx, left, right, b);
+                    }
+                }
                 SiteResolution::CollectionNew { is_map, type_args } => {
                     let mat_args = type_args
                         .into_iter()
@@ -1346,8 +1350,7 @@ impl<'h> Emitter<'h, '_> {
                             },
                         ) => {
                             let arg_ctx = rctx.with_expected(true);
-                            let mut rewritten_args =
-                                self.rewrite_filtered_args(&arg_ctx, args, strip_arg_mask)?;
+                            let mut rewritten_args = Vec::new();
                             let pre_effect = if pass_env {
                                 if pass_receiver
                                     && let Expr::PropertyGet { object, .. } = orig_callee.as_ref()
@@ -1378,9 +1381,16 @@ impl<'h> Emitter<'h, '_> {
                             } else {
                                 None
                             };
+                            let before = self.rewrite_filtered_args(
+                                &arg_ctx,
+                                args,
+                                strip_arg_mask,
+                                &mut rewritten_args,
+                            )?;
                             **callee = Expr::FuncRef(fid);
                             *out_args = rewritten_args;
                             type_args.clear();
+                            let out = sequence(before, out);
                             return Ok(match pre_effect {
                                 Some(eff) => Expr::Sequence(vec![eff, out]),
                                 None => out,
@@ -1424,14 +1434,24 @@ impl<'h> Emitter<'h, '_> {
                             };
                             if let TyKind::Func(ident) = self.types.kind(zero_ty) {
                                 if !self.types.func_members(union_ty).contains(&ident) {
-                                    return Ok(Expr::Bool(!is_eq));
+                                    return self.fold_comparison(rctx, left, right, !is_eq);
                                 }
                                 let u_rewritten = self.rewrite_expr(rctx, union_expr)?;
-                                return Ok(Expr::Compare {
+                                let comparison = Expr::Compare {
                                     op: if is_eq { CompareOp::Eq } else { CompareOp::Ne },
                                     left: Box::new(Self::prop_get(u_rewritten, "tag")),
                                     right: Box::new(Expr::String(func_tag(ident))),
-                                });
+                                };
+                                let erased = if l_zero { left } else { right };
+                                if is_pure_func_expr(erased) {
+                                    return Ok(comparison);
+                                }
+                                let effects = vec![self.rewrite_expr(rctx, erased)?];
+                                return if l_zero {
+                                    Ok(sequence(effects, comparison))
+                                } else {
+                                    self.followed_by(comparison, effects)
+                                };
                             }
                         }
                         let l_env = self
@@ -1499,18 +1519,19 @@ impl<'h> Emitter<'h, '_> {
                     for ((k, v), prop) in pairs.into_iter().zip(props) {
                         if !self.is_zero_sized_func(prop.ty) {
                             kept_names.push(k);
-                            kept_args.push(self.rewrite_expr(rctx, v)?);
+                            kept_args.push(sequence(
+                                std::mem::take(&mut effects),
+                                self.rewrite_expr(rctx, v)?,
+                            ));
                         } else if !is_pure_func_expr(v) {
                             effects.push(self.rewrite_expr(rctx, v)?);
                         }
                     }
-                    let constructed = self.emit_anon_new(&kept_names, kept_args);
-                    return Ok(if effects.is_empty() {
-                        constructed
-                    } else {
-                        effects.push(constructed);
-                        Expr::Sequence(effects)
-                    });
+                    let effects = self.finish_operands(&mut kept_args, effects)?;
+                    return Ok(sequence(
+                        effects,
+                        self.emit_anon_new(&kept_names, kept_args),
+                    ));
                 }
                 SiteResolution::DispatchCall {
                     callee_ty,
@@ -1544,12 +1565,16 @@ impl<'h> Emitter<'h, '_> {
                         {
                             call_args.push(self.rewrite_expr(&arg_ctx, object)?);
                         }
-                        call_args.extend(self.rewrite_filtered_args(
+                        let before = self.rewrite_filtered_args(
                             &arg_ctx,
                             args,
                             strip_arg_mask,
-                        )?);
-                        return Ok(Self::synth_call(fid, call_args, *byte_offset, *byte_end));
+                            &mut call_args,
+                        )?;
+                        return Ok(sequence(
+                            before,
+                            Self::synth_call(fid, call_args, *byte_offset, *byte_end),
+                        ));
                     }
                 }
                 SiteResolution::TaggedArray(arr_ty) => {
@@ -1625,8 +1650,10 @@ impl<'h> Emitter<'h, '_> {
                             },
                         ) => {
                             *out_name = method_name;
-                            *out_args = self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
-                            return Ok(out);
+                            out_args.clear();
+                            let before =
+                                self.rewrite_filtered_args(rctx, args, strip_arg_mask, out_args)?;
+                            return Ok(sequence(before, out));
                         }
                         (
                             Expr::Call { callee, args, .. },
@@ -1646,12 +1673,19 @@ impl<'h> Emitter<'h, '_> {
                                 },
                             ) = (callee.as_ref(), out_callee.as_mut())
                             {
-                                **out_obj = self.rewrite_expr(rctx, object)?;
+                                out_args.clear();
+                                let effects = self.rewrite_filtered_args(
+                                    rctx,
+                                    args,
+                                    strip_arg_mask,
+                                    out_args,
+                                )?;
+                                let receiver = self.rewrite_expr(rctx, object)?;
+                                **out_obj = self.followed_by(receiver, effects)?;
                                 *property = method_name;
+                                type_args.clear();
+                                return Ok(out);
                             }
-                            *out_args = self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
-                            type_args.clear();
-                            return Ok(out);
                         }
                         _ => {}
                     }
@@ -1674,9 +1708,11 @@ impl<'h> Emitter<'h, '_> {
                         {
                             *class_name = name;
                             type_args.clear();
-                            *out_args = self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
+                            out_args.clear();
+                            let before =
+                                self.rewrite_filtered_args(rctx, args, strip_arg_mask, out_args)?;
+                            return Ok(sequence(before, out));
                         }
-                        return Ok(out);
                     }
                 }
             }
@@ -1804,16 +1840,16 @@ impl<'h> Emitter<'h, '_> {
                 byte_end: 0,
             });
         }
-        if rctx.self_local.is_some()
+        let nested;
+        let rctx = if rctx.self_local.is_some()
             && matches!(
                 expr,
                 Expr::Closure {
                     captures_this: false,
                     ..
                 }
-            )
-        {
-            let nested = RewriteCtx {
+            ) {
+            nested = RewriteCtx {
                 inst_id: rctx.inst_id,
                 remap: None,
                 func_params: rctx.func_params,
@@ -1826,26 +1862,10 @@ impl<'h> Emitter<'h, '_> {
                 void_return: false,
                 has_expected: false,
             };
-            let mut cloned = expr.clone();
-            let mut orig_children: Vec<&'h Expr> = Vec::new();
-            perry_hir::walker::walk_expr_children(expr, &mut |child| orig_children.push(child));
-            let (mut idx, mut err) = (0usize, None);
-            perry_hir::walker::walk_expr_children_mut(&mut cloned, &mut |child| {
-                if err.is_none()
-                    && let Some(&orig) = orig_children.get(idx)
-                {
-                    idx += 1;
-                    match self.rewrite_expr(&nested, orig) {
-                        Ok(r) => *child = r,
-                        Err(e) => err = Some(e),
-                    }
-                }
-            });
-            return match err {
-                Some(e) => Err(e),
-                None => Ok(cloned),
-            };
-        }
+            &nested
+        } else {
+            rctx
+        };
         let mut cloned = expr.clone();
         let mut orig_children: Vec<&'h Expr> = Vec::new();
         perry_hir::walker::walk_expr_children(expr, &mut |child| orig_children.push(child));
@@ -1867,17 +1887,64 @@ impl<'h> Emitter<'h, '_> {
         }
     }
 
+    fn fold_comparison(
+        &mut self,
+        rctx: &RewriteCtx<'_>,
+        left: &'h Expr,
+        right: &'h Expr,
+        result: bool,
+    ) -> Result<Expr> {
+        let effects = [left, right]
+            .into_iter()
+            .filter(|operand| !is_pure_func_expr(operand))
+            .map(|operand| self.rewrite_expr(rctx, operand))
+            .collect::<Result<_>>()?;
+        Ok(sequence(effects, Expr::Bool(result)))
+    }
+
+    fn followed_by(&mut self, value: Expr, effects: Vec<Expr>) -> Result<Expr> {
+        if effects.is_empty() {
+            return Ok(value);
+        }
+        let id = self.fresh_synthetic_local()?;
+        Ok(Expr::ScopedTemp {
+            id,
+            value: Box::new(value),
+            body: Box::new(sequence(effects, Expr::LocalGet(id))),
+        })
+    }
+
+    fn finish_operands(&mut self, values: &mut Vec<Expr>, effects: Vec<Expr>) -> Result<Vec<Expr>> {
+        if !effects.is_empty()
+            && let Some(last) = values.pop()
+        {
+            values.push(self.followed_by(last, effects)?);
+            return Ok(Vec::new());
+        }
+        Ok(effects)
+    }
+
     fn rewrite_filtered_args(
         &mut self,
         rctx: &RewriteCtx<'_>,
         args: &'h [Expr],
         mask: u64,
+        values: &mut Vec<Expr>,
     ) -> Result<Vec<Expr>> {
-        args.iter()
-            .enumerate()
-            .filter(|&(i, _)| i >= 64 || (mask & (1u64 << i)) == 0)
-            .map(|(_, arg)| self.rewrite_expr(rctx, arg))
-            .collect()
+        let mut effects = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if i < 64 && mask & (1 << i) != 0 {
+                if !is_pure_func_expr(arg) {
+                    effects.push(self.rewrite_expr(rctx, arg)?);
+                }
+            } else {
+                values.push(sequence(
+                    std::mem::take(&mut effects),
+                    self.rewrite_expr(rctx, arg)?,
+                ));
+            }
+        }
+        self.finish_operands(values, effects)
     }
     fn default_box_init(&self, ty: &HirType, id: LocalId, inst_id: InstanceId) -> Result<Expr> {
         match ty {
@@ -1899,6 +1966,14 @@ impl<'h> Emitter<'h, '_> {
             }
         }
     }
+}
+
+fn sequence(mut effects: Vec<Expr>, value: Expr) -> Expr {
+    if effects.is_empty() {
+        return value;
+    }
+    effects.push(value);
+    Expr::Sequence(effects)
 }
 
 fn is_pure_func_expr(expr: &Expr) -> bool {

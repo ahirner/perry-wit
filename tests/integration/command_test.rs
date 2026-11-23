@@ -756,6 +756,27 @@ console.log(
             "6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
         ),
         (
+            "erased_function_values_preserve_evaluation_order",
+            r#"
+let trace = "";
+function id(n) { return n; }
+function other(n) { return -n; }
+function get(label) { trace += label; return id; }
+function num(label) { trace += label; return 2; }
+function apply(a, f, b) { return f(a + b); }
+function last(n, f) { return f(n); }
+function only(f) { trace += "n"; return f(1); }
+const same = get("a") === get("b");
+const distinct = get("c") !== other;
+const obj = { first: num("d"), middle: get("e"), last: num("f"), end: get("g") };
+const result = apply(num("h"), get("i"), num("j"));
+const tail = last(num("k"), get("l"));
+only(get("m"));
+console.log(trace, same, distinct, obj.first, obj.end(1), result, tail);
+"#,
+            "abcdefghijklmn true true 2 1 4 2\n",
+        ),
+        (
             "loop_let_boxes_nullable_functions_typeof_and_wide_objects",
             r#"
 function makeLoopFns() {
