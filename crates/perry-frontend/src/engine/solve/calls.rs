@@ -1,501 +1,8 @@
-//! Call, method, constructor, built-in callback, and host-import resolution.
+//! Call, method and constructor resolution.
 use super::*;
-use crate::methods::{Callback as Cb, Method, MethodResult};
-
-struct CallbackSite<'h> {
-    callback: &'h Expr,
-    inputs: Vec<Ty>,
-    rule: MethodResult,
-    recv_ty: Ty,
-    init_ty: Option<Ty>,
-    sparse_arrays: bool,
-    group_elem: Option<Ty>,
-}
-
-impl<'h> CallbackSite<'h> {
-    fn new(callback: &'h Expr, inputs: Vec<Ty>, rule: MethodResult, recv_ty: Ty) -> Self {
-        Self {
-            callback,
-            inputs,
-            rule,
-            recv_ty,
-            init_ty: None,
-            sparse_arrays: false,
-            group_elem: None,
-        }
-    }
-}
+use crate::methods::MethodResult;
 
 impl<'h, 'a> Solver<'h, 'a> {
-    fn array_cb_inputs(&mut self, kind: Cb, recv_ty: Ty, elem: Ty) -> Vec<Ty> {
-        match kind {
-            Cb::Elements => vec![elem, Ty::NUMBER, recv_ty],
-            Cb::AllIndices => vec![
-                self.types.with_absences(elem, Absence::Undefined),
-                Ty::NUMBER,
-                recv_ty,
-            ],
-            Cb::Comparator => {
-                let d = self.types.exclude_absences(elem, Absence::Undefined);
-                vec![d, d]
-            }
-            _ => Vec::new(),
-        }
-    }
-
-    fn match_builtin_callback(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-    ) -> Result<Option<Result<CallbackSite<'h>, Ty>>> {
-        let group_by = match expr {
-            Expr::MapGroupBy { items, key_fn } => Some((items.as_ref(), key_fn.as_ref())),
-            Expr::Call { callee, args, .. }
-                if let Expr::PropertyGet {
-                    object, property, ..
-                } = callee.as_ref()
-                    && let Expr::PropertyGet {
-                        object: g,
-                        property: cls,
-                        ..
-                    } = object.as_ref()
-                    && matches!(g.as_ref(), Expr::GlobalGet(_))
-                    && cls == "Map"
-                    && hir_compat::method(property).name() == "groupBy"
-                    && let [items, key_fn] = args.as_slice() =>
-            {
-                Some((items, key_fn))
-            }
-            _ => None,
-        };
-        if let Some((items, key_fn)) = group_by {
-            let src = self.eval_expr(s, items)?;
-            if src == Ty::BOTTOM {
-                return Ok(Some(Err(Ty::BOTTOM)));
-            }
-            let elem = builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN);
-            let mut site =
-                CallbackSite::new(key_fn, vec![elem, Ty::NUMBER], MethodResult::Void, src);
-            site.group_elem = Some(elem);
-            return Ok(Some(Ok(site)));
-        }
-
-        if let Expr::ArrayFromMapped {
-            iterable, map_fn, ..
-        } = expr
-        {
-            let src = self.eval_expr(s, iterable)?;
-            if src == Ty::BOTTOM {
-                return Ok(Some(Err(Ty::BOTTOM)));
-            }
-            let len_name = self.types.intern_name("length");
-            let src_def = self.types.strip_nullish(src).0;
-            let is_array_like = match self.types.kind(src_def) {
-                TyKind::Object { props, .. } => self
-                    .types
-                    .object_slice(props)
-                    .iter()
-                    .any(|p| p.name == len_name),
-                _ => {
-                    matches!(iterable.as_ref(), Expr::Object(p) if p.iter().any(|(k, _)| k == "length"))
-                }
-            };
-            let elem = if is_array_like {
-                Ty::VOID
-            } else {
-                builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN)
-            };
-            return Ok(Some(Ok(CallbackSite::new(
-                map_fn.as_ref(),
-                vec![elem, Ty::NUMBER],
-                MethodResult::Mapped,
-                src,
-            ))));
-        }
-
-        let (object, method_name, args): (&'h Expr, &str, &'h [Expr]) = match expr {
-            Expr::ArrayMap { array, callback } => (array, "map", std::slice::from_ref(callback)),
-            Expr::ArrayFlatMap { array, callback } => {
-                (array, "flatMap", std::slice::from_ref(callback))
-            }
-            Expr::ArrayFilter { array, callback } => {
-                (array, "filter", std::slice::from_ref(callback))
-            }
-            Expr::ArraySome { array, callback } => (array, "some", std::slice::from_ref(callback)),
-            Expr::ArrayEvery { array, callback } => {
-                (array, "every", std::slice::from_ref(callback))
-            }
-            Expr::ArrayFind { array, callback } => (array, "find", std::slice::from_ref(callback)),
-            Expr::ArrayFindIndex { array, callback } => {
-                (array, "findIndex", std::slice::from_ref(callback))
-            }
-            Expr::ArraySort { array, comparator } => {
-                (array, "sort", std::slice::from_ref(comparator))
-            }
-            Expr::ArrayToSorted {
-                array,
-                comparator: Some(c),
-                ..
-            } => (array, "toSorted", std::slice::from_ref(c)),
-            Expr::Call { callee, args, .. }
-                if let Expr::PropertyGet {
-                    object, property, ..
-                } = callee.as_ref() =>
-            {
-                (object, hir_compat::method(property).name(), args.as_slice())
-            }
-            _ => return Ok(None),
-        };
-        let raw_obj = self.eval_expr(s, object)?;
-        if raw_obj == Ty::BOTTOM {
-            return Ok(Some(Err(Ty::BOTTOM)));
-        }
-        let (raw_stripped, _) = self.types.strip_nullish(raw_obj);
-
-        if method_name == "forEach"
-            && let TyKind::Generic { base, args: gargs } = self.types.kind(raw_stripped)
-            && let HirType::Named(base_name) = base.hir(self.ctx)
-            && let Some(cb) = args.first()
-        {
-            let inputs = match (
-                base_name.as_str(),
-                self.types.ty_slice(gargs).to_vec().as_slice(),
-            ) {
-                ("Map" | "ReadonlyMap", [k, v]) => vec![*v, *k, raw_stripped],
-                ("Set" | "ReadonlySet", [v]) => vec![*v, *v, raw_stripped],
-                _ => return Ok(None),
-            };
-            return Ok(Some(Ok(CallbackSite::new(
-                cb,
-                inputs,
-                MethodResult::Void,
-                raw_obj,
-            ))));
-        }
-
-        let Some(method) = builtins::receiver_of(self.ctx, self.types, raw_stripped)
-            .and_then(|r| Method::lookup(r, method_name))
-        else {
-            return Ok(None);
-        };
-        let Some(cb_kind) = method.callback() else {
-            return Ok(None);
-        };
-        let obj_ty = self.resolve_cell_read(s.inst, raw_obj);
-        if obj_ty == Ty::BOTTOM {
-            return Ok(Some(Err(Ty::BOTTOM)));
-        }
-        let (stripped, _) = self.types.strip_nullish(obj_ty);
-        let Some((first_arg, tail)) = args.split_first() else {
-            return Ok(None);
-        };
-
-        if matches!(cb_kind, Cb::Replacement) {
-            let Some(cb) = tail.first() else {
-                return Ok(None);
-            };
-            let cb_ty = self.eval_expr(s, cb)?;
-            if cb_ty == Ty::BOTTOM {
-                return Ok(Some(Err(Ty::BOTTOM)));
-            }
-            if !matches!(self.types.kind(cb_ty), TyKind::Func(_)) {
-                return Ok(None);
-            }
-            let mut inputs = vec![Ty::STRING];
-            let captures = match first_arg {
-                Expr::RegExp { pattern, .. } => Some(crate::methods::regex_captures(pattern)),
-                Expr::LocalGet(id) => self
-                    .index
-                    .local_idx(*id)
-                    .and_then(|li| {
-                        self.index
-                            .local_regex_pattern
-                            .get(li.index())
-                            .copied()
-                            .flatten()
-                    })
-                    .map(crate::methods::regex_captures),
-                Expr::String(_) => Some((0, false)),
-                _ => None,
-            };
-            if let Some((count, named)) = captures {
-                let opt = self.types.with_absences(Ty::STRING, Absence::Undefined);
-                inputs.extend(std::iter::repeat_n(opt, count));
-                inputs.extend([Ty::NUMBER, Ty::STRING]);
-                if named {
-                    inputs.push(self.types.object(&[], Some(opt)));
-                }
-            }
-            return Ok(Some(Ok(CallbackSite::new(
-                cb,
-                inputs,
-                method.result_rule(),
-                obj_ty,
-            ))));
-        }
-
-        if matches!(cb_kind, Cb::Comparator) && matches!(first_arg, Expr::Undefined) {
-            return Ok(None);
-        }
-        let Some(elem) = builtins::iterated_element(self.ctx, self.types, stripped) else {
-            return Ok(None);
-        };
-        let (inputs, init_ty) = if matches!(cb_kind, Cb::Fold) {
-            let acc = match tail.first() {
-                Some(init) => self.eval_expr(s, init)?,
-                None => elem,
-            };
-            if acc == Ty::BOTTOM {
-                return Ok(Some(Err(Ty::BOTTOM)));
-            }
-            (vec![acc, elem, Ty::NUMBER, stripped], Some(acc))
-        } else {
-            (self.array_cb_inputs(cb_kind, stripped, elem), None)
-        };
-        let mut site = CallbackSite::new(first_arg, inputs, method.result_rule(), obj_ty);
-        site.init_ty = init_ty;
-        site.sparse_arrays = self.facts.sparse_arrays;
-        Ok(Some(Ok(site)))
-    }
-
-    pub(super) fn try_eval_builtin_callback(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-    ) -> Result<Option<Ty>> {
-        let Some(matched) = self.match_builtin_callback(s, expr)? else {
-            return Ok(None);
-        };
-        let CallbackSite {
-            callback,
-            mut inputs,
-            rule,
-            recv_ty,
-            init_ty,
-            sparse_arrays,
-            group_elem,
-        } = match matched {
-            Ok(site) => site,
-            Err(early) => return Ok(Some(early)),
-        };
-        if inputs.contains(&Ty::BOTTOM) {
-            return Ok(Some(Ty::BOTTOM));
-        }
-        let ident = if let Expr::Closure { func_id, .. } = callback {
-            let Some(template) = self.index.template_of_func(*func_id) else {
-                return Ok(None);
-            };
-            let capture_owner = if self.index.template_captures(template).is_empty() {
-                CaptureOwner::None
-            } else if self.collapsed_closures.contains(template.index())
-                && let Some(owner_tid) = self.instances.get(s.inst).map(|i| i.template)
-            {
-                CaptureOwner::Template(owner_tid)
-            } else {
-                CaptureOwner::Instance(s.inst)
-            };
-            FuncIdentity {
-                template,
-                capture_owner,
-            }
-        } else {
-            let cb_val = self.eval_expr(s, callback)?;
-            if cb_val == Ty::BOTTOM {
-                return Ok(Some(Ty::BOTTOM));
-            }
-            if let Some(idents) = self.types.func_union_members(cb_val) {
-                let mut arms = Vec::with_capacity(idents.len());
-                let mut cb_ret = Ty::BOTTOM;
-                let mut max_params = 0usize;
-                for ident in idents {
-                    let Some(cb_view) = self.index.view(ident.template) else {
-                        return Ok(None);
-                    };
-                    let mut arm_inputs = inputs.clone();
-                    if !cb_view.params.iter().any(|p| p.is_rest)
-                        && arm_inputs.len() > cb_view.params.len()
-                    {
-                        arm_inputs.truncate(cb_view.params.len());
-                    }
-                    max_params = max_params.max(arm_inputs.len());
-                    let cb_inst = self.request_instance(
-                        InstanceReq::new(ident.template, &arm_inputs, Some(s.inst))
-                            .owner(ident.capture_owner),
-                    )?;
-                    if let Some(ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) {
-                        let r = self.read_loc(ret_loc, s.inst);
-                        cb_ret = self.types.join(cb_ret, r);
-                    }
-                    arms.push((ident, cb_inst));
-                }
-                inputs.truncate(max_params);
-                let arms_span = self.intern_dispatch_arms(&arms);
-                let input_tys = self.types.tuple(&inputs);
-                let helper = self.intern_helper(
-                    HelperSpec::Dispatcher {
-                        callee_ty: cb_val,
-                        arms: arms_span,
-                        arg_tys: input_tys,
-                        strip_arg_mask: 0,
-                        recv_ty: None,
-                    },
-                    0,
-                );
-                self.record_site_coercion(
-                    s.inst,
-                    callback,
-                    FuncCoercion::DispatchCallback {
-                        helper,
-                        arms: arms_span,
-                        input_tys,
-                    },
-                );
-                if let Some(elem) = group_elem {
-                    if cb_ret == Ty::BOTTOM {
-                        return Ok(Some(Ty::BOTTOM));
-                    }
-                    let key = if self.types.is_open(cb_ret) {
-                        Ty::STRING
-                    } else {
-                        cb_ret
-                    };
-                    let arr = self.types.array(elem);
-                    return Ok(Some(self.types.generic(
-                        shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
-                        &[key, arr],
-                    )));
-                }
-                return Ok(Some(builtins::apply_method_result(
-                    self.ctx,
-                    self.types,
-                    rule,
-                    MethodResultArgs {
-                        receiver: recv_ty,
-                        arg0: init_ty,
-                        arg0_expr: None,
-                        callback_result: Some(cb_ret),
-                        sparse_arrays,
-                    },
-                )));
-            }
-            let TyKind::Func(ident) = self.types.kind(cb_val) else {
-                return Ok(None);
-            };
-            if self.is_escaping_env(ident.template, s.inst) {
-                let Some(cb_view) = self.index.view(ident.template) else {
-                    return Ok(None);
-                };
-                if !cb_view.params.iter().any(|p| p.is_rest) && inputs.len() > cb_view.params.len()
-                {
-                    inputs.truncate(cb_view.params.len());
-                }
-                let cb_inst = self.request_instance(
-                    InstanceReq::new(ident.template, &inputs, Some(s.inst))
-                        .owner(ident.capture_owner),
-                )?;
-                let input_tys = self.types.tuple(&inputs);
-                self.record_site_coercion(
-                    s.inst,
-                    callback,
-                    FuncCoercion::EnvCallback {
-                        target: cb_inst,
-                        input_tys,
-                    },
-                );
-                let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
-                    return Ok(None);
-                };
-                let cb_ret = self.read_loc(cb_ret_loc, s.inst);
-                if let Some(elem) = group_elem {
-                    if cb_ret == Ty::BOTTOM {
-                        return Ok(Some(Ty::BOTTOM));
-                    }
-                    let key = if self.types.is_open(cb_ret) {
-                        Ty::STRING
-                    } else {
-                        cb_ret
-                    };
-                    let arr = self.types.array(elem);
-                    return Ok(Some(self.types.generic(
-                        shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
-                        &[key, arr],
-                    )));
-                }
-                return Ok(Some(builtins::apply_method_result(
-                    self.ctx,
-                    self.types,
-                    rule,
-                    MethodResultArgs {
-                        receiver: recv_ty,
-                        arg0: init_ty,
-                        arg0_expr: None,
-                        callback_result: Some(cb_ret),
-                        sparse_arrays,
-                    },
-                )));
-            }
-            ident
-        };
-        let Some(cb_view) = self.index.view(ident.template) else {
-            return Ok(None);
-        };
-        let caller_tid = self.instances.get(s.inst).map(|i| i.template);
-        let caller_is_env = caller_tid.is_some_and(|t| self.is_escaping_env(t, s.inst));
-        let keep_inline = matches!(callback, Expr::Closure { .. })
-            && (cb_view.captures_this
-                || cb_view.captures_new_target
-                || (caller_is_env && !self.index.template_captures(ident.template).is_empty()));
-        if !cb_view.params.iter().any(|p| p.is_rest) && inputs.len() > cb_view.params.len() {
-            inputs.truncate(cb_view.params.len());
-        }
-        let cb_inst = self.request_instance(
-            InstanceReq::new(ident.template, &inputs, Some(s.inst))
-                .receiver(keep_inline.then_some(s.receiver).flatten())
-                .owner(ident.capture_owner)
-                .inline_cb(),
-        )?;
-        self.record_site(
-            s.inst,
-            callback,
-            SiteResolution::Callback {
-                target: cb_inst,
-                keep_inline_closure: keep_inline,
-            },
-        );
-        let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
-            return Ok(None);
-        };
-        let cb_ret = self.read_loc(cb_ret_loc, s.inst);
-
-        if let Some(elem) = group_elem {
-            if cb_ret == Ty::BOTTOM {
-                return Ok(Some(Ty::BOTTOM));
-            }
-            let key = if self.types.is_open(cb_ret) {
-                Ty::STRING
-            } else {
-                cb_ret
-            };
-            let arr = self.types.array(elem);
-            return Ok(Some(self.types.generic(
-                shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
-                &[key, arr],
-            )));
-        }
-        Ok(Some(builtins::apply_method_result(
-            self.ctx,
-            self.types,
-            rule,
-            MethodResultArgs {
-                receiver: recv_ty,
-                arg0: init_ty,
-                arg0_expr: None,
-                callback_result: Some(cb_ret),
-                sparse_arrays,
-            },
-        )))
-    }
-
     pub(super) fn eval_args(&mut self, s: &mut EvalState<'h>, args: &'h [Expr]) -> Result<Vec<Ty>> {
         args.iter().map(|a| self.eval_expr(s, a)).collect()
     }
@@ -540,6 +47,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 readonly: false,
             });
         }
+        if props.iter().any(|p| p.ty == Ty::BOTTOM) {
+            return Ok(Ty::BOTTOM);
+        }
         let obj_ty = self.types.object(&props, None);
         if has_zero_sized_func {
             self.record_site(s.inst, site_expr, SiteResolution::ObjectLiteral(obj_ty));
@@ -571,13 +81,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             .and_then(|cid| self.index.class(cid))
             .and_then(|c| ClassInfo::find(&c.static_methods, mn))
         {
-            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
                 InstanceReq::new(tid, &arg_tys, Some(s.inst)).at(byte_offset),
                 true,
-                mask,
                 false,
             )?;
             return Ok(ret);
@@ -591,20 +99,20 @@ impl<'h, 'a> Solver<'h, 'a> {
         expr: &'h Expr,
         req: InstanceReq<'_>,
         is_method: bool,
-        strip_arg_mask: u64,
         pass_env: bool,
     ) -> Result<(InstanceId, Ty)> {
+        let argument_types = self.types.tuple(req.args);
         let pass_receiver = matches!(req.receiver, Some(Receiver::Object(_)));
         let target = self.request_instance(req)?;
         let res = if is_method {
             SiteResolution::MethodCall {
                 target,
-                strip_arg_mask,
+                argument_types,
             }
         } else {
             SiteResolution::DirectCall {
                 target,
-                strip_arg_mask,
+                argument_types,
                 pass_receiver,
                 pass_env,
             }
@@ -701,13 +209,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let class_inst =
                 self.request_class_inst(cid, &class_args, byte_offset, Some(s.inst))?;
-            let strip_arg_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
+            let argument_types = self.types.tuple(&arg_tys);
             self.record_site(
                 s.inst,
                 expr,
                 SiteResolution::ClassNew {
                     class_inst,
-                    strip_arg_mask,
+                    argument_types,
                 },
             );
             return Ok(self.types.class_inst(class_inst));
@@ -896,12 +404,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.check_callback_params(s.inst, target_view, &arg_tys, byte_offset)?;
 
         let explicit_targs = self.eval_type_args(s.inst, type_args);
-        let mut strip_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
-        if is_promise_handle {
-            for i in 1..arg_tys.len().min(64) {
-                strip_mask |= 1u64 << i;
-            }
-        }
         let pass_env = self.is_escaping_env(ident.template, s.inst);
         let call_arg_tys = if is_promise_handle {
             arg_tys.get(..1).unwrap_or(&[])
@@ -916,14 +418,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .type_args(&explicit_targs)
                 .at(byte_offset),
             false,
-            strip_mask,
             pass_env,
         )?;
-        if let Some(tw) = self.inst_written.get(target_inst.index()).cloned()
-            && let Some(cw) = self.inst_written.get_mut(s.inst.index())
-        {
-            cw.union_with(&tw);
-        }
+        self.propagate_writes(s.inst, target_inst);
         Ok(ret)
     }
 
@@ -990,7 +487,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             expr,
             InstanceReq::new(ident.template, &expanded, Some(s.inst)).owner(ident.capture_owner),
             false,
-            0,
             pass_env,
         )?;
         Ok(ret)
@@ -1134,7 +630,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(view) = self.index.view(method_tid) {
                 self.check_callback_params(s.inst, view, &arg_tys, byte_offset)?;
             }
-            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
@@ -1142,7 +637,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .receiver(Some(Receiver::Class(cinst_id)))
                     .at(byte_offset),
                 true,
-                mask,
                 false,
             )?;
             return Ok(ret);
@@ -1201,7 +695,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(Ty::OPEN);
             };
             self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
-            let mask = self.callable_arg_mask_in(s.inst, &arg_tys);
             let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
             let pass_env = self.is_escaping_env(ident.template, s.inst);
             let (_, ret) = self.dispatch_call_site(
@@ -1212,7 +705,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .owner(ident.capture_owner)
                     .at(byte_offset),
                 false,
-                mask,
                 pass_env,
             )?;
             return Ok(ret);
@@ -1300,7 +792,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let strip_arg_mask = self.callable_arg_mask_in(s.inst, arg_tys);
         let mut arms = Vec::with_capacity(idents.len());
         let mut ret = Ty::BOTTOM;
         for &ident in idents {
@@ -1322,11 +813,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .owner(ident.capture_owner)
                     .at(byte_offset),
             )?;
-            if let Some(tw) = self.inst_written.get(target.index()).cloned()
-                && let Some(cw) = self.inst_written.get_mut(s.inst.index())
-            {
-                cw.union_with(&tw);
-            }
+            self.propagate_writes(s.inst, target);
             let return_loc = self
                 .instances
                 .get(target)
@@ -1347,7 +834,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 callee_ty,
                 arms: arms_span,
                 arg_tys: arg_tuple,
-                strip_arg_mask,
                 recv_ty: needs_recv.then_some(recv_ty).flatten(),
             },
             byte_offset,
@@ -1357,7 +843,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             expr,
             SiteResolution::DispatchCall {
                 helper,
-                strip_arg_mask,
+                argument_types: arg_tuple,
                 needs_recv,
             },
         );
@@ -1546,513 +1032,5 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
         Ok(())
-    }
-
-    fn apply_promise_handle_call(
-        &mut self,
-        s: &mut EvalState<'h>,
-        ident: FuncIdentity,
-        arg_tys: &[Ty],
-        args: Option<&'h [Expr]>,
-        byte_offset: u32,
-    ) -> Result<bool> {
-        let Some(view) = self.index.view(ident.template) else {
-            return Ok(false);
-        };
-        match view.kind {
-            TemplateKind::PromiseResolve => {
-                if let Some(&arg0) = arg_tys.first()
-                    && self.types.is_promise_ty(arg0)
-                {
-                    return Err(self.annotate_expr_error(
-                        s,
-                        Diagnostic::unsupported(
-                            "resolving a Promise with another Promise is not supported yet",
-                        ),
-                        byte_offset,
-                    ));
-                }
-                if let Some(&value_loc) = self
-                    .promise_handle_locs
-                    .get(&(ident.template, ident.capture_owner))
-                {
-                    let val = arg_tys.first().copied().unwrap_or(Ty::VOID);
-                    if val != Ty::BOTTOM {
-                        self.check_escaping_func(s.inst, val, byte_offset, s.current_span)?;
-                        let norm = self.types.normalize_for_storage(self.ctx, self.decls, val);
-                        self.write_loc(value_loc, norm);
-                        if let Some(arg0_expr) = args.and_then(|a| a.first()) {
-                            let cur = self.read_loc(value_loc, s.inst);
-                            self.record_coercion(s.inst, arg0_expr, val, cur);
-                        }
-                    }
-                }
-                Ok(true)
-            }
-            TemplateKind::PromiseReject => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    fn resolve_callback_call(
-        &mut self,
-        s: &mut EvalState<'h>,
-        cb_ty: Ty,
-        recv_ty: Option<Ty>,
-        arg_tys: &[Ty],
-        byte_offset: u32,
-    ) -> Result<Option<(CallbackCall, Ty)>> {
-        if cb_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
-            return Ok(None);
-        }
-        if matches!(cb_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
-            return Ok(Some((CallbackCall::ThrowTypeError(helper), Ty::NEVER)));
-        }
-        let dispatch_idents = if let Some(idents) = self.types.func_union_members(cb_ty) {
-            Some(idents)
-        } else {
-            let (stripped, nullish) = self.types.strip_nullish(cb_ty);
-            if nullish.is_some()
-                && let TyKind::Func(ident) = self.types.kind(stripped)
-            {
-                Some(vec![ident])
-            } else {
-                None
-            }
-        };
-        if let Some(idents) = dispatch_idents {
-            for &a in arg_tys {
-                self.invalidate_conservative_cell(a);
-            }
-            let strip_arg_mask = self.callable_arg_mask_in(s.inst, arg_tys);
-            let mut arms = Vec::with_capacity(idents.len());
-            let mut ret = Ty::BOTTOM;
-            for ident in idents {
-                let Some(view) = self.index.view(ident.template) else {
-                    return Ok(None);
-                };
-                let is_promise_handle =
-                    self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
-                self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
-                let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
-                let call_args = if is_promise_handle {
-                    arg_tys.get(..1).unwrap_or(&[])
-                } else {
-                    arg_tys
-                };
-                let target = self.request_instance(
-                    InstanceReq::new(ident.template, call_args, Some(s.inst))
-                        .receiver(recv)
-                        .owner(ident.capture_owner)
-                        .at(byte_offset),
-                )?;
-                if let Some(tw) = self.inst_written.get(target.index()).cloned()
-                    && let Some(cw) = self.inst_written.get_mut(s.inst.index())
-                {
-                    cw.union_with(&tw);
-                }
-                let r = self.read_loc(self.instances[target].return_loc, s.inst);
-                ret = self.types.join(ret, r);
-                arms.push((ident, target));
-            }
-            let arms_span = self.intern_dispatch_arms(&arms);
-            let arg_tuple = self.types.tuple(arg_tys);
-            let needs_recv = recv_ty.is_some()
-                && arms.iter().any(|&(ident, _)| {
-                    self.index.view(ident.template).is_some_and(|v| v.uses_this)
-                });
-            let helper = self.intern_helper(
-                HelperSpec::Dispatcher {
-                    callee_ty: cb_ty,
-                    arms: arms_span,
-                    arg_tys: arg_tuple,
-                    strip_arg_mask,
-                    recv_ty: needs_recv.then_some(recv_ty).flatten(),
-                },
-                byte_offset,
-            );
-            return Ok(Some((CallbackCall::Dispatch { helper, needs_recv }, ret)));
-        }
-        let TyKind::Func(ident) = self.types.kind(cb_ty) else {
-            if !self.types.is_open(cb_ty) && cb_ty != Ty::DYNAMIC {
-                return Err(self.annotate_expr_error(
-                    s,
-                    diag!(codes::TYPE_MISMATCH, "expression is not callable"),
-                    byte_offset,
-                ));
-            }
-            return Ok(None);
-        };
-        for &a in arg_tys {
-            self.invalidate_conservative_cell(a);
-        }
-        let Some(view) = self.index.view(ident.template) else {
-            return Ok(None);
-        };
-        let is_promise_handle =
-            self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
-        self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
-        let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
-        let call_args = if is_promise_handle {
-            arg_tys.get(..1).unwrap_or(&[])
-        } else {
-            arg_tys
-        };
-        let target = self.request_instance(
-            InstanceReq::new(ident.template, call_args, Some(s.inst))
-                .receiver(recv)
-                .owner(ident.capture_owner)
-                .at(byte_offset),
-        )?;
-        if let Some(tw) = self.inst_written.get(target.index()).cloned()
-            && let Some(cw) = self.inst_written.get_mut(s.inst.index())
-        {
-            cw.union_with(&tw);
-        }
-        let ret = self.read_loc(self.instances[target].return_loc, s.inst);
-        let pass_env = self.is_escaping_env(ident.template, s.inst);
-        Ok(Some((
-            CallbackCall::Direct {
-                target,
-                pass_env,
-                pass_receiver: recv.is_some(),
-            },
-            ret,
-        )))
-    }
-
-    fn eval_new_promise(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        args: &'h [Expr],
-        type_args: &'h [HirType],
-        byte_offset: u32,
-    ) -> Result<Ty> {
-        let Some((resolve_tid, reject_tid)) = self.index.promise_templates_of(expr) else {
-            return Err(Diagnostic::internal("missing promise handle templates"));
-        };
-        let owner = CaptureOwner::Instance(s.inst);
-        let value_loc = match self.promise_handle_locs.get(&(resolve_tid, owner)).copied() {
-            Some(loc) => loc,
-            None => {
-                let loc = self.alloc_loc(Ty::BOTTOM);
-                self.promise_handle_locs.insert((resolve_tid, owner), loc);
-                self.promise_handle_locs.insert((reject_tid, owner), loc);
-                loc
-            }
-        };
-        if !type_args.is_empty() {
-            let targs = self.eval_type_args(s.inst, type_args);
-            if let Some(&ta) = targs.first() {
-                self.constrain_promise_loc(value_loc, ta);
-            }
-        }
-        let resolve_ty = self.types.func(FuncIdentity {
-            template: resolve_tid,
-            capture_owner: owner,
-        });
-        let reject_ty = self.types.func(FuncIdentity {
-            template: reject_tid,
-            capture_owner: owner,
-        });
-        self.mark_escaping_env(s.inst, resolve_ty);
-        self.mark_escaping_env(s.inst, reject_ty);
-
-        let Some((exec_expr, tail)) = args.split_first() else {
-            return Err(self.annotate_expr_error(
-                s,
-                diag!(
-                    codes::TYPE_MISMATCH,
-                    "new Promise requires an executor function"
-                ),
-                byte_offset,
-            ));
-        };
-        let exec_ty = self.eval_expr(s, exec_expr)?;
-        for extra in tail {
-            self.eval_expr(s, extra)?;
-        }
-        let promise_cell = self.types.cell(value_loc, CellKind::Promise);
-        if exec_ty == Ty::BOTTOM {
-            return Ok(promise_cell);
-        }
-        if let Some((executor, _)) =
-            self.resolve_callback_call(s, exec_ty, None, &[resolve_ty, reject_ty], byte_offset)?
-        {
-            let (pass_resolve, pass_reject) = match executor {
-                CallbackCall::Direct { target, .. } => {
-                    let arity = self
-                        .instances
-                        .get(target)
-                        .and_then(|i| self.index.view(i.template))
-                        .map_or(2, |v| {
-                            if v.params.iter().any(|p| p.is_rest) {
-                                2
-                            } else {
-                                v.params.len().min(2)
-                            }
-                        });
-                    (arity >= 1, arity >= 2)
-                }
-                CallbackCall::Dispatch { .. } => (true, true),
-                CallbackCall::ThrowTypeError(_) => (false, false),
-            };
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::PromiseNew {
-                    value_loc,
-                    resolve_tid,
-                    reject_tid,
-                    executor,
-                    pass_resolve,
-                    pass_reject,
-                },
-            );
-        }
-        Ok(promise_cell)
-    }
-
-    fn eval_promise_reaction(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        promise_ty: Ty,
-        name: &str,
-        args: &'h [Expr],
-        byte_offset: u32,
-    ) -> Result<Ty> {
-        let kind = match name {
-            "then" => ReactionKind::Then,
-            "catch" => ReactionKind::Catch,
-            _ => ReactionKind::Finally,
-        };
-        let inner_raw = match self.types.kind(promise_ty) {
-            TyKind::Promise(i) => i,
-            TyKind::Cell {
-                loc,
-                kind: CellKind::Promise,
-            } => self.read_loc(loc, s.inst),
-            _ => Ty::OPEN,
-        };
-        let (fulfilled_expr, rejected_expr) = match kind {
-            ReactionKind::Then => (args.first(), args.get(1)),
-            ReactionKind::Catch => (None, args.first()),
-            ReactionKind::Finally => (args.first(), None),
-        };
-        let f_ty = match fulfilled_expr {
-            Some(e) => Some(self.eval_expr(s, e)?),
-            None => None,
-        };
-        let g_ty = match rejected_expr {
-            Some(e) => Some(self.eval_expr(s, e)?),
-            None => None,
-        };
-        let extra_start = match kind {
-            ReactionKind::Then => 2,
-            ReactionKind::Catch | ReactionKind::Finally => 1,
-        };
-        for extra in args.get(extra_start..).unwrap_or(&[]) {
-            self.eval_expr(s, extra)?;
-        }
-        if f_ty == Some(Ty::BOTTOM) || g_ty == Some(Ty::BOTTOM) {
-            return Ok(Ty::BOTTOM);
-        }
-        let is_absent = |ty: Ty| matches!(ty, Ty::VOID | Ty::NULL);
-        let f_present = f_ty.filter(|&t| !is_absent(t));
-        let g_present = g_ty.filter(|&t| !is_absent(t));
-
-        let mut on_fulfilled: Option<(CallbackCall, Ty)> = None;
-        let mut f_ret = Ty::BOTTOM;
-        if let Some(ft) = f_present {
-            self.check_escaping_func(s.inst, ft, byte_offset, s.current_span)?;
-            match kind {
-                ReactionKind::Finally => {
-                    if let Some((cb_call, _)) =
-                        self.resolve_callback_call(s, ft, None, &[], byte_offset)?
-                    {
-                        on_fulfilled = Some((cb_call, ft));
-                    }
-                }
-                ReactionKind::Then => {
-                    let takes_zero = self.types.func_members(ft).iter().all(|id| {
-                        self.index.view(id.template).is_some_and(|v| {
-                            v.params.is_empty()
-                                && !matches!(
-                                    v.kind,
-                                    TemplateKind::PromiseResolve | TemplateKind::PromiseReject
-                                )
-                        })
-                    });
-                    if inner_raw != Ty::BOTTOM || takes_zero {
-                        let cb_args: &[Ty] = if inner_raw == Ty::BOTTOM {
-                            &[]
-                        } else {
-                            std::slice::from_ref(&inner_raw)
-                        };
-                        if let Some((cb_call, mut r)) =
-                            self.resolve_callback_call(s, ft, None, cb_args, byte_offset)?
-                        {
-                            while let Some(u) = self.unwrap_promise_once(s.inst, r) {
-                                r = u;
-                            }
-                            f_ret = r;
-                            on_fulfilled = Some((cb_call, ft));
-                        }
-                    } else if g_present.is_none() {
-                        return Ok(Ty::BOTTOM);
-                    }
-                }
-                ReactionKind::Catch => {}
-            }
-        }
-
-        let mut on_rejected: Option<(CallbackCall, Ty)> = None;
-        let mut g_ret = Ty::BOTTOM;
-        if let Some(gt) = g_present {
-            self.check_escaping_func(s.inst, gt, byte_offset, s.current_span)?;
-            let err_ty = self.types.named(self.ctx, "Error");
-            if let Some((cb_call, mut r)) =
-                self.resolve_callback_call(s, gt, None, &[err_ty], byte_offset)?
-            {
-                while let Some(u) = self.unwrap_promise_once(s.inst, r) {
-                    r = u;
-                }
-                g_ret = r;
-                on_rejected = Some((cb_call, gt));
-            }
-        }
-
-        let ret_settled = match kind {
-            ReactionKind::Then => {
-                let ful = if f_present.is_some() {
-                    f_ret
-                } else {
-                    inner_raw
-                };
-                if g_present.is_some() {
-                    self.types.join(ful, g_ret)
-                } else {
-                    ful
-                }
-            }
-            ReactionKind::Catch => {
-                if g_present.is_some() {
-                    self.types.join(inner_raw, g_ret)
-                } else {
-                    inner_raw
-                }
-            }
-            ReactionKind::Finally => inner_raw,
-        };
-
-        let pass_fulfilled = on_fulfilled.is_some_and(|(cb, _)| cb.needs_value());
-        let pass_rejected = on_rejected.is_some_and(|(cb, _)| cb.needs_value());
-        let helper = self.intern_helper(
-            HelperSpec::PromiseReaction {
-                kind,
-                promise_ty,
-                inner_ty: inner_raw,
-                on_fulfilled,
-                on_rejected,
-                ret_ty: ret_settled,
-            },
-            byte_offset,
-        );
-        self.record_site(
-            s.inst,
-            expr,
-            SiteResolution::PromiseReaction {
-                helper,
-                pass_fulfilled,
-                pass_rejected,
-            },
-        );
-
-        if kind == ReactionKind::Finally && inner_raw == Ty::BOTTOM {
-            return Ok(promise_ty);
-        }
-        if ret_settled == Ty::BOTTOM {
-            return Ok(self.types.promise(Ty::VOID));
-        }
-        Ok(self.types.promise(ret_settled))
-    }
-
-    fn eval_timer_start(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        name: &str,
-        args: &'h [Expr],
-        byte_offset: u32,
-    ) -> Result<Ty> {
-        let is_immediate = name == "setImmediate";
-        let repeating = name == "setInterval";
-        let Some(cb_expr) = args.first() else {
-            return Err(self.annotate_expr_error(
-                s,
-                diag!(codes::TYPE_MISMATCH, "{name} requires a callback function"),
-                byte_offset,
-            ));
-        };
-        let cb_ty = self.eval_expr(s, cb_expr)?;
-        let has_delay = !is_immediate && args.len() >= 2;
-        if has_delay && let Some(delay_expr) = args.get(1) {
-            self.eval_expr(s, delay_expr)?;
-        }
-        let extra_start = if is_immediate { 1 } else { 2 };
-        let extra_args = args.get(extra_start..).unwrap_or(&[]);
-        let extra_arg_tys = self.eval_args(s, extra_args)?;
-        let timer_ty = self.types.named(self.ctx, "__PerryTimer");
-        if cb_ty == Ty::BOTTOM || extra_arg_tys.contains(&Ty::BOTTOM) {
-            return Ok(timer_ty);
-        }
-        self.check_escaping_func(s.inst, cb_ty, byte_offset, s.current_span)?;
-        if let Some((cb_call, _)) =
-            self.resolve_callback_call(s, cb_ty, Some(timer_ty), &extra_arg_tys, byte_offset)?
-        {
-            let extra_tuple = self.types.tuple(&extra_arg_tys);
-            let pass_cb = cb_call.needs_value();
-            let helper = self.intern_helper(
-                HelperSpec::TimerRunner {
-                    repeating,
-                    is_immediate,
-                    cb_call,
-                    cb_ty,
-                    extra_arg_tys: extra_tuple,
-                },
-                byte_offset,
-            );
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::TimerStart {
-                    helper,
-                    has_delay,
-                    is_immediate,
-                    pass_cb,
-                },
-            );
-        }
-        Ok(timer_ty)
-    }
-
-    fn eval_timer_clear(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        args: &'h [Expr],
-    ) -> Result<Ty> {
-        let arg_tys = self.eval_args(s, args)?;
-        self.record_site(
-            s.inst,
-            expr,
-            SiteResolution::TimerClear {
-                arg_ty: arg_tys.first().copied(),
-            },
-        );
-        Ok(Ty::VOID)
     }
 }

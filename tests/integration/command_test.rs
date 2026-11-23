@@ -760,6 +760,33 @@ console.log(
             "6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
         ),
         (
+            "erased_function_values_preserve_evaluation_order",
+            r#"
+let trace = "";
+function id(n) { return n; }
+function other(n) { return -n; }
+function get(label) { trace += label; return id; }
+function num(label) { trace += label; return 2; }
+function apply(a, f, b) { return f(a + b); }
+function last(n, f) { return f(n); }
+function only(f) { trace += "n"; return f(1); }
+const same = get("a") === get("b");
+const distinct = get("c") !== other;
+const obj = { first: num("d"), middle: get("e"), last: num("f"), end: get("g") };
+const result = apply(num("h"), get("i"), num("j"));
+const tail = last(num("k"), get("l"));
+only(get("m"));
+let reads = 0;
+function make(n) { return { x:n, f:function(a) { return this.x + a + n; } }; }
+const receiver = make(2);
+function getReceiver() { reads++; return receiver; }
+getReceiver().f(0);
+console.log(getReceiver().f(1), reads);
+console.log(trace, same, distinct, obj.first, obj.end(1), result, tail);
+"#,
+            "5 2\nabcdefghijklmn true true 2 1 4 2\n",
+        ),
+        (
             "loop_let_boxes_nullable_functions_typeof_and_wide_objects",
             r#"
 function makeLoopFns() {
@@ -875,6 +902,30 @@ console.log(
             "6 10 5 true false false 11:2 20 1 3 69 22\n",
         ),
         (
+            "promise_operand_order_and_finally_rejection",
+            r#"
+let trace = "";
+function identity(value) { return value; }
+function handler() { trace += "h"; return identity; }
+function addOne(value) { return value + 1; }
+function optional(flag) { return flag ? addOne : null; }
+function extra(tag) { trace += tag; return 0; }
+function executor(resolve) { trace += "x"; resolve(4, extra("s")); }
+function makeExecutor() { trace += "e"; return executor; }
+function optionalExecutor(flag) { return flag ? executor : null; }
+async function verify() {
+  try { new Promise(optionalExecutor(false)); } catch (e) { trace += "t"; }
+  const p = new Promise(makeExecutor(), extra("a"));
+  const value = await p.then(handler(), null, extra("b")).then(17);
+  clearTimeout(undefined, extra("c"));
+  const rejection = await p.finally(() => Promise.reject(new Error("override"))).catch(e => e.message);
+  console.log(trace, value, rejection, await p.then(optional(false)), await p.then(optional(true)));
+}
+await verify();
+"#,
+            "teaxshbc 4 override 4 5\n",
+        ),
+        (
             "guest_settled_promises_and_global_timers",
             r#"
 async function main() {
@@ -959,5 +1010,13 @@ await main();
         assert!(run.ok, "case {name} failed: {}", run.stderr);
         assert_eq!(run.stdout, expected, "case {name} output mismatch");
     }
+    let parameters = (0..64)
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let arguments = (0..64).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let run = execute(&format!("function f({parameters}, cb) {{ return cb(a63); }} console.log(f({arguments}, n => n + 1));")).await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "64\n");
     Ok(())
 }

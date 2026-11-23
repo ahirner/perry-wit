@@ -78,7 +78,6 @@ pub(super) struct Shapes<'h> {
     pub(super) foreign_wrappers: RefCell<HashMap<(&'h str, Vec<TypeHandle>), Identifier>>,
     pub(super) globals: RefCell<HashMap<perry_frontend::hir::types::LocalId, BindingType>>,
     pub(super) global_ids: HashSet<perry_frontend::hir::types::LocalId>,
-    pub(super) type_env: perry_frontend::hir::HirTypeEnv,
     pub(super) decls: Declarations<'h>,
     pub(super) classes: Classes<'h>,
     pub(super) static_fields: HashMap<
@@ -159,7 +158,6 @@ impl<'h> Shapes<'h> {
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
             global_ids,
-            type_env: perry_frontend::hir::HirTypeEnv::from_module(hir),
             decls,
             classes,
             static_fields,

@@ -514,6 +514,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
+    pub(super) fn propagate_writes(&mut self, caller: InstanceId, callee: InstanceId) {
+        if let Ok([caller, callee]) = self
+            .inst_written
+            .get_disjoint_mut([caller.index(), callee.index()])
+        {
+            caller.union_with(callee);
+        }
+    }
+
     pub(super) fn mark_written(&mut self, inst_id: InstanceId, local: LocalIdx) {
         let mut cursor = Some(inst_id);
         while let Some(cur) = cursor {

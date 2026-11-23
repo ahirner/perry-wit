@@ -464,13 +464,21 @@ impl<'s> FunctionBuilder<'s> {
         if self.iteration.is_release(expr) {
             return Ok(());
         }
-        if let Expr::Sequence(parts) = expr
-            && let Some(span) = self.shapes.metadata.locations.operator_span(parts)
-            && let Some(last) = parts.last()
-        {
-            return self
-                .effect(ctx, last)
-                .map_err(|error| error.with_fallback_span(Some(span)));
+        if let Expr::ScopedTemp { id, value, body } = expr {
+            return self.with_temp(ctx, *id, value, |this, ctx| this.effect(ctx, body));
+        }
+        if let Expr::Sequence(parts) = expr {
+            if let Some(span) = self.shapes.metadata.locations.operator_span(parts)
+                && let Some(last) = parts.last()
+            {
+                return self
+                    .effect(ctx, last)
+                    .map_err(|error| error.with_fallback_span(Some(span)));
+            }
+            for part in parts {
+                self.effect(ctx, part)?;
+            }
+            return Ok(());
         }
         if let Expr::Call {
             callee,

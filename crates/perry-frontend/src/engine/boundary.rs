@@ -854,6 +854,7 @@ impl<'h> ModuleIndex<'h> {
                     Self::record_site_expr(scan, owner, arg);
                 }
             }
+            Expr::ArraySpread(_) => Self::record_site_expr(scan, owner, expr),
             Expr::Array(elems, _) => {
                 Self::record_site_expr(scan, owner, expr);
                 for elem in elems {

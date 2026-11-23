@@ -402,7 +402,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     for (elem, &et) in elements.iter().zip(&elem_tys) {
                         self.record_coercion(s.inst, elem, et, joined);
                     }
-                    self.record_site(s.inst, expr, SiteResolution::TaggedArray(arr_ty));
+                    self.record_site(s.inst, expr, SiteResolution::TypedArray(arr_ty));
                 }
                 Ok(arr_ty)
             }
@@ -442,7 +442,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if inner == Ty::VOID && abs.is_some_and(Absence::admits_null) {
                     joined = self.types.with_absences(Ty::NUMBER, abs);
                 }
-                Ok(self.types.array(joined))
+                let array = self.types.array(joined);
+                self.record_site(s.inst, expr, SiteResolution::TypedArray(array));
+                Ok(array)
             }
             Expr::ArrayFrom(source, _) => {
                 let src = self.eval_expr(s, source)?;
@@ -966,8 +968,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(None);
         }
         let prop_ty = builtins::property_type(self.ctx, self.decls, self.types, obj_def, property);
-        let touches_func = !self.types.func_members(val_ty).is_empty()
-            || prop_ty.is_some_and(|p| !self.types.func_members(p).is_empty());
+        let touches_func =
+            self.types.has_func(val_ty) || prop_ty.is_some_and(|p| self.types.has_func(p));
         if touches_func
             && val_ty != Ty::BOTTOM
             && !prop_ty.is_some_and(|p| self.types.accepts(self.ctx, p, val_ty))
