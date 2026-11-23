@@ -4,8 +4,8 @@ use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
 use super::solve::{ClassInst, FuncCoercion, Instance, Receiver, SiteResolution, Solved};
 use super::types::{
-    CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TypeTable, box_hir,
-    func_tag,
+    CaptureOwner, CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind,
+    TypeTable, box_hir, func_tag,
 };
 use crate::hir_compat::{Locations, Metadata};
 use perry_hir::{
@@ -97,6 +97,7 @@ pub(crate) fn build(
         class_origins: Vec::new(),
         json_eligible_bindings: Vec::new(),
         synth_shapes: HashMap::new(),
+        emitted_env_classes: std::collections::HashSet::new(),
         synth_classes: Vec::new(),
         synth_functions: Vec::new(),
         dispatchers: HashMap::new(),
@@ -141,6 +142,7 @@ struct Emitter<'h, 'a> {
     class_origins: Vec<(String, String)>,
     json_eligible_bindings: Vec<LocalId>,
     synth_shapes: HashMap<Vec<String>, String>,
+    emitted_env_classes: std::collections::HashSet<FuncIdentity>,
     synth_classes: Vec<Class>,
     synth_functions: Vec<Function>,
     dispatchers: HashMap<DispatcherKey, FuncId>,
@@ -157,8 +159,6 @@ struct RewriteCtx<'a> {
     self_local: Option<LocalId>,
     env_local: Option<LocalId>,
     env_captures: &'a [(LocalId, String, bool)],
-    self_capture_locals: &'a [LocalId],
-    self_env_tag: Option<&'a str>,
     boxed_param_map: &'a [(LocalId, LocalId)],
     void_return: bool,
     has_expected: bool,
@@ -172,8 +172,6 @@ impl RewriteCtx<'_> {
             self_local: None,
             env_local: None,
             env_captures: &[],
-            self_capture_locals: &[],
-            self_env_tag: None,
             boxed_param_map: &[],
             void_return: false,
             has_expected: false,
@@ -187,8 +185,6 @@ impl RewriteCtx<'_> {
             self_local: self.self_local,
             env_local: self.env_local,
             env_captures: self.env_captures,
-            self_capture_locals: self.self_capture_locals,
-            self_env_tag: self.self_env_tag,
             boxed_param_map: self.boxed_param_map,
             void_return: self.void_return,
             has_expected,
@@ -318,6 +314,7 @@ impl<'h> Emitter<'h, '_> {
             let remap_locals = !keep_original && !seen_templates.insert(inst.template.index());
             let inherited = inst
                 .capture_owner
+                .instance()
                 .and_then(|o| inst_remaps.get(o.index()))
                 .and_then(Option::as_ref)
                 .cloned();
@@ -554,49 +551,22 @@ impl<'h> Emitter<'h, '_> {
             template: inst.template,
             capture_owner: inst.capture_owner,
         };
-        let self_env_tag_owned = is_env_fn.then(|| func_tag(self_ident));
-        let (env_local, env_captures, self_capture_locals) = if is_env_fn {
-            let (fields, self_caps) = self.env_layout(self_ident)?;
+        let (env_local, env_captures) = if is_env_fn {
+            let env_class = self.ensure_env_class(self_ident)?;
+            let fields = self.env_layout(self_ident)?;
             let env_pid = self.fresh_synthetic_local()?;
-            let mut env_props = HashMap::with_capacity(fields.len().max(1));
-            let mut env_order = Vec::with_capacity(fields.len().max(1));
-            let mut cap_entries = Vec::with_capacity(fields.len());
-            if fields.is_empty() {
-                env_order.push("_u".to_owned());
-                env_props.insert(
-                    "_u".to_owned(),
-                    perry_hir::types::PropertyInfo {
-                        ty: HirType::Number,
-                        optional: false,
-                        readonly: false,
-                    },
-                );
-            } else {
-                for (cap_id, fname, fty, boxed) in fields {
-                    let inner = self.materialize(fty)?;
-                    let ty = if boxed { box_hir(inner) } else { inner };
-                    env_order.push(fname.clone());
-                    env_props.insert(
-                        fname.clone(),
-                        perry_hir::types::PropertyInfo {
-                            ty,
-                            optional: false,
-                            readonly: false,
-                        },
-                    );
-                    cap_entries.push((cap_id, fname, boxed));
-                }
-            }
-            let env_ty = HirType::Object(perry_hir::types::ObjectType {
-                name: None,
-                properties: env_props,
-                property_order: Some(env_order),
-                index_signature: None,
-            });
-            params.push(Self::synth_param(env_pid, "__env".to_owned(), env_ty));
-            (Some(env_pid), cap_entries, self_caps)
+            let cap_entries: Vec<(LocalId, String, bool)> = fields
+                .into_iter()
+                .map(|(cap_id, fname, _, boxed)| (cap_id, fname, boxed))
+                .collect();
+            params.push(Self::synth_param(
+                env_pid,
+                "__env".to_owned(),
+                HirType::Named(env_class),
+            ));
+            (Some(env_pid), cap_entries)
         } else {
-            (None, Vec::new(), Vec::new())
+            (None, Vec::new())
         };
         let self_local = match inst.receiver {
             Some(Receiver::Object(obj_ty)) => {
@@ -660,8 +630,6 @@ impl<'h> Emitter<'h, '_> {
                 self_local,
                 env_local,
                 env_captures: &env_captures,
-                self_capture_locals: &self_capture_locals,
-                self_env_tag: self_env_tag_owned.as_deref(),
                 boxed_param_map: &boxed_param_map,
                 void_return: false,
                 has_expected: false,
@@ -714,8 +682,6 @@ impl<'h> Emitter<'h, '_> {
             self_local,
             env_local,
             env_captures: &env_captures,
-            self_capture_locals: &self_capture_locals,
-            self_env_tag: self_env_tag_owned.as_deref(),
             boxed_param_map: &boxed_param_map,
             void_return,
             has_expected: false,
@@ -821,6 +787,25 @@ impl<'h> Emitter<'h, '_> {
     }
     fn rewrite_stmts(&mut self, rctx: &mut RewriteCtx<'_>, stmts: &'h [Stmt]) -> Result<Vec<Stmt>> {
         let mut out = Vec::with_capacity(stmts.len());
+        for stmt in stmts {
+            if let Stmt::Let { id, name, ty, .. } = stmt
+                && self.is_forward_boxed(*id)
+            {
+                let out_id = match &mut rctx.remap {
+                    Some(r) => self.fresh_local(*id, r)?,
+                    None => *id,
+                };
+                let inner_ty = self.resolve_let_ty(rctx.inst_id, *id, out_id, name, ty)?;
+                let box_ty = box_hir(Self::admitting_undefined_hir(inner_ty));
+                out.push(Stmt::Let {
+                    id: out_id,
+                    name: name.clone(),
+                    ty: box_ty,
+                    mutable: false,
+                    init: Some(self.emit_box_record(Expr::Undefined)),
+                });
+            }
+        }
         let mut pending_for_boxes: Vec<LocalId> = Vec::new();
         for stmt in stmts {
             match stmt {
@@ -885,6 +870,83 @@ impl<'h> Emitter<'h, '_> {
         Ok(out)
     }
 
+    fn resolve_let_ty(
+        &mut self,
+        inst_id: InstanceId,
+        id: LocalId,
+        out_id: LocalId,
+        name: &str,
+        ty: &HirType,
+    ) -> Result<HirType> {
+        let resolved = self.local_ty(inst_id, id);
+        let is_inferred = !self.hir.local_source_spans.contains_key(&id)
+            || self
+                .index
+                .local_idx(id)
+                .is_none_or(|li| self.index.local_inferred.contains(li.index()));
+        let is_deferred = self
+            .index
+            .local_idx(id)
+            .is_some_and(|li| self.index.local_deferred.contains(li.index()));
+        match resolved {
+            Some(t)
+                if self.is_resolved(t)
+                    && (is_inferred
+                        || matches!(ty, HirType::Any | HirType::Unknown)
+                        || matches!(ty, HirType::Array(e) if matches!(**e, HirType::Any | HirType::Unknown))
+                        || matches!(self.types.kind(t), TyKind::ClassInst(_))) =>
+            {
+                if is_inferred
+                    && is_deferred
+                    && self.types.is_json_encodable(
+                        self.ctx,
+                        t,
+                        self.solved.locations.as_slice(),
+                        &self.solved.dict_reads,
+                    )
+                {
+                    self.json_eligible_bindings.push(out_id);
+                }
+                self.materialize(t)
+            }
+            Some(t)
+                if is_inferred
+                    && matches!(
+                        self.types.kind(t),
+                        TyKind::Cell {
+                            kind: CellKind::Array,
+                            ..
+                        }
+                    ) =>
+            {
+                let mut err = diag!(codes::MISSING_TYPE_ANNOTATION, "an empty array literal needs a declared element type")
+                    .with_help("Add a concrete element type annotation to this binding (e.g. `const xs: number[] = []`).");
+                if let TyKind::Cell { loc, .. } = self.types.kind(t)
+                    && self.solved.self_nested_locs.contains(loc.index())
+                {
+                    err = err.with_note("its inferred element type nests itself");
+                }
+                let err = self.annotate_local(err, id);
+                Err(self.attach_inst_chain(err, inst_id))
+            }
+            Some(Ty::OPEN)
+                if is_inferred
+                    && self.index.local_idx(id).is_some_and(|lidx| {
+                        self.solved.self_nested_locals.contains(lidx.index())
+                    }) =>
+            {
+                let err = diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "cannot infer type of '{name}': inferred type nests itself"
+                )
+                .with_help("Add a concrete type annotation to this binding.");
+                let err = self.annotate_local(err, id);
+                Err(self.attach_inst_chain(err, inst_id))
+            }
+            _ => Ok(ty.clone()),
+        }
+    }
+
     fn rewrite_stmt(&mut self, rctx: &mut RewriteCtx<'_>, stmt: &'h Stmt) -> Result<Stmt> {
         match stmt {
             Stmt::Let {
@@ -899,15 +961,6 @@ impl<'h> Emitter<'h, '_> {
                     None => *id,
                 };
                 let resolved = self.local_ty(rctx.inst_id, *id);
-                let is_inferred = !self.hir.local_source_spans.contains_key(id)
-                    || self
-                        .index
-                        .local_idx(*id)
-                        .is_none_or(|li| self.index.local_inferred.contains(li.index()));
-                let is_deferred = self
-                    .index
-                    .local_idx(*id)
-                    .is_some_and(|li| self.index.local_deferred.contains(li.index()));
                 if let Some(t) = resolved
                     && let TyKind::Func(ident) = self.types.kind(t)
                     && !self.is_env_template(ident.template)
@@ -930,63 +983,20 @@ impl<'h> Emitter<'h, '_> {
                         init: Some(Expr::FuncRef(fid)),
                     });
                 }
-                let new_ty = match resolved {
-                    Some(t)
-                        if self.is_resolved(t)
-                            && (is_inferred
-                                || matches!(ty, HirType::Any | HirType::Unknown)
-                                || matches!(ty, HirType::Array(e) if matches!(**e, HirType::Any | HirType::Unknown))
-                                || matches!(self.types.kind(t), TyKind::ClassInst(_))) =>
-                    {
-                        if is_inferred
-                            && is_deferred
-                            && self.types.is_json_encodable(
-                                self.ctx,
-                                t,
-                                self.solved.locations.as_slice(),
-                                &self.solved.dict_reads,
-                            )
-                        {
-                            self.json_eligible_bindings.push(out_id);
-                        }
-                        self.materialize(t)?
-                    }
-                    Some(t)
-                        if is_inferred
-                            && matches!(
-                                self.types.kind(t),
-                                TyKind::Cell {
-                                    kind: CellKind::Array,
-                                    ..
-                                }
-                            ) =>
-                    {
-                        let mut err = diag!(codes::MISSING_TYPE_ANNOTATION, "an empty array literal needs a declared element type")
-                            .with_help("Add a concrete element type annotation to this binding (e.g. `const xs: number[] = []`).");
-                        if let TyKind::Cell { loc, .. } = self.types.kind(t)
-                            && self.solved.self_nested_locs.contains(loc.index())
-                        {
-                            err = err.with_note("its inferred element type nests itself");
-                        }
-                        let err = self.annotate_local(err, *id);
-                        return Err(self.attach_inst_chain(err, rctx.inst_id));
-                    }
-                    Some(Ty::OPEN)
-                        if is_inferred
-                            && self.index.local_idx(*id).is_some_and(|lidx| {
-                                self.solved.self_nested_locals.contains(lidx.index())
-                            }) =>
-                    {
-                        let err = diag!(
-                            codes::MISSING_TYPE_ANNOTATION,
-                            "cannot infer type of '{name}': inferred type nests itself"
-                        )
-                        .with_help("Add a concrete type annotation to this binding.");
-                        let err = self.annotate_local(err, *id);
-                        return Err(self.attach_inst_chain(err, rctx.inst_id));
-                    }
-                    _ => ty.clone(),
-                };
+                if self.is_forward_boxed(*id) {
+                    let init_ctx = rctx.with_expected(true);
+                    return match self.rewrite_opt_expr(&init_ctx, init.as_ref())? {
+                        Some(val) => Ok(Stmt::Expr(Expr::PropertySet {
+                            object: Box::new(Expr::LocalGet(out_id)),
+                            property: "v".into(),
+                            value: Box::new(val),
+                            byte_offset: 0,
+                            byte_end: 0,
+                        })),
+                        None => Ok(Stmt::Expr(Expr::Undefined)),
+                    };
+                }
+                let new_ty = self.resolve_let_ty(rctx.inst_id, *id, out_id, name, ty)?;
                 let init_has_expected = !matches!(new_ty, HirType::Any | HirType::Unknown);
                 let init_ctx = rctx.with_expected(init_has_expected);
                 let rewritten_init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
@@ -1254,9 +1264,12 @@ impl<'h> Emitter<'h, '_> {
                     target,
                     keep_inline_closure,
                 } => {
-                    let ti = self.instance(target, "missing callback target instance")?;
+                    let (emitted_func_id, return_loc, param_locs_span) = {
+                        let ti = self.instance(target, "missing callback target instance")?;
+                        (ti.emitted_func_id, ti.return_loc, ti.param_locs)
+                    };
                     if !keep_inline_closure {
-                        return Ok(Expr::FuncRef(ti.emitted_func_id));
+                        return Ok(Expr::FuncRef(emitted_func_id));
                     }
                     if let Expr::Closure { body, .. } = expr {
                         let mut out = expr.clone();
@@ -1269,15 +1282,16 @@ impl<'h> Emitter<'h, '_> {
                             ..
                         } = &mut out
                         {
-                            *return_type =
-                                self.materialize(self.solved.locations[ti.return_loc])?;
-                            for (p, &loc) in params.iter_mut().zip(
-                                self.solved
-                                    .param_locs
-                                    .get(ti.param_locs.range())
-                                    .unwrap_or(&[]),
-                            ) {
-                                let ty = self.solved.locations[loc];
+                            *return_type = self.materialize(self.solved.locations[return_loc])?;
+                            let param_tys: Vec<Ty> = self
+                                .solved
+                                .param_locs
+                                .get(param_locs_span.range())
+                                .unwrap_or(&[])
+                                .iter()
+                                .map(|&loc| self.solved.locations[loc])
+                                .collect();
+                            for (p, ty) in params.iter_mut().zip(param_tys) {
                                 if self.is_resolved(ty) {
                                     p.ty = self.materialize(ty)?;
                                 }
@@ -1288,8 +1302,6 @@ impl<'h> Emitter<'h, '_> {
                                 self_local: None,
                                 env_local: rctx.env_local,
                                 env_captures: rctx.env_captures,
-                                self_capture_locals: rctx.self_capture_locals,
-                                self_env_tag: rctx.self_env_tag,
                                 boxed_param_map: rctx.boxed_param_map,
                                 void_return: false,
                                 has_expected: false,
@@ -1354,14 +1366,10 @@ impl<'h> Emitter<'h, '_> {
                                 {
                                     rewritten_args.insert(0, self.rewrite_expr(&arg_ctx, object)?);
                                 }
-                                let env_arg = if let Expr::LocalGet(id) = orig_callee.as_ref()
-                                    && rctx.self_capture_locals.contains(id)
-                                    && let Some(env_pid) = rctx.env_local
-                                {
-                                    Expr::LocalGet(env_pid)
-                                } else {
-                                    Self::prop_get(self.rewrite_expr(&arg_ctx, orig_callee)?, "val")
-                                };
+                                let env_arg = Self::prop_get(
+                                    self.rewrite_expr(&arg_ctx, orig_callee)?,
+                                    "val",
+                                );
                                 rewritten_args.insert(0, env_arg);
                                 None
                             } else if let Expr::PropertyGet { object, .. } = orig_callee.as_ref() {
@@ -1684,6 +1692,41 @@ impl<'h> Emitter<'h, '_> {
         self.rewrite_expr_plain(rctx, expr)
     }
 
+    fn local_read_override(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
+        let forward = self.is_forward_boxed(id);
+        let unwrap_box = |base: Expr| {
+            let val = Self::prop_get(base, "v");
+            if forward {
+                Self::non_null_unwrap(val)
+            } else {
+                val
+            }
+        };
+        if let Some(env_pid) = rctx.env_local
+            && let Some((_, field, boxed)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == id)
+        {
+            let base = Self::prop_get(Expr::LocalGet(env_pid), field);
+            return Some(if *boxed { unwrap_box(base) } else { base });
+        }
+        if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| *lid == id) {
+            return Some(unwrap_box(Expr::LocalGet(box_id)));
+        }
+        if self.is_boxed_local(id) {
+            return Some(unwrap_box(Expr::LocalGet(id)));
+        }
+        None
+    }
+
+    fn method_call_expr(recv: Expr, property: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Self::prop_get(recv, property)),
+            args,
+            type_args: Vec::new(),
+            byte_offset: 0,
+            byte_end: 0,
+        }
+    }
+
     fn boxed_target(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
         if let Some(env_pid) = rctx.env_local
             && let Some((_, field, boxed)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == id)
@@ -1709,20 +1752,46 @@ impl<'h> Emitter<'h, '_> {
             && let Some(tid) = self.index.template_of_func(*func_id)
             && self.is_env_template(tid)
         {
+            let capture_owner = if self.index.template_captures(tid).is_empty() {
+                CaptureOwner::None
+            } else if self.solved.collapsed_closures.contains(tid.index())
+                && let Some(owner_tid) = self.solved.instances.get(rctx.inst_id).map(|i| i.template)
+            {
+                CaptureOwner::Template(owner_tid)
+            } else {
+                CaptureOwner::Instance(rctx.inst_id)
+            };
             let ident = FuncIdentity {
                 template: tid,
-                capture_owner: Some(rctx.inst_id),
+                capture_owner,
             };
-            let (fields, _) = self.env_layout(ident)?;
-            let env_expr = if fields.is_empty() {
-                self.emit_anon_new(&["_u"], vec![Expr::Number(0.0)])
+            let class_name = self.ensure_env_class(ident)?;
+            let fields = self.env_layout(ident)?;
+            let args = if fields.is_empty() {
+                vec![Expr::Number(0.0)]
             } else {
-                let names: Vec<&str> = fields.iter().map(|(_, f, _, _)| f.as_str()).collect();
-                let args = fields
-                    .iter()
-                    .map(|&(cap_id, _, _, _)| self.emit_capture_ref(rctx, cap_id))
-                    .collect();
-                self.emit_anon_new(&names, args)
+                let mut out_args = Vec::with_capacity(fields.len());
+                for (cap_id, _, dst_ty, boxed) in fields {
+                    let mut arg = self.emit_capture_ref(rctx, cap_id);
+                    if !boxed
+                        && matches!(capture_owner, CaptureOwner::Template(_))
+                        && let Some(src_ty) =
+                            self.local_ty_in_owner(CaptureOwner::Instance(rctx.inst_id), cap_id)
+                        && src_ty != dst_ty
+                    {
+                        arg = self.coerce_capture_expr(arg, src_ty, dst_ty)?;
+                    }
+                    out_args.push(arg);
+                }
+                out_args
+            };
+            let env_expr = Expr::New {
+                class_name,
+                args,
+                type_args: Vec::new(),
+                byte_offset: 0,
+                byte_end: 0,
+                cap_args_appended: 0,
             };
             return Ok(self.emit_env_wrapper(ident, env_expr));
         }
@@ -1730,28 +1799,82 @@ impl<'h> Emitter<'h, '_> {
             if let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id) {
                 return Ok(Expr::FuncRef(*fid));
             }
-            if rctx.self_capture_locals.contains(id)
-                && let (Some(env_pid), Some(tag)) = (rctx.env_local, rctx.self_env_tag)
-            {
-                return Ok(self.emit_env_wrapper_tag(tag, Expr::LocalGet(env_pid)));
+            if let Some(override_expr) = self.local_read_override(rctx, *id) {
+                return Ok(override_expr);
             }
-            if let Some(env_pid) = rctx.env_local
-                && let Some((_, field, boxed)) =
-                    rctx.env_captures.iter().find(|(lid, _, _)| lid == id)
+        }
+        match expr {
+            Expr::ArrayPush {
+                array_id, value, ..
+            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
+                let arg_ctx = rctx.with_expected(true);
+                let val = self.rewrite_expr(&arg_ctx, value)?;
+                return Ok(Self::method_call_expr(recv, "push", vec![val]));
+            }
+            Expr::ArrayPushSpread { array_id, source }
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
             {
-                let base = Self::prop_get(Expr::LocalGet(env_pid), field);
-                return Ok(if *boxed {
-                    Self::prop_get(base, "v")
-                } else {
-                    base
+                let src = self.rewrite_expr(rctx, source)?;
+                return Ok(Expr::CallSpread {
+                    callee: Box::new(Self::prop_get(recv, "push")),
+                    args: vec![CallArg::Spread(src)],
+                    type_args: Vec::new(),
+                    byte_offset: 0,
+                    byte_end: 0,
                 });
             }
-            if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| lid == id) {
-                return Ok(Self::prop_get(Expr::LocalGet(box_id), "v"));
+            Expr::ArrayPop(array_id)
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
+            {
+                return Ok(Self::method_call_expr(recv, "pop", Vec::new()));
             }
-            if self.is_boxed_local(*id) {
-                return Ok(Self::prop_get(Expr::LocalGet(*id), "v"));
+            Expr::ArrayShift(array_id)
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
+            {
+                return Ok(Self::method_call_expr(recv, "shift", Vec::new()));
             }
+            Expr::ArrayUnshift { array_id, value }
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
+            {
+                let arg_ctx = rctx.with_expected(true);
+                let val = self.rewrite_expr(&arg_ctx, value)?;
+                return Ok(Self::method_call_expr(recv, "unshift", vec![val]));
+            }
+            Expr::ArraySplice {
+                array_id,
+                start,
+                delete_count,
+                items,
+            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
+                let mut args = vec![self.rewrite_expr(rctx, start)?];
+                if let Some(dc) = delete_count {
+                    args.push(self.rewrite_expr(rctx, dc)?);
+                }
+                for item in items {
+                    args.push(self.rewrite_expr(rctx, item)?);
+                }
+                return Ok(Self::method_call_expr(recv, "splice", args));
+            }
+            Expr::ArrayCopyWithin {
+                array_id,
+                target,
+                start,
+                end,
+            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
+                return Ok(Expr::ArrayCopyWithinValue {
+                    receiver: Box::new(recv),
+                    target: Box::new(self.rewrite_expr(rctx, target)?),
+                    start: Box::new(self.rewrite_expr(rctx, start)?),
+                    end: self.rewrite_opt_expr(rctx, end.as_deref())?.map(Box::new),
+                });
+            }
+            Expr::SetAdd { set_id, value }
+                if let Some(recv) = self.local_read_override(rctx, *set_id) =>
+            {
+                let val = self.rewrite_expr(rctx, value)?;
+                return Ok(Self::method_call_expr(recv, "add", vec![val]));
+            }
+            _ => {}
         }
         if let Expr::LocalSet(id, value) = expr
             && let Some(box_obj) = self.boxed_target(rctx, *id)
@@ -1820,8 +1943,6 @@ impl<'h> Emitter<'h, '_> {
                 self_local: None,
                 env_local: rctx.env_local,
                 env_captures: rctx.env_captures,
-                self_capture_locals: rctx.self_capture_locals,
-                self_env_tag: rctx.self_env_tag,
                 boxed_param_map: rctx.boxed_param_map,
                 void_return: false,
                 has_expected: false,

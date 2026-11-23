@@ -127,11 +127,13 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) local_module: BitSet,
     pub(crate) local_captured: BitSet,
     pub(crate) local_written_from_closure: BitSet,
+    pub(crate) local_forward_captured: BitSet,
     pub(crate) exported_obj_methods: BitSet,
     pub(crate) capture_free_templates: BitSet,
     pub(crate) closure_in_loop: BitSet,
     pub(crate) closure_owner_template: Vec<Option<TemplateId>>,
     template_captures: Vec<Vec<LocalId>>,
+    template_captured_locals: Vec<Vec<LocalIdx>>,
     local_frame_slot: Vec<Option<u32>>,
     template_frame_counts: Vec<usize>,
     pub(crate) location_types: IdxVec<LocId, Ty>,
@@ -184,12 +186,16 @@ impl<'h> ModuleIndex<'h> {
         });
         debug_assert_eq!(init_tid, TemplateId::INIT);
         let mut raw_sites: Vec<Vec<(usize, u32)>> = vec![Vec::new()];
+        let mut defined_locals = BitSet::default();
+        let mut pending_captures: Vec<(LocalId, bool, bool)> = Vec::new();
         let mut scan = ScanCtx {
             ctx,
             hir,
             facts,
             types,
             raw_sites: &mut raw_sites,
+            defined_locals: &mut defined_locals,
+            pending_captures: &mut pending_captures,
         };
         idx.scan_stmts(&mut scan, &hir.init, init_tid, true, false);
 
@@ -325,21 +331,39 @@ impl<'h> ModuleIndex<'h> {
             idx.template_site_spans.push(TySpan { start, len });
         }
 
+        for (cap_id, written, forward) in pending_captures {
+            if let Some(lidx) = idx.local_idx(cap_id) {
+                let li = lidx.index();
+                idx.local_captured.insert(li);
+                if written {
+                    idx.local_written_from_closure.insert(li);
+                }
+                if forward && !idx.local_module.contains(li) && !idx.local_param.contains(li) {
+                    idx.local_forward_captured.insert(li);
+                }
+            }
+        }
         idx.local_frame_slot = vec![None; idx.local_ids.len()];
         idx.template_frame_counts = vec![0; idx.views.len()];
-        for (lidx, (&owner, slot_out)) in idx
+        idx.template_captured_locals = vec![Vec::new(); idx.views.len()];
+        for (lidx_i, (&owner, slot_out)) in idx
             .local_owner
             .iter()
             .zip(idx.local_frame_slot.iter_mut())
             .enumerate()
         {
-            if !idx.local_module.contains(lidx)
-                && !idx.local_captured.contains(lidx)
-                && !idx.local_param.contains(lidx)
-                && let Some(count) = idx.template_frame_counts.get_mut(owner.index())
-            {
-                *slot_out = Some(*count as u32);
-                *count += 1;
+            if !idx.local_module.contains(lidx_i) && !idx.local_param.contains(lidx_i) {
+                if !idx.local_captured.contains(lidx_i) {
+                    if let Some(count) = idx.template_frame_counts.get_mut(owner.index()) {
+                        *slot_out = Some(*count as u32);
+                        *count += 1;
+                    }
+                } else if let Some(list) = idx.template_captured_locals.get_mut(owner.index())
+                    && let Some(&lid) = idx.local_ids.as_slice().get(lidx_i)
+                    && let Some(lidx) = idx.local_to_idx.get(lid as usize).copied().flatten()
+                {
+                    list.push(lidx);
+                }
             }
         }
         let mut template_captures: Vec<Vec<LocalId>> = idx
@@ -512,6 +536,11 @@ impl<'h> ModuleIndex<'h> {
             .get(t.index())
             .map_or(&[], Vec::as_slice)
     }
+    pub(crate) fn template_captured_locals(&self, t: TemplateId) -> &[LocalIdx] {
+        self.template_captured_locals
+            .get(t.index())
+            .map_or(&[], Vec::as_slice)
+    }
     pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
         self.func_to_template.get(id as usize).copied().flatten()
     }
@@ -624,6 +653,7 @@ impl<'h> ModuleIndex<'h> {
             let ty = scan.types.intern_hir(scan.ctx, &param.ty, explicit);
             let local = self.ensure_local(param.id, owner, ty, scan.hir, scan.facts);
             self.local_param.insert(local.index());
+            scan.defined_locals.insert(param.id as usize);
             if let Some(default) = &param.default {
                 self.scan_expr(scan, default, owner, false);
             }
@@ -666,6 +696,7 @@ impl<'h> ModuleIndex<'h> {
                         }
                         self.scan_expr(scan, init, owner, in_loop);
                     }
+                    scan.defined_locals.insert(*id as usize);
                 }
                 Stmt::If {
                     condition,
@@ -861,15 +892,12 @@ impl<'h> ModuleIndex<'h> {
                 }
                 self.set_func_template(*func_id, tid);
                 for &cap in captures {
-                    if let Some(l) = self.local_idx(cap) {
-                        self.local_captured.insert(l.index());
-                    }
+                    let forward = !scan.defined_locals.contains(cap as usize);
+                    scan.pending_captures.push((cap, false, forward));
                 }
                 for &cap in mutable_captures {
-                    if let Some(l) = self.local_idx(cap) {
-                        self.local_captured.insert(l.index());
-                        self.local_written_from_closure.insert(l.index());
-                    }
+                    let forward = !scan.defined_locals.contains(cap as usize);
+                    scan.pending_captures.push((cap, true, forward));
                 }
                 self.scan_params(scan, params, tid);
                 self.scan_stmts(scan, body, tid, false, false);
@@ -907,6 +935,8 @@ struct ScanCtx<'h, 'a> {
     facts: &'a SourceFacts,
     types: &'a mut TypeTable,
     raw_sites: &'a mut Vec<Vec<(usize, u32)>>,
+    defined_locals: &'a mut BitSet,
+    pending_captures: &'a mut Vec<(LocalId, bool, bool)>,
 }
 
 fn stmts_use_this(stmts: &[Stmt]) -> bool {

@@ -95,11 +95,11 @@ mod tests {
 
         let f1 = table.func(FuncIdentity {
             template: TemplateId::test_id(1),
-            capture_owner: None,
+            capture_owner: super::types::CaptureOwner::None,
         });
         let f2 = table.func(FuncIdentity {
             template: TemplateId::test_id(2),
-            capture_owner: None,
+            capture_owner: super::types::CaptureOwner::None,
         });
         assert_ne!(f1, f2);
 

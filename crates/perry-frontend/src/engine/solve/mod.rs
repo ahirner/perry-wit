@@ -6,8 +6,8 @@ use super::bitset::BitSet;
 use super::boundary::{ClassInfo, ModuleIndex, SourceFacts, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
-    CellKind, ClassId, ClassInstId, FuncIdentity, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp,
-    TemplateId, Ty, TyKind, TySpan, TypeTable,
+    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, IdxVec, InstanceId, LocId,
+    LocalIdx, ObjectProp, TemplateId, Ty, TyKind, TySpan, TypeTable,
 };
 use crate::{
     Absence,
@@ -45,7 +45,7 @@ impl Receiver {
 pub(crate) struct Instance {
     pub(crate) template: TemplateId,
     pub(crate) receiver: Option<Receiver>,
-    pub(crate) capture_owner: Option<InstanceId>,
+    pub(crate) capture_owner: CaptureOwner,
     pub(crate) args: Ty,
     pub(crate) explicit_type_args: Ty,
     pub(crate) return_loc: LocId,
@@ -150,8 +150,10 @@ pub(crate) struct Solved {
     pub(crate) inst_captures: Vec<Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
     pub(crate) escaping_env_templates: BitSet,
+    pub(crate) collapsed_closures: BitSet,
     pub(crate) boxed_locals: BitSet,
     pub(crate) module_local_tys: Vec<Option<Ty>>,
+    pub(crate) collapsed_local_tys: Vec<Option<Ty>>,
     pub(crate) class_static_field_tys: Vec<Vec<Ty>>,
     pub(crate) class_inst_methods: Vec<Vec<InstanceId>>,
     pub(crate) class_inst_getters: Vec<Vec<(usize, InstanceId)>>,
@@ -163,7 +165,7 @@ pub(crate) struct Solved {
     pub(crate) deletes_array_elements: bool,
 }
 
-type InstanceKey = (TemplateId, Option<Receiver>, Option<InstanceId>, Ty, Ty);
+type InstanceKey = (TemplateId, Option<Receiver>, CaptureOwner, Ty, Ty);
 
 struct ResultContract {
     inst: InstanceId,
@@ -175,7 +177,7 @@ struct ResultContract {
 struct InstanceReq<'a> {
     template: TemplateId,
     receiver: Option<Receiver>,
-    capture_owner: Option<InstanceId>,
+    capture_owner: CaptureOwner,
     args: &'a [Ty],
     explicit_type_args: &'a [Ty],
     call_byte_offset: u32,
@@ -188,7 +190,7 @@ impl<'a> InstanceReq<'a> {
         Self {
             template,
             receiver: None,
-            capture_owner: None,
+            capture_owner: CaptureOwner::None,
             args,
             explicit_type_args: &[],
             call_byte_offset: 0,
@@ -200,7 +202,7 @@ impl<'a> InstanceReq<'a> {
         self.receiver = r;
         self
     }
-    fn owner(mut self, o: Option<InstanceId>) -> Self {
+    fn owner(mut self, o: CaptureOwner) -> Self {
         self.capture_owner = o;
         self
     }
@@ -311,6 +313,8 @@ struct Solver<'h, 'a> {
     inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
     inst_superseded: BitSet,
     escaping_env_templates: BitSet,
+    collapsed_closures: BitSet,
+    collapsed_local_locs: Vec<Option<LocId>>,
     boxed_locals: BitSet,
     dict_reads: BitSet,
     self_nested_locs: BitSet,
@@ -441,6 +445,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_coercions: Vec::new(),
             inst_superseded: BitSet::default(),
             escaping_env_templates: BitSet::default(),
+            collapsed_closures: BitSet::default(),
+            collapsed_local_locs: vec![None; index.local_count()],
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
@@ -998,6 +1004,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.param_locs.push(loc);
             if let Some(local) = self.index.local_idx(param.id) {
                 local_slots.push(InstanceLocalSlot { local, loc });
+                if let Some(cloc) = self
+                    .collapsed_local_locs
+                    .get(local.index())
+                    .copied()
+                    .flatten()
+                {
+                    self.write_loc(cloc, bound_ty);
+                }
+            }
+        }
+        for &cap_local in self.index.template_captured_locals(template) {
+            if !local_slots.iter().any(|s| s.local == cap_local) {
+                let loc = self.alloc_loc(Ty::BOTTOM);
+                local_slots.push(InstanceLocalSlot {
+                    local: cap_local,
+                    loc,
+                });
             }
         }
         let param_locs = TySpan {
@@ -1084,12 +1107,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         template: TemplateId,
         receiver: Option<Receiver>,
-        capture_owner: Option<InstanceId>,
+        capture_owner: CaptureOwner,
         args: &[Ty],
         explicit_type_args: &[Ty],
     ) -> Vec<(shapes::TypeId, Ty)> {
-        let mut bindings =
-            capture_owner.map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
+        let mut bindings = capture_owner
+            .instance()
+            .map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
         if let Some(cinst) = receiver
             .and_then(Receiver::class)
             .and_then(|id| self.class_insts.get(id))
@@ -1222,13 +1246,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             .collect();
         let field_loc_start = self.field_locs.len() as u32;
         for field in &hir_class.fields {
+            let is_func_ty = matches!(field.ty, HirType::Function(_));
             let ty = self.types.intern_hir(
                 self.ctx,
                 &field.ty,
-                !matches!(field.ty, HirType::Any | HirType::Unknown),
+                !matches!(
+                    field.ty,
+                    HirType::Any | HirType::Unknown | HirType::Function(_)
+                ),
             );
             let ty = self.types.substitute(self.ctx, ty, &bindings);
-            let declared = !self.types.is_open(ty);
+            let declared = !is_func_ty && !self.types.is_open(ty);
             let loc = self.alloc_loc(if declared { ty } else { Ty::BOTTOM });
             if declared {
                 self.declared_locs.insert(loc.index());
@@ -1255,6 +1283,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         });
         self.class_index.insert(key, cinst_id);
 
+        let mut has_field_inits = false;
         let field_loc_slice: Vec<LocId> = self
             .field_locs
             .get(field_locs.range())
@@ -1262,6 +1291,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .to_vec();
         for (field, field_loc) in hir_class.fields.iter().zip(field_loc_slice) {
             if let Some(init) = &field.init {
+                has_field_inits = true;
                 if matches!(init, Expr::Array(items, _) if items.is_empty())
                     && self.types.is_open(self.locations[field_loc])
                 {
@@ -1271,12 +1301,16 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else if let Some(init_inst) = self.init_inst {
                     let mut state = EvalState::new(init_inst, Some(Receiver::Class(cinst_id)));
                     let init_ty = self.eval_expr(&mut state, init)?;
+                    self.check_escaping_func(init_inst, init_ty, 0, None)?;
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, init_ty);
                     self.write_loc(field_loc, norm);
                 }
             }
+        }
+        if has_field_inits && let Some(init_inst) = self.init_inst {
+            self.enqueue(init_inst);
         }
         if let Some(ctor_tid) = cinfo.ctor {
             let ctor_inst = self.request_instance(
@@ -1361,6 +1395,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let prev_locs = self.locations.as_slice().to_vec();
         let prev_frames = self.inst_frame_locals.clone();
         let prev_escaping = self.escaping_env_templates.clone();
+        let prev_collapsed = self.collapsed_closures.clone();
         self.dirty_locs.clear();
         for id in live_ids {
             self.evaluate_instance(id)?;
@@ -1368,6 +1403,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.escaping_env_templates != prev_escaping {
             return Err(Diagnostic::internal(
                 "fixed-point check marked a new escaping closure",
+            ));
+        }
+        if self.collapsed_closures != prev_collapsed {
+            return Err(Diagnostic::internal(
+                "fixed-point check collapsed a new closure",
             ));
         }
         if self.instances.len() != prev_inst_count {
@@ -1408,6 +1448,73 @@ impl<'h, 'a> Solver<'h, 'a> {
         span
     }
 
+    pub(super) fn collapse_closure(&mut self, tid: TemplateId, owner_tid: TemplateId) {
+        if !self.collapsed_closures.insert(tid.index()) {
+            return;
+        }
+        let caps: Vec<LocalId> = self.index.template_captures(tid).to_vec();
+        for cap_id in caps {
+            let Some(lidx) = self.index.local_idx(cap_id) else {
+                continue;
+            };
+            if self.index.local_module.contains(lidx.index()) {
+                continue;
+            }
+            let cloc = match self
+                .collapsed_local_locs
+                .get(lidx.index())
+                .copied()
+                .flatten()
+            {
+                Some(loc) => loc,
+                None => {
+                    let loc = self.alloc_loc(Ty::BOTTOM);
+                    if let Some(slot) = self.collapsed_local_locs.get_mut(lidx.index()) {
+                        *slot = Some(loc);
+                    }
+                    loc
+                }
+            };
+            let cap_owner_tid = self.index.local_owner.get(lidx.index()).copied();
+            let seed_tys: Vec<Ty> = self
+                .instances
+                .iter_enumerated()
+                .filter_map(|(id, inst)| {
+                    if self.inst_superseded.contains(id.index())
+                        || Some(inst.template) != cap_owner_tid
+                    {
+                        return None;
+                    }
+                    if let Some(slot) = self.local_frame_slot_in(id, lidx) {
+                        self.inst_frame_locals
+                            .get(id.index())
+                            .and_then(|f| f.get(slot))
+                            .copied()
+                    } else {
+                        self.inst_locals
+                            .get(id.index())
+                            .and_then(|sl| sl.iter().find(|s| s.local == lidx))
+                            .and_then(|s| self.locations.get(s.loc).copied())
+                    }
+                })
+                .collect();
+            for ty in seed_tys {
+                self.write_loc(cloc, ty);
+            }
+        }
+        let owners: Vec<InstanceId> = self
+            .instances
+            .iter_enumerated()
+            .filter_map(|(id, inst)| {
+                (!self.inst_superseded.contains(id.index()) && inst.template == owner_tid)
+                    .then_some(id)
+            })
+            .collect();
+        for id in owners {
+            self.enqueue(id);
+        }
+    }
+
     pub(super) fn mark_escaping_env(&mut self, caller: InstanceId, ty: Ty) {
         let members = self.types.func_members(ty);
         for ident in members {
@@ -1427,18 +1534,36 @@ impl<'h, 'a> Solver<'h, 'a> {
                         && (self.index.local_reassigned.contains(li)
                             || self.index.local_written_from_closure.contains(li)
                             || self.index.local_deferred.contains(li)
-                            || self.index.local_for_head.contains(li))
+                            || self.index.local_for_head.contains(li)
+                            || self.index.local_forward_captured.contains(li))
                     {
                         self.boxed_locals.insert(li);
                     }
                 }
             }
             self.enqueue(caller);
-            if let Some(owner) = ident.capture_owner {
-                self.enqueue(owner);
-                if let Some(grand_caller) = self.instances.get(owner).and_then(|i| i.caller) {
-                    self.enqueue(grand_caller);
+            match ident.capture_owner {
+                CaptureOwner::Instance(owner) => {
+                    self.enqueue(owner);
+                    if let Some(grand_caller) = self.instances.get(owner).and_then(|i| i.caller) {
+                        self.enqueue(grand_caller);
+                    }
                 }
+                CaptureOwner::Template(owner_tid) => {
+                    let owners: Vec<InstanceId> = self
+                        .instances
+                        .iter_enumerated()
+                        .filter_map(|(id, inst)| {
+                            (!self.inst_superseded.contains(id.index())
+                                && inst.template == owner_tid)
+                                .then_some(id)
+                        })
+                        .collect();
+                    for id in owners {
+                        self.enqueue(id);
+                    }
+                }
+                CaptureOwner::None => {}
             }
             let to_requeue: Vec<InstanceId> =
                 self.instances

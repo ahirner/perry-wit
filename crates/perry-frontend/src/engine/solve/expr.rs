@@ -159,7 +159,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .map_or(Ty::OPEN, |template| {
                         self.types.func(FuncIdentity {
                             template,
-                            capture_owner: None,
+                            capture_owner: CaptureOwner::None,
                         })
                     }))
             }
@@ -194,10 +194,52 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let Some(template) = self.index.template_of_func(*func_id) else {
                     return Ok(Ty::OPEN);
                 };
+                let capture_owner = if self.index.template_captures(template).is_empty() {
+                    CaptureOwner::None
+                } else if let Some(owner_inst) = self.instances.get(s.inst) {
+                    let owner_tid = owner_inst.template;
+                    let owner_args = owner_inst.args;
+                    let self_nested = self.collapsed_closures.contains(template.index())
+                        || self
+                            .types
+                            .contains_func_template(owner_args, template, None)
+                        || self
+                            .index
+                            .template_captures(template)
+                            .iter()
+                            .any(|&cap_id| {
+                                self.index
+                                    .local_idx(cap_id)
+                                    .and_then(|lidx| self.read_local_value(s.inst, lidx))
+                                    .is_some_and(|ty| {
+                                        self.types.contains_func_template(
+                                            ty,
+                                            template,
+                                            Some(CaptureOwner::Instance(s.inst)),
+                                        )
+                                    })
+                            });
+                    if self_nested {
+                        self.collapse_closure(template, owner_tid);
+                        CaptureOwner::Template(owner_tid)
+                    } else {
+                        CaptureOwner::Instance(s.inst)
+                    }
+                } else {
+                    CaptureOwner::Instance(s.inst)
+                };
+                if self.escaping_env_templates.contains(template.index()) {
+                    for &cap_id in self.index.template_captures(template) {
+                        if let Some(lidx) = self.index.local_idx(cap_id)
+                            && let Some(cap_ty) = self.read_local_value(s.inst, lidx)
+                        {
+                            self.mark_escaping_env(s.inst, cap_ty);
+                        }
+                    }
+                }
                 Ok(self.types.func(FuncIdentity {
                     template,
-                    capture_owner: (!self.index.template_captures(template).is_empty())
-                        .then_some(s.inst),
+                    capture_owner,
                 }))
             }
             Expr::Binary { op, left, right } => {

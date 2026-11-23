@@ -285,10 +285,18 @@ impl<'h, 'a> Solver<'h, 'a> {
             let Some(template) = self.index.template_of_func(*func_id) else {
                 return Ok(None);
             };
+            let capture_owner = if self.index.template_captures(template).is_empty() {
+                CaptureOwner::None
+            } else if self.collapsed_closures.contains(template.index())
+                && let Some(owner_tid) = self.instances.get(s.inst).map(|i| i.template)
+            {
+                CaptureOwner::Template(owner_tid)
+            } else {
+                CaptureOwner::Instance(s.inst)
+            };
             FuncIdentity {
                 template,
-                capture_owner: (!self.index.template_captures(template).is_empty())
-                    .then_some(s.inst),
+                capture_owner,
             }
         } else {
             let cb_val = self.eval_expr(s, callback)?;

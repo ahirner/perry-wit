@@ -1,7 +1,11 @@
 //! Synthetic function-value records, dispatchers, wideners, comparers, and callback wrappers.
 use super::{Emitter, EnvField, RewriteCtx};
+use crate::engine::bitset::BitSet;
 use crate::engine::solve::FuncCoercion;
-use crate::engine::types::{FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TySpan, func_tag};
+use crate::engine::types::{
+    CaptureOwner, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
+    env_class_name, func_tag,
+};
 use perry_hir::{
     ir::{Class, ClassField, ClassFieldOrigin, CompareOp, Expr, Function, Param, Stmt, SwitchCase},
     types::{FuncId, LocalId, Type as HirType},
@@ -15,41 +19,79 @@ impl<'h> Emitter<'h, '_> {
             .is_some_and(|li| self.solved.boxed_locals.contains(li.index()))
     }
 
-    pub(super) fn local_ty_in_owner(&self, owner: InstanceId, id: LocalId) -> Option<Ty> {
-        let mut cur = Some(owner);
-        while let Some(c) = cur {
-            if let Some(inst) = self.solved.instances.get(c)
-                && let Some(view) = self.index.view(inst.template)
-                && let Some(locs) = self.solved.param_locs.get(inst.param_locs.range())
-                && let Some(&loc) = view
-                    .params
-                    .iter()
-                    .zip(locs)
-                    .find_map(|(p, loc)| (p.id == id).then_some(loc))
-                && let Some(&ty) = self.solved.locations.get(loc)
-                && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
-            {
-                return Some(ty);
-            }
-            if let Some(ty) = self.local_ty(c, id)
-                && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
-            {
-                return Some(ty);
-            }
-            cur = self.solved.instances.get(c).and_then(|i| i.capture_owner);
-        }
-        None
+    pub(super) fn is_forward_boxed(&self, id: LocalId) -> bool {
+        self.index.local_idx(id).is_some_and(|li| {
+            self.solved.boxed_locals.contains(li.index())
+                && self.index.local_forward_captured.contains(li.index())
+        })
     }
 
-    pub(super) fn env_layout(&self, ident: FuncIdentity) -> Result<(Vec<EnvField>, Vec<LocalId>)> {
+    pub(super) fn admitting_undefined_hir(ty: HirType) -> HirType {
+        match ty {
+            HirType::Void => HirType::Void,
+            HirType::Union(mut members) => {
+                if !members.contains(&HirType::Void) {
+                    members.push(HirType::Void);
+                }
+                HirType::Union(members)
+            }
+            other => HirType::Union(vec![other, HirType::Void]),
+        }
+    }
+
+    pub(super) fn non_null_unwrap(expr: Expr) -> Expr {
+        Expr::Sequence(vec![Expr::String("\0perry_non_null".into()), expr])
+    }
+
+    pub(super) fn local_ty_in_owner(&self, owner: CaptureOwner, id: LocalId) -> Option<Ty> {
+        let mut cur = owner;
+        loop {
+            match cur {
+                CaptureOwner::Instance(c) => {
+                    if let Some(inst) = self.solved.instances.get(c)
+                        && let Some(view) = self.index.view(inst.template)
+                        && let Some(locs) = self.solved.param_locs.get(inst.param_locs.range())
+                        && let Some(&loc) = view
+                            .params
+                            .iter()
+                            .zip(locs)
+                            .find_map(|(p, loc)| (p.id == id).then_some(loc))
+                        && let Some(&ty) = self.solved.locations.get(loc)
+                        && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
+                    {
+                        return Some(ty);
+                    }
+                    if let Some(ty) = self.local_ty(c, id)
+                        && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
+                    {
+                        return Some(ty);
+                    }
+                    cur = self
+                        .solved
+                        .instances
+                        .get(c)
+                        .map_or(CaptureOwner::None, |i| i.capture_owner);
+                }
+                CaptureOwner::Template(_) => {
+                    let lidx = self.index.local_idx(id)?;
+                    return self
+                        .solved
+                        .collapsed_local_tys
+                        .get(lidx.index())
+                        .copied()
+                        .flatten()
+                        .filter(|&ty| !matches!(ty, Ty::BOTTOM | Ty::OPEN));
+                }
+                CaptureOwner::None => return None,
+            }
+        }
+    }
+
+    pub(super) fn env_layout(&self, ident: FuncIdentity) -> Result<Vec<EnvField>> {
         let caps = self.index.template_captures(ident.template);
         let mut fields = Vec::with_capacity(caps.len());
-        let mut self_caps = Vec::new();
         for &cap_id in caps {
-            let cap_ty = match ident
-                .capture_owner
-                .and_then(|o| self.local_ty_in_owner(o, cap_id))
-            {
+            let cap_ty = match self.local_ty_in_owner(ident.capture_owner, cap_id) {
                 Some(ty) => ty,
                 None => {
                     let err = self.annotate_local(
@@ -59,7 +101,7 @@ impl<'h> Emitter<'h, '_> {
                         ),
                         cap_id,
                     );
-                    return Err(match ident.capture_owner {
+                    return Err(match ident.capture_owner.instance() {
                         Some(owner) => self.attach_inst_chain(err, owner),
                         None => err,
                     });
@@ -68,19 +110,159 @@ impl<'h> Emitter<'h, '_> {
             if self.is_zero_sized_func(cap_ty) {
                 continue;
             }
-            if matches!(self.types.kind(cap_ty), TyKind::Func(cident) if cident == ident) {
-                self_caps.push(cap_id);
-                continue;
-            }
             let boxed = self.is_boxed_local(cap_id);
             let name = format!("c{}", fields.len());
             fields.push((cap_id, name, cap_ty, boxed));
         }
-        Ok((fields, self_caps))
+        Ok(fields)
     }
 
-    pub(super) fn materialize(&self, ty: Ty) -> Result<HirType> {
-        self.types.materialize_hir_with(
+    pub(super) fn ensure_env_class(&mut self, ident: FuncIdentity) -> Result<String> {
+        let name = env_class_name(ident);
+        if !self.emitted_env_classes.insert(ident) {
+            return Ok(name);
+        }
+        let layout = self.env_layout(ident)?;
+        let mut fields = Vec::with_capacity(layout.len().max(1));
+        let mut params = Vec::with_capacity(layout.len().max(1));
+        let mut body = Vec::with_capacity(layout.len().max(1));
+        if layout.is_empty() {
+            let pid = self.fresh_synthetic_local()?;
+            fields.push(ClassField {
+                origin: ClassFieldOrigin::Declared,
+                name: "_u".to_owned(),
+                key_expr: None,
+                ty: HirType::Number,
+                init: None,
+                is_private: false,
+                is_readonly: false,
+                decorators: Vec::new(),
+            });
+            params.push(Self::synth_param(pid, "_u".to_owned(), HirType::Number));
+            body.push(Stmt::Expr(Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: "_u".to_owned(),
+                value: Box::new(Expr::LocalGet(pid)),
+                byte_offset: 0,
+                byte_end: 0,
+            }));
+        } else {
+            for (cap_id, fname, fty, boxed) in layout {
+                let inner = self.materialize(fty)?;
+                let field_ty = if boxed {
+                    let inner = if self.is_forward_boxed(cap_id) {
+                        Self::admitting_undefined_hir(inner)
+                    } else {
+                        inner
+                    };
+                    box_hir(inner)
+                } else {
+                    inner
+                };
+                let pid = self.fresh_synthetic_local()?;
+                fields.push(ClassField {
+                    origin: ClassFieldOrigin::Declared,
+                    name: fname.clone(),
+                    key_expr: None,
+                    ty: field_ty.clone(),
+                    init: None,
+                    is_private: false,
+                    is_readonly: false,
+                    decorators: Vec::new(),
+                });
+                params.push(Self::synth_param(pid, fname.clone(), field_ty));
+                body.push(Stmt::Expr(Expr::PropertySet {
+                    object: Box::new(Expr::This),
+                    property: fname,
+                    value: Box::new(Expr::LocalGet(pid)),
+                    byte_offset: 0,
+                    byte_end: 0,
+                }));
+            }
+        }
+        let ctor_fid = self.fresh_func_id()?;
+        let ctor = Self::synth_function(
+            ctor_fid,
+            "constructor".to_owned(),
+            params,
+            HirType::Void,
+            body,
+            false,
+        );
+        let id = self.next_class_id;
+        self.next_class_id = id.saturating_add(1);
+        self.synth_classes.push(Class {
+            id,
+            name: name.clone(),
+            type_params: Vec::new(),
+            extends: None,
+            extends_name: None,
+            native_extends: None,
+            extends_expr: None,
+            heritage_lexically_shadowed: false,
+            fields,
+            constructor: Some(ctor),
+            methods: Vec::new(),
+            getters: Vec::new(),
+            setters: Vec::new(),
+            static_accessor_names: Vec::new(),
+            static_accessor_fn_ids: Vec::new(),
+            static_fields: Vec::new(),
+            static_methods: Vec::new(),
+            computed_members: Vec::new(),
+            decorators: Vec::new(),
+            is_exported: false,
+            aliases: Vec::new(),
+            is_nested: false,
+            alloc_width_hint: 0,
+            specialized_from: None,
+            decl_stmt: None,
+        });
+        Ok(name)
+    }
+
+    fn collect_env_idents_in(&self, ty: Ty, seen: &mut BitSet, out: &mut Vec<FuncIdentity>) {
+        if !seen.insert(ty.index()) {
+            return;
+        }
+        match self.types.kind(ty) {
+            TyKind::Func(ident) => {
+                if self.is_env_template(ident.template)
+                    && !self.emitted_env_classes.contains(&ident)
+                {
+                    out.push(ident);
+                }
+            }
+            TyKind::Array(i) | TyKind::Promise(i) => self.collect_env_idents_in(i, seen, out),
+            TyKind::Cell { loc, .. } => {
+                if let Some(&elem) = self.solved.locations.get(loc) {
+                    self.collect_env_idents_in(elem, seen, out);
+                }
+            }
+            TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
+                for &m in self.types.ty_slice(s) {
+                    self.collect_env_idents_in(m, seen, out);
+                }
+            }
+            TyKind::Object { props, index } => {
+                if let Some(i) = index {
+                    self.collect_env_idents_in(i, seen, out);
+                }
+                for p in self.types.object_slice(props) {
+                    self.collect_env_idents_in(p.ty, seen, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn materialize(&mut self, ty: Ty) -> Result<HirType> {
+        let mut idents = Vec::new();
+        self.collect_env_idents_in(ty, &mut BitSet::default(), &mut idents);
+        for ident in idents {
+            self.ensure_env_class(ident)?;
+        }
+        Ok(self.types.materialize_hir_with(
             self.ctx,
             ty,
             self.solved.locations.as_slice(),
@@ -88,18 +270,44 @@ impl<'h> Emitter<'h, '_> {
             &self.index.capture_free_templates,
             &self.solved.escaping_env_templates,
             &|cid| self.class_inst_name(cid),
-            &|ident| {
-                let (fields, _) = self.env_layout(ident)?;
-                Ok(if fields.is_empty() {
-                    vec![("_u".to_owned(), Ty::NUMBER, false)]
-                } else {
-                    fields
-                        .into_iter()
-                        .map(|(_, name, fty, boxed)| (name, fty, boxed))
-                        .collect()
-                })
-            },
-        )
+        ))
+    }
+
+    pub(super) fn coerce_capture_expr(
+        &mut self,
+        arg: Expr,
+        src_ty: Ty,
+        dst_ty: Ty,
+    ) -> Result<Expr> {
+        if !self.types.is_tagged_func_union(
+            dst_ty,
+            &self.index.capture_free_templates,
+            &self.solved.escaping_env_templates,
+        ) {
+            return Ok(arg);
+        }
+        if self.is_zero_sized_func(src_ty)
+            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        {
+            return Ok(self.emit_tag_record(ident));
+        }
+        if self
+            .types
+            .is_env_func(src_ty, &self.solved.escaping_env_templates)
+            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        {
+            return Ok(self.emit_env_wrapper(ident, Self::prop_get(arg, "val")));
+        }
+        if self.types.is_tagged_func_union(
+            src_ty,
+            &self.index.capture_free_templates,
+            &self.solved.escaping_env_templates,
+        ) && src_ty != dst_ty
+        {
+            let fid = self.intern_widener(src_ty, dst_ty)?;
+            return Ok(Self::synth_call(fid, vec![arg], 0, 0));
+        }
+        Ok(arg)
     }
 
     pub(super) fn dispatch_arms_slice(
@@ -206,14 +414,9 @@ impl<'h> Emitter<'h, '_> {
     }
 
     pub(super) fn emit_env_wrapper(&mut self, ident: FuncIdentity, env_expr: Expr) -> Expr {
-        let tag = func_tag(ident);
-        self.emit_env_wrapper_tag(&tag, env_expr)
-    }
-
-    pub(super) fn emit_env_wrapper_tag(&mut self, tag: &str, env_expr: Expr) -> Expr {
         self.emit_anon_new(
             &["tag", "val"],
-            vec![Expr::String(tag.to_owned()), env_expr],
+            vec![Expr::String(func_tag(ident)), env_expr],
         )
     }
 
@@ -252,7 +455,7 @@ impl<'h> Emitter<'h, '_> {
             .map(|&(_, c)| c)
     }
 
-    pub(super) fn arm_return_hir(&self, inst_id: InstanceId) -> Result<HirType> {
+    pub(super) fn arm_return_hir(&mut self, inst_id: InstanceId) -> Result<HirType> {
         let inst = self.instance(inst_id, "missing dispatch arm instance")?;
         let ret = *self
             .solved

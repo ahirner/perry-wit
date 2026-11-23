@@ -81,6 +81,51 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.write_loc(loc, norm);
                 }
             }
+            let class_inst_ids: Vec<(ClassInstId, ClassId, TySpan)> = self
+                .class_insts
+                .iter_enumerated()
+                .map(|(id, ci)| (id, ci.class, ci.field_locs))
+                .collect();
+            for (cinst_id, cid, field_locs_span) in class_inst_ids {
+                let Some(hir_class) = self
+                    .index
+                    .class(cid)
+                    .and_then(|c| self.hir.classes.get(c.hir_idx))
+                else {
+                    continue;
+                };
+                let locs: Vec<LocId> = self
+                    .field_locs
+                    .get(field_locs_span.range())
+                    .unwrap_or(&[])
+                    .to_vec();
+                s.receiver = Some(Receiver::Class(cinst_id));
+                for (field, field_loc) in hir_class.fields.iter().zip(locs) {
+                    let Some(init) = &field.init else {
+                        continue;
+                    };
+                    if matches!(init, Expr::Array(items, _) if items.is_empty())
+                        && matches!(
+                            self.types.kind(self.locations[field_loc]),
+                            TyKind::Cell {
+                                kind: CellKind::Array,
+                                ..
+                            }
+                        )
+                    {
+                        continue;
+                    }
+                    let init_ty = self.eval_expr(&mut s, init)?;
+                    self.check_escaping_func(s.inst, init_ty, 0, s.current_span)?;
+                    let norm = self
+                        .types
+                        .normalize_for_storage(self.ctx, self.decls, init_ty);
+                    self.write_loc(field_loc, norm);
+                    let cur = self.read_loc(field_loc, s.inst);
+                    self.record_coercion(s.inst, init, init_ty, cur);
+                }
+            }
+            s.receiver = receiver;
         }
 
         let body = hir_compat::strip_synthetic_default_guards(view.body, view.params.iter());
@@ -143,6 +188,14 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn write_local_value(&mut self, s: &mut EvalState<'h>, local: LocalIdx, value: Ty) {
+        if let Some(cloc) = self
+            .collapsed_local_locs
+            .get(local.index())
+            .copied()
+            .flatten()
+        {
+            self.write_loc(cloc, value);
+        }
         if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
             if let Some(cell) = self
                 .inst_frame_locals
@@ -177,18 +230,32 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.index.local_module.contains(local.index()) {
             return self.index.local_loc.get(local.index()).copied().flatten();
         }
-        let mut cursor = Some(inst_id);
-        while let Some(cur) = cursor {
-            if let Some(slot) = self
-                .inst_locals
-                .get(cur.index())
-                .and_then(|sl| sl.iter().find(|s| s.local == local))
-            {
-                return Some(slot.loc);
+        let mut cursor = CaptureOwner::Instance(inst_id);
+        loop {
+            match cursor {
+                CaptureOwner::Instance(cur) => {
+                    if let Some(slot) = self
+                        .inst_locals
+                        .get(cur.index())
+                        .and_then(|sl| sl.iter().find(|s| s.local == local))
+                    {
+                        return Some(slot.loc);
+                    }
+                    cursor = self
+                        .instances
+                        .get(cur)
+                        .map_or(CaptureOwner::None, |i| i.capture_owner);
+                }
+                CaptureOwner::Template(_) => {
+                    return self
+                        .collapsed_local_locs
+                        .get(local.index())
+                        .copied()
+                        .flatten();
+                }
+                CaptureOwner::None => return None,
             }
-            cursor = self.instances.get(cur).and_then(|i| i.capture_owner);
         }
-        None
     }
 
     pub(super) fn ensure_instance_local(
@@ -340,7 +407,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(w) = self.inst_written.get_mut(cur.index()) {
                 w.insert(local.index());
             }
-            cursor = self.instances.get(cur).and_then(|i| i.capture_owner);
+            cursor = self
+                .instances
+                .get(cur)
+                .and_then(|i| i.capture_owner.instance());
         }
     }
 
@@ -745,6 +815,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
+        let collapsed_local_tys: Vec<Option<Ty>> = self
+            .collapsed_local_locs
+            .iter()
+            .map(|opt| opt.and_then(|loc| self.locations.get(loc).copied()))
+            .collect();
+
         Solved {
             init_inst,
             instances: self.instances,
@@ -760,8 +836,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_captures: self.inst_captures,
             live_instances,
             escaping_env_templates: self.escaping_env_templates,
+            collapsed_closures: self.collapsed_closures,
             boxed_locals: self.boxed_locals,
             module_local_tys,
+            collapsed_local_tys,
             class_static_field_tys,
             class_inst_methods,
             class_inst_getters,
