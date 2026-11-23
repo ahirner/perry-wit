@@ -541,7 +541,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             });
         }
         let obj_ty = self.types.object(&props, None);
-        if has_zero_sized_func || matches!(site_expr, Expr::Object(_)) {
+        if has_zero_sized_func {
             self.record_site(s.inst, site_expr, SiteResolution::ObjectLiteral(obj_ty));
         }
         Ok(obj_ty)
