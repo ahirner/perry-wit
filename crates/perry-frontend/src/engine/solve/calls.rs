@@ -540,6 +540,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 readonly: false,
             });
         }
+        if props.iter().any(|p| p.ty == Ty::BOTTOM) {
+            return Ok(Ty::BOTTOM);
+        }
         let obj_ty = self.types.object(&props, None);
         if has_zero_sized_func {
             self.record_site(s.inst, site_expr, SiteResolution::ObjectLiteral(obj_ty));
