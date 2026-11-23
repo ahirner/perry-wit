@@ -810,6 +810,66 @@ console.log(
 "#,
             "0,1,2 0,1,2 1 -1 1 6 0 TypeError function function function function object 69 1\n",
         ),
+        (
+            "recursive_env_classes_identity_widening_and_class_field_init",
+            r#"
+function wrap(f, k) { return () => f() + k; }
+function build(n) {
+  let g = () => 0;
+  for (let i = 1; i <= n; i++) g = wrap(g, i);
+  return g;
+}
+function upTo(limit) {
+  const step = (i) => (i >= limit ? i : step(i + 1));
+  return step;
+}
+function parity() {
+  const even = (n) => (n === 0 ? true : odd(n - 1));
+  const odd = (n) => (n === 0 ? false : even(n - 1));
+  return [even, odd];
+}
+function runHandlers() {
+  const handlers = [];
+  let count = 0;
+  const on = (h) => handlers.push(h);
+  on(() => { count++; if (count < 3) on(() => { count += 10; }); });
+  for (let i = 0; i < handlers.length; i++) handlers[i]();
+  return count + ":" + handlers.length;
+}
+let calls = 0;
+function mk(k) { calls++; return () => k; }
+function mk2(k) { calls++; return () => k * 10; }
+class Holder {
+  h = mk(1);
+  constructor(b) { if (b) this.h = mk2(2); }
+}
+const plainWide = {
+  p0: 0, p1: 1, p2: 2, p3: 3, p4: 4, p5: 5, p6: 6, p7: 7, p8: 8, p9: 9,
+  p10: 10, p11: 11, p12: 12, p13: 13, p14: 14, p15: 15, p16: 16, p17: 17, p18: 18, p19: 19,
+  p20: 20, p21: 21, p22: 22, p23: 23, p24: 24, p25: 25, p26: 26, p27: 27, p28: 28, p29: 29,
+  p30: 30, p31: 31, p32: 32, p33: 33, p34: 34, p35: 35, p36: 36, p37: 37, p38: 38, p39: 39,
+  p40: 40, p41: 41, p42: 42, p43: 43, p44: 44, p45: 45, p46: 46, p47: 47, p48: 48, p49: 49,
+  p50: 50, p51: 51, p52: 52, p53: 53, p54: 54, p55: 55, p56: 56, p57: 57, p58: 58, p59: 59,
+  p60: 60, p61: 61, p62: 62, p63: 63, p64: 64, p65: 65, p66: 66, p67: 67, p68: 68, p69: 69,
+};
+const [e, o] = parity();
+console.log(
+  build(3)(),
+  build(4)(),
+  upTo(5)(0),
+  e(4),
+  o(4),
+  e(3),
+  runHandlers(),
+  new Holder(true).h(),
+  new Holder(false).h(),
+  calls,
+  plainWide.p69,
+  [() => 11, () => 22][1](),
+);
+"#,
+            "6 10 5 true false false 11:2 20 1 3 69 22\n",
+        ),
     ];
     for &(name, source, expected) in cases {
         let run = execute(source).await?;

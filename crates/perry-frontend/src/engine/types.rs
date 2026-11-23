@@ -917,6 +917,7 @@ impl TypeTable {
         walk(self, ty, target, exclude_owner, &mut BitSet::default())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn materialize_hir_with(
         &self,
         ctx: &Context,

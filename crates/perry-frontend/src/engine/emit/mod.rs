@@ -1912,8 +1912,9 @@ impl<'h> Emitter<'h, '_> {
             else_expr,
         } = expr
         {
+            let cond_ctx = rctx.with_expected(false);
             return Ok(Expr::Conditional {
-                condition: Box::new(self.rewrite_condition(rctx, condition)?),
+                condition: Box::new(self.rewrite_condition(&cond_ctx, condition)?),
                 then_expr: Box::new(self.rewrite_expr(rctx, then_expr)?),
                 else_expr: Box::new(self.rewrite_expr(rctx, else_expr)?),
             });
@@ -1985,6 +1986,9 @@ impl<'h> Emitter<'h, '_> {
                 None => Ok(cloned),
             };
         }
+        let child_expected =
+            rctx.has_expected && matches!(expr, Expr::Logical { .. } | Expr::Sequence(_));
+        let child_ctx = rctx.with_expected(child_expected);
         let mut cloned = expr.clone();
         let mut orig_children: Vec<&'h Expr> = Vec::new();
         perry_hir::walker::walk_expr_children(expr, &mut |child| orig_children.push(child));
@@ -1994,7 +1998,7 @@ impl<'h> Emitter<'h, '_> {
                 && let Some(&orig) = orig_children.get(idx)
             {
                 idx += 1;
-                match self.rewrite_expr(rctx, orig) {
+                match self.rewrite_expr(&child_ctx, orig) {
                     Ok(r) => *child = r,
                     Err(e) => err = Some(e),
                 }
