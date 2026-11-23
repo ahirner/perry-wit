@@ -661,6 +661,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 fields.iter().zip(args).map(|(f, a)| (f.name.as_str(), a)),
             );
         }
+        if class_name == "Promise" && self.index.class_by_name_id(cname_id).is_none() {
+            return self.eval_new_promise(s, expr, args, type_args, byte_offset);
+        }
         let arg_tys = self.eval_args(s, args)?;
         if let Some(cid) = self.index.class_by_name_id(cname_id) {
             if arg_tys.contains(&Ty::BOTTOM) {
@@ -743,10 +746,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             name, return_type, ..
         } = callee
         {
-            let arg_tys = self.eval_args(s, args)?;
-            if let Some(res) = self.eval_builtin_import_call(name, args, &arg_tys) {
-                return Ok(res);
-            }
             let is_imported = self.hir.imports.iter().any(|imp| {
                 imp.specifiers.iter().any(|sp| match sp {
                     perry_hir::ir::ImportSpecifier::Named { local, .. }
@@ -754,6 +753,30 @@ impl<'h, 'a> Solver<'h, 'a> {
                     | perry_hir::ir::ImportSpecifier::Namespace { local } => local == name,
                 })
             });
+            if !is_imported {
+                match name.as_str() {
+                    "queueMicrotask" => {
+                        return Err(self.annotate_expr_error(
+                            s,
+                            Diagnostic::unsupported(
+                                "queueMicrotask is not supported: this runtime has no microtask queue",
+                            ),
+                            byte_offset,
+                        ));
+                    }
+                    "setTimeout" | "setInterval" | "setImmediate" => {
+                        return self.eval_timer_start(s, expr, name, args, byte_offset);
+                    }
+                    "clearTimeout" | "clearInterval" | "clearImmediate" => {
+                        return self.eval_timer_clear(s, expr, args);
+                    }
+                    _ => {}
+                }
+            }
+            let arg_tys = self.eval_args(s, args)?;
+            if let Some(res) = self.eval_builtin_import_call(name, args, &arg_tys) {
+                return Ok(res);
+            }
             if byte_offset != 0
                 && !is_imported
                 && !name.starts_with("js_")
@@ -842,6 +865,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(target_view) = self.index.view(ident.template) else {
             return Ok(Ty::OPEN);
         };
+        let is_promise_handle =
+            self.apply_promise_handle_call(s, ident, &arg_tys, Some(args), byte_offset)?;
 
         if args.iter().any(|a| {
             matches!(
@@ -862,19 +887,31 @@ impl<'h, 'a> Solver<'h, 'a> {
                 byte_offset,
             ));
         }
-        if !target_view.params.iter().any(|p| p.is_rest) && arg_tys.len() > target_view.params.len()
+        if !is_promise_handle
+            && !target_view.params.iter().any(|p| p.is_rest)
+            && arg_tys.len() > target_view.params.len()
         {
             self.check_escaping_unannotated_func(ident.template, None)?;
         }
         self.check_callback_params(s.inst, target_view, &arg_tys, byte_offset)?;
 
         let explicit_targs = self.eval_type_args(s.inst, type_args);
-        let strip_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
+        let mut strip_mask = self.callable_arg_mask_in(s.inst, &arg_tys);
+        if is_promise_handle {
+            for i in 1..arg_tys.len().min(64) {
+                strip_mask |= 1u64 << i;
+            }
+        }
         let pass_env = self.is_escaping_env(ident.template, s.inst);
+        let call_arg_tys = if is_promise_handle {
+            arg_tys.get(..1).unwrap_or(&[])
+        } else {
+            &arg_tys
+        };
         let (target_inst, ret) = self.dispatch_call_site(
             s.inst,
             expr,
-            InstanceReq::new(ident.template, &arg_tys, Some(s.inst))
+            InstanceReq::new(ident.template, call_arg_tys, Some(s.inst))
                 .owner(ident.capture_owner)
                 .type_args(&explicit_targs)
                 .at(byte_offset),
@@ -971,10 +1008,36 @@ impl<'h, 'a> Solver<'h, 'a> {
         let method = hir_compat::method(property);
         let name = method.name();
 
-        if matches!(object, Expr::GlobalGet(_)) && name == "fetch" {
-            self.eval_args(s, args)?;
-            let resp = self.types.named(self.ctx, "Response");
-            return Ok(self.types.promise(resp));
+        if matches!(object, Expr::GlobalGet(_)) {
+            match name {
+                "log" | "info" | "debug" | "error" | "warn"
+                    if matches!(object, Expr::GlobalGet(0)) =>
+                {
+                    self.eval_args(s, args)?;
+                    return Ok(Ty::VOID);
+                }
+                "fetch" => {
+                    self.eval_args(s, args)?;
+                    let resp = self.types.named(self.ctx, "Response");
+                    return Ok(self.types.promise(resp));
+                }
+                "queueMicrotask" => {
+                    return Err(self.annotate_expr_error(
+                        s,
+                        Diagnostic::unsupported(
+                            "queueMicrotask is not supported: this runtime has no microtask queue",
+                        ),
+                        byte_offset,
+                    ));
+                }
+                "setTimeout" | "setInterval" | "setImmediate" => {
+                    return self.eval_timer_start(s, expr, name, args, byte_offset);
+                }
+                "clearTimeout" | "clearInterval" | "clearImmediate" => {
+                    return self.eval_timer_clear(s, expr, args);
+                }
+                _ => {}
+            }
         }
         if name == "toWeb" && let Expr::ExternFuncRef { name: local, .. } = object
             && self.hir.imports.iter().any(|imp| matches!(imp.source.as_str(), "stream" | "node:stream")
@@ -990,7 +1053,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         } = object
             && matches!(global.as_ref(), Expr::GlobalGet(_))
         {
-            let arg_tys = self.eval_args(s, args)?;
+            let mut arg_tys = self.eval_args(s, args)?;
+            if class == "Promise" {
+                for ty in &mut arg_tys {
+                    *ty = self.resolve_promise_cells(s.inst, *ty);
+                }
+            }
             return Ok(builtins::static_global_method(
                 self.ctx, self.types, class, name, args, &arg_tys,
             )
@@ -1020,11 +1088,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
 
         let obj_ty = self.eval_expr(s, object)?;
-        let arg_tys = self.eval_args(s, args)?;
         if obj_ty == Ty::BOTTOM {
+            self.eval_args(s, args)?;
             return Ok(Ty::BOTTOM);
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
+
+        if matches!(name, "then" | "catch" | "finally")
+            && matches!(
+                self.types.kind(stripped),
+                TyKind::Promise(_)
+                    | TyKind::Cell {
+                        kind: CellKind::Promise,
+                        ..
+                    }
+            )
+        {
+            return self.eval_promise_reaction(s, expr, stripped, name, args, byte_offset);
+        }
+
+        let arg_tys = self.eval_args(s, args)?;
 
         if matches!(name, "push" | "unshift") {
             let pushed_cell = self.push_into_cells(stripped, &arg_tys);
@@ -1165,17 +1248,34 @@ impl<'h, 'a> Solver<'h, 'a> {
                 },
             ));
         }
-        let is_collection_or_open = self.types.is_open(stripped)
-            || matches!(
-                self.types.kind(stripped),
-                TyKind::Array(_) | TyKind::Cell { .. }
-            )
-            || matches!(self.types.kind(stripped), TyKind::Generic { base, .. }
-                if matches!(base.hir(self.ctx), HirType::Named(n) if matches!(n.as_str(), "Map" | "Set" | "ReadonlyMap" | "ReadonlySet")));
-        if byte_offset != 0
-            && !is_collection_or_open
-            && arg_tys.iter().any(|&a| self.types.has_func(a))
-        {
+        let is_known_js_cb_method = matches!(
+            name,
+            "map"
+                | "flatMap"
+                | "filter"
+                | "forEach"
+                | "reduce"
+                | "reduceRight"
+                | "some"
+                | "every"
+                | "find"
+                | "findIndex"
+                | "sort"
+                | "toSorted"
+                | "replace"
+                | "replaceAll"
+                | "then"
+                | "catch"
+                | "finally"
+                | "groupBy"
+        );
+        let is_collection = matches!(
+            self.types.kind(stripped),
+            TyKind::Array(_) | TyKind::Cell { .. }
+        ) || matches!(self.types.kind(stripped), TyKind::Generic { base, .. }
+            if matches!(base.hir(self.ctx), HirType::Named(n) if matches!(n.as_str(), "Map" | "Set" | "ReadonlyMap" | "ReadonlySet")));
+        let skip_host_cb = is_collection || (self.types.is_open(stripped) && is_known_js_cb_method);
+        if byte_offset != 0 && !skip_host_cb && arg_tys.iter().any(|&a| self.types.has_func(a)) {
             return Err(self.metadata.locations.annotate_call(
                 Diagnostic::unsupported(format!(
                     "passing a callback to runtime '{name}' requires the runtime to call a guest function"
@@ -1207,10 +1307,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             let Some(view) = self.index.view(ident.template) else {
                 return Ok(Ty::OPEN);
             };
+            let is_promise_handle =
+                self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
             self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
             let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
+            let call_arg_tys = if is_promise_handle {
+                arg_tys.get(..1).unwrap_or(&[])
+            } else {
+                arg_tys
+            };
             let target = self.request_instance(
-                InstanceReq::new(ident.template, arg_tys, Some(s.inst))
+                InstanceReq::new(ident.template, call_arg_tys, Some(s.inst))
                     .receiver(recv)
                     .owner(ident.capture_owner)
                     .at(byte_offset),
@@ -1439,5 +1546,513 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
         Ok(())
+    }
+
+    fn apply_promise_handle_call(
+        &mut self,
+        s: &mut EvalState<'h>,
+        ident: FuncIdentity,
+        arg_tys: &[Ty],
+        args: Option<&'h [Expr]>,
+        byte_offset: u32,
+    ) -> Result<bool> {
+        let Some(view) = self.index.view(ident.template) else {
+            return Ok(false);
+        };
+        match view.kind {
+            TemplateKind::PromiseResolve => {
+                if let Some(&arg0) = arg_tys.first()
+                    && self.types.is_promise_ty(arg0)
+                {
+                    return Err(self.annotate_expr_error(
+                        s,
+                        Diagnostic::unsupported(
+                            "resolving a Promise with another Promise is not supported yet",
+                        ),
+                        byte_offset,
+                    ));
+                }
+                if let Some(&value_loc) = self
+                    .promise_handle_locs
+                    .get(&(ident.template, ident.capture_owner))
+                {
+                    let val = arg_tys.first().copied().unwrap_or(Ty::VOID);
+                    if val != Ty::BOTTOM {
+                        self.check_escaping_func(s.inst, val, byte_offset, s.current_span)?;
+                        let norm = self.types.normalize_for_storage(self.ctx, self.decls, val);
+                        self.write_loc(value_loc, norm);
+                        if let Some(arg0_expr) = args.and_then(|a| a.first()) {
+                            let cur = self.read_loc(value_loc, s.inst);
+                            self.record_coercion(s.inst, arg0_expr, val, cur);
+                        }
+                    }
+                }
+                Ok(true)
+            }
+            TemplateKind::PromiseReject => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    fn resolve_callback_call(
+        &mut self,
+        s: &mut EvalState<'h>,
+        cb_ty: Ty,
+        recv_ty: Option<Ty>,
+        arg_tys: &[Ty],
+        byte_offset: u32,
+    ) -> Result<Option<(CallbackCall, Ty)>> {
+        if cb_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
+            return Ok(None);
+        }
+        if matches!(cb_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
+            let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
+            return Ok(Some((CallbackCall::ThrowTypeError(helper), Ty::NEVER)));
+        }
+        let dispatch_idents = if let Some(idents) = self.types.func_union_members(cb_ty) {
+            Some(idents)
+        } else {
+            let (stripped, nullish) = self.types.strip_nullish(cb_ty);
+            if nullish.is_some()
+                && let TyKind::Func(ident) = self.types.kind(stripped)
+            {
+                Some(vec![ident])
+            } else {
+                None
+            }
+        };
+        if let Some(idents) = dispatch_idents {
+            for &a in arg_tys {
+                self.invalidate_conservative_cell(a);
+            }
+            let strip_arg_mask = self.callable_arg_mask_in(s.inst, arg_tys);
+            let mut arms = Vec::with_capacity(idents.len());
+            let mut ret = Ty::BOTTOM;
+            for ident in idents {
+                let Some(view) = self.index.view(ident.template) else {
+                    return Ok(None);
+                };
+                let is_promise_handle =
+                    self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
+                self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
+                let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
+                let call_args = if is_promise_handle {
+                    arg_tys.get(..1).unwrap_or(&[])
+                } else {
+                    arg_tys
+                };
+                let target = self.request_instance(
+                    InstanceReq::new(ident.template, call_args, Some(s.inst))
+                        .receiver(recv)
+                        .owner(ident.capture_owner)
+                        .at(byte_offset),
+                )?;
+                if let Some(tw) = self.inst_written.get(target.index()).cloned()
+                    && let Some(cw) = self.inst_written.get_mut(s.inst.index())
+                {
+                    cw.union_with(&tw);
+                }
+                let r = self.read_loc(self.instances[target].return_loc, s.inst);
+                ret = self.types.join(ret, r);
+                arms.push((ident, target));
+            }
+            let arms_span = self.intern_dispatch_arms(&arms);
+            let arg_tuple = self.types.tuple(arg_tys);
+            let needs_recv = recv_ty.is_some()
+                && arms.iter().any(|&(ident, _)| {
+                    self.index.view(ident.template).is_some_and(|v| v.uses_this)
+                });
+            let helper = self.intern_helper(
+                HelperSpec::Dispatcher {
+                    callee_ty: cb_ty,
+                    arms: arms_span,
+                    arg_tys: arg_tuple,
+                    strip_arg_mask,
+                    recv_ty: needs_recv.then_some(recv_ty).flatten(),
+                },
+                byte_offset,
+            );
+            return Ok(Some((CallbackCall::Dispatch { helper, needs_recv }, ret)));
+        }
+        let TyKind::Func(ident) = self.types.kind(cb_ty) else {
+            if !self.types.is_open(cb_ty) && cb_ty != Ty::DYNAMIC {
+                return Err(self.annotate_expr_error(
+                    s,
+                    diag!(codes::TYPE_MISMATCH, "expression is not callable"),
+                    byte_offset,
+                ));
+            }
+            return Ok(None);
+        };
+        for &a in arg_tys {
+            self.invalidate_conservative_cell(a);
+        }
+        let Some(view) = self.index.view(ident.template) else {
+            return Ok(None);
+        };
+        let is_promise_handle =
+            self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
+        self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
+        let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
+        let call_args = if is_promise_handle {
+            arg_tys.get(..1).unwrap_or(&[])
+        } else {
+            arg_tys
+        };
+        let target = self.request_instance(
+            InstanceReq::new(ident.template, call_args, Some(s.inst))
+                .receiver(recv)
+                .owner(ident.capture_owner)
+                .at(byte_offset),
+        )?;
+        if let Some(tw) = self.inst_written.get(target.index()).cloned()
+            && let Some(cw) = self.inst_written.get_mut(s.inst.index())
+        {
+            cw.union_with(&tw);
+        }
+        let ret = self.read_loc(self.instances[target].return_loc, s.inst);
+        let pass_env = self.is_escaping_env(ident.template, s.inst);
+        Ok(Some((
+            CallbackCall::Direct {
+                target,
+                pass_env,
+                pass_receiver: recv.is_some(),
+            },
+            ret,
+        )))
+    }
+
+    fn eval_new_promise(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        args: &'h [Expr],
+        type_args: &'h [HirType],
+        byte_offset: u32,
+    ) -> Result<Ty> {
+        let Some((resolve_tid, reject_tid)) = self.index.promise_templates_of(expr) else {
+            return Err(Diagnostic::internal("missing promise handle templates"));
+        };
+        let owner = CaptureOwner::Instance(s.inst);
+        let value_loc = match self.promise_handle_locs.get(&(resolve_tid, owner)).copied() {
+            Some(loc) => loc,
+            None => {
+                let loc = self.alloc_loc(Ty::BOTTOM);
+                self.promise_handle_locs.insert((resolve_tid, owner), loc);
+                self.promise_handle_locs.insert((reject_tid, owner), loc);
+                loc
+            }
+        };
+        if !type_args.is_empty() {
+            let targs = self.eval_type_args(s.inst, type_args);
+            if let Some(&ta) = targs.first() {
+                self.constrain_promise_loc(value_loc, ta);
+            }
+        }
+        let resolve_ty = self.types.func(FuncIdentity {
+            template: resolve_tid,
+            capture_owner: owner,
+        });
+        let reject_ty = self.types.func(FuncIdentity {
+            template: reject_tid,
+            capture_owner: owner,
+        });
+        self.mark_escaping_env(s.inst, resolve_ty);
+        self.mark_escaping_env(s.inst, reject_ty);
+
+        let Some((exec_expr, tail)) = args.split_first() else {
+            return Err(self.annotate_expr_error(
+                s,
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "new Promise requires an executor function"
+                ),
+                byte_offset,
+            ));
+        };
+        let exec_ty = self.eval_expr(s, exec_expr)?;
+        for extra in tail {
+            self.eval_expr(s, extra)?;
+        }
+        let promise_cell = self.types.cell(value_loc, CellKind::Promise);
+        if exec_ty == Ty::BOTTOM {
+            return Ok(promise_cell);
+        }
+        if let Some((executor, _)) =
+            self.resolve_callback_call(s, exec_ty, None, &[resolve_ty, reject_ty], byte_offset)?
+        {
+            let (pass_resolve, pass_reject) = match executor {
+                CallbackCall::Direct { target, .. } => {
+                    let arity = self
+                        .instances
+                        .get(target)
+                        .and_then(|i| self.index.view(i.template))
+                        .map_or(2, |v| {
+                            if v.params.iter().any(|p| p.is_rest) {
+                                2
+                            } else {
+                                v.params.len().min(2)
+                            }
+                        });
+                    (arity >= 1, arity >= 2)
+                }
+                CallbackCall::Dispatch { .. } => (true, true),
+                CallbackCall::ThrowTypeError(_) => (false, false),
+            };
+            self.record_site(
+                s.inst,
+                expr,
+                SiteResolution::PromiseNew {
+                    value_loc,
+                    resolve_tid,
+                    reject_tid,
+                    executor,
+                    pass_resolve,
+                    pass_reject,
+                },
+            );
+        }
+        Ok(promise_cell)
+    }
+
+    fn eval_promise_reaction(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        promise_ty: Ty,
+        name: &str,
+        args: &'h [Expr],
+        byte_offset: u32,
+    ) -> Result<Ty> {
+        let kind = match name {
+            "then" => ReactionKind::Then,
+            "catch" => ReactionKind::Catch,
+            _ => ReactionKind::Finally,
+        };
+        let inner_raw = match self.types.kind(promise_ty) {
+            TyKind::Promise(i) => i,
+            TyKind::Cell {
+                loc,
+                kind: CellKind::Promise,
+            } => self.read_loc(loc, s.inst),
+            _ => Ty::OPEN,
+        };
+        let (fulfilled_expr, rejected_expr) = match kind {
+            ReactionKind::Then => (args.first(), args.get(1)),
+            ReactionKind::Catch => (None, args.first()),
+            ReactionKind::Finally => (args.first(), None),
+        };
+        let f_ty = match fulfilled_expr {
+            Some(e) => Some(self.eval_expr(s, e)?),
+            None => None,
+        };
+        let g_ty = match rejected_expr {
+            Some(e) => Some(self.eval_expr(s, e)?),
+            None => None,
+        };
+        let extra_start = match kind {
+            ReactionKind::Then => 2,
+            ReactionKind::Catch | ReactionKind::Finally => 1,
+        };
+        for extra in args.get(extra_start..).unwrap_or(&[]) {
+            self.eval_expr(s, extra)?;
+        }
+        if f_ty == Some(Ty::BOTTOM) || g_ty == Some(Ty::BOTTOM) {
+            return Ok(Ty::BOTTOM);
+        }
+        let is_absent = |ty: Ty| matches!(ty, Ty::VOID | Ty::NULL);
+        let f_present = f_ty.filter(|&t| !is_absent(t));
+        let g_present = g_ty.filter(|&t| !is_absent(t));
+
+        let mut on_fulfilled: Option<(CallbackCall, Ty)> = None;
+        let mut f_ret = Ty::BOTTOM;
+        if let Some(ft) = f_present {
+            self.check_escaping_func(s.inst, ft, byte_offset, s.current_span)?;
+            match kind {
+                ReactionKind::Finally => {
+                    if let Some((cb_call, _)) =
+                        self.resolve_callback_call(s, ft, None, &[], byte_offset)?
+                    {
+                        on_fulfilled = Some((cb_call, ft));
+                    }
+                }
+                ReactionKind::Then => {
+                    let takes_zero = self.types.func_members(ft).iter().all(|id| {
+                        self.index.view(id.template).is_some_and(|v| {
+                            v.params.is_empty()
+                                && !matches!(
+                                    v.kind,
+                                    TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+                                )
+                        })
+                    });
+                    if inner_raw != Ty::BOTTOM || takes_zero {
+                        let cb_args: &[Ty] = if inner_raw == Ty::BOTTOM {
+                            &[]
+                        } else {
+                            std::slice::from_ref(&inner_raw)
+                        };
+                        if let Some((cb_call, mut r)) =
+                            self.resolve_callback_call(s, ft, None, cb_args, byte_offset)?
+                        {
+                            while let Some(u) = self.unwrap_promise_once(s.inst, r) {
+                                r = u;
+                            }
+                            f_ret = r;
+                            on_fulfilled = Some((cb_call, ft));
+                        }
+                    } else if g_present.is_none() {
+                        return Ok(Ty::BOTTOM);
+                    }
+                }
+                ReactionKind::Catch => {}
+            }
+        }
+
+        let mut on_rejected: Option<(CallbackCall, Ty)> = None;
+        let mut g_ret = Ty::BOTTOM;
+        if let Some(gt) = g_present {
+            self.check_escaping_func(s.inst, gt, byte_offset, s.current_span)?;
+            let err_ty = self.types.named(self.ctx, "Error");
+            if let Some((cb_call, mut r)) =
+                self.resolve_callback_call(s, gt, None, &[err_ty], byte_offset)?
+            {
+                while let Some(u) = self.unwrap_promise_once(s.inst, r) {
+                    r = u;
+                }
+                g_ret = r;
+                on_rejected = Some((cb_call, gt));
+            }
+        }
+
+        let ret_settled = match kind {
+            ReactionKind::Then => {
+                let ful = if f_present.is_some() {
+                    f_ret
+                } else {
+                    inner_raw
+                };
+                if g_present.is_some() {
+                    self.types.join(ful, g_ret)
+                } else {
+                    ful
+                }
+            }
+            ReactionKind::Catch => {
+                if g_present.is_some() {
+                    self.types.join(inner_raw, g_ret)
+                } else {
+                    inner_raw
+                }
+            }
+            ReactionKind::Finally => inner_raw,
+        };
+
+        let pass_fulfilled = on_fulfilled.is_some_and(|(cb, _)| cb.needs_value());
+        let pass_rejected = on_rejected.is_some_and(|(cb, _)| cb.needs_value());
+        let helper = self.intern_helper(
+            HelperSpec::PromiseReaction {
+                kind,
+                promise_ty,
+                inner_ty: inner_raw,
+                on_fulfilled,
+                on_rejected,
+                ret_ty: ret_settled,
+            },
+            byte_offset,
+        );
+        self.record_site(
+            s.inst,
+            expr,
+            SiteResolution::PromiseReaction {
+                helper,
+                pass_fulfilled,
+                pass_rejected,
+            },
+        );
+
+        if kind == ReactionKind::Finally && inner_raw == Ty::BOTTOM {
+            return Ok(promise_ty);
+        }
+        if ret_settled == Ty::BOTTOM {
+            return Ok(self.types.promise(Ty::VOID));
+        }
+        Ok(self.types.promise(ret_settled))
+    }
+
+    fn eval_timer_start(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        name: &str,
+        args: &'h [Expr],
+        byte_offset: u32,
+    ) -> Result<Ty> {
+        let is_immediate = name == "setImmediate";
+        let repeating = name == "setInterval";
+        let Some(cb_expr) = args.first() else {
+            return Err(self.annotate_expr_error(
+                s,
+                diag!(codes::TYPE_MISMATCH, "{name} requires a callback function"),
+                byte_offset,
+            ));
+        };
+        let cb_ty = self.eval_expr(s, cb_expr)?;
+        let has_delay = !is_immediate && args.len() >= 2;
+        if has_delay && let Some(delay_expr) = args.get(1) {
+            self.eval_expr(s, delay_expr)?;
+        }
+        let extra_start = if is_immediate { 1 } else { 2 };
+        let extra_args = args.get(extra_start..).unwrap_or(&[]);
+        let extra_arg_tys = self.eval_args(s, extra_args)?;
+        let timer_ty = self.types.named(self.ctx, "__PerryTimer");
+        if cb_ty == Ty::BOTTOM || extra_arg_tys.contains(&Ty::BOTTOM) {
+            return Ok(timer_ty);
+        }
+        self.check_escaping_func(s.inst, cb_ty, byte_offset, s.current_span)?;
+        if let Some((cb_call, _)) =
+            self.resolve_callback_call(s, cb_ty, Some(timer_ty), &extra_arg_tys, byte_offset)?
+        {
+            let extra_tuple = self.types.tuple(&extra_arg_tys);
+            let pass_cb = cb_call.needs_value();
+            let helper = self.intern_helper(
+                HelperSpec::TimerRunner {
+                    repeating,
+                    is_immediate,
+                    cb_call,
+                    cb_ty,
+                    extra_arg_tys: extra_tuple,
+                },
+                byte_offset,
+            );
+            self.record_site(
+                s.inst,
+                expr,
+                SiteResolution::TimerStart {
+                    helper,
+                    has_delay,
+                    is_immediate,
+                    pass_cb,
+                },
+            );
+        }
+        Ok(timer_ty)
+    }
+
+    fn eval_timer_clear(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        args: &'h [Expr],
+    ) -> Result<Ty> {
+        let arg_tys = self.eval_args(s, args)?;
+        self.record_site(
+            s.inst,
+            expr,
+            SiteResolution::TimerClear {
+                arg_ty: arg_tys.first().copied(),
+            },
+        );
+        Ok(Ty::VOID)
     }
 }

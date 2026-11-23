@@ -303,6 +303,19 @@ pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
             }
         }
         fn visit_call_expr(&mut self, call: &ast::CallExpr) {
+            if let ast::Callee::Expr(callee) = &call.callee {
+                let is_special_host_call = match callee.as_ref() {
+                    ast::Expr::Ident(id) => id.sym == "queueMicrotask",
+                    ast::Expr::Member(member) => {
+                        matches!(member.obj.as_ref(), ast::Expr::Ident(id) if id.sym == "process")
+                            && matches!(&member.prop, ast::MemberProp::Ident(id) if matches!(id.sym.as_ref(), "nextTick" | "on" | "once"))
+                    }
+                    _ => false,
+                };
+                if is_special_host_call {
+                    self.facts.conditional_spans.push(call.span);
+                }
+            }
             match &call.callee {
                 ast::Callee::Expr(e) => self.visit_callable_position(e),
                 callee => callee.visit_with(self),

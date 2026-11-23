@@ -184,10 +184,14 @@ pub(crate) enum CellKind {
     Array,
     LocalArray,
     Dict,
+    Promise,
 }
 impl CellKind {
     pub(crate) fn is_array(self) -> bool {
         matches!(self, Self::Array | Self::LocalArray)
+    }
+    pub(crate) fn is_promise(self) -> bool {
+        matches!(self, Self::Promise)
     }
     pub(crate) fn is_conservative(self) -> bool {
         matches!(self, Self::LocalArray | Self::Dict)
@@ -708,12 +712,27 @@ impl TypeTable {
             locations,
             &mut Vec::new(),
             &mut BitSet::default(),
-            &|loc, ck, elem| {
-                (ck == CellKind::Dict)
-                    .then(|| !self.is_valid_dict_value(elem, dict_reads.contains(loc.index())))
+            &|loc, ck, elem| match ck {
+                CellKind::Dict => {
+                    Some(!self.is_valid_dict_value(elem, dict_reads.contains(loc.index())))
+                }
+                CellKind::Promise => (elem == Ty::BOTTOM).then_some(false),
+                _ => None,
             },
             &|k| matches!(k, TyKind::Bottom | TyKind::Open | TyKind::TypeVar(_)),
         )
+    }
+
+    pub(crate) fn is_promise_ty(&self, ty: Ty) -> bool {
+        match self.kind(ty) {
+            TyKind::Promise(_)
+            | TyKind::Cell {
+                kind: CellKind::Promise,
+                ..
+            } => true,
+            TyKind::Union(span) => self.ty_slice(span).iter().any(|&m| self.is_promise_ty(m)),
+            _ => false,
+        }
     }
 
     pub(crate) fn contains_cell(&self, ty: Ty, target: LocId, locations: &[Ty]) -> bool {
@@ -1185,10 +1204,14 @@ impl TypeTable {
             locations,
             &mut Vec::new(),
             &mut BitSet::default(),
-            &|loc, kind, elem| {
-                (kind == CellKind::Dict
-                    && !self.is_valid_dict_value(elem, dict_reads.contains(loc.index())))
-                .then_some(true)
+            &|loc, kind, elem| match kind {
+                CellKind::Dict
+                    if !self.is_valid_dict_value(elem, dict_reads.contains(loc.index())) =>
+                {
+                    Some(true)
+                }
+                CellKind::Promise => Some(true),
+                _ => None,
             },
             &|k| {
                 !matches!(
@@ -1284,33 +1307,53 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
             TyKind::Symbol => HirType::Symbol,
             TyKind::Leaf(id) | TyKind::TypeVar(id) => id.hir(self.ctx).clone(),
             TyKind::Array(i) => HirType::Array(Box::new(self.run_slot(i))),
-            TyKind::Promise(i) => HirType::Promise(Box::new(self.run(i))),
+            TyKind::Promise(i) => {
+                let inner = if i == Ty::BOTTOM {
+                    HirType::Void
+                } else {
+                    self.run(i)
+                };
+                HirType::Promise(Box::new(inner))
+            }
             TyKind::Cell { loc, kind } => {
                 if self.visiting.contains(&loc) {
-                    return if kind.is_array() {
-                        HirType::Array(Box::new(HirType::Any))
-                    } else {
-                        Self::empty_object(None)
+                    return match kind {
+                        CellKind::Array | CellKind::LocalArray => {
+                            HirType::Array(Box::new(HirType::Any))
+                        }
+                        CellKind::Promise => HirType::Promise(Box::new(HirType::Any)),
+                        CellKind::Dict => Self::empty_object(None),
                     };
                 }
                 let elem = self.locations.get(loc.index()).copied().unwrap_or(Ty::OPEN);
-                if kind.is_array() {
-                    let inner = if self.table.is_zero_sized_func(elem, self.capture_free) {
-                        HirType::Number
-                    } else {
-                        self.run_cell(loc, elem)
-                    };
-                    HirType::Array(Box::new(inner))
-                } else {
-                    let idx = if self
-                        .table
-                        .is_valid_dict_value(elem, self.dict_reads.contains(loc.index()))
-                    {
-                        Some(Box::new(self.run_cell(loc, elem)))
-                    } else {
-                        None
-                    };
-                    Self::empty_object(idx)
+                match kind {
+                    CellKind::Array | CellKind::LocalArray => {
+                        let inner = if self.table.is_zero_sized_func(elem, self.capture_free) {
+                            HirType::Number
+                        } else {
+                            self.run_cell(loc, elem)
+                        };
+                        HirType::Array(Box::new(inner))
+                    }
+                    CellKind::Promise => {
+                        let inner = if elem == Ty::BOTTOM {
+                            HirType::Void
+                        } else {
+                            self.run_cell(loc, elem)
+                        };
+                        HirType::Promise(Box::new(inner))
+                    }
+                    CellKind::Dict => {
+                        let idx = if self
+                            .table
+                            .is_valid_dict_value(elem, self.dict_reads.contains(loc.index()))
+                        {
+                            Some(Box::new(self.run_cell(loc, elem)))
+                        } else {
+                            None
+                        };
+                        Self::empty_object(idx)
+                    }
                 }
             }
             TyKind::Tuple(s) => HirType::Tuple(

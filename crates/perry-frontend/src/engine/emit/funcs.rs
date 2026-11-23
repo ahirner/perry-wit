@@ -1,6 +1,7 @@
 //! Synthetic function-value records, dispatchers, wideners, comparers, and callback wrappers.
 use super::{Emitter, EnvField, RewriteCtx};
 use crate::engine::bitset::BitSet;
+use crate::engine::boundary::TemplateKind;
 use crate::engine::solve::HelperSpec;
 use crate::engine::types::{
     CaptureOwner, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
@@ -23,6 +24,14 @@ impl<'h> Emitter<'h, '_> {
         self.index.local_idx(id).is_some_and(|li| {
             self.solved.boxed_locals.contains(li.index())
                 && self.index.local_forward_captured.contains(li.index())
+        })
+    }
+
+    pub(super) fn is_undef_boxed(&self, id: LocalId) -> bool {
+        self.index.local_idx(id).is_some_and(|li| {
+            self.solved.boxed_locals.contains(li.index())
+                && (self.index.local_forward_captured.contains(li.index())
+                    || self.index.local_deferred.contains(li.index()))
         })
     }
 
@@ -122,6 +131,14 @@ impl<'h> Emitter<'h, '_> {
         if !self.emitted_env_classes.insert(ident) {
             return Ok(name);
         }
+        if self.index.view(ident.template).is_some_and(|v| {
+            matches!(
+                v.kind,
+                TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+            )
+        }) {
+            return self.emit_promise_env_class(ident, name);
+        }
         let layout = self.env_layout(ident)?;
         let mut fields = Vec::with_capacity(layout.len().max(1));
         let mut params = Vec::with_capacity(layout.len().max(1));
@@ -150,7 +167,7 @@ impl<'h> Emitter<'h, '_> {
             for (cap_id, fname, fty, boxed) in layout {
                 let inner = self.materialize(fty)?;
                 let field_ty = if boxed {
-                    let inner = if self.is_forward_boxed(cap_id) {
+                    let inner = if self.is_undef_boxed(cap_id) {
                         Self::admitting_undefined_hir(inner)
                     } else {
                         inner
@@ -221,11 +238,22 @@ impl<'h> Emitter<'h, '_> {
         Ok(name)
     }
 
-    fn collect_env_idents_in(&self, ty: Ty, seen: &mut BitSet, out: &mut Vec<FuncIdentity>) {
+    fn collect_env_idents_in(
+        &self,
+        ty: Ty,
+        seen: &mut BitSet,
+        out: &mut Vec<FuncIdentity>,
+        needs_timer: &mut bool,
+    ) {
         if !seen.insert(ty.index()) {
             return;
         }
         match self.types.kind(ty) {
+            TyKind::Leaf(id) => {
+                if matches!(id.hir(self.ctx), HirType::Named(n) if n == "__PerryTimer") {
+                    *needs_timer = true;
+                }
+            }
             TyKind::Func(ident) => {
                 if self.is_env_template(ident.template)
                     && !self.emitted_env_classes.contains(&ident)
@@ -233,23 +261,25 @@ impl<'h> Emitter<'h, '_> {
                     out.push(ident);
                 }
             }
-            TyKind::Array(i) | TyKind::Promise(i) => self.collect_env_idents_in(i, seen, out),
+            TyKind::Array(i) | TyKind::Promise(i) => {
+                self.collect_env_idents_in(i, seen, out, needs_timer)
+            }
             TyKind::Cell { loc, .. } => {
                 if let Some(&elem) = self.solved.locations.get(loc) {
-                    self.collect_env_idents_in(elem, seen, out);
+                    self.collect_env_idents_in(elem, seen, out, needs_timer);
                 }
             }
             TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
                 for &m in self.types.ty_slice(s) {
-                    self.collect_env_idents_in(m, seen, out);
+                    self.collect_env_idents_in(m, seen, out, needs_timer);
                 }
             }
             TyKind::Object { props, index } => {
                 if let Some(i) = index {
-                    self.collect_env_idents_in(i, seen, out);
+                    self.collect_env_idents_in(i, seen, out, needs_timer);
                 }
                 for p in self.types.object_slice(props) {
-                    self.collect_env_idents_in(p.ty, seen, out);
+                    self.collect_env_idents_in(p.ty, seen, out, needs_timer);
                 }
             }
             _ => {}
@@ -258,7 +288,11 @@ impl<'h> Emitter<'h, '_> {
 
     pub(super) fn materialize(&mut self, ty: Ty) -> Result<HirType> {
         let mut idents = Vec::new();
-        self.collect_env_idents_in(ty, &mut BitSet::default(), &mut idents);
+        let mut needs_timer = false;
+        self.collect_env_idents_in(ty, &mut BitSet::default(), &mut idents, &mut needs_timer);
+        if needs_timer {
+            let _ = self.ensure_timer_class()?;
+        }
         for ident in idents {
             self.ensure_env_class(ident)?;
         }
@@ -613,6 +647,36 @@ impl<'h> Emitter<'h, '_> {
             HelperSpec::Comparer { left_ty, right_ty } => {
                 self.build_comparer(fid, left_ty, right_ty)?
             }
+            HelperSpec::PromiseReaction {
+                kind,
+                promise_ty,
+                inner_ty,
+                on_fulfilled,
+                on_rejected,
+                ret_ty,
+            } => self.build_promise_reaction(
+                fid,
+                kind,
+                promise_ty,
+                inner_ty,
+                on_fulfilled,
+                on_rejected,
+                ret_ty,
+            )?,
+            HelperSpec::TimerRunner {
+                repeating,
+                is_immediate,
+                cb_call,
+                cb_ty,
+                extra_arg_tys,
+            } => self.build_timer_runner(
+                fid,
+                repeating,
+                is_immediate,
+                cb_call,
+                cb_ty,
+                extra_arg_tys,
+            )?,
         };
         self.synth_functions.push(func);
         Ok(fid)
@@ -761,8 +825,20 @@ impl<'h> Emitter<'h, '_> {
             {
                 call_args.push(Expr::LocalGet(sid));
             }
+            let is_promise_handle = matches!(
+                view.kind,
+                TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+            );
             let has_rest = view.params.iter().any(|p| p.is_rest);
-            let max_args = if has_rest {
+            let max_args = if is_promise_handle {
+                self.types
+                    .tuple_slice(
+                        self.instance(target_inst, "missing dispatch arm instance")?
+                            .args,
+                    )
+                    .len()
+                    .min(arg_pids.len())
+            } else if has_rest {
                 arg_pids.len()
             } else {
                 view.params

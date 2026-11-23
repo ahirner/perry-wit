@@ -124,6 +124,11 @@ impl<'s> Locations<'s> {
                         self.0.push(assign.span);
                         (assign.span, token)
                     }
+                    ast::Expr::Call(call) if self.1.contains(&call.span) => {
+                        let token = format!("{OPERATOR}{}", self.0.len());
+                        self.0.push(call.span);
+                        (call.span, token)
+                    }
                     ast::Expr::TsNonNull(assertion) => (assertion.span, NON_NULL.into()),
                     _ => return,
                 };

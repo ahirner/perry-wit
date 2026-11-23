@@ -69,6 +69,36 @@ pub(crate) struct ClassInst {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum ReactionKind {
+    Then,
+    Catch,
+    Finally,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum CallbackCall {
+    Direct {
+        target: InstanceId,
+        pass_env: bool,
+        pass_receiver: bool,
+    },
+    Dispatch {
+        helper: HelperId,
+        needs_recv: bool,
+    },
+    ThrowTypeError(HelperId),
+}
+
+impl CallbackCall {
+    pub(crate) fn needs_value(self) -> bool {
+        matches!(
+            self,
+            Self::Direct { pass_env: true, .. } | Self::Dispatch { .. }
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum HelperSpec {
     Dispatcher {
         callee_ty: Ty,
@@ -87,6 +117,21 @@ pub(crate) enum HelperSpec {
     },
     TypeOfFn(Ty),
     ThrowTypeError,
+    PromiseReaction {
+        kind: ReactionKind,
+        promise_ty: Ty,
+        inner_ty: Ty,
+        on_fulfilled: Option<(CallbackCall, Ty)>,
+        on_rejected: Option<(CallbackCall, Ty)>,
+        ret_ty: Ty,
+    },
+    TimerRunner {
+        repeating: bool,
+        is_immediate: bool,
+        cb_call: CallbackCall,
+        cb_ty: Ty,
+        extra_arg_tys: Ty,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +194,28 @@ pub(crate) enum SiteResolution {
     },
     Cell(LocId),
     FoldBool(bool),
+    PromiseNew {
+        value_loc: LocId,
+        resolve_tid: TemplateId,
+        reject_tid: TemplateId,
+        executor: CallbackCall,
+        pass_resolve: bool,
+        pass_reject: bool,
+    },
+    PromiseReaction {
+        helper: HelperId,
+        pass_fulfilled: bool,
+        pass_rejected: bool,
+    },
+    TimerStart {
+        helper: HelperId,
+        has_delay: bool,
+        is_immediate: bool,
+        pass_cb: bool,
+    },
+    TimerClear {
+        arg_ty: Option<Ty>,
+    },
 }
 
 #[derive(Clone, Default, Debug)]
@@ -185,6 +252,7 @@ pub(crate) struct Solved {
     pub(crate) dict_reads: BitSet,
     pub(crate) self_nested_locs: BitSet,
     pub(crate) self_nested_locals: BitSet,
+    pub(crate) promise_handle_locs: HashMap<(TemplateId, CaptureOwner), LocId>,
     pub(crate) deletes_array_elements: bool,
 }
 
@@ -352,6 +420,7 @@ struct Solver<'h, 'a> {
     class_type_params: Vec<Vec<shapes::TypeId>>,
     result_contracts: Vec<ResultContract>,
     contract_insts: BitSet,
+    promise_handle_locs: HashMap<(TemplateId, CaptureOwner), LocId>,
     next_func_id: u32,
     deletes_array_elements: bool,
 }
@@ -490,6 +559,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             class_type_params,
             result_contracts: Vec::new(),
             contract_insts: BitSet::default(),
+            promise_handle_locs: HashMap::new(),
             next_func_id: index.max_func_id.saturating_add(1),
             deletes_array_elements: false,
         }
@@ -590,6 +660,22 @@ impl<'h, 'a> Solver<'h, 'a> {
             || self.contract_insts.contains(inst_id.index())
     }
 
+    fn for_each_callback_target(&self, cb: CallbackCall, mut f: impl FnMut(InstanceId)) {
+        match cb {
+            CallbackCall::Direct { target, .. } => f(target),
+            CallbackCall::Dispatch { helper, .. } => {
+                if let Some(HelperSpec::Dispatcher { arms, .. }) = self.helpers.get(helper)
+                    && let Some(slice) = self.dispatch_arms.get(arms.range())
+                {
+                    for &(_, target) in slice {
+                        f(target);
+                    }
+                }
+            }
+            CallbackCall::ThrowTypeError(_) => {}
+        }
+    }
+
     fn for_each_site_target(&self, res: &SiteResolution, mut f: impl FnMut(InstanceId)) {
         match *res {
             SiteResolution::DirectCall { target, .. }
@@ -607,6 +693,29 @@ impl<'h, 'a> Solver<'h, 'a> {
             SiteResolution::ClassNew { class_inst, .. } => {
                 if let Some(ctor) = self.class_insts.get(class_inst).and_then(|c| c.ctor_inst) {
                     f(ctor);
+                }
+            }
+            SiteResolution::PromiseNew { executor, .. } => {
+                self.for_each_callback_target(executor, f);
+            }
+            SiteResolution::PromiseReaction { helper, .. } => {
+                if let Some(HelperSpec::PromiseReaction {
+                    on_fulfilled,
+                    on_rejected,
+                    ..
+                }) = self.helpers.get(helper)
+                {
+                    if let Some((cb, _)) = *on_fulfilled {
+                        self.for_each_callback_target(cb, &mut f);
+                    }
+                    if let Some((cb, _)) = *on_rejected {
+                        self.for_each_callback_target(cb, &mut f);
+                    }
+                }
+            }
+            SiteResolution::TimerStart { helper, .. } => {
+                if let Some(HelperSpec::TimerRunner { cb_call, .. }) = self.helpers.get(helper) {
+                    self.for_each_callback_target(*cb_call, f);
                 }
             }
             _ => {}
@@ -889,6 +998,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         } else {
             args
         };
+        let is_promise_handle = self.index.view(template).is_some_and(|v| {
+            matches!(
+                v.kind,
+                TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+            )
+        });
+        let args = if is_promise_handle {
+            args.get(..1).unwrap_or(&[])
+        } else {
+            args
+        };
         let args_key = self.types.tuple(args);
         let targs_key = self.types.tuple(explicit_type_args);
         let key: InstanceKey = (template, receiver, capture_owner, args_key, targs_key);
@@ -1060,7 +1180,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 (!self.types.is_open(ret)).then_some(ret)
             })
             .flatten();
-        let return_loc = self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM));
+        let return_loc = if view.is_async && explicit_return.is_none() {
+            let inner_loc = self.alloc_loc(Ty::BOTTOM);
+            let cell = self.types.cell(inner_loc, CellKind::Promise);
+            self.alloc_loc(cell)
+        } else {
+            self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM))
+        };
 
         let keep_original = count == 0
             && (view.is_exported
@@ -1185,8 +1311,22 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     continue;
                 }
+                let resolved_arg = match self.types.kind(arg_ty) {
+                    TyKind::Cell {
+                        loc,
+                        kind: CellKind::Promise,
+                    } => {
+                        let inner = self.locations.get(loc).copied().unwrap_or(Ty::BOTTOM);
+                        if inner == Ty::BOTTOM {
+                            self.types.promise(Ty::VOID)
+                        } else {
+                            self.types.promise(inner)
+                        }
+                    }
+                    _ => arg_ty,
+                };
                 let pat = self.types.intern_hir(self.ctx, &param.ty, true);
-                self.types.unify(self.ctx, pat, arg_ty, tps, bindings);
+                self.types.unify(self.ctx, pat, resolved_arg, tps, bindings);
             }
         }
     }
@@ -1745,6 +1885,33 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
+    pub(super) fn annotate_expr_error(
+        &self,
+        s: &EvalState<'h>,
+        mut err: Diagnostic,
+        byte_offset: u32,
+    ) -> Diagnostic {
+        if byte_offset != 0 {
+            err = self.metadata.locations.annotate_call(err, byte_offset);
+        } else if let Some(sp) = s.current_span {
+            err = self.metadata.locations.annotate(err, sp);
+        } else if let Some(sp) = self
+            .instances
+            .get(s.inst)
+            .and_then(|i| self.index.view(i.template))
+            .and_then(|v| self.metadata.locations.function_span(v.name))
+        {
+            err = err.with_span(sp);
+        }
+        attach_inst_chain(
+            &self.instances,
+            self.index,
+            &self.metadata.locations,
+            err,
+            s.inst,
+        )
+    }
+
     pub(super) fn check_escaping_func(
         &mut self,
         inst_id: InstanceId,
@@ -1787,22 +1954,38 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    fn verify_contracts(&self) -> Result<()> {
-        for c in &self.result_contracts {
-            let inst = self.instances.get(c.inst).ok_or_else(|| {
+    fn verify_contracts(&mut self) -> Result<()> {
+        let contracts: Vec<(InstanceId, Ty, String, u32)> = self
+            .result_contracts
+            .iter()
+            .map(|c| (c.inst, c.expected, c.param_name.clone(), c.byte_offset))
+            .collect();
+        for (inst_id, expected, param_name, byte_offset) in contracts {
+            let inst = self.instances.get(inst_id).ok_or_else(|| {
                 Diagnostic::internal("callback contract references missing instance")
             })?;
-            let actual = *self.locations.get(inst.return_loc).ok_or_else(|| {
+            let raw_actual = *self.locations.get(inst.return_loc).ok_or_else(|| {
                 Diagnostic::internal("callback contract references missing return location")
             })?;
-            if !self.types.accepts(self.ctx, c.expected, actual) {
+            let actual = match self.types.kind(raw_actual) {
+                TyKind::Cell {
+                    loc,
+                    kind: CellKind::Promise,
+                } => {
+                    let inner = self.locations.get(loc).copied().unwrap_or(Ty::BOTTOM);
+                    self.types
+                        .promise(if inner == Ty::BOTTOM { Ty::VOID } else { inner })
+                }
+                _ => raw_actual,
+            };
+            if !self.types.accepts(self.ctx, expected, actual) {
                 return Err(self.metadata.locations.annotate_call(
                     diag!(
                         codes::TYPE_MISMATCH,
                         "callback result does not match the declared result of parameter '{}'",
-                        c.param_name
+                        param_name
                     ),
-                    c.byte_offset,
+                    byte_offset,
                 ));
             }
         }

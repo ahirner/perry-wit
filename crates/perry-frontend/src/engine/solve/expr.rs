@@ -333,11 +333,40 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             Expr::Await(promise) => {
                 let ty = self.eval_expr(s, promise)?;
+                let ty = self.resolve_cell_read(s.inst, ty);
                 Ok(match self.types.kind(ty) {
                     TyKind::Promise(i) => i,
                     _ => ty,
                 })
             }
+            Expr::QueueMicrotask(_) => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "queueMicrotask is not supported: this runtime has no microtask queue",
+                ),
+                0,
+            )),
+            Expr::ProcessNextTick { .. } => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "process.nextTick is not supported: this runtime has no microtask queue",
+                ),
+                0,
+            )),
+            Expr::ProcessOn { .. } => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "passing a callback to runtime 'on' requires the runtime to call a guest function",
+                ),
+                0,
+            )),
+            Expr::ProcessOnce { .. } => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "passing a callback to runtime 'once' requires the runtime to call a guest function",
+                ),
+                0,
+            )),
             Expr::StructuredClone { value, .. } => self.eval_expr(s, value),
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
@@ -627,6 +656,30 @@ impl<'h, 'a> Solver<'h, 'a> {
                 byte_offset,
                 ..
             } => self.eval_new(s, expr, class_name, args, type_args, *byte_offset),
+            Expr::NewDynamic {
+                callee,
+                args,
+                byte_offset,
+                ..
+            } => {
+                self.eval_expr(s, callee)?;
+                let arg_tys = self.eval_args(s, args)?;
+                if arg_tys.iter().any(|&a| self.types.has_func(a)) {
+                    let name = match callee.as_ref() {
+                        Expr::PropertyGet { property, .. } => property.as_str(),
+                        Expr::ExternFuncRef { name, .. } => name.as_str(),
+                        _ => "constructor",
+                    };
+                    return Err(self.annotate_expr_error(
+                        s,
+                        Diagnostic::unsupported(format!(
+                            "passing a callback to runtime '{name}' requires the runtime to call a guest function"
+                        )),
+                        *byte_offset,
+                    ));
+                }
+                Ok(Ty::OPEN)
+            }
             Expr::Call {
                 callee,
                 args,
@@ -699,6 +752,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                             },
                         ));
                     }
+                }
+                if arg_tys.iter().any(|&a| self.types.has_func(a)) {
+                    return Err(self.annotate_expr_error(
+                        s,
+                        Diagnostic::unsupported(format!(
+                            "passing a callback to runtime '{method}' requires the runtime to call a guest function"
+                        )),
+                        0,
+                    ));
                 }
                 Ok(Ty::OPEN)
             }

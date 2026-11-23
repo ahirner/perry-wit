@@ -1,9 +1,11 @@
 //! Final monomorphic HIR emission phase.
+mod async_helpers;
 mod funcs;
 use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
 use super::solve::{
-    ClassInst, FuncCoercion, Instance, Receiver, SiteEntry, SiteResolution, Solved,
+    ClassInst, FuncCoercion, HelperSpec, Instance, ReactionKind, Receiver, SiteEntry,
+    SiteResolution, Solved,
 };
 use super::types::{
     CaptureOwner, CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind,
@@ -30,6 +32,7 @@ pub(crate) struct Emitted {
     pub(crate) inline_callbacks: Vec<FuncId>,
     pub(crate) class_origins: Vec<(String, String)>,
     pub(crate) json_eligible_bindings: Vec<LocalId>,
+    pub(crate) boxed_locals: Vec<LocalId>,
     pub(crate) deletes_array_elements: bool,
 }
 
@@ -48,6 +51,9 @@ impl Emitted {
             if metadata.inferred_bindings.contains(&old_id) {
                 metadata.inferred_bindings.insert(new_id);
             }
+        }
+        for id in self.boxed_locals {
+            metadata.deferred_bindings.remove(&id);
         }
         for (inst_name, template_name, offset, caller) in self.instantiations {
             metadata
@@ -98,8 +104,10 @@ pub(crate) fn build(
         inline_callbacks: Vec::new(),
         class_origins: Vec::new(),
         json_eligible_bindings: Vec::new(),
+        boxed_locals: Vec::new(),
         synth_shapes: HashMap::new(),
         emitted_env_classes: std::collections::HashSet::new(),
+        emitted_timer_class: false,
         synth_classes: Vec::new(),
         synth_functions: Vec::new(),
         helper_fids: vec![None; solved.helpers.len()],
@@ -116,6 +124,7 @@ pub(crate) fn build(
         inline_callbacks: e.inline_callbacks,
         class_origins: e.class_origins,
         json_eligible_bindings: e.json_eligible_bindings,
+        boxed_locals: e.boxed_locals,
         deletes_array_elements: solved.deletes_array_elements,
     })
 }
@@ -137,8 +146,10 @@ struct Emitter<'h, 'a> {
     inline_callbacks: Vec<FuncId>,
     class_origins: Vec<(String, String)>,
     json_eligible_bindings: Vec<LocalId>,
+    boxed_locals: Vec<LocalId>,
     synth_shapes: HashMap<Vec<String>, String>,
     emitted_env_classes: std::collections::HashSet<FuncIdentity>,
+    emitted_timer_class: bool,
     synth_classes: Vec<Class>,
     synth_functions: Vec<Function>,
     helper_fids: Vec<Option<FuncId>>,
@@ -290,7 +301,13 @@ impl<'h> Emitter<'h, '_> {
             let Some(view) = self.index.view(inst.template) else {
                 continue;
             };
-            if !matches!(view.kind, TemplateKind::Function | TemplateKind::Closure) {
+            if !matches!(
+                view.kind,
+                TemplateKind::Function
+                    | TemplateKind::Closure
+                    | TemplateKind::PromiseResolve
+                    | TemplateKind::PromiseReject
+            ) {
                 continue;
             }
             let keep_original = view.is_exported
@@ -529,6 +546,15 @@ impl<'h> Emitter<'h, '_> {
         remap_locals: bool,
         inherited: Option<HashMap<LocalId, LocalId>>,
     ) -> Result<(Function, HashMap<LocalId, LocalId>)> {
+        if matches!(
+            view.kind,
+            TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+        ) {
+            return Ok((
+                self.emit_promise_handle_function(inst, view)?,
+                HashMap::new(),
+            ));
+        }
         let mut remap = inherited.unwrap_or_default();
         let has_inherited = !remap.is_empty();
         let mut params = Vec::with_capacity(view.params.len() + 2);
@@ -784,6 +810,7 @@ impl<'h> Emitter<'h, '_> {
                 };
                 let inner_ty = self.resolve_let_ty(rctx.inst_id, *id, out_id, name, ty)?;
                 let box_ty = box_hir(Self::admitting_undefined_hir(inner_ty));
+                self.boxed_locals.push(out_id);
                 out.push(Stmt::Let {
                     id: out_id,
                     name: name.clone(),
@@ -988,14 +1015,27 @@ impl<'h> Emitter<'h, '_> {
                 let init_ctx = rctx.with_expected(init_has_expected);
                 let rewritten_init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
                 if self.is_boxed_local(*id) {
-                    let init_val = match rewritten_init {
-                        Some(v) => v,
-                        None => self.default_box_init(&new_ty, *id, rctx.inst_id)?,
-                    };
+                    self.boxed_locals.push(out_id);
+                    let undef_box = self.is_undef_boxed(*id);
+                    let (box_inner_ty, init_val) =
+                        if undef_box && matches!(init, None | Some(Expr::Undefined)) {
+                            (Self::admitting_undefined_hir(new_ty), Expr::Undefined)
+                        } else {
+                            let v = match rewritten_init {
+                                Some(v) => v,
+                                None => self.default_box_init(&new_ty, *id, rctx.inst_id)?,
+                            };
+                            let t = if undef_box {
+                                Self::admitting_undefined_hir(new_ty)
+                            } else {
+                                new_ty
+                            };
+                            (t, v)
+                        };
                     return Ok(Stmt::Let {
                         id: out_id,
                         name: name.clone(),
-                        ty: box_hir(new_ty),
+                        ty: box_hir(box_inner_ty),
                         mutable: self.index.is_for_head_local(*id),
                         init: Some(self.emit_box_record(init_val)),
                     });
@@ -1705,16 +1745,117 @@ impl<'h> Emitter<'h, '_> {
                         return Ok(out);
                     }
                 }
+                SiteResolution::PromiseNew {
+                    value_loc,
+                    resolve_tid,
+                    reject_tid,
+                    executor,
+                    pass_resolve,
+                    pass_reject,
+                } => {
+                    if let Expr::New { args, .. } = expr
+                        && let Some(exec_expr) = args.first()
+                    {
+                        return self.emit_promise_new(
+                            rctx,
+                            exec_expr,
+                            value_loc,
+                            resolve_tid,
+                            reject_tid,
+                            executor,
+                            pass_resolve,
+                            pass_reject,
+                        );
+                    }
+                }
+                SiteResolution::PromiseReaction {
+                    helper,
+                    pass_fulfilled,
+                    pass_rejected,
+                } => {
+                    if let Expr::Call {
+                        callee,
+                        args,
+                        byte_offset,
+                        byte_end,
+                        ..
+                    } = expr
+                        && let Expr::PropertyGet { object, .. } = callee.as_ref()
+                    {
+                        let fid = self.emit_helper(helper)?;
+                        let kind = match self.solved.helpers.get(helper) {
+                            Some(HelperSpec::PromiseReaction { kind, .. }) => *kind,
+                            _ => {
+                                return Err(Diagnostic::internal(
+                                    "promise reaction site references non-reaction helper",
+                                ));
+                            }
+                        };
+                        let arg_ctx = rctx.with_expected(true);
+                        let mut call_args = vec![self.rewrite_expr(&arg_ctx, object)?];
+                        match kind {
+                            ReactionKind::Then => {
+                                if pass_fulfilled && let Some(f) = args.first() {
+                                    call_args.push(self.rewrite_expr(&arg_ctx, f)?);
+                                }
+                                if pass_rejected && let Some(g) = args.get(1) {
+                                    call_args.push(self.rewrite_expr(&arg_ctx, g)?);
+                                }
+                            }
+                            ReactionKind::Catch => {
+                                if pass_rejected && let Some(g) = args.first() {
+                                    call_args.push(self.rewrite_expr(&arg_ctx, g)?);
+                                }
+                            }
+                            ReactionKind::Finally => {
+                                if pass_fulfilled && let Some(f) = args.first() {
+                                    call_args.push(self.rewrite_expr(&arg_ctx, f)?);
+                                }
+                            }
+                        }
+                        return Ok(Self::synth_call(fid, call_args, *byte_offset, *byte_end));
+                    }
+                }
+                SiteResolution::TimerStart {
+                    helper,
+                    has_delay,
+                    is_immediate,
+                    pass_cb,
+                } => {
+                    if let Expr::Call {
+                        args,
+                        byte_offset,
+                        byte_end,
+                        ..
+                    } = expr
+                    {
+                        return self.emit_timer_start(
+                            rctx,
+                            args,
+                            helper,
+                            has_delay,
+                            is_immediate,
+                            pass_cb,
+                            *byte_offset,
+                            *byte_end,
+                        );
+                    }
+                }
+                SiteResolution::TimerClear { arg_ty } => {
+                    if let Expr::Call { args, .. } = expr {
+                        return self.emit_timer_clear(rctx, args, arg_ty);
+                    }
+                }
             }
         }
         self.rewrite_expr_plain(rctx, expr)
     }
 
     fn local_read_override(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
-        let forward = self.is_forward_boxed(id);
+        let undef_box = self.is_undef_boxed(id);
         let unwrap_box = |base: Expr| {
             let val = Self::prop_get(base, "v");
-            if forward {
+            if undef_box {
                 Self::non_null_unwrap(val)
             } else {
                 val

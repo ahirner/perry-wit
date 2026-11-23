@@ -27,6 +27,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(view) = self.index.view(template) else {
             return Ok(());
         };
+        if matches!(
+            view.kind,
+            TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+        ) {
+            return Ok(());
+        }
         let mut s = EvalState::new(inst_id, receiver);
 
         for (p_idx, param) in view.params.iter().enumerate() {
@@ -153,8 +159,18 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ty::VOID
             };
             if view.is_async {
-                while let TyKind::Promise(inner) = self.types.kind(result_ty) {
+                while let Some(inner) = self.unwrap_promise_once(inst_id, result_ty) {
                     result_ty = inner;
+                }
+                if let TyKind::Cell {
+                    loc: inner_loc,
+                    kind: CellKind::Promise,
+                } = self.types.kind(self.locations[return_loc])
+                {
+                    if result_ty != Ty::BOTTOM {
+                        self.write_loc(inner_loc, result_ty);
+                    }
+                    return Ok(());
                 }
                 result_ty = self.types.promise(result_ty);
             }
@@ -357,6 +373,96 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
+    pub(super) fn unwrap_promise_once(&mut self, inst_id: InstanceId, ty: Ty) -> Option<Ty> {
+        match self.types.kind(ty) {
+            TyKind::Promise(inner) => Some(inner),
+            TyKind::Cell {
+                loc,
+                kind: CellKind::Promise,
+            } => Some(self.read_loc(loc, inst_id)),
+            _ => None,
+        }
+    }
+
+    pub(super) fn constrain_promise_loc(&mut self, loc: LocId, expected: Ty) {
+        if self.types.is_open(expected) {
+            return;
+        }
+        if self.locations[loc] != expected {
+            self.locations[loc] = expected;
+            self.dirty_locs.insert(loc.index());
+        }
+        self.declared_locs.insert(loc.index());
+    }
+
+    pub(super) fn resolve_promise_cells(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
+        match self.types.kind(ty) {
+            TyKind::Cell {
+                loc,
+                kind: CellKind::Promise,
+            } => {
+                let elem = self.read_loc(loc, inst_id);
+                if elem == Ty::BOTTOM {
+                    Ty::BOTTOM
+                } else {
+                    self.types.promise(elem)
+                }
+            }
+            TyKind::Cell { loc, kind } if kind.is_array() => {
+                let elem = self.read_loc(loc, inst_id);
+                if elem == Ty::BOTTOM {
+                    Ty::BOTTOM
+                } else {
+                    let elem = self.resolve_promise_cells(inst_id, elem);
+                    if elem == Ty::BOTTOM {
+                        Ty::BOTTOM
+                    } else {
+                        self.types.array(elem)
+                    }
+                }
+            }
+            TyKind::Array(elem) => {
+                let next = self.resolve_promise_cells(inst_id, elem);
+                if next == Ty::BOTTOM {
+                    Ty::BOTTOM
+                } else if next == elem {
+                    ty
+                } else {
+                    self.types.array(next)
+                }
+            }
+            TyKind::Tuple(span) => {
+                let items: Vec<Ty> = self.types.ty_slice(span).to_vec();
+                let mut out = Vec::with_capacity(items.len());
+                let mut changed = false;
+                for item in items {
+                    let next = self.resolve_promise_cells(inst_id, item);
+                    if next == Ty::BOTTOM {
+                        return Ty::BOTTOM;
+                    }
+                    changed |= next != item;
+                    out.push(next);
+                }
+                if changed { self.types.tuple(&out) } else { ty }
+            }
+            TyKind::Union(span) => {
+                let items: Vec<Ty> = self.types.ty_slice(span).to_vec();
+                let mut out = Vec::with_capacity(items.len());
+                let mut changed = false;
+                for item in items {
+                    let next = self.resolve_promise_cells(inst_id, item);
+                    if next == Ty::BOTTOM {
+                        return Ty::BOTTOM;
+                    }
+                    changed |= next != item;
+                    out.push(next);
+                }
+                if changed { self.types.union(&out) } else { ty }
+            }
+            _ => ty,
+        }
+    }
+
     pub(super) fn resolve_cell_read(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
         let (stripped, abs) = self.types.strip_nullish(ty);
         match self.types.kind(stripped) {
@@ -368,6 +474,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     let arr = self.types.array(elem);
                     return self.types.with_absences(arr, abs);
+                }
+                if kind.is_promise() {
+                    if elem == Ty::BOTTOM {
+                        return Ty::BOTTOM;
+                    }
+                    let p = self.types.promise(elem);
+                    return self.types.with_absences(p, abs);
                 }
                 if self
                     .types
@@ -541,6 +654,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                         return Ok(());
                     }
                     let init_ty = self.eval_expr(s, init_expr)?;
+                    if !is_inferred
+                        && let TyKind::Promise(expected_inner) = self.types.kind(declared)
+                        && let TyKind::Cell {
+                            loc,
+                            kind: CellKind::Promise,
+                        } = self.types.kind(init_ty)
+                    {
+                        self.constrain_promise_loc(loc, expected_inner);
+                    }
                     if !matches!(init_expr, Expr::Undefined) {
                         self.mark_written(s.inst, lidx);
                     }
@@ -589,13 +711,24 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.write_loc(loc, Ty::OPEN);
                     ty = self.types.object(&[], None);
                 }
+                if let Some(inst) = self.instances.get(s.inst)
+                    && inst.has_explicit_return
+                    && let TyKind::Promise(expected_inner) =
+                        self.types.kind(self.locations[inst.return_loc])
+                    && let TyKind::Cell {
+                        loc,
+                        kind: CellKind::Promise,
+                    } = self.types.kind(ty)
+                {
+                    self.constrain_promise_loc(loc, expected_inner);
+                }
                 if self
                     .instances
                     .get(s.inst)
                     .and_then(|i| self.index.view(i.template))
                     .is_some_and(|v| v.is_async)
                 {
-                    while let TyKind::Promise(inner) = self.types.kind(ty) {
+                    while let Some(inner) = self.unwrap_promise_once(s.inst, ty) {
                         ty = inner;
                     }
                 }
@@ -845,6 +978,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             dict_reads: self.dict_reads,
             self_nested_locs: self.self_nested_locs,
             self_nested_locals: self.self_nested_locals,
+            promise_handle_locs: self.promise_handle_locs,
             deletes_array_elements: self.deletes_array_elements,
         }
     }

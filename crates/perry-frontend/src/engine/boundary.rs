@@ -21,6 +21,8 @@ pub(crate) enum TemplateKind {
     ClassGetter(usize),
     ClassSetter(usize),
     Closure,
+    PromiseResolve,
+    PromiseReject,
 }
 
 pub(crate) struct TemplateView<'h> {
@@ -106,6 +108,7 @@ pub(crate) struct ModuleIndex<'h> {
     func_to_template: Vec<Option<TemplateId>>,
     template_site_spans: Vec<TySpan>,
     site_entries: Vec<(usize, u32)>,
+    promise_site_templates: Vec<(usize, TemplateId, TemplateId)>,
     pub(crate) classes: IdxVec<ClassId, ClassInfo>,
     pub(crate) class_has_implicit_params: BitSet,
     pub(crate) hir_class_is_literal: BitSet,
@@ -411,10 +414,18 @@ impl<'h> ModuleIndex<'h> {
         for (i, caps) in template_captures.iter_mut().enumerate() {
             caps.sort_unstable();
             caps.dedup();
-            if caps.is_empty() {
+            let is_promise_handle = idx.views.as_slice().get(i).is_some_and(|v| {
+                matches!(
+                    v.kind,
+                    TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+                )
+            });
+            if caps.is_empty() && !is_promise_handle {
                 idx.capture_free_templates.insert(i);
             }
         }
+        idx.promise_site_templates
+            .sort_unstable_by_key(|&(addr, _, _)| addr);
         idx.template_captures = template_captures;
         for stmt in &hir.init {
             if let Stmt::Let {
@@ -485,6 +496,16 @@ impl<'h> ModuleIndex<'h> {
             .binary_search_by_key(&(std::ptr::from_ref(expr) as usize), |&(a, _)| a)
             .ok()?;
         entries.get(pos).map(|&(_, s)| s as usize)
+    }
+    pub(crate) fn promise_templates_of(&self, expr: &Expr) -> Option<(TemplateId, TemplateId)> {
+        let addr = std::ptr::from_ref(expr) as usize;
+        let pos = self
+            .promise_site_templates
+            .binary_search_by_key(&addr, |&(a, _, _)| a)
+            .ok()?;
+        self.promise_site_templates
+            .get(pos)
+            .map(|&(_, r, j)| (r, j))
     }
     pub(crate) fn view(&self, id: TemplateId) -> Option<&TemplateView<'h>> {
         self.views.get(id)
@@ -566,6 +587,39 @@ impl<'h> ModuleIndex<'h> {
     fn add_template(&mut self, view: TemplateView<'h>) -> TemplateId {
         self.closure_owner_template.push(None);
         self.views.push(view)
+    }
+
+    fn add_promise_handle_template(
+        &mut self,
+        scan: &mut ScanCtx<'h, '_>,
+        kind: TemplateKind,
+    ) -> TemplateId {
+        let name = match kind {
+            TemplateKind::PromiseResolve => "resolve",
+            TemplateKind::PromiseReject => "reject",
+            _ => "",
+        };
+        let tid = self.add_template(TemplateView {
+            kind,
+            name,
+            func_id: 0,
+            params: &[],
+            return_type: &VOID_HIR,
+            body: &[],
+            captures: &[],
+            type_params: &[],
+            is_async: false,
+            is_generator: false,
+            is_strict: true,
+            construct_only: false,
+            is_exported: false,
+            captures_this: false,
+            captures_new_target: false,
+            uses_this: false,
+            explicit_return: true,
+        });
+        scan.raw_sites.resize_with(self.views.len(), Vec::new);
+        tid
     }
 
     fn register_member(
@@ -825,10 +879,28 @@ impl<'h> ModuleIndex<'h> {
                 Self::record_site_expr(scan, owner, then_expr);
                 Self::record_site_expr(scan, owner, else_expr);
             }
+            Expr::New {
+                class_name, args, ..
+            } => {
+                Self::record_site_expr(scan, owner, expr);
+                for arg in args {
+                    Self::record_site_expr(scan, owner, arg);
+                }
+                if class_name == "Promise" {
+                    let resolve_tid =
+                        self.add_promise_handle_template(scan, TemplateKind::PromiseResolve);
+                    let reject_tid =
+                        self.add_promise_handle_template(scan, TemplateKind::PromiseReject);
+                    self.promise_site_templates.push((
+                        std::ptr::from_ref(expr) as usize,
+                        resolve_tid,
+                        reject_tid,
+                    ));
+                }
+            }
             Expr::Object(_)
             | Expr::ObjectSpread { .. }
             | Expr::CallSpread { .. }
-            | Expr::New { .. }
             | Expr::NewDynamic { .. }
             | Expr::MapNew
             | Expr::MapNewFromArray(_)
