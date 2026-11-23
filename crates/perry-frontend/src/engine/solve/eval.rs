@@ -3,14 +3,14 @@ use super::*;
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn evaluate_instance(&mut self, inst_id: InstanceId) -> Result<()> {
-        let Some(inst) = self.instances.get(inst_id.0 as usize) else {
+        let Some(inst) = self.instances.get(inst_id) else {
             return Ok(());
         };
-        let (template, receiver, return_loc, explicit_return, param_locs_span, args_span) = (
+        let (template, receiver, return_loc, has_explicit_return, param_locs_span, args_ty) = (
             inst.template,
             inst.receiver,
             inst.return_loc,
-            inst.explicit_return,
+            inst.has_explicit_return,
             inst.param_locs,
             inst.args,
         );
@@ -23,9 +23,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         for (p_idx, param) in view.params.iter().enumerate() {
             if let Some(default_expr) = &param.default {
                 let incoming = self
-                    .instance_args
-                    .get(args_span.range())
-                    .and_then(|sl| sl.get(p_idx))
+                    .types
+                    .tuple_slice(args_ty)
+                    .get(p_idx)
                     .copied()
                     .unwrap_or(Ty::VOID);
                 let (_, abs) = self.types.strip_nullish(incoming);
@@ -46,7 +46,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                         if !view.is_exported {
                             self.write_loc(ploc, Ty::VOID);
                         }
-                    } else if !self.types.is_open(norm) {
+                    } else if !self.types.is_open_with(
+                        norm,
+                        self.locations.as_slice(),
+                        &self.dict_reads,
+                    ) || self.types.is_open(self.locations[ploc])
+                    {
                         self.write_loc(ploc, norm);
                     }
                 }
@@ -70,17 +75,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
 
         let body = hir_compat::strip_synthetic_default_guards(view.body, view.params.iter());
-        for _ in 0..8 {
-            s.guards = Guards::default();
-            s.iteration = hir_compat::Iteration::default();
-            s.local_changed = false;
-            s.returned = Ty::BOTTOM;
-            s.has_return_value = false;
-            self.eval_stmts(&mut s, body)?;
-            if !s.local_changed {
-                break;
-            }
-        }
+        self.eval_stmts(&mut s, body)?;
         if s.local_changed {
             self.enqueue(inst_id);
         }
@@ -88,12 +83,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         if template == TemplateId(0)
             || matches!(
                 view.kind,
-                TemplateKind::ClassConstructor { .. } | TemplateKind::ClassSetter { .. }
+                TemplateKind::ClassConstructor | TemplateKind::ClassSetter(_)
             )
         {
             return Ok(());
         }
-        if explicit_return.is_none() {
+        if !has_explicit_return {
             let mut result_ty = if s.has_return_value {
                 if crate::completion::returns_optional(body) {
                     self.types.with_absences(s.returned, Absence::Undefined)
@@ -123,7 +118,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     ) -> Option<usize> {
         let slot = self.index.local_frame_slot(local)?;
         let owner = self.index.local_owner.get(local.0 as usize).copied()?;
-        (owner == self.instances.get(inst_id.0 as usize)?.template).then_some(slot)
+        (owner == self.instances.get(inst_id)?.template).then_some(slot)
     }
 
     pub(super) fn read_local_current(&self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
@@ -134,7 +129,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .get(slot)
                 .copied();
         }
-        Some(self.locations[self.local_loc_in_instance(inst_id, local)?.0 as usize])
+        Some(self.locations[self.local_loc_in_instance(inst_id, local)?])
     }
 
     pub(super) fn read_local_value(&mut self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
@@ -151,14 +146,14 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn write_local_value(&mut self, s: &mut EvalState<'h>, local: LocalIdx, value: Ty) {
         if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
-            if let Some(&old) = self
+            if let Some(cell) = self
                 .inst_frame_locals
-                .get(s.inst.0 as usize)
-                .and_then(|f| f.get(slot))
+                .get_mut(s.inst.0 as usize)
+                .and_then(|f| f.get_mut(slot))
             {
-                let next = self.types.join_bounded(old, value);
-                if next != old {
-                    self.inst_frame_locals[s.inst.0 as usize][slot] = next;
+                let next = self.types.join_bounded(*cell, value);
+                if next != *cell {
+                    *cell = next;
                     s.local_changed = true;
                 }
             }
@@ -186,7 +181,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let loc = self
             .local_loc_in_instance(s.inst, local)
             .unwrap_or_else(|| self.ensure_instance_local(s.inst, local, value));
-        if let Some(cell) = self.locations.get_mut(loc.0 as usize)
+        if let Some(cell) = self.locations.get_mut(loc)
             && *cell != value
         {
             *cell = value;
@@ -216,10 +211,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             {
                 return Some(slot.loc);
             }
-            cursor = self
-                .instances
-                .get(cur.0 as usize)
-                .and_then(|i| i.capture_owner);
+            cursor = self.instances.get(cur).and_then(|i| i.capture_owner);
         }
         None
     }
@@ -267,7 +259,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         if val_ty == Ty::BOTTOM {
             return;
         }
-        let next = if self.types.contains_cell(val_ty, elem_loc, &self.locations)
+        let next = if self
+            .types
+            .contains_cell(val_ty, elem_loc, self.locations.as_slice())
             || self.types.has_nested_unresolved(val_ty, false)
         {
             Ty::OPEN
@@ -276,6 +270,37 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .normalize_for_storage(self.ctx, self.decls, val_ty)
         };
         self.write_loc(elem_loc, next);
+    }
+
+    pub(super) fn push_into_cells(&mut self, stripped: Ty, vals: &[Ty]) -> bool {
+        match self.types.kind(stripped) {
+            TyKind::Cell { loc, kind } => {
+                if kind.is_array() {
+                    for &a in vals {
+                        self.write_cell(loc, a);
+                    }
+                } else {
+                    self.write_loc(loc, Ty::OPEN);
+                }
+                true
+            }
+            TyKind::Union(span) => {
+                let members: Vec<Ty> = self.types.ty_slice(span).to_vec();
+                let mut hit = false;
+                for m in members {
+                    if let TyKind::Cell { loc, kind } = self.types.kind(m)
+                        && kind.is_array()
+                    {
+                        hit = true;
+                        for &a in vals {
+                            self.write_cell(loc, a);
+                        }
+                    }
+                }
+                hit
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn write_cell_indexed(&mut self, obj_def: Ty, idx_ty: Ty, val_ty: Ty) {
@@ -295,25 +320,46 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn resolve_cell_read(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
         let (stripped, abs) = self.types.strip_nullish(ty);
-        let TyKind::Cell { loc, kind } = self.types.kind(stripped) else {
-            return ty;
-        };
-        let elem = self.read_loc(loc, inst_id);
-        if kind.is_array() {
-            if elem == Ty::BOTTOM {
-                return Ty::BOTTOM;
+        match self.types.kind(stripped) {
+            TyKind::Cell { loc, kind } => {
+                let elem = self.read_loc(loc, inst_id);
+                if kind.is_array() {
+                    if elem == Ty::BOTTOM {
+                        return Ty::BOTTOM;
+                    }
+                    let arr = self.types.array(elem);
+                    return self.types.with_absences(arr, abs);
+                }
+                if self
+                    .types
+                    .is_valid_dict_value(elem, self.dict_reads.contains(loc.0 as usize))
+                {
+                    let obj = self.types.object(&[], Some(elem));
+                    return self.types.with_absences(obj, abs);
+                }
+                Ty::OPEN
             }
-            let arr = self.types.array(elem);
-            return self.types.with_absences(arr, abs);
+            TyKind::Union(span) => {
+                let members = self.types.ty_slice(span);
+                if !members
+                    .iter()
+                    .any(|&m| matches!(self.types.kind(m), TyKind::Cell { .. }))
+                {
+                    return ty;
+                }
+                let members: Vec<Ty> = members.to_vec();
+                let mut joined = Ty::BOTTOM;
+                for m in members {
+                    let r = self.resolve_cell_read(inst_id, m);
+                    if r == Ty::BOTTOM {
+                        return Ty::BOTTOM;
+                    }
+                    joined = self.types.join(joined, r);
+                }
+                self.types.with_absences(joined, abs)
+            }
+            _ => ty,
         }
-        if self
-            .types
-            .is_valid_dict_value(elem, self.dict_reads.contains(loc.0 as usize))
-        {
-            let obj = self.types.object(&[], Some(elem));
-            return self.types.with_absences(obj, abs);
-        }
-        Ty::OPEN
     }
 
     pub(super) fn mark_written(&mut self, inst_id: InstanceId, local: LocalIdx) {
@@ -322,42 +368,24 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(w) = self.inst_written.get_mut(cur.0 as usize) {
                 w.insert(local.0 as usize);
             }
-            cursor = self
-                .instances
-                .get(cur.0 as usize)
-                .and_then(|i| i.capture_owner);
+            cursor = self.instances.get(cur).and_then(|i| i.capture_owner);
         }
     }
 
     pub(super) fn record_site(&mut self, inst_id: InstanceId, expr: &Expr, res: SiteResolution) {
-        let Some(template) = self.instances.get(inst_id.0 as usize).map(|i| i.template) else {
+        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
             return;
         };
         let Some(local_site) = self.index.site_of(template, expr) else {
             debug_assert!(false, "unindexed site in template {}", template.0);
             return;
         };
-        let old_target = self
-            .inst_sites
-            .get(inst_id.0 as usize)
-            .and_then(|s| s.get(local_site))
-            .and_then(Option::as_ref)
-            .and_then(|p| self.site_target(p));
-        let new_target = self.site_target(&res);
         if let Some(slot) = self
             .inst_sites
             .get_mut(inst_id.0 as usize)
             .and_then(|s| s.get_mut(local_site))
         {
             *slot = Some(res);
-        }
-        if old_target != new_target {
-            if let Some(t) = new_target {
-                self.retain_site_target(inst_id, t);
-            }
-            if let Some(t) = old_target {
-                self.release_site_target(inst_id, t);
-            }
         }
     }
 
@@ -384,7 +412,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                         handled = true;
                     } else if matches!(init, Expr::Undefined)
-                        && let Some(el) = s.iteration.element(&stmts[idx..])
+                        && let Some(el) = s.iteration.element(stmts.get(idx..).unwrap_or(&[]))
                     {
                         let ty = self.eval_expr(s, el.value)?;
                         let ty = match el.available {
@@ -526,7 +554,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 if self
                     .instances
-                    .get(s.inst.0 as usize)
+                    .get(s.inst)
                     .and_then(|i| self.index.view(i.template))
                     .is_some_and(|v| v.is_async)
                 {
@@ -643,34 +671,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn finish(mut self) -> Solved {
-        let mut live_instances = BitSet::default();
-        let mut live_queue = Vec::new();
-        for idx in 0..self.instances.len() {
-            let id = InstanceId(idx as u32);
-            if !self.inst_superseded.contains(idx)
-                && self.is_non_site_root(id)
-                && live_instances.insert(idx)
-            {
-                live_queue.push(id);
-            }
-        }
-        let mut head = 0usize;
-        while let Some(&caller) = live_queue.get(head) {
-            head += 1;
-            for res in self
-                .inst_sites
-                .get(caller.0 as usize)
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
-                if let Some(t) = self.site_target(res)
-                    && live_instances.insert(t.0 as usize)
-                {
-                    live_queue.push(t);
-                }
-            }
-        }
+        let live_instances = self.compute_live_instances();
 
         let inst_local_tys = std::mem::take(&mut self.inst_locals)
             .iter()
@@ -680,7 +681,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .filter_map(|sl| {
                         Some((
                             *self.index.local_ids.get(sl.local.0 as usize)?,
-                            self.locations[sl.loc.0 as usize],
+                            self.locations[sl.loc],
                         ))
                     })
                     .collect()
@@ -695,7 +696,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .get(l_idx)
                 .copied()
                 .flatten()
-                .map_or(Ty::OPEN, |loc| self.locations[loc.0 as usize]);
+                .map_or(Ty::OPEN, |loc| self.locations[loc]);
             if let Some(slot) = module_local_tys.get_mut(l_idx) {
                 *slot = Some(ty);
             }
@@ -720,7 +721,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .get_mut(cid.0 as usize)
                 .and_then(|f| f.get_mut(f_idx))
             {
-                *slot = self.locations[loc.0 as usize];
+                *slot = self.locations[loc];
             }
         }
 
@@ -728,36 +729,39 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut class_inst_getters = vec![Vec::new(); self.class_insts.len()];
         let mut class_inst_setters = vec![Vec::new(); self.class_insts.len()];
         let mut class_static_methods = vec![Vec::new(); self.index.classes.len()];
-        let mut template_instances = vec![Vec::new(); self.index.template_count()];
-        for (idx, inst) in self.instances.iter().enumerate() {
-            if !live_instances.contains(idx) {
+        for (id, inst) in self.instances.iter_enumerated() {
+            if !live_instances.contains(id.0 as usize) {
                 continue;
-            }
-            let id = InstanceId(idx as u32);
-            if let Some(list) = template_instances.get_mut(inst.template.0 as usize) {
-                list.push(id);
             }
             let Some(view) = self.index.view(inst.template) else {
                 continue;
             };
             match view.kind {
-                TemplateKind::ClassMethod { .. } => {
-                    if let Some(ci) = inst.receiver {
-                        class_inst_methods[ci.0 as usize].push(id);
+                TemplateKind::ClassMethod => {
+                    if let Some(ci) = inst.receiver
+                        && let Some(list) = class_inst_methods.get_mut(ci.0 as usize)
+                    {
+                        list.push(id);
                     }
                 }
-                TemplateKind::ClassGetter { getter_idx, .. } => {
-                    if let Some(ci) = inst.receiver {
-                        class_inst_getters[ci.0 as usize].push((getter_idx, id));
+                TemplateKind::ClassGetter(getter_idx) => {
+                    if let Some(ci) = inst.receiver
+                        && let Some(list) = class_inst_getters.get_mut(ci.0 as usize)
+                    {
+                        list.push((getter_idx, id));
                     }
                 }
-                TemplateKind::ClassSetter { setter_idx, .. } => {
-                    if let Some(ci) = inst.receiver {
-                        class_inst_setters[ci.0 as usize].push((setter_idx, id));
+                TemplateKind::ClassSetter(setter_idx) => {
+                    if let Some(ci) = inst.receiver
+                        && let Some(list) = class_inst_setters.get_mut(ci.0 as usize)
+                    {
+                        list.push((setter_idx, id));
                     }
                 }
-                TemplateKind::ClassStaticMethod { class, .. } => {
-                    class_static_methods[class.0 as usize].push(id)
+                TemplateKind::ClassStaticMethod(class) => {
+                    if let Some(list) = class_static_methods.get_mut(class.0 as usize) {
+                        list.push(id);
+                    }
                 }
                 _ => {}
             }
@@ -779,7 +783,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             class_inst_getters,
             class_inst_setters,
             class_static_methods,
-            template_instances,
             dict_reads: self.dict_reads,
             deletes_array_elements: self.deletes_array_elements,
         }

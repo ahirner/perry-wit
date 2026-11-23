@@ -473,3 +473,80 @@ console.error(failed);
     assert_eq!(run.stderr, "2\n");
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn inference_engine_specializes_generics_classes_cells_and_json_storage() -> Result<()> {
+    let run = execute(
+        r#"
+// Static generic methods (c10) and implicit generic classes + getters/setters + instanceof (a11, a22, c08)
+class Util {
+  static wrap(x) { return [x]; }
+}
+class Box {
+  constructor(v) { this.v = v; }
+  get value() { return this.v; }
+  set value(x) { this.v = x; }
+  map(f) { return f(this.v); }
+}
+class Pair {
+  constructor(a, b) { this.a = a; this.b = b; }
+  swap() { return new Pair(this.b, this.a); }
+}
+const bn = new Box(1);
+const bs = new Box("a");
+bn.value = 5;
+const swapped = new Pair(1, "x").swap();
+console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b);
+
+// Distinct capture owners (a15, c07) and mutual recursion (a12)
+function addAll(k, arr) { return arr.map(x => x + k); }
+function isEven(n) { return n === 0 ? true : isOdd(n - 1); }
+function isOdd(n) { return n === 0 ? false : isEven(n - 1); }
+console.log(addAll(1, [1, 2]).join(","), addAll("s", ["a", "b"]).join(","), isEven(4), isOdd(3));
+
+// Empty-array cells: call-before-push, push-in-callee, ctor, two cells, choice, factory, object field, nested, closure (b01-b10, d02-d10)
+function fill(list, v) { list.push(v); return list.length; }
+function count(list) { return list.length; }
+function makeList() { return []; }
+class Bag {
+  constructor() { this.items = []; }
+  add(x) { this.items.push(x); }
+}
+const c1 = [];
+const before = count(c1);
+fill(c1, 7);
+const c2 = [];
+fill(c2, "s");
+const a = [];
+const b = [];
+let pick = false;
+fill(pick ? a : b, 9);
+const f1 = makeList(); f1.push(1);
+const f2 = makeList(); f2.push(2);
+const state = { items: [] }; state.items.push("x");
+const inner = []; inner.push(4);
+const outer = []; outer.push(inner);
+const bagN = new Bag(); bagN.add(2);
+const bagS = new Bag(); bagS.add("k");
+const closed = [];
+const pushClosed = (v) => { closed.push(v); };
+pushClosed(10); pushClosed(20);
+console.log(before, c1[0], c2[0], a.length, b[0], f1[0] + f2[0], state.items[0], outer[0][0], bagN.items[0], bagS.items[0], closed.length);
+
+// Explicit JSON storage for unannotated deferred mixed unions (a03, d11) and object property order (a02)
+let mixed;
+mixed = 1;
+mixed = "a";
+mixed = [1];
+const ordered = { b: 1, a: "x" };
+console.log(typeof mixed, JSON.stringify(mixed), JSON.stringify(ordered));
+"#,
+    )
+    .await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        "2 a! true true 5 a! x 1\n2,3 as,bs true true\n0 7 s 0 9 3 x 4 2 k 2\nobject [1] {\"b\":1,\"a\":\"x\"}\n"
+    );
+    Ok(())
+}

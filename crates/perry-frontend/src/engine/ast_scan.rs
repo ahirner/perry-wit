@@ -32,7 +32,7 @@ impl SourceFacts {
             .param_value_uses
             .binary_search_by_key(&start, |(s, _)| *s)
             .ok()?;
-        Some(self.param_value_uses[idx].1)
+        self.param_value_uses.get(idx).map(|&(_, span)| span)
     }
 }
 
@@ -65,7 +65,7 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
                 && let ast::Expr::Member(member) = callee.as_ref()
                 && matches!(member.obj.as_ref(), ast::Expr::Ident(id) if id.sym == "String")
                 && matches!(&member.prop, ast::MemberProp::Ident(id) if id.sym == "fromCodePoint")
-                && (call.args.len() != 1 || call.args[0].spread.is_some())
+                && !matches!(call.args.as_slice(), [arg] if arg.spread.is_none())
             {
                 self.code_point_arity.get_or_insert(call.span);
             }

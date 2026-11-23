@@ -1010,3 +1010,43 @@ fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> any
     assert_eq!(source.get(span.start_byte..span.end_byte), Some("storage"));
     Ok(())
 }
+
+#[test]
+fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> anyhow::Result<()> {
+    // Object-literal method diagnostic reports the source method name, never `__obj_method_*`.
+    let obj_method = perry_wit::compile_core(
+        "const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
+        "obj_method.js",
+    )
+    .err()
+    .context("expected missing annotation diagnostic for object method")?;
+    assert_eq!(obj_method.primary().code(), codes::MISSING_TYPE_ANNOTATION);
+    let msg = obj_method.primary().message();
+    assert!(msg.contains("'greet'"), "{obj_method}");
+    assert!(!msg.contains("__obj_method_"), "{obj_method}");
+
+    // Polymorphic recursion hits the explicit specialization budget instead of diverging.
+    let poly = perry_wit::compile_core(
+        "function wrap(x, n) { return n <= 0 ? x : wrap([x], n - 1); }\nexport function run(): number { wrap(1, 3); return 0; }\n",
+        "poly.js",
+    )
+    .err()
+    .context("expected specialization limit diagnostic")?;
+    assert_eq!(poly.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
+    assert!(
+        poly.primary()
+            .message()
+            .contains("generic specialization limit"),
+        "{poly}"
+    );
+
+    // Self-nested empty array stays unresolved instead of looping or erasing to Any.
+    let self_nest = perry_wit::compile_core(
+        "export function run(): number { const a = []; a.push(a); return a.length; }\n",
+        "self_nest.js",
+    )
+    .err()
+    .context("expected empty array diagnostic")?;
+    assert_eq!(self_nest.primary().code(), codes::MISSING_TYPE_ANNOTATION);
+    Ok(())
+}

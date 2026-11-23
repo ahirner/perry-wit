@@ -1,5 +1,5 @@
 //! Built-in expression, method, property, and constructor typing over dense `Ty`.
-use super::types::{NameId, ObjectProp, Ty, TyKind, TypeTable};
+use super::types::{ObjectProp, Ty, TyKind, TypeTable};
 use crate::{
     Absence,
     collections::IteratorMethod,
@@ -28,23 +28,9 @@ impl HirTypeFacts for NoFacts {
 
 pub(crate) const SETTLED: &str = "PromiseSettledResult";
 
-pub(crate) fn normalize_named_integer(
-    ctx: &Context,
-    decls: &Declarations<'_>,
-    types: &TypeTable,
-    ty: Ty,
-) -> Ty {
-    if let TyKind::Leaf(id) = types.kind(ty)
-        && let HirType::Named(name) = id.hir(ctx)
-        && let Some(carrier) = decls.integer_carrier(name)
-    {
-        return if matches!(carrier, HirType::BigInt) {
-            Ty::BIGINT
-        } else {
-            Ty::NUMBER
-        };
-    }
-    ty
+fn is_array_like_ty(types: &TypeTable, ty: Ty) -> bool {
+    matches!(types.kind(ty), TyKind::Array(_) | TyKind::Tuple(_))
+        || matches!(types.kind(ty), TyKind::Cell { kind, .. } if kind.is_array())
 }
 
 pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Receiver> {
@@ -55,8 +41,16 @@ pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Re
         other => Some(Receiver::Value(Kind::builtin(other)?)),
     };
     match types.kind(ty) {
-        TyKind::Array(_) | TyKind::Tuple(_) => Some(Receiver::Value(Kind::Array)),
-        TyKind::Cell { kind, .. } if kind.is_array() => Some(Receiver::Value(Kind::Array)),
+        _ if is_array_like_ty(types, ty) => Some(Receiver::Value(Kind::Array)),
+        TyKind::Union(span)
+            if !types.ty_slice(span).is_empty()
+                && types
+                    .ty_slice(span)
+                    .iter()
+                    .all(|&m| is_array_like_ty(types, m)) =>
+        {
+            Some(Receiver::Value(Kind::Array))
+        }
         TyKind::String => Some(Receiver::Value(Kind::String)),
         TyKind::Number | TyKind::Int32 => Some(Receiver::Value(Kind::Number)),
         TyKind::Boolean => Some(Receiver::Value(Kind::Boolean)),
@@ -105,6 +99,13 @@ pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> 
             let items = types.ty_slice(span).to_vec();
             Some(types.union(&items))
         }
+        TyKind::Union(span) => {
+            let mut elems = Vec::new();
+            for m in types.ty_slice(span).to_vec() {
+                elems.push(iterated_element(ctx, types, m)?);
+            }
+            (!elems.is_empty()).then(|| types.union(&elems))
+        }
         TyKind::Leaf(id) => match id.hir(ctx) {
             HirType::StringLiteral(_) => Some(Ty::STRING),
             HirType::Named(n) if n == "Uint8Array" => Some(Ty::NUMBER),
@@ -148,12 +149,10 @@ pub(crate) fn iterator_view(
                 return None;
             };
             let slice = types.ty_slice(args).to_vec();
-            let (view_name, kept) = match name.as_str() {
-                "Map" | "ReadonlyMap" if slice.len() == 2 => {
-                    (method.map_view().type_name(), &slice[..])
-                }
-                "Set" | "ReadonlySet" if !slice.is_empty() => {
-                    (method.set_view().type_name(), &slice[..1])
+            let (view_name, kept): (&str, &[Ty]) = match (name.as_str(), slice.as_slice()) {
+                ("Map" | "ReadonlyMap", [_, _]) => (method.map_view().type_name(), &slice),
+                ("Set" | "ReadonlySet", [e, ..]) => {
+                    (method.set_view().type_name(), std::slice::from_ref(e))
                 }
                 _ => return None,
             };
@@ -566,7 +565,17 @@ pub(crate) fn property_type(
                 .unwrap_or_default();
             if let Some(prop_hir) = decls.property_type(ctx, base_name, &arg_hirs, property) {
                 let ty = types.intern_hir(ctx, &prop_hir, true);
-                return Some(normalize_named_integer(ctx, decls, types, ty));
+                if let TyKind::Leaf(lid) = types.kind(ty)
+                    && let HirType::Named(n) = lid.hir(ctx)
+                    && let Some(carrier) = decls.integer_carrier(n)
+                {
+                    return Some(if matches!(carrier, HirType::BigInt) {
+                        Ty::BIGINT
+                    } else {
+                        Ty::NUMBER
+                    });
+                }
+                return Some(ty);
             }
             if gargs.is_none()
                 && let Some(resolved) = decls.resolve_foreign_type(base_name)
@@ -615,17 +624,6 @@ pub(crate) fn property_type(
     }
 }
 
-pub(crate) fn object_property(types: &TypeTable, ty: Ty, name: NameId) -> Option<(Ty, bool)> {
-    let TyKind::Object { props, .. } = types.kind(ty) else {
-        return None;
-    };
-    types
-        .object_slice(props)
-        .iter()
-        .find(|p| p.name == name)
-        .map(|p| (p.ty, p.optional))
-}
-
 pub(crate) fn index_type(
     ctx: &Context,
     decls: &Declarations<'_>,
@@ -667,11 +665,16 @@ pub(crate) fn index_type(
         TyKind::Object { props, index: idx } => {
             if let Expr::String(key) = index {
                 let name = types.intern_name(key);
-                if let Some((ty, opt)) = object_property(types, stripped, name) {
-                    return Some(if opt {
-                        types.with_absences(ty, Absence::Undefined)
+                if let Some(p) = types
+                    .object_slice(props)
+                    .iter()
+                    .find(|p| p.name == name)
+                    .copied()
+                {
+                    return Some(if p.optional {
+                        types.with_absences(p.ty, Absence::Undefined)
                     } else {
-                        ty
+                        p.ty
                     });
                 }
             }

@@ -357,20 +357,24 @@ impl<'s> FunctionBuilder<'s> {
         let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
         let inferred_deferred =
             self.shapes.deferred_binding(id) && !self.shapes.is_explicit_binding(id);
-        let declared = match type_state
-            .resolved()
-            .map(|ty| self.active_value_type(ctx, ty))
-            .transpose()
-        {
-            Err(error) if inferred_deferred && error.code() == codes::UNSUPPORTED_TYPE => {
-                let name = self.shapes.local_name(id).unwrap_or("binding");
-                return Err(diag!(
-                    codes::UNSUPPORTED_TYPE,
-                    "local '{name}' receives incompatible write types ({})",
-                    error.message()
-                ));
+        let declared = if self.shapes.metadata.json_storage_bindings.contains(&id) {
+            Some(perry_mir::JsonType::get(ctx).into())
+        } else {
+            match type_state
+                .resolved()
+                .map(|ty| self.active_value_type(ctx, ty))
+                .transpose()
+            {
+                Err(error) if inferred_deferred && error.code() == codes::UNSUPPORTED_TYPE => {
+                    let name = self.shapes.local_name(id).unwrap_or("binding");
+                    return Err(diag!(
+                        codes::UNSUPPORTED_TYPE,
+                        "local '{name}' receives incompatible write types ({})",
+                        error.message()
+                    ));
+                }
+                result => result?,
             }
-            result => result?,
         };
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
             self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64

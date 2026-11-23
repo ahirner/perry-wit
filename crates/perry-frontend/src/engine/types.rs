@@ -4,9 +4,89 @@ use perry_hir::types::{ObjectType, PropertyInfo, Type as HirType};
 use pliron::context::Context;
 use std::collections::HashMap;
 
+pub(crate) trait Idx: Copy + Eq {
+    fn from_usize(n: usize) -> Self;
+    fn index(self) -> usize;
+}
+
+/// Index-typed vector whose IDs are minted by [`IdxVec::push`] and checked in debug builds.
+pub(crate) struct IdxVec<I, T> {
+    data: Vec<T>,
+    _marker: std::marker::PhantomData<fn(I) -> I>,
+}
+
+impl<I, T> Default for IdxVec<I, T> {
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<I: Idx, T> IdxVec<I, T> {
+    pub(crate) fn from_vec(data: Vec<T>) -> Self {
+        Self {
+            data,
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub(crate) fn push(&mut self, value: T) -> I {
+        let id = I::from_usize(self.data.len());
+        self.data.push(value);
+        id
+    }
+    pub(crate) fn get(&self, id: I) -> Option<&T> {
+        self.data.get(id.index())
+    }
+    pub(crate) fn get_mut(&mut self, id: I) -> Option<&mut T> {
+        self.data.get_mut(id.index())
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.data.len()
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.data.iter()
+    }
+    pub(crate) fn iter_enumerated(&self) -> impl Iterator<Item = (I, &T)> {
+        self.data
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (I::from_usize(i), v))
+    }
+    pub(crate) fn as_slice(&self) -> &[T] {
+        &self.data
+    }
+}
+
+impl<I: Idx, T> std::ops::Index<I> for IdxVec<I, T> {
+    type Output = T;
+    fn index(&self, id: I) -> &T {
+        debug_assert!(id.index() < self.data.len());
+        &self.data[id.index()]
+    }
+}
+
+impl<I: Idx, T> std::ops::IndexMut<I> for IdxVec<I, T> {
+    fn index_mut(&mut self, id: I) -> &mut T {
+        debug_assert!(id.index() < self.data.len());
+        &mut self.data[id.index()]
+    }
+}
+
 macro_rules! id_type {
     ($($name:ident($vis:vis u32)),* $(,)?) => {
-        $(#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)] pub(crate) struct $name($vis u32);)*
+        $(
+            #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+            pub(crate) struct $name($vis u32);
+            impl Idx for $name {
+                fn from_usize(n: usize) -> Self { Self(n as u32) }
+                fn index(self) -> usize { self.0 as usize }
+            }
+        )*
     };
 }
 
@@ -106,11 +186,11 @@ enum InternKey {
 
 #[derive(Default)]
 pub(crate) struct TypeTable {
-    kinds: Vec<TyKind>,
+    kinds: IdxVec<Ty, TyKind>,
     index: HashMap<InternKey, Ty>,
     ty_pool: Vec<Ty>,
     object_props: Vec<ObjectProp>,
-    names: Vec<String>,
+    names: IdxVec<NameId, String>,
     name_index: HashMap<String, NameId>,
     scratch: Vec<Ty>,
 }
@@ -118,12 +198,11 @@ pub(crate) struct TypeTable {
 impl TypeTable {
     pub(crate) fn new() -> Self {
         let mut table = Self {
-            kinds: Vec::with_capacity(64),
             index: HashMap::with_capacity(64),
             name_index: HashMap::with_capacity(32),
             ..Self::default()
         };
-        for (i, kind) in [
+        for kind in [
             TyKind::Bottom,
             TyKind::Open,
             TyKind::Dynamic,
@@ -136,38 +215,40 @@ impl TypeTable {
             TyKind::BigInt,
             TyKind::String,
             TyKind::Symbol,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            table.kinds.push(kind);
-            table.index.insert(InternKey::Simple(kind), Ty(i as u32));
+        ] {
+            let id = table.kinds.push(kind);
+            table.index.insert(InternKey::Simple(kind), id);
         }
         table
     }
 
     pub(crate) fn kind(&self, ty: Ty) -> TyKind {
-        debug_assert!((ty.0 as usize) < self.kinds.len());
-        self.kinds[ty.0 as usize]
+        self.kinds[ty]
     }
     pub(crate) fn ty_slice(&self, span: TySpan) -> &[Ty] {
-        &self.ty_pool[span.range()]
+        debug_assert!(span.range().end <= self.ty_pool.len());
+        self.ty_pool.get(span.range()).unwrap_or(&[])
+    }
+    pub(crate) fn tuple_slice(&self, ty: Ty) -> &[Ty] {
+        match self.kind(ty) {
+            TyKind::Tuple(span) => self.ty_slice(span),
+            _ => &[],
+        }
     }
     pub(crate) fn object_slice(&self, span: TySpan) -> &[ObjectProp] {
-        &self.object_props[span.range()]
+        debug_assert!(span.range().end <= self.object_props.len());
+        self.object_props.get(span.range()).unwrap_or(&[])
     }
     pub(crate) fn name_str(&self, id: NameId) -> &str {
-        debug_assert!((id.0 as usize) < self.names.len());
-        &self.names[id.0 as usize]
+        self.names[id].as_str()
     }
 
     pub(crate) fn intern_name(&mut self, name: &str) -> NameId {
         if let Some(&id) = self.name_index.get(name) {
             return id;
         }
-        let id = NameId(self.names.len() as u32);
         let owned = name.to_owned();
-        self.names.push(owned.clone());
+        let id = self.names.push(owned.clone());
         self.name_index.insert(owned, id);
         id
     }
@@ -186,8 +267,7 @@ impl TypeTable {
             return ty;
         }
         let kind = make_kind(self);
-        let ty = Ty(self.kinds.len() as u32);
-        self.kinds.push(kind);
+        let ty = self.kinds.push(kind);
         self.index.insert(key, ty);
         ty
     }
@@ -212,9 +292,6 @@ impl TypeTable {
     }
     pub(crate) fn cell(&mut self, loc: LocId, kind: CellKind) -> Ty {
         self.intern_simple(TyKind::Cell { loc, kind })
-    }
-    pub(crate) fn array_cell(&mut self, loc: LocId) -> Ty {
-        self.cell(loc, CellKind::Array)
     }
     pub(crate) fn promise(&mut self, inner: Ty) -> Ty {
         self.intern_simple(TyKind::Promise(inner))
@@ -768,7 +845,7 @@ impl TypeTable {
             TyKind::Bottom | TyKind::Open | TyKind::Dynamic | TyKind::TypeVar(_) => true,
             TyKind::Tuple(s) => {
                 let items = self.ty_slice(s);
-                (nested && items.windows(2).any(|w| w[0] != w[1]))
+                (nested && items.windows(2).any(|w| matches!(w, [a, b] if a != b)))
                     || items.iter().any(|&t| self.has_nested_unresolved(t, true))
             }
             TyKind::Union(s) => {
@@ -787,6 +864,89 @@ impl TypeTable {
 
     pub(crate) fn contains_ty(&self, haystack: Ty, needle: Ty) -> bool {
         haystack == needle || self.any_child(haystack, &mut |c| self.contains_ty(c, needle))
+    }
+
+    /// True when an unannotated deferred local's union type cannot be lowered as a native
+    /// value/tagged union, yet every branch encodes cleanly as JSON.
+    pub(crate) fn needs_json_storage(
+        &self,
+        ctx: &Context,
+        ty: Ty,
+        locations: &[Ty],
+        dict_reads: &super::bitset::BitSet,
+    ) -> bool {
+        let TyKind::Union(span) = self.kind(ty) else {
+            return false;
+        };
+        let defined: Vec<Ty> = self
+            .ty_slice(span)
+            .iter()
+            .copied()
+            .filter(|&m| m != Ty::NULL && m != Ty::VOID)
+            .collect();
+        if defined.len() < 2 {
+            return false;
+        }
+        let is_str_lit = |k: TyKind| matches!(k, TyKind::Leaf(id) if matches!(id.hir(ctx), HirType::StringLiteral(_)));
+        let is_prim = |m: Ty| {
+            let k = self.kind(m);
+            matches!(
+                k,
+                TyKind::Number | TyKind::Int32 | TyKind::String | TyKind::Boolean
+            ) || is_str_lit(k)
+        };
+        let native = if defined.iter().any(|&m| is_prim(m)) {
+            let mut objs = 0usize;
+            defined.iter().all(|&m| {
+                if is_prim(m) {
+                    true
+                } else if matches!(self.kind(m), TyKind::Object { .. })
+                    || matches!(self.kind(m), TyKind::Leaf(id) if matches!(id.hir(ctx), HirType::Named(n) if n == "Uint8Array"))
+                {
+                    objs += 1;
+                    objs <= 1
+                } else {
+                    false
+                }
+            })
+        } else {
+            defined.iter().all(|&m| {
+                matches!(self.kind(m), TyKind::Object { props, .. } if self.object_slice(props).iter().any(|p| {
+                    let n = self.name_str(p.name);
+                    (n == "tag" && is_str_lit(self.kind(p.ty))) || (n == "ok" && p.ty == Ty::BOOLEAN)
+                }))
+            })
+        };
+        !native
+            && defined.iter().all(|&m| {
+                !self.any_with_cells(
+                    m,
+                    locations,
+                    &mut Vec::new(),
+                    &|loc, kind, elem| {
+                        (kind == CellKind::Dict
+                            && !self.is_valid_dict_value(elem, dict_reads.contains(loc.0 as usize)))
+                        .then_some(true)
+                    },
+                    &|k| {
+                        !matches!(
+                            k,
+                            TyKind::Null
+                                | TyKind::Void
+                                | TyKind::Boolean
+                                | TyKind::Number
+                                | TyKind::Int32
+                                | TyKind::String
+                                | TyKind::Dynamic
+                                | TyKind::Array(_)
+                                | TyKind::Cell { .. }
+                                | TyKind::Tuple(_)
+                                | TyKind::Union(_)
+                                | TyKind::Object { .. }
+                        ) && !is_str_lit(k)
+                    },
+                )
+            })
     }
 }
 

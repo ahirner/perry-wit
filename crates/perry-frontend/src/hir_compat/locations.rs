@@ -16,14 +16,23 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
 
-/// Strip internal module-mangling prefixes (`__perry_module_<N>_`) for user-facing names.
+/// Strip internal module-mangling prefixes (`__perry_module_<N>_`) and object-literal method
+/// wrappers (`__obj_method_<name>_<N>`) for user-facing diagnostic names.
 pub(crate) fn display_name(name: &str) -> &str {
-    name.strip_prefix("__perry_module_")
+    let name = name
+        .strip_prefix("__perry_module_")
         .and_then(|rest| {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             (digits > 0)
-                .then(|| rest[digits..].strip_prefix('_'))
+                .then(|| rest.get(digits..)?.strip_prefix('_'))
                 .flatten()
+        })
+        .unwrap_or(name);
+    name.strip_prefix("__obj_method_")
+        .and_then(|rest| {
+            let (base, suffix) = rest.rsplit_once('_')?;
+            (!base.is_empty() && !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+                .then_some(base)
         })
         .unwrap_or(name)
 }

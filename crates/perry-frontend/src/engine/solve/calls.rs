@@ -326,7 +326,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         );
         let cb_ret = self.read_loc(
             self.instances
-                .get(cb_inst.0 as usize)
+                .get(cb_inst)
                 .map_or(LocId(0), |i| i.return_loc),
             s.inst,
         );
@@ -461,7 +461,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.record_site(inst_id, expr, res);
         Ok((
             target,
-            self.read_loc(self.instances[target.0 as usize].return_loc, inst_id),
+            self.read_loc(self.instances[target].return_loc, inst_id),
         ))
     }
 
@@ -527,10 +527,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .and_then(|c| c.ctor)
                     .and_then(|t| self.index.view(t))
                 {
-                    for (param, &arg_ty) in ctor_view.params.iter().zip(&arg_tys) {
-                        let pat = self.types.intern_hir(self.ctx, &param.ty, true);
-                        self.types.unify(self.ctx, pat, arg_ty, &tps, &mut bindings);
-                    }
+                    self.unify_params(ctor_view.params, &arg_tys, &tps, &mut bindings);
                 }
                 tps.iter()
                     .map(|tp| {
@@ -805,16 +802,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
 
-        if matches!(name, "push" | "unshift")
-            && let TyKind::Cell { loc, kind } = self.types.kind(stripped)
-        {
-            if kind.is_array() {
-                for &a in &arg_tys {
-                    self.write_cell(loc, a);
-                }
-            } else {
-                self.write_loc(loc, Ty::OPEN);
-            }
+        if matches!(name, "push" | "unshift") && self.push_into_cells(stripped, &arg_tys) {
             return Ok(Ty::NUMBER);
         }
         if method == hir_compat::Method::Iteration {
@@ -823,7 +811,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         let mname_id = self.types.intern_name(name);
         if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, byte_offset)?
-            && let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
+            && let Some(cinst) = self.class_insts.get(cinst_id)
             && let Some(method_tid) = self
                 .index
                 .class(cinst.class)
@@ -851,14 +839,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(rule) =
             builtins::lookup_method_result(self.ctx, self.types, stripped, name, false)
         {
-            let resolved_recv = if matches!(self.types.kind(stripped), TyKind::Cell { .. })
-                && !matches!(
-                    rule,
-                    MethodResult::Number
-                        | MethodResult::Boolean
-                        | MethodResult::String
-                        | MethodResult::Void
-                ) {
+            let resolved_recv = if !matches!(
+                rule,
+                MethodResult::Number
+                    | MethodResult::Boolean
+                    | MethodResult::String
+                    | MethodResult::Void
+            ) {
                 self.resolve_cell_read(s.inst, obj_ty)
             } else {
                 obj_ty
@@ -970,6 +957,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             )?;
             let exp_ret = self.types.intern_hir(self.ctx, &expected.return_type, true);
             if exp_ret != Ty::VOID {
+                self.contract_insts.insert(bound_cb.0 as usize);
                 self.result_contracts.push(ResultContract {
                     inst: bound_cb,
                     expected: exp_ret,
@@ -1067,29 +1055,5 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
         Ok(())
-    }
-
-    pub(super) fn attach_instantiation_chain(
-        &self,
-        mut err: Diagnostic,
-        mut cursor: InstanceId,
-    ) -> Diagnostic {
-        for _ in 0..16 {
-            let Some(inst) = self.instances.get(cursor.0 as usize) else {
-                break;
-            };
-            if let Some(view) = self.index.view(inst.template)
-                && inst.call_byte_offset != 0
-            {
-                let msg = format!("while instantiating '{}'", view.display_name());
-                err = match self.metadata.locations.call_span(inst.call_byte_offset) {
-                    Some(span) => err.with_spanned_note(span, msg),
-                    None => err.with_note(msg),
-                };
-            }
-            let Some(next) = inst.caller else { break };
-            cursor = next;
-        }
-        err
     }
 }

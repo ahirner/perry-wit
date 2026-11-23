@@ -40,7 +40,10 @@ pub fn contextual_type(ty: &Type) -> Option<&Type> {
 fn requires_context(ty: &Type) -> bool {
     match ty {
         Type::Any | Type::Unknown | Type::Never | Type::TypeVar(_) => true,
-        Type::Array(element) => matches!(**element, Type::Any | Type::Never | Type::TypeVar(_)),
+        Type::Array(element) => matches!(
+            **element,
+            Type::Any | Type::Unknown | Type::Never | Type::TypeVar(_)
+        ),
         Type::Generic { base, type_args }
             if matches!(
                 base.as_str(),
@@ -61,7 +64,7 @@ fn requires_context(ty: &Type) -> bool {
             type_args.is_empty()
                 || type_args
                     .iter()
-                    .any(|ty| matches!(ty, Type::Any | Type::TypeVar(_)))
+                    .any(|ty| matches!(ty, Type::Any | Type::Unknown | Type::TypeVar(_)))
         }
         _ => false,
     }

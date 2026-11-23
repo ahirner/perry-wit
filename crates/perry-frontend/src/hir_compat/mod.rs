@@ -41,6 +41,8 @@ pub struct Metadata<'s> {
     pub sparse_arrays: bool,
     /// Monomorphized class name -> original source class name (for `instanceof`).
     pub class_origins: HashMap<String, String>,
+    /// Deferred unannotated locals explicitly assigned JSON storage by the inference engine.
+    pub json_storage_bindings: HashSet<LocalId>,
 }
 
 pub(crate) struct LoweredHir<'s> {
@@ -106,6 +108,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             constructors,
             sparse_arrays,
             class_origins: HashMap::new(),
+            json_storage_bindings: HashSet::new(),
         },
     })
 }

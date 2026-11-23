@@ -168,6 +168,13 @@ function joinedIdentity(bytes: Uint8Array, takeBytes: boolean): number {
   return value.length;
 }
 
+function boxedLength(takeList: boolean): number {
+  let value;
+  if (takeList) value = [1, 2];
+  else value = "abc";
+  return value.length;
+}
+
 function capturedWrite(change: boolean): number {
   let value;
   value = 7;
@@ -189,7 +196,7 @@ console.log(readChunk(false), readChunk(true), capturedWrite(false), capturedWri
 
 const bytes = new Uint8Array(4);
 console.log(joinedBytes(false), joinedBytes(true), joinedLength(bytes, false), joinedLength(bytes, true), new ChunkSource().first(true));
-console.log(joinedIdentity(bytes, false), joinedIdentity(bytes, true));
+console.log(joinedIdentity(bytes, false), joinedIdentity(bytes, true), boxedLength(false), boxedLength(true));
 
 function retagged(): string {
   let shape: Shape = { tag: "circle", val: 1 };

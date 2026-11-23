@@ -219,7 +219,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::StructuredClone { value, .. } => self.eval_expr(s, value),
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
-                    return Ok(Ty::OPEN);
+                    return Ok(self.alloc_expr_cell(s.inst, expr));
                 }
                 let elem_tys = self.eval_args(s, elements)?;
                 if elem_tys.contains(&Ty::BOTTOM) {
@@ -470,6 +470,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                         return Ok(Ty::BOTTOM);
                     }
                     let (stripped, _) = self.types.strip_nullish(obj_ty);
+                    if matches!(method.as_str(), "push" | "push_single" | "unshift")
+                        && self.push_into_cells(stripped, &arg_tys)
+                    {
+                        return Ok(Ty::NUMBER);
+                    }
                     let rule = args
                         .is_empty()
                         .then(|| {
@@ -625,13 +630,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .and_then(|l| self.read_local_value(s.inst, l))
                 {
                     let def = self.types.strip_nullish(arr_ty).0;
-                    if let TyKind::Cell { loc, kind } = self.types.kind(def) {
-                        if kind.is_array() {
-                            self.write_cell(loc, val_ty);
-                        } else {
-                            self.write_loc(loc, Ty::OPEN);
-                        }
-                    }
+                    self.push_into_cells(def, &[val_ty]);
                 }
                 Ok(Ty::NUMBER)
             }
@@ -745,7 +744,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .types
             .normalize_for_storage(self.ctx, self.decls, val_ty);
         if let Some(loc) = self.class_field_loc(cinst_id, property) {
-            let existing = self.locations[loc.0 as usize];
+            let existing = self.locations[loc];
             if matches!(value, Expr::Array(items, _) if items.is_empty()) {
                 if !matches!(
                     self.types.kind(existing),
@@ -756,7 +755,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ) && self.types.is_open(existing)
                 {
                     let elem_loc = self.alloc_loc(Ty::BOTTOM);
-                    let cell = self.types.array_cell(elem_loc);
+                    let cell = self.types.cell(elem_loc, CellKind::Array);
                     self.write_loc(loc, cell);
                 }
             } else if !self.types.is_open(norm) || self.types.is_open(existing) {
@@ -765,7 +764,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let prop_id = self.types.intern_name(property);
         if norm != Ty::BOTTOM
-            && let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
+            && let Some(cinst) = self.class_insts.get(cinst_id)
             && let Some(setter_tid) = self
                 .index
                 .class(cinst.class)
@@ -899,21 +898,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         inst_id: InstanceId,
     ) -> Vec<(shapes::TypeId, Ty)> {
-        let Some(inst) = self.instances.get(inst_id.0 as usize) else {
+        let Some(inst) = self.instances.get(inst_id) else {
             return Vec::new();
         };
-        let (template, receiver, capture_owner) =
-            (inst.template, inst.receiver, inst.capture_owner);
-        let args = self
-            .instance_args
-            .get(inst.args.range())
-            .unwrap_or(&[])
-            .to_vec();
-        let explicit_targs = self
-            .instance_type_args
-            .get(inst.explicit_type_args.range())
-            .unwrap_or(&[])
-            .to_vec();
+        let (template, receiver, capture_owner, args_ty, targs_ty) = (
+            inst.template,
+            inst.receiver,
+            inst.capture_owner,
+            inst.args,
+            inst.explicit_type_args,
+        );
+        let args = self.types.tuple_slice(args_ty).to_vec();
+        let explicit_targs = self.types.tuple_slice(targs_ty).to_vec();
         self.compute_type_param_bindings(template, receiver, capture_owner, &args, &explicit_targs)
     }
 
@@ -947,7 +943,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(self.read_loc(loc, s.inst));
             }
             let pname = self.types.intern_name(property);
-            if let Some(cinst) = self.class_insts.get(cinst_id.0 as usize)
+            if let Some(cinst) = self.class_insts.get(cinst_id)
                 && let Some(getter_tid) = self
                     .index
                     .class(cinst.class)
@@ -956,7 +952,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let target = self.request_instance(
                     InstanceReq::new(getter_tid, &[], Some(s.inst)).receiver(Some(cinst_id)),
                 )?;
-                return Ok(self.read_loc(self.instances[target.0 as usize].return_loc, s.inst));
+                return Ok(self.read_loc(self.instances[target].return_loc, s.inst));
             }
         }
         Ok(
@@ -966,7 +962,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
-        let cinst = self.class_insts.get(cinst_id.0 as usize)?;
+        let cinst = self.class_insts.get(cinst_id)?;
         let f_idx = self
             .hir
             .classes

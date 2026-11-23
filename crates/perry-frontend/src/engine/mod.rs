@@ -103,42 +103,15 @@ mod tests {
         });
         assert_ne!(f1, f2);
 
-        let n_a = table.intern_name("a");
-        let n_b = table.intern_name("b");
-        let o1 = table.object(
-            &[
-                ObjectProp {
-                    name: n_b,
-                    ty: Ty::STRING,
-                    optional: false,
-                    readonly: false,
-                },
-                ObjectProp {
-                    name: n_a,
-                    ty: Ty::NUMBER,
-                    optional: false,
-                    readonly: false,
-                },
-            ],
-            None,
-        );
-        let o2 = table.object(
-            &[
-                ObjectProp {
-                    name: n_a,
-                    ty: Ty::NUMBER,
-                    optional: false,
-                    readonly: false,
-                },
-                ObjectProp {
-                    name: n_b,
-                    ty: Ty::STRING,
-                    optional: false,
-                    readonly: false,
-                },
-            ],
-            None,
-        );
+        let (n_a, n_b) = (table.intern_name("a"), table.intern_name("b"));
+        let prop = |name, ty| ObjectProp {
+            name,
+            ty,
+            optional: false,
+            readonly: false,
+        };
+        let o1 = table.object(&[prop(n_b, Ty::STRING), prop(n_a, Ty::NUMBER)], None);
+        let o2 = table.object(&[prop(n_a, Ty::NUMBER), prop(n_b, Ty::STRING)], None);
         assert_ne!(o1, o2);
 
         let hir_u = HirType::Union(vec![HirType::String, HirType::Number, HirType::Void]);
