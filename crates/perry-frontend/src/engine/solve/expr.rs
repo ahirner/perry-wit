@@ -957,7 +957,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let target = self.request_instance(
                     InstanceReq::new(getter_tid, &[], Some(s.inst)).receiver(Some(cinst_id)),
                 )?;
-                self.eval_if_fresh(target)?;
                 return Ok(self.read_loc(self.instances[target].return_loc, s.inst));
             }
         }

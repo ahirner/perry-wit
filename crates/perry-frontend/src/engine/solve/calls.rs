@@ -324,7 +324,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 keep_inline_closure: keep_inline,
             },
         );
-        self.eval_if_fresh(cb_inst)?;
         let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
             return Ok(None);
         };
@@ -458,7 +457,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         };
         self.record_site(inst_id, expr, res);
-        self.eval_if_fresh(target)?;
         Ok((
             target,
             self.read_loc(self.instances[target].return_loc, inst_id),

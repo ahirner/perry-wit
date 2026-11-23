@@ -1051,7 +1051,7 @@ fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> an
         "{poly}"
     );
 
-    // Self-nesting composites (empty arrays, recursive unions, and loops) widen cleanly instead of hanging.
+    // Self-nesting composites (empty arrays, recursive unions, and loops) widen cleanly and explain why.
     for (source, file, expected_code) in [
         (
             "export function run(): number { const a = []; a.push(a); return a.length; }\n",
@@ -1066,13 +1066,17 @@ fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> an
         (
             "export function run(): number { let x; x = 1; for (let i = 0; i < 3; i++) x = [x]; return JSON.stringify(x).length; }\n",
             "self_nest_loop.js",
-            codes::TYPE_MISMATCH,
+            codes::MISSING_TYPE_ANNOTATION,
         ),
     ] {
         let self_nest = perry_wit::compile_core(source, file)
             .err()
             .context("expected widening diagnostic")?;
         assert_eq!(self_nest.primary().code(), expected_code, "{self_nest}");
+        assert!(
+            self_nest.to_string().contains("nests itself"),
+            "expected self-nesting explanation in diagnostic: {self_nest}"
+        );
     }
     Ok(())
 }

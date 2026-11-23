@@ -494,9 +494,9 @@ impl TypeTable {
         )
     }
 
-    pub(crate) fn join_bounded(&mut self, old: Ty, value: Ty) -> Ty {
+    pub(crate) fn join_bounded(&mut self, old: Ty, value: Ty) -> (Ty, bool) {
         if old == value || value == Ty::BOTTOM || (value == Ty::NEVER && old != Ty::BOTTOM) {
-            return old;
+            return (old, false);
         }
         let self_nested = match self.kind(old) {
             TyKind::Union(s) => self
@@ -507,13 +507,13 @@ impl TypeTable {
             _ => false,
         };
         if self_nested {
-            return Ty::OPEN;
+            return (Ty::OPEN, true);
         }
         let joined = self.join(old, value);
         if self.meta[joined].depth > MAX_TYPE_DEPTH {
-            Ty::OPEN
+            (Ty::OPEN, false)
         } else {
-            joined
+            (joined, false)
         }
     }
 

@@ -501,6 +501,22 @@ impl<'h> Emitter<'h, '_> {
         let ret_ty = self.solved.locations[inst.return_loc];
         let return_type = if self.is_resolved(ret_ty) {
             self.materialize(ret_ty)
+        } else if self
+            .solved
+            .self_nested_locs
+            .contains(inst.return_loc.index())
+        {
+            let err = diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "cannot infer return type of '{}': inferred type nests itself",
+                view.display_name()
+            )
+            .with_help("Add a concrete return type annotation to this function.");
+            let err = match self.locations.function_span(view.name) {
+                Some(span) => err.with_span(span),
+                None => err,
+            };
+            return Err(self.attach_inst_chain(err, inst_id));
         } else {
             view.return_type.clone()
         };
@@ -663,8 +679,27 @@ impl<'h> Emitter<'h, '_> {
                                 }
                             ) =>
                     {
-                        let err = diag!(codes::MISSING_TYPE_ANNOTATION, "an empty array literal needs a declared element type")
+                        let mut err = diag!(codes::MISSING_TYPE_ANNOTATION, "an empty array literal needs a declared element type")
                             .with_help("Add a concrete element type annotation to this binding (e.g. `const xs: number[] = []`).");
+                        if let TyKind::Cell { loc, .. } = self.types.kind(t)
+                            && self.solved.self_nested_locs.contains(loc.index())
+                        {
+                            err = err.with_note("its inferred element type nests itself");
+                        }
+                        let err = self.annotate_local(err, *id);
+                        return Err(self.attach_inst_chain(err, rctx.inst_id));
+                    }
+                    Some(Ty::OPEN)
+                        if is_inferred
+                            && self.index.local_idx(*id).is_some_and(|lidx| {
+                                self.solved.self_nested_locals.contains(lidx.index())
+                            }) =>
+                    {
+                        let err = diag!(
+                            codes::MISSING_TYPE_ANNOTATION,
+                            "cannot infer type of '{name}': inferred type nests itself"
+                        )
+                        .with_help("Add a concrete type annotation to this binding.");
                         let err = self.annotate_local(err, *id);
                         return Err(self.attach_inst_chain(err, rctx.inst_id));
                     }

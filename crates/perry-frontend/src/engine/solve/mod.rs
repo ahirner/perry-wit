@@ -26,7 +26,6 @@ use pliron::context::Context;
 use std::collections::HashMap;
 
 const INSTANCE_BUDGET: u16 = 256;
-const MAX_EAGER_DEPTH: u16 = 64;
 
 pub(crate) struct Instance {
     pub(crate) template: TemplateId,
@@ -99,6 +98,8 @@ pub(crate) struct Solved {
     pub(crate) class_inst_setters: Vec<Vec<(usize, InstanceId)>>,
     pub(crate) class_static_methods: Vec<Vec<InstanceId>>,
     pub(crate) dict_reads: BitSet,
+    pub(crate) self_nested_locs: BitSet,
+    pub(crate) self_nested_locals: BitSet,
     pub(crate) deletes_array_elements: bool,
 }
 
@@ -221,17 +222,16 @@ struct Solver<'h, 'a> {
     init_inst: Option<InstanceId>,
     locations: IdxVec<LocId, Ty>,
     dirty_locs: BitSet,
-    deps: Vec<(LocId, InstanceId)>,
+    inst_reads: Vec<Vec<LocId>>,
     reader_offsets: Vec<u32>,
     reader_instances: Vec<InstanceId>,
     csr_dirty: bool,
+    evaluating_inst: Option<InstanceId>,
     current_reads: BitSet,
+    current_read_list: Vec<LocId>,
     worklist: Vec<InstanceId>,
     worklist_head: usize,
     queued: BitSet,
-    active_insts: BitSet,
-    evaluated_insts: BitSet,
-    eval_depth: u16,
     instances: IdxVec<InstanceId, Instance>,
     instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: Vec<u16>,
@@ -244,6 +244,8 @@ struct Solver<'h, 'a> {
     inst_sites: Vec<Vec<Option<SiteResolution>>>,
     inst_superseded: BitSet,
     dict_reads: BitSet,
+    self_nested_locs: BitSet,
+    self_nested_locals: BitSet,
     static_field_locs: Vec<(ClassId, usize, LocId)>,
     class_insts: IdxVec<ClassInstId, ClassInst>,
     class_index: HashMap<(ClassId, Ty), ClassInstId>,
@@ -344,17 +346,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             init_inst: None,
             locations,
             dirty_locs: BitSet::default(),
-            deps: Vec::new(),
+            inst_reads: Vec::new(),
             reader_offsets: Vec::new(),
             reader_instances: Vec::new(),
             csr_dirty: true,
+            evaluating_inst: None,
             current_reads: BitSet::default(),
+            current_read_list: Vec::new(),
             worklist: Vec::new(),
             worklist_head: 0,
             queued: BitSet::default(),
-            active_insts: BitSet::default(),
-            evaluated_insts: BitSet::default(),
-            eval_depth: 0,
             instances: IdxVec::default(),
             instance_index: HashMap::with_capacity(64),
             template_counts: vec![0; index.views.len()],
@@ -367,6 +368,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_sites: Vec::new(),
             inst_superseded: BitSet::default(),
             dict_reads: BitSet::default(),
+            self_nested_locs: BitSet::default(),
+            self_nested_locals: BitSet::default(),
             static_field_locs,
             class_insts: IdxVec::default(),
             class_index: HashMap::with_capacity(16),
@@ -413,36 +416,39 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.types.cell(loc, kind)
     }
 
-    pub(super) fn eval_if_fresh(&mut self, inst_id: InstanceId) -> Result<()> {
-        let idx = inst_id.index();
-        if self.evaluated_insts.contains(idx)
-            || self.active_insts.contains(idx)
-            || self.inst_superseded.contains(idx)
-            || self.eval_depth >= MAX_EAGER_DEPTH
-        {
-            return Ok(());
-        }
-        let saved_reads = std::mem::take(&mut self.current_reads);
-        self.eval_depth += 1;
-        let res = self.evaluate_instance(inst_id);
-        self.eval_depth -= 1;
-        self.current_reads = saved_reads;
-        res
-    }
-
     fn read_loc(&mut self, loc: LocId, reader: InstanceId) -> Ty {
-        if self.current_reads.insert(loc.index()) {
-            self.deps.push((loc, reader));
+        if self.evaluating_inst == Some(reader) {
+            if self.current_reads.insert(loc.index()) {
+                self.current_read_list.push(loc);
+            }
+        } else if let Some(reads) = self.inst_reads.get_mut(reader.index())
+            && let Err(pos) = reads.binary_search(&loc)
+        {
+            reads.insert(pos, loc);
             self.csr_dirty = true;
         }
         self.locations[loc]
+    }
+
+    pub(super) fn commit_reads(&mut self, inst_id: InstanceId) {
+        self.current_read_list.sort_unstable();
+        if let Some(prev) = self.inst_reads.get_mut(inst_id.index())
+            && *prev != self.current_read_list
+        {
+            prev.clear();
+            prev.extend_from_slice(&self.current_read_list);
+            self.csr_dirty = true;
+        }
     }
 
     fn write_loc(&mut self, loc: LocId, value: Ty) -> bool {
         let Some(&old) = self.locations.get(loc) else {
             return false;
         };
-        let next = self.types.join_bounded(old, value);
+        let (next, self_nested) = self.types.join_bounded(old, value);
+        if self_nested {
+            self.self_nested_locs.insert(loc.index());
+        }
         if next == old {
             return false;
         }
@@ -516,10 +522,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             let idx = id.index();
             if live.contains(idx) {
                 bump_count(&mut self.template_counts, inst.template);
-            } else if self.inst_superseded.insert(idx)
-                && let Some(sites) = self.inst_sites.get_mut(idx)
-            {
-                sites.fill(None);
+            } else if self.inst_superseded.insert(idx) {
+                if let Some(sites) = self.inst_sites.get_mut(idx) {
+                    sites.fill(None);
+                }
+                if let Some(reads) = self.inst_reads.get_mut(idx)
+                    && !reads.is_empty()
+                {
+                    reads.clear();
+                    self.csr_dirty = true;
+                }
             }
         }
     }
@@ -536,9 +548,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         self.reader_offsets.clear();
         self.reader_offsets.resize(self.locations.len() + 1, 0);
-        for &(loc, _) in &self.deps {
-            if let Some(slot) = self.reader_offsets.get_mut(loc.index() + 1) {
-                *slot = slot.saturating_add(1);
+        for (inst_i, reads) in self.inst_reads.iter().enumerate() {
+            if self.inst_superseded.contains(inst_i) {
+                continue;
+            }
+            for &loc in reads {
+                if let Some(slot) = self.reader_offsets.get_mut(loc.index() + 1) {
+                    *slot = slot.saturating_add(1);
+                }
             }
         }
         let mut acc = 0u32;
@@ -550,12 +567,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.reader_instances.clear();
         self.reader_instances.resize(total, init_inst);
         let mut cursor = self.reader_offsets.clone();
-        for &(loc, reader) in &self.deps {
-            if let Some(pos) = cursor.get_mut(loc.index()) {
-                let idx = *pos as usize;
-                *pos = pos.saturating_add(1);
-                if let Some(slot) = self.reader_instances.get_mut(idx) {
-                    *slot = reader;
+        for (reader, reads) in self
+            .instances
+            .iter_enumerated()
+            .map(|(id, _)| id)
+            .zip(&self.inst_reads)
+        {
+            if self.inst_superseded.contains(reader.index()) {
+                continue;
+            }
+            for &loc in reads {
+                if let Some(pos) = cursor.get_mut(loc.index()) {
+                    let idx = *pos as usize;
+                    *pos = pos.saturating_add(1);
+                    if let Some(slot) = self.reader_instances.get_mut(idx) {
+                        *slot = reader;
+                    }
                 }
             }
         }
@@ -931,6 +958,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.inst_captures.push(inst_caps);
         self.inst_sites
             .push(vec![None; self.index.site_count(template)]);
+        self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
     }
@@ -1210,24 +1238,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         for id in live_ids {
             self.evaluate_instance(id)?;
         }
-        debug_assert_eq!(
-            self.instances.len(),
-            prev_inst_count,
-            "fixed-point check spawned a new instance"
-        );
-        debug_assert_eq!(
-            self.locations.as_slice(),
-            prev_locs.as_slice(),
-            "fixed-point check mutated a storage location"
-        );
-        debug_assert_eq!(
-            self.inst_frame_locals, prev_frames,
-            "fixed-point check mutated a local frame slot"
-        );
-        debug_assert!(
-            self.dirty_locs.is_empty(),
-            "fixed-point check dirtied a storage location"
-        );
+        if self.instances.len() != prev_inst_count {
+            return Err(Diagnostic::internal(
+                "fixed-point check spawned a new instance",
+            ));
+        }
+        if self.locations.as_slice() != prev_locs.as_slice() {
+            return Err(Diagnostic::internal(
+                "fixed-point check mutated a storage location",
+            ));
+        }
+        if self.inst_frame_locals != prev_frames {
+            return Err(Diagnostic::internal(
+                "fixed-point check mutated a local frame slot",
+            ));
+        }
+        if !self.dirty_locs.is_empty() {
+            return Err(Diagnostic::internal(
+                "fixed-point check dirtied a storage location",
+            ));
+        }
         Ok(())
     }
 

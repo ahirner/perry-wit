@@ -3,11 +3,12 @@ use super::*;
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn evaluate_instance(&mut self, inst_id: InstanceId) -> Result<()> {
-        let idx = inst_id.index();
-        self.active_insts.insert(idx);
+        self.evaluating_inst = Some(inst_id);
+        self.current_reads.clear();
+        self.current_read_list.clear();
         let res = self.evaluate_instance_inner(inst_id);
-        self.active_insts.remove(idx);
-        self.evaluated_insts.insert(idx);
+        self.evaluating_inst = None;
+        self.commit_reads(inst_id);
         res
     }
 
@@ -26,7 +27,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(view) = self.index.view(template) else {
             return Ok(());
         };
-        self.current_reads.clear();
         let mut s = EvalState::new(inst_id, receiver);
 
         for (p_idx, param) in view.params.iter().enumerate() {
@@ -149,7 +149,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .get_mut(s.inst.index())
                 .and_then(|f| f.get_mut(slot))
             {
-                let next = self.types.join_bounded(*cell, value);
+                let (next, self_nested) = self.types.join_bounded(*cell, value);
+                if self_nested {
+                    self.self_nested_locals.insert(local.index());
+                }
                 if next != *cell {
                     *cell = next;
                     s.local_changed = true;
@@ -161,6 +164,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             .local_loc_in_instance(s.inst, local)
             .unwrap_or_else(|| self.ensure_instance_local(s.inst, local, Ty::BOTTOM));
         self.write_loc(loc, value);
+        if self.self_nested_locs.contains(loc.index()) {
+            self.self_nested_locals.insert(local.index());
+        }
     }
 
     pub(super) fn local_loc_in_instance(
@@ -223,11 +229,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         if val_ty == Ty::BOTTOM {
             return;
         }
-        let next = if self
+        let self_nested = self
             .types
-            .contains_cell(val_ty, elem_loc, self.locations.as_slice())
-            || self.types.has_nested_unresolved(val_ty, false)
-        {
+            .contains_cell(val_ty, elem_loc, self.locations.as_slice());
+        if self_nested {
+            self.self_nested_locs.insert(elem_loc.index());
+        }
+        let next = if self_nested || self.types.has_nested_unresolved(val_ty, false) {
             Ty::OPEN
         } else {
             self.types
@@ -737,6 +745,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             class_inst_setters,
             class_static_methods,
             dict_reads: self.dict_reads,
+            self_nested_locs: self.self_nested_locs,
+            self_nested_locals: self.self_nested_locals,
             deletes_array_elements: self.deletes_array_elements,
         }
     }
