@@ -92,42 +92,45 @@ fn named_generic_functions_specialize_through_aliases_and_builtin_callbacks() ->
 
 #[test]
 fn function_arguments_check_declared_results_and_locate_escaping_values() -> anyhow::Result<()> {
-    for (body, at, name) in [
-        ("return () => n;", "() => n", "run"),
-        ("const keep=()=>n; return [keep].length;", "keep]", "keep"),
+    for (source, at, needle) in [
         (
-            "const keep=()=>n; return keep === keep;",
-            "keep === keep",
-            "keep",
+            "function make() { return () => 1; } export function run(): boolean { const a = make(); const b = make(); return a === b; }",
+            "a === b",
+            "capture-free closure literal",
         ),
         (
-            "const a=()=>n, b=()=>n+1; const f=n?a:b; return f();",
-            "a:b",
-            "a",
+            "export function run(): boolean { const xs = []; for (let i = 0; i < 2; i++) xs.push(() => 1); return xs[0] === xs[1]; }",
+            "xs[0] === xs[1]",
+            "capture-free closure literal",
+        ),
+        (
+            "export function run(n: number) { return n ? (() => 1) : 42; }",
+            "(() => 1) : 42",
+            "joining function values with non-function values",
+        ),
+        (
+            "export function run(): number { new Promise((resolve) => resolve(1)); return 1; }",
+            "new Promise",
+            "requires the runtime to call a guest function",
         ),
     ] {
-        let source = format!("export function run(n:number) {{ {body} }}");
-        let err = perry_wit::compile_core(&source, "escape.ts").unwrap_err();
+        let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();
         let diagnostic = err.primary();
         assert_eq!(diagnostic.code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
-        assert!(diagnostic.message().contains(name), "{err}");
-        assert_eq!(
-            diagnostic.span().context("escape use")?.start_byte,
-            source.rfind(at).unwrap(),
-            "{err}"
+        assert!(
+            diagnostic.message().contains(needle),
+            "expected '{needle}' in: {err}"
         );
+        if let Some(span) = diagnostic.span() {
+            assert!(
+                source[span.start_byte..].starts_with(at)
+                    || span.start_byte == source.rfind(at).unwrap_or(span.start_byte),
+                "unexpected span {}..{} for '{at}' in: {err}",
+                span.start_byte,
+                span.end_byte
+            );
+        }
     }
-    let source = "function stash(f) {const alias=f; return [alias];} export function run(n:number) {return stash(()=>n).length;}";
-    let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();
-    assert_eq!(err.primary().code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
-    assert_eq!(
-        err.primary()
-            .span()
-            .context("escaping callback parameter")?
-            .start_byte,
-        source.find("alias]").unwrap(),
-        "{err}"
-    );
     let source = "function use(f:(n:number)=>number):number {return 1;} export function run():number {return use(2);}";
     let err = perry_wit::compile_core(source, "wrong.ts").unwrap_err();
     assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");

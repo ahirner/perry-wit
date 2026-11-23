@@ -795,7 +795,19 @@ impl TypeTable {
         )
     }
 
-    pub(crate) fn is_tagged_func_union(&self, ty: Ty, capture_free: &BitSet) -> bool {
+    pub(crate) fn is_env_func(&self, ty: Ty, escaping_env: &BitSet) -> bool {
+        matches!(
+            self.kind(ty),
+            TyKind::Func(id) if escaping_env.contains(id.template.index())
+        )
+    }
+
+    pub(crate) fn is_tagged_func_union(
+        &self,
+        ty: Ty,
+        capture_free: &BitSet,
+        escaping_env: &BitSet,
+    ) -> bool {
         let TyKind::Union(span) = self.kind(ty) else {
             return false;
         };
@@ -805,7 +817,7 @@ impl TypeTable {
             if matches!(m, Ty::NULL | Ty::VOID) {
                 continue;
             }
-            if self.is_zero_sized_func(m, capture_free) {
+            if self.is_zero_sized_func(m, capture_free) || self.is_env_func(m, escaping_env) {
                 func_count += 1;
             } else {
                 return false;
@@ -832,6 +844,21 @@ impl TypeTable {
         (out.len() >= 2).then_some(out)
     }
 
+    pub(crate) fn func_members(&self, ty: Ty) -> Vec<FuncIdentity> {
+        match self.kind(ty) {
+            TyKind::Func(id) => vec![id],
+            TyKind::Union(span) => self
+                .ty_slice(span)
+                .iter()
+                .filter_map(|&m| match self.kind(m) {
+                    TyKind::Func(id) => Some(id),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn has_func(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Func(_) => true,
@@ -843,6 +870,7 @@ impl TypeTable {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn materialize_hir_with(
         &self,
         ctx: &Context,
@@ -850,7 +878,9 @@ impl TypeTable {
         locations: &[Ty],
         dict_reads: &super::bitset::BitSet,
         capture_free: &super::bitset::BitSet,
+        escaping_env: &super::bitset::BitSet,
         class_name: &impl Fn(ClassInstId) -> Option<String>,
+        env_fields: &impl Fn(FuncIdentity) -> Vec<(String, Ty, bool)>,
     ) -> HirType {
         Materializer {
             table: self,
@@ -858,8 +888,11 @@ impl TypeTable {
             locations,
             dict_reads,
             capture_free,
+            escaping_env,
             class_name,
+            env_fields,
             visiting: Vec::new(),
+            visiting_funcs: Vec::new(),
         }
         .run(ty)
     }
@@ -871,7 +904,9 @@ impl TypeTable {
         class_name: &impl Fn(ClassInstId) -> Option<String>,
     ) -> HirType {
         let empty = super::bitset::BitSet::default();
-        self.materialize_hir_with(ctx, ty, &[], &empty, &empty, class_name)
+        self.materialize_hir_with(ctx, ty, &[], &empty, &empty, &empty, class_name, &|_| {
+            Vec::new()
+        })
     }
 
     pub(crate) fn is_valid_dict_value(&self, elem: Ty, dict_read: bool) -> bool {
@@ -1134,17 +1169,22 @@ impl TypeTable {
     }
 }
 
-struct Materializer<'a, F> {
+struct Materializer<'a, F, E> {
     table: &'a TypeTable,
     ctx: &'a Context,
     locations: &'a [Ty],
     dict_reads: &'a super::bitset::BitSet,
     capture_free: &'a super::bitset::BitSet,
+    escaping_env: &'a super::bitset::BitSet,
     class_name: &'a F,
+    env_fields: &'a E,
     visiting: Vec<LocId>,
+    visiting_funcs: Vec<FuncIdentity>,
 }
 
-impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
+impl<F: Fn(ClassInstId) -> Option<String>, E: Fn(FuncIdentity) -> Vec<(String, Ty, bool)>>
+    Materializer<'_, F, E>
+{
     fn empty_object(index_signature: Option<Box<HirType>>) -> HirType {
         HirType::Object(ObjectType {
             name: None,
@@ -1165,6 +1205,58 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
         } else {
             self.run(ty)
         }
+    }
+    fn func_env_hir(&mut self, ident: FuncIdentity) -> HirType {
+        if self.visiting_funcs.contains(&ident) {
+            return func_tag_hir(ident);
+        }
+        self.visiting_funcs.push(ident);
+        let fields = (self.env_fields)(ident);
+        let mut env_props = HashMap::with_capacity(fields.len());
+        let mut env_order = Vec::with_capacity(fields.len());
+        for (name, fty, is_boxed) in fields {
+            let inner = self.run(fty);
+            let ty = if is_boxed { box_hir(inner) } else { inner };
+            env_order.push(name.clone());
+            env_props.insert(
+                name,
+                PropertyInfo {
+                    ty,
+                    optional: false,
+                    readonly: false,
+                },
+            );
+        }
+        self.visiting_funcs.pop();
+        let env_obj = HirType::Object(ObjectType {
+            name: None,
+            properties: env_props,
+            property_order: (!env_order.is_empty()).then_some(env_order),
+            index_signature: None,
+        });
+        let mut properties = HashMap::with_capacity(2);
+        properties.insert(
+            "tag".to_owned(),
+            PropertyInfo {
+                ty: HirType::StringLiteral(func_tag(ident)),
+                optional: false,
+                readonly: false,
+            },
+        );
+        properties.insert(
+            "val".to_owned(),
+            PropertyInfo {
+                ty: env_obj,
+                optional: false,
+                readonly: false,
+            },
+        );
+        HirType::Object(ObjectType {
+            name: None,
+            properties,
+            property_order: Some(vec!["tag".to_owned(), "val".to_owned()]),
+            index_signature: None,
+        })
     }
     fn run(&mut self, ty: Ty) -> HirType {
         match self.table.kind(ty) {
@@ -1221,7 +1313,11 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                 let mut members = Vec::with_capacity(s.len as usize);
                 for &t in slice {
                     let h = if has_func && let TyKind::Func(ident) = self.table.kind(t) {
-                        func_tag_hir(ident)
+                        if self.escaping_env.contains(ident.template.index()) {
+                            self.func_env_hir(ident)
+                        } else {
+                            func_tag_hir(ident)
+                        }
                     } else {
                         self.run(t)
                     };
@@ -1273,6 +1369,9 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                 })
             }
             TyKind::ClassInst(inst) => HirType::Named((self.class_name)(inst).unwrap_or_default()),
+            TyKind::Func(ident) if self.escaping_env.contains(ident.template.index()) => {
+                self.func_env_hir(ident)
+            }
             TyKind::Func(_) => HirType::Function(perry_hir::types::FunctionType {
                 params: Vec::new(),
                 return_type: Box::new(HirType::Void),
@@ -1283,8 +1382,29 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
     }
 }
 
-pub(crate) fn func_tag(template: TemplateId) -> String {
-    format!("fn_{}", template.index())
+pub(crate) fn func_tag(ident: FuncIdentity) -> String {
+    match ident.capture_owner {
+        Some(owner) => format!("fn_{}_{}", ident.template.index(), owner.index()),
+        None => format!("fn_{}", ident.template.index()),
+    }
+}
+
+pub(crate) fn box_hir(inner: HirType) -> HirType {
+    let mut properties = HashMap::with_capacity(1);
+    properties.insert(
+        "v".to_owned(),
+        PropertyInfo {
+            ty: inner,
+            optional: false,
+            readonly: false,
+        },
+    );
+    HirType::Object(ObjectType {
+        name: None,
+        properties,
+        property_order: Some(vec!["v".to_owned()]),
+        index_signature: None,
+    })
 }
 
 fn func_tag_hir(ident: FuncIdentity) -> HirType {
@@ -1292,7 +1412,7 @@ fn func_tag_hir(ident: FuncIdentity) -> HirType {
     properties.insert(
         "tag".to_owned(),
         PropertyInfo {
-            ty: HirType::StringLiteral(func_tag(ident.template)),
+            ty: HirType::StringLiteral(func_tag(ident)),
             optional: false,
             readonly: false,
         },

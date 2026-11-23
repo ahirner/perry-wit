@@ -1,15 +1,17 @@
 //! Final monomorphic HIR emission phase.
+mod funcs;
 use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
 use super::solve::{ClassInst, FuncCoercion, Instance, Receiver, SiteResolution, Solved};
 use super::types::{
-    CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TypeTable, func_tag,
+    CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TypeTable, box_hir,
+    func_tag,
 };
 use crate::hir_compat::{Locations, Metadata};
 use perry_hir::{
     ir::{
-        CallArg, CatchClause, Class, ClassField, ClassFieldOrigin, Expr, Function,
-        Module as HirModule, Param, Stmt, SwitchCase,
+        BinaryOp, CallArg, CatchClause, Class, CompareOp, Expr, Function, Module as HirModule,
+        Stmt, SwitchCase, UnaryOp, UpdateOp,
     },
     types::{FuncId, LocalId, Type as HirType},
 };
@@ -100,6 +102,7 @@ pub(crate) fn build(
         dispatchers: HashMap::new(),
         wideners: HashMap::new(),
         casters: HashMap::new(),
+        comparers: HashMap::new(),
     };
     let (init, mut functions, mut classes) = e.build_all()?;
     functions.extend(e.synth_functions);
@@ -117,7 +120,8 @@ pub(crate) fn build(
     })
 }
 
-type DispatcherKey = (Ty, Vec<(TemplateId, InstanceId)>, Ty, u64, Option<Ty>);
+type DispatcherKey = (Ty, Vec<(FuncIdentity, InstanceId)>, Ty, u64, Option<Ty>);
+type EnvField = (LocalId, String, Ty, bool);
 
 struct Emitter<'h, 'a> {
     ctx: &'a Context,
@@ -140,12 +144,18 @@ struct Emitter<'h, 'a> {
     dispatchers: HashMap<DispatcherKey, FuncId>,
     wideners: HashMap<(Ty, Ty), FuncId>,
     casters: HashMap<Ty, FuncId>,
+    comparers: HashMap<(Ty, Ty), FuncId>,
 }
 
 struct RewriteCtx<'a> {
     inst_id: InstanceId,
     func_params: &'a [(LocalId, FuncId)],
     self_local: Option<LocalId>,
+    env_local: Option<LocalId>,
+    env_captures: &'a [(LocalId, String, bool)],
+    self_capture_locals: &'a [LocalId],
+    self_env_tag: Option<&'a str>,
+    boxed_param_map: &'a [(LocalId, LocalId)],
     void_return: bool,
     has_expected: bool,
     remap: Option<&'a mut HashMap<LocalId, LocalId>>,
@@ -156,6 +166,11 @@ impl RewriteCtx<'_> {
             inst_id,
             func_params: &[],
             self_local: None,
+            env_local: None,
+            env_captures: &[],
+            self_capture_locals: &[],
+            self_env_tag: None,
+            boxed_param_map: &[],
             void_return: false,
             has_expected: false,
             remap: None,
@@ -166,6 +181,11 @@ impl RewriteCtx<'_> {
             inst_id: self.inst_id,
             func_params: self.func_params,
             self_local: self.self_local,
+            env_local: self.env_local,
+            env_captures: self.env_captures,
+            self_capture_locals: self.self_capture_locals,
+            self_env_tag: self.self_env_tag,
+            boxed_param_map: self.boxed_param_map,
             void_return: self.void_return,
             has_expected,
             remap: None,
@@ -182,382 +202,6 @@ impl<'h> Emitter<'h, '_> {
     }
     fn class_inst_name(&self, id: ClassInstId) -> Option<String> {
         Some(self.solved.class_insts[id].emitted_name.clone())
-    }
-    fn materialize(&self, ty: Ty) -> HirType {
-        self.types.materialize_hir_with(
-            self.ctx,
-            ty,
-            self.solved.locations.as_slice(),
-            &self.solved.dict_reads,
-            &self.index.capture_free_templates,
-            &|cid| self.class_inst_name(cid),
-        )
-    }
-    fn is_zero_sized_func(&self, ty: Ty) -> bool {
-        self.types
-            .is_zero_sized_func(ty, &self.index.capture_free_templates)
-    }
-    fn intern_anon_shape(&mut self, field_names: &[&str]) -> String {
-        let key: Vec<String> = field_names.iter().map(|&n| n.to_owned()).collect();
-        if let Some(existing) = self.synth_shapes.get(&key) {
-            return existing.clone();
-        }
-        let id = self.next_class_id;
-        self.next_class_id = id.saturating_add(1);
-        let name = format!("__AnonShape_e_{id}");
-        let fields = key
-            .iter()
-            .map(|fname| ClassField {
-                origin: ClassFieldOrigin::Declared,
-                name: fname.clone(),
-                key_expr: None,
-                ty: HirType::Any,
-                init: None,
-                is_private: false,
-                is_readonly: false,
-                decorators: Vec::new(),
-            })
-            .collect();
-        self.synth_classes.push(Class {
-            id,
-            name: name.clone(),
-            type_params: Vec::new(),
-            extends: None,
-            extends_name: None,
-            native_extends: None,
-            extends_expr: None,
-            heritage_lexically_shadowed: false,
-            fields,
-            constructor: None,
-            methods: Vec::new(),
-            getters: Vec::new(),
-            setters: Vec::new(),
-            static_accessor_names: Vec::new(),
-            static_accessor_fn_ids: Vec::new(),
-            static_fields: Vec::new(),
-            static_methods: Vec::new(),
-            computed_members: Vec::new(),
-            decorators: Vec::new(),
-            is_exported: false,
-            aliases: Vec::new(),
-            is_nested: false,
-            alloc_width_hint: 0,
-            specialized_from: None,
-            decl_stmt: None,
-        });
-        self.synth_shapes.insert(key, name.clone());
-        name
-    }
-    fn fresh_synthetic_local(&mut self) -> Result<LocalId> {
-        let next = self.next_local;
-        self.next_local = next
-            .checked_add(1)
-            .ok_or_else(|| Diagnostic::internal("local identifier limit"))?;
-        Ok(next)
-    }
-    fn fresh_func_id(&mut self) -> Result<FuncId> {
-        let next = self.next_func_id;
-        self.next_func_id = next
-            .checked_add(1)
-            .ok_or_else(|| Diagnostic::internal("function identifier limit"))?;
-        Ok(next)
-    }
-    fn emit_tag_record(&mut self, tid: TemplateId) -> Expr {
-        let class_name = self.intern_anon_shape(&["tag"]);
-        Expr::New {
-            class_name,
-            args: vec![Expr::String(func_tag(tid))],
-            type_args: Vec::new(),
-            byte_offset: 0,
-            byte_end: 0,
-            cap_args_appended: 0,
-        }
-    }
-    fn coercion_of(&self, inst_id: InstanceId, expr: &Expr) -> Option<FuncCoercion> {
-        let key = std::ptr::from_ref(expr) as usize;
-        self.solved
-            .inst_coercions
-            .get(inst_id.index())?
-            .iter()
-            .find(|&&(k, _)| k == key)
-            .map(|&(_, c)| c)
-    }
-    fn arm_return_hir(&self, inst_id: InstanceId) -> HirType {
-        let Some(inst) = self.solved.instances.get(inst_id) else {
-            return HirType::Void;
-        };
-        let ret = self
-            .solved
-            .locations
-            .get(inst.return_loc)
-            .copied()
-            .unwrap_or(Ty::VOID);
-        if matches!(ret, Ty::BOTTOM | Ty::VOID | Ty::NEVER) || self.is_zero_sized_func(ret) {
-            HirType::Void
-        } else {
-            self.materialize(ret)
-        }
-    }
-    fn synth_param(id: LocalId, name: String, ty: HirType) -> Param {
-        Param {
-            id,
-            name,
-            ty,
-            default: None,
-            is_rest: false,
-            decorators: Vec::new(),
-            arguments_object: None,
-        }
-    }
-    fn synth_call(fid: FuncId, args: Vec<Expr>, byte_offset: u32, byte_end: u32) -> Expr {
-        Expr::Call {
-            callee: Box::new(Expr::FuncRef(fid)),
-            args,
-            type_args: Vec::new(),
-            byte_offset,
-            byte_end,
-        }
-    }
-    fn synth_function(
-        id: FuncId,
-        name: String,
-        params: Vec<Param>,
-        return_type: HirType,
-        body: Vec<Stmt>,
-        is_async: bool,
-    ) -> Function {
-        Function {
-            id,
-            name,
-            type_params: Vec::new(),
-            params,
-            return_type,
-            body,
-            is_async,
-            is_generator: false,
-            is_exported: false,
-            captures: Vec::new(),
-            decorators: Vec::new(),
-            is_strict: true,
-            construct_only: false,
-            was_unrolled: false,
-            was_plain_async: false,
-        }
-    }
-    fn intern_dispatcher(
-        &mut self,
-        callee_ty: Ty,
-        arms: &[(TemplateId, InstanceId)],
-        arg_tys: Ty,
-        strip_arg_mask: u64,
-        recv_ty: Option<Ty>,
-    ) -> Result<(FuncId, bool)> {
-        let needs_recv = recv_ty.is_some()
-            && arms
-                .iter()
-                .any(|&(tid, _)| self.index.view(tid).is_some_and(|v| v.uses_this));
-        let eff_recv = needs_recv.then_some(recv_ty).flatten();
-        let key = (callee_ty, arms.to_vec(), arg_tys, strip_arg_mask, eff_recv);
-        if let Some(&fid) = self.dispatchers.get(&key) {
-            return Ok((fid, needs_recv));
-        }
-        let fid = self.fresh_func_id()?;
-        let fn_pid = self.fresh_synthetic_local()?;
-        let mut params = vec![Self::synth_param(
-            fn_pid,
-            "__fn".into(),
-            self.materialize(callee_ty),
-        )];
-        let self_pid = if let Some(rty) = eff_recv {
-            let sid = self.fresh_synthetic_local()?;
-            params.push(Self::synth_param(
-                sid,
-                "__self".into(),
-                self.materialize(rty),
-            ));
-            Some(sid)
-        } else {
-            None
-        };
-        let mut arg_pids = Vec::new();
-        for (i, &aty) in self.types.tuple_slice(arg_tys).iter().enumerate() {
-            if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
-                continue;
-            }
-            let pid = self.fresh_synthetic_local()?;
-            params.push(Self::synth_param(
-                pid,
-                format!("__p{i}"),
-                self.materialize(aty),
-            ));
-            arg_pids.push(pid);
-        }
-        let mut unique_rets: Vec<HirType> = Vec::new();
-        let mut any_async = false;
-        for &(tid, target_inst) in arms {
-            if self.index.view(tid).is_some_and(|v| v.is_async) {
-                any_async = true;
-            }
-            let r = self.arm_return_hir(target_inst);
-            if !unique_rets.contains(&r) {
-                unique_rets.push(r);
-            }
-        }
-        let disp_ret = match unique_rets.as_slice() {
-            [] => HirType::Void,
-            [single] => single.clone(),
-            _ => HirType::Union(unique_rets),
-        };
-        let mut cases = Vec::with_capacity(arms.len());
-        for &(tid, target_inst) in arms {
-            let target_fid = self
-                .instance(target_inst, "missing dispatch arm instance")?
-                .emitted_func_id;
-            let view = self
-                .index
-                .view(tid)
-                .ok_or_else(|| Diagnostic::internal("missing dispatch arm template"))?;
-            let mut call_args = Vec::with_capacity(arg_pids.len() + 1);
-            if view.uses_this
-                && let Some(sid) = self_pid
-            {
-                call_args.push(Expr::LocalGet(sid));
-            }
-            let has_rest = view.params.iter().any(|p| p.is_rest);
-            let max_args = if has_rest {
-                arg_pids.len()
-            } else {
-                view.params
-                    .iter()
-                    .enumerate()
-                    .filter(|&(i, _)| i >= 64 || (strip_arg_mask & (1u64 << i)) == 0)
-                    .count()
-            };
-            for &pid in arg_pids.iter().take(max_args) {
-                call_args.push(Expr::LocalGet(pid));
-            }
-            let call = Self::synth_call(target_fid, call_args, 0, 0);
-            let arm_ret = self.arm_return_hir(target_inst);
-            let body = if disp_ret == HirType::Void {
-                vec![Stmt::Expr(call), Stmt::Return(None)]
-            } else if arm_ret == HirType::Void {
-                vec![Stmt::Expr(call), Stmt::Return(Some(Expr::Undefined))]
-            } else {
-                vec![Stmt::Return(Some(call))]
-            };
-            cases.push(SwitchCase {
-                test: Some(Expr::String(func_tag(tid))),
-                body,
-            });
-        }
-        let switch = Stmt::Switch {
-            discriminant: Expr::PropertyGet {
-                object: Box::new(Expr::LocalGet(fn_pid)),
-                property: "tag".into(),
-                byte_offset: 0,
-                byte_end: 0,
-            },
-            cases,
-        };
-        let func = Self::synth_function(
-            fid,
-            format!("__dispatch_{fid}"),
-            params,
-            disp_ret,
-            vec![switch],
-            any_async,
-        );
-        self.synth_functions.push(func);
-        self.dispatchers.insert(key, fid);
-        Ok((fid, needs_recv))
-    }
-    fn intern_widener(&mut self, from: Ty, to: Ty) -> Result<FuncId> {
-        if let Some(&fid) = self.wideners.get(&(from, to)) {
-            return Ok(fid);
-        }
-        let fid = self.fresh_func_id()?;
-        let pid = self.fresh_synthetic_local()?;
-        let idents = self.types.func_union_members(from).unwrap_or_default();
-        let (has_null, has_undef) = match self.types.kind(from) {
-            TyKind::Union(span) => {
-                let s = self.types.ty_slice(span);
-                (s.contains(&Ty::NULL), s.contains(&Ty::VOID))
-            }
-            _ => (false, false),
-        };
-        let mut stmts = Vec::new();
-        if has_null {
-            stmts.push(Stmt::If {
-                condition: Expr::Compare {
-                    op: perry_hir::ir::CompareOp::Eq,
-                    left: Box::new(Expr::LocalGet(pid)),
-                    right: Box::new(Expr::Null),
-                },
-                then_branch: vec![Stmt::Return(Some(Expr::Null))],
-                else_branch: None,
-            });
-        }
-        if has_undef {
-            stmts.push(Stmt::If {
-                condition: Expr::Compare {
-                    op: perry_hir::ir::CompareOp::Eq,
-                    left: Box::new(Expr::LocalGet(pid)),
-                    right: Box::new(Expr::Undefined),
-                },
-                then_branch: vec![Stmt::Return(Some(Expr::Undefined))],
-                else_branch: None,
-            });
-        }
-        let mut cases = Vec::with_capacity(idents.len());
-        for ident in idents {
-            cases.push(SwitchCase {
-                test: Some(Expr::String(func_tag(ident.template))),
-                body: vec![Stmt::Return(Some(self.emit_tag_record(ident.template)))],
-            });
-        }
-        stmts.push(Stmt::Switch {
-            discriminant: Expr::PropertyGet {
-                object: Box::new(Expr::LocalGet(pid)),
-                property: "tag".into(),
-                byte_offset: 0,
-                byte_end: 0,
-            },
-            cases,
-        });
-        let func = Self::synth_function(
-            fid,
-            format!("__widen_{fid}"),
-            vec![Self::synth_param(
-                pid,
-                "__fn".into(),
-                self.materialize(from),
-            )],
-            self.materialize(to),
-            stmts,
-            false,
-        );
-        self.synth_functions.push(func);
-        self.wideners.insert((from, to), fid);
-        Ok(fid)
-    }
-    fn intern_caster(&mut self, ty: Ty) -> Result<FuncId> {
-        if let Some(&fid) = self.casters.get(&ty) {
-            return Ok(fid);
-        }
-        let fid = self.fresh_func_id()?;
-        let pid = self.fresh_synthetic_local()?;
-        let hty = self.materialize(ty);
-        let func = Self::synth_function(
-            fid,
-            format!("__cast_{fid}"),
-            vec![Self::synth_param(pid, "__v".into(), hty.clone())],
-            hty,
-            vec![Stmt::Return(Some(Expr::LocalGet(pid)))],
-            false,
-        );
-        self.synth_functions.push(func);
-        self.casters.insert(ty, fid);
-        Ok(fid)
     }
     fn is_resolved(&self, ty: Ty) -> bool {
         !self.types.is_open_with(
@@ -679,7 +323,9 @@ impl<'h> Emitter<'h, '_> {
             {
                 *slot = Some(remap);
             }
-            if inst.is_inline_callback || inst.captures_non_global {
+            if !self.is_env_template(inst.template)
+                && (inst.is_inline_callback || inst.captures_non_global)
+            {
                 self.inline_callbacks.push(func.id);
             }
             new_functions.push(func);
@@ -897,25 +543,72 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<(Function, HashMap<LocalId, LocalId>)> {
         let mut remap = inherited.unwrap_or_default();
         let has_inherited = !remap.is_empty();
-        let mut params = Vec::with_capacity(view.params.len() + 1);
+        let mut params = Vec::with_capacity(view.params.len() + 2);
         let mut static_func_params: Vec<(LocalId, FuncId)> = Vec::new();
+        let is_env_fn = self.is_env_template(inst.template);
+        let self_ident = FuncIdentity {
+            template: inst.template,
+            capture_owner: inst.capture_owner,
+        };
+        let self_env_tag_owned = is_env_fn.then(|| func_tag(self_ident));
+        let (env_local, env_captures, self_capture_locals) = if is_env_fn {
+            let (fields, self_caps) = self.env_layout(self_ident);
+            let env_pid = self.fresh_synthetic_local()?;
+            let mut env_props = HashMap::with_capacity(fields.len().max(1));
+            let mut env_order = Vec::with_capacity(fields.len().max(1));
+            let mut cap_entries = Vec::with_capacity(fields.len());
+            if fields.is_empty() {
+                env_order.push("_u".to_owned());
+                env_props.insert(
+                    "_u".to_owned(),
+                    perry_hir::types::PropertyInfo {
+                        ty: HirType::Number,
+                        optional: false,
+                        readonly: false,
+                    },
+                );
+            } else {
+                for (cap_id, fname, fty, boxed) in fields {
+                    let inner = self.materialize(fty);
+                    let ty = if boxed { box_hir(inner) } else { inner };
+                    env_order.push(fname.clone());
+                    env_props.insert(
+                        fname.clone(),
+                        perry_hir::types::PropertyInfo {
+                            ty,
+                            optional: false,
+                            readonly: false,
+                        },
+                    );
+                    cap_entries.push((cap_id, fname, boxed));
+                }
+            }
+            let env_ty = HirType::Object(perry_hir::types::ObjectType {
+                name: None,
+                properties: env_props,
+                property_order: Some(env_order),
+                index_signature: None,
+            });
+            params.push(Self::synth_param(env_pid, "__env".to_owned(), env_ty));
+            (Some(env_pid), cap_entries, self_caps)
+        } else {
+            (None, Vec::new(), Vec::new())
+        };
         let self_local = match inst.receiver {
             Some(Receiver::Object(obj_ty)) => {
                 let sid = self.fresh_synthetic_local()?;
-                params.push(Param {
-                    id: sid,
-                    name: "__self".to_owned(),
-                    ty: self.materialize(obj_ty),
-                    default: None,
-                    decorators: Vec::new(),
-                    is_rest: false,
-                    arguments_object: None,
-                });
+                params.push(Self::synth_param(
+                    sid,
+                    "__self".to_owned(),
+                    self.materialize(obj_ty),
+                ));
                 Some(sid)
             }
             _ => None,
         };
 
+        let mut boxed_param_map: Vec<(LocalId, LocalId)> = Vec::new();
+        let mut boxed_param_inits: Vec<Stmt> = Vec::new();
         for (p_idx, param) in view.params.iter().enumerate() {
             let param_loc = *self
                 .solved
@@ -930,7 +623,9 @@ impl<'h> Emitter<'h, '_> {
                 .locations
                 .get(param_loc)
                 .ok_or_else(|| Diagnostic::internal("parameter location out of range"))?;
-            if let TyKind::Func(ident) = self.types.kind(param_ty) {
+            if let TyKind::Func(ident) = self.types.kind(param_ty)
+                && !self.is_env_template(ident.template)
+            {
                 if let Some(fid) = self.find_func_identity_instance(ident) {
                     static_func_params.push((param.id, fid));
                 }
@@ -959,11 +654,28 @@ impl<'h> Emitter<'h, '_> {
                 inst_id,
                 func_params: &static_func_params,
                 self_local,
+                env_local,
+                env_captures: &env_captures,
+                self_capture_locals: &self_capture_locals,
+                self_env_tag: self_env_tag_owned.as_deref(),
+                boxed_param_map: &boxed_param_map,
                 void_return: false,
                 has_expected: false,
                 remap: None,
             };
             new_param.default = self.rewrite_opt_expr(&param_ctx, param.default.as_ref())?;
+            if self.is_boxed_local(param.id) {
+                let box_id = self.fresh_synthetic_local()?;
+                boxed_param_map.push((param.id, box_id));
+                let init_expr = self.emit_box_record(Expr::LocalGet(new_param.id));
+                boxed_param_inits.push(Stmt::Let {
+                    id: box_id,
+                    name: format!("__box_{}", param.name),
+                    ty: box_hir(new_param.ty.clone()),
+                    mutable: false,
+                    init: Some(init_expr),
+                });
+            }
             params.push(new_param);
         }
 
@@ -996,6 +708,11 @@ impl<'h> Emitter<'h, '_> {
             inst_id,
             func_params: &static_func_params,
             self_local,
+            env_local,
+            env_captures: &env_captures,
+            self_capture_locals: &self_capture_locals,
+            self_env_tag: self_env_tag_owned.as_deref(),
+            boxed_param_map: &boxed_param_map,
             void_return,
             has_expected: false,
             remap: remap_locals.then_some(&mut remap),
@@ -1009,20 +726,30 @@ impl<'h> Emitter<'h, '_> {
             }
             perry_hir::analysis::remap_local_ids_in_stmts(&mut body, &remap);
         }
-
-        let mut captures = view.captures.to_vec();
-        if let Some(extra) = self.solved.inst_captures.get(inst_id.index()) {
-            captures.extend(extra.iter().copied());
+        if !boxed_param_inits.is_empty() {
+            boxed_param_inits.extend(body);
+            body = boxed_param_inits;
         }
-        if !remap.is_empty() {
-            for cap in &mut captures {
-                if let Some(&m) = remap.get(cap) {
-                    *cap = m;
+
+        let mut captures = if is_env_fn {
+            Vec::new()
+        } else {
+            let mut caps = view.captures.to_vec();
+            if let Some(extra) = self.solved.inst_captures.get(inst_id.index()) {
+                caps.extend(extra.iter().copied());
+            }
+            if !remap.is_empty() {
+                for cap in &mut caps {
+                    if let Some(&m) = remap.get(cap) {
+                        *cap = m;
+                    }
                 }
             }
-        }
-        captures.sort_unstable();
-        captures.dedup();
+            caps.sort_unstable();
+            caps.dedup();
+            caps
+        };
+        captures.retain(|c| !self.is_boxed_local(*c) || !is_env_fn);
 
         if !view.is_exported && inst.caller.is_some() {
             let caller_name = inst
@@ -1109,6 +836,7 @@ impl<'h> Emitter<'h, '_> {
                     .is_some_and(|li| self.index.local_deferred.contains(li.index()));
                 if let Some(t) = resolved
                     && let TyKind::Func(ident) = self.types.kind(t)
+                    && !self.is_env_template(ident.template)
                 {
                     if let Some(init_expr) = init
                         && !is_pure_func_expr(init_expr)
@@ -1187,12 +915,23 @@ impl<'h> Emitter<'h, '_> {
                 };
                 let init_has_expected = !matches!(new_ty, HirType::Any | HirType::Unknown);
                 let init_ctx = rctx.with_expected(init_has_expected);
+                let rewritten_init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
+                if self.is_boxed_local(*id) {
+                    let init_val = rewritten_init.unwrap_or_else(|| placeholder_for_hir(&new_ty));
+                    return Ok(Stmt::Let {
+                        id: out_id,
+                        name: name.clone(),
+                        ty: box_hir(new_ty),
+                        mutable: false,
+                        init: Some(self.emit_box_record(init_val)),
+                    });
+                }
                 Ok(Stmt::Let {
                     id: out_id,
                     name: name.clone(),
                     ty: new_ty,
                     mutable: *mutable,
-                    init: self.rewrite_opt_expr(&init_ctx, init.as_ref())?,
+                    init: rewritten_init,
                 })
             }
             Stmt::Expr(e) => Ok(Stmt::Expr(self.rewrite_expr(rctx, e)?)),
@@ -1303,8 +1042,8 @@ impl<'h> Emitter<'h, '_> {
         if let Some(c) = coercion {
             match c {
                 FuncCoercion::Zero if is_pure_func_expr(expr) => return Ok(Expr::Number(0.0)),
-                FuncCoercion::Tag(tid) if is_pure_func_expr(expr) => {
-                    return Ok(self.emit_tag_record(tid));
+                FuncCoercion::Tag(ident) if is_pure_func_expr(expr) => {
+                    return Ok(self.emit_tag_record(ident));
                 }
                 _ => {}
             }
@@ -1312,13 +1051,69 @@ impl<'h> Emitter<'h, '_> {
         let rewritten = self.rewrite_expr_inner(rctx, expr)?;
         match coercion {
             Some(FuncCoercion::Zero) => Ok(Expr::Sequence(vec![rewritten, Expr::Number(0.0)])),
-            Some(FuncCoercion::Tag(tid)) => {
-                let tag = self.emit_tag_record(tid);
+            Some(FuncCoercion::Tag(ident)) => {
+                let tag = self.emit_tag_record(ident);
                 Ok(Expr::Sequence(vec![rewritten, tag]))
+            }
+            Some(FuncCoercion::BoxEnv(ident)) => {
+                let val_expr = Self::prop_get(rewritten, "val");
+                Ok(self.emit_env_wrapper(ident, val_expr))
             }
             Some(FuncCoercion::Widen { from, to }) => {
                 let fid = self.intern_widener(from, to)?;
                 Ok(Self::synth_call(fid, vec![rewritten], 0, 0))
+            }
+            Some(FuncCoercion::EnvCallback { target, input_tys }) => {
+                let target_fid = self
+                    .instance(target, "missing env callback target instance")?
+                    .emitted_func_id;
+                let inputs = self.types.tuple_slice(input_tys).to_vec();
+                let arm_ret = self.arm_return_hir(target);
+                self.emit_callback_wrapper(
+                    target_fid,
+                    Self::prop_get(rewritten, "val"),
+                    &inputs,
+                    arm_ret,
+                )
+            }
+            Some(FuncCoercion::DispatchCallback {
+                callee_ty,
+                arms,
+                input_tys,
+            }) => {
+                let arm_slice = self
+                    .solved
+                    .dispatch_arms
+                    .get(arms.range())
+                    .unwrap_or(&[])
+                    .to_vec();
+                let inputs = self.types.tuple_slice(input_tys).to_vec();
+                let max_params = arm_slice
+                    .iter()
+                    .filter_map(|&(ident, _)| self.index.view(ident.template))
+                    .map(|v| {
+                        if v.params.iter().any(|p| p.is_rest) {
+                            inputs.len()
+                        } else {
+                            v.params.len()
+                        }
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .min(inputs.len());
+                let (disp_fid, _) =
+                    self.intern_dispatcher(callee_ty, &arm_slice, input_tys, 0, None)?;
+                let disp_ret = self
+                    .synth_functions
+                    .iter()
+                    .find(|f| f.id == disp_fid)
+                    .map_or(HirType::Void, |f| f.return_type.clone());
+                self.emit_callback_wrapper(
+                    disp_fid,
+                    rewritten,
+                    inputs.get(..max_params).unwrap_or(&inputs),
+                    disp_ret,
+                )
             }
             None => Ok(rewritten),
         }
@@ -1353,6 +1148,8 @@ impl<'h> Emitter<'h, '_> {
                             params,
                             return_type,
                             body: out_body,
+                            captures,
+                            mutable_captures,
                             ..
                         } = &mut out
                         {
@@ -1368,7 +1165,41 @@ impl<'h> Emitter<'h, '_> {
                                     p.ty = self.materialize(ty);
                                 }
                             }
-                            *out_body = self.rewrite_stmts(&mut RewriteCtx::plain(target), body)?;
+                            let mut cb_ctx = RewriteCtx {
+                                inst_id: target,
+                                func_params: &[],
+                                self_local: None,
+                                env_local: rctx.env_local,
+                                env_captures: rctx.env_captures,
+                                self_capture_locals: rctx.self_capture_locals,
+                                self_env_tag: rctx.self_env_tag,
+                                boxed_param_map: rctx.boxed_param_map,
+                                void_return: false,
+                                has_expected: false,
+                                remap: None,
+                            };
+                            *out_body = self.rewrite_stmts(&mut cb_ctx, body)?;
+                            if rctx.env_local.is_some()
+                                || !rctx.boxed_param_map.is_empty()
+                                || captures.iter().any(|c| self.is_boxed_local(*c))
+                            {
+                                let mut new_caps = Vec::new();
+                                let mut defined: std::collections::HashSet<usize> =
+                                    params.iter().map(|p| p.id as usize).collect();
+                                for s in out_body.iter() {
+                                    perry_hir::analysis::collect_local_refs_stmt(
+                                        s,
+                                        &mut new_caps,
+                                        &mut defined,
+                                    );
+                                }
+                                *captures = new_caps;
+                                mutable_captures.retain(|c| {
+                                    !self.is_boxed_local(*c)
+                                        && !rctx.env_captures.iter().any(|(lid, _, _)| lid == c)
+                                        && !rctx.boxed_param_map.iter().any(|(lid, _)| lid == c)
+                                });
+                            }
                         }
                         return Ok(out);
                     }
@@ -1377,6 +1208,7 @@ impl<'h> Emitter<'h, '_> {
                     target,
                     strip_arg_mask,
                     pass_receiver,
+                    pass_env,
                 } => {
                     let fid = self
                         .instance(target, "missing direct call target instance")?
@@ -1396,23 +1228,39 @@ impl<'h> Emitter<'h, '_> {
                                 ..
                             },
                         ) => {
+                            let arg_ctx = rctx.with_expected(true);
                             let mut rewritten_args =
-                                self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
-                            let pre_effect =
-                                if let Expr::PropertyGet { object, .. } = orig_callee.as_ref() {
-                                    if pass_receiver {
-                                        rewritten_args.insert(0, self.rewrite_expr(rctx, object)?);
-                                        None
-                                    } else if !is_pure_func_expr(object) {
-                                        Some(self.rewrite_expr(rctx, object)?)
-                                    } else {
-                                        None
-                                    }
-                                } else if !is_pure_func_expr(orig_callee) {
-                                    Some(self.rewrite_expr(rctx, orig_callee)?)
+                                self.rewrite_filtered_args(&arg_ctx, args, strip_arg_mask)?;
+                            let pre_effect = if pass_env {
+                                if pass_receiver
+                                    && let Expr::PropertyGet { object, .. } = orig_callee.as_ref()
+                                {
+                                    rewritten_args.insert(0, self.rewrite_expr(&arg_ctx, object)?);
+                                }
+                                let env_arg = if let Expr::LocalGet(id) = orig_callee.as_ref()
+                                    && rctx.self_capture_locals.contains(id)
+                                    && let Some(env_pid) = rctx.env_local
+                                {
+                                    Expr::LocalGet(env_pid)
+                                } else {
+                                    Self::prop_get(self.rewrite_expr(&arg_ctx, orig_callee)?, "val")
+                                };
+                                rewritten_args.insert(0, env_arg);
+                                None
+                            } else if let Expr::PropertyGet { object, .. } = orig_callee.as_ref() {
+                                if pass_receiver {
+                                    rewritten_args.insert(0, self.rewrite_expr(&arg_ctx, object)?);
+                                    None
+                                } else if !is_pure_func_expr(object) {
+                                    Some(self.rewrite_expr(rctx, object)?)
                                 } else {
                                     None
-                                };
+                                }
+                            } else if !is_pure_func_expr(orig_callee) {
+                                Some(self.rewrite_expr(rctx, orig_callee)?)
+                            } else {
+                                None
+                            };
                             **callee = Expr::FuncRef(fid);
                             *out_args = rewritten_args;
                             type_args.clear();
@@ -1440,6 +1288,60 @@ impl<'h> Emitter<'h, '_> {
                             return Ok(out);
                         }
                         _ => {}
+                    }
+                }
+                SiteResolution::FuncCompare {
+                    left_ty,
+                    right_ty,
+                    op,
+                } => {
+                    if let Expr::Compare { left, right, .. } = expr {
+                        let is_eq = matches!(op, CompareOp::Eq | CompareOp::LooseEq);
+                        let l_zero = self.is_zero_sized_func(left_ty);
+                        let r_zero = self.is_zero_sized_func(right_ty);
+                        if l_zero || r_zero {
+                            let (zero_ty, union_expr, union_ty) = if l_zero {
+                                (left_ty, right.as_ref(), right_ty)
+                            } else {
+                                (right_ty, left.as_ref(), left_ty)
+                            };
+                            if let TyKind::Func(ident) = self.types.kind(zero_ty) {
+                                if !self.types.func_members(union_ty).contains(&ident) {
+                                    return Ok(Expr::Bool(!is_eq));
+                                }
+                                let u_rewritten = self.rewrite_expr(rctx, union_expr)?;
+                                return Ok(Expr::Compare {
+                                    op: if is_eq { CompareOp::Eq } else { CompareOp::Ne },
+                                    left: Box::new(Self::prop_get(u_rewritten, "tag")),
+                                    right: Box::new(Expr::String(func_tag(ident))),
+                                });
+                            }
+                        }
+                        let l_env = self
+                            .types
+                            .is_env_func(left_ty, &self.solved.escaping_env_templates);
+                        let r_env = self
+                            .types
+                            .is_env_func(right_ty, &self.solved.escaping_env_templates);
+                        let l_rewritten = self.rewrite_expr(rctx, left)?;
+                        let r_rewritten = self.rewrite_expr(rctx, right)?;
+                        if l_env && r_env && left_ty == right_ty {
+                            return Ok(Expr::Compare {
+                                op: if is_eq { CompareOp::Eq } else { CompareOp::Ne },
+                                left: Box::new(Self::prop_get(l_rewritten, "val")),
+                                right: Box::new(Self::prop_get(r_rewritten, "val")),
+                            });
+                        }
+                        let cmp_fid = self.intern_comparer(left_ty, right_ty)?;
+                        let call = Self::synth_call(cmp_fid, vec![l_rewritten, r_rewritten], 0, 0);
+                        return Ok(if is_eq {
+                            call
+                        } else {
+                            Expr::Unary {
+                                op: UnaryOp::Not,
+                                operand: Box::new(call),
+                            }
+                        });
                     }
                 }
                 SiteResolution::ObjectLiteral { keep_mask } => {
@@ -1533,82 +1435,6 @@ impl<'h> Emitter<'h, '_> {
                         )?);
                         return Ok(Self::synth_call(fid, call_args, *byte_offset, *byte_end));
                     }
-                }
-                SiteResolution::DispatchCallback {
-                    callee_ty,
-                    arms,
-                    input_tys,
-                } => {
-                    let arm_slice = self
-                        .solved
-                        .dispatch_arms
-                        .get(arms.range())
-                        .unwrap_or(&[])
-                        .to_vec();
-                    let inputs = self.types.tuple_slice(input_tys);
-                    let max_params = arm_slice
-                        .iter()
-                        .filter_map(|&(tid, _)| self.index.view(tid))
-                        .map(|v| {
-                            if v.params.iter().any(|p| p.is_rest) {
-                                inputs.len()
-                            } else {
-                                v.params.len()
-                            }
-                        })
-                        .max()
-                        .unwrap_or(0)
-                        .min(inputs.len());
-                    let (disp_fid, _) =
-                        self.intern_dispatcher(callee_ty, &arm_slice, input_tys, 0, None)?;
-                    let cb_expr = self.rewrite_expr_plain(&rctx.with_expected(true), expr)?;
-                    let mut captures = Vec::new();
-                    let mut defined = std::collections::HashSet::new();
-                    perry_hir::analysis::collect_local_refs_expr(
-                        &cb_expr,
-                        &mut captures,
-                        &mut defined,
-                    );
-                    let mut params = Vec::with_capacity(max_params);
-                    let mut call_args = Vec::with_capacity(max_params + 1);
-                    call_args.push(cb_expr);
-                    for (i, &ity) in inputs.iter().take(max_params).enumerate() {
-                        let pid = self.fresh_synthetic_local()?;
-                        params.push(Self::synth_param(
-                            pid,
-                            format!("__cb{i}"),
-                            self.materialize(ity),
-                        ));
-                        call_args.push(Expr::LocalGet(pid));
-                    }
-                    let disp_ret = self
-                        .synth_functions
-                        .iter()
-                        .find(|f| f.id == disp_fid)
-                        .map_or(HirType::Void, |f| f.return_type.clone());
-                    let call = Self::synth_call(disp_fid, call_args, 0, 0);
-                    let body = if disp_ret == HirType::Void {
-                        vec![Stmt::Expr(call)]
-                    } else {
-                        vec![Stmt::Return(Some(call))]
-                    };
-                    let closure_fid = self.fresh_func_id()?;
-                    return Ok(Expr::Closure {
-                        func_id: closure_fid,
-                        params,
-                        return_type: disp_ret,
-                        body,
-                        captures,
-                        mutable_captures: Vec::new(),
-                        captures_this: false,
-                        captures_new_target: false,
-                        enclosing_class: None,
-                        is_async: false,
-                        is_generator: false,
-                        is_strict: true,
-                        construct_only: false,
-                        is_arrow: true,
-                    });
                 }
                 SiteResolution::TaggedArray(arr_ty) => {
                     if let Expr::Array(elems, _) = expr {
@@ -1742,16 +1568,103 @@ impl<'h> Emitter<'h, '_> {
         self.rewrite_expr_plain(rctx, expr)
     }
 
+    fn boxed_target(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
+        if let Some(env_pid) = rctx.env_local
+            && let Some((_, field, boxed)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == id)
+        {
+            return boxed.then(|| Self::prop_get(Expr::LocalGet(env_pid), field));
+        }
+        if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| *lid == id) {
+            return Some(Expr::LocalGet(box_id));
+        }
+        if self.is_boxed_local(id) {
+            return Some(Expr::LocalGet(id));
+        }
+        None
+    }
+
     fn rewrite_expr_plain(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
         if let Expr::This = expr
             && let Some(sid) = rctx.self_local
         {
             return Ok(Expr::LocalGet(sid));
         }
-        if let Expr::LocalGet(id) = expr
-            && let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id)
+        if let Expr::Closure { func_id, .. } = expr
+            && let Some(tid) = self.index.template_of_func(*func_id)
+            && self.is_env_template(tid)
         {
-            return Ok(Expr::FuncRef(*fid));
+            let ident = FuncIdentity {
+                template: tid,
+                capture_owner: Some(rctx.inst_id),
+            };
+            let (fields, _) = self.env_layout(ident);
+            let env_expr = if fields.is_empty() {
+                self.emit_anon_new(&["_u"], vec![Expr::Number(0.0)])
+            } else {
+                let names: Vec<&str> = fields.iter().map(|(_, f, _, _)| f.as_str()).collect();
+                let args = fields
+                    .iter()
+                    .map(|&(cap_id, _, _, _)| self.emit_capture_ref(rctx, cap_id))
+                    .collect();
+                self.emit_anon_new(&names, args)
+            };
+            return Ok(self.emit_env_wrapper(ident, env_expr));
+        }
+        if let Expr::LocalGet(id) = expr {
+            if let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id) {
+                return Ok(Expr::FuncRef(*fid));
+            }
+            if rctx.self_capture_locals.contains(id)
+                && let (Some(env_pid), Some(tag)) = (rctx.env_local, rctx.self_env_tag)
+            {
+                return Ok(self.emit_env_wrapper_tag(tag, Expr::LocalGet(env_pid)));
+            }
+            if let Some(env_pid) = rctx.env_local
+                && let Some((_, field, boxed)) =
+                    rctx.env_captures.iter().find(|(lid, _, _)| lid == id)
+            {
+                let base = Self::prop_get(Expr::LocalGet(env_pid), field);
+                return Ok(if *boxed {
+                    Self::prop_get(base, "v")
+                } else {
+                    base
+                });
+            }
+            if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| lid == id) {
+                return Ok(Self::prop_get(Expr::LocalGet(box_id), "v"));
+            }
+            if self.is_boxed_local(*id) {
+                return Ok(Self::prop_get(Expr::LocalGet(*id), "v"));
+            }
+        }
+        if let Expr::LocalSet(id, value) = expr
+            && let Some(box_obj) = self.boxed_target(rctx, *id)
+        {
+            let val = self.rewrite_expr(rctx, value)?;
+            return Ok(Expr::PropertySet {
+                object: Box::new(box_obj),
+                property: "v".into(),
+                value: Box::new(val),
+                byte_offset: 0,
+                byte_end: 0,
+            });
+        }
+        if let Expr::Update { id, op, prefix } = expr
+            && let Some(box_obj) = self.boxed_target(rctx, *id)
+        {
+            let bin_op = match op {
+                UpdateOp::Increment => BinaryOp::Add,
+                UpdateOp::Decrement => BinaryOp::Sub,
+            };
+            return Ok(Expr::PropertyUpdate {
+                object: Box::new(box_obj),
+                property: "v".into(),
+                op: bin_op,
+                prefix: *prefix,
+                strict: true,
+                byte_offset: 0,
+                byte_end: 0,
+            });
         }
         if rctx.self_local.is_some()
             && matches!(
@@ -1767,6 +1680,11 @@ impl<'h> Emitter<'h, '_> {
                 remap: None,
                 func_params: rctx.func_params,
                 self_local: None,
+                env_local: rctx.env_local,
+                env_captures: rctx.env_captures,
+                self_capture_locals: rctx.self_capture_locals,
+                self_env_tag: rctx.self_env_tag,
+                boxed_param_map: rctx.boxed_param_map,
                 void_return: false,
                 has_expected: false,
             };
@@ -1822,6 +1740,15 @@ impl<'h> Emitter<'h, '_> {
             .filter(|&(i, _)| i >= 64 || (mask & (1u64 << i)) == 0)
             .map(|(_, arg)| self.rewrite_expr(rctx, arg))
             .collect()
+    }
+}
+
+fn placeholder_for_hir(ty: &HirType) -> Expr {
+    match ty {
+        HirType::Number | HirType::Int32 => Expr::Number(0.0),
+        HirType::Boolean => Expr::Bool(false),
+        HirType::String => Expr::String(String::new()),
+        _ => Expr::Undefined,
     }
 }
 

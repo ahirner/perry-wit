@@ -80,9 +80,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
                         let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
                         if matches!(self.types.kind(existing), TyKind::Func(_))
-                            || self
-                                .types
-                                .is_tagged_func_union(existing, &self.index.capture_free_templates)
+                            || self.types.is_tagged_func_union(
+                                existing,
+                                &self.index.capture_free_templates,
+                                &self.escaping_env_templates,
+                            )
                         {
                             self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
                             let joined = self.types.join(existing, val_ty);
@@ -173,7 +175,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 };
                 Ok(self.types.func(FuncIdentity {
                     template,
-                    capture_owner: self.index.captures_local(captures).then_some(s.inst),
+                    capture_owner: (!self.index.template_captures(template).is_empty())
+                        .then_some(s.inst),
                 }))
             }
             Expr::Binary { op, left, right } => {
@@ -192,6 +195,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let r = self.eval_expr(s, right)?;
                 s.guards.truncate(depth);
                 let res = builtins::logical_result(self.types, *op, l, r);
+                self.check_stage1_escaping_func(s.inst, res, 0)?;
                 self.record_coercion(s.inst, left, l, res);
                 self.record_coercion(s.inst, right, r, res);
                 Ok(res)
@@ -217,6 +221,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 s.guards.join(branch, then_writes, true, true);
                 let joined = self.types.join(then_ty, else_ty);
+                self.check_stage1_escaping_func(s.inst, joined, 0)?;
                 self.record_coercion(s.inst, then_expr, then_ty, joined);
                 self.record_coercion(s.inst, else_expr, else_ty, joined);
                 Ok(joined)
@@ -274,10 +279,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .is_zero_sized_func(joined, &self.index.capture_free_templates)
                 {
                     self.record_site(s.inst, expr, SiteResolution::ZeroSizedArray);
-                } else if self
-                    .types
-                    .is_tagged_func_union(joined, &self.index.capture_free_templates)
-                {
+                } else if self.types.is_tagged_func_union(
+                    joined,
+                    &self.index.capture_free_templates,
+                    &self.escaping_env_templates,
+                ) {
                     for (elem, &et) in elements.iter().zip(&elem_tys) {
                         self.record_coercion(s.inst, elem, et, joined);
                     }
@@ -702,9 +708,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ) =>
             {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
-                if let (TyKind::Func(a), TyKind::Func(b)) = (self.types.kind(l), self.types.kind(r))
+                if l != Ty::BOTTOM
+                    && r != Ty::BOTTOM
+                    && (self.types.has_func(l) || self.types.has_func(r))
                 {
-                    self.fold_func_compare(s.inst, expr, *op, a, b, left, right)?;
+                    self.eval_func_compare(s.inst, expr, *op, l, r, left, right)?;
                 }
                 Ok(Ty::BOOLEAN)
             }
@@ -771,54 +779,83 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn fold_func_compare(
+    fn eval_func_compare(
         &mut self,
         inst_id: InstanceId,
         expr: &'h Expr,
         op: CompareOp,
-        a: FuncIdentity,
-        b: FuncIdentity,
+        l: Ty,
+        r: Ty,
         left: &Expr,
         right: &Expr,
     ) -> Result<()> {
-        for (ident, side) in [(a, left), (b, right)] {
-            if ident.capture_owner.is_some()
-                || self
-                    .index
-                    .view(ident.template)
-                    .is_some_and(|v| self.index.captures_local(v.captures))
-            {
-                let raw = self.index.view(ident.template).map_or("", |v| v.name);
-                let name = if raw.is_empty()
-                    && let Expr::LocalGet(lid) = side
-                    && let Some(src) = self
-                        .hir
-                        .local_source_spans
-                        .get(lid)
-                        .and_then(|sp| self.metadata.locations.source_at(sp.start))
+        if matches!(l, Ty::NULL | Ty::VOID) || matches!(r, Ty::NULL | Ty::VOID) {
+            return Ok(());
+        }
+        self.mark_escaping_env(inst_id, l);
+        self.mark_escaping_env(inst_id, r);
+        let l_members = self.types.func_members(l);
+        let r_members = self.types.func_members(r);
+        let same_local = matches!((left, right), (Expr::LocalGet(a), Expr::LocalGet(b)) if a == b);
+        if !same_local {
+            for &lm in &l_members {
+                let tid = lm.template;
+                if !r_members.iter().any(|rm| rm.template == tid) {
+                    continue;
+                }
+                if !self.escaping_env_templates.contains(tid.index())
+                    && self
+                        .index
+                        .view(tid)
+                        .is_some_and(|v| v.kind == TemplateKind::Closure)
+                    && (self.index.closure_in_loop.contains(tid.index())
+                        || self
+                            .index
+                            .closure_owner_template
+                            .get(tid.index())
+                            .copied()
+                            .flatten()
+                            .is_some_and(|owner| owner != TemplateId::INIT))
                 {
-                    src.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
-                        .next()
-                        .unwrap_or("closure")
-                } else if raw.is_empty() {
-                    "closure"
-                } else {
-                    raw
-                };
-                let err =
-                    Diagnostic::unsupported(format!("cannot compare capturing function '{name}'"));
-                return Err(match self.facts.callable_comparisons.first() {
-                    Some(&span) => self.metadata.locations.annotate(err, span),
-                    None => err,
-                });
+                    let err = Diagnostic::unsupported(
+                        "cannot compare a capture-free closure literal that may be evaluated more than once",
+                    );
+                    return Err(match self.facts.callable_comparisons.last() {
+                        Some(&span) => self.metadata.locations.annotate(err, span),
+                        None => err,
+                    });
+                }
+            }
+        }
+        let is_eq = matches!(op, CompareOp::Eq | CompareOp::LooseEq);
+        if let (TyKind::Func(a), TyKind::Func(b)) = (self.types.kind(l), self.types.kind(r)) {
+            let a_zero = self
+                .types
+                .is_zero_sized_func(l, &self.index.capture_free_templates);
+            let b_zero = self
+                .types
+                .is_zero_sized_func(r, &self.index.capture_free_templates);
+            if a_zero && b_zero {
+                self.record_site(
+                    inst_id,
+                    expr,
+                    SiteResolution::FoldBool((a.template == b.template) == is_eq),
+                );
+                return Ok(());
+            }
+            if a != b {
+                self.record_site(inst_id, expr, SiteResolution::FoldBool(!is_eq));
+                return Ok(());
             }
         }
         self.record_site(
             inst_id,
             expr,
-            SiteResolution::FoldBool(
-                (a.template == b.template) == matches!(op, CompareOp::Eq | CompareOp::LooseEq),
-            ),
+            SiteResolution::FuncCompare {
+                left_ty: l,
+                right_ty: r,
+                op,
+            },
         );
         Ok(())
     }

@@ -670,6 +670,91 @@ console.log(
 "#,
             "a,b,c 4 6 8 2,3 6 6 10\n",
         ),
+        (
+            "escaping_closures_environments_boxed_captures_and_equality",
+            r#"
+function scale(k) {
+  return (x) => x * k;
+}
+function counter() {
+  let n = 0;
+  return () => ++n;
+}
+function pair() {
+  let n = 0;
+  return [() => ++n, () => n];
+}
+function boxedParam(n) {
+  return () => ++n;
+}
+function stash(f) {
+  const alias = f;
+  return [alias];
+}
+const base = (x) => x + 10;
+function pickFn(flag, k) {
+  return flag ? scale(k) : base;
+}
+function selfRet(k) {
+  let count = k;
+  const f = () => {
+    count++;
+    return f;
+  };
+  return { f, get: () => count };
+}
+function nestedInline(start) {
+  let acc = start;
+  return (xs) => xs.map((x) => {
+    acc += x;
+    return acc;
+  });
+}
+
+const s3 = scale(3);
+const s3b = scale(3);
+const c1 = counter();
+const c2 = counter();
+const p = pair();
+const bp = boxedParam(10);
+const stashed = stash(() => 7);
+const u1 = pickFn(true, 4);
+const u2 = pickFn(false, 4);
+const sr = selfRet(0);
+const sf = sr.f;
+const sget = sr.get;
+const sfAfter = sf()();
+const ni = nestedInline(5);
+
+console.log(
+  s3(2),
+  c1(),
+  c1(),
+  c2(),
+  p[0](),
+  p[1](),
+  p[0](),
+  p[1](),
+  bp(),
+  bp(),
+  stashed[0](),
+  [1, 2].map(s3).join(","),
+  [1, 2].map(scale(5)).join(","),
+  [1, 2].map(u1).join(","),
+  [1, 2].map(u2).join(","),
+  s3 === s3,
+  s3 === s3b,
+  s3 !== s3b,
+  u1 === u1,
+  u1 === u2,
+  u2 === u2,
+  sfAfter === sf,
+  sget(),
+  ni([1, 2, 3]).join(","),
+);
+"#,
+            "6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
+        ),
     ];
     for &(name, source, expected) in cases {
         let run = execute(source).await?;

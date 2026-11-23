@@ -2,8 +2,8 @@
 use crate::hir_compat::{self, Locations};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
-use std::collections::{HashMap, HashSet};
-use swc_common::{Span, Spanned};
+use std::collections::HashMap;
+use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Default)]
@@ -15,7 +15,6 @@ pub(crate) struct SourceFacts {
     pub(crate) exported_var_starts: Vec<u32>,
     pub(crate) callable_comparisons: Vec<Span>,
     pub(crate) param_value_uses: Vec<(u32, Span)>,
-    pub(crate) escaping_closure: Option<(String, Span)>,
 }
 
 impl SourceFacts {
@@ -100,26 +99,19 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
     Ok(())
 }
 
-pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<SourceFacts> {
+pub(crate) fn scan_ast(module: &ast::Module, _locations: &Locations<'_>) -> Result<SourceFacts> {
     #[derive(Default)]
     struct AstScanner {
         facts: SourceFacts,
         parameters: HashMap<ast::Id, u32>,
         closures: HashMap<ast::Id, Span>,
-        capturing_closures: HashMap<ast::Id, Span>,
         top_vars: HashMap<ast::Id, u32>,
-        enclosing: Option<swc_atoms::Atom>,
-        enclosing_scopes: Vec<HashSet<ast::Id>>,
+        enclosing_depth: u32,
     }
 
     impl AstScanner {
         fn record_param(&mut self, pat: &ast::Pat) {
             record_pattern_annotations(pat, false, &mut self.facts.param_annotated_starts);
-            if let Some(scope) = self.enclosing_scopes.last_mut() {
-                hir_compat::pattern_bindings(pat, false, &mut |id, _| {
-                    scope.insert(id.to_id());
-                });
-            }
             if let ast::Pat::Ident(binding) = pat {
                 self.parameters
                     .insert(binding.id.to_id(), binding.id.span.lo.0);
@@ -130,17 +122,6 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                 ast::Expr::Ident(id) => self.closures.contains_key(&id.to_id()),
                 ast::Expr::Paren(p) => self.is_closure_expr(&p.expr),
                 other => matches!(other, ast::Expr::Arrow(_) | ast::Expr::Fn(_)),
-            }
-        }
-        fn is_capturing_closure(&self, expr: &ast::Expr) -> bool {
-            match expr {
-                ast::Expr::Ident(id) => self.capturing_closures.contains_key(&id.to_id()),
-                ast::Expr::Paren(p) => self.is_capturing_closure(&p.expr),
-                ast::Expr::Arrow(_) | ast::Expr::Fn(_) => {
-                    !self.enclosing_scopes.is_empty()
-                        && expr_captures_outer(expr, &self.enclosing_scopes)
-                }
-                _ => false,
             }
         }
         fn visit_callable_position(&mut self, expr: &ast::Expr) {
@@ -185,48 +166,21 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             self.record_param(&param.pat);
             param.visit_children_with(self);
         }
-        fn visit_function(&mut self, func: &ast::Function) {
-            self.enclosing_scopes.push(HashSet::new());
-            func.visit_children_with(self);
-            self.enclosing_scopes.pop();
-        }
-        fn visit_constructor(&mut self, ctor: &ast::Constructor) {
-            self.enclosing_scopes.push(HashSet::new());
-            for param in &ctor.params {
-                match param {
-                    ast::ParamOrTsParamProp::Param(p) => self.record_param(&p.pat),
-                    ast::ParamOrTsParamProp::TsParamProp(prop) => match &prop.param {
-                        ast::TsParamPropParam::Ident(b) => {
-                            if let Some(scope) = self.enclosing_scopes.last_mut() {
-                                scope.insert(b.id.to_id());
-                            }
-                        }
-                        ast::TsParamPropParam::Assign(a) => self.record_param(&a.left),
-                    },
-                }
-            }
-            ctor.visit_children_with(self);
-            self.enclosing_scopes.pop();
-        }
         fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
-            self.enclosing_scopes.push(HashSet::new());
             for pat in &arrow.params {
                 self.record_param(pat);
             }
+            self.enclosing_depth += 1;
             arrow.visit_children_with(self);
-            self.enclosing_scopes.pop();
+            self.enclosing_depth -= 1;
         }
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
-            if !self.enclosing_scopes.is_empty() {
+            if self.enclosing_depth > 0 {
                 self.closures.insert(decl.ident.to_id(), decl.ident.span);
-                if fn_captures_outer(&decl.function, &self.enclosing_scopes) {
-                    self.capturing_closures
-                        .insert(decl.ident.to_id(), decl.ident.span);
-                }
             }
-            let prev = self.enclosing.replace(decl.ident.sym.clone());
+            self.enclosing_depth += 1;
             decl.function.visit_with(self);
-            self.enclosing = prev;
+            self.enclosing_depth -= 1;
         }
         fn visit_for_head(&mut self, head: &ast::ForHead) {
             if let ast::ForHead::VarDecl(var) = head {
@@ -246,9 +200,7 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                     self.facts.deferred_starts.push(b.id.span.lo.0);
                 }
                 hir_compat::pattern_bindings(&decl.name, false, &mut |id, annotated| {
-                    if let Some(scope) = self.enclosing_scopes.last_mut() {
-                        scope.insert(id.to_id());
-                    } else {
+                    if self.enclosing_depth == 0 {
                         self.top_vars.insert(id.to_id(), id.span.lo.0);
                     }
                     if !annotated {
@@ -266,9 +218,6 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                                 _ => b.id.span,
                             };
                             self.closures.insert(b.id.to_id(), origin);
-                            if self.is_capturing_closure(init) {
-                                self.capturing_closures.insert(b.id.to_id(), origin);
-                            }
                         }
                         if let ast::Expr::Ident(src) = init.as_ref()
                             && let Some(&origin) = self.parameters.get(&src.to_id())
@@ -286,20 +235,7 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             {
                 self.facts.param_value_uses.push((origin, id.span));
             }
-            if self.is_capturing_closure(expr) {
-                self.facts.escaping_closure.get_or_insert_with(|| {
-                    let name = match expr {
-                        ast::Expr::Ident(id) => format!("function '{}'", id.sym),
-                        _ => self.enclosing.as_ref().map_or_else(
-                            || "anonymous function".into(),
-                            |n| format!("closure in '{}'", hir_compat::display_name(n)),
-                        ),
-                    };
-                    (name, expr.span())
-                });
-            } else {
-                expr.visit_children_with(self);
-            }
+            expr.visit_children_with(self);
         }
         fn visit_bin_expr(&mut self, expr: &ast::BinExpr) {
             if matches!(
@@ -309,7 +245,16 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                     | ast::BinaryOp::EqEq
                     | ast::BinaryOp::NotEq
             ) {
-                if self.is_closure_expr(&expr.left) || self.is_closure_expr(&expr.right) {
+                if self.is_closure_expr(&expr.left)
+                    || self.is_closure_expr(&expr.right)
+                    || matches!(
+                        (&*expr.left, &*expr.right),
+                        (
+                            ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_),
+                            ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
+                        )
+                    )
+                {
                     self.facts.callable_comparisons.push(expr.span);
                 }
                 self.visit_callable_position(&expr.left);
@@ -331,14 +276,6 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
 
     let mut scanner = AstScanner::default();
     module.visit_with(&mut scanner);
-    if let Some((name, span)) = scanner.facts.escaping_closure {
-        return Err(locations.annotate(
-            unsupported!(
-                "{name} escapes its static call site. Storing, returning or joining function values with captures requires a runtime environment"
-            ),
-            span,
-        ));
-    }
     scanner.facts.inferred_spans.sort_unstable();
     scanner.facts.inferred_spans.dedup();
     scanner.facts.deferred_starts.sort_unstable();
@@ -353,78 +290,6 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
         .sort_unstable_by_key(|(s, _)| *s);
     scanner.facts.param_value_uses.dedup_by_key(|(s, _)| *s);
     Ok(scanner.facts)
-}
-
-fn expr_captures_outer(expr: &ast::Expr, outer_scopes: &[HashSet<ast::Id>]) -> bool {
-    let mut check = CaptureCheck {
-        outer_scopes,
-        bound: HashSet::new(),
-        found: false,
-    };
-    match expr {
-        ast::Expr::Arrow(arrow) => {
-            for pat in &arrow.params {
-                hir_compat::pattern_bindings(pat, false, &mut |id, _| {
-                    check.bound.insert(id.to_id());
-                });
-            }
-            arrow.body.visit_with(&mut check);
-        }
-        ast::Expr::Fn(fn_expr) => {
-            if let Some(id) = &fn_expr.ident {
-                check.bound.insert(id.to_id());
-            }
-            fn_expr.function.visit_with(&mut check);
-        }
-        _ => {}
-    }
-    check.found
-}
-
-fn fn_captures_outer(func: &ast::Function, outer_scopes: &[HashSet<ast::Id>]) -> bool {
-    let mut check = CaptureCheck {
-        outer_scopes,
-        bound: HashSet::new(),
-        found: false,
-    };
-    func.visit_with(&mut check);
-    check.found
-}
-
-struct CaptureCheck<'a> {
-    outer_scopes: &'a [HashSet<ast::Id>],
-    bound: HashSet<ast::Id>,
-    found: bool,
-}
-
-impl Visit for CaptureCheck<'_> {
-    fn visit_param(&mut self, param: &ast::Param) {
-        hir_compat::pattern_bindings(&param.pat, false, &mut |id, _| {
-            self.bound.insert(id.to_id());
-        });
-        param.visit_children_with(self);
-    }
-    fn visit_var_decl(&mut self, decl: &ast::VarDecl) {
-        for d in &decl.decls {
-            hir_compat::pattern_bindings(&d.name, false, &mut |id, _| {
-                self.bound.insert(id.to_id());
-            });
-        }
-        decl.visit_children_with(self);
-    }
-    fn visit_expr(&mut self, expr: &ast::Expr) {
-        if self.found {
-            return;
-        }
-        if let ast::Expr::Ident(id) = expr {
-            let key = id.to_id();
-            if !self.bound.contains(&key) && self.outer_scopes.iter().any(|s| s.contains(&key)) {
-                self.found = true;
-                return;
-            }
-        }
-        expr.visit_children_with(self);
-    }
 }
 
 fn record_pattern_annotations(pat: &ast::Pat, inherited: bool, out: &mut Vec<u32>) {

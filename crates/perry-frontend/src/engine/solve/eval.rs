@@ -475,9 +475,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.mark_written(s.inst, lidx);
                     }
                     if matches!(self.types.kind(init_ty), TyKind::Func(_))
-                        || self
-                            .types
-                            .is_tagged_func_union(init_ty, &self.index.capture_free_templates)
+                        || self.types.is_tagged_func_union(
+                            init_ty,
+                            &self.index.capture_free_templates,
+                            &self.escaping_env_templates,
+                        )
                     {
                         self.write_local_value(s, lidx, init_ty);
                     } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
@@ -757,6 +759,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_coercions: self.inst_coercions,
             inst_captures: self.inst_captures,
             live_instances,
+            escaping_env_templates: self.escaping_env_templates,
+            boxed_locals: self.boxed_locals,
             module_local_tys,
             class_static_field_tys,
             class_inst_methods,
@@ -784,9 +788,11 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 }
 
-pub(super) fn callable_arg_mask(types: &TypeTable, args: &[Ty]) -> u64 {
+pub(super) fn callable_arg_mask(types: &TypeTable, escaping_env: &BitSet, args: &[Ty]) -> u64 {
     args.iter().enumerate().take(64).fold(0u64, |m, (i, &ty)| {
-        if matches!(types.kind(ty), TyKind::Func(_)) {
+        if let TyKind::Func(ident) = types.kind(ty)
+            && !escaping_env.contains(ident.template.index())
+        {
             m | (1u64 << i)
         } else {
             m

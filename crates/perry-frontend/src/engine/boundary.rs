@@ -128,6 +128,9 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) local_written_from_closure: BitSet,
     pub(crate) exported_obj_methods: BitSet,
     pub(crate) capture_free_templates: BitSet,
+    pub(crate) closure_in_loop: BitSet,
+    pub(crate) closure_owner_template: Vec<Option<TemplateId>>,
+    template_captures: Vec<Vec<LocalId>>,
     local_frame_slot: Vec<Option<u32>>,
     template_frame_counts: Vec<usize>,
     pub(crate) location_types: IdxVec<LocId, Ty>,
@@ -187,7 +190,7 @@ impl<'h> ModuleIndex<'h> {
             types,
             raw_sites: &mut raw_sites,
         };
-        idx.scan_stmts(&mut scan, &hir.init, init_tid, true);
+        idx.scan_stmts(&mut scan, &hir.init, init_tid, true, false);
 
         for f in &hir.functions {
             idx.register_member(
@@ -218,12 +221,12 @@ impl<'h> ModuleIndex<'h> {
                 let loc = idx.add_location(ty);
                 static_field_locs.push((scan.types.intern_name(&field.name), loc));
                 if let Some(init) = &field.init {
-                    idx.scan_expr(&mut scan, init, init_tid);
+                    idx.scan_expr(&mut scan, init, init_tid, false);
                 }
             }
             for field in &class.fields {
                 if let Some(init) = &field.init {
-                    idx.scan_expr(&mut scan, init, init_tid);
+                    idx.scan_expr(&mut scan, init, init_tid, false);
                 }
             }
             if class
@@ -338,11 +341,54 @@ impl<'h> ModuleIndex<'h> {
                 *count += 1;
             }
         }
+        let mut template_captures: Vec<Vec<LocalId>> = idx
+            .views
+            .iter()
+            .map(|v| {
+                v.captures
+                    .iter()
+                    .copied()
+                    .filter(|&c| idx.is_non_global_local(c))
+                    .collect()
+            })
+            .collect();
         for (tid, view) in idx.views.iter_enumerated() {
-            if !idx.captures_local(view.captures) {
-                idx.capture_free_templates.insert(tid.index());
+            for &cap_id in view.captures {
+                let Some(lidx) = idx.local_idx(cap_id) else {
+                    continue;
+                };
+                if idx.local_module.contains(lidx.index()) {
+                    continue;
+                }
+                let cap_owner = idx.local_owner.get(lidx.index()).copied();
+                let mut cur = idx
+                    .closure_owner_template
+                    .get(tid.index())
+                    .copied()
+                    .flatten();
+                while let Some(parent) = cur {
+                    if Some(parent) == cap_owner || parent == TemplateId::INIT {
+                        break;
+                    }
+                    if let Some(list) = template_captures.get_mut(parent.index()) {
+                        list.push(cap_id);
+                    }
+                    cur = idx
+                        .closure_owner_template
+                        .get(parent.index())
+                        .copied()
+                        .flatten();
+                }
             }
         }
+        for (i, caps) in template_captures.iter_mut().enumerate() {
+            caps.sort_unstable();
+            caps.dedup();
+            if caps.is_empty() {
+                idx.capture_free_templates.insert(i);
+            }
+        }
+        idx.template_captures = template_captures;
         for stmt in &hir.init {
             if let Stmt::Let {
                 id,
@@ -456,8 +502,10 @@ impl<'h> ModuleIndex<'h> {
         self.local_idx(id)
             .is_some_and(|li| !self.local_module.contains(li.index()))
     }
-    pub(crate) fn captures_local(&self, captures: &[LocalId]) -> bool {
-        captures.iter().any(|&c| self.is_non_global_local(c))
+    pub(crate) fn template_captures(&self, t: TemplateId) -> &[LocalId] {
+        self.template_captures
+            .get(t.index())
+            .map_or(&[], Vec::as_slice)
     }
     pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
         self.func_to_template.get(id as usize).copied().flatten()
@@ -480,6 +528,7 @@ impl<'h> ModuleIndex<'h> {
     }
 
     fn add_template(&mut self, view: TemplateView<'h>) -> TemplateId {
+        self.closure_owner_template.push(None);
         self.views.push(view)
     }
 
@@ -495,7 +544,7 @@ impl<'h> ModuleIndex<'h> {
         scan.raw_sites.resize_with(self.views.len(), Vec::new);
         self.set_func_template(func.id, tid);
         self.scan_params(scan, &func.params, tid);
-        self.scan_stmts(scan, &func.body, tid, false);
+        self.scan_stmts(scan, &func.body, tid, false, false);
         tid
     }
 
@@ -568,7 +617,7 @@ impl<'h> ModuleIndex<'h> {
             let local = self.ensure_local(param.id, owner, ty, scan.hir, scan.facts);
             self.local_param.insert(local.index());
             if let Some(default) = &param.default {
-                self.scan_expr(scan, default, owner);
+                self.scan_expr(scan, default, owner, false);
             }
         }
     }
@@ -579,6 +628,7 @@ impl<'h> ModuleIndex<'h> {
         stmts: &'h [Stmt],
         owner: TemplateId,
         is_module_top: bool,
+        in_loop: bool,
     ) {
         for stmt in stmts {
             match stmt {
@@ -606,7 +656,7 @@ impl<'h> ModuleIndex<'h> {
                         {
                             *slot = Some(pattern.as_str());
                         }
-                        self.scan_expr(scan, init, owner);
+                        self.scan_expr(scan, init, owner, in_loop);
                     }
                 }
                 Stmt::If {
@@ -614,15 +664,15 @@ impl<'h> ModuleIndex<'h> {
                     then_branch,
                     else_branch,
                 } => {
-                    self.scan_expr(scan, condition, owner);
-                    self.scan_stmts(scan, then_branch, owner, false);
+                    self.scan_expr(scan, condition, owner, in_loop);
+                    self.scan_stmts(scan, then_branch, owner, false, in_loop);
                     if let Some(b) = else_branch {
-                        self.scan_stmts(scan, b, owner, false);
+                        self.scan_stmts(scan, b, owner, false, in_loop);
                     }
                 }
                 Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-                    self.scan_expr(scan, condition, owner);
-                    self.scan_stmts(scan, body, owner, false);
+                    self.scan_expr(scan, condition, owner, true);
+                    self.scan_stmts(scan, body, owner, false, true);
                 }
                 Stmt::For {
                     init,
@@ -631,15 +681,15 @@ impl<'h> ModuleIndex<'h> {
                     body,
                 } => {
                     if let Some(i) = init {
-                        self.scan_stmts(scan, std::slice::from_ref(i), owner, false);
+                        self.scan_stmts(scan, std::slice::from_ref(i), owner, false, in_loop);
                     }
                     if let Some(c) = condition {
-                        self.scan_expr(scan, c, owner);
+                        self.scan_expr(scan, c, owner, true);
                     }
                     if let Some(u) = update {
-                        self.scan_expr(scan, u, owner);
+                        self.scan_expr(scan, u, owner, true);
                     }
-                    self.scan_stmts(scan, body, owner, false);
+                    self.scan_stmts(scan, body, owner, false, true);
                 }
                 Stmt::Try {
                     body,
@@ -647,36 +697,36 @@ impl<'h> ModuleIndex<'h> {
                     finally,
                     ..
                 } => {
-                    self.scan_stmts(scan, body, owner, false);
+                    self.scan_stmts(scan, body, owner, false, in_loop);
                     if let Some(catch) = catch {
                         if let Some((id, _)) = &catch.param {
                             let err_ty = scan.types.named(scan.ctx, "Error");
                             self.ensure_local(*id, owner, err_ty, scan.hir, scan.facts);
                         }
-                        self.scan_stmts(scan, &catch.body, owner, false);
+                        self.scan_stmts(scan, &catch.body, owner, false, in_loop);
                     }
                     if let Some(f) = finally {
-                        self.scan_stmts(scan, f, owner, false);
+                        self.scan_stmts(scan, f, owner, false, in_loop);
                     }
                 }
                 Stmt::Switch {
                     discriminant,
                     cases,
                 } => {
-                    self.scan_expr(scan, discriminant, owner);
+                    self.scan_expr(scan, discriminant, owner, in_loop);
                     for case in cases {
                         if let Some(t) = &case.test {
-                            self.scan_expr(scan, t, owner);
+                            self.scan_expr(scan, t, owner, in_loop);
                         }
-                        self.scan_stmts(scan, &case.body, owner, false);
+                        self.scan_stmts(scan, &case.body, owner, false, in_loop);
                     }
                 }
                 Stmt::Labeled { body, .. } => {
-                    self.scan_stmts(scan, std::slice::from_ref(body), owner, false)
+                    self.scan_stmts(scan, std::slice::from_ref(body), owner, false, in_loop)
                 }
                 other => {
                     stmt_any_expr(other, &mut |e| {
-                        self.scan_expr(scan, e, owner);
+                        self.scan_expr(scan, e, owner, in_loop);
                         false
                     });
                 }
@@ -690,7 +740,13 @@ impl<'h> ModuleIndex<'h> {
         }
     }
 
-    fn scan_expr(&mut self, scan: &mut ScanCtx<'h, '_>, expr: &'h Expr, owner: TemplateId) {
+    fn scan_expr(
+        &mut self,
+        scan: &mut ScanCtx<'h, '_>,
+        expr: &'h Expr,
+        owner: TemplateId,
+        in_loop: bool,
+    ) {
         match expr {
             Expr::Call { args, .. } => {
                 Self::record_site_expr(scan, owner, expr);
@@ -788,6 +844,12 @@ impl<'h> ModuleIndex<'h> {
                     explicit_return: exp_ret,
                 });
                 scan.raw_sites.resize_with(self.views.len(), Vec::new);
+                if let Some(slot) = self.closure_owner_template.get_mut(tid.index()) {
+                    *slot = Some(owner);
+                }
+                if in_loop {
+                    self.closure_in_loop.insert(tid.index());
+                }
                 self.set_func_template(*func_id, tid);
                 for &cap in captures {
                     if let Some(l) = self.local_idx(cap) {
@@ -801,12 +863,14 @@ impl<'h> ModuleIndex<'h> {
                     }
                 }
                 self.scan_params(scan, params, tid);
-                self.scan_stmts(scan, body, tid, false);
+                self.scan_stmts(scan, body, tid, false, false);
                 return;
             }
             _ => {}
         }
-        walk_expr_children(expr, &mut |child| self.scan_expr(scan, child, owner));
+        walk_expr_children(expr, &mut |child| {
+            self.scan_expr(scan, child, owner, in_loop)
+        });
     }
 
     fn record_local_use(&mut self, id: LocalId, user_template: TemplateId, is_write: bool) {

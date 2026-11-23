@@ -71,8 +71,21 @@ pub(crate) struct ClassInst {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FuncCoercion {
     Zero,
-    Tag(TemplateId),
-    Widen { from: Ty, to: Ty },
+    Tag(FuncIdentity),
+    BoxEnv(FuncIdentity),
+    Widen {
+        from: Ty,
+        to: Ty,
+    },
+    DispatchCallback {
+        callee_ty: Ty,
+        arms: TySpan,
+        input_tys: Ty,
+    },
+    EnvCallback {
+        target: InstanceId,
+        input_tys: Ty,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +94,7 @@ pub(crate) enum SiteResolution {
         target: InstanceId,
         strip_arg_mask: u64,
         pass_receiver: bool,
+        pass_env: bool,
     },
     DispatchCall {
         callee_ty: Ty,
@@ -89,10 +103,10 @@ pub(crate) enum SiteResolution {
         arg_tys: Ty,
         recv_ty: Option<Ty>,
     },
-    DispatchCallback {
-        callee_ty: Ty,
-        arms: TySpan,
-        input_tys: Ty,
+    FuncCompare {
+        left_ty: Ty,
+        right_ty: Ty,
+        op: CompareOp,
     },
     MethodCall {
         target: InstanceId,
@@ -127,13 +141,15 @@ pub(crate) struct Solved {
     pub(crate) locations: IdxVec<LocId, Ty>,
     pub(crate) param_locs: Vec<LocId>,
     pub(crate) field_locs: Vec<LocId>,
-    pub(crate) dispatch_arms: Vec<(TemplateId, InstanceId)>,
+    pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
     pub(crate) inst_sites: Vec<Vec<Option<SiteResolution>>>,
     pub(crate) inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
     pub(crate) inst_captures: Vec<Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
+    pub(crate) escaping_env_templates: BitSet,
+    pub(crate) boxed_locals: BitSet,
     pub(crate) module_local_tys: Vec<Option<Ty>>,
     pub(crate) class_static_field_tys: Vec<Vec<Ty>>,
     pub(crate) class_inst_methods: Vec<Vec<InstanceId>>,
@@ -282,7 +298,7 @@ struct Solver<'h, 'a> {
     template_counts: Vec<u16>,
     param_locs: Vec<LocId>,
     field_locs: Vec<LocId>,
-    dispatch_arms: Vec<(TemplateId, InstanceId)>,
+    dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     dispatch_arm_spans: Vec<TySpan>,
     inst_locals: Vec<Vec<InstanceLocalSlot>>,
     inst_frame_locals: Vec<Vec<Ty>>,
@@ -291,6 +307,8 @@ struct Solver<'h, 'a> {
     inst_sites: Vec<Vec<Option<SiteResolution>>>,
     inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
     inst_superseded: BitSet,
+    escaping_env_templates: BitSet,
+    boxed_locals: BitSet,
     dict_reads: BitSet,
     self_nested_locs: BitSet,
     self_nested_locals: BitSet,
@@ -419,6 +437,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_sites: Vec::new(),
             inst_coercions: Vec::new(),
             inst_superseded: BitSet::default(),
+            escaping_env_templates: BitSet::default(),
+            boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
             self_nested_locals: BitSet::default(),
@@ -533,8 +553,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             SiteResolution::DirectCall { target, .. }
             | SiteResolution::MethodCall { target, .. }
             | SiteResolution::Callback { target, .. } => f(target),
-            SiteResolution::DispatchCall { arms, .. }
-            | SiteResolution::DispatchCallback { arms, .. } => {
+            SiteResolution::DispatchCall { arms, .. } => {
                 for &(_, target) in self.dispatch_arms.get(arms.range()).unwrap_or(&[]) {
                     f(target);
                 }
@@ -573,6 +592,28 @@ impl<'h, 'a> Solver<'h, 'a> {
                         queue.push(t);
                     }
                 });
+            }
+            for &(_, coercion) in self
+                .inst_coercions
+                .get(caller.index())
+                .into_iter()
+                .flatten()
+            {
+                match coercion {
+                    FuncCoercion::EnvCallback { target, .. } => {
+                        if live.insert(target.index()) {
+                            queue.push(target);
+                        }
+                    }
+                    FuncCoercion::DispatchCallback { arms, .. } => {
+                        for &(_, target) in self.dispatch_arms.get(arms.range()).unwrap_or(&[]) {
+                            if live.insert(target.index()) {
+                                queue.push(target);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         live
@@ -1305,9 +1346,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         let prev_inst_count = self.instances.len();
         let prev_locs = self.locations.as_slice().to_vec();
         let prev_frames = self.inst_frame_locals.clone();
+        let prev_escaping = self.escaping_env_templates.clone();
         self.dirty_locs.clear();
         for id in live_ids {
             self.evaluate_instance(id)?;
+        }
+        if self.escaping_env_templates != prev_escaping {
+            return Err(Diagnostic::internal(
+                "fixed-point check marked a new escaping closure",
+            ));
         }
         if self.instances.len() != prev_inst_count {
             return Err(Diagnostic::internal(
@@ -1332,7 +1379,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn intern_dispatch_arms(&mut self, arms: &[(TemplateId, InstanceId)]) -> TySpan {
+    pub(super) fn intern_dispatch_arms(&mut self, arms: &[(FuncIdentity, InstanceId)]) -> TySpan {
         for &span in &self.dispatch_arm_spans {
             if self.dispatch_arms.get(span.range()) == Some(arms) {
                 return span;
@@ -1345,6 +1392,58 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.dispatch_arms.extend_from_slice(arms);
         self.dispatch_arm_spans.push(span);
         span
+    }
+
+    pub(super) fn mark_escaping_env(&mut self, caller: InstanceId, ty: Ty) {
+        let members = self.types.func_members(ty);
+        for ident in members {
+            let tid = ident.template;
+            if ident.capture_owner.is_none()
+                && self.index.capture_free_templates.contains(tid.index())
+            {
+                continue;
+            }
+            if !self.escaping_env_templates.insert(tid.index()) {
+                continue;
+            }
+            for &cap_id in self.index.template_captures(tid) {
+                if let Some(lidx) = self.index.local_idx(cap_id) {
+                    let li = lidx.index();
+                    if !self.index.local_module.contains(li)
+                        && (self.index.local_reassigned.contains(li)
+                            || self.index.local_written_from_closure.contains(li)
+                            || self.index.local_deferred.contains(li))
+                    {
+                        self.boxed_locals.insert(li);
+                    }
+                }
+            }
+            self.enqueue(caller);
+            if let Some(owner) = ident.capture_owner {
+                self.enqueue(owner);
+                if let Some(grand_caller) = self.instances.get(owner).and_then(|i| i.caller) {
+                    self.enqueue(grand_caller);
+                }
+            }
+            let to_requeue: Vec<InstanceId> =
+                self.instances
+                    .iter_enumerated()
+                    .filter_map(|(id, inst)| {
+                        if self.inst_superseded.contains(id.index()) {
+                            return None;
+                        }
+                        let matches = inst.template == tid
+                            || inst.capture_owner == ident.capture_owner
+                            || self.types.tuple_slice(inst.args).iter().any(|&a| {
+                                self.types.func_members(a).iter().any(|m| m.template == tid)
+                            });
+                        matches.then_some(id)
+                    })
+                    .collect();
+            for id in to_requeue {
+                self.enqueue(id);
+            }
+        }
     }
 
     pub(super) fn set_coercion(&mut self, inst_id: InstanceId, expr: &Expr, c: FuncCoercion) {
@@ -1381,6 +1480,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         args: &[Expr],
         arg_tys: &[Ty],
     ) {
+        for &at in arg_tys {
+            self.mark_escaping_env(inst_id, at);
+        }
         let elem_ty = match self.types.kind(arr_def) {
             TyKind::Cell { loc, kind } if kind.is_array() => Some(self.read_loc(loc, inst_id)),
             TyKind::Array(elem) => Some(elem),
@@ -1394,10 +1496,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             for a in args {
                 self.set_coercion(inst_id, a, FuncCoercion::Zero);
             }
-        } else if self
-            .types
-            .is_tagged_func_union(elem_ty, &self.index.capture_free_templates)
-        {
+        } else if self.types.is_tagged_func_union(
+            elem_ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        ) {
             for (a, &at) in args.iter().zip(arg_tys) {
                 self.record_coercion(inst_id, a, at, elem_ty);
             }
@@ -1414,10 +1517,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         if src_ty == Ty::BOTTOM || dst_ty == Ty::BOTTOM {
             return;
         }
-        if !self
-            .types
-            .is_tagged_func_union(dst_ty, &self.index.capture_free_templates)
-        {
+        if !self.types.is_tagged_func_union(
+            dst_ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        ) {
             return;
         }
         if matches!(expr, Expr::Conditional { .. } | Expr::Logical { .. }) {
@@ -1428,13 +1532,22 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
-            self.set_coercion(inst_id, expr, FuncCoercion::Tag(ident.template));
+            self.set_coercion(inst_id, expr, FuncCoercion::Tag(ident));
             return;
         }
-        if self
-            .types
-            .is_tagged_func_union(src_ty, &self.index.capture_free_templates)
-            && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
+        if self.types.is_env_func(src_ty, &self.escaping_env_templates)
+            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        {
+            if !matches!(expr, Expr::Closure { .. }) {
+                self.set_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
+            }
+            return;
+        }
+        if self.types.is_tagged_func_union(
+            src_ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        ) && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
         {
             self.set_coercion(
                 inst_id,
@@ -1448,75 +1561,37 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn check_stage1_escaping_func(
-        &self,
+        &mut self,
         inst_id: InstanceId,
         ty: Ty,
         byte_offset: u32,
     ) -> Result<()> {
-        match self.types.kind(ty) {
-            TyKind::Func(_)
-                if !self
-                    .types
-                    .is_zero_sized_func(ty, &self.index.capture_free_templates) =>
-            {
-                let owner = self
-                    .instances
-                    .get(inst_id)
-                    .and_then(|i| self.index.view(i.template))
-                    .filter(|v| !v.name.is_empty())
-                    .map(|v| format!("closure in '{}'", v.display_name()))
-                    .unwrap_or_else(|| "anonymous function".into());
-                let mut err = Diagnostic::unsupported(format!(
-                    "{owner} escapes its static call site. Storing, returning or joining function values with captures requires a runtime environment"
-                ));
-                if byte_offset != 0 {
-                    err = self.metadata.locations.annotate_call(err, byte_offset);
-                }
-                return Err(attach_inst_chain(
-                    &self.instances,
-                    self.index,
-                    &self.metadata.locations,
-                    err,
-                    inst_id,
-                ));
+        self.mark_escaping_env(inst_id, ty);
+        if let TyKind::Union(span) = self.types.kind(ty)
+            && self
+                .types
+                .ty_slice(span)
+                .iter()
+                .any(|&m| matches!(self.types.kind(m), TyKind::Func(_)))
+            && !self.types.is_tagged_func_union(
+                ty,
+                &self.index.capture_free_templates,
+                &self.escaping_env_templates,
+            )
+        {
+            let mut err = Diagnostic::unsupported(
+                "joining function values with non-function values is not supported yet",
+            );
+            if byte_offset != 0 {
+                err = self.metadata.locations.annotate_call(err, byte_offset);
             }
-            TyKind::Union(span)
-                if self
-                    .types
-                    .ty_slice(span)
-                    .iter()
-                    .any(|&m| matches!(self.types.kind(m), TyKind::Func(_))) =>
-            {
-                if self
-                    .types
-                    .is_tagged_func_union(ty, &self.index.capture_free_templates)
-                {
-                    return Ok(());
-                }
-                let has_capturing = self.types.ty_slice(span).iter().any(|&m| {
-                    matches!(self.types.kind(m), TyKind::Func(_))
-                        && !self
-                            .types
-                            .is_zero_sized_func(m, &self.index.capture_free_templates)
-                });
-                let msg = if has_capturing {
-                    "storing, returning or joining function values with captures requires a runtime environment"
-                } else {
-                    "joining function values with non-function values is not supported yet"
-                };
-                let mut err = Diagnostic::unsupported(msg);
-                if byte_offset != 0 {
-                    err = self.metadata.locations.annotate_call(err, byte_offset);
-                }
-                return Err(attach_inst_chain(
-                    &self.instances,
-                    self.index,
-                    &self.metadata.locations,
-                    err,
-                    inst_id,
-                ));
-            }
-            _ => {}
+            return Err(attach_inst_chain(
+                &self.instances,
+                self.index,
+                &self.metadata.locations,
+                err,
+                inst_id,
+            ));
         }
         Ok(())
     }
