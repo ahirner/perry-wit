@@ -317,14 +317,14 @@ impl<'h, 'a> Emitter<'h, 'a> {
         if self.is_zero_sized_func(src_ty)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
-            return Ok(self.emit_tag_record(ident));
+            return Ok(Self::emit_tag_record(ident));
         }
         if self
             .types
             .is_env_func(src_ty, &self.solved.escaping_env_templates)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
-            return Ok(self.emit_env_wrapper(ident, Self::prop_get(arg, "val")));
+            return Ok(Self::emit_env_wrapper(ident, Self::prop_get(arg, "val")));
         }
         if self.types.is_tagged_func_union(
             src_ty,
@@ -385,18 +385,18 @@ impl<'h, 'a> Emitter<'h, 'a> {
         Ok(next)
     }
 
-    pub(super) fn emit_tag_record(&mut self, ident: FuncIdentity) -> Expr {
+    pub(super) fn emit_tag_record(ident: FuncIdentity) -> Expr {
         Expr::Object(vec![("tag".into(), Expr::String(func_tag(ident)))])
     }
 
-    pub(super) fn emit_env_wrapper(&mut self, ident: FuncIdentity, env_expr: Expr) -> Expr {
+    pub(super) fn emit_env_wrapper(ident: FuncIdentity, env_expr: Expr) -> Expr {
         Expr::Object(vec![
             ("tag".into(), Expr::String(func_tag(ident))),
             ("val".into(), env_expr),
         ])
     }
 
-    pub(super) fn emit_box_record(&mut self, val: Expr) -> Expr {
+    pub(super) fn emit_box_record(val: Expr) -> Expr {
         Expr::Object(vec![("v".into(), val)])
     }
 
@@ -813,7 +813,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
 
     fn build_widener(&mut self, fid: FuncId, from: Ty, to: Ty) -> Result<Function> {
         let pid = self.fresh_synthetic_local()?;
-        let idents = self.types.func_members(from);
+        let idents = self.types.func_members(&from);
         let (has_null, has_undef) = self.nullish_flags(from);
         let mut stmts = Vec::new();
         if has_null {
@@ -822,13 +822,13 @@ impl<'h, 'a> Emitter<'h, 'a> {
         if has_undef {
             stmts.push(Self::nullish_guard(pid, Expr::Undefined, Expr::Undefined));
         }
-        let mut cases = Vec::with_capacity(idents.len());
+        let mut cases = Vec::new();
         for ident in idents {
             let val = if self.is_env_template(ident.template) {
                 let env_val = Self::prop_get(Expr::LocalGet(pid), "val");
-                self.emit_env_wrapper(ident, env_val)
+                Self::emit_env_wrapper(ident, env_val)
             } else {
-                self.emit_tag_record(ident)
+                Self::emit_tag_record(ident)
             };
             cases.push(SwitchCase {
                 test: Some(Expr::String(func_tag(ident))),
@@ -885,10 +885,10 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 Expr::Bool(false),
             ));
         }
-        let l_members = self.types.func_members(left_ty);
-        let r_members = self.types.func_members(right_ty);
+        let l_members = self.types.func_members(&left_ty);
+        let r_members = self.types.func_members(&right_ty);
         for ident in l_members {
-            if !r_members.contains(&ident) {
+            if !r_members.clone().any(|member| member == ident) {
                 continue;
             }
             let tag = func_tag(ident);

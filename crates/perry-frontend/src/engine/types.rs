@@ -886,30 +886,24 @@ impl TypeTable {
         (out.len() >= 2).then_some(out)
     }
 
-    pub(crate) fn func_members(&self, ty: Ty) -> Vec<FuncIdentity> {
-        match self.kind(ty) {
-            TyKind::Func(id) => vec![id],
-            TyKind::Union(span) => self
-                .ty_slice(span)
-                .iter()
-                .filter_map(|&m| match self.kind(m) {
-                    TyKind::Func(id) => Some(id),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
+    pub(crate) fn func_members<'t>(
+        &'t self,
+        ty: &'t Ty,
+    ) -> impl Iterator<Item = FuncIdentity> + Clone + 't {
+        let members = match self.kind(*ty) {
+            TyKind::Union(span) => self.ty_slice(span),
+            _ => std::slice::from_ref(ty),
+        };
+        members
+            .iter()
+            .filter_map(|&member| match self.kind(member) {
+                TyKind::Func(identity) => Some(identity),
+                _ => None,
+            })
     }
 
     pub(crate) fn has_func(&self, ty: Ty) -> bool {
-        match self.kind(ty) {
-            TyKind::Func(_) => true,
-            TyKind::Union(span) => self
-                .ty_slice(span)
-                .iter()
-                .any(|&m| matches!(self.kind(m), TyKind::Func(_))),
-            _ => false,
-        }
+        self.func_members(&ty).next().is_some()
     }
 
     pub(crate) fn contains_func_template(

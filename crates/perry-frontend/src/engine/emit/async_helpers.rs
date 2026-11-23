@@ -291,7 +291,7 @@ impl<'h> Emitter<'h, '_> {
                 byte_end: 0,
                 cap_args_appended: 0,
             };
-            exec_args.push(self.emit_env_wrapper(ident, env_new));
+            exec_args.push(Self::emit_env_wrapper(ident, env_new));
         }
         let (exec_call, _) = self.emit_callback_call_expr(executor, exec_val, None, exec_args)?;
         let err_id = self.fresh_synthetic_local()?;

@@ -939,6 +939,8 @@ async function main() {
   const caught = await new Promise((_, reject) => {
     reject(new Error("boom"));
   }).catch((e) => e.message);
+  const rejected = new Promise((_, reject) => reject(new Error("forwarded")));
+  const forwarded = await rejected.then(n => n).then().catch(e => e.message);
   const thrown = await new Promise(() => {
     throw new Error("sync-fail");
   }).catch((e) => e.message);
@@ -989,6 +991,7 @@ async function main() {
     delayed,
     withArgs,
     caught,
+    forwarded,
     thrown,
     chained,
     finOk,
@@ -1002,7 +1005,7 @@ async function main() {
 }
 await main();
 "#,
-            "42 later 30 boom sync-fail 13 ok bad f1,f2 false 3 true imm\n",
+            "42 later 30 boom forwarded sync-fail 13 ok bad f1,f2 false 3 true imm\n",
         ),
     ];
     for &(name, source, expected) in cases {

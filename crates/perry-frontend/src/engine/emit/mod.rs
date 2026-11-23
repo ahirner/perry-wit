@@ -650,7 +650,7 @@ impl<'h> Emitter<'h, '_> {
             if self.is_boxed_local(param.id) {
                 let box_id = self.fresh_synthetic_local()?;
                 boxed_param_map.push((param.id, box_id));
-                let init_expr = self.emit_box_record(Expr::LocalGet(new_param.id));
+                let init_expr = Self::emit_box_record(Expr::LocalGet(new_param.id));
                 boxed_param_inits.push(Stmt::Let {
                     id: box_id,
                     name: format!("__box_{}", param.name),
@@ -814,7 +814,7 @@ impl<'h> Emitter<'h, '_> {
                     name: name.clone(),
                     ty: box_ty,
                     mutable: false,
-                    init: Some(self.emit_box_record(Expr::Undefined)),
+                    init: Some(Self::emit_box_record(Expr::Undefined)),
                 });
             }
         }
@@ -858,7 +858,7 @@ impl<'h> Emitter<'h, '_> {
                         let mut seq = Vec::with_capacity(box_ids.len() + 1);
                         for box_id in box_ids {
                             let fresh =
-                                self.emit_box_record(Self::prop_get(Expr::LocalGet(box_id), "v"));
+                                Self::emit_box_record(Self::prop_get(Expr::LocalGet(box_id), "v"));
                             seq.push(Expr::LocalSet(box_id, Box::new(fresh)));
                         }
                         if let Some(u) = rewritten_update {
@@ -1035,7 +1035,7 @@ impl<'h> Emitter<'h, '_> {
                         name: name.clone(),
                         ty: box_hir(box_inner_ty),
                         mutable: self.index.is_for_head_local(*id),
-                        init: Some(self.emit_box_record(init_val)),
+                        init: Some(Self::emit_box_record(init_val)),
                     });
                 }
                 Ok(Stmt::Let {

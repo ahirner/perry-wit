@@ -318,7 +318,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
                 ReactionKind::Then => {
-                    let takes_zero = self.types.func_members(ft).iter().all(|id| {
+                    let takes_zero = self.types.func_members(&ft).all(|id| {
                         self.index.view(id.template).is_some_and(|v| {
                             v.params.is_empty()
                                 && !matches!(
@@ -342,8 +342,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                             f_ret = r;
                             on_fulfilled = Some((cb_call, ft));
                         }
-                    } else if g_present.is_none() {
-                        return Ok(Ty::BOTTOM);
                     }
                 }
                 ReactionKind::Catch => {}
@@ -391,6 +389,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             ReactionKind::Finally => inner_raw,
         };
 
+        let result = self.expr_cell_loc(s.inst, expr)?;
+        self.write_loc(result, ret_settled);
         let pass_fulfilled = on_fulfilled.is_some_and(|(cb, _)| cb.needs_value());
         let pass_rejected = on_rejected.is_some_and(|(cb, _)| cb.needs_value());
         let helper = self.intern_helper(
@@ -408,6 +408,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             s.inst,
             expr,
             SiteResolution::PromiseReaction {
+                result,
                 helper,
                 pass_first: if kind == ReactionKind::Catch {
                     pass_rejected
@@ -418,13 +419,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             },
         );
 
-        if kind == ReactionKind::Finally && inner_raw == Ty::BOTTOM {
-            return Ok(promise_ty);
-        }
-        if ret_settled == Ty::BOTTOM {
-            return Ok(Ty::BOTTOM);
-        }
-        Ok(self.types.promise(ret_settled))
+        Ok(self.types.cell(result, CellKind::Promise))
     }
 
     pub(super) fn eval_timer_start(

@@ -205,6 +205,7 @@ pub(crate) enum SiteResolution {
         pass_reject: bool,
     },
     PromiseReaction {
+        result: LocId,
         helper: HelperId,
         pass_first: bool,
         pass_second: bool,
@@ -571,35 +572,27 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.locations.push(initial)
     }
 
-    pub(super) fn alloc_expr_cell(
-        &mut self,
-        inst_id: InstanceId,
-        expr: &Expr,
-        kind: CellKind,
-    ) -> Ty {
-        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
-            return Ty::OPEN;
-        };
-        let Some(local_site) = self.index.site_of(template, expr) else {
-            return Ty::OPEN;
-        };
-        if let Some(Some(SiteResolution::Cell(loc))) = self
-            .inst_sites
-            .get(inst_id.index())
-            .and_then(|s| s.get(local_site))
-            .map(|e| &e.resolution)
-        {
-            return self.types.cell(*loc, kind);
+    fn expr_cell_loc(&mut self, inst: InstanceId, expr: &Expr) -> Result<LocId> {
+        let entry = self
+            .index
+            .site_of(self.instances[inst].template, expr)
+            .and_then(|site| self.inst_sites.get_mut(inst.index())?.get_mut(site))
+            .ok_or_else(|| Diagnostic::internal("missing storage site for expression"))?;
+        match entry.resolution {
+            Some(
+                SiteResolution::Cell(loc) | SiteResolution::PromiseReaction { result: loc, .. },
+            ) => Ok(loc),
+            _ => {
+                let loc = self.locations.push(Ty::BOTTOM);
+                entry.resolution = Some(SiteResolution::Cell(loc));
+                Ok(loc)
+            }
         }
-        let loc = self.alloc_loc(Ty::BOTTOM);
-        if let Some(slot) = self
-            .inst_sites
-            .get_mut(inst_id.index())
-            .and_then(|s| s.get_mut(local_site))
-        {
-            slot.resolution = Some(SiteResolution::Cell(loc));
-        }
-        self.types.cell(loc, kind)
+    }
+
+    fn alloc_expr_cell(&mut self, inst: InstanceId, expr: &Expr, kind: CellKind) -> Result<Ty> {
+        let loc = self.expr_cell_loc(inst, expr)?;
+        Ok(self.types.cell(loc, kind))
     }
 
     fn read_loc(&mut self, loc: LocId, reader: InstanceId) -> Ty {
@@ -1071,14 +1064,19 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn mark_escaping_env(&mut self, _caller: InstanceId, ty: Ty) {
-        let members = self.types.func_members(ty);
+        let members: Vec<_> = self
+            .types
+            .func_members(&ty)
+            .filter(|ident| {
+                !ident.capture_owner.is_none()
+                    || !self
+                        .index
+                        .capture_free_templates
+                        .contains(ident.template.index())
+            })
+            .collect();
         for ident in members {
             let tid = ident.template;
-            if ident.capture_owner.is_none()
-                && self.index.capture_free_templates.contains(tid.index())
-            {
-                continue;
-            }
             if !self.escaping_env_templates.insert(tid.index()) {
                 continue;
             }

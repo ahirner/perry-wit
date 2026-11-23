@@ -370,7 +370,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::StructuredClone { value, .. } => self.eval_expr(s, value),
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
-                    return Ok(self.alloc_expr_cell(s.inst, expr, CellKind::Array));
+                    return self.alloc_expr_cell(s.inst, expr, CellKind::Array);
                 }
                 let elem_tys = self.eval_args(s, elements)?;
                 if elem_tys.contains(&Ty::BOTTOM) {
@@ -1012,15 +1012,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         self.mark_escaping_env(inst_id, l);
         self.mark_escaping_env(inst_id, r);
-        let l_members = self.types.func_members(l);
-        let r_members = self.types.func_members(r);
         let same_local = matches!((left, right), (Expr::LocalGet(a), Expr::LocalGet(b)) if a == b);
         if !same_local {
-            for &lm in &l_members {
-                let tid = lm.template;
-                if !r_members.iter().any(|rm| rm.template == tid) {
-                    continue;
-                }
+            let shared: Vec<_> = self
+                .types
+                .func_members(&l)
+                .map(|ident| ident.template)
+                .filter(|&template| {
+                    self.types
+                        .func_members(&r)
+                        .any(|ident| ident.template == template)
+                })
+                .collect();
+            for tid in shared {
                 if !self.is_escaping_env(tid, inst_id)
                     && self
                         .index
@@ -1128,7 +1132,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 ) && self.types.is_open(existing)
                 {
-                    let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array);
+                    let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array)?;
                     self.write_loc(loc, cell);
                 }
             } else if !self.types.is_open(norm) || self.types.is_open(existing) {

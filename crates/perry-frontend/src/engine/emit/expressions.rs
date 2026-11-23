@@ -16,7 +16,7 @@ impl<'h> Emitter<'h, '_> {
             match c {
                 FuncCoercion::Zero if is_pure_func_expr(expr) => return Ok(Expr::Number(0.0)),
                 FuncCoercion::Tag(ident) if is_pure_func_expr(expr) => {
-                    return Ok(self.emit_tag_record(ident));
+                    return Ok(Self::emit_tag_record(ident));
                 }
                 _ => {}
             }
@@ -25,12 +25,12 @@ impl<'h> Emitter<'h, '_> {
         match coercion {
             Some(FuncCoercion::Zero) => Ok(Expr::Sequence(vec![rewritten, Expr::Number(0.0)])),
             Some(FuncCoercion::Tag(ident)) => {
-                let tag = self.emit_tag_record(ident);
+                let tag = Self::emit_tag_record(ident);
                 Ok(Expr::Sequence(vec![rewritten, tag]))
             }
             Some(FuncCoercion::BoxEnv(ident)) => {
                 let val_expr = Self::prop_get(rewritten, "val");
-                Ok(self.emit_env_wrapper(ident, val_expr))
+                Ok(Self::emit_env_wrapper(ident, val_expr))
             }
             Some(FuncCoercion::Widen(helper)) => {
                 let fid = self.emit_helper(helper)?;
@@ -285,7 +285,11 @@ impl<'h> Emitter<'h, '_> {
                                 (right_ty, left.as_ref(), left_ty)
                             };
                             if let TyKind::Func(ident) = self.types.kind(zero_ty) {
-                                if !self.types.func_members(union_ty).contains(&ident) {
+                                if !self
+                                    .types
+                                    .func_members(&union_ty)
+                                    .any(|member| member == ident)
+                                {
                                     return self.fold_comparison(rctx, left, right, !is_eq);
                                 }
                                 let u_rewritten = self.rewrite_expr(rctx, union_expr)?;
@@ -598,6 +602,7 @@ impl<'h> Emitter<'h, '_> {
                     helper,
                     pass_first,
                     pass_second,
+                    ..
                 } => {
                     if let Expr::Call {
                         callee,
@@ -757,7 +762,7 @@ impl<'h> Emitter<'h, '_> {
                 byte_end: 0,
                 cap_args_appended: 0,
             };
-            return Ok(self.emit_env_wrapper(ident, env_expr));
+            return Ok(Self::emit_env_wrapper(ident, env_expr));
         }
         if let Expr::LocalGet(id) = expr {
             if let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id) {

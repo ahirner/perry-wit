@@ -657,7 +657,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         None
                     };
                     if let Some(kind) = cell_kind {
-                        let cell = self.alloc_expr_cell(s.inst, init_expr, kind);
+                        let cell = self.alloc_expr_cell(s.inst, init_expr, kind)?;
                         self.write_local_value(s, lidx, cell);
                         self.mark_written(s.inst, lidx);
                         return Ok(());
