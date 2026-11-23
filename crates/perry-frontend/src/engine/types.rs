@@ -788,12 +788,31 @@ impl TypeTable {
         }
     }
 
+    pub(crate) fn is_zero_sized_func(&self, ty: Ty, capture_free: &BitSet) -> bool {
+        matches!(
+            self.kind(ty),
+            TyKind::Func(id) if id.capture_owner.is_none() && capture_free.contains(id.template.index())
+        )
+    }
+
+    pub(crate) fn has_func(&self, ty: Ty) -> bool {
+        match self.kind(ty) {
+            TyKind::Func(_) => true,
+            TyKind::Union(span) => self
+                .ty_slice(span)
+                .iter()
+                .any(|&m| matches!(self.kind(m), TyKind::Func(_))),
+            _ => false,
+        }
+    }
+
     pub(crate) fn materialize_hir_with(
         &self,
         ctx: &Context,
         ty: Ty,
         locations: &[Ty],
         dict_reads: &super::bitset::BitSet,
+        capture_free: &super::bitset::BitSet,
         class_name: &impl Fn(ClassInstId) -> Option<String>,
     ) -> HirType {
         Materializer {
@@ -801,6 +820,7 @@ impl TypeTable {
             ctx,
             locations,
             dict_reads,
+            capture_free,
             class_name,
             visiting: Vec::new(),
         }
@@ -813,7 +833,8 @@ impl TypeTable {
         ty: Ty,
         class_name: &impl Fn(ClassInstId) -> Option<String>,
     ) -> HirType {
-        self.materialize_hir_with(ctx, ty, &[], &super::bitset::BitSet::default(), class_name)
+        let empty = super::bitset::BitSet::default();
+        self.materialize_hir_with(ctx, ty, &[], &empty, &empty, class_name)
     }
 
     pub(crate) fn is_valid_dict_value(&self, elem: Ty, dict_read: bool) -> bool {
@@ -1076,6 +1097,7 @@ struct Materializer<'a, F> {
     ctx: &'a Context,
     locations: &'a [Ty],
     dict_reads: &'a super::bitset::BitSet,
+    capture_free: &'a super::bitset::BitSet,
     class_name: &'a F,
     visiting: Vec<LocId>,
 }
@@ -1095,6 +1117,13 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
         self.visiting.pop();
         hir
     }
+    fn run_slot(&mut self, ty: Ty) -> HirType {
+        if self.table.is_zero_sized_func(ty, self.capture_free) {
+            HirType::Number
+        } else {
+            self.run(ty)
+        }
+    }
     fn run(&mut self, ty: Ty) -> HirType {
         match self.table.kind(ty) {
             TyKind::Bottom | TyKind::Open => HirType::Any,
@@ -1109,7 +1138,7 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
             TyKind::String => HirType::String,
             TyKind::Symbol => HirType::Symbol,
             TyKind::Leaf(id) | TyKind::TypeVar(id) => id.hir(self.ctx).clone(),
-            TyKind::Array(i) => HirType::Array(Box::new(self.run(i))),
+            TyKind::Array(i) => HirType::Array(Box::new(self.run_slot(i))),
             TyKind::Promise(i) => HirType::Promise(Box::new(self.run(i))),
             TyKind::Cell { loc, kind } => {
                 if self.visiting.contains(&loc) {
@@ -1121,7 +1150,12 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                 }
                 let elem = self.locations.get(loc.index()).copied().unwrap_or(Ty::OPEN);
                 if kind.is_array() {
-                    HirType::Array(Box::new(self.run_cell(loc, elem)))
+                    let inner = if self.table.is_zero_sized_func(elem, self.capture_free) {
+                        HirType::Number
+                    } else {
+                        self.run_cell(loc, elem)
+                    };
+                    HirType::Array(Box::new(inner))
                 } else {
                     let idx = self
                         .table
@@ -1134,7 +1168,7 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                 self.table
                     .ty_slice(s)
                     .iter()
-                    .map(|&t| self.run(t))
+                    .map(|&t| self.run_slot(t))
                     .collect(),
             ),
             TyKind::Union(s) => {
@@ -1167,6 +1201,9 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                 let mut properties = HashMap::with_capacity(props.len as usize);
                 let mut order = Vec::with_capacity(props.len as usize);
                 for prop in self.table.object_slice(props) {
+                    if self.table.is_zero_sized_func(prop.ty, self.capture_free) {
+                        continue;
+                    }
                     let name = self.table.name_str(prop.name).to_owned();
                     order.push(name.clone());
                     properties.insert(

@@ -379,14 +379,23 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_object_fields<'b>(
         &mut self,
         s: &mut EvalState<'h>,
+        site_expr: &'h Expr,
         pairs: impl Iterator<Item = (&'b str, &'h Expr)>,
     ) -> Result<Ty> {
         let mut props = Vec::new();
-        for (name, expr) in pairs {
+        let mut keep_mask = 0u64;
+        let mut has_zero_sized_func = false;
+        for (idx, (name, expr)) in pairs.enumerate() {
             let ty = self.eval_expr(s, expr)?;
             self.invalidate_conservative_cell(ty);
-            if let TyKind::Func(ident) = self.types.kind(ty) {
-                self.check_escaping_unannotated_func(ident.template, Some(name))?;
+            self.check_stage1_escaping_func(s.inst, ty, 0)?;
+            if self
+                .types
+                .is_zero_sized_func(ty, &self.index.capture_free_templates)
+            {
+                has_zero_sized_func = true;
+            } else if idx < 64 {
+                keep_mask |= 1u64 << idx;
             }
             let ty = self.types.normalize_for_storage(self.ctx, self.decls, ty);
             props.push(ObjectProp {
@@ -395,6 +404,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 optional: false,
                 readonly: false,
             });
+        }
+        if has_zero_sized_func || matches!(site_expr, Expr::Object(_)) {
+            self.record_site(
+                s.inst,
+                site_expr,
+                SiteResolution::ObjectLiteral { keep_mask },
+            );
         }
         Ok(self.types.object(&props, None))
     }
@@ -444,6 +460,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         is_method: bool,
         strip_arg_mask: u64,
     ) -> Result<(InstanceId, Ty)> {
+        let pass_receiver = matches!(req.receiver, Some(Receiver::Object(_)));
         let target = self.request_instance(req)?;
         let res = if is_method {
             SiteResolution::MethodCall {
@@ -454,6 +471,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             SiteResolution::DirectCall {
                 target,
                 strip_arg_mask,
+                pass_receiver,
             }
         };
         self.record_site(inst_id, expr, res);
@@ -502,6 +520,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(fields) = self.index.literal_fields_by_id(cname_id) {
             return self.eval_object_fields(
                 s,
+                expr,
                 fields.iter().zip(args).map(|(f, a)| (f.name.as_str(), a)),
             );
         }
@@ -552,6 +571,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                 },
             );
             return Ok(self.types.class_inst(class_inst));
+        }
+        if arg_tys.iter().any(|&a| self.types.has_func(a)) {
+            return Err(self.metadata.locations.annotate_call(
+                Diagnostic::unsupported(format!(
+                    "passing a callback to runtime '{class_name}' requires the runtime to call a guest function"
+                )),
+                byte_offset,
+            ));
         }
         Ok(if class_name == "Array" {
             self.types.array(Ty::OPEN)
@@ -822,9 +849,42 @@ impl<'h, 'a> Solver<'h, 'a> {
                 s.inst,
                 expr,
                 InstanceReq::new(method_tid, &arg_tys, Some(s.inst))
-                    .receiver(Some(cinst_id))
+                    .receiver(Some(Receiver::Class(cinst_id)))
                     .at(byte_offset),
                 true,
+                mask,
+            )?;
+            return Ok(ret);
+        }
+
+        let prop_ty = if let Some(cinst_id) =
+            self.resolve_class_inst(s.inst, stripped, byte_offset)?
+            && let Some(loc) = self.class_field_loc(cinst_id, name)
+        {
+            Some(self.read_loc(loc, s.inst))
+        } else {
+            builtins::property_type(self.ctx, self.decls, self.types, stripped, name)
+        };
+        if let Some(prop_ty) = prop_ty
+            && let TyKind::Func(ident) = self.types.kind(prop_ty)
+        {
+            if arg_tys.contains(&Ty::BOTTOM) {
+                return Ok(Ty::BOTTOM);
+            }
+            let Some(method_view) = self.index.view(ident.template) else {
+                return Ok(Ty::OPEN);
+            };
+            self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
+            let mask = callable_arg_mask(self.types, &arg_tys);
+            let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
+            let (_, ret) = self.dispatch_call_site(
+                s.inst,
+                expr,
+                InstanceReq::new(ident.template, &arg_tys, Some(s.inst))
+                    .receiver(recv)
+                    .owner(ident.capture_owner)
+                    .at(byte_offset),
+                false,
                 mask,
             )?;
             return Ok(ret);
@@ -877,6 +937,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 _ => None,
             };
             if func_ident.is_some()
+                && !self
+                    .types
+                    .is_zero_sized_func(actual, &self.index.capture_free_templates)
                 && let Some(span) = self
                     .index
                     .local_idx(param.id)

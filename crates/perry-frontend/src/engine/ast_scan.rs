@@ -2,7 +2,7 @@
 use crate::hir_compat::{self, Locations};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -12,6 +12,7 @@ pub(crate) struct SourceFacts {
     pub(crate) inferred_spans: Vec<(u32, u32)>,
     pub(crate) deferred_starts: Vec<u32>,
     pub(crate) param_annotated_starts: Vec<u32>,
+    pub(crate) exported_var_starts: Vec<u32>,
     pub(crate) callable_comparisons: Vec<Span>,
     pub(crate) param_value_uses: Vec<(u32, Span)>,
     pub(crate) escaping_closure: Option<(String, Span)>,
@@ -26,6 +27,9 @@ impl SourceFacts {
     }
     pub(crate) fn is_param_annotated(&self, start: u32) -> bool {
         self.param_annotated_starts.binary_search(&start).is_ok()
+    }
+    pub(crate) fn is_exported_var(&self, start: u32) -> bool {
+        self.exported_var_starts.binary_search(&start).is_ok()
     }
     pub(crate) fn param_value_use(&self, start: u32) -> Option<Span> {
         let idx = self
@@ -102,12 +106,20 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
         facts: SourceFacts,
         parameters: HashMap<ast::Id, u32>,
         closures: HashMap<ast::Id, Span>,
+        capturing_closures: HashMap<ast::Id, Span>,
+        top_vars: HashMap<ast::Id, u32>,
         enclosing: Option<swc_atoms::Atom>,
+        enclosing_scopes: Vec<HashSet<ast::Id>>,
     }
 
     impl AstScanner {
         fn record_param(&mut self, pat: &ast::Pat) {
             record_pattern_annotations(pat, false, &mut self.facts.param_annotated_starts);
+            if let Some(scope) = self.enclosing_scopes.last_mut() {
+                hir_compat::pattern_bindings(pat, false, &mut |id, _| {
+                    scope.insert(id.to_id());
+                });
+            }
             if let ast::Pat::Ident(binding) = pat {
                 self.parameters
                     .insert(binding.id.to_id(), binding.id.span.lo.0);
@@ -118,6 +130,17 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                 ast::Expr::Ident(id) => self.closures.contains_key(&id.to_id()),
                 ast::Expr::Paren(p) => self.is_closure_expr(&p.expr),
                 other => matches!(other, ast::Expr::Arrow(_) | ast::Expr::Fn(_)),
+            }
+        }
+        fn is_capturing_closure(&self, expr: &ast::Expr) -> bool {
+            match expr {
+                ast::Expr::Ident(id) => self.capturing_closures.contains_key(&id.to_id()),
+                ast::Expr::Paren(p) => self.is_capturing_closure(&p.expr),
+                ast::Expr::Arrow(_) | ast::Expr::Fn(_) => {
+                    !self.enclosing_scopes.is_empty()
+                        && expr_captures_outer(expr, &self.enclosing_scopes)
+                }
+                _ => false,
             }
         }
         fn visit_callable_position(&mut self, expr: &ast::Expr) {
@@ -131,6 +154,29 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
     }
 
     impl Visit for AstScanner {
+        fn visit_export_decl(&mut self, export: &ast::ExportDecl) {
+            if let ast::Decl::Var(var) = &export.decl {
+                for decl in &var.decls {
+                    hir_compat::pattern_bindings(&decl.name, false, &mut |id, _| {
+                        self.facts.exported_var_starts.push(id.span.lo.0);
+                    });
+                }
+            }
+            export.visit_children_with(self);
+        }
+        fn visit_named_export(&mut self, export: &ast::NamedExport) {
+            if export.src.is_none() {
+                for spec in &export.specifiers {
+                    if let ast::ExportSpecifier::Named(named) = spec
+                        && let ast::ModuleExportName::Ident(ident) = &named.orig
+                        && let Some(&start) = self.top_vars.get(&ident.to_id())
+                    {
+                        self.facts.exported_var_starts.push(start);
+                    }
+                }
+            }
+            export.visit_children_with(self);
+        }
         fn visit_array_lit(&mut self, array: &ast::ArrayLit) {
             self.facts.sparse_arrays |= array.elems.iter().any(Option::is_none);
             array.visit_children_with(self);
@@ -139,15 +185,44 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             self.record_param(&param.pat);
             param.visit_children_with(self);
         }
+        fn visit_function(&mut self, func: &ast::Function) {
+            self.enclosing_scopes.push(HashSet::new());
+            func.visit_children_with(self);
+            self.enclosing_scopes.pop();
+        }
+        fn visit_constructor(&mut self, ctor: &ast::Constructor) {
+            self.enclosing_scopes.push(HashSet::new());
+            for param in &ctor.params {
+                match param {
+                    ast::ParamOrTsParamProp::Param(p) => self.record_param(&p.pat),
+                    ast::ParamOrTsParamProp::TsParamProp(prop) => match &prop.param {
+                        ast::TsParamPropParam::Ident(b) => {
+                            if let Some(scope) = self.enclosing_scopes.last_mut() {
+                                scope.insert(b.id.to_id());
+                            }
+                        }
+                        ast::TsParamPropParam::Assign(a) => self.record_param(&a.left),
+                    },
+                }
+            }
+            ctor.visit_children_with(self);
+            self.enclosing_scopes.pop();
+        }
         fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
+            self.enclosing_scopes.push(HashSet::new());
             for pat in &arrow.params {
                 self.record_param(pat);
             }
             arrow.visit_children_with(self);
+            self.enclosing_scopes.pop();
         }
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
-            if self.enclosing.is_some() {
+            if !self.enclosing_scopes.is_empty() {
                 self.closures.insert(decl.ident.to_id(), decl.ident.span);
+                if fn_captures_outer(&decl.function, &self.enclosing_scopes) {
+                    self.capturing_closures
+                        .insert(decl.ident.to_id(), decl.ident.span);
+                }
             }
             let prev = self.enclosing.replace(decl.ident.sym.clone());
             decl.function.visit_with(self);
@@ -171,6 +246,11 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                     self.facts.deferred_starts.push(b.id.span.lo.0);
                 }
                 hir_compat::pattern_bindings(&decl.name, false, &mut |id, annotated| {
+                    if let Some(scope) = self.enclosing_scopes.last_mut() {
+                        scope.insert(id.to_id());
+                    } else {
+                        self.top_vars.insert(id.to_id(), id.span.lo.0);
+                    }
                     if !annotated {
                         self.facts.inferred_spans.push((id.span.lo.0, id.span.hi.0));
                     }
@@ -186,6 +266,9 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                                 _ => b.id.span,
                             };
                             self.closures.insert(b.id.to_id(), origin);
+                            if self.is_capturing_closure(init) {
+                                self.capturing_closures.insert(b.id.to_id(), origin);
+                            }
                         }
                         if let ast::Expr::Ident(src) = init.as_ref()
                             && let Some(&origin) = self.parameters.get(&src.to_id())
@@ -203,7 +286,7 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             {
                 self.facts.param_value_uses.push((origin, id.span));
             }
-            if self.is_closure_expr(expr) {
+            if self.is_capturing_closure(expr) {
                 self.facts.escaping_closure.get_or_insert_with(|| {
                     let name = match expr {
                         ast::Expr::Ident(id) => format!("function '{}'", id.sym),
@@ -251,7 +334,7 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
     if let Some((name, span)) = scanner.facts.escaping_closure {
         return Err(locations.annotate(
             unsupported!(
-                "{name} escapes its static call site. Storing, returning or joining function values requires a runtime function representation"
+                "{name} escapes its static call site. Storing, returning or joining function values with captures requires a runtime environment"
             ),
             span,
         ));
@@ -262,12 +345,86 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
     scanner.facts.deferred_starts.dedup();
     scanner.facts.param_annotated_starts.sort_unstable();
     scanner.facts.param_annotated_starts.dedup();
+    scanner.facts.exported_var_starts.sort_unstable();
+    scanner.facts.exported_var_starts.dedup();
     scanner
         .facts
         .param_value_uses
         .sort_unstable_by_key(|(s, _)| *s);
     scanner.facts.param_value_uses.dedup_by_key(|(s, _)| *s);
     Ok(scanner.facts)
+}
+
+fn expr_captures_outer(expr: &ast::Expr, outer_scopes: &[HashSet<ast::Id>]) -> bool {
+    let mut check = CaptureCheck {
+        outer_scopes,
+        bound: HashSet::new(),
+        found: false,
+    };
+    match expr {
+        ast::Expr::Arrow(arrow) => {
+            for pat in &arrow.params {
+                hir_compat::pattern_bindings(pat, false, &mut |id, _| {
+                    check.bound.insert(id.to_id());
+                });
+            }
+            arrow.body.visit_with(&mut check);
+        }
+        ast::Expr::Fn(fn_expr) => {
+            if let Some(id) = &fn_expr.ident {
+                check.bound.insert(id.to_id());
+            }
+            fn_expr.function.visit_with(&mut check);
+        }
+        _ => {}
+    }
+    check.found
+}
+
+fn fn_captures_outer(func: &ast::Function, outer_scopes: &[HashSet<ast::Id>]) -> bool {
+    let mut check = CaptureCheck {
+        outer_scopes,
+        bound: HashSet::new(),
+        found: false,
+    };
+    func.visit_with(&mut check);
+    check.found
+}
+
+struct CaptureCheck<'a> {
+    outer_scopes: &'a [HashSet<ast::Id>],
+    bound: HashSet<ast::Id>,
+    found: bool,
+}
+
+impl Visit for CaptureCheck<'_> {
+    fn visit_param(&mut self, param: &ast::Param) {
+        hir_compat::pattern_bindings(&param.pat, false, &mut |id, _| {
+            self.bound.insert(id.to_id());
+        });
+        param.visit_children_with(self);
+    }
+    fn visit_var_decl(&mut self, decl: &ast::VarDecl) {
+        for d in &decl.decls {
+            hir_compat::pattern_bindings(&d.name, false, &mut |id, _| {
+                self.bound.insert(id.to_id());
+            });
+        }
+        decl.visit_children_with(self);
+    }
+    fn visit_expr(&mut self, expr: &ast::Expr) {
+        if self.found {
+            return;
+        }
+        if let ast::Expr::Ident(id) = expr {
+            let key = id.to_id();
+            if !self.bound.contains(&key) && self.outer_scopes.iter().any(|s| s.contains(&key)) {
+                self.found = true;
+                return;
+            }
+        }
+        expr.visit_children_with(self);
+    }
 }
 
 fn record_pattern_annotations(pat: &ast::Pat, inherited: bool, out: &mut Vec<u32>) {

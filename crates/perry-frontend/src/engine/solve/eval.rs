@@ -525,7 +525,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
                 let norm = self.types.normalize_for_storage(self.ctx, self.decls, ty);
+                self.check_stage1_escaping_func(s.inst, norm, 0)?;
                 s.returned = self.types.join(s.returned, norm);
+                self.check_stage1_escaping_func(s.inst, s.returned, 0)?;
             }
             Stmt::If {
                 condition,
@@ -697,21 +699,21 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             match view.kind {
                 TemplateKind::ClassMethod => {
-                    if let Some(ci) = inst.receiver
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
                         && let Some(list) = class_inst_methods.get_mut(ci.index())
                     {
                         list.push(id);
                     }
                 }
                 TemplateKind::ClassGetter(getter_idx) => {
-                    if let Some(ci) = inst.receiver
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
                         && let Some(list) = class_inst_getters.get_mut(ci.index())
                     {
                         list.push((getter_idx, id));
                     }
                 }
                 TemplateKind::ClassSetter(setter_idx) => {
-                    if let Some(ci) = inst.receiver
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
                         && let Some(list) = class_inst_setters.get_mut(ci.index())
                     {
                         list.push((setter_idx, id));

@@ -56,7 +56,7 @@ fn unannotated_parameters_need_evidence_from_statically_known_calls() -> anyhow:
     for source in [
         "export function id(x) { return x; } export function run(): number { return id(1); }",
         "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
-        "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
+        "function id(x) { return x; } export const other = {id}; export function run():number { return id(1); }",
         "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
     ] {
         let error = perry_wit::compile_core(source, "closed.ts")
@@ -197,7 +197,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
     program
         .source
         .contents
-        .extend_from_slice(b"\nconst escaped = {helper};");
+        .extend_from_slice(b"\nexport { helper };");
     let error = api::compile_core(&program).unwrap_err();
     program.source.contents.truncate(end);
     let diagnostic = error.primary();
@@ -1013,15 +1013,15 @@ fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> any
 
 #[test]
 fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> anyhow::Result<()> {
-    // Object-literal method diagnostics report the source method name, never internal synthetic names.
+    // Exported object-literal method diagnostics report the source method name, never internal synthetic names.
     for (source, file, expected_name) in [
         (
-            "const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
+            "export const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
             "obj_method.js",
             "'greet'",
         ),
         (
-            "const counter = { n: 0, bump(by) { this.n += by; } };\nexport function run(): number { counter.bump(1); return counter.n; }\n",
+            "export const counter = { n: 0, bump(by) { this.n += by; } };\nexport function run(): number { counter.bump(1); return counter.n; }\n",
             "obj_closure_method.js",
             "'bump'",
         ),
@@ -1030,7 +1030,7 @@ fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> an
             .err()
             .context("expected missing annotation diagnostic for object method")?;
         assert_eq!(obj_method.primary().code(), codes::MISSING_TYPE_ANNOTATION);
-        let msg = obj_method.primary().message();
+        let msg = obj_method.to_string();
         assert!(msg.contains(expected_name), "{obj_method}");
         assert!(!msg.contains("__obj_method_"), "{obj_method}");
         assert!(!msg.contains("callback_"), "{obj_method}");

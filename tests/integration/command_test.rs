@@ -598,6 +598,33 @@ console.log(new Mode("b").mode, late.n);
             "b 3\n",
         ),
         ("deep_call_chain_300", chain.as_str(), "301\n"),
+        (
+            "function_identities_in_storage_and_object_methods",
+            r#"
+function apply(f, x) { return f(x); }
+const twice = (n) => n * 2;
+const holder = { f: twice };
+const counter = { n: 0, bump(by) { this.n += by; return this.n; } };
+const greeter = { greet(name) { return "hi " + name; } };
+function getFn() { return twice; }
+function selfRef() { return selfRef; }
+class FnBox { constructor() { this.op = twice; } run(x) { return this.op(x); } }
+const fs = [(x) => x + 1];
+counter.bump(2);
+console.log(
+  apply(twice, 4),
+  apply(holder.f, 5),
+  holder.f(6),
+  counter.bump(3),
+  greeter.greet("a"),
+  getFn()(7),
+  selfRef()()() === selfRef,
+  new FnBox().run(8),
+  fs[0](1),
+);
+"#,
+            "8 10 12 5 hi a 14 true 16 2\n",
+        ),
     ];
     for &(name, source, expected) in cases {
         let run = execute(source).await?;

@@ -39,13 +39,11 @@ pub(crate) struct TemplateView<'h> {
     pub(crate) is_exported: bool,
     pub(crate) captures_this: bool,
     pub(crate) captures_new_target: bool,
+    pub(crate) uses_this: bool,
     pub(crate) explicit_return: bool,
 }
 
 impl<'h> TemplateView<'h> {
-    pub(crate) fn is_obj_method(&self) -> bool {
-        self.name.starts_with("__obj_method_")
-    }
     pub(crate) fn display_name(&self) -> String {
         if self.name.is_empty() {
             format!("callback_{}", self.func_id)
@@ -79,6 +77,7 @@ impl<'h> TemplateView<'h> {
             is_exported: f.is_exported,
             captures_this: false,
             captures_new_target: false,
+            uses_this: stmts_use_this(&f.body),
             explicit_return,
         }
     }
@@ -127,6 +126,8 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) local_module: BitSet,
     pub(crate) local_captured: BitSet,
     pub(crate) local_written_from_closure: BitSet,
+    pub(crate) exported_obj_methods: BitSet,
+    pub(crate) capture_free_templates: BitSet,
     local_frame_slot: Vec<Option<u32>>,
     template_frame_counts: Vec<usize>,
     pub(crate) location_types: IdxVec<LocId, Ty>,
@@ -174,6 +175,7 @@ impl<'h> ModuleIndex<'h> {
             is_exported: false,
             captures_this: false,
             captures_new_target: false,
+            uses_this: false,
             explicit_return: false,
         });
         debug_assert_eq!(init_tid, TemplateId::INIT);
@@ -336,7 +338,54 @@ impl<'h> ModuleIndex<'h> {
                 *count += 1;
             }
         }
+        for (tid, view) in idx.views.iter_enumerated() {
+            if !idx.captures_local(view.captures) {
+                idx.capture_free_templates.insert(tid.index());
+            }
+        }
+        for stmt in &hir.init {
+            if let Stmt::Let {
+                id,
+                init: Some(init_expr),
+                ..
+            } = stmt
+                && hir
+                    .local_source_spans
+                    .get(id)
+                    .is_some_and(|s| facts.is_exported_var(s.start))
+            {
+                idx.mark_exported_obj_methods(init_expr);
+            }
+        }
         idx
+    }
+
+    fn mark_exported_obj_methods(&mut self, expr: &Expr) {
+        match expr {
+            Expr::FuncRef(fid) | Expr::Closure { func_id: fid, .. } => {
+                if let Some(tid) = self.template_of_func(*fid) {
+                    self.exported_obj_methods.insert(tid.index());
+                }
+            }
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Closure { body, .. } = callee.as_ref() {
+                    self.mark_exported_obj_methods_stmts(body);
+                }
+                for arg in args {
+                    self.mark_exported_obj_methods(arg);
+                }
+            }
+            _ => walk_expr_children(expr, &mut |child| self.mark_exported_obj_methods(child)),
+        }
+    }
+
+    fn mark_exported_obj_methods_stmts(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            stmt_any_expr(stmt, &mut |e| {
+                self.mark_exported_obj_methods(e);
+                false
+            });
+        }
     }
 
     pub(crate) fn local_frame_slot(&self, local: LocalIdx) -> Option<usize> {
@@ -649,9 +698,12 @@ impl<'h> ModuleIndex<'h> {
                     Self::record_site_expr(scan, owner, arg);
                 }
             }
-            Expr::Array(items, _) if items.is_empty() => Self::record_site_expr(scan, owner, expr),
-            Expr::Object(fields) if fields.is_empty() => Self::record_site_expr(scan, owner, expr),
-            Expr::CallSpread { .. }
+            Expr::Array(_, _)
+            | Expr::Object(_)
+            | Expr::ObjectSpread { .. }
+            | Expr::PropertySet { .. }
+            | Expr::PutValueSet { .. }
+            | Expr::CallSpread { .. }
             | Expr::New { .. }
             | Expr::NewDynamic { .. }
             | Expr::MapNew
@@ -714,7 +766,11 @@ impl<'h> ModuleIndex<'h> {
                 );
                 let tid = self.add_template(TemplateView {
                     kind: TemplateKind::Closure,
-                    name: "",
+                    name: scan
+                        .hir
+                        .closure_display_names
+                        .get(func_id)
+                        .map_or("", String::as_str),
                     func_id: *func_id,
                     params: params.as_slice(),
                     return_type,
@@ -728,6 +784,7 @@ impl<'h> ModuleIndex<'h> {
                     is_exported: false,
                     captures_this: *captures_this,
                     captures_new_target: *captures_new_target,
+                    uses_this: stmts_use_this(body),
                     explicit_return: exp_ret,
                 });
                 scan.raw_sites.resize_with(self.views.len(), Vec::new);
@@ -777,4 +834,37 @@ struct ScanCtx<'h, 'a> {
     facts: &'a SourceFacts,
     types: &'a mut TypeTable,
     raw_sites: &'a mut Vec<Vec<(usize, u32)>>,
+}
+
+fn stmts_use_this(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| stmt_any_expr(s, &mut expr_uses_this))
+}
+
+fn expr_uses_this(expr: &Expr) -> bool {
+    match expr {
+        Expr::This => true,
+        Expr::Closure {
+            is_arrow,
+            captures_this,
+            body,
+            ..
+        } => {
+            if *captures_this {
+                true
+            } else if *is_arrow {
+                stmts_use_this(body)
+            } else {
+                false
+            }
+        }
+        _ => {
+            let mut found = false;
+            walk_expr_children(expr, &mut |child| {
+                if !found && expr_uses_this(child) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
 }

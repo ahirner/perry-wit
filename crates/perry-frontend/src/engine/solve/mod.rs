@@ -27,9 +27,24 @@ use std::collections::HashMap;
 
 const INSTANCE_BUDGET: u16 = 256;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Receiver {
+    Class(ClassInstId),
+    Object(Ty),
+}
+
+impl Receiver {
+    pub(crate) fn class(self) -> Option<ClassInstId> {
+        match self {
+            Self::Class(id) => Some(id),
+            Self::Object(_) => None,
+        }
+    }
+}
+
 pub(crate) struct Instance {
     pub(crate) template: TemplateId,
-    pub(crate) receiver: Option<ClassInstId>,
+    pub(crate) receiver: Option<Receiver>,
     pub(crate) capture_owner: Option<InstanceId>,
     pub(crate) args: Ty,
     pub(crate) explicit_type_args: Ty,
@@ -58,6 +73,7 @@ pub(crate) enum SiteResolution {
     DirectCall {
         target: InstanceId,
         strip_arg_mask: u64,
+        pass_receiver: bool,
     },
     MethodCall {
         target: InstanceId,
@@ -71,6 +87,11 @@ pub(crate) enum SiteResolution {
         class_inst: ClassInstId,
         strip_arg_mask: u64,
     },
+    ObjectLiteral {
+        keep_mask: u64,
+    },
+    ZeroSizedArray,
+    ZeroSizedFieldSet,
     CollectionNew {
         is_map: bool,
         type_args: Vec<Ty>,
@@ -103,7 +124,7 @@ pub(crate) struct Solved {
     pub(crate) deletes_array_elements: bool,
 }
 
-type InstanceKey = (TemplateId, Option<ClassInstId>, Option<InstanceId>, Ty, Ty);
+type InstanceKey = (TemplateId, Option<Receiver>, Option<InstanceId>, Ty, Ty);
 
 struct ResultContract {
     inst: InstanceId,
@@ -114,7 +135,7 @@ struct ResultContract {
 
 struct InstanceReq<'a> {
     template: TemplateId,
-    receiver: Option<ClassInstId>,
+    receiver: Option<Receiver>,
     capture_owner: Option<InstanceId>,
     args: &'a [Ty],
     explicit_type_args: &'a [Ty],
@@ -136,7 +157,7 @@ impl<'a> InstanceReq<'a> {
             is_inline_callback: false,
         }
     }
-    fn receiver(mut self, r: Option<ClassInstId>) -> Self {
+    fn receiver(mut self, r: Option<Receiver>) -> Self {
         self.receiver = r;
         self
     }
@@ -160,7 +181,7 @@ impl<'a> InstanceReq<'a> {
 
 struct EvalState<'h> {
     inst: InstanceId,
-    receiver: Option<ClassInstId>,
+    receiver: Option<Receiver>,
     returned: Ty,
     has_return_value: bool,
     guards: Guards<'h>,
@@ -169,7 +190,7 @@ struct EvalState<'h> {
 }
 
 impl EvalState<'_> {
-    fn new(inst: InstanceId, receiver: Option<ClassInstId>) -> Self {
+    fn new(inst: InstanceId, receiver: Option<Receiver>) -> Self {
         Self {
             inst,
             receiver,
@@ -604,7 +625,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             .views
             .iter_enumerated()
             .skip(1)
-            .filter_map(|(tid, view)| (view.is_exported || view.is_obj_method()).then_some(tid))
+            .filter_map(|(tid, view)| {
+                (view.is_exported || self.index.exported_obj_methods.contains(tid.index()))
+                    .then_some(tid)
+            })
             .collect();
         for tid in roots {
             let Some(view) = self.index.view(tid) else {
@@ -907,8 +931,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             .flatten();
         let return_loc = self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM));
 
-        let keep_original =
-            count == 0 && (view.is_exported || view.is_obj_method() || is_monomorphic_plain);
+        let keep_original = count == 0
+            && (view.is_exported
+                || self.index.exported_obj_methods.contains(template.index())
+                || is_monomorphic_plain);
         let emitted_func_id = if keep_original {
             view.func_id
         } else {
@@ -972,14 +998,16 @@ impl<'h, 'a> Solver<'h, 'a> {
     fn compute_type_param_bindings(
         &mut self,
         template: TemplateId,
-        receiver: Option<ClassInstId>,
+        receiver: Option<Receiver>,
         capture_owner: Option<InstanceId>,
         args: &[Ty],
         explicit_type_args: &[Ty],
     ) -> Vec<(shapes::TypeId, Ty)> {
         let mut bindings =
             capture_owner.map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
-        if let Some(cinst) = receiver.and_then(|id| self.class_insts.get(id))
+        if let Some(cinst) = receiver
+            .and_then(Receiver::class)
+            .and_then(|id| self.class_insts.get(id))
             && let Some(class_tps) = self.class_type_params.get(cinst.class.index())
         {
             bindings.extend(
@@ -1149,7 +1177,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     let cell = self.types.cell(elem_loc, CellKind::Array);
                     self.write_loc(field_loc, cell);
                 } else if let Some(init_inst) = self.init_inst {
-                    let mut state = EvalState::new(init_inst, Some(cinst_id));
+                    let mut state = EvalState::new(init_inst, Some(Receiver::Class(cinst_id)));
                     let init_ty = self.eval_expr(&mut state, init)?;
                     let norm = self
                         .types
@@ -1161,7 +1189,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(ctor_tid) = cinfo.ctor {
             let ctor_inst = self.request_instance(
                 InstanceReq::new(ctor_tid, args, caller)
-                    .receiver(Some(cinst_id))
+                    .receiver(Some(Receiver::Class(cinst_id)))
                     .at(byte_offset),
             )?;
             if let Some(ci) = self.class_insts.get_mut(cinst_id) {
@@ -1263,6 +1291,65 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Err(Diagnostic::internal(
                 "fixed-point check dirtied a storage location",
             ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_stage1_escaping_func(
+        &self,
+        inst_id: InstanceId,
+        ty: Ty,
+        byte_offset: u32,
+    ) -> Result<()> {
+        match self.types.kind(ty) {
+            TyKind::Func(_)
+                if !self
+                    .types
+                    .is_zero_sized_func(ty, &self.index.capture_free_templates) =>
+            {
+                let owner = self
+                    .instances
+                    .get(inst_id)
+                    .and_then(|i| self.index.view(i.template))
+                    .filter(|v| !v.name.is_empty())
+                    .map(|v| format!("closure in '{}'", v.display_name()))
+                    .unwrap_or_else(|| "anonymous function".into());
+                let mut err = Diagnostic::unsupported(format!(
+                    "{owner} escapes its static call site. Storing, returning or joining function values with captures requires a runtime environment"
+                ));
+                if byte_offset != 0 {
+                    err = self.metadata.locations.annotate_call(err, byte_offset);
+                }
+                return Err(attach_inst_chain(
+                    &self.instances,
+                    self.index,
+                    &self.metadata.locations,
+                    err,
+                    inst_id,
+                ));
+            }
+            TyKind::Union(span)
+                if self
+                    .types
+                    .ty_slice(span)
+                    .iter()
+                    .any(|&m| matches!(self.types.kind(m), TyKind::Func(_))) =>
+            {
+                let mut err = Diagnostic::unsupported(
+                    "joining function values requires a runtime function representation",
+                );
+                if byte_offset != 0 {
+                    err = self.metadata.locations.annotate_call(err, byte_offset);
+                }
+                return Err(attach_inst_chain(
+                    &self.instances,
+                    self.index,
+                    &self.metadata.locations,
+                    err,
+                    inst_id,
+                ));
+            }
+            _ => {}
         }
         Ok(())
     }

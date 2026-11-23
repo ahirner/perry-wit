@@ -78,13 +78,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let val_ty = self.eval_expr(s, value)?;
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
-                        if matches!(self.types.kind(existing), TyKind::Func(_)) {
-                            return Err(Diagnostic::unsupported(
-                                "a reassigned function binding requires a runtime function representation",
-                            ));
-                        }
                         let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                        if let TyKind::Cell { loc, kind } = self.types.kind(existing) {
+                        if matches!(self.types.kind(existing), TyKind::Func(_)) {
+                            if existing != val_ty && val_ty != Ty::BOTTOM {
+                                return Err(Diagnostic::unsupported(
+                                    "a reassigned function binding requires a runtime function representation",
+                                ));
+                            }
+                        } else if let TyKind::Cell { loc, kind } = self.types.kind(existing) {
                             if kind == CellKind::Array {
                                 let (def, _) = self.types.strip_nullish(val_ty);
                                 match self.types.kind(def) {
@@ -106,6 +107,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 || self.index.local_nullish_init.contains(lidx.index())))
                             || self.types.is_open(existing)
                         {
+                            self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
                             let norm = self
                                 .types
                                 .normalize_for_storage(self.ctx, self.decls, val_ty);
@@ -116,7 +118,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(val_ty)
             }
-            Expr::This => Ok(s.receiver.map_or(Ty::OPEN, |c| self.types.class_inst(c))),
+            Expr::This => Ok(match s.receiver {
+                Some(Receiver::Class(c)) => self.types.class_inst(c),
+                Some(Receiver::Object(ty)) => ty,
+                None => Ty::OPEN,
+            }),
             Expr::FuncRef(fid) => {
                 Ok(self
                     .index
@@ -234,16 +240,27 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if elem_tys.contains(&Ty::BOTTOM) {
                     return Ok(Ty::BOTTOM);
                 }
+                for &et in &elem_tys {
+                    self.check_stage1_escaping_func(s.inst, et, 0)?;
+                }
                 if let [a, b] = elem_tys.as_slice()
                     && self.types.strip_nullish(*a).0 != self.types.strip_nullish(*b).0
                     && !self.types.is_open(*a)
                     && !self.types.is_open(*b)
+                    && !(self.types.has_func(*a) && self.types.has_func(*b))
                 {
                     return Ok(self.types.tuple(&[*a, *b]));
                 }
                 let joined = elem_tys
                     .into_iter()
                     .fold(Ty::BOTTOM, |acc, t| self.types.join(acc, t));
+                self.check_stage1_escaping_func(s.inst, joined, 0)?;
+                if self
+                    .types
+                    .is_zero_sized_func(joined, &self.index.capture_free_templates)
+                {
+                    self.record_site(s.inst, expr, SiteResolution::ZeroSizedArray);
+                }
                 Ok(self.types.array(joined))
             }
             Expr::ArraySpread(items) => {
@@ -298,7 +315,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .map_or(Ty::OPEN, |e| self.types.array(e)))
             }
             Expr::Object(fields) => {
-                self.eval_object_fields(s, fields.iter().map(|(n, v)| (n.as_str(), v)))
+                self.eval_object_fields(s, expr, fields.iter().map(|(n, v)| (n.as_str(), v)))
             }
             Expr::ObjectSpread { parts } => self.eval_object_spread(s, parts),
             Expr::ObjectRest {
@@ -336,6 +353,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ..
             } => {
                 let (obj_ty, val_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, value)?);
+                self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                if self
+                    .types
+                    .is_zero_sized_func(val_ty, &self.index.capture_free_templates)
+                {
+                    self.record_site(s.inst, expr, SiteResolution::ZeroSizedFieldSet);
+                }
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
                 self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?;
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
@@ -394,6 +418,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if matches!(expr, Expr::PutValueSet { .. })
                     && let Expr::String(field_name) = index.as_ref()
                 {
+                    self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
+                    if self
+                        .types
+                        .is_zero_sized_func(val_ty, &self.index.capture_free_templates)
+                    {
+                        self.record_site(s.inst, expr, SiteResolution::ZeroSizedFieldSet);
+                    }
                     self.write_class_or_setter(s.inst, obj_def, field_name, value, val_ty)?;
                 }
                 self.write_cell_indexed(obj_def, idx_ty, val_ty);
@@ -779,7 +810,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .and_then(|c| ClassInfo::find(&c.setters, prop_id))
         {
             self.request_instance(
-                InstanceReq::new(setter_tid, &[norm], Some(inst_id)).receiver(Some(cinst_id)),
+                InstanceReq::new(setter_tid, &[norm], Some(inst_id))
+                    .receiver(Some(Receiver::Class(cinst_id))),
             )?;
         }
         Ok(())
@@ -955,7 +987,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .and_then(|c| ClassInfo::find(&c.getters, pname))
             {
                 let target = self.request_instance(
-                    InstanceReq::new(getter_tid, &[], Some(s.inst)).receiver(Some(cinst_id)),
+                    InstanceReq::new(getter_tid, &[], Some(s.inst))
+                        .receiver(Some(Receiver::Class(cinst_id))),
                 )?;
                 return Ok(self.read_loc(self.instances[target].return_loc, s.inst));
             }
@@ -966,7 +999,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         )
     }
 
-    fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
+    pub(super) fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
         let cinst = self.class_insts.get(cinst_id)?;
         let f_idx = self
             .hir
@@ -1028,9 +1061,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 continue;
             }
             if let Some(key) = hir_compat::static_property(part) {
-                if let TyKind::Func(ident) = self.types.kind(val_ty) {
-                    self.check_escaping_unannotated_func(ident.template, Some(key))?;
-                }
+                self.check_stage1_escaping_func(s.inst, val_ty, 0)?;
                 let name = self.types.intern_name(key);
                 let norm = self
                     .types
