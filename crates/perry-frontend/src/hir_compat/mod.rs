@@ -27,36 +27,32 @@ pub(crate) use parser::parse;
 mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
-mod source;
-pub(crate) use source::{CallableBindings, pattern_bindings, validate};
 mod streams;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
 
 pub struct Metadata<'s> {
     pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
-    pub(crate) lifted_captures: HashSet<LocalId>,
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
     /// Bindings declared without an initializer.
     pub deferred_bindings: HashSet<LocalId>,
     pub constructors: Constructors,
     pub sparse_arrays: bool,
+    /// Monomorphized class name -> original source class name (for `instanceof`).
+    pub class_origins: HashMap<String, String>,
 }
 
 pub(crate) struct LoweredHir<'s> {
-    pub callables: CallableBindings,
+    pub facts: crate::engine::boundary::SourceFacts,
     pub module: HirModule,
     pub metadata: Metadata<'s>,
 }
 
 pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {
     let mut ast = loaded.module;
-    let mut sparse = SparseArrays(false);
-    swc_ecma_visit::VisitWith::visit_with(&ast, &mut sparse);
     let mut locations = loaded.locations;
     locations.collect(&ast);
-    let spans = source::validate(&ast, &locations)?;
     let mut constructors = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
@@ -66,7 +62,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
-    let mut callables = source::callable_bindings(&ast, &mut locations)?;
+    let facts = crate::engine::boundary::scan_ast(&ast, &locations)?;
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
@@ -91,49 +87,62 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     let inferred_bindings = module
         .local_source_spans
         .iter()
-        .filter_map(|(id, span)| {
-            spans
-                .inferred
-                .contains(&(span.start, span.end))
-                .then_some(*id)
-        })
+        .filter_map(|(id, span)| facts.is_inferred(span.start, span.end).then_some(*id))
         .collect();
     let deferred_bindings = module
         .local_source_spans
         .iter()
-        .filter_map(|(id, span)| spans.deferred.contains(&span.start).then_some(*id))
+        .filter_map(|(id, span)| facts.is_deferred(span.start).then_some(*id))
         .collect();
-    callables.invoked = module
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| callables.invoked.contains(&span.start).then_some(*id))
-        .collect();
-    callables.value_uses = module
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| {
-            callables
-                .value_uses
-                .get(&span.start)
-                .map(|value| (*id, *value))
-        })
-        .collect();
+    let sparse_arrays = facts.sparse_arrays;
     Ok(LoweredHir {
-        callables,
+        facts,
         module,
         metadata: Metadata {
             inline_callbacks: HashSet::new(),
-            lifted_captures: HashSet::new(),
             locations,
             inferred_bindings,
             deferred_bindings,
             constructors,
-            sparse_arrays: sparse.0,
+            sparse_arrays,
+            class_origins: HashMap::new(),
         },
     })
 }
 
-struct SparseArrays(bool);
+/// Visit the declared names and whether a type annotation covers each binding.
+pub(crate) fn pattern_bindings<'a>(
+    pat: &'a perry_parser::swc_ecma_ast::Pat,
+    annotated: bool,
+    visit: &mut impl FnMut(&'a perry_parser::swc_ecma_ast::Ident, bool),
+) {
+    use perry_parser::swc_ecma_ast as ast;
+    match pat {
+        ast::Pat::Ident(binding) => visit(&binding.id, annotated || binding.type_ann.is_some()),
+        ast::Pat::Array(array) => {
+            for element in array.elems.iter().flatten() {
+                pattern_bindings(element, annotated || array.type_ann.is_some(), visit);
+            }
+        }
+        ast::Pat::Object(object) => {
+            let annotated = annotated || object.type_ann.is_some();
+            for prop in &object.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        pattern_bindings(&kv.value, annotated, visit)
+                    }
+                    ast::ObjectPatProp::Assign(assign) => visit(&assign.key.id, annotated),
+                    ast::ObjectPatProp::Rest(rest) => pattern_bindings(&rest.arg, annotated, visit),
+                }
+            }
+        }
+        ast::Pat::Rest(rest) => {
+            pattern_bindings(&rest.arg, annotated || rest.type_ann.is_some(), visit)
+        }
+        ast::Pat::Assign(assign) => pattern_bindings(&assign.left, annotated, visit),
+        ast::Pat::Invalid(_) | ast::Pat::Expr(_) => {}
+    }
+}
 
 fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
     if message.starts_with("SyntaxError:") {
@@ -155,13 +164,6 @@ fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
         codes::TYPE_MISMATCH
     } else {
         codes::UNSUPPORTED_CONSTRUCT
-    }
-}
-
-impl swc_ecma_visit::Visit for SparseArrays {
-    fn visit_array_lit(&mut self, array: &perry_parser::swc_ecma_ast::ArrayLit) {
-        self.0 |= array.elems.iter().any(Option::is_none);
-        swc_ecma_visit::VisitWith::visit_children_with(array, self);
     }
 }
 

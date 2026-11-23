@@ -7,10 +7,8 @@ pub use open_types::{TypeState, binding_type, contextual_type};
 mod absence;
 pub mod collections;
 pub mod completion;
-#[allow(dead_code)]
 pub(crate) mod engine;
 pub mod hir_compat;
-mod infer;
 pub mod methods;
 mod modules;
 pub mod narrowing;
@@ -63,22 +61,17 @@ pub fn load_sources<'s>(
 ) -> Result<Program<'s>> {
     let loaded = modules::load(source, identity, sources, foreign)?;
     let mut lowered = hir_compat::lower(loaded, identity)?;
-    infer::specialize_functions(
+    engine::run_engine(
         ctx,
         &mut lowered.module,
         &mut lowered.metadata,
+        &lowered.facts,
         foreign,
-        lowered.callables,
     )?;
     lowered
         .metadata
         .locations
         .record_call_origins(&lowered.module);
-    infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
-    if !lowered.metadata.sparse_arrays {
-        lowered.metadata.sparse_arrays =
-            infer::deletes_array_elements(ctx, &lowered.module, &lowered.metadata, foreign);
-    }
     Ok(Program {
         module: lowered.module,
         metadata: lowered.metadata,

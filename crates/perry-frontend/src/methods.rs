@@ -254,18 +254,6 @@ macro_rules! argument_type {
     ($name:ident:rest) => { &'s [Expr] };
 }
 
-macro_rules! argument_values {
-    ($arg:ident) => {
-        Some(*$arg).into_iter()
-    };
-    ($arg:ident:optional) => {
-        $arg.iter().copied()
-    };
-    ($arg:ident:rest) => {
-        $arg.iter()
-    };
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum Callback {
     Elements,
@@ -360,17 +348,6 @@ macro_rules! registry {
                         Self::$variant($($argument),*)
                     },)*)*
                 }))
-            }
-
-            pub(crate) fn result(&self) -> MethodResult {
-                match self { $($(Self::$variant(..) => MethodResult::$result $(($result_arg))?,)*)* }
-            }
-
-            pub(crate) fn argument(&self, index: usize) -> Option<&'s Expr> {
-                match self {
-                    $($(Self::$variant($($argument),*) => std::iter::empty()
-                        $(.chain(argument_values!($argument $(:$mode)?)))*.nth(index),)*)*
-                }
             }
         }
     };

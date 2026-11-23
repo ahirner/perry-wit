@@ -20,15 +20,9 @@ pub(crate) struct TySpan {
 }
 
 impl TySpan {
-    pub(crate) const EMPTY: Self = Self { start: 0, len: 0 };
-
     pub(crate) fn range(self) -> std::ops::Range<usize> {
         let start = self.start as usize;
         start..start.saturating_add(self.len as usize)
-    }
-
-    pub(crate) fn is_empty(self) -> bool {
-        self.len == 0
     }
 }
 
@@ -272,10 +266,6 @@ impl TypeTable {
         table
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.kinds.len()
-    }
-
     pub(crate) fn kind(&self, ty: Ty) -> TyKind {
         self.kinds.get(ty.index()).copied().unwrap_or(TyKind::Open)
     }
@@ -333,11 +323,6 @@ impl TypeTable {
 
     pub(crate) fn named(&mut self, ctx: &Context, name: &str) -> Ty {
         let id = shapes::TypeId::from_owned(ctx, HirType::Named(name.to_owned()));
-        self.leaf(id)
-    }
-
-    pub(crate) fn string_literal(&mut self, ctx: &Context, value: &str) -> Ty {
-        let id = shapes::TypeId::from_owned(ctx, HirType::StringLiteral(value.to_owned()));
         self.leaf(id)
     }
 
@@ -437,6 +422,14 @@ impl TypeTable {
         for &member in members {
             self.push_union_member(&mut flat, member);
         }
+        if flat.contains(&Ty::OPEN) {
+            self.scratch = flat;
+            return Ty::OPEN;
+        }
+        if flat.contains(&Ty::DYNAMIC) {
+            self.scratch = flat;
+            return Ty::DYNAMIC;
+        }
         flat.sort_unstable();
         flat.dedup();
         let result = self.intern_sorted_union(&flat);
@@ -497,6 +490,9 @@ impl TypeTable {
         }
         if a == Ty::OPEN || b == Ty::OPEN {
             return Ty::OPEN;
+        }
+        if a == Ty::DYNAMIC || b == Ty::DYNAMIC {
+            return Ty::DYNAMIC;
         }
         self.union(&[a, b])
     }
@@ -642,33 +638,6 @@ impl TypeTable {
             TyKind::Object { props, index } => {
                 index.is_some_and(|t| self.is_open(t))
                     || self.object_slice(props).iter().any(|p| self.is_open(p.ty))
-            }
-            _ => false,
-        }
-    }
-
-    pub(crate) fn contains_type_var(&self, ty: Ty) -> bool {
-        match self.kind(ty) {
-            TyKind::TypeVar(_) => true,
-            TyKind::Array(inner) | TyKind::Promise(inner) => self.contains_type_var(inner),
-            TyKind::Tuple(span) => self
-                .tuple_slice(span)
-                .iter()
-                .any(|&t| self.contains_type_var(t)),
-            TyKind::Union(span) => self
-                .union_slice(span)
-                .iter()
-                .any(|&t| self.contains_type_var(t)),
-            TyKind::Generic { args, .. } => self
-                .generic_slice(args)
-                .iter()
-                .any(|&t| self.contains_type_var(t)),
-            TyKind::Object { props, index } => {
-                index.is_some_and(|t| self.contains_type_var(t))
-                    || self
-                        .object_slice(props)
-                        .iter()
-                        .any(|p| self.contains_type_var(p.ty))
             }
             _ => false,
         }

@@ -355,24 +355,31 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(());
         }
         let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
-        let inferred_storage =
+        let inferred_deferred =
             self.shapes.deferred_binding(id) && !self.shapes.is_explicit_binding(id);
         let declared = match type_state
             .resolved()
             .map(|ty| self.active_value_type(ctx, ty))
             .transpose()
         {
-            Err(error) if inferred_storage && error.code() == codes::UNSUPPORTED_TYPE => {
-                let HirType::Union(members) = ty else {
-                    return Err(error);
-                };
-                for member in members {
-                    self.active_value_type(ctx, member)?;
-                }
-                Some(perry_mir::JsonType::get(ctx).into())
+            Err(error) if inferred_deferred && error.code() == codes::UNSUPPORTED_TYPE => {
+                let name = self.shapes.local_name(id).unwrap_or("binding");
+                return Err(diag!(
+                    codes::UNSUPPORTED_TYPE,
+                    "local '{name}' receives incompatible write types ({})",
+                    error.message()
+                ));
             }
             result => {
-                result?.or_else(|| inferred_storage.then(|| perry_mir::JsonType::get(ctx).into()))
+                let resolved = result?;
+                if resolved.is_none()
+                    && inferred_deferred
+                    && matches!(type_state, perry_frontend::TypeState::Dynamic)
+                {
+                    Some(perry_mir::JsonType::get(ctx).into())
+                } else {
+                    resolved
+                }
             }
         };
         let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
@@ -397,20 +404,20 @@ impl<'s> FunctionBuilder<'s> {
         }
         let is_never = matches!(ty, HirType::Never);
         // Inferred bindings preserve the initializer's absence states.
-        let carrier = match (declared, init) {
-            (Some(ty), Some(value))
+        let carrier = match (declared, type_state, init) {
+            (Some(ty), _, Some(value))
                 if self.shapes.metadata.inferred_bindings.contains(&id)
                     && present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty) =>
             {
                 value.get_type(ctx)
             }
-            (Some(ty), _) => ty,
-            (None, Some(value)) => value.get_type(ctx),
-            (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
-            (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
+            (Some(ty), _, _) => ty,
+            (None, perry_frontend::TypeState::Dynamic, Some(value)) => value.get_type(ctx),
+            (None, _, None) if is_never => self.shapes.value_type(ctx, ty)?,
+            (None, perry_frontend::TypeState::Open, _) => {
                 return Err(missing_type_annotation());
             }
-            (None, None) => bail_diag!(
+            (None, _, _) => bail_diag!(
                 codes::MISSING_TYPE_ANNOTATION,
                 "an untyped binding needs an initializer"
             ),

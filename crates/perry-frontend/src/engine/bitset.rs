@@ -6,12 +6,6 @@ pub(crate) struct BitSet {
 }
 
 impl BitSet {
-    pub(crate) fn with_bits(bits: usize) -> Self {
-        Self {
-            words: vec![0; bits.div_ceil(64)],
-        }
-    }
-
     pub(crate) fn clear(&mut self) {
         self.words.fill(0);
     }
@@ -48,10 +42,6 @@ impl BitSet {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.words.iter().all(|&w| w == 0)
-    }
-
-    pub(crate) fn count_ones(&self) -> usize {
-        self.words.iter().map(|w| w.count_ones() as usize).sum()
     }
 
     pub(crate) fn union_with(&mut self, other: &Self) -> bool {

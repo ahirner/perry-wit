@@ -50,11 +50,13 @@ fn unannotated_parameters_need_evidence_from_statically_known_calls() -> anyhow:
         }"#;
     let mut program = crate::core_program::Program::new(callbacks);
     assert_eq!(program.number("run", 4.0), 536.0);
+    let self_recursive = "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }";
+    let mut program = crate::core_program::Program::new(self_recursive);
+    assert_eq!(program.call("run", &[]).0[0].unwrap_f64(), 0.0);
     for source in [
         "export function id(x) { return x; } export function run(): number { return id(1); }",
         "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
         "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
-        "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }",
         "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
     ] {
         let error = perry_wit::compile_core(source, "closed.ts")
@@ -156,10 +158,8 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
 
 #[test]
 fn unresolved_parameter_patterns_keep_the_source_location() -> anyhow::Result<()> {
-    for (pattern, argument) in [("{ w, h }", "{ w:2, h:3 }"), ("[first]", "[1,2]")] {
-        let source = format!(
-            "function probe(n:number, {pattern}) {{ return n; }} export function run(): number {{ return probe(3, {argument}); }}"
-        );
+    for pattern in ["{ w, h }", "[first]"] {
+        let source = format!("export function probe(n:number, {pattern}) {{ return n; }}");
         let error = perry_wit::compile_core(&source, "pattern.ts")
             .err()
             .context("expected an unannotated parameter pattern")?;

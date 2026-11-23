@@ -6,8 +6,7 @@ use super::types::{NameId, ObjectProp, Ty, TyKind, TypeTable};
 use crate::{
     Absence,
     collections::IteratorMethod,
-    hir_compat::{self, Constructor},
-    methods::{Callback, Kind, Method, MethodResult, Receiver},
+    methods::{Kind, Method, MethodResult, Receiver},
     shapes::{self, Declarations},
 };
 use perry_hir::{
@@ -17,13 +16,6 @@ use perry_hir::{
 use pliron::context::Context;
 
 pub(crate) const SETTLED: &str = "PromiseSettledResult";
-
-/// Built-in callback invocation site recognized by the single callback table.
-pub(crate) struct BuiltinCallback<'h> {
-    pub(crate) callback: &'h Expr,
-    pub(crate) inputs: Vec<Ty>,
-    pub(crate) contract: CallbackContract,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CallbackContract {
@@ -204,270 +196,6 @@ pub(crate) fn iterator_view(
     }
 }
 
-/// Compute the inputs and contract of any built-in callback call expression.
-pub(crate) fn builtin_callback<'h>(
-    ctx: &Context,
-    types: &mut TypeTable,
-    sparse_arrays: bool,
-    expr: &'h Expr,
-    eval: &mut impl FnMut(&'h Expr, &mut TypeTable) -> Ty,
-) -> Option<BuiltinCallback<'h>> {
-    match expr {
-        Expr::ArrayMap { array, callback } => {
-            let arr_ty = eval(array, types);
-            let (recv, elem) = array_receiver(types, arr_ty)?;
-            Some(BuiltinCallback {
-                callback,
-                inputs: vec![elem, Ty::NUMBER, recv],
-                contract: CallbackContract::Mapped {
-                    keep_holes: sparse_arrays,
-                },
-            })
-        }
-        Expr::ArrayFlatMap { array, callback } => {
-            let arr_ty = eval(array, types);
-            let (recv, elem) = array_receiver(types, arr_ty)?;
-            Some(BuiltinCallback {
-                callback,
-                inputs: vec![elem, Ty::NUMBER, recv],
-                contract: CallbackContract::FlatMapped,
-            })
-        }
-        Expr::ArrayFilter { array, callback }
-        | Expr::ArraySome { array, callback }
-        | Expr::ArrayEvery { array, callback } => {
-            let arr_ty = eval(array, types);
-            let (recv, elem) = array_receiver(types, arr_ty)?;
-            Some(BuiltinCallback {
-                callback,
-                inputs: vec![elem, Ty::NUMBER, recv],
-                contract: CallbackContract::Predicate,
-            })
-        }
-        Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } => {
-            let arr_ty = eval(array, types);
-            let (recv, elem) = array_receiver(types, arr_ty)?;
-            let opt_elem = types.with_absences(elem, Absence::Undefined);
-            Some(BuiltinCallback {
-                callback,
-                inputs: vec![opt_elem, Ty::NUMBER, recv],
-                contract: CallbackContract::Predicate,
-            })
-        }
-        Expr::ArraySort { array, comparator } => {
-            if matches!(comparator.as_ref(), Expr::Undefined) {
-                return None;
-            }
-            let arr_ty = eval(array, types);
-            let (_, elem) = array_receiver(types, arr_ty)?;
-            let defined = types.exclude_absences(elem, Absence::Undefined);
-            Some(BuiltinCallback {
-                callback: comparator,
-                inputs: vec![defined, defined],
-                contract: CallbackContract::Comparator,
-            })
-        }
-        Expr::ArrayToSorted {
-            array, comparator, ..
-        } => {
-            let comparator = comparator
-                .as_deref()
-                .filter(|c| !matches!(c, Expr::Undefined))?;
-            let arr_ty = eval(array, types);
-            let (_, elem) = array_receiver(types, arr_ty)?;
-            let defined = types.exclude_absences(elem, Absence::Undefined);
-            Some(BuiltinCallback {
-                callback: comparator,
-                inputs: vec![defined, defined],
-                contract: CallbackContract::Comparator,
-            })
-        }
-        Expr::ArrayFromMapped {
-            iterable, map_fn, ..
-        } => {
-            let src_ty = eval(iterable, types);
-            let elem = if let Expr::Object(props) = iterable.as_ref()
-                && props.iter().any(|(k, _)| k == "length")
-            {
-                Ty::VOID
-            } else {
-                iterated_element(ctx, types, src_ty).unwrap_or(Ty::OPEN)
-            };
-            Some(BuiltinCallback {
-                callback: map_fn,
-                inputs: vec![elem, Ty::NUMBER],
-                contract: CallbackContract::Mapped { keep_holes: false },
-            })
-        }
-        Expr::MapGroupBy { items, key_fn } => {
-            let src_ty = eval(items, types);
-            let elem = iterated_element(ctx, types, src_ty).unwrap_or(Ty::OPEN);
-            Some(BuiltinCallback {
-                callback: key_fn,
-                inputs: vec![elem, Ty::NUMBER],
-                contract: CallbackContract::GroupKey,
-            })
-        }
-        Expr::Call { callee, args, .. } => {
-            let Expr::PropertyGet {
-                object, property, ..
-            } = callee.as_ref()
-            else {
-                return None;
-            };
-            let method_name = hir_compat::method(property).name();
-            // Static Map.groupBy(items, keyFn)
-            if let Expr::PropertyGet {
-                object: global,
-                property: class,
-                ..
-            } = object.as_ref()
-                && matches!(global.as_ref(), Expr::GlobalGet(_))
-                && class == "Map"
-                && method_name == "groupBy"
-            {
-                let [items, key_fn] = args.as_slice() else {
-                    return None;
-                };
-                let src_ty = eval(items, types);
-                let elem = iterated_element(ctx, types, src_ty).unwrap_or(Ty::OPEN);
-                return Some(BuiltinCallback {
-                    callback: key_fn,
-                    inputs: vec![elem, Ty::NUMBER],
-                    contract: CallbackContract::GroupKey,
-                });
-            }
-
-            let obj_ty = eval(object, types);
-            let (stripped, _) = types.strip_nullish(obj_ty);
-
-            // Map.forEach / Set.forEach
-            if method_name == "forEach"
-                && let TyKind::Generic { base, args: gargs } = types.kind(stripped)
-                && let HirType::Named(base_name) = base.hir(ctx)
-            {
-                let callback = args.first()?;
-                let gslice: Vec<Ty> = types.generic_slice(gargs).to_vec();
-                match (base_name.as_str(), gslice.as_slice()) {
-                    ("Map" | "ReadonlyMap", [k, v]) => {
-                        return Some(BuiltinCallback {
-                            callback,
-                            inputs: vec![*v, *k, stripped],
-                            contract: CallbackContract::Void,
-                        });
-                    }
-                    ("Set" | "ReadonlySet", [v]) => {
-                        return Some(BuiltinCallback {
-                            callback,
-                            inputs: vec![*v, *v, stripped],
-                            contract: CallbackContract::Void,
-                        });
-                    }
-                    _ => {}
-                }
-            }
-
-            let recv_kind = receiver_of(ctx, types, stripped)?;
-            let method = Method::lookup(recv_kind, method_name)?;
-            let cb_kind = method.callback()?;
-            let (first_arg, tail) = args.split_first()?;
-            match cb_kind {
-                Callback::Replacement => {
-                    let callback = tail.first()?;
-                    if !matches!(
-                        callback,
-                        Expr::Closure { .. } | Expr::FuncRef(_) | Expr::LocalGet(_)
-                    ) {
-                        return None;
-                    }
-                    let mut inputs = vec![Ty::STRING];
-                    let captures = match first_arg {
-                        Expr::RegExp { pattern, .. } => {
-                            Some(crate::methods::regex_captures(pattern))
-                        }
-                        Expr::String(_) => Some((0, false)),
-                        _ => None,
-                    };
-                    if let Some((count, named)) = captures {
-                        let opt_str = types.with_absences(Ty::STRING, Absence::Undefined);
-                        inputs.extend(std::iter::repeat_n(opt_str, count));
-                        inputs.extend([Ty::NUMBER, Ty::STRING]);
-                        if named {
-                            inputs.push(Ty::DYNAMIC);
-                        }
-                    }
-                    Some(BuiltinCallback {
-                        callback,
-                        inputs,
-                        contract: CallbackContract::Replacement,
-                    })
-                }
-                Callback::Elements => {
-                    let (recv, elem) = array_receiver(types, stripped)?;
-                    let contract = match method_name {
-                        "forEach" => CallbackContract::Void,
-                        "map" => CallbackContract::Mapped {
-                            keep_holes: sparse_arrays,
-                        },
-                        "flatMap" => CallbackContract::FlatMapped,
-                        _ => CallbackContract::Predicate,
-                    };
-                    Some(BuiltinCallback {
-                        callback: first_arg,
-                        inputs: vec![elem, Ty::NUMBER, recv],
-                        contract,
-                    })
-                }
-                Callback::AllIndices => {
-                    let (recv, elem) = array_receiver(types, stripped)?;
-                    let opt_elem = types.with_absences(elem, Absence::Undefined);
-                    Some(BuiltinCallback {
-                        callback: first_arg,
-                        inputs: vec![opt_elem, Ty::NUMBER, recv],
-                        contract: CallbackContract::Predicate,
-                    })
-                }
-                Callback::Comparator => {
-                    if matches!(first_arg, Expr::Undefined) {
-                        return None;
-                    }
-                    let (_, elem) = array_receiver(types, stripped)?;
-                    let defined = types.exclude_absences(elem, Absence::Undefined);
-                    Some(BuiltinCallback {
-                        callback: first_arg,
-                        inputs: vec![defined, defined],
-                        contract: CallbackContract::Comparator,
-                    })
-                }
-                Callback::Fold => {
-                    let (recv, elem) = array_receiver(types, stripped)?;
-                    let acc = tail.first().map_or(elem, |initial| eval(initial, types));
-                    Some(BuiltinCallback {
-                        callback: first_arg,
-                        inputs: vec![acc, elem, Ty::NUMBER, recv],
-                        contract: CallbackContract::Fold,
-                    })
-                }
-            }
-        }
-        _ => None,
-    }
-}
-
-fn array_receiver(types: &mut TypeTable, ty: Ty) -> Option<(Ty, Ty)> {
-    let (stripped, _) = types.strip_nullish(ty);
-    match types.kind(stripped) {
-        TyKind::Array(elem) => Some((stripped, elem)),
-        TyKind::Tuple(span) => {
-            let items: Vec<Ty> = types.tuple_slice(span).to_vec();
-            let elem = types.union(&items);
-            let arr = types.array(elem);
-            Some((arr, elem))
-        }
-        _ => None,
-    }
-}
-
 /// Arguments to [`apply_method_result`].
 #[derive(Clone, Copy)]
 pub(crate) struct MethodResultArgs<'a> {
@@ -601,15 +329,26 @@ pub(crate) fn apply_method_result(
         }
         MethodResult::PromiseVoid => types.promise(Ty::VOID),
         MethodResult::PromiseJson => types.promise(Ty::DYNAMIC),
-        MethodResult::StreamReader => native_ty(
-            ctx,
-            types,
-            if arg0_expr.is_some() {
-                Kind::ByobReader
-            } else {
-                Kind::Reader
-            },
-        ),
+        MethodResult::StreamReader => {
+            let is_byob = arg0_expr.is_some_and(|arg| match arg {
+                Expr::Object(props) => props
+                    .iter()
+                    .any(|(k, v)| k == "mode" && matches!(v, Expr::String(s) if s == "byob")),
+                Expr::New { args, .. } => args
+                    .iter()
+                    .any(|v| matches!(v, Expr::String(s) if s == "byob")),
+                _ => false,
+            });
+            native_ty(
+                ctx,
+                types,
+                if is_byob {
+                    Kind::ByobReader
+                } else {
+                    Kind::Reader
+                },
+            )
+        }
         MethodResult::IteratorKeys => {
             iterator_view(ctx, types, receiver, IteratorMethod::Keys).unwrap_or(Ty::OPEN)
         }
@@ -686,9 +425,6 @@ pub(crate) fn binary_result(
             if is_mixed_string_union(ctx, types, left) || is_mixed_string_union(ctx, types, right) {
                 return types.union(&[Ty::NUMBER, Ty::STRING]);
             }
-            if is_numeric_operand(types, left) && is_numeric_operand(types, right) {
-                return Ty::NUMBER;
-            }
             Ty::NUMBER
         }
         BinaryOp::Sub
@@ -738,13 +474,6 @@ fn is_numeric_atom(ty: Ty) -> bool {
     )
 }
 
-fn is_numeric_operand(types: &TypeTable, ty: Ty) -> bool {
-    match types.kind(ty) {
-        TyKind::Union(span) => types.union_slice(span).iter().all(|&m| is_numeric_atom(m)),
-        _ => is_numeric_atom(ty),
-    }
-}
-
 fn is_mixed_string_union(ctx: &Context, types: &TypeTable, ty: Ty) -> bool {
     let TyKind::Union(span) = types.kind(ty) else {
         return false;
@@ -754,62 +483,6 @@ fn is_mixed_string_union(ctx: &Context, types: &TypeTable, ty: Ty) -> bool {
             && (is_string_ty(ctx, types, m)
                 || !matches!(types.kind(m), TyKind::Bottom | TyKind::Open))
     })
-}
-
-/// Resolve the type of a `new Map(...)` or `new Set(...)` constructor preserved in metadata.
-pub(crate) fn constructor_type<'h>(
-    ctx: &Context,
-    types: &mut TypeTable,
-    ctor: Constructor<'h>,
-    eval: &mut impl FnMut(&'h Expr, &mut TypeTable) -> Ty,
-) -> Ty {
-    match ctor {
-        Constructor::Map {
-            types: explicit,
-            init,
-        } => {
-            let base = shapes::TypeId::from_owned(ctx, HirType::Named("Map".to_owned()));
-            if let Some((k, v)) = explicit {
-                let k = types.intern_hir(ctx, k, true);
-                let v = types.intern_hir(ctx, v, true);
-                return types.generic(base, &[k, v]);
-            }
-            if let Some(init) = init {
-                if let Expr::Array(entries, _) = init
-                    && let Some(Expr::Array(pair, _)) = entries.first()
-                    && let [key, value] = pair.as_slice()
-                {
-                    let k = eval(key, types);
-                    let v = eval(value, types);
-                    return types.generic(base, &[k, v]);
-                }
-                let init_ty = eval(init, types);
-                let (stripped, _) = types.strip_nullish(init_ty);
-                if let TyKind::Array(elem) = types.kind(stripped)
-                    && let TyKind::Tuple(span) = types.kind(elem)
-                    && let [k, v] = types.tuple_slice(span)
-                {
-                    let (k, v) = (*k, *v);
-                    return types.generic(base, &[k, v]);
-                }
-            }
-            Ty::OPEN
-        }
-        Constructor::Set { element, init } => {
-            let base = shapes::TypeId::from_owned(ctx, HirType::Named("Set".to_owned()));
-            if let Some(elem) = element {
-                let elem = types.intern_hir(ctx, elem, true);
-                return types.generic(base, &[elem]);
-            }
-            if let Some(init) = init {
-                let init_ty = eval(init, types);
-                if let Some(elem) = iterated_element(ctx, types, init_ty) {
-                    return types.generic(base, &[elem]);
-                }
-            }
-            Ty::OPEN
-        }
-    }
 }
 
 /// Classify a leaf HIR expression directly into [`Ty`] without recursing via `perry_hir`.
@@ -1051,6 +724,10 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         | Expr::TextEncoderEncode(_)
         | Expr::CryptoRandomBytes(_) => types.named(ctx, "Uint8Array"),
 
+        Expr::FetchWithOptions { .. } => {
+            let resp = types.named(ctx, "Response");
+            types.promise(resp)
+        }
         Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) | Expr::JsonParseReviver { .. } => {
             Ty::DYNAMIC
         }
@@ -1076,11 +753,16 @@ pub(crate) fn property_type(
 ) -> Option<Ty> {
     let (stripped, _) = types.strip_nullish(source);
     match types.kind(stripped) {
+        TyKind::Dynamic => Some(Ty::DYNAMIC),
         TyKind::String if property == "length" => Some(Ty::NUMBER),
         TyKind::Array(_) | TyKind::Tuple(_) => match property {
             "length" | "index" => Some(Ty::NUMBER),
             "input" => Some(Ty::STRING),
-            "groups" => Some(Ty::DYNAMIC),
+            "groups" => {
+                let opt_str = types.with_absences(Ty::STRING, Absence::Undefined);
+                let rec = types.object(&mut [], Some(opt_str));
+                Some(types.with_absences(rec, Absence::Undefined))
+            }
             _ => None,
         },
         TyKind::Object { props, index } => {
@@ -1150,10 +832,12 @@ pub(crate) fn property_type(
                 }
                 return None;
             };
-            if Kind::builtin(base_name) == Some(Kind::Exception)
-                && matches!(property, "message" | "name")
-            {
-                return Some(Ty::STRING);
+            if Kind::builtin(base_name) == Some(Kind::Exception) {
+                match property {
+                    "message" | "name" => return Some(Ty::STRING),
+                    "cause" => return Some(Ty::DYNAMIC),
+                    _ => {}
+                }
             }
             match (base_name.as_str(), property) {
                 ("Temporal.PlainDate", "year" | "month" | "day" | "dayOfWeek")
@@ -1172,16 +856,13 @@ pub(crate) fn property_type(
                 let ty = types.intern_hir(ctx, &prop_hir, true);
                 return Some(normalize_named_integer(ctx, decls, types, ty));
             }
-            if let Some(HirType::Object(obj)) = decls.resolve_foreign_type(base_name)
-                && let Some(prop) = obj.properties.get(property)
-            {
-                let ty = types.intern_hir(ctx, &prop.ty, true);
-                let ty = if prop.optional {
-                    types.with_absences(ty, Absence::Undefined)
-                } else {
-                    ty
-                };
-                return Some(normalize_named_integer(ctx, decls, types, ty));
+            if let Some(resolved) = decls.resolve_foreign_type(base_name) {
+                let resolved_ty = types.intern_hir(ctx, resolved, true);
+                if resolved_ty != stripped
+                    && let Some(found) = property_type(ctx, decls, types, resolved_ty, property)
+                {
+                    return Some(found);
+                }
             }
             if let Some((_, val_hir)) =
                 decls.dict_entry_types(ctx, &HirType::Named(base_name.clone()))
@@ -1202,14 +883,17 @@ pub(crate) fn property_type(
             })
         }
         TyKind::Union(span) => {
-            // Property read on a finite value union (e.g. `Uint8Array | string`: `.length`).
+            // Property read on a finite value union or discriminated tagged union:
+            // collect property types from every member that defines the property
+            // (after a tag check like `if (r.ok) r.value`, only the matching variant has it).
             let members: Vec<Ty> = types.union_slice(span).to_vec();
             let mut results = Vec::with_capacity(members.len());
             for member in members {
-                let ty = property_type(ctx, decls, types, member, property)?;
-                results.push(ty);
+                if let Some(ty) = property_type(ctx, decls, types, member, property) {
+                    results.push(ty);
+                }
             }
-            Some(types.union(&results))
+            (!results.is_empty()).then(|| types.union(&results))
         }
         _ => None,
     }
@@ -1237,6 +921,7 @@ pub(crate) fn index_type(
 ) -> Option<Ty> {
     let (stripped, _) = types.strip_nullish(object);
     match types.kind(stripped) {
+        TyKind::Dynamic => Some(Ty::DYNAMIC),
         TyKind::Tuple(span) => {
             let pos = match index {
                 Expr::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
@@ -1318,11 +1003,20 @@ pub(crate) fn static_global_method<'h>(
             let [items] = args else {
                 return Some(Ty::OPEN);
             };
-            let src = eval(items, types);
-            let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
-            let val = match types.kind(elem) {
-                TyKind::Promise(inner) => inner,
-                _ => elem,
+            let val = if matches!(items, Expr::Array(elems, _) if elems.is_empty()) {
+                Ty::VOID
+            } else {
+                let src = eval(items, types);
+                if src == Ty::BOTTOM {
+                    return Some(Ty::BOTTOM);
+                }
+                let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
+                let unwrapped = unwrap_promise_members(types, elem);
+                if unwrapped == Ty::NEVER {
+                    Ty::VOID
+                } else {
+                    unwrapped
+                }
             };
             let settled_base = shapes::TypeId::from_owned(ctx, HirType::Named(SETTLED.to_owned()));
             let settled = types.generic(settled_base, &[val]);
@@ -1333,11 +1027,20 @@ pub(crate) fn static_global_method<'h>(
             let [items] = args else {
                 return Some(Ty::OPEN);
             };
-            let src = eval(items, types);
-            let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
-            let val = match types.kind(elem) {
-                TyKind::Promise(inner) => inner,
-                _ => elem,
+            let val = if matches!(items, Expr::Array(elems, _) if elems.is_empty()) {
+                Ty::VOID
+            } else {
+                let src = eval(items, types);
+                if src == Ty::BOTTOM {
+                    return Some(Ty::BOTTOM);
+                }
+                let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
+                let unwrapped = unwrap_promise_members(types, elem);
+                if unwrapped == Ty::NEVER {
+                    Ty::VOID
+                } else {
+                    unwrapped
+                }
             };
             let arr = types.array(val);
             Some(types.promise(arr))
@@ -1346,11 +1049,20 @@ pub(crate) fn static_global_method<'h>(
             let [items] = args else {
                 return Some(Ty::OPEN);
             };
-            let src = eval(items, types);
-            let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
-            let val = match types.kind(elem) {
-                TyKind::Promise(inner) => inner,
-                _ => elem,
+            let val = if matches!(items, Expr::Array(elems, _) if elems.is_empty()) {
+                Ty::VOID
+            } else {
+                let src = eval(items, types);
+                if src == Ty::BOTTOM {
+                    return Some(Ty::BOTTOM);
+                }
+                let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
+                let unwrapped = unwrap_promise_members(types, elem);
+                if unwrapped == Ty::NEVER {
+                    Ty::VOID
+                } else {
+                    unwrapped
+                }
             };
             Some(types.promise(val))
         }
@@ -1361,8 +1073,26 @@ pub(crate) fn static_global_method<'h>(
                 _ => types.promise(val),
             })
         }
-        ("Promise", "reject") => Some(types.promise(Ty::VOID)),
+        ("Promise", "reject") => Some(types.promise(Ty::NEVER)),
         _ => None,
+    }
+}
+
+fn unwrap_promise_members(types: &mut TypeTable, elem: Ty) -> Ty {
+    match types.kind(elem) {
+        TyKind::Promise(inner) => inner,
+        TyKind::Union(span) => {
+            let members: Vec<Ty> = types.union_slice(span).to_vec();
+            let mut out = Vec::with_capacity(members.len());
+            for member in members {
+                out.push(match types.kind(member) {
+                    TyKind::Promise(inner) => inner,
+                    _ => member,
+                });
+            }
+            types.union(&out)
+        }
+        _ => elem,
     }
 }
 

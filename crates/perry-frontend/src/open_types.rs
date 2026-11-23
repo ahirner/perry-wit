@@ -1,4 +1,5 @@
 //! Context needed to finish source binding types during elaboration.
+use crate::shapes::HirTypeExt;
 use perry_hir::types::Type;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -17,7 +18,10 @@ impl<'t> TypeState<'t> {
 }
 
 pub fn binding_type(ty: &Type, annotated: bool) -> TypeState<'_> {
-    if requires_context(ty) || (!annotated && crate::infer::contains_type_var(ty)) {
+    if matches!(ty, Type::Unknown) {
+        return TypeState::Dynamic;
+    }
+    if requires_context(ty) || (!annotated && contains_type_var(ty)) {
         if annotated {
             TypeState::Dynamic
         } else {
@@ -28,6 +32,10 @@ pub fn binding_type(ty: &Type, annotated: bool) -> TypeState<'_> {
     }
 }
 
+fn contains_type_var(ty: &Type) -> bool {
+    ty.any(&mut |t| matches!(t, Type::TypeVar(_)))
+}
+
 pub fn contextual_type(ty: &Type) -> Option<&Type> {
     (!matches!(ty, Type::Any | Type::Unknown)).then_some(ty)
 }
@@ -35,10 +43,7 @@ pub fn contextual_type(ty: &Type) -> Option<&Type> {
 fn requires_context(ty: &Type) -> bool {
     match ty {
         Type::Any | Type::Unknown | Type::Never | Type::TypeVar(_) => true,
-        Type::Array(element) => matches!(
-            **element,
-            Type::Any | Type::Unknown | Type::Never | Type::TypeVar(_)
-        ),
+        Type::Array(element) => matches!(**element, Type::Any | Type::Never | Type::TypeVar(_)),
         Type::Generic { base, type_args }
             if matches!(
                 base.as_str(),
@@ -59,7 +64,7 @@ fn requires_context(ty: &Type) -> bool {
             type_args.is_empty()
                 || type_args
                     .iter()
-                    .any(|ty| matches!(ty, Type::Any | Type::Unknown | Type::TypeVar(_)))
+                    .any(|ty| matches!(ty, Type::Any | Type::TypeVar(_)))
         }
         _ => false,
     }

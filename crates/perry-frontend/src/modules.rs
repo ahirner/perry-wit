@@ -270,7 +270,7 @@ impl Graph<'_, '_> {
         };
         let offset = self.locations.add(path.to_owned(), text)?;
         module.visit_mut_with(&mut Rebase(offset));
-        super::hir_compat::validate(&module, &self.locations)?;
+        crate::engine::boundary::scan_ast(&module, &self.locations)?;
         self.active.insert(path.to_owned());
         if path.to_string_lossy().ends_with(".d.ts") {
             module.body.retain(|item| {

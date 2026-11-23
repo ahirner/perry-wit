@@ -327,6 +327,14 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             span,
         ));
     }
+    if let Some((name, span)) = scanner.facts.escaping_closure {
+        return Err(locations.annotate(
+            unsupported!(
+                "{name} escapes its static call site. Storing, returning or joining function values requires a runtime function representation"
+            ),
+            span,
+        ));
+    }
 
     for id in &scanner.invoked_ids {
         if let Some(span) = scanner.closures.get(id) {
@@ -518,6 +526,8 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) local_empty_agg: Vec<Option<(LocId, AggregateKind)>>,
     /// `LocalIdx -> first escaping parameter value-use span` (if any).
     pub(crate) local_value_use: Vec<Option<Span>>,
+    /// `LocalIdx -> constant RegExp literal pattern` (for `str.replace(regex, cb)`).
+    pub(crate) local_regex_pattern: Vec<Option<&'h str>>,
     /// `Hir LocalId -> LocalIdx` boundary map.
     local_map: HashMap<LocalId, LocalIdx>,
     /// Source-fact bitsets indexed by `LocalIdx`.
@@ -572,6 +582,7 @@ impl<'h> ModuleIndex<'h> {
             local_loc: Vec::new(),
             local_empty_agg: Vec::new(),
             local_value_use: Vec::new(),
+            local_regex_pattern: Vec::new(),
             local_map: HashMap::new(),
             local_inferred: BitSet::default(),
             local_deferred: BitSet::default(),
@@ -895,10 +906,6 @@ impl<'h> ModuleIndex<'h> {
         self.local_ids.len()
     }
 
-    pub(crate) fn location_count(&self) -> usize {
-        self.locations.len()
-    }
-
     fn add_function_template(
         &mut self,
         kind: TemplateKind,
@@ -981,6 +988,7 @@ impl<'h> ModuleIndex<'h> {
         self.local_loc.push(None);
         self.local_empty_agg.push(None);
         self.local_value_use.push(None);
+        self.local_regex_pattern.push(None);
         self.local_map.insert(id, idx);
 
         if let Some(span) = hir.local_source_spans.get(&id) {
@@ -1093,13 +1101,21 @@ impl<'h> ModuleIndex<'h> {
                         }
                     }
                     if let Some(init) = init {
-                        if matches!(init, Expr::Array(items, _) if items.is_empty()) {
+                        if let Expr::RegExp { pattern, .. } = init
+                            && let Some(slot) = self.local_regex_pattern.get_mut(local.0 as usize)
+                        {
+                            *slot = Some(pattern.as_str());
+                        }
+                        let open_array = !explicit
+                            || matches!(scan.types.kind(declared), super::types::TyKind::Array(e) if e == Ty::OPEN);
+                        let open_object = !explicit || declared == Ty::OPEN;
+                        if open_array && matches!(init, Expr::Array(items, _) if items.is_empty()) {
                             let agg_loc =
                                 self.add_location(LocationKind::EmptyArray(local), Ty::BOTTOM);
                             if let Some(slot) = self.local_empty_agg.get_mut(local.0 as usize) {
                                 *slot = Some((agg_loc, AggregateKind::Array));
                             }
-                        } else if self.is_empty_object_expr(init) {
+                        } else if open_object && self.is_empty_object_expr(init) {
                             let agg_loc =
                                 self.add_location(LocationKind::EmptyObject(local), Ty::BOTTOM);
                             if let Some(slot) = self.local_empty_agg.get_mut(local.0 as usize) {

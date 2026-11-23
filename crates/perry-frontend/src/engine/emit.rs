@@ -2,9 +2,10 @@
 //!
 //! Borrows original templates from `&HirModule`, applies every resolved type and call/class/closure
 //! rewrite from [`Solved`], and outputs concrete monomorphic `init`, `functions`, and `classes`.
+use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind};
 use super::solve::{SiteResolution, Solved};
-use super::types::{ClassInstId, InstanceId, LocId, TemplateId, Ty, TyKind, TypeTable};
+use super::types::{ClassId, ClassInstId, InstanceId, LocId, TemplateId, Ty, TyKind, TypeTable};
 use crate::hir_compat::{self, Metadata};
 use perry_hir::{
     ir::{Class, ClassField, Expr, Function, Module as HirModule, Param, Stmt},
@@ -23,6 +24,7 @@ pub(crate) struct Emitted {
     pub(crate) instantiations: Vec<(String, String, u32, Option<String>)>,
     pub(crate) inline_callbacks: Vec<FuncId>,
     pub(crate) class_origins: Vec<(String, String)>,
+    pub(crate) deletes_array_elements: bool,
 }
 
 impl Emitted {
@@ -50,7 +52,10 @@ impl Emitted {
         for fid in self.inline_callbacks {
             metadata.inline_callbacks.insert(fid);
         }
-        let _ = self.class_origins;
+        for (emitted, origin) in self.class_origins {
+            metadata.class_origins.insert(emitted, origin);
+        }
+        metadata.sparse_arrays |= self.deletes_array_elements;
     }
 }
 
@@ -83,6 +88,7 @@ pub(crate) fn build(
         instantiations: emitter.instantiations,
         inline_callbacks: emitter.inline_callbacks,
         class_origins: emitter.class_origins,
+        deletes_array_elements: solved.deletes_array_elements,
     })
 }
 
@@ -110,6 +116,82 @@ impl<'h> Emitter<'h, '_> {
     fn materialize(&self, ty: Ty) -> HirType {
         self.types
             .materialize_hir(self.ctx, ty, &|cid| self.class_inst_name(cid))
+    }
+
+    /// True when a deferred inferred union cannot be lowered as a finite value union (e.g.
+    /// `number[] | string`) yet every member supports dynamic JSON boxing (excluding native
+    /// byte arrays like `Uint8Array`, class instances, and opaque handles).
+    fn needs_json_union_box(&self, ty: Ty) -> bool {
+        let TyKind::Union(span) = self.types.kind(ty) else {
+            return false;
+        };
+        let members = self.types.union_slice(span);
+        let mut has_non_value_union_member = false;
+        let mut object_alternatives = 0u32;
+        for &member in members {
+            match self.types.kind(member) {
+                TyKind::Null
+                | TyKind::Void
+                | TyKind::Number
+                | TyKind::Int32
+                | TyKind::String
+                | TyKind::Boolean => {}
+                TyKind::Object { .. } => {
+                    object_alternatives += 1;
+                }
+                TyKind::Array(elem) => {
+                    if !self.is_json_boxable(elem) {
+                        return false;
+                    }
+                    has_non_value_union_member = true;
+                }
+                TyKind::Tuple(tspan) => {
+                    if !self
+                        .types
+                        .tuple_slice(tspan)
+                        .iter()
+                        .all(|&t| self.is_json_boxable(t))
+                    {
+                        return false;
+                    }
+                    has_non_value_union_member = true;
+                }
+                _ => return false,
+            }
+        }
+        has_non_value_union_member || object_alternatives > 1
+    }
+
+    fn is_json_boxable(&self, ty: Ty) -> bool {
+        match self.types.kind(ty) {
+            TyKind::Null
+            | TyKind::Void
+            | TyKind::Number
+            | TyKind::Int32
+            | TyKind::String
+            | TyKind::Boolean
+            | TyKind::Dynamic => true,
+            TyKind::Array(elem) => self.is_json_boxable(elem),
+            TyKind::Tuple(span) => self
+                .types
+                .tuple_slice(span)
+                .iter()
+                .all(|&t| self.is_json_boxable(t)),
+            TyKind::Object { props, index } => {
+                index.is_none_or(|t| self.is_json_boxable(t))
+                    && self
+                        .types
+                        .object_slice(props)
+                        .iter()
+                        .all(|p| self.is_json_boxable(p.ty))
+            }
+            TyKind::Union(span) => self
+                .types
+                .union_slice(span)
+                .iter()
+                .all(|&t| self.is_json_boxable(t)),
+            _ => false,
+        }
     }
 
     fn site_of(&self, inst_id: InstanceId, expr: &Expr) -> Option<&SiteResolution> {
@@ -161,8 +243,16 @@ impl<'h> Emitter<'h, '_> {
         let new_init = self.rewrite_stmts(init_inst, &self.hir.init, None)?;
 
         // 2. Emit every reached top-level function & lifted closure instance.
+        // Only remap locals on a 2nd+ specialization of the same template (so exported and
+        // single-instance functions keep original LocalIds and captures match directly).
+        let mut seen_templates = BitSet::default();
+        let mut inst_remaps: Vec<HashMap<LocalId, LocalId>> =
+            vec![HashMap::new(); self.solved.instances.len()];
         let mut new_functions = Vec::new();
         for inst_i in 1..self.solved.instances.len() {
+            if !self.solved.live_instances.contains(inst_i) {
+                continue;
+            }
             let inst_id = InstanceId(inst_i as u32);
             let Some(inst) = self.solved.instances.get(inst_i) else {
                 continue;
@@ -172,7 +262,18 @@ impl<'h> Emitter<'h, '_> {
             };
             match view.kind {
                 TemplateKind::Function { .. } | TemplateKind::Closure { .. } => {
-                    let func = self.emit_function(inst_id, inst, view, true)?;
+                    let keep_original = view.is_exported || view.name.starts_with("__obj_method_");
+                    let remap_locals =
+                        !keep_original && !seen_templates.insert(inst.template.0 as usize);
+                    let inherited = inst
+                        .capture_owner
+                        .and_then(|owner| inst_remaps.get(owner.0 as usize))
+                        .cloned();
+                    let (func, remap) =
+                        self.emit_function(inst_id, inst, view, remap_locals, inherited)?;
+                    if let Some(slot) = inst_remaps.get_mut(inst_i) {
+                        *slot = remap;
+                    }
                     if inst.is_inline_callback || inst.captures_non_global {
                         self.inline_callbacks.push(func.id);
                     }
@@ -182,19 +283,39 @@ impl<'h> Emitter<'h, '_> {
             }
         }
 
-        // 3. Emit classes: keep `__AnonShape_*` object-literal classes as-is, and emit concrete
-        // monomorphic classes for every instantiated user class.
+        // Retain unreached generator functions so lowering's exact unsupported diagnostic fires.
+        // Also retain unreached concrete top-level functions when no exported functions exist,
+        // so WIT export binding can report `MISSING_EXPORT` with the declaration span and help.
+        let keep_unexported_candidates = new_functions.is_empty();
+        for func in &self.hir.functions {
+            if new_functions.iter().any(|f| f.id == func.id) {
+                continue;
+            }
+            let concrete_candidate = keep_unexported_candidates
+                && func.type_params.is_empty()
+                && func.params.iter().all(|p| !matches!(p.ty, HirType::Any))
+                && !matches!(func.return_type, HirType::Any);
+            if func.is_generator || concrete_candidate {
+                new_functions.push(func.clone());
+            }
+        }
+
+        // 3. Emit classes: keep `__AnonShape_*` object-literal classes as-is, emit concrete
+        // monomorphic classes for every instantiated user class, and also emit static-only
+        // classes that had static methods or fields reached without `new`.
         let mut new_classes = Vec::with_capacity(self.hir.classes.len());
         for class in &self.hir.classes {
             if hir_compat::is_object_literal(&class.name) {
                 new_classes.push(class.clone());
             }
         }
+        let mut emitted_class_ids = BitSet::default();
         for cinst_i in 0..self.solved.class_insts.len() {
             let cinst_id = ClassInstId(cinst_i as u32);
             let Some(cinst) = self.solved.class_insts.get(cinst_i) else {
                 continue;
             };
+            emitted_class_ids.insert(cinst.class.0 as usize);
             let Some(&hir_idx) = self.index.class_hir_idx.get(cinst.class.0 as usize) else {
                 continue;
             };
@@ -218,6 +339,9 @@ impl<'h> Emitter<'h, '_> {
                 if !self.types.is_open(resolved) {
                     f.ty = self.materialize(resolved);
                 }
+                if let Some(init) = &field.init {
+                    f.init = Some(self.rewrite_expr(init_inst, init, None)?);
+                }
                 fields.push(f);
             }
             let mut static_fields = Vec::with_capacity(orig.static_fields.len());
@@ -232,6 +356,9 @@ impl<'h> Emitter<'h, '_> {
                 {
                     f.ty = self.materialize(*ty);
                 }
+                if let Some(init) = &field.init {
+                    f.init = Some(self.rewrite_expr(init_inst, init, None)?);
+                }
                 static_fields.push(f);
             }
 
@@ -241,7 +368,8 @@ impl<'h> Emitter<'h, '_> {
                     let view = inst.and_then(|i| self.index.view(i.template));
                     match (inst, view) {
                         (Some(inst), Some(view)) => {
-                            Some(self.emit_function(ctor_id, inst, view, false)?)
+                            let (f, _) = self.emit_function(ctor_id, inst, view, false, None)?;
+                            Some(f)
                         }
                         _ => orig.constructor.clone(),
                     }
@@ -265,26 +393,36 @@ impl<'h> Emitter<'h, '_> {
                     TemplateKind::ClassMethod { class, .. }
                         if class == cinst.class && inst.receiver == Some(cinst_id) =>
                     {
-                        let mut m = self.emit_function(inst_id, inst, view, false)?;
+                        let (mut m, _) = self.emit_function(inst_id, inst, view, false, None)?;
                         m.name = inst.emitted_method_name.clone();
                         methods.push(m);
                     }
                     TemplateKind::ClassStaticMethod { class, .. } if class == cinst.class => {
-                        let mut m = self.emit_function(inst_id, inst, view, false)?;
+                        let (mut m, _) = self.emit_function(inst_id, inst, view, false, None)?;
                         m.name = inst.emitted_method_name.clone();
                         static_methods.push(m);
                     }
-                    TemplateKind::ClassGetter { class, .. }
-                        if class == cinst.class && inst.receiver == Some(cinst_id) =>
-                    {
-                        let g = self.emit_function(inst_id, inst, view, false)?;
-                        getters.push((view.name.to_owned(), g));
+                    TemplateKind::ClassGetter {
+                        class, getter_idx, ..
+                    } if class == cinst.class && inst.receiver == Some(cinst_id) => {
+                        let (g, _) = self.emit_function(inst_id, inst, view, false, None)?;
+                        let prop = orig
+                            .getters
+                            .get(getter_idx)
+                            .map_or(view.name, |(n, _)| n.as_str())
+                            .to_owned();
+                        getters.push((prop, g));
                     }
-                    TemplateKind::ClassSetter { class, .. }
-                        if class == cinst.class && inst.receiver == Some(cinst_id) =>
-                    {
-                        let s = self.emit_function(inst_id, inst, view, false)?;
-                        setters.push((view.name.to_owned(), s));
+                    TemplateKind::ClassSetter {
+                        class, setter_idx, ..
+                    } if class == cinst.class && inst.receiver == Some(cinst_id) => {
+                        let (s, _) = self.emit_function(inst_id, inst, view, false, None)?;
+                        let prop = orig
+                            .setters
+                            .get(setter_idx)
+                            .map_or(view.name, |(n, _)| n.as_str())
+                            .to_owned();
+                        setters.push((prop, s));
                     }
                     _ => {}
                 }
@@ -303,6 +441,66 @@ impl<'h> Emitter<'h, '_> {
             new_classes.push(emitted_class);
         }
 
+        // Emit classes that were never constructed with `new` but have reached static methods/fields.
+        for (cid_i, &hir_idx) in self.index.class_hir_idx.iter().enumerate() {
+            if emitted_class_ids.contains(cid_i) {
+                continue;
+            }
+            let cid = ClassId(cid_i as u32);
+            let Some(orig) = self.hir.classes.get(hir_idx) else {
+                continue;
+            };
+            let mut static_methods = Vec::new();
+            for inst_i in 1..self.solved.instances.len() {
+                let inst_id = InstanceId(inst_i as u32);
+                let Some(inst) = self.solved.instances.get(inst_i) else {
+                    continue;
+                };
+                let Some(view) = self.index.view(inst.template) else {
+                    continue;
+                };
+                if let TemplateKind::ClassStaticMethod { class, .. } = view.kind
+                    && class == cid
+                {
+                    let (mut m, _) = self.emit_function(inst_id, inst, view, false, None)?;
+                    m.name = inst.emitted_method_name.clone();
+                    static_methods.push(m);
+                }
+            }
+            if static_methods.is_empty()
+                && orig.static_fields.is_empty()
+                && orig.extends_name.is_none()
+            {
+                continue;
+            }
+            let mut static_fields = Vec::with_capacity(orig.static_fields.len());
+            for (f_idx, field) in orig.static_fields.iter().enumerate() {
+                let mut f = field.clone();
+                if let Some((_, _, ty)) = self
+                    .solved
+                    .static_fields
+                    .iter()
+                    .find(|(c, i, _)| *c == cid && *i == f_idx)
+                    && !self.types.is_open(*ty)
+                {
+                    f.ty = self.materialize(*ty);
+                }
+                if let Some(init) = &field.init {
+                    f.init = Some(self.rewrite_expr(init_inst, init, None)?);
+                }
+                static_fields.push(f);
+            }
+            let mut emitted_class = orig.clone();
+            emitted_class.type_params.clear();
+            emitted_class.constructor = None;
+            emitted_class.methods.clear();
+            emitted_class.getters.clear();
+            emitted_class.setters.clear();
+            emitted_class.static_fields = static_fields;
+            emitted_class.static_methods = static_methods;
+            new_classes.push(emitted_class);
+        }
+
         Ok((new_init, new_functions, new_classes))
     }
 
@@ -312,8 +510,10 @@ impl<'h> Emitter<'h, '_> {
         inst: &super::solve::Instance,
         view: &super::boundary::TemplateView<'h>,
         remap_locals: bool,
-    ) -> Result<Function> {
-        let mut remap = HashMap::new();
+        inherited_remap: Option<HashMap<LocalId, LocalId>>,
+    ) -> Result<(Function, HashMap<LocalId, LocalId>)> {
+        let mut remap = inherited_remap.unwrap_or_default();
+        let has_inherited = !remap.is_empty();
         let mut params = Vec::with_capacity(view.params.len());
         let mut static_func_params: Vec<(LocalId, FuncId)> = Vec::new();
 
@@ -321,7 +521,8 @@ impl<'h> Emitter<'h, '_> {
             let param_ty = self
                 .solved
                 .param_locs
-                .get(inst.param_locs.start as usize + p_idx)
+                .get(inst.param_locs.range())
+                .and_then(|slice| slice.get(p_idx))
                 .and_then(|loc| self.solved.locations.get(loc.0 as usize).copied())
                 .unwrap_or(Ty::OPEN);
             if let TyKind::Func(ident) = self.types.kind(param_ty) {
@@ -360,6 +561,8 @@ impl<'h> Emitter<'h, '_> {
         let mut body = self.rewrite_stmts(inst_id, view.body, Some(&static_func_params))?;
         if remap_locals {
             self.remap_declared_locals(&mut body, &mut remap)?;
+        }
+        if remap_locals || has_inherited {
             for param in &mut params {
                 if let Some(default) = &mut param.default {
                     perry_hir::analysis::remap_local_ids_in_expr(default, &remap);
@@ -372,6 +575,13 @@ impl<'h> Emitter<'h, '_> {
         for (i, cap) in &self.solved.instance_captures {
             if *i == inst_id && !captures.contains(cap) {
                 captures.push(*cap);
+            }
+        }
+        if !remap.is_empty() {
+            for cap in &mut captures {
+                if let Some(&mapped) = remap.get(cap) {
+                    *cap = mapped;
+                }
             }
         }
         captures.sort_unstable();
@@ -391,31 +601,39 @@ impl<'h> Emitter<'h, '_> {
             ));
         }
 
-        Ok(Function {
-            id: inst.emitted_func_id,
-            name: inst.emitted_name.clone(),
-            type_params: Vec::new(),
-            params,
-            return_type,
-            body,
-            captures,
-            is_async: view.is_async,
-            is_generator: view.is_generator,
-            is_strict: view.is_strict,
-            construct_only: view.construct_only,
-            is_exported: view.is_exported,
-            decorators: Vec::new(),
-            was_plain_async: false,
-            was_unrolled: false,
-        })
+        Ok((
+            Function {
+                id: inst.emitted_func_id,
+                name: inst.emitted_name.clone(),
+                type_params: Vec::new(),
+                params,
+                return_type,
+                body,
+                captures,
+                is_async: view.is_async,
+                is_generator: view.is_generator,
+                is_strict: view.is_strict,
+                construct_only: view.construct_only,
+                is_exported: view.is_exported,
+                decorators: Vec::new(),
+                was_plain_async: false,
+                was_unrolled: false,
+            },
+            remap,
+        ))
     }
 
     fn find_func_identity_instance(&self, ident: super::types::FuncIdentity) -> Option<FuncId> {
         self.solved
             .instances
             .iter()
-            .find(|i| i.template == ident.template && i.capture_owner == ident.capture_owner)
-            .map(|i| i.emitted_func_id)
+            .enumerate()
+            .find(|(idx, i)| {
+                self.solved.live_instances.contains(*idx)
+                    && i.template == ident.template
+                    && i.capture_owner == ident.capture_owner
+            })
+            .map(|(_, i)| i.emitted_func_id)
             .or_else(|| self.index.view(ident.template).map(|v| v.func_id))
     }
 
@@ -507,14 +725,46 @@ impl<'h> Emitter<'h, '_> {
                 init,
             } => {
                 let resolved = self.local_ty(inst_id, *id);
-                // Drop runtime `const f = double` alias bindings whose value is a static function identity
-                // only when they have no runtime representation; wait: keep `init` rewritten so lowering skips or inlines.
+                let is_inferred = !self.hir.local_source_spans.contains_key(id)
+                    || self
+                        .index
+                        .local_idx(*id)
+                        .is_none_or(|lidx| self.index.local_inferred.contains(lidx.0 as usize));
+                // Rewrite static function-alias initializers (`const again = verify`) to
+                // `Expr::FuncRef(...)` so lowering skips slot allocation instead of reading
+                // a non-slot lexical function local.
+                if let Some(t) = resolved
+                    && let TyKind::Func(ident) = self.types.kind(t)
+                {
+                    let target_fid = self
+                        .find_func_identity_instance(ident)
+                        .or_else(|| self.index.view(ident.template).map(|v| v.func_id))
+                        .unwrap_or(0);
+                    return Ok(Stmt::Let {
+                        id: *id,
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        mutable: *mutable,
+                        init: Some(Expr::FuncRef(target_fid)),
+                    });
+                }
+                let is_deferred = self
+                    .index
+                    .local_idx(*id)
+                    .is_some_and(|lidx| self.index.local_deferred.contains(lidx.0 as usize));
                 let new_ty = match resolved {
                     Some(t)
                         if !self.types.is_open(t)
-                            && !matches!(self.types.kind(t), TyKind::Func(_)) =>
+                            && (is_inferred
+                                || matches!(ty, HirType::Any | HirType::Unknown)
+                                || matches!(ty, HirType::Array(e) if matches!(**e, HirType::Any | HirType::Unknown))
+                                || matches!(self.types.kind(t), TyKind::ClassInst(_))) =>
                     {
-                        self.materialize(t)
+                        if is_inferred && is_deferred && self.needs_json_union_box(t) {
+                            HirType::Unknown
+                        } else {
+                            self.materialize(t)
+                        }
                     }
                     _ => ty.clone(),
                 };
@@ -632,14 +882,6 @@ impl<'h> Emitter<'h, '_> {
         if let Some(site) = self.site_of(inst_id, expr).cloned() {
             match site {
                 SiteResolution::FoldBool(b) => return Ok(Expr::Bool(b)),
-                SiteResolution::FuncAlias(target) => {
-                    let fid = self
-                        .solved
-                        .instances
-                        .get(target.0 as usize)
-                        .map_or(0, |i| i.emitted_func_id);
-                    return Ok(Expr::FuncRef(fid));
-                }
                 SiteResolution::Callback {
                     target,
                     keep_inline_closure,
@@ -686,8 +928,11 @@ impl<'h> Emitter<'h, '_> {
                         for (i, p) in params.iter().enumerate() {
                             let mut np = p.clone();
                             if let Some(span) = param_span
-                                && let Some(loc) =
-                                    self.solved.param_locs.get(span.start as usize + i)
+                                && let Some(loc) = self
+                                    .solved
+                                    .param_locs
+                                    .get(span.range())
+                                    .and_then(|slice| slice.get(i))
                                 && let Some(&ty) = self.solved.locations.get(loc.0 as usize)
                                 && !self.types.is_open(ty)
                             {
@@ -731,6 +976,11 @@ impl<'h> Emitter<'h, '_> {
                     target,
                     strip_arg_mask,
                 } => {
+                    let fid = self
+                        .solved
+                        .instances
+                        .get(target.0 as usize)
+                        .map_or(0, |i| i.emitted_func_id);
                     if let Expr::Call {
                         args,
                         byte_offset,
@@ -738,11 +988,6 @@ impl<'h> Emitter<'h, '_> {
                         ..
                     } = expr
                     {
-                        let fid = self
-                            .solved
-                            .instances
-                            .get(target.0 as usize)
-                            .map_or(0, |i| i.emitted_func_id);
                         let mut new_args = Vec::with_capacity(args.len());
                         for (i, arg) in args.iter().enumerate() {
                             if i < 64 && (strip_arg_mask & (1u64 << i)) != 0 {
@@ -754,6 +999,37 @@ impl<'h> Emitter<'h, '_> {
                             callee: Box::new(Expr::FuncRef(fid)),
                             args: new_args,
                             type_args: Vec::new(),
+                            byte_offset: *byte_offset,
+                            byte_end: *byte_end,
+                        });
+                    }
+                    if let Expr::CallSpread {
+                        args,
+                        type_args,
+                        byte_offset,
+                        byte_end,
+                        ..
+                    } = expr
+                    {
+                        let mut new_args = Vec::with_capacity(args.len());
+                        for arg in args {
+                            new_args.push(match arg {
+                                perry_hir::ir::CallArg::Expr(e) => perry_hir::ir::CallArg::Expr(
+                                    self.rewrite_expr(inst_id, e, func_params)?,
+                                ),
+                                perry_hir::ir::CallArg::Spread(e) => {
+                                    perry_hir::ir::CallArg::Spread(self.rewrite_expr(
+                                        inst_id,
+                                        e,
+                                        func_params,
+                                    )?)
+                                }
+                            });
+                        }
+                        return Ok(Expr::CallSpread {
+                            callee: Box::new(Expr::FuncRef(fid)),
+                            args: new_args,
+                            type_args: type_args.clone(),
                             byte_offset: *byte_offset,
                             byte_end: *byte_end,
                         });

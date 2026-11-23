@@ -15,16 +15,6 @@ pub fn class_functions(class: &Class) -> impl Iterator<Item = &Function> {
         .chain(class.setters.iter().map(|(_, method)| method))
 }
 
-pub(crate) fn class_functions_mut(class: &mut Class) -> impl Iterator<Item = &mut Function> {
-    class
-        .constructor
-        .iter_mut()
-        .chain(&mut class.methods)
-        .chain(&mut class.static_methods)
-        .chain(class.getters.iter_mut().map(|(_, method)| method))
-        .chain(class.setters.iter_mut().map(|(_, method)| method))
-}
-
 /// Only bindings used outside module initialization need persistent storage.
 pub fn captured(module: &Module) -> HashSet<LocalId> {
     let methods = module.classes.iter().flat_map(class_functions);
