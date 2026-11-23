@@ -586,6 +586,17 @@ console.log(beforeSize, lf.size(), lf.first().toUpperCase(), readCap(), typeof a
 "#,
             "0 1 A 2 number 2 number 2 number object [1] {\"b\":1,\"a\":\"x\"}\n",
         ),
+        (
+            "annotated_fields_keep_declared_types",
+            r#"
+class Mode { mode: "a" | "b" = "a"; constructor(m: "a" | "b") { this.mode = m; } }
+class Late { n = null; set(v) { this.n = v; } }
+const late = new Late();
+late.set(3);
+console.log(new Mode("b").mode, late.n);
+"#,
+            "b 3\n",
+        ),
         ("deep_call_chain_300", chain.as_str(), "301\n"),
     ];
     for &(name, source, expected) in cases {

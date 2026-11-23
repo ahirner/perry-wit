@@ -221,6 +221,8 @@ struct Solver<'h, 'a> {
     types: &'a mut TypeTable,
     init_inst: Option<InstanceId>,
     locations: IdxVec<LocId, Ty>,
+    /// Locations whose type an annotation fixes: writes are checked by lowering, never joined.
+    declared_locs: BitSet,
     dirty_locs: BitSet,
     inst_reads: Vec<Vec<LocId>>,
     reader_offsets: Vec<u32>,
@@ -345,6 +347,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             types,
             init_inst: None,
             locations,
+            declared_locs: BitSet::default(),
             dirty_locs: BitSet::default(),
             inst_reads: Vec::new(),
             reader_offsets: Vec::new(),
@@ -442,6 +445,9 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn write_loc(&mut self, loc: LocId, value: Ty) -> bool {
+        if self.declared_locs.contains(loc.index()) {
+            return false;
+        }
         let Some(&old) = self.locations.get(loc) else {
             return false;
         };
@@ -1102,11 +1108,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 !matches!(field.ty, HirType::Any | HirType::Unknown),
             );
             let ty = self.types.substitute(self.ctx, ty, &bindings);
-            let loc = self.alloc_loc(if self.types.is_open(ty) {
-                Ty::BOTTOM
-            } else {
-                ty
-            });
+            let declared = !self.types.is_open(ty);
+            let loc = self.alloc_loc(if declared { ty } else { Ty::BOTTOM });
+            if declared {
+                self.declared_locs.insert(loc.index());
+            }
             self.field_locs.push(loc);
         }
         let field_locs = TySpan {
