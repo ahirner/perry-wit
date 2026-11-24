@@ -735,6 +735,12 @@ impl<'h> Emitter<'h, '_> {
     }
 
     fn rewrite_expr_plain(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
+        if let Expr::PrivateGuard {
+            object, kind: 0, ..
+        } = expr
+        {
+            return self.rewrite_expr(rctx, object);
+        }
         if let Expr::This = expr
             && let Some(sid) = rctx.self_local
         {

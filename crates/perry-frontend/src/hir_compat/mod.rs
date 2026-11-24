@@ -130,6 +130,13 @@ pub(crate) fn lower<'s>(
             None => diagnostic,
         }
     })?;
+    for class in &mut module.classes {
+        for field in &mut class.fields {
+            if field.is_private && field.name.starts_with('#') {
+                field.name = perry_hir::private_names::private_value_key(class.id, &field.name);
+            }
+        }
+    }
     let (witnesses, class_roots) = witnesses.in_hir(&mut module)?;
     constructors.collect_types(&mut module)?;
     let inferred_bindings = module

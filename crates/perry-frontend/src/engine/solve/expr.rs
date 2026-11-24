@@ -143,6 +143,25 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(val_ty)
             }
+            Expr::PrivateGuard {
+                class_id,
+                object,
+                field_name,
+                kind: 0,
+                ..
+            } => {
+                let ty = self.eval_expr(s, object)?;
+                if ty == Ty::BOTTOM
+                    || matches!(self.types.kind(ty), TyKind::ClassInst(id)
+                    if self.hir.classes.get(self.index.classes[self.class_insts[id].class].hir_idx)
+                        .is_some_and(|class| class.id == *class_id))
+                {
+                    return Ok(ty);
+                }
+                Err(Diagnostic::unsupported(format!(
+                    "receiver of private field '{field_name}' must have its declaring class"
+                )))
+            }
             Expr::This => Ok(match s.receiver {
                 Some(Receiver::Class(c)) => self.types.class_inst(c),
                 Some(Receiver::Object(ty)) => ty,
