@@ -6,7 +6,7 @@ Perry-WIT builds typed components that export WIT functions, CLI commands that r
 ## Typed Components
 
 The WIT world declares the exports.
-Each `kebab-case` WIT export binds to the matching `camelCase` TypeScript export, and exported interfaces also bind to an exported object whose properties name the interface's functions and `PascalCase` resource classes (with optional `[Symbol.dispose]()` destructors). Remaining module functions stay internal.
+Each `kebab-case` WIT export binds to the matching `camelCase` TypeScript export, and exported interfaces also bind to an exported object whose properties name the interface's functions and `PascalCase` resource classes. Remaining module functions stay internal.
 The starter template contains this pair:
 
 ```wit check=task

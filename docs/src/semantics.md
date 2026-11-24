@@ -4,15 +4,9 @@ Perry-WIT accepts a statically typed subset of TypeScript.
 Names, object layouts and host capabilities are resolved at compile time, and a construct outside the subset is a compile error with a source location.
 Property reads through nullable values require narrowing: check for `null`, supply a non-null fallback, or use optional chaining before reading a property such as `.length`.
 A `typeof` or tag check narrows a union until its local is assigned directly or by a closure. Assigning a literal narrows the local to that alternative.
-Deferred `let` declarations preserve `undefined` until assigned and infer their storage type from statically visible writes.
+A `let` declaration without an initializer infers its storage type from statically visible writes.
+Functions are specialized per distinct argument types at their call sites, up to 256 specializations per function.
 A narrowed read of a property or global that another reference or call has since changed throws `TypeError`.
-
-## Functions
-
-- Functions and closures can be stored in locals, arrays, records, and class fields, passed as arguments, and returned from functions.
-- Mutable variables captured by escaping closures share boxed storage across invocations, preserving per-iteration bindings for loop-head `let` declarations.
-- Unions of function values dispatch dynamically on a compile-time function tag, preserve `typeof === "function"` and `===` / `!==` identity semantics, and throw `TypeError` when a nullable callable is invoked while `null` or `undefined`.
-- Functions are specialized per distinct argument types at their call sites (up to 256 specializations per function).
 
 ## Objects
 
@@ -30,7 +24,6 @@ A narrowed read of a property or global that another reference or call has since
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
 - At a WIT `list<T>` boundary, holes lower to `none` when `T` is `option<U>` and trap otherwise.
 - Fresh empty arrays (`[]`, including `any[]`) infer their element type from `push` calls and numeric-indexed writes across branches, loops, non-reassigned local aliases and helper returns, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, index reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer. Other uses, unresolved writes, or empty arrays with zero writes require an explicit element type.
-- `Uint8Array` and `DataView` share underlying `ArrayBuffer` storage with bounded typed reads and writes.
 
 ## Strings
 
@@ -63,8 +56,7 @@ A narrowed read of a property or global that another reference or call has since
 
 ## Async
 
-- An `async` function runs eagerly until its first suspension. Awaiting an already settled promise continues inline.
-- `new Promise((resolve, reject) => ...)` creates a guest-settled promise, and `.then`, `.catch`, and `.finally` chain reactions onto any promise. `setTimeout`, `setInterval`, `setImmediate`, `clearTimeout`, and `clearInterval` are available globally and as named imports from `node:timers`.
+- An `async` function runs eagerly until its first suspension. Awaiting an already settled promise continues inline. Resolving a `Promise` with another `Promise` is a compile error.
 - Waiting tasks resume from WASI 0.3 callbacks, so continuation order across distinct host events follows the host scheduler. Observers of the same promise resume in registration order.
 - Commands (`wasi:cli/run`) drain pending timers and external async operations before exiting. Library exports cancel lingering detached tasks and trap if unresolved background work remains at return.
 - `ReadableStream` supports default readers (`getReader()`), `for await` loops, BYOB readers (`getReader({ mode: "byob" })` with `read(view, { min })` into a caller-provided `Uint8Array`) and explicit cancellation. `for await` over a byte stream releases the reader lock and cancels the stream when the loop exits early. Releasing a reader lock rejects pending reads while keeping buffered chunks for the next reader.

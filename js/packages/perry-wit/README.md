@@ -2,8 +2,8 @@
 
 Compile TypeScript ahead of time into [WASI 0.3](https://wasi.dev) WebAssembly components, from Node.js or the browser.
 
-[Perry-WIT](https://ahirner.github.io/perry-wit/) lowers a static subset of TypeScript directly to native WebAssembly instructions.
-This package bundles the compiler for self-contained compilation in Node.js and browsers.
+[Perry-WIT](https://ahirner.github.io/perry-wit/) lowers a static subset of TypeScript directly to WebAssembly instructions instead of embedding a JavaScript engine.
+This package bundles the compiler, so it needs no Rust or LLVM toolchain.
 
 ```sh
 npm install perry-wit

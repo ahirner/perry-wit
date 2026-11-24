@@ -2,7 +2,8 @@
 
 **Perry-WIT** compiles a static subset of TypeScript ahead-of-time into WebAssembly components targeting **WASI 0.3 (Preview 3)**.
 
-Perry-WIT lowers TypeScript through [Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions, linking only the `#![no_std]` runtime and standard-library functions a program reaches.
+Rather than embedding a JavaScript engine or in-Wasm interpreter (such as QuickJS or SpiderMonkey), Perry-WIT lowers TypeScript through
+[Perry](https://www.perryts.com) HIR and typed SSA MIR built on [pliron](https://github.com/pliron-org/pliron) directly to native WebAssembly instructions, linking only the `#![no_std]` runtime and standard-library functions a program reaches.
 An integer `add` export compiles to 100 bytes, and a string `trim` export stays under 6 KiB.
 
 - **Dual-mode authoring**: Write CLI commands with top-level `await`, export typed functions, resource classes, or HTTP handlers, or combine both in one module whose top-level code initializes state once before any export runs.
@@ -10,7 +11,7 @@ An integer `add` export compiles to 100 bytes, and a string `trim` export stays 
 - **WIT-refined numbers**: Specialize `u8`–`s64` parameters and in-range arithmetic to native `i32` and `i64` instructions via forward range and backward bitwidth analysis while preserving IEEE 754 `f64` semantics for unconstrained `number` values.
 - **Tiered memory reclamation**: Persist module-level state across calls while reclaiming temporaries through SROA, bounded activation frames, and per-call task regions or precise safe-point collection.
 - **Callback-driven concurrency**: Lower `async` functions to stackless state machines so `await`, guest-settled promises, timers, streams, and Promise combinators suspend directly on WASI 0.3 callbacks.
-- **Toolchain-free embedding**: Compile from in-memory buffers via `perry_wit::api`, the standalone WASI 0.2 compiler component (`perry-wit.wasm`), or the `perry-wit` npm package in Node.js and browsers.
+- **Toolchain-free embedding**: Compile from in-memory buffers via `perry_wit::api` or the standalone WASI 0.2 compiler component (`perry-wit.wasm`), or from Node.js and browsers via the `perry-wit` npm package, without an external Rust or LLVM toolchain.
 
 [Homepage](https://ahirner.github.io/perry-wit/) · [Handbook](https://ahirner.github.io/perry-wit/docs/) · [Playground](https://ahirner.github.io/perry-wit/play/) · [Rust API](https://ahirner.github.io/perry-wit/rust/perry_wit/api/index.html) · [Architecture](ARCHITECTURE.md)
 
