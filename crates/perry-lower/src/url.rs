@@ -37,17 +37,15 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Option<Value>> {
-        let (value, field) = match expr {
-            Expr::UrlGetHref(value) => (value, "href"),
-            Expr::UrlGetPathname(value) => (value, "pathname"),
-            Expr::UrlGetProtocol(value) => (value, "protocol"),
-            Expr::UrlGetHost(value) => (value, "host"),
-            Expr::UrlGetHostname(value) => (value, "hostname"),
-            Expr::UrlGetPort(value) => (value, "port"),
-            Expr::UrlGetSearch(value) => (value, "search"),
-            Expr::UrlGetHash(value) => (value, "hash"),
-            Expr::UrlGetOrigin(value) => (value, "origin"),
-            Expr::UrlGetSearchParams(value) => (value, "searchParams"),
+        match expr {
+            Expr::UrlGetSearchParams(url) => {
+                let url = self.typed_operand(ctx, url, Kind::Url, "a URL")?;
+                Ok(Some(self.intrinsic(
+                    ctx,
+                    Intrinsic::UrlSearchParams,
+                    vec![url],
+                )))
+            }
             Expr::UrlNew { url, base } => {
                 let input = self.url_string(ctx, url)?;
                 let base = match base {
@@ -60,21 +58,19 @@ impl<'s> FunctionBuilder<'s> {
                         self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, string))
                     }
                 };
-                return Ok(self.call_intrinsic(ctx, Intrinsic::UrlNew, vec![input, base]));
+                Ok(self.call_intrinsic(ctx, Intrinsic::UrlNew, vec![input, base]))
             }
             Expr::UrlSetPathname { url, value } => {
                 let url = self.typed_operand(ctx, url, Kind::Url, "a URL")?;
                 let value = self.string_operand(ctx, value)?;
                 self.intrinsic_void(ctx, Intrinsic::UrlSetPathname, vec![url, value]);
-                return Ok(Some(value));
+                Ok(Some(value))
             }
             Expr::EncodeURIComponent(value) => {
                 let value = self.string_operand(ctx, value)?;
-                return Ok(self.call_intrinsic(ctx, Intrinsic::EncodeUriComponent, vec![value]));
+                Ok(self.call_intrinsic(ctx, Intrinsic::EncodeUriComponent, vec![value]))
             }
-            _ => return Ok(None),
-        };
-        let value = self.typed_operand(ctx, value, Kind::Url, "a URL")?;
-        Ok(Some(self.url_field(ctx, value, field)?))
+            _ => Ok(None),
+        }
     }
 }

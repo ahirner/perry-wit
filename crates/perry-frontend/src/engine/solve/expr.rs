@@ -355,20 +355,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ),
                 0,
             )),
-            Expr::ProcessOn { .. } => Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported(
-                    "passing a callback to runtime 'on' requires the runtime to call a guest function",
-                ),
-                0,
-            )),
-            Expr::ProcessOnce { .. } => Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported(
-                    "passing a callback to runtime 'once' requires the runtime to call a guest function",
-                ),
-                0,
-            )),
             Expr::StructuredClone { value, .. } => self.eval_expr(s, value),
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
@@ -491,7 +477,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(Ty::OPEN)
             }
             Expr::PropertyGet {
-                object, property, byte_offset, ..
+                object,
+                property,
+                byte_offset,
+                ..
             } => self.eval_property_get(s, object, property, *byte_offset),
             Expr::PropertySet {
                 object,
@@ -537,7 +526,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(val_ty)
             }
-            Expr::IndexGet { object, index, element_offset, .. } => {
+            Expr::IndexGet {
+                object,
+                index,
+                element_offset,
+                ..
+            } => {
                 let obj_ty = self.eval_expr(s, object)?;
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
                 self.check_timer_member(obj_def, *element_offset)?;
@@ -940,8 +934,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             _ => {
                 if let Some((receiver, call)) = crate::methods::Call::expression(expr) {
                     let (ty, evaluated) = match receiver {
-                        crate::methods::CallReceiver::Expression(e) => (self.eval_expr(s, e)?, Some(e)),
-                        crate::methods::CallReceiver::Local(id) => (self.eval_local_get(s, id)?, None),
+                        crate::methods::CallReceiver::Expression(e) => {
+                            (self.eval_expr(s, e)?, Some(e))
+                        }
+                        crate::methods::CallReceiver::Local(id) => {
+                            (self.eval_local_get(s, id)?, None)
+                        }
                     };
                     self.eval_children(s, expr, evaluated)?;
                     return Ok(self.apply_resolved_method(s.inst, ty, call.result_rule()));

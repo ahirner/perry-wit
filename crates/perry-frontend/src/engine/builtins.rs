@@ -412,13 +412,8 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         Expr::Integer(_) | Expr::Number(_) | Expr::Update { .. } => Ty::NUMBER,
         Expr::BigInt(_) => Ty::BIGINT,
         Expr::String(_) | Expr::WtfString(_) | Expr::TypeOf(_) => Ty::STRING,
-        Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => {
-            types.with_absences(Ty::NUMBER, Absence::Undefined)
-        }
-        Expr::StringAt { .. } => types.with_absences(Ty::STRING, Absence::Undefined),
-        Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) | Expr::JsonParseReviver { .. } => {
-            Ty::DYNAMIC
-        }
+        Expr::Uint8ArrayGet { .. } => types.with_absences(Ty::NUMBER, Absence::Undefined),
+        Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) => Ty::DYNAMIC,
         Expr::JsonParseTyped { ty, .. } => {
             let p = types.intern_hir(ctx, ty, true);
             if p == Ty::OPEN { Ty::DYNAMIC } else { p }
@@ -438,13 +433,11 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         | Expr::NumberCoerce(_)
         | Expr::ParseInt { .. }
         | Expr::ParseFloat(_)
-        | Expr::PerformanceNow
         | Expr::DateNow
         | Expr::DateParse(_)
         | Expr::DateUtc(_)
         | Expr::MapSize(_)
         | Expr::SetSize(_)
-        | Expr::Uint8ArrayLength(_)
         | Expr::Uint8ArraySet { .. }
         | Expr::PropertyUpdate { .. } => Ty::NUMBER,
         Expr::IsNaN(_)
@@ -467,21 +460,10 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         | Expr::PathResolve(_)
         | Expr::TextDecoderEncoding(_)
         | Expr::TextDecoderDecode { .. }
-        | Expr::ErrorMessage(_)
         | Expr::CryptoRandomUUID
         | Expr::EncodeURIComponent(_)
-        | Expr::UrlGetHref(_)
-        | Expr::UrlGetPathname(_)
-        | Expr::UrlGetProtocol(_)
-        | Expr::UrlGetHost(_)
-        | Expr::UrlGetHostname(_)
-        | Expr::UrlGetPort(_)
-        | Expr::UrlGetSearch(_)
-        | Expr::UrlGetHash(_)
-        | Expr::UrlGetOrigin(_)
         | Expr::UrlSetPathname { .. }
         | Expr::JsonStringify(_)
-        | Expr::JsonStringifyPretty { .. }
         | Expr::JsonStringifyFull(..) => Ty::STRING,
         Expr::EnvGet(_) => types.with_absences(Ty::STRING, Absence::Undefined),
         Expr::ForInKeys(_) | Expr::ObjectKeys(_) => types.array(Ty::STRING),
@@ -501,10 +483,6 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         Expr::UrlNew { .. } => types.named(ctx, "URL"),
         Expr::UrlGetSearchParams(_) | Expr::UrlSearchParamsNew(_) => {
             types.named(ctx, "URLSearchParams")
-        }
-        Expr::FetchWithOptions { .. } => {
-            let response = types.named(ctx, "Response");
-            types.promise(response)
         }
         _ => Ty::OPEN,
     }

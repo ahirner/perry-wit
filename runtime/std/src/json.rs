@@ -719,18 +719,6 @@ pub(crate) extern "C" fn std_json_from_number(value: f64) -> *mut u8 {
     numeric_node(Number::Float(value))
 }
 
-/// A signed 64-bit integer as an exact JSON value.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_from_i64(value: i64) -> *mut u8 {
-    numeric_node(Number::Signed(value))
-}
-
-/// An unsigned 64-bit integer as an exact JSON value.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_json_from_u64(value: u64) -> *mut u8 {
-    numeric_node(Number::Unsigned(value))
-}
-
 /// A string as a JSON value.
 ///
 /// # Safety

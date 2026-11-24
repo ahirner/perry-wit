@@ -168,7 +168,7 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
     Ok(())
 }
 
-pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
+pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
     #[derive(Default)]
     struct AstScanner {
         facts: SourceFacts,
@@ -409,7 +409,7 @@ pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
         .param_value_uses
         .sort_unstable_by_key(|(s, _)| *s);
     scanner.facts.param_value_uses.dedup_by_key(|(s, _)| *s);
-    Ok(scanner.facts)
+    scanner.facts
 }
 
 fn record_pattern_annotations(pat: &ast::Pat, inherited: bool, out: &mut Vec<u32>) {

@@ -333,14 +333,6 @@ impl<'h> Emitter<'h, '_> {
         }
     }
 
-    fn admits_undef_hir(ty: &HirType) -> bool {
-        match ty {
-            HirType::Void => true,
-            HirType::Union(ms) => ms.contains(&HirType::Void),
-            _ => false,
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn build_promise_reaction(
         &mut self,
@@ -464,7 +456,8 @@ impl<'h> Emitter<'h, '_> {
                 let f_arg = match val_slot {
                     Some(vid) => {
                         let v = Expr::LocalGet(vid);
-                        if Self::admits_undef_hir(&inner_hir) {
+                        if matches!(&inner_hir, HirType::Union(members) if members.contains(&HirType::Void))
+                        {
                             v
                         } else {
                             Self::non_null_unwrap(v)
