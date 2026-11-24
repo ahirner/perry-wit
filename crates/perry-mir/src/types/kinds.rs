@@ -54,7 +54,7 @@ value_types! {
         /// A mutable Date object containing epoch milliseconds or NaN.
         DateType("perry.date", ["Date"]);
         /// `fs.Stats` of `stat()`: the entry type and size, read through `perry.intrinsic`.
-        StatsType("perry.stats", []);
+        StatsType("perry.stats", ["Stats", "fs.Stats"]);
         /// A Fetch `Headers` list.
         HeadersType("perry.headers", ["Headers"]);
         /// A Fetch `Response`.
@@ -90,7 +90,7 @@ value_types! {
         AbortType("perry.abort", ["AbortController","AbortSignal"]);
         /// An HTTP request a handler serves (`wasi:http/handler`): its parts, its body and the
         /// response being built.
-        IncomingType("perry.incoming", []);
+        IncomingType("perry.incoming", ["__PerryIncoming"]);
         /// A caught exception (`catch (e)`): an `Error` object or a boxed thrown value.
         ExceptionType("perry.exception", ["Error","TypeError","RangeError","ReferenceError","SyntaxError"]);
         /// A `TextEncoder`: stateless, so every instance is the same static UTF-8 encoder.

@@ -34,14 +34,17 @@ impl<'s> FunctionBuilder<'s> {
         value
             .defining_op()
             .filter(|&op| Operation::is_op::<VariantNewOp>(op, ctx))?;
-        let Expr::New {
-            class_name, args, ..
-        } = expr
-        else {
-            return None;
+        let tag = match expr {
+            Expr::New {
+                class_name, args, ..
+            } => {
+                let fields = self.shapes.literal_fields(class_name)?;
+                args.get(fields.iter().position(|&name| name == "tag")?)?
+            }
+            Expr::Object(fields) => &fields.iter().find(|(name, _)| name == "tag")?.1,
+            _ => return None,
         };
-        let fields = self.shapes.literal_fields(class_name)?;
-        match args.get(fields.iter().position(|&name| name == "tag")?)? {
+        match tag {
             Expr::String(tag) => Some(tag),
             _ => None,
         }
@@ -149,19 +152,18 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         ty: TypeHandle,
-        names: &[&str],
-        args: &'s [Expr],
+        fields: &[(&str, &'s Expr)],
     ) -> Result<Value> {
         ensure_diag!(
-            names.iter().all(|&n| n == "tag" || n == "val"),
+            fields.iter().all(|&(n, _)| n == "tag" || n == "val"),
             codes::TYPE_MISMATCH,
             "variants have tag and val only"
         );
-        let tag = names
+        let tag_expr = fields
             .iter()
-            .position(|&n| n == "tag")
+            .find_map(|&(n, e)| (n == "tag").then_some(e))
             .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "variant literal needs a tag"))?;
-        let Expr::String(tag) = &args[tag] else {
+        let Expr::String(tag) = tag_expr else {
             bail_unsupported!("variant construction needs a literal tag");
         };
         let variant = TypedHandle::<VariantType>::from_handle(ty, ctx).to_diag(ctx)?;
@@ -177,10 +179,10 @@ impl<'s> FunctionBuilder<'s> {
                     "literal tag is not a case of this variant",
                 )
             })?;
-        let argument = names.iter().position(|&n| n == "val");
+        let argument = fields.iter().find_map(|&(n, e)| (n == "val").then_some(e));
         let value = match (argument, payload) {
-            (Some(index), Some(payload)) => {
-                let value = self.expression_with(ctx, &args[index], Some(payload))?;
+            (Some(val_expr), Some(payload)) => {
+                let value = self.expression_with(ctx, val_expr, Some(payload))?;
                 Some(self.fit(ctx, value, payload)?)
             }
             (None, None) => None,

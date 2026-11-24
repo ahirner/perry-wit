@@ -511,17 +511,34 @@ pub(crate) extern "C" fn perry_exit_code_set(code: f64) {
     process().exit_code = exit_code(code);
 }
 
-/// Report unresolved detached work once, before command output is drained.
-///
-/// # Safety
-/// `message` is a live UTF-8 runtime string.
 #[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn perry_task_detached(count: u32, message: *mut u8) {
-    if count != 0 {
-        // SAFETY: compiled code passes a static diagnostic string.
-        print_bytes(1, unsafe { crate::string::bytes(message) }, true);
-        current().outcome = Some(1);
+pub(crate) extern "C" fn perry_command_start() {
+    current().rejections = Some(alloc::vec::Vec::new());
+}
+
+/// A null result asks the callback ABI to wait for another host event.
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn perry_command_result(external: u32) -> *mut u8 {
+    let root = crate::region::perry_task_result();
+    let task = current();
+    // SAFETY: the command wrapper registers its top-level promise before polling.
+    let (state, _, _) = unsafe { rejection_fields(root) };
+    if task.outcome.is_some() || state == crate::promise::REJECTED {
+        return root;
     }
+    if task.signals.ready != 0 {
+        return core::ptr::null_mut();
+    }
+    if let Some(&rejected) = task.rejections.as_ref().and_then(|r| r.first()) {
+        return rejected;
+    }
+    if external != 0
+        || !task.subtasks.is_null()
+        || task.outputs.iter().any(|output| !output.acks.is_null())
+    {
+        return core::ptr::null_mut();
+    }
+    root
 }
 
 /// `process.exit(code)`: record the code and return the exit status that unwinds to the
@@ -545,7 +562,9 @@ pub(crate) unsafe extern "C" fn perry_command_outcome(promise: *mut u8) -> u32 {
     }
     // SAFETY: guaranteed by the caller.
     let (state, status, exception) = unsafe { rejection_fields(promise) };
-    if state == crate::promise::REJECTED && status != EXIT {
+    if state == crate::promise::PENDING {
+        process().exit_code = 13;
+    } else if state == crate::promise::REJECTED && status != EXIT {
         unsafe { print_uncaught(status, exception) };
         process().exit_code = 1;
     }

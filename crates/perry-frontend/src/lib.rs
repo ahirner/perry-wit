@@ -2,13 +2,11 @@
 use perry_wit_diagnostics::Result;
 use pliron::context::Context;
 use std::collections::{BTreeMap, HashMap};
-mod open_types;
-pub use open_types::{TypeState, binding_type, contextual_type};
 mod absence;
 pub mod collections;
 pub mod completion;
+pub(crate) mod engine;
 pub mod hir_compat;
-mod infer;
 pub mod methods;
 mod modules;
 pub mod narrowing;
@@ -59,24 +57,30 @@ pub fn load_sources<'s>(
     sources: &'s BTreeMap<String, String>,
     foreign: &'s HashMap<String, hir::Foreign>,
 ) -> Result<Program<'s>> {
+    load_world(ctx, source, identity, sources, foreign, None)
+}
+
+pub fn load_world<'s>(
+    ctx: &mut Context,
+    source: &'s str,
+    identity: &str,
+    sources: &'s BTreeMap<String, String>,
+    foreign: &'s HashMap<String, hir::Foreign>,
+    world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
+) -> Result<Program<'s>> {
     let loaded = modules::load(source, identity, sources, foreign)?;
-    let mut lowered = hir_compat::lower(loaded, identity)?;
-    infer::specialize_functions(
+    let mut lowered = hir_compat::lower(loaded, identity, world)?;
+    engine::run_engine(
         ctx,
         &mut lowered.module,
         &mut lowered.metadata,
+        &lowered.facts,
         foreign,
-        lowered.callables,
     )?;
     lowered
         .metadata
         .locations
         .record_call_origins(&lowered.module);
-    infer::unresolved_types(ctx, &mut lowered.module, &lowered.metadata, foreign);
-    if !lowered.metadata.sparse_arrays {
-        lowered.metadata.sparse_arrays =
-            infer::deletes_array_elements(ctx, &lowered.module, &lowered.metadata, foreign);
-    }
     Ok(Program {
         module: lowered.module,
         metadata: lowered.metadata,

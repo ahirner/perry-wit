@@ -278,8 +278,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(crate) fn record_literal(
         &mut self,
         ctx: &mut Context,
-        names: &[&str],
-        args: &'s [Expr],
+        fields: &[(&str, &'s Expr)],
         expected: Option<TypeHandle>,
         kind: RecordKind,
     ) -> Result<Value> {
@@ -298,12 +297,12 @@ impl<'s> FunctionBuilder<'s> {
             if let Some(ty) = expected
                 && ty.deref(ctx).is::<perry_mir::VariantType>()
             {
-                return self.variant_literal(ctx, ty, names, args);
+                return self.variant_literal(ctx, ty, fields);
             }
             if let Some(ty) = expected
                 && let Some((_, value, tuple)) = crate::collections::dict_entry_types(ctx, ty)
             {
-                return self.dict_literal(ctx, names, args, value, tuple);
+                return self.dict_literal(ctx, fields, value, tuple);
             }
         }
         let expected = expected
@@ -312,14 +311,14 @@ impl<'s> FunctionBuilder<'s> {
         let expected = matching_record(
             ctx,
             expected,
-            names.iter().copied(),
+            fields.iter().map(|&(name, _)| name),
             MissingFields::Diagnose,
         )?;
         let mut assembly = RecordAssembly {
             expected,
-            fields: Vec::with_capacity(args.len()),
+            fields: Vec::with_capacity(fields.len()),
         };
-        for (&name, arg) in names.iter().zip(args) {
+        for &(name, arg) in fields {
             assembly.write(
                 self,
                 ctx,

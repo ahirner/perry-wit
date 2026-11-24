@@ -1,7 +1,7 @@
 //! Array and string spread and `concat` lowering.
 use super::*;
 use crate::control_flow::{ArrayOutput, Holes, Input};
-use perry_mir::{Absence, ArrayExtendOp, ConcatSegmentsOp, OptionalType, StringType};
+use perry_mir::{ArrayExtendOp, ConcatSegmentsOp, StringType};
 
 impl<'s> FunctionBuilder<'s> {
     /// `[...text]` and `Array.from(text)`: one string per Unicode scalar value.
@@ -107,62 +107,15 @@ impl<'s> FunctionBuilder<'s> {
         items: &'s [perry_frontend::hir::ArrayElement],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let mut element = expected
+        let element = expected
             .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, present_type(ctx, ty)))
-            .map(|array| array.deref(ctx).element());
-        let fixed_element = element.is_some();
-        if element.is_none() {
-            let env = &self.shapes.type_env;
-            element = items.iter().find_map(|item| {
-                let (expression, spread) = match item {
-                    perry_frontend::hir::ArrayElement::Expr(Expr::Null | Expr::Undefined)
-                    | perry_frontend::hir::ArrayElement::Hole => return None,
-                    perry_frontend::hir::ArrayElement::Expr(expr) => (expr, false),
-                    perry_frontend::hir::ArrayElement::Spread(expr) => (expr, true),
-                };
-                let ty = perry_frontend::hir::infer_expr_type(expression, env);
-                let ty = if spread {
-                    perry_frontend::shapes::generics::iterated_element(ty).ok()?
-                } else {
-                    ty
-                };
-                self.shapes.value_type(ctx, &ty).ok()
-            });
-            if let Some(base) = element {
-                let states = items.iter().fold(absence(ctx, base), |states, item| {
-                    let state = match item {
-                        perry_frontend::hir::ArrayElement::Expr(Expr::Null) => Some(Absence::Null),
-                        perry_frontend::hir::ArrayElement::Expr(Expr::Undefined)
-                        | perry_frontend::hir::ArrayElement::Hole => Some(Absence::Undefined),
-                        _ => None,
-                    };
-                    perry_mir::Absence::join_optional(states, state)
-                });
-                let inner = present_type(ctx, base);
-                element = Some(states.map_or(inner, |states| {
-                    OptionalType::get_with(ctx, inner, states).into()
-                }));
-            }
-        }
-        if element.is_none()
-            && items.iter().all(|item| match item {
-                perry_frontend::hir::ArrayElement::Hole
-                | perry_frontend::hir::ArrayElement::Expr(Expr::Null | Expr::Undefined) => true,
-                perry_frontend::hir::ArrayElement::Spread(Expr::Array(items, _)) => {
-                    items.is_empty()
-                }
-                _ => false,
-            })
-        {
-            let mut ty = void_type(ctx);
-            if items
-                .iter()
-                .any(|item| matches!(item, perry_frontend::hir::ArrayElement::Expr(Expr::Null)))
-            {
-                ty = crate::coerce::admitting(ctx, ty, Absence::Null);
-            }
-            element = Some(ty);
-        }
+            .map(|array| array.deref(ctx).element())
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "array spread needs an element type",
+                )
+            })?;
         let mut result = None;
         // Holes evaluate nothing, so each run is appended once the element type is known.
         let mut holes = 0;
@@ -176,45 +129,10 @@ impl<'s> FunctionBuilder<'s> {
                 }
             };
             let value = if spread {
-                self.spread_value(ctx, expression, element)?
+                self.spread_value(ctx, expression, Some(element))?
             } else {
-                self.expression_with(ctx, expression, element)?
+                self.expression_with(ctx, expression, Some(element))?
             };
-            let source_element = if spread {
-                self.array_element(ctx, value)?
-            } else {
-                value.get_type(ctx)
-            };
-            if element.is_none() {
-                let optional = items
-                    .iter()
-                    .any(|item| matches!(item, perry_frontend::hir::ArrayElement::Hole));
-                element = Some(if optional {
-                    crate::coerce::admitting(ctx, source_element, Absence::Undefined)
-                } else {
-                    source_element
-                });
-            }
-            if !fixed_element && let Some(previous) = element {
-                let inner = present_type(ctx, previous);
-                ensure_unsupported!(
-                    present_type(ctx, source_element) == inner,
-                    "array spreads must have one element type"
-                );
-                let merged = perry_mir::Absence::join_optional(
-                    absence(ctx, previous),
-                    absence(ctx, source_element),
-                )
-                .map_or(inner, |states| {
-                    OptionalType::get_with(ctx, inner, states).into()
-                });
-                element = Some(merged);
-                if let Some(prefix) = result {
-                    let target = ArrayType::get(ctx, merged).into();
-                    result = Some(self.fit(ctx, prefix, target)?);
-                }
-            }
-            let element = *element.get_or_insert(source_element);
             let source = if spread {
                 let target = ArrayType::get(ctx, element).into();
                 self.fit(ctx, value, target)?
@@ -227,12 +145,6 @@ impl<'s> FunctionBuilder<'s> {
             result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
         }
         if holes > 0 {
-            let element = element.ok_or_else(|| {
-                Diagnostic::new(
-                    codes::MISSING_TYPE_ANNOTATION,
-                    "array holes need an element type",
-                )
-            })?;
             result = self.append_holes(ctx, result, element, holes);
         }
         result.ok_or_else(|| {

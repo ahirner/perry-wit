@@ -78,7 +78,6 @@ pub(super) struct Shapes<'h> {
     pub(super) foreign_wrappers: RefCell<HashMap<(&'h str, Vec<TypeHandle>), Identifier>>,
     pub(super) globals: RefCell<HashMap<perry_frontend::hir::types::LocalId, BindingType>>,
     pub(super) global_ids: HashSet<perry_frontend::hir::types::LocalId>,
-    pub(super) type_env: perry_frontend::hir::HirTypeEnv,
     pub(super) decls: Declarations<'h>,
     pub(super) classes: Classes<'h>,
     pub(super) static_fields: HashMap<
@@ -88,7 +87,7 @@ pub(super) struct Shapes<'h> {
             &'h perry_frontend::hir::ir::ClassField,
         ),
     >,
-    pub(super) class_records: RefCell<HashMap<TypeHandle, (&'h str, Vec<TypeId>)>>,
+    class_records: RefCell<HashMap<TypeHandle, &'h str>>,
     pub(super) lexical_functions: HashMap<perry_frontend::hir::types::FuncId, &'h Expr>,
     function_names: HashSet<&'h str>,
     local_source_spans:
@@ -159,7 +158,6 @@ impl<'h> Shapes<'h> {
             foreign_wrappers: RefCell::new(HashMap::new()),
             globals: RefCell::new(HashMap::new()),
             global_ids,
-            type_env: perry_frontend::hir::HirTypeEnv::from_module(hir),
             decls,
             classes,
             static_fields,
@@ -246,7 +244,18 @@ impl<'h> Shapes<'h> {
         &self,
         local: &str,
     ) -> Option<(&'h str, &'h perry_frontend::hir::types::FunctionType)> {
-        self.decls.foreign_functions.get(local).copied()
+        self.decls
+            .foreign_functions
+            .get(local)
+            .copied()
+            .or_else(|| {
+                let (binding, crate::hir::Foreign::Function(sig)) =
+                    self.decls.foreign.get_key_value(local)?
+                else {
+                    return None;
+                };
+                Some((binding, sig))
+            })
     }
 
     pub(super) fn input_type(&self, ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {
@@ -326,13 +335,9 @@ impl<'h> Shapes<'h> {
         self.decls.is_user_type(name)
     }
 
-    pub(super) fn class_of_type(
-        &self,
-        ctx: &Context,
-        ty: TypeHandle,
-    ) -> Option<(&'h str, Vec<TypeId>)> {
+    pub(super) fn class_of_type(&self, ctx: &Context, ty: TypeHandle) -> Option<&'h str> {
         let inner = crate::present_type(ctx, ty);
-        self.class_records.borrow().get(&inner).cloned()
+        self.class_records.borrow().get(&inner).copied()
     }
 
     pub(super) fn static_field(

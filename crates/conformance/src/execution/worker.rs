@@ -62,7 +62,7 @@ fn execute_inner(
     limits: &Limits,
 ) -> Result<Outcome> {
     match case {
-        Case::Command { .. } | Case::Reject { .. } => {
+        Case::Command { .. } | Case::Reject { wit: None, .. } => {
             match compile_command_cached(source, &path.to_string_lossy()) {
                 Err(error) => Ok(Outcome::Compile(error)),
                 Ok(stripped) => {
@@ -252,6 +252,7 @@ fn compile_component_cached(
         _ => FactLimits::Default,
     };
     let wit_source = match case {
+        Case::Reject { wit: Some(wit), .. } => wit.clone(),
         Case::Handler(_) => "@handler".to_owned(),
         Case::Aggregate(agg) => agg.wit_signature.wit_world(),
         Case::Stream(_) => async_wit().replace("x: f64", "input: stream<u8>"),
@@ -282,8 +283,11 @@ fn compile_component_cached(
                 })
                 .map_err(|e| Outcome::Compile(format!("{e:#}")))?
         } else {
-            let resolved = resolve_world_cached(case.asynchronous(), &wit_source)
-                .map_err(|e| Outcome::Compile(format!("{e:#}")))?;
+            let resolved = resolve_world_cached(
+                case.asynchronous() || matches!(case, Case::Reject { wit: Some(_), .. }),
+                &wit_source,
+            )
+            .map_err(|e| Outcome::Compile(format!("{e:#}")))?;
             let (resolve, world) = &*resolved;
             fact_limits
                 .apply(|| {

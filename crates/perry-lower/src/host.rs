@@ -169,15 +169,6 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(self.intrinsic(ctx, Intrinsic::HeadersCopy, vec![value]));
         }
         let fields = self.init_fields(init)?;
-        self.header_list(ctx, fields)
-    }
-
-    /// A new header list of string-valued `(name, value)` pairs, in order.
-    fn header_list<'e: 's>(
-        &mut self,
-        ctx: &mut Context,
-        fields: impl IntoIterator<Item = (&'e str, &'e Expr)>,
-    ) -> Result<Value> {
         let headers = self.intrinsic(ctx, Intrinsic::HeadersNew, vec![]);
         for (name, expr) in fields {
             let name = self.string(ctx, name);
@@ -225,30 +216,6 @@ impl<'s> FunctionBuilder<'s> {
             .ok_or_else(|| unsupported!("{name} is not supported on this receiver"))?
             .lower(self, ctx, receiver)?
             .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "web members produce a value"))
-    }
-
-    /// `fetch(url, { method, headers, body })` as Perry HIR desugars a literal init.
-    pub(super) fn fetch_with_options(
-        &mut self,
-        ctx: &mut Context,
-        url: &'s Expr,
-        method: &'s Expr,
-        body: &'s Expr,
-        headers: &'s [(String, Expr)],
-        headers_dynamic: Option<&'s Expr>,
-    ) -> Result<Value> {
-        let url = self.url_string(ctx, url)?;
-        let method = self.typed_operand(ctx, method, Kind::String, "a method string")?;
-        let list = match headers_dynamic {
-            Some(dynamic) => self.headers_init(ctx, Some(dynamic))?,
-            None => self.header_list(
-                ctx,
-                headers.iter().map(|(name, value)| (name.as_str(), value)),
-            )?,
-        };
-        let (body, text) = self.body_init(ctx, Some(body))?;
-        let text = self.boolean(ctx, text);
-        Ok(self.intrinsic(ctx, Intrinsic::Fetch, vec![url, method, list, body, text]))
     }
 
     /// `Writable.toWeb(process.stdout)` or of `process.stderr`.

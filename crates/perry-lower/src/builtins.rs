@@ -36,11 +36,10 @@ impl<'s> FunctionBuilder<'s> {
             );
             return Ok(Some(receiver));
         }
-        if let Some((class_name, type_args)) =
-            self.shapes.class_of_type(ctx, receiver.get_type(ctx))
+        if let Some(class_name) = self.shapes.class_of_type(ctx, receiver.get_type(ctx))
             && let Some((owner_class, func)) = self.shapes.class_method(class_name, method.name())
         {
-            return self.class_method_call(ctx, receiver, owner_class, &type_args, func, args);
+            return self.class_method_call(ctx, receiver, owner_class, func, args);
         }
         if method == hir_compat::Method::Push {
             ensure_unsupported!(
@@ -176,11 +175,26 @@ impl<'s> FunctionBuilder<'s> {
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
-        if self.shapes.classes.named.contains_key(ty) {
+        let is_known_class = self.shapes.classes.named.contains_key(ty)
+            || self
+                .shapes
+                .metadata
+                .class_origins
+                .values()
+                .any(|origin| origin == ty);
+        if is_known_class {
             let is_inst = self
                 .shapes
                 .class_of_type(ctx, value.get_type(ctx))
-                .is_some_and(|(c, _)| c == ty);
+                .is_some_and(|c| {
+                    c == ty
+                        || self
+                            .shapes
+                            .metadata
+                            .class_origins
+                            .get(c)
+                            .is_some_and(|origin| origin == ty)
+                });
             return Ok(self.boolean(ctx, is_inst));
         }
         let (error, code) = match ty {

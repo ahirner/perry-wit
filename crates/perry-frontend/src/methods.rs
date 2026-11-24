@@ -1,4 +1,5 @@
 //! Built-in method signatures and HIR call normalization.
+use crate::hir_compat::Preservation;
 use perry_hir::{
     ir::Expr,
     types::{LocalId, Type as HirType},
@@ -117,30 +118,6 @@ impl Kind {
         }
     }
 }
-pub(crate) const PUSH: &str = "$$perryArrayPush";
-pub(crate) const CONCAT: &str = "$$perryArrayConcat";
-pub(crate) const METHOD_PREFIX: &str = "$$perryMethod_";
-
-enum Preservation {
-    Upstream,
-    Always,
-    Push,
-    Concat,
-    Arguments,
-}
-
-impl Preservation {
-    fn rewrite(&self, name: &str, count: usize, spread: bool) -> Option<String> {
-        match self {
-            Self::Push if count != 1 || spread => Some(PUSH.into()),
-            Self::Concat => Some(CONCAT.into()),
-            Self::Always => Some(format!("{METHOD_PREFIX}{name}")),
-            Self::Arguments if count > 0 => Some(format!("{METHOD_PREFIX}{name}")),
-            _ => None,
-        }
-    }
-}
-
 pub enum CallReceiver<'s> {
     Expression(&'s Expr),
     Local(LocalId),
@@ -254,18 +231,6 @@ macro_rules! argument_type {
     ($name:ident:rest) => { &'s [Expr] };
 }
 
-macro_rules! argument_values {
-    ($arg:ident) => {
-        Some(*$arg).into_iter()
-    };
-    ($arg:ident:optional) => {
-        $arg.iter().copied()
-    };
-    ($arg:ident:rest) => {
-        $arg.iter()
-    };
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum Callback {
     Elements,
@@ -301,20 +266,20 @@ macro_rules! registry {
 
             pub(crate) fn named_property(type_name: &str, name: &str) -> Option<MethodResult> {
                 let receiver = Receiver::Value(Kind::builtin(type_name)?);
-                Self::lookup(receiver, name).filter(|m| m.is_property()).map(Self::result)
+                Self::lookup(receiver, name).filter(|m| m.is_property()).map(Self::result_rule)
             }
 
             pub(crate) fn is_property(self) -> bool {
                 match self { $($(Self::$variant => registry!(@property $form),)*)* }
             }
 
-            fn result(self) -> MethodResult {
+            pub(crate) fn result_rule(self) -> MethodResult {
                 match self { $($(Self::$variant => MethodResult::$result $(($result_arg))?,)*)* }
             }
 
             pub(crate) fn inferred(receiver: &HirType, name: &str, property: bool) -> Option<MethodResult> {
                 if let Some(receiver) = Receiver::inferred(receiver) {
-                    return Self::lookup(receiver, name).filter(|m| m.is_property() == property).map(Self::result);
+                    return Self::lookup(receiver, name).filter(|m| m.is_property() == property).map(Self::result_rule);
                 }
                 if property { return None; }
                 let mut result = None;
@@ -341,6 +306,10 @@ macro_rules! registry {
         }
 
         impl<'s> Call<'s> {
+            pub(crate) fn result_rule(&self) -> MethodResult {
+                match self { $($(Self::$variant(..) => Method::$variant.result_rule(),)*)* }
+            }
+
             pub fn parse(receiver: Receiver, name: &str, args: &'s [Expr]) -> Result<Option<Self>> {
                 Self::member(receiver, name, Some(args))
             }
@@ -356,17 +325,6 @@ macro_rules! registry {
                         Self::$variant($($argument),*)
                     },)*)*
                 }))
-            }
-
-            pub(crate) fn result(&self) -> MethodResult {
-                match self { $($(Self::$variant(..) => MethodResult::$result $(($result_arg))?,)*)* }
-            }
-
-            pub(crate) fn argument(&self, index: usize) -> Option<&'s Expr> {
-                match self {
-                    $($(Self::$variant($($argument),*) => std::iter::empty()
-                        $(.chain(argument_values!($argument $(:$mode)?)))*.nth(index),)*)*
-                }
             }
         }
     };
@@ -400,7 +358,7 @@ impl<'s> Call<'s> {
             } if matches!((&**offset, &**size), (Expr::Undefined, Expr::Undefined)) => {
                 (buffer, Self::BytesCryptoFillRandom(&[]))
             }
-            Expr::DateGetTime(date) | Expr::DateValueOf(date) => (date, Self::DateGetTime(&[])),
+            Expr::DateGetTime(date) => (date, Self::DateGetTime(&[])),
             Expr::DateToISOString(date) => (date, Self::DateToISOString(&[])),
             Expr::DateToJSON(date) => (date, Self::DateToJSON(&[])),
             Expr::UrlInstanceToString(url) | Expr::UrlInstanceToJSON(url) => {
@@ -454,9 +412,6 @@ impl<'s> Call<'s> {
             | Expr::DateSetMilliseconds { date, args } => (date, Self::DateSetMilliseconds(args)),
             Expr::DateSetTime { date, args } => (date, Self::DateSetTime(args)),
             Expr::StringSplit(text, separator) => (text, Self::StringSplit(separator)),
-            Expr::StringCodePointAt { string, index } => {
-                (string, Self::StringCodePointAt(std::slice::from_ref(index)))
-            }
             Expr::ArrayMap { array, callback } => (array, Self::ArrayMap(callback)),
             Expr::ArrayFilter { array, callback } => (array, Self::ArrayFilter(callback)),
             Expr::ArrayFlatMap { array, callback } => (array, Self::ArrayFlatMap(callback)),

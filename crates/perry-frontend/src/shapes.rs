@@ -5,7 +5,6 @@ use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub mod generics;
 mod globals;
-pub(crate) use globals::class_functions_mut;
 pub use globals::{captured, class_functions};
 mod records;
 pub use records::{Classes, RecordId};
@@ -334,6 +333,25 @@ impl<'h> Declarations<'h> {
     }
 
     pub fn resolve_foreign_type(&self, type_name: &str) -> Option<&'h HirType> {
+        match self.resolve_foreign(type_name)? {
+            crate::hir::Foreign::Type(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn resource(&self, name: &str) -> Option<u32> {
+        let entry = if self.imported_types.contains_key(name) {
+            self.resolve_foreign(name)?
+        } else {
+            self.foreign.get(name)?
+        };
+        match entry {
+            crate::hir::Foreign::Resource(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn resolve_foreign(&self, type_name: &str) -> Option<&'h crate::hir::Foreign> {
         if self.is_user_type(type_name) {
             return None;
         }
@@ -342,14 +360,11 @@ impl<'h> Declarations<'h> {
             .get(type_name)
             .copied()
             .or_else(|| self.foreign.get(type_name))?;
-        for _ in 0..8 {
-            match entry {
-                crate::hir::Foreign::Type(HirType::Named(next)) => {
-                    entry = self.foreign.get(next.as_str())?;
-                }
-                crate::hir::Foreign::Type(ty) => return Some(ty),
-                _ => return None,
-            }
+        for _ in 0..=self.foreign.len() {
+            let crate::hir::Foreign::Type(HirType::Named(next)) = entry else {
+                return Some(entry);
+            };
+            entry = self.foreign.get(next.as_str())?;
         }
         None
     }

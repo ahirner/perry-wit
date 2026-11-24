@@ -50,11 +50,12 @@ fn unannotated_parameters_need_evidence_from_statically_known_calls() -> anyhow:
         }"#;
     let mut program = crate::core_program::Program::new(callbacks);
     assert_eq!(program.number("run", 4.0), 536.0);
+    let self_recursive = "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }";
+    let mut program = crate::core_program::Program::new(self_recursive);
+    assert_eq!(program.call("run", &[]).0[0].unwrap_f64(), 0.0);
     for source in [
         "export function id(x) { return x; } export function run(): number { return id(1); }",
         "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
-        "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
-        "function loop(x) { return x ? loop(x-1) : 0; } export function run():number { return loop(3); }",
         "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
     ] {
         let error = perry_wit::compile_core(source, "closed.ts")
@@ -90,40 +91,96 @@ fn named_generic_functions_specialize_through_aliases_and_builtin_callbacks() ->
 
 #[test]
 fn function_arguments_check_declared_results_and_locate_escaping_values() -> anyhow::Result<()> {
-    for (body, at, name) in [
-        ("return () => n;", "() => n", "run"),
-        ("const keep=()=>n; return [keep].length;", "keep]", "keep"),
+    for (source, at, needle) in [
         (
-            "const keep=()=>n; return keep === keep;",
-            "keep === keep",
-            "keep",
+            "function make() { return () => 1; } export function run(): boolean { const a = make(); const b = make(); const r = a === b; const x = 1; const y = 2; return r && x === y; }",
+            "a === b",
+            "capture-free closure literal",
         ),
         (
-            "const a=()=>n, b=()=>n+1; const f=n?a:b; return f();",
-            "a:b",
-            "a",
+            "export function run(): boolean { const xs = []; for (let i = 0; i < 2; i++) xs.push(() => 1); return xs[0] === xs[1]; }",
+            "xs[0] === xs[1]",
+            "capture-free closure literal",
+        ),
+        (
+            "export function run(n: number) { return n ? (() => 1) : 42; }",
+            "n ? (() => 1) : 42",
+            "joining function values with non-function values",
+        ),
+        (
+            "export function run(): number { const o = { f: () => 1 }; o.f = () => 2; return o.f(); }",
+            "o.f = () => 2",
+            "reassigning function property 'f' on an object literal",
+        ),
+        (
+            "export function run(): number { new PerformanceObserver(() => {}); return 1; }",
+            "new PerformanceObserver",
+            "requires the runtime to call a guest function",
+        ),
+        (
+            "export function run(): number { new Promise((resolve) => resolve(Promise.resolve(1))); return 1; }",
+            "resolve(Promise.resolve(1))",
+            "resolving a Promise with another Promise is not supported yet",
+        ),
+        (
+            "const m = new Map(); const alias = m; alias.set('k', () => 2);",
+            "alias.set",
+            "storing a function value with Map.set",
+        ),
+        (
+            "export function run(): number { queueMicrotask(() => {}); return 1; }",
+            "queueMicrotask(() => {})",
+            "queueMicrotask is not supported",
+        ),
+        (
+            "export function run(): number { process.nextTick(() => {}); return 1; }",
+            "process.nextTick(() => {})",
+            "process.nextTick is not supported",
+        ),
+        (
+            "export function run(): number { process.on('exit', () => {}); return 1; }",
+            "process.on('exit', () => {})",
+            "passing a callback to runtime 'on' requires the runtime to call a guest function",
+        ),
+        (
+            "export function run(): number { addEventListener('click', () => {}); return 1; }",
+            "addEventListener('click', () => {})",
+            "passing a callback to runtime 'addEventListener' requires the runtime to call a guest function",
         ),
     ] {
-        let source = format!("export function run(n:number) {{ {body} }}");
-        let err = perry_wit::compile_core(&source, "escape.ts").unwrap_err();
+        let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();
         let diagnostic = err.primary();
         assert_eq!(diagnostic.code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
-        assert!(diagnostic.message().contains(name), "{err}");
+        assert!(
+            diagnostic.message().contains(needle),
+            "expected '{needle}' in: {err}"
+        );
         assert_eq!(
-            diagnostic.span().context("escape use")?.start_byte,
+            diagnostic.span().context("diagnostic span")?.start_byte,
             source.rfind(at).unwrap(),
             "{err}"
         );
     }
-    let source = "function stash(f) {const alias=f; return [alias];} export function run(n:number) {return stash(()=>n).length;}";
-    let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();
-    assert_eq!(err.primary().code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
+    let non_callable = "export function run(): number { const x = 1; return x(); }";
+    let err = perry_wit::compile_core(non_callable, "call.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");
     assert_eq!(
         err.primary()
             .span()
-            .context("escaping callback parameter")?
+            .context("non-callable span")?
             .start_byte,
-        source.find("alias]").unwrap(),
+        non_callable.rfind("x()").unwrap(),
+        "{err}"
+    );
+    let async_mixed = "export function run(): number { const fs = [async () => 1, () => 2]; let n = 0; for (const f of fs) { f(); n++; } return n; }";
+    let err = perry_wit::compile_core(async_mixed, "dispatch.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::UNSUPPORTED_TYPE, "{err}");
+    assert_eq!(
+        err.primary()
+            .span()
+            .context("dispatcher union span")?
+            .start_byte,
+        async_mixed.rfind("f()").unwrap(),
         "{err}"
     );
     let source = "function use(f:(n:number)=>number):number {return 1;} export function run():number {return use(2);}";
@@ -156,10 +213,8 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
 
 #[test]
 fn unresolved_parameter_patterns_keep_the_source_location() -> anyhow::Result<()> {
-    for (pattern, argument) in [("{ w, h }", "{ w:2, h:3 }"), ("[first]", "[1,2]")] {
-        let source = format!(
-            "function probe(n:number, {pattern}) {{ return n; }} export function run(): number {{ return probe(3, {argument}); }}"
-        );
+    for pattern in ["{ w, h }", "[first]"] {
+        let source = format!("export function probe(n:number, {pattern}) {{ return n; }}");
         let error = perry_wit::compile_core(&source, "pattern.ts")
             .err()
             .context("expected an unannotated parameter pattern")?;
@@ -197,7 +252,7 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
     program
         .source
         .contents
-        .extend_from_slice(b"\nconst escaped = {helper};");
+        .extend_from_slice(b"\nexport { helper };");
     let error = api::compile_core(&program).unwrap_err();
     program.source.contents.truncate(end);
     let diagnostic = error.primary();
@@ -235,23 +290,6 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
         assert_eq!(&helper[span.start_byte..span.end_byte], expression);
         assert_eq!((span.start_line, span.start_column), (2, 15));
     }
-
-    let destructured = "export const { value: binding } = { value: 7 };";
-    let error = api::compile_core(&program_with(
-        "src/main.ts",
-        "export { binding as run } from './helper';",
-        &[("src/helper.ts", destructured)],
-    ))
-    .err()
-    .context("expected a diagnostic for the re-exported constant")?;
-    let diagnostic = error.primary();
-    assert!(diagnostic.message().contains("Component export 'run'"));
-    let span = diagnostic.span().context("destructured declaration span")?;
-    assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
-    assert_eq!(
-        destructured.get(span.start_byte..span.end_byte),
-        Some("binding")
-    );
 
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
     let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
@@ -702,6 +740,7 @@ fn unsupported_forms_have_exact_diagnostics() {
     };
     const REGEX_CONST: &str = "case.ts:1:8: error[unsupported-regex]: ";
     let cases = [
+        ("import timers from 'timers';\ntimers.setImmediate(() => {});".into(), "case.ts:2:1: error[unsupported-construct]: timer import 'timers.setImmediate' is not supported".into()),
         (iteration("new Headers()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; this receiver has no supported iterator".into()),
         (iteration("new URLSearchParams()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported".into()),
         ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), "case.ts:1:40: error[unsupported-construct]: String.prototype.replaceAll called with a non-global RegExp argument".into()),
@@ -719,7 +758,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("export function run(x: number): number { return x ** (2 ** x); }".into(), "case.ts:1:55: error[unsupported-operator]: operator Pow is not supported yet".into()),
         ("function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }".into(), "case.ts:1:1: error[unsupported-construct]: generator function count is not supported yet".into()),
         ("export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }".into(), "case.ts:1:48: error[unsupported-type]: unresolved generic type WeakMap is not supported yet".into()),
-        ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), "case.ts:2:10: error[unsupported-construct]: indirect calls through local or parameter bindings are not supported yet; call a declared module function directly".into()),
+        ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), "case.ts:2:10: error[type-mismatch]: expression is not callable".into()),
         ("export function run(s: string): number {\n  return (s as any).byteLength;\n}".into(), "case.ts:2:10: error[unsupported-construct]: property byteLength is not supported on string yet".into()),
         ("export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}".into(), "case.ts:2:10: error[unsupported-operator]: operator Pow on bigint and bigint is not supported yet".into()),
         ("export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }".into(), "case.ts:1:38: error[unsupported-construct]: Temporal.ZonedDateTime.from is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now".into()),
@@ -728,8 +767,13 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("export function run(): number {\n  return (performance as any).mark();\n}".into(), "case.ts:2:10: error[unsupported-construct]: performance.mark is not supported yet".into()),
         ("enum Color { A }\nexport function run(): number { return 0; }".into(), "case.ts:1:1: error[unsupported-construct]: TypeScript enum declarations are not supported yet; use a union of string or number literals instead".into()),
     ];
+    let timeout_members = [".ref", ".hasRef", ".refresh", "[Symbol.dispose]"].map(|member| {
+        (format!("const h = setTimeout(() => {{}}, 1);\nh{member}();"),
+         format!("case.ts:2:1: error[unsupported-construct]: Timeout member 'h{member}' is not supported"))
+    });
     let mismatches: Vec<String> = cases
         .iter()
+        .chain(&timeout_members)
         .filter_map(|(source, expected)| {
             let actual = match perry_wit::compile_core(source, "case.ts") {
                 Ok(_) => "<compiled>".to_owned(),
@@ -1008,5 +1052,52 @@ fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> any
     let span = diagnostic.span().context("missing binding location")?;
     assert_eq!((span.start_line, span.start_column), (3, 7));
     assert_eq!(source.get(span.start_byte..span.end_byte), Some("storage"));
+    Ok(())
+}
+
+#[test]
+fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> anyhow::Result<()> {
+    // Polymorphic recursion hits the explicit specialization budget instead of diverging.
+    let poly = perry_wit::compile_core(
+        "function wrap(x, n) { return n <= 0 ? x : wrap([x], n - 1); }\nexport function run(): number { wrap(1, 3); return 0; }\n",
+        "poly.js",
+    )
+    .err()
+    .context("expected specialization limit diagnostic")?;
+    assert_eq!(poly.primary().code(), codes::UNSUPPORTED_CONSTRUCT);
+    assert!(
+        poly.primary()
+            .message()
+            .contains("generic specialization limit"),
+        "{poly}"
+    );
+
+    // Self-nesting composites (empty arrays, recursive unions, and loops) widen cleanly and explain why.
+    for (source, file, expected_code) in [
+        (
+            "export function run(): number { const a = []; a.push(a); return a.length; }\n",
+            "self_nest_array.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+        (
+            "function wrap(n) { return n === 0 ? 0 : [wrap(n - 1)]; }\nexport function run(): number { return JSON.stringify(wrap(2)).length; }\n",
+            "self_nest_union.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+        (
+            "export function run(): number { let x; x = 1; for (let i = 0; i < 3; i++) x = [x]; return JSON.stringify(x).length; }\n",
+            "self_nest_loop.js",
+            codes::MISSING_TYPE_ANNOTATION,
+        ),
+    ] {
+        let self_nest = perry_wit::compile_core(source, file)
+            .err()
+            .context("expected widening diagnostic")?;
+        assert_eq!(self_nest.primary().code(), expected_code, "{self_nest}");
+        assert!(
+            self_nest.to_string().contains("nests itself"),
+            "expected self-nesting explanation in diagnostic: {self_nest}"
+        );
+    }
     Ok(())
 }

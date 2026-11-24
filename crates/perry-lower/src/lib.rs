@@ -51,11 +51,11 @@ use perry_mir::{
     ConcatOp, CondBrOp, ErrorKind, ErrorNewOp, ExceptionIsOp, ExceptionMessageOp, ExceptionType,
     ExitOp, FieldGetOp, FieldPresentOp, FieldSetOp, Intrinsic, IsNullOp, IsUndefinedOp,
     JsonStringifyOp, JsonType, LoadOp, NullOp, NumericCastOp, OmittedOp, OptionalCastOp,
-    PlironResultExt as _, PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType,
-    RaiseOp, RecordKind, RecordType, RethrowOp, ReturnOp, SettledField, SettledFieldOp, StoreOp,
-    StringLenOp, StringType, TimerOp, ToNumberOp, ToStringOp, UndefOp, UndefinedOp, UnwrapOp,
-    WrapOp, absence, admits_undefined, may_throw, optional_parts, optional_value, present_type,
-    set_async,
+    PlironResultExt as _, PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp,
+    PromiseResolvedOp, PromiseSettleOp, PromiseType, RaiseOp, RecordKind, RecordType, RethrowOp,
+    ReturnOp, SettledField, SettledFieldOp, StoreOp, StringLenOp, StringType, TimerOp, ToNumberOp,
+    ToStringOp, UndefOp, UndefinedOp, UnwrapOp, WrapOp, absence, admits_undefined, may_throw,
+    optional_parts, optional_value, present_type, set_async,
 };
 use perry_wit_diagnostics::{
     Diagnostic, Result, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag,
@@ -132,6 +132,24 @@ pub fn lower_sources(
 
 /// Elaborate a resolved frontend program into MIR.
 pub fn lower_program(ctx: &mut Context, program: &perry_frontend::Program<'_>) -> Result<ModuleOp> {
+    Ok(lower_with_exports(ctx, program)?.module)
+}
+
+pub enum ExportTarget {
+    Destructor(FuncOp, String),
+    Function(FuncOp),
+    Command(FuncOp),
+}
+
+pub struct LoweredProgram {
+    pub module: ModuleOp,
+    pub exports: Vec<ExportTarget>,
+}
+
+pub fn lower_with_exports(
+    ctx: &mut Context,
+    program: &perry_frontend::Program<'_>,
+) -> Result<LoweredProgram> {
     program::build_module(ctx, program.module(), program.foreign(), program.metadata())
 }
 

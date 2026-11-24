@@ -264,29 +264,6 @@ pub fn optional_property(ty: HirType, optional: bool) -> HirType {
     }
 }
 
-/// The element type yielded by iteration. Unsupported types are returned unchanged.
-pub fn iterated_element(ty: HirType) -> Result<HirType, HirType> {
-    let HirType::Generic { base, type_args } = ty else {
-        return match ty {
-            HirType::String => Ok(HirType::String),
-            HirType::Array(element) => Ok(*element),
-            other => Err(other),
-        };
-    };
-    let picked = match base.as_str() {
-        "Set" | "ReadonlySet" | "SetValues" => <[HirType; 1]>::try_from(type_args).map(|[e]| e),
-        "MapKeys" => <[HirType; 2]>::try_from(type_args).map(|[key, _]| key),
-        "MapValues" => <[HirType; 2]>::try_from(type_args).map(|[_, value]| value),
-        "Map" | "ReadonlyMap" | "MapEntries" => {
-            <[HirType; 2]>::try_from(type_args).map(|pair| HirType::Tuple(pair.into()))
-        }
-        "SetEntries" => <[HirType; 1]>::try_from(type_args)
-            .map(|[element]| HirType::Tuple(vec![element.clone(), element])),
-        _ => Err(type_args),
-    };
-    picked.map_err(|type_args| HirType::Generic { base, type_args })
-}
-
 impl Declarations<'_> {
     /// HIR compatibility result for a selected member.
     pub fn property_type(

@@ -49,6 +49,7 @@ A narrowed read of a property or global that another reference or call has since
 - `Error`, `TypeError`, `RangeError`, `ReferenceError` and `SyntaxError` keep `name`, `message` and `cause` through `try`, `catch` and `finally`.
 - A failed implicit check produces a fresh error object when caught. Successful checks bypass the exception runtime; explicitly thrown values retain their identity.
 - An export declared with a WIT `result<T, E>` turns an uncaught exception into `err`. Without a `result`, an uncaught exception traps, and a trap does not run pending `finally` blocks.
+- A jco resource import with a WIT error type throws at the call when the host returns `err`. A host failure without a declared error channel traps. For a variant error, the caught error's `message` names the case. The adapter drops the case's owned resource handle. Reading the variant payload in guest code is unsupported and produces a compile error.
 
 ## Async
 

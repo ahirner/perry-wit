@@ -206,6 +206,48 @@ async fn instantiate(check_memory: bool) -> Result<(Store<Host>, Instance)> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn async_witness_observes_suspension_and_error_channel() -> Result<()> {
+    let source = "import {setTimeout} from 'node:timers/promises';
+        async function work(fail) {await setTimeout(1); if (fail) throw 'failed'; return 'done';}
+        export {work as run};";
+    let world = |signature| {
+        format!(
+            "package test:effects; world api {{
+        import wasi:clocks/monotonic-clock@0.3.0; export run: {signature}; }}"
+        )
+    };
+    let compiler = crate::world::Compiler::Standard;
+    let bytes = compiler.component(
+        &world("async func(fail:bool)->result<string,string>"),
+        "api",
+        "work.ts",
+        source,
+    )?;
+    let (mut store, instance) =
+        wasi_host::instantiate(&async_engine()?, &bytes, Host::default()).await?;
+    let run = instance.get_typed_func::<(bool,), (Result<String, String>,)>(&mut store, "run")?;
+    assert_eq!(
+        run.call_async(&mut store, (false,)).await?,
+        (Ok("done".into()),)
+    );
+    assert_eq!(
+        run.call_async(&mut store, (true,)).await?,
+        (Err("failed".into()),)
+    );
+    for (signature, expected) in [
+        ("async func(fail:bool)->string", "missing-error-channel"),
+        ("func(fail:bool)->string", "async-mismatch"),
+    ] {
+        let error = compiler
+            .component(&world(signature), "api", "work.ts", source)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("expected {expected}"))?;
+        assert!(format!("{error:#}").contains(expected), "{error:#}");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn timers_and_awaits_cross_host_suspensions() -> Result<()> {
     let (mut store, instance) = instantiate(false).await?;
 

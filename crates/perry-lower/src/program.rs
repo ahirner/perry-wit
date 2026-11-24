@@ -49,7 +49,9 @@ pub(super) fn build_module(
     hir: &HirModule,
     foreign: &HashMap<String, crate::hir::Foreign>,
     metadata: &hir_compat::Metadata<'_>,
-) -> Result<ModuleOp> {
+) -> Result<LoweredProgram> {
+    let mut functions = Vec::new();
+    let mut command = None;
     let locations = &metadata.locations;
     let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
     // Subclass instances flow into base-typed bindings, where methods would bind statically
@@ -67,6 +69,9 @@ pub(super) fn build_module(
     let mut builtins: HashMap<&str, Builtin> = HashMap::new();
     for import in &hir.imports {
         let source = import.source.as_str();
+        if hir_compat::is_timer_module(source) {
+            continue;
+        }
         let module = match source {
             "timers/promises" | "node:timers/promises" => Some(BuiltinModule::Timers),
             "fs/promises" | "node:fs/promises" => Some(BuiltinModule::Fs),
@@ -87,7 +92,7 @@ pub(super) fn build_module(
         }
         if module.is_none() && builtin {
             return Err(unsupported!(
-                "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
+                "Unsupported capability import {source}: supported Node imports are callback timers from node:timers, setTimeout from node:timers/promises, asynchronous filesystem operations from node:fs/promises and Writable from node:stream"
             )
             .with_fallback_span(locations.import_span(source)));
         }
@@ -257,6 +262,9 @@ pub(super) fn build_module(
             if signature.is_async {
                 set_async(ctx, &func);
             }
+            if !persistent || !signature.top_level {
+                command = Some(func);
+            }
             module.append_operation(ctx, func.get_operation(), 0);
         }
     }
@@ -284,13 +292,40 @@ pub(super) fn build_module(
         }
         if function.is_exported {
             perry_mir::set_exported(ctx, &func);
+            let index = function.id as usize;
+            if functions.len() <= index {
+                functions.resize(index + 1, None);
+            }
+            *functions
+                .get_mut(index)
+                .ok_or_else(|| internal!("missing export slot"))? = Some(func);
         }
         if function.is_async {
             set_async(ctx, &func);
         }
         module.append_operation(ctx, func.get_operation(), 0);
     }
-    Ok(module)
+    let exports = metadata
+        .witness_functions()
+        .map(|(target, destructor)| match target {
+            Some(id) => functions
+                .get(id as usize)
+                .copied()
+                .flatten()
+                .map(|f| match destructor {
+                    Some(name) => ExportTarget::Destructor(f, name.into()),
+                    None => ExportTarget::Function(f),
+                })
+                .ok_or_else(|| internal!("witness function was not emitted")),
+            None => command.map(ExportTarget::Command).ok_or_else(|| {
+                diag!(
+                    codes::MISSING_EXPORT,
+                    "wasi:cli/run requires an implementation or top-level statements"
+                )
+            }),
+        })
+        .collect::<Result<_>>()?;
+    Ok(LoweredProgram { module, exports })
 }
 
 fn hir_module_name(hir: &HirModule) -> String {

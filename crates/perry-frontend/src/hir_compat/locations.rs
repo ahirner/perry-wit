@@ -10,20 +10,46 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
-use swc_common::Span;
+use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
 
-/// Strip internal module-mangling prefixes (`__perry_module_<N>_`) for user-facing names.
+pub(crate) fn has_source_offset(offset: u32) -> bool {
+    offset != 0
+}
+
+pub(crate) fn mark_non_null(value: Expr) -> Expr {
+    Expr::Sequence(vec![Expr::String(NON_NULL.into()), value])
+}
+
+pub(crate) fn function_label(name: &str) -> &str {
+    let name = display_name(name);
+    if name.is_empty() || name.starts_with("callback_") {
+        "anonymous function"
+    } else {
+        name
+    }
+}
+
+/// Strip internal module-mangling prefixes (`__perry_module_<N>_`) and object-literal method
+/// wrappers (`__obj_method_<name>_<N>`) for user-facing diagnostic names.
 pub(crate) fn display_name(name: &str) -> &str {
-    name.strip_prefix("__perry_module_")
+    let name = name
+        .strip_prefix(super::names::MODULE_PREFIX)
         .and_then(|rest| {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             (digits > 0)
-                .then(|| rest[digits..].strip_prefix('_'))
+                .then(|| rest.get(digits..)?.strip_prefix('_'))
                 .flatten()
+        })
+        .unwrap_or(name);
+    name.strip_prefix("__obj_method_")
+        .and_then(|rest| {
+            let (base, suffix) = rest.rsplit_once('_')?;
+            (!base.is_empty() && !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+                .then_some(base)
         })
         .unwrap_or(name)
 }
@@ -67,46 +93,40 @@ struct SourceFile<'s> {
 pub struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
-    calls: HashMap<u32, Span>,
+    calls: HashMap<u32, (Span, Option<Span>)>,
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
-    pub(super) callable_comparisons: HashSet<Span>,
     pub(crate) generic_templates: Vec<(FuncId, String)>,
     origins: HashMap<String, CallerOrigin>,
 }
 
 impl<'s> Locations<'s> {
     /// Preserve operator spans and non-null assertions as inert sequences before HIR erases them.
-    pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module) {
-        struct Preserver<'a>(&'a mut Vec<Span>, HashSet<Span>);
+    pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module, spans: &HashSet<Span>) {
+        struct Preserver<'a>(&'a mut Vec<Span>, &'a HashSet<Span>);
         impl VisitMut for Preserver<'_> {
             // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
             fn visit_mut_ts_enum_decl(&mut self, _: &mut ast::TsEnumDecl) {}
 
             fn visit_mut_expr(&mut self, expr: &mut ast::Expr) {
                 expr.visit_mut_children_with(self);
-                let (span, token) = match expr {
-                    ast::Expr::Bin(binary)
-                        if self.1.contains(&binary.span)
-                            || matches!(
-                                binary.op,
-                                ast::BinaryOp::Exp
-                                    | ast::BinaryOp::BitAnd
-                                    | ast::BinaryOp::BitOr
-                                    | ast::BinaryOp::BitXor
-                                    | ast::BinaryOp::LShift
-                                    | ast::BinaryOp::RShift
-                                    | ast::BinaryOp::ZeroFillRShift
-                            ) =>
-                    {
-                        let token = format!("{OPERATOR}{}", self.0.len());
-                        self.0.push(binary.span);
-                        (binary.span, token)
-                    }
-                    ast::Expr::TsNonNull(assertion) => (assertion.span, NON_NULL.into()),
-                    _ => return,
+                let span = expr.span();
+                let token = if matches!(expr, ast::Expr::TsNonNull(_)) {
+                    NON_NULL.to_owned()
+                } else if self.1.contains(&span)
+                    || matches!(expr, ast::Expr::Bin(binary) if matches!(
+                        binary.op,
+                        ast::BinaryOp::Exp | ast::BinaryOp::BitAnd | ast::BinaryOp::BitOr | ast::BinaryOp::BitXor
+                        | ast::BinaryOp::LShift | ast::BinaryOp::RShift | ast::BinaryOp::ZeroFillRShift
+                    ))
+                {
+                    let token = format!("{OPERATOR}{}", self.0.len());
+                    self.0.push(span);
+                    token
+                } else {
+                    return;
                 };
                 let token = ast::Expr::Lit(ast::Lit::Str(ast::Str {
                     span,
@@ -120,18 +140,20 @@ impl<'s> Locations<'s> {
                 });
             }
         }
-        module.visit_mut_with(&mut Preserver(
-            &mut self.operators,
-            std::mem::take(&mut self.callable_comparisons),
-        ));
+        module.visit_mut_with(&mut Preserver(&mut self.operators, spans));
     }
 
-    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
+    pub(crate) fn operator_raw_span(&self, parts: &[Expr]) -> Option<Span> {
         let [Expr::String(token), _] = parts else {
             return None;
         };
         let index: usize = token.strip_prefix(OPERATOR)?.parse().ok()?;
-        self.operators.get(index).and_then(|span| self.span(*span))
+        self.operators.get(index).copied()
+    }
+
+    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
+        self.operator_raw_span(parts)
+            .and_then(|span| self.span(span))
     }
 
     pub(crate) fn add(&mut self, path: PathBuf, source: &'s str) -> Result<u32> {
@@ -148,6 +170,15 @@ impl<'s> Locations<'s> {
             positions: offset + 1..=end,
         });
         Ok(offset)
+    }
+
+    pub(super) fn module_text(&self) -> String {
+        let mut text = String::new();
+        for file in &self.files {
+            text.push_str(file.source);
+            text.push('\n');
+        }
+        text
     }
 
     fn template_name<'a>(&'a self, mut name: &'a str) -> &'a str {
@@ -283,12 +314,27 @@ impl<'s> Locations<'s> {
         self.functions
             .get(self.template_name(name))
             .and_then(|info| self.span(info.span))
+            .or_else(|| match self.origins.get(name)?.site {
+                CallSite::Instantiation { ref note, .. } => {
+                    note.as_ref().and_then(Note::span).cloned()
+                }
+                CallSite::Import(ref note) => note.span().cloned(),
+            })
     }
 
     pub fn source_at(&self, position: u32) -> Option<&'s str> {
         let file = self.file_at(position)?;
         file.source
             .get((position - file.positions.start()) as usize..)
+    }
+
+    pub(super) fn source_text(&self, span: Span) -> Option<&'s str> {
+        self.source_at(span.lo.0)?
+            .get(..(span.hi.0.checked_sub(span.lo.0)?) as usize)
+    }
+
+    pub(crate) fn member_text(&self, offset: u32) -> Option<&'s str> {
+        self.source_text(*self.members.get(&offset)?)
     }
 
     pub fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
@@ -298,10 +344,17 @@ impl<'s> Locations<'s> {
         ))
     }
 
+    pub(crate) fn calls_dispose(&self, start: u32, end: u32) -> bool {
+        self.calls
+            .get(&start)
+            .and_then(|(_, dispose)| *dispose)
+            .is_some_and(|span| span.hi.0 == end)
+    }
+
     pub fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.calls
             .get(&byte_offset)
-            .and_then(|span| self.span(*span))
+            .and_then(|(span, _)| self.span(*span))
             .or_else(|| self.offset_span(byte_offset, 1))
     }
 
@@ -332,14 +385,16 @@ impl<'s> Locations<'s> {
     }
 
     pub fn import_span(&self, source: &str) -> Option<SourceSpan> {
-        self.imports.get(source).and_then(|span| self.span(*span))
+        self.imports
+            .get(source.strip_prefix("node:").unwrap_or(source))
+            .and_then(|span| self.span(*span))
     }
 
     pub(crate) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
         error.with_fallback_span(self.call_span(byte_offset))
     }
 
-    fn span(&self, span: Span) -> Option<SourceSpan> {
+    pub(super) fn span(&self, span: Span) -> Option<SourceSpan> {
         let file = self.file_at(span.lo.0)?;
         let start = (span.lo.0 - file.positions.start()) as usize;
         let end = span.hi.0.checked_sub(*file.positions.start())? as usize;
@@ -359,8 +414,13 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.span(span))
     }
 
-    pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
+    pub(super) fn collect(
+        &mut self,
+        module: &perry_parser::swc_ecma_ast::Module,
+        unresolved: swc_common::SyntaxContext,
+    ) {
         struct Collector<'a, 's> {
+            unresolved: swc_common::SyntaxContext,
             locations: &'a mut Locations<'s>,
             class_name: Option<String>,
         }
@@ -398,7 +458,21 @@ impl<'s> Locations<'s> {
             }
             fn visit_call_expr(&mut self, call: &ast::CallExpr) {
                 if call.span.lo.0 != 0 {
-                    self.locations.calls.insert(call.span.lo.0, call.span);
+                    let entry = self
+                        .locations
+                        .calls
+                        .entry(call.span.lo.0)
+                        .or_insert((call.span, None));
+                    entry.0 = call.span;
+                    if let ast::Callee::Expr(callee) = &call.callee
+                        && let ast::Expr::Member(member) = callee.unwrap_parens()
+                        && let ast::MemberProp::Computed(prop) = &member.prop
+                        && let ast::Expr::Member(symbol) = prop.expr.unwrap_parens()
+                        && matches!(&*symbol.obj, ast::Expr::Ident(id) if id.sym == "Symbol" && id.ctxt == self.unresolved)
+                        && matches!(&symbol.prop,ast::MemberProp::Ident(id) if id.sym=="dispose")
+                    {
+                        entry.1 = Some(call.span);
+                    }
                 }
                 call.visit_children_with(self);
             }
@@ -410,7 +484,9 @@ impl<'s> Locations<'s> {
                 if new_expr.span.lo.0 != 0 {
                     self.locations
                         .calls
-                        .insert(new_expr.span.lo.0, new_expr.span);
+                        .entry(new_expr.span.lo.0)
+                        .or_insert((new_expr.span, None))
+                        .0 = new_expr.span;
                 }
                 new_expr.visit_children_with(self);
             }
@@ -471,12 +547,15 @@ impl<'s> Locations<'s> {
                 method.visit_children_with(self);
             }
             fn visit_import_decl(&mut self, import: &ast::ImportDecl) {
-                self.locations
-                    .imports
-                    .insert(import.src.value.to_string_lossy().into_owned(), import.span);
+                let source = import.src.value.to_string_lossy();
+                self.locations.imports.insert(
+                    source.strip_prefix("node:").unwrap_or(&source).to_owned(),
+                    import.span,
+                );
             }
         }
         module.visit_with(&mut Collector {
+            unresolved,
             locations: self,
             class_name: None,
         });

@@ -4,6 +4,7 @@ use super::*;
 #[derive(Default)]
 pub struct Iteration {
     guards: HashSet<LocalId>,
+    object_patterns: Vec<(LocalId, u32)>,
     released: HashSet<LocalId>,
     positions: HashMap<LocalId, usize>,
 }
@@ -21,6 +22,7 @@ pub enum Availability<'a> {
 }
 
 pub struct Element<'a> {
+    pub ty: &'a perry_hir::types::Type,
     pub id: LocalId,
     pub value: &'a Expr,
     pub advance: Option<&'a Expr>,
@@ -31,6 +33,13 @@ pub struct Element<'a> {
     pub rest: &'a [Stmt],
 }
 
+const RUNTIME: &str = "__perry_runtime";
+const REQUIRE_OBJECT: &str = "requireObjectCoercible";
+
+pub(crate) fn is_object_coercibility_check(module: &str, method: &str) -> bool {
+    module == RUNTIME && method == REQUIRE_OBJECT
+}
+
 fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
     match expr {
         Expr::NativeMethodCall {
@@ -39,13 +48,16 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
             object: None,
             method,
             args,
-        } if module == "__perry_runtime" => Some((method, args)),
+        } if module == RUNTIME => Some((method, args)),
         _ => None,
     }
 }
 
 impl Iteration {
     pub fn register_binding(&mut self, id: LocalId, name: &str, init: Option<&Expr>) {
+        if let Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) = init.and_then(runtime) {
+            self.object_patterns.push((id, *offset as u32));
+        }
         if matches!(
             init.and_then(runtime),
             Some(("arrayRecordIndex", [Expr::Integer(0)]))
@@ -59,6 +71,15 @@ impl Iteration {
         {
             self.released.insert(id);
         }
+    }
+
+    pub(crate) fn object_pattern_offset(&self, receiver: &Expr) -> Option<u32> {
+        let Expr::LocalGet(id) = receiver else {
+            return None;
+        };
+        self.object_patterns
+            .iter()
+            .find_map(|(local, offset)| (id == local).then_some(*offset))
     }
 
     pub fn guard<'a>(&mut self, id: LocalId, expr: &'a Expr) -> Option<Option<&'a Expr>> {
@@ -100,7 +121,7 @@ impl Iteration {
         }
         Some(match runtime(expr)? {
             ("arrayRecordIndex", [value]) => RecordExpr::Value(value),
-            ("requireObjectCoercible", [value, ..]) => RecordExpr::RequireObject(value),
+            (REQUIRE_OBJECT, [value, ..]) => RecordExpr::RequireObject(value),
             ("arrayRecordLength", [source]) => RecordExpr::Length(source),
             ("arrayRecordPayload", [_, Expr::LocalSet(_, value), _]) => RecordExpr::Value(value),
             ("arrayRecordClose", _) => RecordExpr::Close,
@@ -156,6 +177,7 @@ impl Iteration {
         let [
             Stmt::Let {
                 id,
+                ty,
                 init: Some(Expr::Undefined),
                 ..
             },
@@ -226,6 +248,7 @@ impl Iteration {
             None => Availability::Known(matches!(steps.last(), Some(Expr::Bool(false)))),
         };
         Some(Element {
+            ty,
             id: *id,
             value,
             advance,

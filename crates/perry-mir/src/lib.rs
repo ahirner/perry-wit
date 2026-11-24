@@ -124,8 +124,8 @@ pub use heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp, RecordOrderOp};
 pub use integers::BigIntConstOp;
 pub use intrinsics::{
     Combinator, Intrinsic, IntrinsicOp, JsonCopyOp, JsonDecodeOp, JsonStringifyOp,
-    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, SettledField, SettledFieldOp,
-    may_throw,
+    PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp, PromiseResolvedOp, PromiseSettleOp,
+    SettleKind, SettledField, SettledFieldOp, may_throw,
 };
 pub use json_schema::JsonSchema;
 pub use liveness::{LiveAfter, LiveValues};

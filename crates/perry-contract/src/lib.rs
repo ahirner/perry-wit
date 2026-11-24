@@ -15,6 +15,19 @@ pub struct WorldFunction<'a> {
 }
 
 impl WorldFunction<'_> {
+    pub fn is_command(&self, resolve: &Resolve) -> bool {
+        let WorldKey::Interface(id) = self.key else {
+            return false;
+        };
+        let interface = &resolve.interfaces[*id];
+        self.function.name == "run"
+            && interface.name.as_deref() == Some("run")
+            && interface.package.is_some_and(|id| {
+                let name = &resolve.packages[id].name;
+                name.namespace == "wasi" && name.name == "cli"
+            })
+    }
+
     pub fn implementation_name(&self, resolve: &Resolve, world: &World) -> String {
         if self.interface.is_some() {
             export_names::interface_implementation_name(resolve, world, self.key, self.function)

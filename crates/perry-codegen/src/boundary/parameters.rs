@@ -15,15 +15,20 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn lift_parameters(
         &mut self,
         ctx: &mut Context,
-        params: &[AbiType],
+        export: &Export,
         mir: &[TypeHandle],
         flat: &mut Vec<Value>,
     ) -> Result<Vec<Value>> {
+        let params = &export.params;
         if params.iter().map(|ty| ty.flat().len()).sum::<usize>() <= MAX_FLAT_PARAMS {
             return params
                 .iter()
                 .zip(mir)
-                .map(|(ty, mir)| self.lift_abi(ctx, ty, *mir, Canonical::Flat(flat)))
+                .enumerate()
+                .map(|(i, (ty, mir))| {
+                    self.lift_abi(ctx, ty, *mir, Canonical::Flat(flat))
+                        .map_err(|e| e.with_fallback_span(export.annotation(i)))
+                })
                 .collect();
         }
         let area = flat
@@ -31,7 +36,10 @@ impl FunctionLowering<'_, '_> {
             .ok_or_else(|| Diagnostic::internal("missing indirect parameter record"))?;
         let mut args = Vec::with_capacity(params.len());
         for ((ty, mir), offset) in params.iter().zip(mir).zip(record_offsets(params.iter())) {
-            args.push(self.lift_abi(ctx, ty, *mir, Canonical::Memory(area, offset))?);
+            args.push(
+                self.lift_abi(ctx, ty, *mir, Canonical::Memory(area, offset))
+                    .map_err(|e| e.with_fallback_span(export.annotation(args.len())))?,
+            );
         }
         if self.state.collectible {
             self.runtime_void(ctx, Runtime::CabiRelease, vec![area]);

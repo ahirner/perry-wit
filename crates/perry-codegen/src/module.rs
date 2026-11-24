@@ -321,7 +321,6 @@ pub(crate) fn lower(
         } else {
             Initializer::Sync(address)
         });
-        state.collectible = true;
     }
     for function in &functions {
         state.leased.extend(lease::leased(ctx, function, &live));

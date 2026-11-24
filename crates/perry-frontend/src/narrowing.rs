@@ -113,6 +113,11 @@ fn comparisons<'s>(
     visit: &mut impl FnMut(CompareOp, &'s Expr, &'s Expr, bool),
 ) {
     match condition {
+        Expr::Sequence(parts) => {
+            if let Some(last) = parts.last() {
+                comparisons(last, truth, visit);
+            }
+        }
         Expr::Unary {
             op: UnaryOp::Not,
             operand,
@@ -124,6 +129,28 @@ fn comparisons<'s>(
             comparisons(right, truth, visit);
         }
         Expr::Compare { op, left, right } => visit(*op, left, right, truth),
+        _ => {}
+    }
+}
+
+fn truthy_locals(condition: &Expr, truth: bool, visit: &mut impl FnMut(LocalId)) {
+    match condition {
+        Expr::Sequence(parts) => {
+            if let Some(last) = parts.last() {
+                truthy_locals(last, truth, visit);
+            }
+        }
+        Expr::LocalGet(local) if truth => visit(*local),
+        Expr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => truthy_locals(operand, !truth, visit),
+        Expr::Logical { op, left, right }
+            if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) =>
+        {
+            truthy_locals(left, truth, visit);
+            truthy_locals(right, truth, visit);
+        }
         _ => {}
     }
 }
@@ -197,6 +224,9 @@ impl<'s> Guards<'s> {
             {
                 self.push(Path::local(*local), Fact::Excludes(absence));
             }
+        });
+        truthy_locals(condition, truth, &mut |local| {
+            self.push(Path::local(local), Fact::Excludes(Absence::Both));
         });
         // A later operand may write a value tested by an earlier operand.
         if self.depth() != 0 {

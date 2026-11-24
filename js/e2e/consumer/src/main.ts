@@ -63,8 +63,9 @@ assert.ok(error instanceof CompileError, "invalid programs reject with a Compile
 const [diagnostic]: readonly Diagnostic[] = error.diagnostics;
 const primaryKind: ErrorKind = error.primary.kind;
 const notes: readonly Note[] = error.primary.notes;
-assert.equal(primaryKind, "type-check");
-assert.equal(error.primary.code, "missing-type-annotation");
+assert.equal(primaryKind, "contract");
+assert.equal(error.primary.code, "missing-export");
+assert.match(error.primary.message, /WIT export double/);
 assert.ok(Array.isArray(notes));
 assert.equal(diagnostic?.span?.file, "src/bad.ts");
 

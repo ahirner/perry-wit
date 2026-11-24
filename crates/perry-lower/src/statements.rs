@@ -8,17 +8,19 @@ impl<'s> FunctionBuilder<'s> {
         while let Some((first, tail)) = rest.split_first() {
             rest = match self.iteration.element(rest) {
                 Some(element) => {
+                    let element_ty = self.shapes.value_type(ctx, element.ty)?;
+                    let element_ty =
+                        crate::coerce::admitting(ctx, element_ty, perry_mir::Absence::Undefined);
                     let value = self.conditional(
                         ctx,
                         element.condition,
                         element.missing,
                         element.value,
-                        None,
+                        Some(element_ty),
                     )?;
-                    let slot = self.entry_slot(ctx, value.get_type(ctx));
-                    self.store(ctx, slot, value);
+                    let binding = self.initialized_local(ctx, value);
                     self.variant_guards.assign(element.id);
-                    self.locals.insert(element.id, LocalBinding::plain(slot));
+                    self.locals.insert(element.id, binding);
                     let done = self.condition(ctx, element.condition)?;
                     let done = self.choose(
                         ctx,
@@ -135,11 +137,10 @@ impl<'s> FunctionBuilder<'s> {
                         }
                         None => {
                             ensure_diag!(
-                                self.returns_no_value(expr),
+                                self.optional_operand(ctx, expr, None)?.is_none(),
                                 codes::TYPE_MISMATCH,
                                 "a void function returns a value"
                             );
-                            self.effect(ctx, expr)?;
                             (self.implicit_results(ctx), None)
                         }
                     },
@@ -354,69 +355,69 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(());
         }
-        let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
-        let inferred_storage =
-            self.shapes.deferred_binding(id) && !self.shapes.is_explicit_binding(id);
-        let declared = match type_state
-            .resolved()
-            .map(|ty| self.active_value_type(ctx, ty))
-            .transpose()
-        {
-            Err(error) if inferred_storage && error.code() == codes::UNSUPPORTED_TYPE => {
-                let HirType::Union(members) = ty else {
-                    return Err(error);
-                };
-                for member in members {
-                    self.active_value_type(ctx, member)?;
-                }
-                Some(perry_mir::JsonType::get(ctx).into())
+        let explicit = self.shapes.is_explicit_binding(id);
+        let declared = match self.shapes.value_type(ctx, ty) {
+            Err(error)
+                if error.code() == codes::MISSING_TYPE_ANNOTATION
+                    && let Some(name) = self.shapes.local_name(id) =>
+            {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "cannot infer the type of binding '{name}'"
+                )
+                .with_help("Add a concrete type annotation to this binding."));
             }
-            result => {
-                result?.or_else(|| inferred_storage.then(|| perry_mir::JsonType::get(ctx).into()))
+            Err(error)
+                if error.code() == codes::UNSUPPORTED_TYPE
+                    && self.shapes.metadata.json_eligible_bindings.contains(&id) =>
+            {
+                perry_mir::JsonType::get(ctx).into()
             }
+            Err(error)
+                if !explicit
+                    && self.shapes.deferred_binding(id)
+                    && error.code() == codes::UNSUPPORTED_TYPE =>
+            {
+                let name = self.shapes.local_name(id).unwrap_or("binding");
+                return Err(diag!(
+                    codes::UNSUPPORTED_TYPE,
+                    "local '{name}' receives incompatible write types ({})",
+                    error.message()
+                ));
+            }
+            result => result?,
         };
-        let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
-            self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
-        });
-        let expr_expected = integer
-            .filter(|int_ty| int_ty.deref(ctx).width() == 64)
-            .map(TypeHandle::from)
-            .or(declared);
-        let deferred = declared.and_then(|ty| self.shapes.deferred_storage(ctx, id, ty));
-        let init = if deferred.is_some() {
+        let mut binding = BindingType {
+            carrier: declared,
+            integer: self
+                .shapes
+                .integer_type(ctx, ty)
+                .filter(|ty| explicit || ty.deref(ctx).width() == 64),
+        };
+        let deferred = self.shapes.deferred_storage(ctx, id, declared);
+        let is_never = matches!(ty, HirType::Never);
+        let init = if is_never {
+            if let Some(expr) = init {
+                self.effect(ctx, expr)?;
+            }
+            None
+        } else if deferred.is_some() {
             None
         } else {
-            init.map(|e| self.expression_with(ctx, e, expr_expected))
+            init.map(|e| self.expression_with(ctx, e, Some(binding.expected_type(ctx))))
                 .transpose()?
         };
-        if integer.is_none()
-            && let Some(value) = init
-            && let Some(src) = self.integer64_source(ctx, value)
+        if binding.integer.is_none()
+            && let Some(src) = init.and_then(|v| self.integer64_source(ctx, v))
         {
-            integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
+            binding.integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
         }
-        let is_never = matches!(ty, HirType::Never);
-        // Inferred bindings preserve the initializer's absence states.
-        let carrier = match (declared, init) {
-            (Some(ty), Some(value))
-                if self.shapes.metadata.inferred_bindings.contains(&id)
-                    && present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty) =>
-            {
-                value.get_type(ctx)
-            }
-            (Some(ty), _) => ty,
-            (None, Some(value)) => value.get_type(ctx),
-            (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
-            (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
-                return Err(missing_type_annotation());
-            }
-            (None, None) => bail_diag!(
-                codes::MISSING_TYPE_ANNOTATION,
-                "an untyped binding needs an initializer"
-            ),
-        };
-        let binding = BindingType { carrier, integer };
-        let storage = deferred.unwrap_or(carrier);
+        if let Some(value) = init
+            && self.shapes.metadata.inferred_bindings.contains(&id)
+        {
+            binding.carrier = crate::coerce::result_carrier(ctx, declared, &[value]);
+        }
+        let storage = deferred.unwrap_or(binding.carrier);
         let slot = if self.shapes.global_ids.contains(&id) {
             self.shapes.globals.borrow_mut().insert(id, binding);
             self.global_slot(ctx, id, storage)?
@@ -436,66 +437,82 @@ impl<'s> FunctionBuilder<'s> {
             id,
             LocalBinding {
                 slot,
-                integer,
-                deferred_write: deferred.map(|_| carrier),
+                writes: binding,
                 is_never,
             },
         );
         Ok(())
     }
 
-    pub(super) fn returns_no_value(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Undefined => true,
-            Expr::LocalGet(id) => self.locals.get(id).is_some_and(|b| b.is_never),
-            Expr::Call { callee, .. } => {
-                matches!(callee.as_ref(),Expr::FuncRef(id) if self.signatures.get(id).is_some_and(|s|s.returns_never || (!s.is_async && s.result.is_none())))
-            }
-            _ => false,
+    pub(super) fn optional_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Option<Value>> {
+        if self.iteration.is_release(expr) {
+            return Ok(None);
         }
+        let value = match expr {
+            Expr::ScopedTemp { id, value, body } => {
+                return self.with_temp(ctx, *id, value, |this, ctx| {
+                    this.optional_operand(ctx, body, expected)
+                });
+            }
+            Expr::Sequence(parts) if hir_compat::non_null_assertion(expr).is_none() => {
+                let Some((last, effects)) = parts.split_last() else {
+                    return Ok(None);
+                };
+                if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+                    return self
+                        .optional_operand(ctx, last, expected)
+                        .map_err(|error| error.with_fallback_span(Some(span)));
+                }
+                for part in effects {
+                    self.effect(ctx, part)?;
+                }
+                return self.optional_operand(ctx, last, expected);
+            }
+            Expr::Undefined => None,
+            Expr::Call {
+                callee,
+                args,
+                type_args,
+                byte_offset,
+                ..
+            } => self
+                .call(ctx, callee, args, type_args, *byte_offset, expected)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+            Expr::StaticMethodCall {
+                class_name,
+                method_name,
+                args,
+            } => self.class_static_method_call(ctx, class_name, method_name, args)?,
+            Expr::ProcessExit(code) => {
+                let code = match code {
+                    Some(code) => {
+                        let code = self.expression(ctx, code)?;
+                        let code = self.arithmetic(ctx, code);
+                        ensure_diag!(
+                            kind(ctx, code)? == Kind::Number,
+                            codes::TYPE_MISMATCH,
+                            "process.exit takes a number"
+                        );
+                        code
+                    }
+                    None => self.number(ctx, 0.0),
+                };
+                let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
+                self.propagate(ctx, status);
+                self.after_terminator(ctx);
+                None
+            }
+            _ => Some(self.expression_with(ctx, expr, expected)?),
+        };
+        Ok(value.filter(|v| !self.never_values.contains(v)))
     }
 
-    /// Lower an expression statement evaluated for its side effects, permitting `void` calls.
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
-        if self.iteration.is_release(expr) {
-            return Ok(());
-        }
-        if let Expr::Call {
-            callee,
-            args,
-            byte_offset,
-            ..
-        } = expr
-        {
-            self.call(ctx, callee, args, *byte_offset)
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
-        } else if let Expr::StaticMethodCall {
-            class_name,
-            method_name,
-            args,
-        } = expr
-        {
-            self.class_static_method_call(ctx, class_name, method_name, args)?;
-        } else if let Expr::ProcessExit(code) = expr {
-            let code = match code {
-                Some(code) => {
-                    let code = self.expression(ctx, code)?;
-                    let code = self.arithmetic(ctx, code);
-                    ensure_diag!(
-                        kind(ctx, code)? == Kind::Number,
-                        codes::TYPE_MISMATCH,
-                        "process.exit takes a number"
-                    );
-                    code
-                }
-                None => self.number(ctx, 0.0),
-            };
-            let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
-            self.propagate(ctx, status);
-            self.after_terminator(ctx);
-        } else {
-            self.expression(ctx, expr)?;
-        }
-        Ok(())
+        self.optional_operand(ctx, expr, None).map(|_| ())
     }
 }

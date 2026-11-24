@@ -1,6 +1,5 @@
 //! Return frames for inline callbacks and class callables.
 use super::*;
-use perry_mir::OptionalType;
 
 /// The result an inline body stores. The frontend types every inline callable's result, so
 /// lowering never infers one from the returned values.
@@ -59,32 +58,23 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         let done = self.new_block(ctx, "inline_done");
         let slot = match result_type {
-            InlineResult::Declared(ty) => {
-                let ty = if returns_optional(body) {
-                    OptionalType::get(ctx, ty).into()
-                } else {
-                    ty
-                };
-                Some(self.entry_slot(ctx, ty))
-            }
+            InlineResult::Declared(ty) => Some(self.entry_slot(ctx, ty)),
             InlineResult::Void => None,
         };
         self.inline_returns.push(ReturnFrame { done, slot });
         let body = hir_compat::strip_synthetic_default_guards(body, params.iter());
         // An inline callback runs once per element.
         self.invalidate_inline_writes(body, []);
-        let mut result = self.statements(ctx, body);
-        if result.is_ok() && self.reachable(ctx, self.block) {
-            if matches!(result_type, InlineResult::Void) {
-                self.jump(ctx, done);
-            } else {
-                result = self.inline_return(ctx, None);
-            }
-        }
-        self.inline_returns
+        let result = self.statements(ctx, body);
+        let frame = self
+            .inline_returns
             .pop()
             .ok_or_else(|| Diagnostic::internal("inline return frame"))?;
         result?;
+        if self.reachable(ctx, self.block) {
+            self.store_inline_result(ctx, &frame, None)?;
+            self.jump(ctx, done);
+        }
         self.switch_to(done);
         Ok(slot)
     }
@@ -118,14 +108,6 @@ impl<'s> FunctionBuilder<'s> {
         frame: &ReturnFrame,
         expression: Option<&'s Expr>,
     ) -> Result<()> {
-        let expression = if let Some(expr) = expression
-            && self.returns_no_value(expr)
-        {
-            self.effect(ctx, expr)?;
-            None
-        } else {
-            expression
-        };
         let Some(slot) = frame.slot else {
             if let Some(expr) = expression {
                 self.effect(ctx, expr)?;
@@ -133,8 +115,12 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(());
         };
         let ty = self.slot_type(ctx, slot)?;
-        let value = match expression {
-            Some(expression) => self.expression_with(ctx, expression, Some(ty))?,
+        let value = match expression
+            .map(|expr| self.optional_operand(ctx, expr, Some(ty)))
+            .transpose()?
+            .flatten()
+        {
+            Some(value) => value,
             None => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
         };
         let value = self.fit(ctx, value, ty)?;
@@ -142,6 +128,3 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 }
-
-// How a statement list may complete, as a bit set.
-pub(super) use perry_frontend::completion::returns_optional;

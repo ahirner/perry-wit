@@ -95,7 +95,9 @@ pub(super) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
     types
 }
 
-fn object(fields: impl IntoIterator<Item = Option<(String, HirType)>>) -> Option<HirType> {
+pub(super) fn object(
+    fields: impl IntoIterator<Item = Option<(String, HirType)>>,
+) -> Option<HirType> {
     Some(HirType::Object(ObjectType {
         properties: fields
             .into_iter()
@@ -115,7 +117,7 @@ fn object(fields: impl IntoIterator<Item = Option<(String, HirType)>>) -> Option
     }))
 }
 
-pub(super) fn ty(resolve: &Resolve, input: Input) -> Option<HirType> {
+pub(crate) fn ty(resolve: &Resolve, input: Input) -> Option<HirType> {
     convert(
         resolve,
         input,

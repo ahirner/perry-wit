@@ -22,13 +22,12 @@ impl<'s> FunctionBuilder<'s> {
     pub(crate) fn dict_literal(
         &mut self,
         ctx: &mut Context,
-        names: &[&str],
-        args: &'s [Expr],
+        fields: &[(&str, &'s Expr)],
         v_ty: TypeHandle,
         tuple_rec: TypedHandle<RecordType>,
     ) -> Result<Value> {
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
-        for (name, val_expr) in names.iter().zip(args) {
+        for &(name, val_expr) in fields {
             let k = self.string(ctx, name);
             let v = self.expression_with(ctx, val_expr, Some(v_ty))?;
             let v = self.fit(ctx, v, v_ty)?;

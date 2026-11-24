@@ -494,11 +494,19 @@ pub(crate) static ENTRIES: &[CatalogEntry] = &[
         expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
     },
     CatalogEntry {
-        id: "node.timers.callbacks.unsupported",
-        description: "Explicit compiler rejection of callback timers",
+        id: "node.timers.callbacks.named",
+        description: "Named callback timers, cancellation and forwarded arguments",
         specification: "https://nodejs.org/api/timers.html",
-        domain: "Callback timers are outside the supported source domain",
-        partitions: &["callback-timer"],
+        domain: "Both module spellings, an import alias and byte-valued callback arguments",
+        partitions: &["timers", "node:timers"],
+        expected_outcomes: &[ExpectedOutcome::EquivalentExecution],
+    },
+    CatalogEntry {
+        id: "node.timers.callbacks.namespace",
+        description: "Explicit compiler rejection of timer namespace members",
+        specification: "https://nodejs.org/api/timers.html",
+        domain: "Namespace import used as a callback timer receiver",
+        partitions: &["namespace"],
         expected_outcomes: &[ExpectedOutcome::CompilerRejection],
     },
     CatalogEntry {

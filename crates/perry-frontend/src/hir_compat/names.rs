@@ -6,6 +6,16 @@ use swc_ecma_visit::{Visit, VisitWith};
 /// Prefix of every generated binding name.
 const PREFIX: &str = "__perry_";
 
+pub(crate) const MODULE_PREFIX: &str = "__perry_module_";
+
+pub(crate) fn module_binding_name(index: usize, name: &str) -> String {
+    format!("{MODULE_PREFIX}{index}_{name}")
+}
+
+pub(crate) fn is_reserved_binding(name: &str) -> bool {
+    name.starts_with(PREFIX)
+}
+
 /// Allocates name prefixes that no source identifier starts with. Perry HIR resolves locals
 /// by name, so a generated binding must not shadow or be shadowed by a source binding in any
 /// scope.
@@ -20,7 +30,7 @@ impl FreshNames {
         struct Names(HashSet<String>);
         impl Visit for Names {
             fn visit_ident(&mut self, ident: &ast::Ident) {
-                if ident.sym.starts_with(PREFIX) {
+                if is_reserved_binding(&ident.sym) {
                     self.0.insert(ident.sym.to_string());
                 }
             }

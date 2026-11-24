@@ -151,6 +151,7 @@ macro_rules! intrinsic_catalog {
                 DateNow = "perry_date_now" [DateNow = "date_now" () -> (Number), Effectful, None;];
                 NumberFormat = "number_format" (F64, I32) -> I32;
                 // Further runtime and standard-library functions, by name.
+                FsPending = "fs_pending" () -> I32;
                 FsClose = "fs_close" () -> I32;
                 FsEvent = "fs_event" (I32, I32, I32) -> I32;
                 FsMkdir = "fs_mkdir" [FsMkdir = "fs_mkdir" (String) -> (PromiseVoid), Effectful, Conservative;];
@@ -218,7 +219,8 @@ macro_rules! intrinsic_catalog {
                 StringAppend = "perry_string_append" (I32, I32) -> I32;
                 TaskCancel = "perry_task_cancel" () -> I32;
                 TaskCurrent = "perry_task_current" () -> I32;
-                TaskDetached = "perry_task_detached" (I32, I32);
+                CommandStart = "perry_command_start" ();
+                CommandResult = "perry_command_result" (I32) -> I32;
                 StdBigintAdd = "std_bigint_add" (I32, I32) -> I32;
                 StdBigintSub = "std_bigint_sub" (I32, I32) -> I32;
                 StdBigintCompare = "std_bigint_compare" (I32, I32) -> I32;

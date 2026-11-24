@@ -1,7 +1,6 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
 use crate::inline::InlineResult;
-use perry_frontend::shapes::TypeId;
 use pliron::utils::vec_exns::VecExtns;
 
 enum ClassArguments<'a, 's> {
@@ -9,10 +8,10 @@ enum ClassArguments<'a, 's> {
     Evaluated(&'a [Value]),
 }
 
-enum ClassReceiver {
+enum ClassReceiver<'a, 's> {
     Static,
     Instance(Value),
-    Constructor(Value),
+    Constructor(Value, &'a [(&'s str, Option<&'s Expr>)]),
 }
 
 #[derive(Clone, Copy)]
@@ -77,8 +76,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         class_name: &'s str,
         args: &'s [Expr],
-        type_args: &'s [HirType],
-        expected: Option<TypeHandle>,
     ) -> Result<Value> {
         let (&class_name, &(_, class)) = self
             .shapes
@@ -86,59 +83,7 @@ impl<'s> FunctionBuilder<'s> {
             .named
             .get_key_value(class_name)
             .ok_or_else(|| unsupported!("unknown class {class_name}"))?;
-        let mut pre_evaluated: Option<Vec<Value>> = None;
-        let (rec_ty, effective_args) = if !type_args.is_empty() {
-            let ty = self.shapes.generic(ctx, class_name, type_args)?;
-            let effective = self
-                .shapes
-                .class_of_type(ctx, ty)
-                .map(|(_, a)| a)
-                .unwrap_or_else(|| TypeId::intern_slice(ctx, type_args));
-            (ty, effective)
-        } else if class.type_params.is_empty() {
-            (self.shapes.named(ctx, class_name)?, Vec::new())
-        } else if let Some(exp) = expected.map(|ty| present_type(ctx, ty))
-            && let Some((c, mapped)) = self.shapes.class_of_type(ctx, exp)
-            && c == class_name
-        {
-            (exp, mapped)
-        } else {
-            let mut vals = Vec::with_capacity(args.len());
-            for arg in args {
-                vals.push(self.expression(ctx, arg)?);
-            }
-            let mut arg_tys = Vec::with_capacity(class.type_params.len());
-            for tp in &class.type_params {
-                let inferred = class.constructor.as_ref().and_then(|ctor| {
-                    ctor.params.iter().enumerate().find_map(|(idx, p)| {
-                        if matches!(&p.ty, HirType::TypeVar(n) | HirType::Named(n) if n == &tp.name)
-                            && let Some(&val) = vals.get(idx)
-                        {
-                            mir_type_to_hir(ctx, self.shapes, val.get_type(ctx))
-                        } else {
-                            None
-                        }
-                    })
-                });
-                let arg_ty = inferred.unwrap_or_else(|| {
-                    tp.default
-                        .as_deref()
-                        .or(tp.constraint.as_deref())
-                        .unwrap_or(&HirType::Any)
-                        .clone()
-                });
-                arg_tys.push(arg_ty);
-            }
-            pre_evaluated = Some(vals);
-            let ty = self.shapes.generic(ctx, class_name, &arg_tys)?;
-            let effective = self
-                .shapes
-                .class_of_type(ctx, ty)
-                .map(|(_, a)| a)
-                .unwrap_or_else(|| TypeId::intern_slice(ctx, &arg_tys));
-            (ty, effective)
-        };
-
+        let rec_ty = self.shapes.named(ctx, class_name)?;
         let rec = TypedHandle::<RecordType>::from_handle(rec_ty, ctx)
             .map_err(|_| internal!("expected class record for {class_name}"))?;
         let field_defs: Vec<(String, TypeHandle)> = rec
@@ -146,24 +91,92 @@ impl<'s> FunctionBuilder<'s> {
             .fields()
             .map_err(|_| Diagnostic::internal("incomplete class record"))?
             .to_vec();
-        let mut init_operands = Vec::with_capacity(field_defs.len());
-        for (field, field_ty) in &field_defs {
-            let val = if admits_undefined(ctx, *field_ty) {
-                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *field_ty))
-            } else if absence(ctx, *field_ty).is_some_and(|a| a.admits_null()) {
-                self.emit_value(ctx, |ctx| NullOp::new(ctx, *field_ty))
-            } else {
-                self.unassigned_field(ctx, class_name, field, *field_ty)?
-            };
-            init_operands.push(val);
-        }
         let mut order = Vec::with_capacity(field_defs.len());
         for field in &class.fields {
             let (index, _) = rec
                 .deref(ctx)
                 .field(&field.name)
                 .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
-            order.push_unique(index as u32);
+            if !(field.is_private && field.name.starts_with('#')) {
+                order.push_unique(index as u32);
+            }
+        }
+        if class.extends.is_none()
+            && class.fields.iter().all(|f| f.init.is_none())
+            && let Some(ctor) = &class.constructor
+            && ctor.params.len() == class.fields.len()
+            && ctor
+                .params
+                .iter()
+                .all(|p| !p.is_rest && p.default.is_none())
+            && ctor.body.len() == class.fields.len()
+            && args.len() == class.fields.len()
+            && ctor
+                .body
+                .iter()
+                .zip(class.fields.iter().zip(&ctor.params))
+                .all(|(stmt, (field, param))| {
+                    matches!(
+                        stmt,
+                        Stmt::Expr(Expr::PropertySet { object, property, value, .. })
+                            if matches!(object.as_ref(), Expr::This)
+                                && property == &field.name
+                                && matches!(value.as_ref(), Expr::LocalGet(id) if *id == param.id)
+                    )
+                })
+        {
+            let mut arg_vals = Vec::with_capacity(args.len());
+            for (field, expr) in class.fields.iter().zip(args) {
+                let (_, field_ty) = rec
+                    .deref(ctx)
+                    .field(&field.name)
+                    .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
+                let val = self.expression_with(ctx, expr, Some(field_ty))?;
+                arg_vals.push((field.name.as_str(), self.fit(ctx, val, field_ty)?));
+            }
+            let mut init_operands = Vec::with_capacity(field_defs.len());
+            for (field, _) in &field_defs {
+                let val = arg_vals
+                    .iter()
+                    .find_map(|&(name, v)| (name == field.as_str()).then_some(v))
+                    .ok_or_else(|| {
+                        internal!("missing direct-init field {field} on {class_name}")
+                    })?;
+                init_operands.push(val);
+            }
+            let instance = self.emit_value(ctx, |ctx| {
+                let alloc = AllocOp::new(ctx, rec, init_operands);
+                alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(order));
+                alloc
+            });
+            return Ok(instance);
+        }
+        let mut init_operands = Vec::with_capacity(field_defs.len());
+        let mut initializers: Vec<_> = class
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.init.as_ref()))
+            .collect();
+        for (field, field_ty) in &field_defs {
+            let initializer = initializers.iter_mut().find(|(name, _)| *name == field);
+            let field_init = initializer.as_ref().and_then(|(_, init)| *init);
+            let (val, used_init) = if admits_undefined(ctx, *field_ty) {
+                (
+                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *field_ty)),
+                    false,
+                )
+            } else if absence(ctx, *field_ty).is_some_and(|a| a.admits_null()) {
+                (
+                    self.emit_value(ctx, |ctx| NullOp::new(ctx, *field_ty)),
+                    false,
+                )
+            } else {
+                self.unassigned_field(ctx, class_name, field, *field_ty, field_init)?
+            };
+            if used_init && let Some((_, init)) = initializer {
+                *init = None;
+            }
+            init_operands.push(val);
         }
         let instance = self.emit_value(ctx, |ctx| {
             let alloc = AllocOp::new(ctx, rec, init_operands);
@@ -173,46 +186,62 @@ impl<'s> FunctionBuilder<'s> {
         let this_slot = self.entry_slot(ctx, rec_ty);
         self.store(ctx, this_slot, instance);
         if let Some(ctor) = &class.constructor {
-            let args = match pre_evaluated.as_deref() {
-                Some(values) => ClassArguments::Evaluated(values),
-                None => ClassArguments::Expressions(args),
-            };
             self.inline_class_callable(
                 ctx,
                 class_name,
-                &effective_args,
                 ctor,
-                args,
-                ClassReceiver::Constructor(this_slot),
+                ClassArguments::Expressions(args),
+                ClassReceiver::Constructor(this_slot, &initializers),
             )?;
         } else {
-            if pre_evaluated.is_none() {
-                for arg in args {
-                    self.expression(ctx, arg)?;
-                }
+            for arg in args {
+                self.effect(ctx, arg)?;
             }
-            self.init_own_class_fields(ctx, class_name, this_slot)?;
+            self.init_own_class_fields(ctx, class_name, this_slot, &initializers)?;
         }
         self.load(ctx, this_slot)
     }
 
     /// Initial placeholder value for a non-optional field before its constructor assignment.
-    /// Requires a reference-free zero or empty value for `ty`.
+    /// Requires a reference-free zero or empty value for `ty`, or a tagged-union placeholder.
     fn unassigned_field(
         &mut self,
         ctx: &mut Context,
         class_name: &str,
         field: &str,
         ty: TypeHandle,
-    ) -> Result<Value> {
+        init: Option<&'s Expr>,
+    ) -> Result<(Value, bool)> {
         if ty.deref(ctx).is::<FP64Type>() {
-            Ok(self.number(ctx, 0.0))
+            Ok((self.number(ctx, 0.0), false))
         } else if perry_mir::typed::<IntegerType>(ctx, ty)
             .is_some_and(|int| int.deref(ctx).width() == 1)
         {
-            Ok(self.boolean(ctx, false))
+            Ok((self.boolean(ctx, false), false))
         } else if let Some(zero) = self.zero_value_for_type(ctx, ty) {
-            Ok(zero)
+            Ok((zero, false))
+        } else if let Ok(variant) = TypedHandle::<perry_mir::VariantType>::from_handle(ty, ctx) {
+            let payload_free = variant
+                .deref(ctx)
+                .cases()
+                .iter()
+                .find_map(|(tag, payload)| payload.is_none().then(|| tag.clone()));
+            if let Some(tag) = payload_free {
+                return Ok((
+                    self.emit_value(ctx, |ctx| perry_mir::VariantNewOp::new(ctx, ty, &tag, None)),
+                    false,
+                ));
+            }
+            if let Some(init_expr) = init {
+                let val = self.expression_with(ctx, init_expr, Some(ty))?;
+                return Ok((self.fit(ctx, val, ty)?, true));
+            }
+            bail_unsupported!(
+                "class {class_name} field {field} has no placeholder before its constructor assignment"
+            )
+        } else if let Some(init_expr) = init {
+            let val = self.expression_with(ctx, init_expr, Some(ty))?;
+            Ok((self.fit(ctx, val, ty)?, true))
         } else {
             bail_unsupported!(
                 "class {class_name} field {field} has no placeholder before its constructor assignment"
@@ -225,6 +254,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         class_name: &'s str,
         this_slot: Value,
+        initializers: &[(&'s str, Option<&'s Expr>)],
     ) -> Result<()> {
         let (&class_name, &(_, class)) = self
             .shapes
@@ -241,19 +271,19 @@ impl<'s> FunctionBuilder<'s> {
             ClassExpansion::Fields(class),
             class_name,
             |this, ctx| {
-                for field in &class.fields {
-                    let Some(init_expr) = &field.init else {
+                for &(name, init) in initializers {
+                    let Some(init_expr) = init else {
                         continue;
                     };
                     let (_, field_ty) = rec
                         .deref(ctx)
-                        .field(&field.name)
-                        .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
+                        .field(name)
+                        .ok_or_else(|| internal!("missing field {name} on {class_name}"))?;
                     let val = this.expression_with(ctx, init_expr, Some(field_ty))?;
                     let val = this.fit(ctx, val, field_ty)?;
                     let target = this.load(ctx, this_slot)?;
                     this.emit(ctx, |ctx| {
-                        FieldSetOp::new(ctx, target, field.name.clone(), val)
+                        FieldSetOp::new(ctx, target, name.to_owned(), val)
                     });
                 }
                 Ok(())
@@ -272,22 +302,11 @@ impl<'s> FunctionBuilder<'s> {
         self.load(ctx, slot)
     }
 
-    pub(super) fn active_class(&self, ctx: &Context) -> Option<(&'s str, Vec<TypeId>)> {
-        let slot = self.this_slot?;
-        let ty = self.slot_type(ctx, slot).ok()?;
-        self.shapes.class_of_type(ctx, ty)
-    }
-
     pub(super) fn is_proven_this_class(&self, ctx: &Context, class_name: &str) -> bool {
-        self.active_class(ctx)
-            .is_some_and(|(owner, _)| owner == class_name)
-    }
-
-    pub(super) fn active_value_type(&self, ctx: &Context, ty: &HirType) -> Result<TypeHandle> {
-        match self.active_class(ctx) {
-            Some((owner, type_args)) => self.shapes.class_value_type(ctx, owner, &type_args, ty),
-            None => self.shapes.value_type(ctx, ty),
-        }
+        self.this_slot
+            .and_then(|slot| self.slot_type(ctx, slot).ok())
+            .and_then(|ty| self.shapes.class_of_type(ctx, ty))
+            == Some(class_name)
     }
 
     pub(super) fn class_static_method_call(
@@ -309,7 +328,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            &[],
             func,
             ClassArguments::Expressions(args),
             ClassReceiver::Static,
@@ -352,7 +370,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         func: &'s Function,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
@@ -361,7 +378,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            type_args,
             func,
             ClassArguments::Expressions(args),
             ClassReceiver::Instance(slot),
@@ -373,7 +389,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         getter: &'s Function,
     ) -> Result<Value> {
         let slot = self.entry_slot(ctx, receiver.get_type(ctx));
@@ -381,7 +396,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            type_args,
             getter,
             ClassArguments::Expressions(&[]),
             ClassReceiver::Instance(slot),
@@ -394,25 +408,16 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         setter: &'s Function,
         value: &'s Expr,
     ) -> Result<Value> {
-        let param_ty = setter
-            .params
-            .first()
-            .and_then(|param| perry_frontend::contextual_type(&param.ty))
-            .and_then(|ty| {
-                self.shapes
-                    .class_value_type(ctx, owner_class, type_args, ty)
-                    .ok()
-            });
-        let val = self.expression_with(ctx, value, param_ty)?;
-        let val = match param_ty {
-            Some(ty) => self.fit(ctx, val, ty)?,
-            None => val,
+        let [param] = setter.params.as_slice() else {
+            bail_internal!("emitted setter requires one parameter");
         };
-        self.class_setter_call_value(ctx, receiver, owner_class, type_args, setter, val)
+        let param_ty = self.shapes.value_type(ctx, &param.ty)?;
+        let val = self.expression_with(ctx, value, Some(param_ty))?;
+        let val = self.fit(ctx, val, param_ty)?;
+        self.class_setter_call_value(ctx, receiver, owner_class, setter, val)
     }
 
     pub(super) fn class_setter_call_value(
@@ -420,7 +425,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         setter: &'s Function,
         val: Value,
     ) -> Result<Value> {
@@ -429,7 +433,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            type_args,
             setter,
             ClassArguments::Evaluated(std::slice::from_ref(&val)),
             ClassReceiver::Instance(slot),
@@ -441,10 +444,9 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         owner_class: &'s str,
-        type_args: &[TypeId],
         func: &'s Function,
         args: ClassArguments<'_, 's>,
-        receiver: ClassReceiver,
+        receiver: ClassReceiver<'_, 's>,
     ) -> Result<Option<Value>> {
         ensure_unsupported!(
             !func.is_async && !func.is_generator,
@@ -476,20 +478,9 @@ impl<'s> FunctionBuilder<'s> {
         };
         let mut evaluated_args = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            let param_ty = if perry_frontend::contextual_type(&param.ty).is_none() && !param.is_rest
-            {
-                None
-            } else {
-                Some(
-                    self.shapes
-                        .class_value_type(ctx, owner_class, type_args, &param.ty)?,
-                )
-            };
+            let param_ty = self.shapes.value_type(ctx, &param.ty)?;
             let value = if param.is_rest {
-                let rest_ty = param_ty.ok_or_else(|| {
-                    Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")
-                })?;
-                let element = TypedHandle::<ArrayType>::from_handle(rest_ty, ctx)
+                let element = TypedHandle::<ArrayType>::from_handle(param_ty, ctx)
                     .map_err(|_| {
                         Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")
                     })?
@@ -501,7 +492,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 Some(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)))
             } else {
-                next_arg(self, ctx, param_ty, param.default.as_ref())?
+                next_arg(self, ctx, Some(param_ty), param.default.as_ref())?
             };
             evaluated_args.push((param_ty, value));
             if param.is_rest {
@@ -515,45 +506,31 @@ impl<'s> FunctionBuilder<'s> {
             ClassExpansion::Callable(func),
             owner_class,
             |this, ctx| {
-                if let ClassReceiver::Constructor(slot) = receiver {
-                    this.init_own_class_fields(ctx, owner_class, slot)?;
+                if let ClassReceiver::Constructor(slot, initializers) = receiver {
+                    this.init_own_class_fields(ctx, owner_class, slot, initializers)?;
                 }
                 let this_slot = match receiver {
                     ClassReceiver::Static => None,
-                    ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot) => Some(slot),
+                    ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot, _) => {
+                        Some(slot)
+                    }
                 };
 
                 let slot = this.with_inline_scope(ctx, this_slot, |this, ctx| {
                     for (param, (param_ty, eval_arg)) in func.params.iter().zip(evaluated_args) {
-                        this.bind_parameter(
-                            ctx,
-                            param,
-                            eval_arg,
-                            param_ty.map(BindingType::plain),
-                        )?;
+                        this.bind_parameter(ctx, param, eval_arg, BindingType::plain(param_ty))?;
                     }
 
-                    let result_type = if matches!(receiver, ClassReceiver::Constructor(_))
+                    let result_type = if matches!(receiver, ClassReceiver::Constructor(_, _))
                         || matches!(func.return_type, HirType::Void)
                     {
                         InlineResult::Void
                     } else {
-                        ensure_diag!(
-                            perry_frontend::contextual_type(&func.return_type).is_some(),
-                            codes::MISSING_TYPE_ANNOTATION,
-                            "cannot infer the return type of '{}'; annotate it",
-                            func.name
-                        );
-                        InlineResult::Declared(this.shapes.class_value_type(
-                            ctx,
-                            owner_class,
-                            type_args,
-                            &func.return_type,
-                        )?)
+                        InlineResult::Declared(this.shapes.value_type(ctx, &func.return_type)?)
                     };
                     this.inline_body(ctx, &func.body, &func.params, result_type)
                 })?;
-                if let ClassReceiver::Constructor(slot) = receiver {
+                if let ClassReceiver::Constructor(slot, _) = receiver {
                     return this.load(ctx, slot).map(Some);
                 }
                 match slot {
@@ -563,48 +540,4 @@ impl<'s> FunctionBuilder<'s> {
             },
         )
     }
-}
-
-fn mir_type_to_hir(ctx: &Context, shapes: &Shapes<'_>, ty: TypeHandle) -> Option<HirType> {
-    if let Some((inner, states)) = optional_parts(ctx, ty) {
-        let mut members = vec![mir_type_to_hir(ctx, shapes, inner)?];
-        if states.admits_null() {
-            members.push(HirType::Null);
-        }
-        if states.admits_undefined() {
-            members.push(HirType::Void);
-        }
-        return Some(HirType::Union(members));
-    }
-    if let Some((c_name, c_args)) = shapes.class_of_type(ctx, ty) {
-        return Some(if c_args.is_empty() {
-            HirType::Named(c_name.to_string())
-        } else {
-            HirType::Generic {
-                base: c_name.to_string(),
-                type_args: c_args.into_iter().map(|id| id.hir(ctx).clone()).collect(),
-            }
-        });
-    }
-    if let Some(arr) = perry_mir::typed::<ArrayType>(ctx, ty) {
-        let elem = mir_type_to_hir(ctx, shapes, arr.deref(ctx).element())?;
-        return Some(HirType::Array(Box::new(elem)));
-    }
-    if ty == FP64Type::get(ctx).into() {
-        return Some(HirType::Number);
-    }
-    if let Some(int_ty) = ty.deref(ctx).downcast_ref::<IntegerType>() {
-        return Some(match int_ty.width() {
-            1 => HirType::Boolean,
-            64 => HirType::BigInt,
-            _ => HirType::Number,
-        });
-    }
-    if ty == BigIntType::get(ctx).into() {
-        return Some(HirType::BigInt);
-    }
-    if ty == StringType::get(ctx).into() {
-        return Some(HirType::String);
-    }
-    None
 }

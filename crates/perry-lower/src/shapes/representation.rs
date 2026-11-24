@@ -153,7 +153,7 @@ impl Shapes<'_> {
             }
             HirType::Function(_) => bail_diag!(
                 codes::UNSUPPORTED_TYPE,
-                "a function value requires a statically known callee; storing or returning a function is not supported"
+                "unresolved function value type reached lowering"
             ),
             HirType::Symbol | HirType::TypeVar(_) => {
                 bail_diag!(codes::UNSUPPORTED_TYPE, "type {ty:?} is not supported yet")
@@ -163,47 +163,44 @@ impl Shapes<'_> {
 
     fn union_type(&self, ctx: &Context, members: &[HirType]) -> Result<TypeHandle> {
         let member_ids = TypeId::intern_slice(ctx, members);
-        self.union_type_ids(ctx, &member_ids)
+        let resolver = Resolver::new(ctx, self);
+        let mut members = resolver.flatten(&member_ids, 0);
+        let mut absence = None;
+        members.retain(|ty| {
+            let state = match ty.hir(ctx) {
+                HirType::Void => perry_mir::Absence::Undefined,
+                HirType::Null => perry_mir::Absence::Null,
+                _ => return true,
+            };
+            absence = perry_mir::Absence::join_optional(absence, Some(state));
+            false
+        });
+        let inner = match (members.as_slice(), absence) {
+            ([], Some(_)) => bail_diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an absence-only union needs a declared value type"
+            ),
+            ([one], Some(_)) => self.value_type(ctx, one.hir(ctx))?,
+            (members, _)
+                if members
+                    .iter()
+                    .all(|ty| matches!(ty.hir(ctx), HirType::StringLiteral(_))) =>
+            {
+                StringType::get(ctx).into()
+            }
+            (members, _) => self.union_layout(ctx, &resolver, members)?,
+        };
+        Ok(absence.map_or(inner, |states| {
+            OptionalType::get_with(ctx, inner, states).into()
+        }))
     }
 
-    fn union_type_ids(&self, ctx: &Context, members: &[TypeId]) -> Result<TypeHandle> {
-        let resolver = Resolver::new(ctx, self);
-        let flattened = resolver.flatten(members, 0);
-        let members = flattened.as_slice();
-        if members
-            .iter()
-            .all(|ty| matches!(ty.hir(ctx), HirType::StringLiteral(_)))
-        {
-            return Ok(StringType::get(ctx).into());
-        }
-        let mut defined = Vec::with_capacity(members.len());
-        let mut absence = None;
-        for &ty in members {
-            match ty.hir(ctx) {
-                HirType::Null => {
-                    absence =
-                        perry_mir::Absence::join_optional(absence, Some(perry_mir::Absence::Null));
-                }
-                HirType::Void => {
-                    absence = perry_mir::Absence::join_optional(
-                        absence,
-                        Some(perry_mir::Absence::Undefined),
-                    );
-                }
-                _ => defined.push(ty),
-            }
-        }
-        if let Some(absence) = absence {
-            let inner = match defined.as_slice() {
-                [defined] => self.value_type(ctx, defined.hir(ctx))?,
-                [] => bail_diag!(
-                    codes::MISSING_TYPE_ANNOTATION,
-                    "an absence-only union needs a declared value type"
-                ),
-                defined => self.union_type_ids(ctx, defined)?,
-            };
-            return Ok(OptionalType::get_with(ctx, inner, absence).into());
-        }
+    fn union_layout(
+        &self,
+        ctx: &Context,
+        resolver: &Resolver<'_, Self>,
+        members: &[TypeId],
+    ) -> Result<TypeHandle> {
         // Integers up to 32 bits are exact JavaScript numbers.
         let number = |hir: &HirType| {
             matches!(hir, HirType::Number)
@@ -211,12 +208,12 @@ impl Shapes<'_> {
                     .integer_type(ctx, hir)
                     .is_some_and(|int_ty| int_ty.deref(ctx).width() <= 32)
         };
-        if defined.iter().any(|ty| {
+        if members.iter().any(|ty| {
             let hir = ty.hir(ctx);
             number(hir) || matches!(hir, HirType::String | HirType::Boolean)
         }) {
-            let mut cases = Vec::with_capacity(defined.len());
-            for member in defined {
+            let mut cases = Vec::with_capacity(members.len());
+            for member in members {
                 let hir = member.hir(ctx);
                 let ty = if number(hir) {
                     FP64Type::get(ctx).into()
