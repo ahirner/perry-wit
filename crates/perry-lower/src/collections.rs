@@ -253,7 +253,7 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
-        if let Some(constructor) = self.shapes.metadata.constructors.get(expr) {
+        if let Some(constructor) = hir_compat::constructor(expr) {
             return match constructor {
                 Constructor::Map { types, init } => {
                     let expected = match types {

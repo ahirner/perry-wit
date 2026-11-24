@@ -176,7 +176,7 @@ fn hash_hir_type<H: std::hash::Hasher>(ty: &HirType, state: &mut H) {
 pub struct Declarations<'h> {
     pub(crate) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
     pub(crate) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
-    class_names: HashSet<String>,
+    pub classes: Classes<'h>,
     records: std::cell::RefCell<records::Records>,
     pub foreign: &'h HashMap<String, crate::hir::Foreign>,
     pub integer_imports: HashMap<&'h str, (u32, Signedness)>,
@@ -189,7 +189,7 @@ impl<'h> Declarations<'h> {
         interfaces: &'h [perry_hir::ir::Interface],
         type_aliases: &'h [perry_hir::ir::TypeAlias],
         imports: &'h [perry_hir::ir::Import],
-        classes: &[perry_hir::ir::Class],
+        classes: &'h [perry_hir::ir::Class],
         foreign: &'h HashMap<String, crate::hir::Foreign>,
     ) -> Self {
         let interfaces = interfaces
@@ -202,11 +202,7 @@ impl<'h> Declarations<'h> {
             .enumerate()
             .map(|(idx, alias)| (alias.name.as_str(), (idx, alias)))
             .collect();
-        let class_names = classes
-            .iter()
-            .filter(|class| !crate::hir_compat::is_object_literal(&class.name))
-            .map(|class| class.name.clone())
-            .collect();
+        let classes = Classes::new(classes);
         let mut integer_imports = HashMap::new();
         let mut imported_types = HashMap::new();
         let mut foreign_functions = HashMap::new();
@@ -243,7 +239,7 @@ impl<'h> Declarations<'h> {
         Self {
             interfaces,
             type_aliases,
-            class_names,
+            classes,
             records: std::cell::RefCell::default(),
             foreign,
             integer_imports,
@@ -255,7 +251,7 @@ impl<'h> Declarations<'h> {
     pub fn is_user_type(&self, name: &str) -> bool {
         self.interfaces.contains_key(name)
             || self.type_aliases.contains_key(name)
-            || self.class_names.contains(name)
+            || self.classes.named.contains_key(name)
     }
 
     /// Intern source identity and place its fields in canonical name order.

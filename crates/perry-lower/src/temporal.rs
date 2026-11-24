@@ -485,36 +485,18 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A field of a `PlainDate` or `PlainDateTime` (`perry-time` part numbers).
-    pub(super) fn temporal_field(
+    pub(super) fn temporal_part(
         &mut self,
         ctx: &mut Context,
         value: Value,
-        field: &str,
+        part: DatePart,
     ) -> Result<Value> {
-        let receiver_kind = kind(ctx, value)?;
-        let date = receiver_kind == Kind::PlainDate;
-        let part = match field {
-            "year" => DatePart::Year,
-            "month" => DatePart::Month,
-            "day" => DatePart::Day,
-            "dayOfWeek" => DatePart::Weekday,
-            "hour" if !date => DatePart::Hour,
-            "minute" if !date => DatePart::Minute,
-            "second" if !date => DatePart::Second,
-            "millisecond" if !date => DatePart::Millisecond,
-            "microsecond" if !date => DatePart::Microsecond,
-            "nanosecond" if !date => DatePart::Nanosecond,
-            other => bail_unsupported!(
-                "property {other} is not supported on {} yet",
-                receiver_kind.label()
-            ),
-        };
-        let part = self.number(ctx, f64::from(part as u32));
-        let intrinsic = if date {
+        let intrinsic = if kind(ctx, value)? == Kind::PlainDate {
             Intrinsic::PlainDatePart
         } else {
             Intrinsic::PlainDateTimePart
         };
+        let part = self.number(ctx, f64::from(part as u32));
         Ok(self.intrinsic(ctx, intrinsic, vec![value, part]))
     }
 

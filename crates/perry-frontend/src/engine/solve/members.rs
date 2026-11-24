@@ -237,7 +237,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         s: &mut EvalState<'h>,
         expr: &'h Expr,
     ) -> Result<Ty> {
-        let (is_map, explicit_tys, init) = match self.metadata.constructors.get(expr) {
+        let (is_map, explicit_tys, init) = match hir_compat::constructor(expr) {
             Some(hir_compat::Constructor::Map { types, init }) => (
                 true,
                 types.map(|(k, v)| {

@@ -4,6 +4,7 @@ use crate::array_methods::{Direction, FindResult, Mutation, Quantifier, Search, 
 use crate::collections::{
     IteratorMethod, SetOperation, SetRelation, dict_entry_types, kv_entry_types, set_entry_type,
 };
+use perry_mir::DatePart;
 
 mod intrinsic;
 use intrinsic::{
@@ -175,6 +176,18 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let element = set_element(ctx, set)?;
         self.set_relation_op(ctx, set, other, element, relation)
+    }
+
+    fn utf8_encoding(&mut self, ctx: &mut Context, _codec: Value) -> Result<Value> {
+        Ok(self.string(ctx, "utf-8"))
+    }
+
+    fn iso_calendar_id(&mut self, ctx: &mut Context, _date: Value) -> Result<Value> {
+        Ok(self.string(ctx, "iso8601"))
+    }
+
+    fn exception_message(&mut self, ctx: &mut Context, error: Value) -> Result<Value> {
+        Ok(self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, error)))
     }
 
     fn encode(&mut self, ctx: &mut Context, _encoder: Value, args: &'s [Expr]) -> Result<Value> {

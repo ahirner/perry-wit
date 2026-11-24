@@ -53,7 +53,6 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         body: &'s [Stmt],
-        params: &'s [perry_frontend::hir::ir::Param],
         result_type: InlineResult,
     ) -> Result<Option<Value>> {
         let done = self.new_block(ctx, "inline_done");
@@ -62,7 +61,6 @@ impl<'s> FunctionBuilder<'s> {
             InlineResult::Void => None,
         };
         self.inline_returns.push(ReturnFrame { done, slot });
-        let body = hir_compat::strip_synthetic_default_guards(body, params.iter());
         // An inline callback runs once per element.
         self.invalidate_inline_writes(body, []);
         let result = self.statements(ctx, body);

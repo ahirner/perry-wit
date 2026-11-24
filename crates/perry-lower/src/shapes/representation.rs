@@ -163,7 +163,7 @@ impl Shapes<'_> {
 
     fn union_type(&self, ctx: &Context, members: &[HirType]) -> Result<TypeHandle> {
         let member_ids = TypeId::intern_slice(ctx, members);
-        let resolver = Resolver::new(ctx, self);
+        let resolver = Resolver::new(ctx, &self.decls);
         let mut members = resolver.flatten(&member_ids, 0);
         let mut absence = None;
         members.retain(|ty| {
@@ -198,7 +198,7 @@ impl Shapes<'_> {
     fn union_layout(
         &self,
         ctx: &Context,
-        resolver: &Resolver<'_, Self>,
+        resolver: &Resolver<'_, '_>,
         members: &[TypeId],
     ) -> Result<TypeHandle> {
         // Integers up to 32 bits are exact JavaScript numbers.

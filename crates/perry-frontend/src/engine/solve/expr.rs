@@ -2,17 +2,44 @@
 use super::*;
 
 impl<'h, 'a> Solver<'h, 'a> {
-    fn eval_first(
+    #[allow(clippy::too_many_arguments)]
+    fn record_field_write(
         &mut self,
-        s: &mut EvalState<'h>,
-        first: &'h Expr,
-        rest: &[&'h Expr],
-    ) -> Result<Ty> {
-        let ty = self.eval_expr(s, first)?;
-        for &e in rest {
-            self.eval_expr(s, e)?;
+        s: &EvalState<'h>,
+        site: &'h Expr,
+        obj_def: Ty,
+        property: &str,
+        value: &'h Expr,
+        val_ty: Ty,
+        byte_offset: u32,
+    ) -> Result<()> {
+        self.check_escaping_func(s.inst, val_ty, byte_offset, s.current_span)?;
+        let objlit_prop = self.check_objlit_func_write(
+            s.inst,
+            obj_def,
+            property,
+            val_ty,
+            byte_offset,
+            s.current_span,
+        )?;
+        self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?;
+        let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
+            && let Some(loc) = self.class_field_loc(cinst_id, property)
+        {
+            self.read_loc(loc, s.inst)
+        } else {
+            objlit_prop.unwrap_or(val_ty)
+        };
+        if self
+            .types
+            .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
+        {
+            self.record_site(s.inst, site, SiteResolution::ZeroSizedFieldSet);
+        } else {
+            self.clear_site(s.inst, site);
+            self.record_coercion(s.inst, value, val_ty, field_ty);
         }
-        Ok(ty)
+        Ok(())
     }
 
     pub(super) fn read_static_field(
@@ -65,7 +92,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 hir_compat::RecordExpr::Close => Ok(Ty::VOID),
             };
         }
-        if self.metadata.constructors.get(expr).is_some() {
+        if hir_compat::constructor(expr).is_some() {
             return self.eval_collection_constructor(s, expr);
         }
         if let Some(cb_ty) = self.try_eval_builtin_callback(s, expr)? {
@@ -358,20 +385,20 @@ impl<'h, 'a> Solver<'h, 'a> {
                     _ => ty,
                 })
             }
-            Expr::QueueMicrotask(_) => Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported(
-                    "queueMicrotask is not supported: this runtime has no microtask queue",
-                ),
-                0,
-            )),
-            Expr::ProcessNextTick { .. } => Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported(
-                    "process.nextTick is not supported: this runtime has no microtask queue",
-                ),
-                0,
-            )),
+            Expr::QueueMicrotask(_) | Expr::ProcessNextTick { .. } => {
+                let api = if matches!(expr, Expr::QueueMicrotask(_)) {
+                    "queueMicrotask"
+                } else {
+                    "process.nextTick"
+                };
+                Err(self.annotate_expr_error(
+                    s,
+                    Diagnostic::unsupported(format!(
+                        "{api} is not supported: this runtime has no microtask queue"
+                    )),
+                    0,
+                ))
+            }
             Expr::StructuredClone { value, .. } => self.eval_expr(s, value),
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
@@ -507,33 +534,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ..
             } => {
                 let (obj_ty, val_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, value)?);
-                self.check_escaping_func(s.inst, val_ty, *byte_offset, s.current_span)?;
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                let objlit_prop = self.check_objlit_func_write(
-                    s.inst,
-                    obj_def,
-                    property,
-                    val_ty,
-                    *byte_offset,
-                    s.current_span,
-                )?;
-                self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?;
-                let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
-                    && let Some(loc) = self.class_field_loc(cinst_id, property)
-                {
-                    self.read_loc(loc, s.inst)
-                } else {
-                    objlit_prop.unwrap_or(val_ty)
-                };
-                if self
-                    .types
-                    .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
-                {
-                    self.record_site(s.inst, expr, SiteResolution::ZeroSizedFieldSet);
-                } else {
-                    self.clear_site(s.inst, expr);
-                    self.record_coercion(s.inst, value, val_ty, field_ty);
-                }
+                self.record_field_write(s, expr, obj_def, property, value, val_ty, *byte_offset)?;
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
                     if kind == CellKind::Dict {
                         self.write_cell(loc, val_ty);
@@ -597,32 +599,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Expr::PutValueSet { byte_offset, .. } = expr
                     && let Expr::String(field_name) = index.as_ref()
                 {
-                    self.check_escaping_func(s.inst, val_ty, *byte_offset, s.current_span)?;
-                    let objlit_prop = self.check_objlit_func_write(
-                        s.inst,
+                    self.record_field_write(
+                        s,
+                        expr,
                         obj_def,
                         field_name,
+                        value,
                         val_ty,
                         *byte_offset,
-                        s.current_span,
                     )?;
-                    self.write_class_or_setter(s.inst, obj_def, field_name, value, val_ty)?;
-                    let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
-                        && let Some(loc) = self.class_field_loc(cinst_id, field_name)
-                    {
-                        self.read_loc(loc, s.inst)
-                    } else {
-                        objlit_prop.unwrap_or(val_ty)
-                    };
-                    if self
-                        .types
-                        .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
-                    {
-                        self.record_site(s.inst, expr, SiteResolution::ZeroSizedFieldSet);
-                    } else {
-                        self.clear_site(s.inst, expr);
-                        self.record_coercion(s.inst, value, val_ty, field_ty);
-                    }
                 }
                 self.write_cell_indexed(obj_def, idx_ty, val_ty);
                 self.coerce_array_write(
@@ -815,67 +800,19 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(Ty::OPEN)
             }
-            Expr::ArraySlice {
-                array, start, end, ..
-            } => {
-                let ty = self.eval_first(s, array, &[start])?;
-                if let Some(e) = end {
-                    self.eval_expr(s, e)?;
-                }
-                Ok(ty)
-            }
-            Expr::ArrayToReversed { array }
-            | Expr::ArraySort { array, .. }
-            | Expr::ArrayToSorted { array, .. } => self.eval_expr(s, array),
-            Expr::ArrayWith {
-                array,
-                index,
-                value,
-            } => self.eval_first(s, array, &[index, value]),
-            Expr::MapSet { map, key, value } => self.eval_first(s, map, &[key, value]),
             Expr::CryptoRandomFillSync {
                 buffer,
                 offset,
                 size,
-            } => self.eval_first(s, buffer, &[offset, size]),
-            Expr::ArrayPop(id) | Expr::ArrayShift(id) => {
+            } => {
+                let ty = self.eval_expr(s, buffer)?;
+                self.eval_expr(s, offset)?;
+                self.eval_expr(s, size)?;
+                Ok(ty)
+            }
+            Expr::ArrayShift(id) => {
                 let arr = self.eval_local_get(s, *id)?;
                 Ok(self.apply_resolved_method(s.inst, arr, crate::methods::MethodResult::Element))
-            }
-            Expr::ArrayAt { array, index } => {
-                let arr = self.eval_first(s, array, &[index])?;
-                Ok(self.apply_resolved_method(s.inst, arr, crate::methods::MethodResult::At))
-            }
-            Expr::MapGet { map, key } => {
-                let m = self.eval_first(s, map, &[key])?;
-                Ok(self.apply_resolved_method(s.inst, m, crate::methods::MethodResult::Lookup))
-            }
-            Expr::ArrayKeys(src)
-            | Expr::MapKeys(src)
-            | Expr::ArrayValues(src)
-            | Expr::MapValues(src)
-            | Expr::SetValues(src)
-            | Expr::ArrayEntries(src)
-            | Expr::MapEntries(src) => {
-                let src_ty = self.eval_expr(s, src)?;
-                let src_ty = self.resolve_cell_read(s.inst, src_ty);
-                if src_ty == Ty::BOTTOM {
-                    return Ok(Ty::BOTTOM);
-                }
-                let m = match expr {
-                    Expr::ArrayKeys(_) | Expr::MapKeys(_) => {
-                        crate::collections::IteratorMethod::Keys
-                    }
-                    Expr::ArrayValues(_) | Expr::MapValues(_) | Expr::SetValues(_) => {
-                        crate::collections::IteratorMethod::Values
-                    }
-                    _ => crate::collections::IteratorMethod::Entries,
-                };
-                Ok(builtins::iterator_view(self.ctx, self.types, src_ty, m).unwrap_or(Ty::OPEN))
-            }
-            Expr::SetAdd { set_id, value } => {
-                self.eval_expr(s, value)?;
-                self.eval_local_get(s, *set_id)
             }
             Expr::TypeOf(operand) => {
                 let op_ty = self.eval_expr(s, operand)?;

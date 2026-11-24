@@ -101,7 +101,14 @@ impl<'h> Emitter<'h, '_> {
                         .into_iter()
                         .map(|t| self.materialize(t))
                         .collect::<Result<Vec<_>>>()?;
-                    return Ok(hir_compat::typed_collection(is_map, mat_args));
+                    let init_args = if let Expr::New { args, .. } = expr {
+                        args.iter()
+                            .map(|a| self.rewrite_expr(rctx, a))
+                            .collect::<Result<Vec<_>>>()?
+                    } else {
+                        Vec::new()
+                    };
+                    return Ok(hir_compat::typed_collection(is_map, mat_args, init_args));
                 }
                 SiteResolution::ThrowTypeError(helper) => {
                     let fid = self.emit_helper(helper)?;
@@ -116,12 +123,7 @@ impl<'h> Emitter<'h, '_> {
                                 effects.push(self.rewrite_expr(rctx, a)?);
                             }
                         }
-                        return Ok(if effects.is_empty() {
-                            call
-                        } else {
-                            effects.push(call);
-                            Expr::Sequence(effects)
-                        });
+                        return Ok(sequence(effects, call));
                     }
                     return Ok(call);
                 }
@@ -470,12 +472,7 @@ impl<'h> Emitter<'h, '_> {
                         if !is_pure_func_expr(value) {
                             effects.push(self.rewrite_expr(rctx, value)?);
                         }
-                        return Ok(if effects.is_empty() {
-                            Expr::Undefined
-                        } else {
-                            effects.push(Expr::Undefined);
-                            Expr::Sequence(effects)
-                        });
+                        return Ok(sequence(effects, Expr::Undefined));
                     }
                 }
                 SiteResolution::MethodCall {

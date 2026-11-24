@@ -1,123 +1,94 @@
 //! Built-in method signatures and HIR call normalization.
 use crate::hir_compat::Preservation;
-use perry_hir::{
-    ir::Expr,
-    types::{LocalId, Type as HirType},
-};
+use perry_hir::{ir::Expr, types::LocalId};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_unsupported;
-/// Source-level families used by built-in method signatures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    Number,
-    Boolean,
-    String,
-    BigInt,
-    Bytes,
-    Url,
-    SearchParams,
-    Json,
-    Date,
-    Stats,
-    Headers,
-    Response,
-    Request,
-    Writable,
-    Writer,
-    Readable,
-    ByteBuffer,
-    DataView,
-    ByobReader,
-    Reader,
-    ReadResult,
-    Instant,
-    PlainDate,
-    PlainDateTime,
-    Abort,
-    Incoming,
-    Exception,
-    Encoder,
-    Decoder,
-    Regex,
-    ValueUnion,
-    Array,
-    Record,
-    Variant,
-    Resource,
-    Settled,
-}
-impl Kind {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Number => "number",
-            Self::Boolean => "boolean",
-            Self::String => "string",
-            Self::BigInt => "bigint",
-            Self::Bytes => "Uint8Array",
-            Self::Url => "URL",
-            Self::SearchParams => "URLSearchParams",
-            Self::Json => "JSON value",
-            Self::Date => "Date",
-            Self::Stats => "Stats",
-            Self::Headers => "Headers",
-            Self::Response => "Response",
-            Self::Request => "Request",
-            Self::Writable => "WritableStream",
-            Self::Writer => "WritableStreamDefaultWriter",
-            Self::Readable => "ReadableStream",
-            Self::ByteBuffer => "ArrayBuffer",
-            Self::DataView => "DataView",
-            Self::ByobReader => "ReadableStreamBYOBReader",
-            Self::Reader => "ReadableStreamDefaultReader",
-            Self::ReadResult => "ReadableStreamReadResult",
-            Self::Instant => "Temporal.Instant",
-            Self::PlainDate => "Temporal.PlainDate",
-            Self::PlainDateTime => "Temporal.PlainDateTime",
-            Self::Abort => "AbortController",
-            Self::Incoming => "IncomingRequest",
-            Self::Exception => "Error",
-            Self::Encoder => "TextEncoder",
-            Self::Decoder => "TextDecoder",
-            Self::Regex => "RegExp",
-            Self::ValueUnion => "finite value union",
-            Self::Array => "array",
-            Self::Record => "record",
-            Self::Variant => "variant",
-            Self::Resource => "WIT resource",
-            Self::Settled => "PromiseSettlementResult",
-        }
-    }
-    pub(crate) fn builtin(name: &str) -> Option<Self> {
-        match name {
-            "Uint8Array" => Some(Self::Bytes),
-            "URL" => Some(Self::Url),
-            "URLSearchParams" => Some(Self::SearchParams),
-            "Date" => Some(Self::Date),
-            "Headers" => Some(Self::Headers),
-            "Response" => Some(Self::Response),
-            "Request" => Some(Self::Request),
-            "WritableStream" => Some(Self::Writable),
-            "WritableStreamDefaultWriter" => Some(Self::Writer),
-            "ReadableStream" => Some(Self::Readable),
-            "ArrayBuffer" => Some(Self::ByteBuffer),
-            "DataView" => Some(Self::DataView),
-            "ReadableStreamBYOBReader" => Some(Self::ByobReader),
-            "ReadableStreamDefaultReader" => Some(Self::Reader),
-            "ReadableStreamReadResult" => Some(Self::ReadResult),
-            "Temporal.Instant" => Some(Self::Instant),
-            "Temporal.PlainDate" => Some(Self::PlainDate),
-            "Temporal.PlainDateTime" => Some(Self::PlainDateTime),
-            "AbortController" | "AbortSignal" => Some(Self::Abort),
-            "Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError" => {
-                Some(Self::Exception)
+/// Source-level value families, their diagnostic labels, optional builtin constructor names,
+/// and corresponding MIR reference types.
+#[macro_export]
+macro_rules! kind_catalog {
+    ($consumer:ident) => {
+        $consumer! {
+            primitives {
+                Number "number";
+                Boolean "boolean";
             }
-            "TextEncoder" => Some(Self::Encoder),
-            "TextDecoder" => Some(Self::Decoder),
-            "RegExp" => Some(Self::Regex),
-            _ => None,
+            references {
+                String "string" => StringType;
+                BigInt "bigint" => BigIntType;
+                Bytes "Uint8Array" builtin => BytesType;
+                Url "URL" builtin => UrlType;
+                SearchParams "URLSearchParams" builtin => SearchParamsType;
+                Json "JSON value" => JsonType;
+                Date "Date" builtin => DateType;
+                Stats "Stats" => StatsType;
+                Headers "Headers" builtin => HeadersType;
+                Response "Response" builtin => ResponseType;
+                Request "Request" builtin => RequestType;
+                Writable "WritableStream" builtin => WritableType;
+                Writer "WritableStreamDefaultWriter" builtin => WriterType;
+                Readable "ReadableStream" builtin => ReadableType;
+                ByteBuffer "ArrayBuffer" builtin => ByteBufferType;
+                DataView "DataView" builtin => DataViewType;
+                ByobReader "ReadableStreamBYOBReader" builtin => ByobReaderType;
+                Reader "ReadableStreamDefaultReader" builtin => ReaderType;
+                ReadResult "ReadableStreamReadResult" builtin => ReadResultType;
+                Instant "Temporal.Instant" builtin => InstantType;
+                PlainDate "Temporal.PlainDate" builtin => PlainDateType;
+                PlainDateTime "Temporal.PlainDateTime" builtin => PlainDateTimeType;
+                Abort "AbortController" builtin("AbortController" | "AbortSignal") => AbortType;
+                Incoming "IncomingRequest" => IncomingType;
+                Exception "Error" builtin("Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError") => ExceptionType;
+                Encoder "TextEncoder" builtin => EncoderType;
+                Decoder "TextDecoder" builtin => DecoderType;
+                Regex "RegExp" builtin => RegexType;
+                ValueUnion "finite value union" => ValueUnionType;
+                Array "array" => ArrayType;
+                Record "record" => RecordType;
+                Variant "variant" => VariantType;
+                Resource "WIT resource" => ResourceType;
+                Settled "PromiseSettlementResult" => SettledType;
+            }
         }
-    }
+    };
 }
+
+macro_rules! define_kinds {
+    (
+        primitives { $($prim:ident $plabel:literal;)* }
+        references { $($refk:ident $rlabel:literal $(builtin $(($($alias:literal)|+))?)? => $mir:ident;)* }
+    ) => {
+        /// Source-level families used by built-in method signatures.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum Kind {
+            $($prim,)*
+            $($refk,)*
+        }
+
+        impl Kind {
+            pub const fn label(self) -> &'static str {
+                match self {
+                    $(Self::$prim => $plabel,)*
+                    $(Self::$refk => $rlabel,)*
+                }
+            }
+
+            pub(crate) fn builtin(name: &str) -> Option<Self> {
+                $(define_kinds!(@builtin name $refk $rlabel $(builtin $(($($alias)|+))?)?);)*
+                None
+            }
+        }
+    };
+    (@builtin $name:ident $kind:ident $label:literal builtin ($($alias:literal)|+)) => {
+        if matches!($name, $($alias)|+) { return Some(Self::$kind); }
+    };
+    (@builtin $name:ident $kind:ident $label:literal builtin) => {
+        if $name == $label { return Some(Self::$kind); }
+    };
+    (@builtin $name:ident $kind:ident $label:literal) => {};
+}
+
+crate::kind_catalog!(define_kinds);
 pub enum CallReceiver<'s> {
     Expression(&'s Expr),
     Local(LocalId),
@@ -128,24 +99,6 @@ pub enum Receiver {
     Value(Kind),
     Map,
     Set,
-}
-
-impl Receiver {
-    fn inferred(ty: &HirType) -> Option<Self> {
-        Some(match ty {
-            HirType::Array(_) | HirType::Tuple(_) => Self::Value(Kind::Array),
-            HirType::String => Self::Value(Kind::String),
-            HirType::Number => Self::Value(Kind::Number),
-            HirType::Boolean => Self::Value(Kind::Boolean),
-            HirType::Named(name) | HirType::Generic { base: name, .. } => match name.as_str() {
-                "Map" | "ReadonlyMap" => Self::Map,
-                "Set" | "ReadonlySet" => Self::Set,
-                "Stats" | "fs.Stats" => Self::Value(Kind::Stats),
-                _ => Self::Value(Kind::builtin(name)?),
-            },
-            _ => return None,
-        })
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -163,6 +116,7 @@ pub(crate) enum MethodResult {
     NullableStrings,
     Number,
     Boolean,
+    Dynamic,
     Lookup,
     Duration,
     OptionalNumber,
@@ -264,11 +218,6 @@ macro_rules! registry {
                 match self { $($(Self::$variant => registry!(@callback $($callback)?),)*)* }
             }
 
-            pub(crate) fn named_property(type_name: &str, name: &str) -> Option<MethodResult> {
-                let receiver = Receiver::Value(Kind::builtin(type_name)?);
-                Self::lookup(receiver, name).filter(|m| m.is_property()).map(Self::result_rule)
-            }
-
             pub(crate) fn is_property(self) -> bool {
                 match self { $($(Self::$variant => registry!(@property $form),)*)* }
             }
@@ -277,13 +226,9 @@ macro_rules! registry {
                 match self { $($(Self::$variant => MethodResult::$result $(($result_arg))?,)*)* }
             }
 
-            pub(crate) fn inferred(receiver: &HirType, name: &str, property: bool) -> Option<MethodResult> {
-                if let Some(receiver) = Receiver::inferred(receiver) {
-                    return Self::lookup(receiver, name).filter(|m| m.is_property() == property).map(Self::result_rule);
-                }
-                if property { return None; }
+            pub(crate) fn unique_result_rule(name: &str) -> Option<MethodResult> {
                 let mut result = None;
-                $($(if registry!(@property $form) == property && matches!(name, $($name)|+) {
+                $($(if !registry!(@property $form) && matches!(name, $($name)|+) {
                     let rule = MethodResult::$result $(($result_arg))?;
                     if result.is_some_and(|previous| previous != rule) { return None; }
                     result = Some(rule);
@@ -340,6 +285,9 @@ impl<'s> Call<'s> {
             Expr::SetAdd { set_id, value } => {
                 return Some((CallReceiver::Local(*set_id), Self::SetAdd(value)));
             }
+            Expr::ArrayPop(array_id) => {
+                return Some((CallReceiver::Local(*array_id), Self::ArrayPop()));
+            }
             Expr::ArrayPush {
                 array_id, value, ..
             } => {
@@ -350,113 +298,104 @@ impl<'s> Call<'s> {
             }
             _ => {}
         }
-        let (receiver, call): (&Expr, Self) = match expr {
-            Expr::CryptoRandomFillSync {
-                buffer,
-                offset,
-                size,
-            } if matches!((&**offset, &**size), (Expr::Undefined, Expr::Undefined)) => {
-                (buffer, Self::BytesCryptoFillRandom(&[]))
+        macro_rules! match_exprs {
+            (
+                date_get { $($dg_utc:ident | $dg_loc:ident => $dg_call:ident,)* }
+                date_set { $($ds_utc:ident | $ds_loc:ident => $ds_call:ident,)* }
+                array_cb { $($acb:ident,)* }
+                map_key { $($mk:ident,)* }
+                set_val { $($sv:ident,)* }
+                rest { $($rest:tt)* }
+            ) => {
+                match expr {
+                    $(Expr::$dg_utc(d) | Expr::$dg_loc(d) => (d, Self::$dg_call(&[])),)*
+                    $(Expr::$ds_utc { date, args } | Expr::$ds_loc { date, args } => (date, Self::$ds_call(args)),)*
+                    $(Expr::$acb { array, callback } => (array, Self::$acb(callback)),)*
+                    $(Expr::$mk { map, key } => (map, Self::$mk(key)),)*
+                    $(Expr::$sv { set, value } => (set, Self::$sv(value)),)*
+                    $($rest)*
+                }
+            };
+        }
+        let (receiver, call): (&Expr, Self) = match_exprs! {
+            date_get {
+                DateGetUtcFullYear | DateGetFullYear => DateGetFullYear,
+                DateGetUtcMonth | DateGetMonth => DateGetMonth,
+                DateGetUtcDate | DateGetDate => DateGetDate,
+                DateGetUtcDay | DateGetDay => DateGetDay,
+                DateGetUtcHours | DateGetHours => DateGetHours,
+                DateGetUtcMinutes | DateGetMinutes => DateGetMinutes,
+                DateGetUtcSeconds | DateGetSeconds => DateGetSeconds,
+                DateGetUtcMilliseconds | DateGetMilliseconds => DateGetMilliseconds,
             }
-            Expr::DateGetTime(date) => (date, Self::DateGetTime(&[])),
-            Expr::DateToISOString(date) => (date, Self::DateToISOString(&[])),
-            Expr::DateToJSON(date) => (date, Self::DateToJSON(&[])),
-            Expr::UrlInstanceToString(url) | Expr::UrlInstanceToJSON(url) => {
-                (url, Self::UrlString(&[]))
+            date_set {
+                DateSetUtcFullYear | DateSetFullYear => DateSetFullYear,
+                DateSetUtcMonth | DateSetMonth => DateSetMonth,
+                DateSetUtcDate | DateSetDate => DateSetDate,
+                DateSetUtcHours | DateSetHours => DateSetHours,
+                DateSetUtcMinutes | DateSetMinutes => DateSetMinutes,
+                DateSetUtcSeconds | DateSetSeconds => DateSetSeconds,
+                DateSetUtcMilliseconds | DateSetMilliseconds => DateSetMilliseconds,
             }
-            Expr::UrlSearchParamsAppend {
-                params,
-                name,
-                value,
-            } => (params, Self::SearchParamsAppend(name, value)),
-            Expr::DateGetUtcFullYear(date) | Expr::DateGetFullYear(date) => {
-                (date, Self::DateGetFullYear(&[]))
+            array_cb {
+                ArrayMap, ArrayFilter, ArrayFlatMap, ArrayFind, ArrayFindIndex, ArraySome, ArrayEvery,
             }
-            Expr::DateGetUtcMonth(date) | Expr::DateGetMonth(date) => {
-                (date, Self::DateGetMonth(&[]))
-            }
-            Expr::DateGetUtcDate(date) | Expr::DateGetDate(date) => (date, Self::DateGetDate(&[])),
-            Expr::DateGetUtcDay(date) | Expr::DateGetDay(date) => (date, Self::DateGetDay(&[])),
-            Expr::DateGetUtcHours(date) | Expr::DateGetHours(date) => {
-                (date, Self::DateGetHours(&[]))
-            }
-            Expr::DateGetUtcMinutes(date) | Expr::DateGetMinutes(date) => {
-                (date, Self::DateGetMinutes(&[]))
-            }
-            Expr::DateGetUtcSeconds(date) | Expr::DateGetSeconds(date) => {
-                (date, Self::DateGetSeconds(&[]))
-            }
-            Expr::DateGetUtcMilliseconds(date) | Expr::DateGetMilliseconds(date) => {
-                (date, Self::DateGetMilliseconds(&[]))
-            }
-            Expr::DateGetTimezoneOffset(date) => (date, Self::DateGetTimezoneOffset(&[])),
-            Expr::DateSetUtcFullYear { date, args } | Expr::DateSetFullYear { date, args } => {
-                (date, Self::DateSetFullYear(args))
-            }
-            Expr::DateSetUtcMonth { date, args } | Expr::DateSetMonth { date, args } => {
-                (date, Self::DateSetMonth(args))
-            }
-            Expr::DateSetUtcDate { date, args } | Expr::DateSetDate { date, args } => {
-                (date, Self::DateSetDate(args))
-            }
-            Expr::DateSetUtcHours { date, args } | Expr::DateSetHours { date, args } => {
-                (date, Self::DateSetHours(args))
-            }
-            Expr::DateSetUtcMinutes { date, args } | Expr::DateSetMinutes { date, args } => {
-                (date, Self::DateSetMinutes(args))
-            }
-            Expr::DateSetUtcSeconds { date, args } | Expr::DateSetSeconds { date, args } => {
-                (date, Self::DateSetSeconds(args))
-            }
-            Expr::DateSetUtcMilliseconds { date, args }
-            | Expr::DateSetMilliseconds { date, args } => (date, Self::DateSetMilliseconds(args)),
-            Expr::DateSetTime { date, args } => (date, Self::DateSetTime(args)),
-            Expr::StringSplit(text, separator) => (text, Self::StringSplit(separator)),
-            Expr::ArrayMap { array, callback } => (array, Self::ArrayMap(callback)),
-            Expr::ArrayFilter { array, callback } => (array, Self::ArrayFilter(callback)),
-            Expr::ArrayFlatMap { array, callback } => (array, Self::ArrayFlatMap(callback)),
-            Expr::ArrayFind { array, callback } => (array, Self::ArrayFind(callback)),
-            Expr::ArrayFindIndex { array, callback } => (array, Self::ArrayFindIndex(callback)),
-            Expr::ArraySome { array, callback } => (array, Self::ArraySome(callback)),
-            Expr::ArrayEvery { array, callback } => (array, Self::ArrayEvery(callback)),
-            Expr::ArraySort { array, comparator } => (
-                array,
-                Self::ArraySort((!matches!(**comparator, Expr::Undefined)).then_some(comparator)),
-            ),
-            Expr::ArrayToSorted { array, comparator } => (
-                array,
-                Self::ArrayToSorted(
-                    comparator
-                        .as_deref()
-                        .filter(|c| !matches!(c, Expr::Undefined)),
+            map_key { MapGet, MapHas, MapDelete, }
+            set_val { SetHas, SetDelete, }
+            rest {
+                Expr::CryptoRandomFillSync {
+                    buffer,
+                    offset,
+                    size,
+                } if matches!((&**offset, &**size), (Expr::Undefined, Expr::Undefined)) => {
+                    (buffer, Self::BytesCryptoFillRandom(&[]))
+                }
+                Expr::DateGetTime(date) => (date, Self::DateGetTime(&[])),
+                Expr::DateToISOString(date) => (date, Self::DateToISOString(&[])),
+                Expr::DateToJSON(date) => (date, Self::DateToJSON(&[])),
+                Expr::DateGetTimezoneOffset(date) => (date, Self::DateGetTimezoneOffset(&[])),
+                Expr::DateSetTime { date, args } => (date, Self::DateSetTime(args)),
+                Expr::UrlInstanceToString(url) | Expr::UrlInstanceToJSON(url) => {
+                    (url, Self::UrlString(&[]))
+                }
+                Expr::UrlSearchParamsAppend { params, name, value } => {
+                    (params, Self::SearchParamsAppend(name, value))
+                }
+                Expr::StringSplit(text, separator) => (text, Self::StringSplit(separator)),
+                Expr::ArraySlice { array, start, end, .. } => {
+                    (array, Self::ArraySlice(Some(start), end.as_deref()))
+                }
+                Expr::ArrayToReversed { array } => (array, Self::ArrayToReversed()),
+                Expr::ArrayWith { array, index, value } => (array, Self::ArrayWith(index, value)),
+                Expr::ArrayAt { array, index } => (array, Self::ArrayAt(Some(index))),
+                Expr::ArraySort { array, comparator } => (
+                    array,
+                    Self::ArraySort((!matches!(**comparator, Expr::Undefined)).then_some(comparator)),
                 ),
-            ),
-            Expr::ArrayIncludes {
-                array,
-                value,
-                from_index,
-            } => (array, Self::ArrayIncludes(value, from_index.as_deref())),
-            Expr::ArrayIndexOf {
-                array,
-                value,
-                from_index,
-            } => (array, Self::ArrayIndexOf(value, from_index.as_deref())),
-            Expr::MapClear(source) => (source, Self::MapClear()),
-            Expr::SetClear(source) => (source, Self::SetClear()),
-            Expr::MapKeys(source) | Expr::ArrayKeys(source) => (source, Self::CollectionKeys()),
-            Expr::MapValues(source) | Expr::SetValues(source) | Expr::ArrayValues(source) => {
-                (source, Self::CollectionValues())
+                Expr::ArrayToSorted { array, comparator } => (
+                    array,
+                    Self::ArrayToSorted(
+                        comparator.as_deref().filter(|c| !matches!(c, Expr::Undefined)),
+                    ),
+                ),
+                Expr::ArrayIncludes { array, value, from_index } => {
+                    (array, Self::ArrayIncludes(value, from_index.as_deref()))
+                }
+                Expr::ArrayIndexOf { array, value, from_index } => {
+                    (array, Self::ArrayIndexOf(value, from_index.as_deref()))
+                }
+                Expr::MapClear(source) => (source, Self::MapClear()),
+                Expr::SetClear(source) => (source, Self::SetClear()),
+                Expr::MapKeys(source) | Expr::ArrayKeys(source) => (source, Self::CollectionKeys()),
+                Expr::MapValues(source) | Expr::SetValues(source) | Expr::ArrayValues(source) => {
+                    (source, Self::CollectionValues())
+                }
+                Expr::MapEntries(source) | Expr::ArrayEntries(source) => {
+                    (source, Self::CollectionEntries())
+                }
+                Expr::MapSet { map, key, value } => (map, Self::MapSet(key, value)),
+                _ => return None,
             }
-            Expr::MapEntries(source) | Expr::ArrayEntries(source) => {
-                (source, Self::CollectionEntries())
-            }
-            Expr::MapGet { map, key } => (map, Self::MapGet(key)),
-            Expr::MapSet { map, key, value } => (map, Self::MapSet(key, value)),
-            Expr::MapHas { map, key } => (map, Self::MapHas(key)),
-            Expr::MapDelete { map, key } => (map, Self::MapDelete(key)),
-            Expr::SetHas { set, value } => (set, Self::SetHas(value)),
-            Expr::SetDelete { set, value } => (set, Self::SetDelete(value)),
-            _ => return None,
         };
         Some((CallReceiver::Expression(receiver), call))
     }

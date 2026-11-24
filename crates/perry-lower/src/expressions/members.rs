@@ -100,15 +100,6 @@ impl<'s> FunctionBuilder<'s> {
         }
         Ok(match (kind(ctx, value)?, property) {
             (Kind::Url, field) => self.url_field(ctx, value, field)?,
-            (Kind::Encoder | Kind::Decoder, "encoding") => self.string(ctx, "utf-8"),
-            (Kind::Decoder, "fatal" | "ignoreBOM") => {
-                let intrinsic = if property == "fatal" {
-                    Intrinsic::DecoderFatal
-                } else {
-                    Intrinsic::DecoderIgnoreBom
-                };
-                self.intrinsic(ctx, intrinsic, vec![value])
-            }
             (Kind::String, "length") => self.string_length(ctx, value),
             (Kind::Array, field) if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) => {
                 let key = self.string(ctx, field);
@@ -147,39 +138,6 @@ impl<'s> FunctionBuilder<'s> {
                     .ok_or_else(|| Diagnostic::internal("expected a settled result"))?;
                 self.append_value(ctx, &op)
             }
-            (
-                Kind::Bytes
-                | Kind::ByteBuffer
-                | Kind::DataView
-                | Kind::Headers
-                | Kind::Response
-                | Kind::Request
-                | Kind::Writable
-                | Kind::Writer
-                | Kind::Readable
-                | Kind::Reader
-                | Kind::ByobReader
-                | Kind::ReadResult,
-                name,
-            ) => self.web_member(ctx, value, name, None)?,
-            (Kind::Instant, "epochMilliseconds") => {
-                self.intrinsic(ctx, Intrinsic::InstantMs, vec![value])
-            }
-            // Every supported date uses the ISO 8601 calendar.
-            (Kind::PlainDate | Kind::PlainDateTime, "calendarId") => self.string(ctx, "iso8601"),
-            (Kind::PlainDate | Kind::PlainDateTime, field) => {
-                self.temporal_field(ctx, value, field)?
-            }
-            (Kind::Abort, "signal") => value,
-            (Kind::Abort, "aborted") => self.intrinsic(ctx, Intrinsic::AbortAborted, vec![value]),
-            (Kind::Stats, "size") => self.intrinsic(ctx, Intrinsic::StatsSize, vec![value]),
-            (Kind::Exception, "cause") => {
-                self.intrinsic(ctx, Intrinsic::ExceptionCause, vec![value])
-            }
-            (Kind::Exception, "name") => self.intrinsic(ctx, Intrinsic::ExceptionName, vec![value]),
-            (Kind::Exception, "message") => {
-                self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, value))
-            }
             (Kind::Variant, field) => self.variant_member(ctx, object, value, field)?,
             (Kind::Record, "size")
                 if map_box_record(ctx, ty).is_some() || set_box_record(ctx, ty).is_some() =>
@@ -210,10 +168,20 @@ impl<'s> FunctionBuilder<'s> {
                 ),
             },
             (receiver_kind, property) => {
-                bail_unsupported!(
-                    "property {property} is not supported on {} yet",
-                    receiver_kind.label()
-                )
+                if let Some(call) = crate::methods::Call::member(
+                    crate::methods::Receiver::Value(receiver_kind),
+                    property,
+                    None,
+                )? {
+                    call.lower(self, ctx, value)?.ok_or_else(|| {
+                        Diagnostic::new(codes::TYPE_MISMATCH, "properties produce a value")
+                    })?
+                } else {
+                    bail_unsupported!(
+                        "property {property} is not supported on {} yet",
+                        receiver_kind.label()
+                    )
+                }
             }
         })
     }

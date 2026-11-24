@@ -193,8 +193,6 @@ impl VisitMut for Fill {
     }
 }
 
-pub(super) const DECODE: &str = "$$perryDecodeOptions";
-
 pub(super) fn preserve_options(
     module: &mut ast::Module,
     unresolved: SyntaxContext,
@@ -213,17 +211,6 @@ pub(super) fn preserve_options(
                 && self.error.is_none()
             {
                 self.error = Some(error);
-            }
-        }
-        fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
-            call.visit_mut_children_with(self);
-            if call.args.len() > 1
-                && let ast::Callee::Expr(callee) = &mut call.callee
-                && let ast::Expr::Member(member) = &mut **callee
-                && let ast::MemberProp::Ident(method) = &mut member.prop
-                && method.sym == "decode"
-            {
-                method.sym = DECODE.into();
             }
         }
     }

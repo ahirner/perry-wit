@@ -164,7 +164,7 @@ pub(super) fn bind(
             _ => HirType::Named(c.name.clone()),
         };
         let types = vec![HirType::Number, class_type];
-        let map = super::typed_collection(true, types);
+        let map = super::typed_collection(true, types, Vec::new());
         init.push(local(table, "instances", HirType::Any, map, false));
         init.push(local(
             next,

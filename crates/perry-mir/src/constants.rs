@@ -10,6 +10,7 @@ use pliron::{
     builtin::{
         attributes::{FPDoubleAttr, IntegerAttr},
         op_interfaces::{BranchOpInterface, OneRegionInterface, OneResultInterface},
+        ops::ConstantOp,
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
@@ -275,13 +276,21 @@ impl ConstFoldInterface for CompareOp {
     }
 }
 
+/// Build a signless integer constant attribute of `bits` width.
+fn integer_attr(ctx: &Context, bits: u32, value: u64) -> IntegerAttr {
+    let ty = IntegerType::get(ctx, bits, Signedness::Signless);
+    IntegerAttr::new(ty, APInt::from_u64(value, bw(bits as usize)))
+}
+
+/// Build a signless integer `ConstantOp` of `bits` width.
+pub(crate) fn integer_constant(ctx: &mut Context, bits: u32, value: u64) -> Ptr<Operation> {
+    let attr = integer_attr(ctx, bits, value);
+    ConstantOp::new(ctx, Box::new(attr)).get_operation()
+}
+
 /// The folded `i1` of a comparison.
 fn boolean(ctx: &Context, value: bool) -> AttrObj {
-    let ty = IntegerType::get(ctx, 1, Signedness::Signless);
-    Box::new(IntegerAttr::new(
-        ty,
-        APInt::from_u64(u64::from(value), bw(1)),
-    ))
+    Box::new(integer_attr(ctx, 1, u64::from(value)))
 }
 
 #[op_interface_impl]

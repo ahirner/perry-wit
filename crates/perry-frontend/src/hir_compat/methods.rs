@@ -5,24 +5,23 @@ use swc_common::{DUMMY_SP, SyntaxContext};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 const PUSH: &str = "$$perryArrayPush";
-const CONCAT: &str = "$$perryArrayConcat";
 const METHOD_PREFIX: &str = "$$perryMethod_";
 
 pub(crate) enum Preservation {
     Upstream,
     Always,
     Push,
-    Concat,
     Arguments,
+    Options,
 }
 
 impl Preservation {
     pub(crate) fn rewrite(&self, name: &str, count: usize, spread: bool) -> Option<String> {
         match self {
             Self::Push if count != 1 || spread => Some(PUSH.into()),
-            Self::Concat => Some(CONCAT.into()),
             Self::Always => Some(format!("{METHOD_PREFIX}{name}")),
             Self::Arguments if count > 0 => Some(format!("{METHOD_PREFIX}{name}")),
+            Self::Options if count > 1 => Some(format!("{METHOD_PREFIX}{name}")),
             _ => None,
         }
     }
@@ -153,8 +152,6 @@ pub enum Method<'a> {
     UsingCheck,
     Iteration,
     Push,
-    Concat,
-    Decode,
     Ordinary(&'a str),
 }
 
@@ -166,8 +163,6 @@ pub fn method(name: &str) -> Method<'_> {
         "__perry_using_check__" => Method::UsingCheck,
         streams::ITERATION => Method::Iteration,
         PUSH => Method::Push,
-        CONCAT => Method::Concat,
-        streams::DECODE => Method::Decode,
         name => Method::Ordinary(name),
     }
 }
@@ -178,8 +173,6 @@ impl<'a> Method<'a> {
             Self::UsingCheck => "using",
             Self::Iteration => "[iteration]",
             Self::Push => "push",
-            Self::Concat => "concat",
-            Self::Decode => "decode",
             Self::Ordinary(name) => name,
         }
     }

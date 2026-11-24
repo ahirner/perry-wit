@@ -183,16 +183,8 @@ impl<'s> FunctionBuilder<'s> {
         let lhs = self.arithmetic(ctx, lhs);
         let rhs = self.arithmetic(ctx, rhs);
         Ok(match (op, kind(ctx, lhs)?, kind(ctx, rhs)?) {
-            (BinaryOp::Add, Kind::String, Kind::String) => {
-                self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs))
-            }
-            (BinaryOp::Add, Kind::String, _) | (BinaryOp::Add, _, Kind::String) => {
-                let lhs = self.display(ctx, lhs)?;
-                let rhs = self.display(ctx, rhs)?;
-                self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs))
-            }
             (op, Kind::Number, Kind::Number) => {
-                let intrinsic = match op {
+                if let Some(intrinsic) = match op {
                     BinaryOp::BitAnd => Some(Intrinsic::BitAnd),
                     BinaryOp::BitOr => Some(Intrinsic::BitOr),
                     BinaryOp::BitXor => Some(Intrinsic::BitXor),
@@ -200,38 +192,17 @@ impl<'s> FunctionBuilder<'s> {
                     BinaryOp::Shr => Some(Intrinsic::ShiftRight),
                     BinaryOp::UShr => Some(Intrinsic::ShiftRightUnsigned),
                     _ => None,
-                };
-                if let Some(intrinsic) = intrinsic {
+                } {
                     return Ok(self.intrinsic(ctx, intrinsic, vec![lhs, rhs]));
                 }
-                let kind = match op {
-                    BinaryOp::Add => BinaryKind::Add,
-                    BinaryOp::Sub => BinaryKind::Sub,
-                    BinaryOp::Mul => BinaryKind::Mul,
-                    BinaryOp::Div => BinaryKind::Div,
-                    BinaryOp::Mod => BinaryKind::Rem,
-                    other => bail_diag!(
-                        codes::UNSUPPORTED_OPERATOR,
-                        "operator {other:?} is not supported yet"
-                    ),
-                };
-                self.binary(ctx, kind, lhs, rhs)
+                self.binary(ctx, Self::arithmetic_kind(op)?, lhs, rhs)
             }
             (
                 op
                 @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod),
                 Kind::BigInt,
                 Kind::BigInt,
-            ) => {
-                let kind = match op {
-                    BinaryOp::Add => BinaryKind::Add,
-                    BinaryOp::Sub => BinaryKind::Sub,
-                    BinaryOp::Mul => BinaryKind::Mul,
-                    BinaryOp::Div => BinaryKind::Div,
-                    _ => BinaryKind::Rem,
-                };
-                self.binary(ctx, kind, lhs, rhs)
-            }
+            ) => self.binary(ctx, Self::arithmetic_kind(op)?, lhs, rhs),
             (op, left_kind, right_kind) => {
                 bail_diag!(
                     codes::UNSUPPORTED_OPERATOR,
@@ -240,6 +211,20 @@ impl<'s> FunctionBuilder<'s> {
                     right_kind.label()
                 )
             }
+        })
+    }
+
+    fn arithmetic_kind(op: &BinaryOp) -> Result<BinaryKind> {
+        Ok(match op {
+            BinaryOp::Add => BinaryKind::Add,
+            BinaryOp::Sub => BinaryKind::Sub,
+            BinaryOp::Mul => BinaryKind::Mul,
+            BinaryOp::Div => BinaryKind::Div,
+            BinaryOp::Mod => BinaryKind::Rem,
+            other => bail_diag!(
+                codes::UNSUPPORTED_OPERATOR,
+                "operator {other:?} is not supported yet"
+            ),
         })
     }
 
@@ -412,70 +397,66 @@ impl<'s> FunctionBuilder<'s> {
         };
         let null = matches!(left, Expr::Null) || matches!(right, Expr::Null);
         let value = self.expression(ctx, other)?;
-        let absent = if loose {
-            self.is_nullish(ctx, value)?
-        } else if let Some(json) = self.json_operand(ctx, value)? {
-            let intrinsic = if null {
-                Intrinsic::JsonIsNull
-            } else {
-                Intrinsic::JsonIsUndefined
-            };
-            self.intrinsic(ctx, intrinsic, vec![json])
-        } else if value.get_type(ctx).deref(ctx).is::<ExceptionType>() {
-            self.intrinsic(
-                ctx,
-                if null {
-                    Intrinsic::ExceptionIsNull
-                } else {
-                    Intrinsic::ExceptionIsUndefined
-                },
-                vec![value],
-            )
-        } else if self.is_optional(ctx, value) {
-            if null {
-                self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))
-            } else {
-                self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value))
-            }
-        } else {
-            self.boolean(ctx, false)
-        };
+        let absent = self.absence_match(ctx, value, (!loose).then_some(null))?;
         Ok(Some(self.equality_result(ctx, equality, absent)))
     }
 
     /// Whether `value` is `null` or `undefined`.
     pub(super) fn is_nullish(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
-        let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        if let Some(json) = self.json_operand(ctx, value)? {
-            let null = self.intrinsic(ctx, Intrinsic::JsonIsNull, vec![json]);
-            self.choose(
-                ctx,
-                ty,
-                null,
-                |b, ctx| Ok(b.boolean(ctx, true)),
-                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonIsUndefined, vec![json])),
-            )
+        self.absence_match(ctx, value, None)
+    }
+
+    /// Test `value` for `null` (`Some(true)`), `undefined` (`Some(false)`), or either (`None`).
+    fn absence_match(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        null_only: Option<bool>,
+    ) -> Result<Value> {
+        let pair = if let Some(json) = self.json_operand(ctx, value)? {
+            Some((
+                Some(json),
+                Intrinsic::JsonIsNull,
+                Intrinsic::JsonIsUndefined,
+            ))
         } else if value.get_type(ctx).deref(ctx).is::<ExceptionType>() {
-            let null = self.intrinsic(ctx, Intrinsic::ExceptionIsNull, vec![value]);
-            self.choose(
-                ctx,
-                ty,
-                null,
-                |b, ctx| Ok(b.boolean(ctx, true)),
-                |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::ExceptionIsUndefined, vec![value])),
-            )
-        } else if self.is_optional(ctx, value) {
-            let undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-            self.choose(
-                ctx,
-                ty,
-                undef,
-                |b, ctx| Ok(b.boolean(ctx, true)),
-                |b, ctx| Ok(b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))),
-            )
+            Some((
+                None,
+                Intrinsic::ExceptionIsNull,
+                Intrinsic::ExceptionIsUndefined,
+            ))
         } else {
-            Ok(self.boolean(ctx, false))
+            None
+        };
+        let check = |b: &mut Self, ctx: &mut Context, null: bool| match pair {
+            Some((json, null_op, undef_op)) => b.intrinsic(
+                ctx,
+                if null { null_op } else { undef_op },
+                vec![json.unwrap_or(value)],
+            ),
+            None if b.is_optional(ctx, value) && null => {
+                b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))
+            }
+            None if b.is_optional(ctx, value) => {
+                b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value))
+            }
+            None => b.boolean(ctx, false),
+        };
+        if let Some(null) = null_only {
+            return Ok(check(self, ctx, null));
         }
+        if pair.is_none() && !self.is_optional(ctx, value) {
+            return Ok(self.boolean(ctx, false));
+        }
+        let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let first = check(self, ctx, true);
+        self.choose(
+            ctx,
+            ty,
+            first,
+            |b, ctx| Ok(b.boolean(ctx, true)),
+            |b, ctx| Ok(check(b, ctx, false)),
+        )
     }
 
     /// `equal` for `===` (`CompareKind::Eq`), its negation for `!==`.

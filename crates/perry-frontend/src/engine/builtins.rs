@@ -69,7 +69,7 @@ pub(crate) fn lookup_method_result(
     if property || matches!(types.kind(receiver), TyKind::ClassInst(_)) {
         return None;
     }
-    Method::inferred(&types.materialize_hir(ctx, receiver), name, false)
+    Method::unique_result_rule(name)
 }
 
 pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> Option<Ty> {
@@ -255,6 +255,7 @@ pub(crate) fn apply_method_result(
         }
         MethodResult::Number => Ty::NUMBER,
         MethodResult::Boolean => Ty::BOOLEAN,
+        MethodResult::Dynamic => Ty::DYNAMIC,
         MethodResult::OptionalNumber => types.with_absences(Ty::NUMBER, Absence::Undefined),
         MethodResult::NullableString => types.with_absences(Ty::STRING, Absence::Null),
         MethodResult::Native(k) => native_ty(ctx, types, k),
@@ -561,27 +562,6 @@ pub(crate) fn property_type(
                         _ => None,
                     };
                 }
-            } else {
-                if Kind::builtin(base_name) == Some(Kind::Exception) {
-                    match property {
-                        "message" | "name" => return Some(Ty::STRING),
-                        "cause" => return Some(Ty::DYNAMIC),
-                        _ => {}
-                    }
-                }
-                match (base_name.as_str(), property) {
-                    ("Temporal.PlainDate", "year" | "month" | "day" | "dayOfWeek")
-                    | (
-                        "Temporal.PlainDateTime",
-                        "year" | "month" | "day" | "dayOfWeek" | "hour" | "minute" | "second"
-                        | "millisecond" | "microsecond" | "nanosecond",
-                    )
-                    | ("Temporal.Instant", "epochMilliseconds") => return Some(Ty::NUMBER),
-                    ("Temporal.PlainDate" | "Temporal.PlainDateTime", "calendarId") => {
-                        return Some(Ty::STRING);
-                    }
-                    _ => {}
-                }
             }
             let arg_hirs: Vec<HirType> = gargs
                 .map(|a| {
@@ -625,19 +605,9 @@ pub(crate) fn property_type(
                 HirType::Named(base_name.clone())
             };
             dict_value_ty(ctx, decls, types, &full_hir).or_else(|| {
-                gargs
-                    .is_none()
-                    .then(|| Method::named_property(base_name, property))
-                    .flatten()
-                    .or_else(|| lookup_method_result(ctx, types, stripped, property, true))
-                    .map(|rule| {
-                        apply_method_result(
-                            ctx,
-                            types,
-                            rule,
-                            MethodResultArgs::receiver_only(stripped),
-                        )
-                    })
+                lookup_method_result(ctx, types, stripped, property, true).map(|rule| {
+                    apply_method_result(ctx, types, rule, MethodResultArgs::receiver_only(stripped))
+                })
             })
         }
         TyKind::Union(span) => {
@@ -693,21 +663,6 @@ pub(crate) fn index_type(
             _ => None,
         },
         TyKind::Object { props, index: idx } => {
-            if let Expr::String(key) = index {
-                let name = types.intern_name(key);
-                if let Some(p) = types
-                    .object_slice(props)
-                    .iter()
-                    .find(|p| p.name == name)
-                    .copied()
-                {
-                    return Some(if p.optional {
-                        types.with_absences(p.ty, Absence::Undefined)
-                    } else {
-                        p.ty
-                    });
-                }
-            }
             if let Some(idx_ty) = idx {
                 return Some(types.with_absences(idx_ty, Absence::Undefined));
             }

@@ -11,7 +11,7 @@ use super::solve::{
     ClassInst, FuncCoercion, Instance, Receiver, SiteEntry, SiteResolution, Solved,
 };
 use super::types::{
-    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, IdxVec, InstanceId,
+    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, Idx, IdxVec, InstanceId,
     TemplateId, Ty, TyKind, TypeTable, box_hir, func_tag,
 };
 use crate::hir_compat::resource_classes::{
@@ -37,7 +37,6 @@ pub(crate) struct Emitted {
     pub(crate) instantiations: Vec<(String, String, u32, Option<String>)>,
     pub(crate) inline_callbacks: Vec<FuncId>,
     pub(crate) class_origins: Vec<(String, String)>,
-    pub(crate) json_eligible_bindings: Vec<LocalId>,
     pub(crate) boxed_locals: Vec<LocalId>,
     pub(crate) deletes_array_elements: bool,
 }
@@ -68,9 +67,6 @@ impl Emitted {
         }
         metadata.inline_callbacks.extend(self.inline_callbacks);
         metadata.class_origins.extend(self.class_origins);
-        metadata
-            .json_eligible_bindings
-            .extend(self.json_eligible_bindings);
         metadata.sparse_arrays |= self.deletes_array_elements;
     }
 }
@@ -111,7 +107,6 @@ pub(crate) fn build(
         instantiations: Vec::new(),
         inline_callbacks: Vec::new(),
         class_origins: Vec::new(),
-        json_eligible_bindings: Vec::new(),
         boxed_locals: Vec::new(),
         emitted_env_classes: std::collections::HashSet::new(),
         emitted_timer_class: false,
@@ -130,7 +125,6 @@ pub(crate) fn build(
         instantiations: e.instantiations,
         inline_callbacks: e.inline_callbacks,
         class_origins: e.class_origins,
-        json_eligible_bindings: e.json_eligible_bindings,
         boxed_locals: e.boxed_locals,
         deletes_array_elements: solved.deletes_array_elements,
     })
@@ -154,7 +148,6 @@ struct Emitter<'h, 'a> {
     instantiations: Vec<(String, String, u32, Option<String>)>,
     inline_callbacks: Vec<FuncId>,
     class_origins: Vec<(String, String)>,
-    json_eligible_bindings: Vec<LocalId>,
     boxed_locals: Vec<LocalId>,
     emitted_env_classes: std::collections::HashSet<FuncIdentity>,
     emitted_timer_class: bool,

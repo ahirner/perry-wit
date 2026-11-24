@@ -205,7 +205,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A property (`args` is `None`) or method of `Headers`, `Response` or `Request`.
-    pub(super) fn web_member(
+    fn web_member(
         &mut self,
         ctx: &mut Context,
         receiver: Value,

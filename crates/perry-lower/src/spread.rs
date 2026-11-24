@@ -237,6 +237,36 @@ impl<'s> FunctionBuilder<'s> {
         Ok(self.array_length(ctx, receiver))
     }
 
+    fn for_each_spread_arg(
+        &mut self,
+        ctx: &mut Context,
+        args: &'s [perry_frontend::hir::CallArg],
+        hint: TypeHandle,
+        label: &str,
+        mut on_value: impl FnMut(&mut Self, &mut Context, Value) -> Result<()>,
+    ) -> Result<()> {
+        for argument in args {
+            match argument {
+                perry_frontend::hir::CallArg::Expr(expression) => {
+                    let value = self.expression(ctx, expression)?;
+                    on_value(self, ctx, value)?;
+                }
+                perry_frontend::hir::CallArg::Spread(expression) => {
+                    let source = self.spread_value(ctx, expression, Some(hint))?;
+                    let source = self.defined(ctx, source)?;
+                    self.array_element(ctx, source)?;
+                    let limit = self.array_length(ctx, source);
+                    let zero = self.number(ctx, 0.0);
+                    self.index_loop(ctx, label, zero, limit, |b, ctx, current, _, _| {
+                        let value = b.element_at(ctx, source, current)?;
+                        on_value(b, ctx, value)
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn concat_call_spread(
         &mut self,
         ctx: &mut Context,
@@ -246,84 +276,33 @@ impl<'s> FunctionBuilder<'s> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
         if receiver.get_type(ctx).deref(ctx).is::<StringType>() {
-            return self.string_concat_spread(ctx, receiver, args);
+            let text = StringType::get(ctx).into();
+            let result = self.entry_slot(ctx, text);
+            self.store(ctx, result, receiver);
+            self.for_each_spread_arg(
+                ctx,
+                args,
+                text,
+                "string_concat_arguments",
+                |b, ctx, value| {
+                    let value = b.display(ctx, value)?;
+                    let previous = b.load(ctx, result)?;
+                    let joined = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
+                    b.store(ctx, result, joined);
+                    Ok(())
+                },
+            )?;
+            return self.load(ctx, result);
         }
         let element = self.array_element(ctx, receiver)?;
         let array = ArrayType::get(ctx, element).into();
         let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, array, vec![receiver]));
-        for argument in args {
-            match argument {
-                perry_frontend::hir::CallArg::Expr(expression) => {
-                    let value = self.expression(ctx, expression)?;
-                    let source = self.concat_segment(ctx, value, element)?;
-                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, source));
-                }
-                perry_frontend::hir::CallArg::Spread(expression) => {
-                    let source = self.spread_value(ctx, expression, Some(element))?;
-                    self.array_element(ctx, source)?;
-                    let limit = self.array_length(ctx, source);
-                    let zero = self.number(ctx, 0.0);
-                    self.index_loop(
-                        ctx,
-                        "concat_arguments",
-                        zero,
-                        limit,
-                        |b, ctx, current, _, _| {
-                            let value = b.element_at(ctx, source, current)?;
-                            let segment = b.concat_segment(ctx, value, element)?;
-                            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
-                            Ok(())
-                        },
-                    )?;
-                }
-            }
-        }
+        self.for_each_spread_arg(ctx, args, element, "concat_arguments", |b, ctx, value| {
+            let segment = b.concat_segment(ctx, value, element)?;
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
+            Ok(())
+        })?;
         Ok(self.emit_value(ctx, |ctx| ConcatSegmentsOp::new(ctx, sources)))
-    }
-
-    fn string_concat_spread(
-        &mut self,
-        ctx: &mut Context,
-        receiver: Value,
-        args: &'s [perry_frontend::hir::CallArg],
-    ) -> Result<Value> {
-        let text = StringType::get(ctx).into();
-        let result = self.entry_slot(ctx, text);
-        self.store(ctx, result, receiver);
-        for argument in args {
-            match argument {
-                perry_frontend::hir::CallArg::Expr(expression) => {
-                    let value = self.expression(ctx, expression)?;
-                    let value = self.display(ctx, value)?;
-                    let previous = self.load(ctx, result)?;
-                    let joined = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
-                    self.store(ctx, result, joined);
-                }
-                perry_frontend::hir::CallArg::Spread(expression) => {
-                    let source = self.spread_value(ctx, expression, Some(text))?;
-                    let source = self.defined(ctx, source)?;
-                    self.array_element(ctx, source)?;
-                    let limit = self.array_length(ctx, source);
-                    let zero = self.number(ctx, 0.0);
-                    self.index_loop(
-                        ctx,
-                        "string_concat_arguments",
-                        zero,
-                        limit,
-                        |b, ctx, current, _, _| {
-                            let value = b.element_at(ctx, source, current)?;
-                            let value = b.display(ctx, value)?;
-                            let previous = b.load(ctx, result)?;
-                            let joined =
-                                b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
-                            b.store(ctx, result, joined);
-                            Ok(())
-                        },
-                    )?;
-                }
-            }
-        }
-        self.load(ctx, result)
     }
 
     fn collect_spread_args(
@@ -410,16 +389,7 @@ impl<'s> FunctionBuilder<'s> {
             })?);
         }
         if let Some(rest_param) = rest {
-            let rest_arr_ty =
-                TypedHandle::<ArrayType>::from_handle(rest_param.binding.carrier, ctx).map_err(
-                    |_| {
-                        Diagnostic::new(
-                            codes::TYPE_MISMATCH,
-                            "rest parameter must have an array type",
-                        )
-                    },
-                )?;
-            let elem_ty = rest_arr_ty.deref(ctx).element();
+            let elem_ty = Self::rest_element_type(ctx, rest_param.binding.carrier)?;
             values.push(self.collect_spread_args(ctx, &args[arg_idx..], elem_ty)?);
         }
         Ok(self

@@ -394,9 +394,6 @@ impl<'s> FunctionBuilder<'s> {
                     let error = self.shapes.annotate_call(error, byte_offset);
                     self.shapes.annotate_local(error, *id)
                 }
-                Expr::Closure { .. } => unsupported!(
-                    "immediately invoked function expressions and closure calls are not supported yet; declare a named function instead"
-                ),
                 Expr::ExternFuncRef { name, .. } => {
                     unsupported!(
                         "call to external or unresolved function '{name}' is not supported yet"
@@ -434,14 +431,7 @@ impl<'s> FunctionBuilder<'s> {
             );
         }
         if let Some(rest) = rest {
-            let array =
-                TypedHandle::<ArrayType>::from_handle(rest.binding.carrier, ctx).map_err(|_| {
-                    Diagnostic::new(
-                        codes::TYPE_MISMATCH,
-                        "rest parameter must have an array type",
-                    )
-                })?;
-            let element = array.deref(ctx).element();
+            let element = Self::rest_element_type(ctx, rest.binding.carrier)?;
             let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
             for (offset, arg) in args.iter().skip(fixed.len()).enumerate() {
                 let value = self.expression_with(ctx, arg, Some(element))?;
@@ -455,6 +445,16 @@ impl<'s> FunctionBuilder<'s> {
             values.push(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)));
         }
         self.emit_signature_call(ctx, signature, values)
+    }
+
+    pub(super) fn rest_element_type(ctx: &Context, carrier: TypeHandle) -> Result<TypeHandle> {
+        let array = TypedHandle::<ArrayType>::from_handle(carrier, ctx).map_err(|_| {
+            Diagnostic::new(
+                codes::TYPE_MISMATCH,
+                "rest parameter must have an array type",
+            )
+        })?;
+        Ok(array.deref(ctx).element())
     }
 
     pub(super) fn bind_fixed_arg(
@@ -508,7 +508,7 @@ impl<'s> FunctionBuilder<'s> {
                     .map_or(crate::inline::InlineResult::Void, |ty| {
                         crate::inline::InlineResult::Declared(ty.carrier)
                     });
-                let slot = this.inline_body(ctx, &function.body, &function.params, result)?;
+                let slot = this.inline_body(ctx, &function.body, result)?;
                 slot.map(|slot| this.load(ctx, slot)).transpose()
             });
             self.inline_functions.pop();

@@ -200,10 +200,6 @@ impl<'s> FunctionBuilder<'s> {
                 builder.binding(ctx, id, &field.ty, field.init.as_ref())?;
             }
         }
-        let body = hir_compat::strip_synthetic_default_guards(
-            body,
-            signature.params.iter().map(|p| p.source),
-        );
         builder.statements(ctx, body)?;
         if !builder.terminated(ctx) {
             let values = builder.implicit_results(ctx);

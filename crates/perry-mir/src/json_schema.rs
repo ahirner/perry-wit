@@ -105,39 +105,39 @@ impl JsonSchema {
                 Some(JsonSchema::Value) if usage != Usage::Reflection => {}
                 Some(JsonSchema::Integer { width, .. })
                     if width == 64 || usage == Usage::Reflection => {}
-                Some(JsonSchema::Array(element) | JsonSchema::Optional(element)) => {
-                    pending.push(element)
+                Some(s @ (JsonSchema::Array(_) | JsonSchema::Optional(_))) => {
+                    s.push_children(ctx, &mut pending);
                 }
-                Some(JsonSchema::Record(record)) => {
-                    let record = record.deref(ctx);
+                Some(s @ JsonSchema::Dictionary { .. }) if usage != Usage::Cursor => {
+                    s.push_children(ctx, &mut pending);
+                }
+                Some(s @ JsonSchema::Record(record)) => {
                     if usage == Usage::Cursor
-                        && !matches!(record.kind(), RecordKind::Object | RecordKind::Tuple)
+                        && !matches!(
+                            record.deref(ctx).kind(),
+                            RecordKind::Object | RecordKind::Tuple
+                        )
                     {
                         return false;
                     }
-                    let Ok(fields) = record.fields() else {
+                    if !s.push_children(ctx, &mut pending) {
                         return false;
-                    };
-                    pending.extend(fields.iter().map(|(_, ty)| *ty));
+                    }
                 }
-                Some(JsonSchema::Dictionary { entry, .. }) if usage != Usage::Cursor => {
-                    pending.push(entry.into())
-                }
-                Some(JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant))
+                Some(s @ (JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant)))
                     if usage != Usage::Reflection =>
                 {
-                    for (_, payload) in variant.deref(ctx).cases() {
-                        if let Some(payload) = payload {
-                            // Variant payload storage has one scalar slot, unlike record/array slots.
-                            if crate::present_type(ctx, *payload)
+                    // Variant payload storage has one scalar slot, unlike record/array slots.
+                    if variant.deref(ctx).cases().iter().any(|(_, payload)| {
+                        payload.is_some_and(|p| {
+                            crate::present_type(ctx, p)
                                 .deref(ctx)
                                 .is::<crate::NumericType>()
-                            {
-                                return false;
-                            }
-                            pending.push(*payload);
-                        }
+                        })
+                    }) {
+                        return false;
                     }
+                    s.push_children(ctx, &mut pending);
                 }
                 None if usage == Usage::Reflection
                     && ty.deref(ctx).is::<crate::ExceptionType>() => {}
@@ -201,6 +201,26 @@ impl JsonSchema {
             Self::Dictionary { entry, .. } => Some(entry.into()),
             _ => None,
         }
+    }
+
+    /// Append this schema's directly nested types to `out`. Returns `false` if a record is incomplete.
+    pub(crate) fn push_children(self, ctx: &Context, out: &mut Vec<TypeHandle>) -> bool {
+        match self {
+            Self::Optional(inner) | Self::Array(inner) => out.push(inner),
+            Self::Dictionary { entry, .. } => out.push(entry.into()),
+            Self::Record(record) => {
+                let record = record.deref(ctx);
+                let Ok(fields) = record.fields() else {
+                    return false;
+                };
+                out.extend(fields.iter().map(|&(_, ty)| ty));
+            }
+            Self::Variant(variant) | Self::ValueUnion(variant) => {
+                out.extend(variant.deref(ctx).cases().iter().filter_map(|&(_, p)| p));
+            }
+            Self::Value | Self::Number | Self::Integer { .. } | Self::Boolean | Self::String => {}
+        }
+        true
     }
 
     /// Whether every reachable type can be built directly from the JSON lexer.

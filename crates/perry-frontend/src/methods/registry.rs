@@ -8,7 +8,7 @@ macro_rules! method_catalog {
         $consumer! {
             Receiver::Value(Kind::Array), "array" {
                 ArrayPush "push" Number Push Method [args:rest] => value(push_values(args)), "accepts values";
-                ArrayConcat "concat" Receiver Concat Method [args:rest] => value(concat_values(args)), "accepts values";
+                ArrayConcat "concat" Receiver Always Method [args:rest] => value(concat_values(args)), "accepts values";
                 ArrayMap "map" Mapped Upstream Method callback(Elements) [callback] => value(array_transform(callback, Transform::Map)), "requires one static callback";
                 ArrayFilter "filter" Receiver Upstream Method callback(Elements) [callback] => value(array_transform(callback, Transform::Filter)), "requires one static callback";
                 ArrayFlatMap "flatMap" FlatMapped Upstream Method callback(Elements) [callback] => value(array_transform(callback, Transform::FlatMap)), "requires one static callback";
@@ -120,6 +120,7 @@ macro_rules! method_catalog {
                 DateSetTime "setTime" Number Upstream Method [args:rest] => optional(date_set(7, 1, args)), "accepts date fields";
             }
             Receiver::Value(Kind::Stats), "Stats" {
+                StatsSize "size" Number Upstream Property [] => intrinsic(StatsSize), "takes no arguments";
                 StatsIsFile "isFile" Boolean Upstream Method [args:rest] => intrinsic(StatsIsFile, args, [], Value), "accepts method arguments";
                 StatsIsDirectory "isDirectory" Boolean Upstream Method [args:rest] => intrinsic(StatsIsDirectory, args, [], Value), "accepts method arguments";
             }
@@ -138,11 +139,16 @@ macro_rules! method_catalog {
                 RegexTest "test" Boolean Upstream Method [text] => value(regex_test_text(text)), "requires one string";
                 RegexExec "exec" NullableStrings Always Method [text] => optional(regex_exec(text)), "requires one string";
             }
+            Receiver::Value(Kind::Encoder | Kind::Decoder), "TextCodec" {
+                CodecEncoding "encoding" String Upstream Property [] => value(utf8_encoding()), "takes no arguments";
+            }
             Receiver::Value(Kind::Encoder), "TextEncoder" {
                 EncoderEncode "encode" Native(Kind::Bytes) Upstream Method [args:rest] => value(encode(args)), "accepts a string";
             }
             Receiver::Value(Kind::Decoder), "method" {
-                DecoderDecode "decode" String Upstream Method [bytes:optional, options:optional] => value(decode(bytes, options)), "takes bytes and stream options";
+                DecoderFatal "fatal" Boolean Upstream Property [] => intrinsic(DecoderFatal), "takes no arguments";
+                DecoderIgnoreBom "ignoreBOM" Boolean Upstream Property [] => intrinsic(DecoderIgnoreBom), "takes no arguments";
+                DecoderDecode "decode" String Options Method [bytes:optional, options:optional] => value(decode(bytes, options)), "takes bytes and stream options";
             }
             Receiver::Value(Kind::Url), "method" {
                 UrlString "toString" | "toJSON" String Upstream Method [args:rest] => intrinsic(UrlGet, args, [Constant(0.0)], Value), "accepts method arguments";
@@ -151,7 +157,14 @@ macro_rules! method_catalog {
                 SearchParamsAppend "append" Void Upstream Method [name, value] => value(search_params_append(name, value)), "needs a name and value";
             }
             Receiver::Value(Kind::Abort), "method" {
+                AbortSignal "signal" Receiver Upstream Property [] => receiver(&[]), "takes no arguments";
+                AbortAborted "aborted" Boolean Upstream Property [] => intrinsic(AbortAborted), "takes no arguments";
                 AbortAbort "abort" Void Upstream Method [] => optional(abort_controller()), "does not support abort reasons yet";
+            }
+            Receiver::Value(Kind::Exception), "Error" {
+                ExceptionCause "cause" Dynamic Upstream Property [] => intrinsic(ExceptionCause), "takes no arguments";
+                ExceptionName "name" String Upstream Property [] => intrinsic(ExceptionName), "takes no arguments";
+                ExceptionMessage "message" String Upstream Property [] => value(exception_message()), "takes no arguments";
             }
             Receiver::Value(Kind::Number), "method" {
                 NumberToString "toString" String Arguments Method [radix:optional] => optional(number_to_string(radix)), "accepts at most one radix";
@@ -165,6 +178,7 @@ macro_rules! method_catalog {
                 CollectionEntries "entries" IteratorEntries Upstream Method [] => value(iterator_method(IteratorMethod::Entries)), "takes no arguments";
             }
             Receiver::Value(Kind::Instant), "Temporal" {
+                InstantEpochMs "epochMilliseconds" Number Upstream Property [] => intrinsic(InstantMs), "takes no arguments";
                 InstantToString "toString" | "toJSON" String Upstream Method [] => intrinsic(InstantString), "toString options are not supported yet";
             }
             Receiver::Value(Kind::PlainDate), "Temporal" {
@@ -172,6 +186,12 @@ macro_rules! method_catalog {
             }
             Receiver::Value(Kind::PlainDateTime), "Temporal" {
                 PlainDateTimeToString "toString" | "toJSON" String Upstream Method [] => intrinsic(PlainDateTimeString), "toString options are not supported yet";
+                TemporalHour "hour" Number Upstream Property [] => value(temporal_part(DatePart::Hour)), "takes no arguments";
+                TemporalMinute "minute" Number Upstream Property [] => value(temporal_part(DatePart::Minute)), "takes no arguments";
+                TemporalSecond "second" Number Upstream Property [] => value(temporal_part(DatePart::Second)), "takes no arguments";
+                TemporalMillisecond "millisecond" Number Upstream Property [] => value(temporal_part(DatePart::Millisecond)), "takes no arguments";
+                TemporalMicrosecond "microsecond" Number Upstream Property [] => value(temporal_part(DatePart::Microsecond)), "takes no arguments";
+                TemporalNanosecond "nanosecond" Number Upstream Property [] => value(temporal_part(DatePart::Nanosecond)), "takes no arguments";
             }
             Receiver::Value(Kind::PlainDate), "Temporal.PlainDate" {
                 PlainDateEquals "equals" Boolean Upstream Method [other] => value(plain_date_equals(other)), "takes one argument";
@@ -179,6 +199,11 @@ macro_rules! method_catalog {
                 PlainDateSince "since" Duration Upstream Method [other, options:optional] => value(plain_date_since(other, options)), "takes one or two arguments";
             }
             Receiver::Value(Kind::PlainDate | Kind::PlainDateTime), "Temporal" {
+                TemporalCalendarId "calendarId" String Upstream Property [] => value(iso_calendar_id()), "takes no arguments";
+                TemporalYear "year" Number Upstream Property [] => value(temporal_part(DatePart::Year)), "takes no arguments";
+                TemporalMonth "month" Number Upstream Property [] => value(temporal_part(DatePart::Month)), "takes no arguments";
+                TemporalDay "day" Number Upstream Property [] => value(temporal_part(DatePart::Day)), "takes no arguments";
+                TemporalDayOfWeek "dayOfWeek" Number Upstream Property [] => value(temporal_part(DatePart::Weekday)), "takes no arguments";
                 TemporalAdd "add" Receiver Upstream Method [duration, options:optional] => optional(temporal_add(duration, options, false)), "takes a duration object and optional options";
                 TemporalSubtract "subtract" Receiver Upstream Method [duration, options:optional] => optional(temporal_add(duration, options, true)), "takes a duration object and optional options";
             }

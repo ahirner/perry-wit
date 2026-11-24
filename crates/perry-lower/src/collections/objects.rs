@@ -36,6 +36,31 @@ impl<'s> FunctionBuilder<'s> {
         Ok(dict)
     }
 
+    /// Dispatch a dynamic string `key` against each field of a closed record.
+    fn match_record_key(
+        &mut self,
+        ctx: &mut Context,
+        rec: TypedHandle<RecordType>,
+        key: Value,
+        mut acc: Value,
+        mut on_match: impl FnMut(&mut Self, &mut Context, String, TypeHandle) -> Result<Value>,
+    ) -> Result<Value> {
+        let result_ty = acc.get_type(ctx);
+        let fields = rec.deref(ctx).fields().to_diag(ctx)?.to_vec();
+        for (name, field_ty) in fields.into_iter().rev() {
+            let name_val = self.string(ctx, &name);
+            let eq = self.compare(ctx, CompareKind::Eq, key, name_val);
+            acc = self.choose(
+                ctx,
+                result_ty,
+                eq,
+                |b, ctx| on_match(b, ctx, name, field_ty),
+                |_, _| Ok(acc),
+            )?;
+        }
+        Ok(acc)
+    }
+
     /// Dynamic string indexing `rec[key]` on a closed `RecordType` when all fields share a uniform type.
     pub(crate) fn record_dynamic_get(
         &mut self,
@@ -45,19 +70,14 @@ impl<'s> FunctionBuilder<'s> {
         rec_handle: TypedHandle<RecordType>,
     ) -> Result<Value> {
         let uniform_ty = record_uniform_field_type(ctx, rec_handle).ok_or_else(|| Diagnostic::unsupported("dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>"))?;
-        let fields = rec_handle.deref(ctx).fields().to_diag(ctx)?.to_vec();
         let opt_ty = crate::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
-        let mut acc = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
-        for (name, _) in fields.into_iter().rev() {
-            let name_str = self.string(ctx, &name);
-            let eq = self.compare(ctx, CompareKind::Eq, key, name_str);
+        let init = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
+        self.match_record_key(ctx, rec_handle, key, init, |b, ctx, name, _| {
             let op = FieldGetOp::new(ctx, rec, name).to_diag(ctx)?;
-            let field_val = self.append_value(ctx, &op);
-            let normalized = self.normalize_optional_read(ctx, field_val)?;
-            let field_opt = self.fit(ctx, normalized, opt_ty)?;
-            acc = self.choose(ctx, opt_ty, eq, |_, _| Ok(field_opt), |_, _| Ok(acc))?;
-        }
-        Ok(acc)
+            let field_val = b.append_value(ctx, &op);
+            let normalized = b.normalize_optional_read(ctx, field_val)?;
+            b.fit(ctx, normalized, opt_ty)
+        })
     }
 
     /// Closed-record enumeration shares presence checks and value normalization.
@@ -205,8 +225,7 @@ impl<'s> FunctionBuilder<'s> {
                 return Ok(self.boolean(ctx, false));
             }
             let nullish = self.is_nullish(ctx, val)?;
-            let false_val = self.boolean(ctx, false);
-            return Ok(self.compare(ctx, CompareKind::Eq, nullish, false_val));
+            return Ok(self.not(ctx, nullish));
         }
         Ok(self.boolean(ctx, is_plain_array))
     }
@@ -243,32 +262,15 @@ impl<'s> FunctionBuilder<'s> {
             && rec.deref(ctx).kind() == RecordKind::Object
         {
             let k = self.string_operand(ctx, prop_expr)?;
-            let fields = rec
-                .deref(ctx)
-                .fields()
-                .map_err(|_| Diagnostic::internal("record without fields"))?
-                .to_vec();
-            let mut acc = self.boolean(ctx, false);
-            let bool_ty = acc.get_type(ctx);
-            for (name, field_ty) in fields {
-                let name_val = self.string(ctx, &name);
-                let eq = self.compare(ctx, CompareKind::Eq, k, name_val);
-                acc = self.choose(
-                    ctx,
-                    bool_ty,
-                    eq,
-                    |b, ctx| {
-                        if admits_undefined(ctx, field_ty) {
-                            let op = FieldPresentOp::new(ctx, obj, name).to_diag(ctx)?;
-                            Ok(b.append_value(ctx, &op))
-                        } else {
-                            Ok(b.boolean(ctx, true))
-                        }
-                    },
-                    |_, _| Ok(acc),
-                )?;
-            }
-            return Ok(acc);
+            let init = self.boolean(ctx, false);
+            return self.match_record_key(ctx, rec, k, init, |b, ctx, name, field_ty| {
+                if admits_undefined(ctx, field_ty) {
+                    let op = FieldPresentOp::new(ctx, obj, name).to_diag(ctx)?;
+                    Ok(b.append_value(ctx, &op))
+                } else {
+                    Ok(b.boolean(ctx, true))
+                }
+            });
         }
         bail_unsupported!("'in' operator requires a Record<K, V> or closed record shape")
     }

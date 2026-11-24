@@ -4,7 +4,7 @@ use crate::engine::bitset::BitSet;
 use crate::engine::boundary::{LocalFlags, TemplateKind};
 use crate::engine::solve::HelperSpec;
 use crate::engine::types::{
-    CaptureOwner, DispatchArmSpan, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind,
+    CaptureOwner, DispatchArmSpan, FuncIdentity, HelperId, Idx, InstanceId, TemplateId, Ty, TyKind,
     box_hir, env_class_name, func_tag,
 };
 use crate::hir_compat;
@@ -162,13 +162,11 @@ impl<'h, 'a> Emitter<'h, 'a> {
         for (field, ty) in members {
             let pid = self.fresh_synthetic_local()?;
             params.push(synth_param(pid, field.clone(), ty.clone()));
-            body.push(Stmt::Expr(Expr::PropertySet {
-                object: Box::new(Expr::This),
-                property: field.clone(),
-                value: Box::new(Expr::LocalGet(pid)),
-                byte_offset: 0,
-                byte_end: 0,
-            }));
+            body.push(Stmt::Expr(Self::prop_set(
+                Expr::This,
+                field.clone(),
+                Expr::LocalGet(pid),
+            )));
             fields.push(ClassField {
                 origin: ClassFieldOrigin::Declared,
                 name: field,
@@ -386,6 +384,56 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
     }
 
+    pub(super) fn prop_set(object: Expr, property: impl Into<String>, value: Expr) -> Expr {
+        Expr::PropertySet {
+            object: Box::new(object),
+            property: property.into(),
+            value: Box::new(value),
+            byte_offset: 0,
+            byte_end: 0,
+        }
+    }
+
+    pub(super) fn synth_new(class_name: impl Into<String>, args: Vec<Expr>) -> Expr {
+        Expr::New {
+            class_name: class_name.into(),
+            args,
+            type_args: Vec::new(),
+            byte_offset: 0,
+            byte_end: 0,
+            cap_args_appended: 0,
+        }
+    }
+
+    pub(super) fn synth_closure(
+        &mut self,
+        params: Vec<perry_hir::ir::Param>,
+        return_type: HirType,
+        body: Vec<Stmt>,
+        captures: Vec<LocalId>,
+    ) -> Result<Expr> {
+        Ok(Expr::Closure {
+            func_id: self.fresh_func_id()?,
+            params,
+            return_type,
+            body,
+            captures,
+            mutable_captures: Vec::new(),
+            captures_this: false,
+            captures_new_target: false,
+            enclosing_class: None,
+            is_async: false,
+            is_generator: false,
+            is_strict: true,
+            construct_only: false,
+            is_arrow: true,
+        })
+    }
+
+    pub(super) fn throw_type_error(message: &str) -> Stmt {
+        Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(message.into()))))
+    }
+
     pub(super) fn emit_capture_ref(&self, rctx: &RewriteCtx<'_>, cap_id: LocalId) -> Expr {
         if let Some(env_pid) = rctx.env_local
             && let Some((_, field, _)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == cap_id)
@@ -434,23 +482,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         } else {
             vec![Stmt::Return(Some(call))]
         };
-        let closure_fid = self.fresh_func_id()?;
-        Ok(Expr::Closure {
-            func_id: closure_fid,
-            params,
-            return_type: ret_ty,
-            body,
-            captures,
-            mutable_captures: Vec::new(),
-            captures_this: false,
-            captures_new_target: false,
-            enclosing_class: None,
-            is_async: false,
-            is_generator: false,
-            is_strict: true,
-            construct_only: false,
-            is_arrow: true,
-        })
+        self.synth_closure(params, ret_ty, body, captures)
     }
 
     pub(super) fn emit_helper_fn(&mut self, id: HelperId) -> Result<&Function> {
@@ -517,15 +549,12 @@ impl<'h, 'a> Emitter<'h, 'a> {
     }
 
     fn build_throw_type_error(&self, fid: FuncId) -> Function {
-        let body = vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
-            "callee is not a function".into(),
-        ))))];
         synth_function(
             fid,
             format!("__not_fn_{fid}"),
             Vec::new(),
             HirType::Never,
-            body,
+            vec![Self::throw_type_error("callee is not a function")],
             false,
         )
     }
@@ -610,23 +639,14 @@ impl<'h, 'a> Emitter<'h, 'a> {
         };
         let (has_null, has_undef) = self.nullish_flags(callee_ty);
         let mut stmts = Vec::new();
-        if has_null {
-            stmts.push(Stmt::If {
-                condition: Self::eq_expr(Expr::LocalGet(fn_pid), Expr::Null),
-                then_branch: vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
-                    "callee is not a function".into(),
-                ))))],
-                else_branch: None,
-            });
-        }
-        if has_undef {
-            stmts.push(Stmt::If {
-                condition: Self::eq_expr(Expr::LocalGet(fn_pid), Expr::Undefined),
-                then_branch: vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
-                    "callee is not a function".into(),
-                ))))],
-                else_branch: None,
-            });
+        for (present, sentinel) in [(has_null, Expr::Null), (has_undef, Expr::Undefined)] {
+            if present {
+                stmts.push(Stmt::If {
+                    condition: Self::eq_expr(Expr::LocalGet(fn_pid), sentinel),
+                    then_branch: vec![Self::throw_type_error("callee is not a function")],
+                    else_branch: None,
+                });
+            }
         }
         let mut cases = Vec::with_capacity(arms.len());
         for &(ident, target_inst) in arms {

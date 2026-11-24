@@ -9,11 +9,11 @@ const CONSTRUCTOR: &str = "\0perry_constructor:";
 const MAP: &str = "\0perry_Map";
 const SET: &str = "\0perry_Set";
 
-pub(crate) fn typed_collection(is_map: bool, type_args: Vec<HirType>) -> Expr {
+pub(crate) fn typed_collection(is_map: bool, type_args: Vec<HirType>, args: Vec<Expr>) -> Expr {
     Expr::New {
         class_name: if is_map { MAP } else { SET }.into(),
         type_args,
-        args: Vec::new(),
+        args,
         byte_offset: 0,
         byte_end: 0,
         cap_args_appended: 0,
@@ -21,22 +21,48 @@ pub(crate) fn typed_collection(is_map: bool, type_args: Vec<HirType>) -> Expr {
 }
 
 #[derive(Default)]
-pub struct Constructors(Vec<ConstructorTypes>);
+pub(super) struct Constructors(Vec<ConstructorTypes>);
 
 enum ConstructorTypes {
     Map(Option<(HirType, HirType)>),
     Set(Option<HirType>),
 }
 
-pub enum Constructor<'s, 'e> {
+pub enum Constructor<'e> {
     Map {
-        types: Option<(&'s HirType, &'s HirType)>,
+        types: Option<(&'e HirType, &'e HirType)>,
         init: Option<&'e Expr>,
     },
     Set {
-        element: Option<&'s HirType>,
+        element: Option<&'e HirType>,
         init: Option<&'e Expr>,
     },
+}
+
+pub fn constructor(expr: &Expr) -> Option<Constructor<'_>> {
+    let Expr::New {
+        class_name,
+        type_args,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    match class_name.as_str() {
+        MAP => Some(Constructor::Map {
+            types: match type_args.as_slice() {
+                [key, value] => Some((key, value)),
+                _ => None,
+            },
+            init: args.first(),
+        }),
+        SET => Some(Constructor::Set {
+            element: type_args.first(),
+            init: args.first(),
+        }),
+        _ => None,
+    }
 }
 
 impl Constructors {
@@ -85,63 +111,59 @@ impl Constructors {
         Ok(())
     }
 
-    pub fn get<'s, 'e: 's>(&'s self, expr: &'e Expr) -> Option<Constructor<'s, 'e>> {
-        if let Expr::New {
-            class_name,
-            type_args,
-            args,
-            ..
-        } = expr
-        {
-            match (class_name.as_str(), type_args.as_slice()) {
-                (MAP, [key, value]) => {
-                    return Some(Constructor::Map {
-                        types: Some((key, value)),
-                        init: args.first(),
-                    });
-                }
-                (SET, [element]) => {
-                    return Some(Constructor::Set {
-                        element: Some(element),
-                        init: args.first(),
-                    });
-                }
-                _ => {}
-            }
-        }
+    pub(super) fn rewrite_expr(&self, expr: &mut Expr) {
         let argument = match expr {
             Expr::NewDynamic { callee, args, .. }
                 if matches!(&**callee, Expr::PropertyGet { object, property, .. }
                     if matches!(&**object, Expr::GlobalGet(0)) && property == "Map") =>
             {
-                args.first()?
+                args.first_mut()
             }
-            Expr::MapNewFromArray(argument) | Expr::SetNewFromArray(argument) => argument,
+            Expr::MapNewFromArray(argument) | Expr::SetNewFromArray(argument) => {
+                Some(&mut **argument)
+            }
             Expr::New {
                 class_name, args, ..
-            } if matches!(class_name.as_str(), "Map" | "Set") => args.first()?,
-            _ => return None,
+            } if matches!(class_name.as_str(), "Map" | "Set") => args.first_mut(),
+            _ => None,
         };
-        let Expr::Sequence(items) = argument else {
-            return None;
+        let Some(Expr::Sequence(items)) = argument else {
+            return;
         };
-        let (Expr::String(token), rest) = items.split_first()? else {
-            return None;
+        let Some(Expr::String(token)) = items.first() else {
+            return;
         };
-        let id: usize = token.strip_prefix(CONSTRUCTOR)?.parse().ok()?;
-        let init = rest
-            .first()
-            .filter(|expr| !matches!(expr, Expr::Undefined | Expr::Null));
-        Some(match self.0.get(id)? {
-            ConstructorTypes::Map(types) => Constructor::Map {
-                types: types.as_ref().map(|(key, value)| (key, value)),
-                init,
-            },
-            ConstructorTypes::Set(element) => Constructor::Set {
-                element: element.as_ref(),
-                init,
-            },
-        })
+        let Some(id) = token
+            .strip_prefix(CONSTRUCTOR)
+            .and_then(|s| s.parse::<usize>().ok())
+        else {
+            return;
+        };
+        let Some(entry) = self.0.get(id) else {
+            return;
+        };
+        let init = (items.len() > 1)
+            .then(|| items.remove(1))
+            .filter(|e| !matches!(e, Expr::Undefined | Expr::Null));
+        let args = init.into_iter().collect();
+        *expr = match entry {
+            ConstructorTypes::Map(types) => typed_collection(
+                true,
+                types
+                    .as_ref()
+                    .map(|(k, v)| vec![k.clone(), v.clone()])
+                    .unwrap_or_default(),
+                args,
+            ),
+            ConstructorTypes::Set(element) => typed_collection(
+                false,
+                element
+                    .as_ref()
+                    .map(|e| vec![e.clone()])
+                    .unwrap_or_default(),
+                args,
+            ),
+        };
     }
 }
 

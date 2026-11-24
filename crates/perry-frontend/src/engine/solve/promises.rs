@@ -71,6 +71,42 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok((target, ret, recv.is_some()))
     }
 
+    pub(super) fn build_callback_dispatcher(
+        &mut self,
+        s: &mut EvalState<'h>,
+        callee_ty: Ty,
+        idents: &[FuncIdentity],
+        recv_ty: Option<Ty>,
+        arg_tys: &[Ty],
+        byte_offset: u32,
+    ) -> Result<(HelperId, Ty, bool, Ty)> {
+        for &a in arg_tys {
+            self.invalidate_conservative_cell(a);
+        }
+        let mut arms = Vec::with_capacity(idents.len());
+        let mut ret = Ty::BOTTOM;
+        let mut needs_recv = false;
+        for &ident in idents {
+            let (target, r, pass_receiver) =
+                self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
+            needs_recv |= pass_receiver;
+            ret = self.types.join(ret, r);
+            arms.push((ident, target));
+        }
+        let arms_span = self.intern_dispatch_arms(&arms);
+        let arg_tuple = self.types.tuple(arg_tys);
+        let helper = self.intern_helper(
+            HelperSpec::Dispatcher {
+                callee_ty,
+                arms: arms_span,
+                arg_tys: arg_tuple,
+                recv_ty: needs_recv.then_some(recv_ty).flatten(),
+            },
+            byte_offset,
+        );
+        Ok((helper, arg_tuple, needs_recv, ret))
+    }
+
     fn resolve_callback_call(
         &mut self,
         s: &mut EvalState<'h>,
@@ -86,43 +122,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
             return Ok(Some((CallbackCall::ThrowTypeError(helper), Ty::NEVER)));
         }
-        let dispatch_idents = if let Some(idents) = self.types.func_union_members(cb_ty) {
-            Some(idents)
-        } else {
-            let (stripped, nullish) = self.types.strip_nullish(cb_ty);
-            if nullish.is_some()
-                && let TyKind::Func(ident) = self.types.kind(stripped)
-            {
-                Some(vec![ident])
-            } else {
-                None
-            }
-        };
-        if let Some(idents) = dispatch_idents {
-            for &a in arg_tys {
-                self.invalidate_conservative_cell(a);
-            }
-            let mut arms = Vec::with_capacity(idents.len());
-            let mut ret = Ty::BOTTOM;
-            let mut needs_recv = false;
-            for ident in idents {
-                let (target, r, pass_receiver) =
-                    self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
-                needs_recv |= pass_receiver;
-                ret = self.types.join(ret, r);
-                arms.push((ident, target));
-            }
-            let arms_span = self.intern_dispatch_arms(&arms);
-            let arg_tuple = self.types.tuple(arg_tys);
-            let helper = self.intern_helper(
-                HelperSpec::Dispatcher {
-                    callee_ty: cb_ty,
-                    arms: arms_span,
-                    arg_tys: arg_tuple,
-                    recv_ty: needs_recv.then_some(recv_ty).flatten(),
-                },
-                byte_offset,
-            );
+        if let Some(idents) = self.types.func_dispatch_members(cb_ty, true) {
+            let (helper, _, needs_recv, ret) =
+                self.build_callback_dispatcher(s, cb_ty, &idents, recv_ty, arg_tys, byte_offset)?;
             return Ok(Some((CallbackCall::Dispatch { helper, needs_recv }, ret)));
         }
         let TyKind::Func(ident) = self.types.kind(cb_ty) else {

@@ -57,7 +57,7 @@ impl<'h> Emitter<'h, '_> {
                     Some(r) => self.fresh_local(*id, r)?,
                     None => *id,
                 };
-                let inner_ty = self.resolve_let_ty(rctx.inst_id, *id, out_id, name, ty)?;
+                let inner_ty = self.resolve_let_ty(rctx.inst_id, *id, name, ty)?;
                 let box_ty = box_hir(Self::admitting_undefined_hir(inner_ty));
                 self.boxed_locals.push(out_id);
                 out.push(Stmt::Let {
@@ -137,7 +137,6 @@ impl<'h> Emitter<'h, '_> {
         &mut self,
         inst_id: InstanceId,
         id: LocalId,
-        out_id: LocalId,
         name: &str,
         ty: &HirType,
     ) -> Result<HirType> {
@@ -148,7 +147,6 @@ impl<'h> Emitter<'h, '_> {
             .map(|li| self.index.locals[li].flags);
         let is_inferred = !self.hir.local_source_spans.contains_key(&id)
             || local_flags.is_none_or(|f| f.contains(LocalFlags::INFERRED));
-        let is_deferred = local_flags.is_some_and(|f| f.contains(LocalFlags::DEFERRED));
         match resolved {
             Some(t)
                 if self.is_resolved(t)
@@ -157,17 +155,6 @@ impl<'h> Emitter<'h, '_> {
                         || matches!(ty, HirType::Array(e) if matches!(**e, HirType::Any | HirType::Unknown))
                         || matches!(self.types.kind(t), TyKind::ClassInst(_))) =>
             {
-                if is_inferred
-                    && is_deferred
-                    && self.types.is_json_encodable(
-                        self.ctx,
-                        t,
-                        self.solved.locations.as_slice(),
-                        &self.solved.dict_reads,
-                    )
-                {
-                    self.json_eligible_bindings.push(out_id);
-                }
                 self.materialize(t)
             }
             Some(t)
@@ -256,17 +243,13 @@ impl<'h> Emitter<'h, '_> {
                 if self.is_forward_boxed(*id) {
                     let init_ctx = rctx.with_expected(true);
                     return match self.rewrite_opt_expr(&init_ctx, init.as_ref())? {
-                        Some(val) => Ok(Stmt::Expr(Expr::PropertySet {
-                            object: Box::new(Expr::LocalGet(out_id)),
-                            property: "v".into(),
-                            value: Box::new(val),
-                            byte_offset: 0,
-                            byte_end: 0,
-                        })),
+                        Some(val) => {
+                            Ok(Stmt::Expr(Self::prop_set(Expr::LocalGet(out_id), "v", val)))
+                        }
                         None => Ok(Stmt::Expr(Expr::Undefined)),
                     };
                 }
-                let new_ty = self.resolve_let_ty(rctx.inst_id, *id, out_id, name, ty)?;
+                let new_ty = self.resolve_let_ty(rctx.inst_id, *id, name, ty)?;
                 let init_has_expected = !matches!(new_ty, HirType::Any | HirType::Unknown);
                 let init_ctx = rctx.with_expected(init_has_expected);
                 let rewritten_init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;

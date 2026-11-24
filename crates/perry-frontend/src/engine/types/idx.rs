@@ -1,6 +1,8 @@
 //! Index-typed vectors, dense IDs, and canonical type keys.
 use crate::shapes;
 use perry_hir::types::LocalId;
+use std::collections::HashMap;
+use std::hash::Hash;
 
 mod sealed {
     pub(crate) trait MintIdx: Copy + Eq {
@@ -117,10 +119,6 @@ macro_rules! id_type {
         $(
             #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
             pub(crate) struct $name(u32);
-            impl $name {
-                #[allow(dead_code)]
-                pub(crate) fn index(self) -> usize { self.0 as usize }
-            }
             impl Idx for $name {
                 fn index(self) -> usize { self.0 as usize }
             }
@@ -179,6 +177,18 @@ impl<S: sealed::MintSpan, T> Pool<S, T> {
         self.data.extend_from_slice(items);
         S::from_range(start, items.len())
     }
+
+    pub(crate) fn intern(&mut self, index: &mut HashMap<Box<[T]>, S>, items: &[T]) -> S
+    where
+        T: Copy + Eq + Hash,
+    {
+        if let Some(&span) = index.get(items) {
+            return span;
+        }
+        let span = self.extend_from_slice(items);
+        index.insert(items.into(), span);
+        span
+    }
 }
 
 #[allow(private_bounds)]
@@ -196,16 +206,6 @@ macro_rules! span_type {
             pub(crate) struct $name {
                 start: u32,
                 len: u32,
-            }
-            impl $name {
-                #[allow(dead_code)]
-                pub(crate) fn len(self) -> usize {
-                    self.len as usize
-                }
-                #[allow(dead_code)]
-                pub(crate) fn is_empty(self) -> bool {
-                    self.len == 0
-                }
             }
             impl sealed::MintSpan for $name {
                 fn from_range(start: usize, len: usize) -> Self {

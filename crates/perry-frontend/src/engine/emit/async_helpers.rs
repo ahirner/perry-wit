@@ -42,23 +42,7 @@ impl<'h> Emitter<'h, '_> {
         params: Vec<perry_hir::ir::Param>,
         args: Vec<Expr>,
     ) -> Result<Expr> {
-        let closure_fid = self.fresh_func_id()?;
-        let closure = Expr::Closure {
-            func_id: closure_fid,
-            params,
-            return_type,
-            body,
-            captures: Vec::new(),
-            mutable_captures: Vec::new(),
-            captures_this: false,
-            captures_new_target: false,
-            enclosing_class: None,
-            is_async: false,
-            is_generator: false,
-            is_strict: true,
-            construct_only: false,
-            is_arrow: true,
-        };
+        let closure = self.synth_closure(params, return_type, body, Vec::new())?;
         Ok(Expr::Call {
             callee: Box::new(closure),
             args,
@@ -329,9 +313,9 @@ impl<'h> Emitter<'h, '_> {
                             op: UnaryOp::Not,
                             operand: Box::new(Expr::LocalGet(*id)),
                         },
-                        then_branch: vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
-                            "Promise executor is not a function".into(),
-                        ))))],
+                        then_branch: vec![Self::throw_type_error(
+                            "Promise executor is not a function",
+                        )],
                         else_branch: None,
                     });
                 }
@@ -365,14 +349,7 @@ impl<'h> Emitter<'h, '_> {
                 capture_owner: owner,
             };
             let env_cls = self.ensure_env_class(ident)?;
-            let env_new = Expr::New {
-                class_name: env_cls,
-                args: vec![Expr::LocalGet(p_id)],
-                type_args: Vec::new(),
-                byte_offset: 0,
-                byte_end: 0,
-                cap_args_appended: 0,
-            };
+            let env_new = Self::synth_new(env_cls, vec![Expr::LocalGet(p_id)]);
             exec_args.push(Self::emit_env_wrapper(ident, env_new));
         }
         let (exec_call, _) = self.emit_callback_call_expr(bound_executor, exec_args)?;
@@ -461,6 +438,23 @@ impl<'h> Emitter<'h, '_> {
         let is_void_inner = inner_hir == HirType::Void;
         let await_p = || Expr::Await(Box::new(Expr::LocalGet(p_pid)));
 
+        let build_catch = |this: &mut Self,
+                           g_call: BoundCallback,
+                           optional_g: Option<LocalId>|
+         -> Result<CatchClause> {
+            let catch_id = this.fresh_synthetic_local()?;
+            let (g_expr, g_is_prom) =
+                this.emit_callback_call_expr(g_call, vec![Expr::LocalGet(catch_id)])?;
+            Ok(CatchClause {
+                param: Some((catch_id, "__e".to_owned())),
+                body: when_callable(
+                    optional_g,
+                    Self::return_cb_stmts(g_expr, g_is_prom, is_void_ret),
+                    optional_g.map(|_| vec![Stmt::Throw(Expr::LocalGet(catch_id))]),
+                ),
+            })
+        };
+
         let body = match (kind, f_bound, g_bound) {
             (ReactionKind::Finally, Some((f_call, optional_f)), _) => {
                 let (call, asynchronous) = self.emit_callback_call_expr(f_call, Vec::new())?;
@@ -484,66 +478,44 @@ impl<'h> Emitter<'h, '_> {
                     forof_completion: None,
                 }]
             }
-            (ReactionKind::Then, Some((f_call, optional_f)), Some((g_call, optional_g))) => {
-                let catch_id = self.fresh_synthetic_local()?;
+            (ReactionKind::Then, Some((f_call, optional_f)), g_bound) => {
                 let mut stmts = Vec::with_capacity(4);
-                let val_slot = if !is_void_inner {
-                    let vid = self.fresh_synthetic_local()?;
-                    stmts.push(Stmt::Let {
-                        id: vid,
-                        name: "__v".to_owned(),
-                        ty: Self::admitting_undefined_hir(inner_hir.clone()),
-                        mutable: true,
-                        init: Some(Expr::Undefined),
-                    });
-                    Some(vid)
-                } else {
-                    None
-                };
-                let try_stmt = match val_slot {
-                    Some(vid) => Stmt::Expr(Expr::LocalSet(vid, Box::new(await_p()))),
-                    None => Stmt::Expr(await_p()),
-                };
-                let (g_expr, g_is_prom) =
-                    self.emit_callback_call_expr(g_call, vec![Expr::LocalGet(catch_id)])?;
-                stmts.push(Stmt::Try {
-                    body: vec![try_stmt],
-                    catch: Some(CatchClause {
-                        param: Some((catch_id, "__e".to_owned())),
-                        body: when_callable(
-                            optional_g,
-                            Self::return_cb_stmts(g_expr, g_is_prom, is_void_ret),
-                            optional_g.map(|_| vec![Stmt::Throw(Expr::LocalGet(catch_id))]),
-                        ),
-                    }),
-                    finally: None,
-                    forof_completion: None,
-                });
-                let f_arg = match val_slot {
-                    Some(vid) => {
-                        let v = Expr::LocalGet(vid);
-                        if matches!(&inner_hir, HirType::Union(members) if members.contains(&HirType::Void))
-                        {
-                            v
-                        } else {
-                            hir_compat::mark_non_null(v)
-                        }
+                let f_arg = if let Some((g_call, optional_g)) = g_bound {
+                    let val_slot = (!is_void_inner)
+                        .then(|| self.fresh_synthetic_local())
+                        .transpose()?;
+                    if let Some(vid) = val_slot {
+                        stmts.push(Stmt::Let {
+                            id: vid,
+                            name: "__v".to_owned(),
+                            ty: Self::admitting_undefined_hir(inner_hir.clone()),
+                            mutable: true,
+                            init: Some(Expr::Undefined),
+                        });
                     }
-                    None => Expr::Undefined,
-                };
-                let passthrough =
-                    optional_f.map(|_| vec![Stmt::Return((!is_void_ret).then(|| f_arg.clone()))]);
-                let (f_expr, f_is_prom) = self.emit_callback_call_expr(f_call, vec![f_arg])?;
-                stmts.extend(when_callable(
-                    optional_f,
-                    Self::return_cb_stmts(f_expr, f_is_prom, is_void_ret),
-                    passthrough,
-                ));
-                stmts
-            }
-            (ReactionKind::Then, Some((f_call, optional_f)), None) => {
-                let mut stmts = Vec::with_capacity(3);
-                let f_arg = if is_void_inner {
+                    let try_stmt = match val_slot {
+                        Some(vid) => Stmt::Expr(Expr::LocalSet(vid, Box::new(await_p()))),
+                        None => Stmt::Expr(await_p()),
+                    };
+                    stmts.push(Stmt::Try {
+                        body: vec![try_stmt],
+                        catch: Some(build_catch(self, g_call, optional_g)?),
+                        finally: None,
+                        forof_completion: None,
+                    });
+                    match val_slot {
+                        Some(vid) => {
+                            let v = Expr::LocalGet(vid);
+                            if matches!(&inner_hir, HirType::Union(m) if m.contains(&HirType::Void))
+                            {
+                                v
+                            } else {
+                                hir_compat::mark_non_null(v)
+                            }
+                        }
+                        None => Expr::Undefined,
+                    }
+                } else if is_void_inner {
                     stmts.push(Stmt::Expr(await_p()));
                     Expr::Undefined
                 } else {
@@ -568,7 +540,6 @@ impl<'h> Emitter<'h, '_> {
                 stmts
             }
             (_, None, Some((g_call, optional_g))) => {
-                let catch_id = self.fresh_synthetic_local()?;
                 let try_body = if is_void_ret {
                     vec![Stmt::Expr(await_p()), Stmt::Return(None)]
                 } else if matches!(inner_ty, Ty::BOTTOM | Ty::NEVER) {
@@ -581,18 +552,9 @@ impl<'h> Emitter<'h, '_> {
                 } else {
                     vec![Stmt::Return(Some(await_p()))]
                 };
-                let (g_expr, g_is_prom) =
-                    self.emit_callback_call_expr(g_call, vec![Expr::LocalGet(catch_id)])?;
                 vec![Stmt::Try {
                     body: try_body,
-                    catch: Some(CatchClause {
-                        param: Some((catch_id, "__e".to_owned())),
-                        body: when_callable(
-                            optional_g,
-                            Self::return_cb_stmts(g_expr, g_is_prom, is_void_ret),
-                            optional_g.map(|_| vec![Stmt::Throw(Expr::LocalGet(catch_id))]),
-                        ),
-                    }),
+                    catch: Some(build_catch(self, g_call, optional_g)?),
                     finally: None,
                     forof_completion: None,
                 }]
@@ -733,24 +695,13 @@ impl<'h> Emitter<'h, '_> {
             name: "__t".to_owned(),
             ty: HirType::Named(timer_cls.clone()),
             mutable: false,
-            init: Some(Expr::New {
-                class_name: timer_cls.clone(),
-                args: vec![
-                    Expr::New {
-                        class_name: "AbortController".to_owned(),
-                        args: Vec::new(),
-                        type_args: Vec::new(),
-                        byte_offset: 0,
-                        byte_end: 0,
-                        cap_args_appended: 0,
-                    },
+            init: Some(Self::synth_new(
+                timer_cls.clone(),
+                vec![
+                    Self::synth_new("AbortController", Vec::new()),
                     Expr::Bool(false),
                 ],
-                type_args: Vec::new(),
-                byte_offset: 0,
-                byte_end: 0,
-                cap_args_appended: 0,
-            }),
+            )),
         });
         let mut call_args = vec![Expr::LocalGet(t_id)];
         if pass_cb && let Some(cb_expr) = args.first() {
@@ -805,13 +756,11 @@ impl<'h> Emitter<'h, '_> {
             Expr::LocalGet(h_id)
         };
         let cancel = vec![
-            Stmt::Expr(Expr::PropertySet {
-                object: Box::new(target.clone()),
-                property: "cancelled".to_owned(),
-                value: Box::new(Expr::Bool(true)),
-                byte_offset: 0,
-                byte_end: 0,
-            }),
+            Stmt::Expr(Self::prop_set(
+                target.clone(),
+                "cancelled",
+                Expr::Bool(true),
+            )),
             Stmt::Expr(Self::method_call_expr(
                 Self::prop_get(target, "ctrl"),
                 "abort",

@@ -109,8 +109,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             TyKind::Union(s) => {
                 let mut changed = false;
-                let mut out = Vec::with_capacity(s.len());
-                for m in self.types.ty_slice(s).to_vec() {
+                let members = self.types.ty_slice(s).to_vec();
+                let mut out = Vec::with_capacity(members.len());
+                for m in members {
                     let n = self.instantiate_annotated_class(m, byte_offset, caller)?;
                     changed |= n != m;
                     out.push(n);
@@ -473,7 +474,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let view = self.index.view(template);
         let tp_span = self.template_type_params[template];
-        if tp_span.is_empty() {
+        if self.type_param_pool[tp_span].is_empty() {
             return bindings;
         }
         for (&tp_id, &et) in self.type_param_pool[tp_span].iter().zip(explicit_type_args) {

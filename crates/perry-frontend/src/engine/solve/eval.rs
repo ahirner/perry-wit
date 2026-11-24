@@ -128,8 +128,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(());
         }
 
-        let body = hir_compat::strip_synthetic_default_guards(view.body, view.params.iter());
-        self.eval_stmts(&mut s, body)?;
+        self.eval_stmts(&mut s, view.body)?;
         if s.local_changed {
             self.enqueue(inst_id);
         }
@@ -144,12 +143,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if !has_explicit_return {
             let mut result_ty = if s.has_return_value {
-                if crate::completion::returns_optional(body) {
+                if crate::completion::returns_optional(view.body) {
                     self.types.with_absences(s.returned, Absence::Undefined)
                 } else {
                     s.returned
                 }
-            } else if !crate::completion::falls_through(body) {
+            } else if !crate::completion::falls_through(view.body) {
                 Ty::NEVER
             } else {
                 Ty::VOID
@@ -394,7 +393,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.types.array(next)
                 }
             }
-            TyKind::Tuple(span) => {
+            TyKind::Tuple(span) | TyKind::Union(span) => {
+                let is_tuple = matches!(self.types.kind(ty), TyKind::Tuple(_));
                 let items: Vec<Ty> = self.types.ty_slice(span).to_vec();
                 let mut out = Vec::with_capacity(items.len());
                 let mut changed = false;
@@ -406,21 +406,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                     changed |= next != item;
                     out.push(next);
                 }
-                if changed { self.types.tuple(&out) } else { ty }
-            }
-            TyKind::Union(span) => {
-                let items: Vec<Ty> = self.types.ty_slice(span).to_vec();
-                let mut out = Vec::with_capacity(items.len());
-                let mut changed = false;
-                for item in items {
-                    let next = self.resolve_promise_cells(inst_id, item);
-                    if next == Ty::BOTTOM {
-                        return Ty::BOTTOM;
-                    }
-                    changed |= next != item;
-                    out.push(next);
+                if !changed {
+                    ty
+                } else if is_tuple {
+                    self.types.tuple(&out)
+                } else {
+                    self.types.union(&out)
                 }
-                if changed { self.types.union(&out) } else { ty }
             }
             _ => ty,
         }

@@ -201,10 +201,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
+            let tp_span = self.class_type_params[cid];
             let class_args = if !type_args.is_empty() {
                 self.eval_type_args(s.inst, type_args)
-            } else if !self.class_type_params[cid].is_empty() {
-                let tp_span = self.class_type_params[cid];
+            } else if !self.type_param_pool[tp_span].is_empty() {
                 let mut bindings = Vec::new();
                 if let Some(ctor_tid) = self.index.class(cid).ctor {
                     let ctor_view = self.index.view(ctor_tid);
@@ -384,26 +384,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.record_site(s.inst, expr, SiteResolution::ThrowTypeError(helper));
             return Ok(Ty::NEVER);
         }
-        if let Some(idents) = self.types.func_union_members(callee_ty) {
+        if let Some(idents) = self.types.func_dispatch_members(callee_ty, true) {
             return self.eval_dispatch_call(
                 s,
                 expr,
                 callee_ty,
                 &idents,
-                None,
-                &arg_tys,
-                byte_offset,
-            );
-        }
-        let (stripped_callee, nullish) = self.types.strip_nullish(callee_ty);
-        if nullish.is_some()
-            && let TyKind::Func(ident) = self.types.kind(stripped_callee)
-        {
-            return self.eval_dispatch_call(
-                s,
-                expr,
-                callee_ty,
-                &[ident],
                 None,
                 &arg_tys,
                 byte_offset,
@@ -558,54 +544,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         arg_tys: &[Ty],
         byte_offset: u32,
     ) -> Result<Ty> {
-        for &a in arg_tys {
-            self.invalidate_conservative_cell(a);
-        }
-        let mut arms = Vec::with_capacity(idents.len());
-        let mut ret = Ty::BOTTOM;
-        for &ident in idents {
-            let view = self.index.view(ident.template);
-            let is_promise_handle =
-                self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
-            self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
-            let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
-            let call_arg_tys = if is_promise_handle {
-                arg_tys.get(..1).unwrap_or(&[])
-            } else {
-                arg_tys
-            };
-            let target = self.request_instance(
-                InstanceReq::new(ident.template, call_arg_tys, Some(s.inst))
-                    .receiver(recv)
-                    .owner(ident.capture_owner)
-                    .at(byte_offset),
-            )?;
-            self.propagate_writes(s.inst, target);
-            let r = self.read_loc(self.instances[target].return_loc, s.inst);
-            ret = self.types.join(ret, r);
-            arms.push((ident, target));
-        }
-        let arms_span = self.intern_dispatch_arms(&arms);
-        let arg_tuple = self.types.tuple(arg_tys);
-        let needs_recv = recv_ty.is_some()
-            && arms
-                .iter()
-                .any(|&(ident, _)| self.index.view(ident.template).uses_this);
-        let helper = self.intern_helper(
-            HelperSpec::Dispatcher {
-                callee_ty,
-                arms: arms_span,
-                arg_tys: arg_tuple,
-                recv_ty: needs_recv.then_some(recv_ty).flatten(),
-            },
-            byte_offset,
-        );
+        let (helper, argument_types, needs_recv, ret) =
+            self.build_callback_dispatcher(s, callee_ty, idents, recv_ty, arg_tys, byte_offset)?;
         self.record_site(
             s.inst,
             expr,
             SiteResolution::DispatchCall {
                 helper,
-                argument_types: arg_tuple,
+                argument_types,
                 needs_recv,
             },
         );

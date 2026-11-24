@@ -3,7 +3,7 @@ pub(crate) use super::ast_scan::{SourceFacts, scan_ast, validate_ast};
 use super::bitset::BitSet;
 pub(crate) use super::types::LocalFlags;
 use super::types::{
-    CaptureSpan, CapturedLocalSpan, ClassId, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage,
+    CaptureSpan, CapturedLocalSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage,
     NameId, Pool, SiteSpan, TemplateId, Ty, TypeTable,
 };
 use crate::hir_compat::{self, Locations};

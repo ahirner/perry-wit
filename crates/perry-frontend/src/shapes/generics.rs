@@ -11,23 +11,6 @@ pub use resolution::Resolver;
 const RESOLUTION_DEPTH: usize = 32;
 pub(crate) const ARGUMENT_LIMIT: usize = 4096;
 
-pub trait DeclarationLookup<'h> {
-    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)>;
-    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)>;
-    fn class(&self, _name: &str) -> Option<(usize, &'h Class)> {
-        None
-    }
-}
-
-impl<'h> DeclarationLookup<'h> for Declarations<'h> {
-    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)> {
-        self.interfaces.get(name).copied()
-    }
-    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)> {
-        self.type_aliases.get(name).copied()
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Utility {
     Partial,
@@ -154,14 +137,14 @@ pub fn substitute_id(
 }
 
 impl<'a> Declaration<'a> {
-    pub fn find<L: DeclarationLookup<'a>>(lookup: &L, base: &str) -> Option<(DeclarationId, Self)> {
-        if let Some((index, interface)) = lookup.interface(base) {
+    pub fn find(decls: &Declarations<'a>, base: &str) -> Option<(DeclarationId, Self)> {
+        if let Some(&(index, interface)) = decls.interfaces.get(base) {
             return Some((DeclarationId::Interface(index), Self::Interface(interface)));
         }
-        if let Some((index, class)) = lookup.class(base) {
+        if let Some(&(index, class)) = decls.classes.named.get(base) {
             return Some((DeclarationId::Class(index), Self::Class(class)));
         }
-        let (index, alias) = lookup.type_alias(base)?;
+        let &(index, alias) = decls.type_aliases.get(base)?;
         Some((DeclarationId::Alias(index), Self::Alias(alias)))
     }
 
@@ -286,7 +269,11 @@ impl Declarations<'_> {
 
     /// Extract `(key_ty, value_ty)` if `ty` resolves to `Record<K, V>`, `{ [key: string]: V }`, or a
     /// closed record/interface whose properties share a uniform value type.
-    pub fn dict_entry_types(&self, ctx: &Context, ty: &HirType) -> Option<(HirType, HirType)> {
+    pub(crate) fn dict_entry_types(
+        &self,
+        ctx: &Context,
+        ty: &HirType,
+    ) -> Option<(HirType, HirType)> {
         if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
             return None;
         }

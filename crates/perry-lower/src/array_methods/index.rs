@@ -35,23 +35,13 @@ impl<'s> FunctionBuilder<'s> {
             Input::Array(array, Holes::Dense),
             |b, ctx, item, step, _, _| {
                 let elem_str = if optional_value(ctx, item.get_type(ctx)).is_some() {
-                    let undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
-                    b.choose_string(
+                    b.match_optional(
                         ctx,
-                        undefined,
+                        item,
+                        str_ty,
                         |b, ctx| Ok(b.string(ctx, "")),
-                        |b, ctx| {
-                            let null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, item));
-                            b.choose_string(
-                                ctx,
-                                null,
-                                |b, ctx| Ok(b.string(ctx, "")),
-                                |b, ctx| {
-                                    let defined = b.defined(ctx, item)?;
-                                    b.display(ctx, defined)
-                                },
-                            )
-                        },
+                        |b, ctx| Ok(b.string(ctx, "")),
+                        |b, ctx, defined| b.display(ctx, defined),
                     )?
                 } else {
                     b.display(ctx, item)?

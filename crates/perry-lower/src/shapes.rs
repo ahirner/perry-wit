@@ -25,7 +25,7 @@ use std::{
 
 mod collection_types;
 pub(crate) use perry_frontend::shapes::TypeId;
-use perry_frontend::shapes::{Classes, Declarations, RecordId, captured, generics::InstanceKey};
+use perry_frontend::shapes::{Declarations, RecordId, captured, generics::InstanceKey};
 
 mod generics;
 mod representation;
@@ -79,7 +79,6 @@ pub(super) struct Shapes<'h> {
     pub(super) globals: RefCell<HashMap<perry_frontend::hir::types::LocalId, BindingType>>,
     pub(super) global_ids: HashSet<perry_frontend::hir::types::LocalId>,
     pub(super) decls: Declarations<'h>,
-    pub(super) classes: Classes<'h>,
     pub(super) static_fields: HashMap<
         (&'h str, &'h str),
         (
@@ -128,13 +127,12 @@ impl<'h> Shapes<'h> {
             &hir.classes,
             foreign,
         );
-        let classes = Classes::new(&hir.classes);
         let mut static_fields = HashMap::new();
         let mut next_static_id = 0x8000_0000u32;
         for class in hir
             .classes
             .iter()
-            .filter(|class| classes.named.contains_key(class.name.as_str()))
+            .filter(|class| decls.classes.named.contains_key(class.name.as_str()))
         {
             for field in &class.static_fields {
                 static_fields.insert(
@@ -150,7 +148,7 @@ impl<'h> Shapes<'h> {
             .map(|function| function.name.as_str())
             .collect();
         let mut global_ids = captured(hir);
-        if !hir.functions.is_empty() || !classes.named.is_empty() {
+        if !hir.functions.is_empty() || !decls.classes.named.is_empty() {
             global_ids.extend(static_fields.values().map(|(id, _)| *id));
         }
         Shapes {
@@ -159,7 +157,6 @@ impl<'h> Shapes<'h> {
             globals: RefCell::new(HashMap::new()),
             global_ids,
             decls,
-            classes,
             static_fields,
             class_records: RefCell::new(HashMap::new()),
             lexical_functions: perry_frontend::hir::emitted_closures(hir)
@@ -358,7 +355,7 @@ impl<'h> Shapes<'h> {
             &'h perry_frontend::hir::ir::Class,
         ) -> Option<&'h perry_frontend::hir::ir::Function>,
     ) -> Option<(&'h str, &'h perry_frontend::hir::ir::Function)> {
-        let (&owner_name, &(_, class)) = self.classes.named.get_key_value(class_name)?;
+        let (&owner_name, &(_, class)) = self.decls.classes.named.get_key_value(class_name)?;
         Some((owner_name, find(class)?))
     }
 
@@ -543,6 +540,6 @@ impl<'h> Shapes<'h> {
 
     /// Field names, in source order, of a synthesized object-literal shape.
     pub(super) fn literal_fields(&self, class_name: &str) -> Option<&[&'h str]> {
-        self.classes.literal_fields(class_name)
+        self.decls.classes.literal_fields(class_name)
     }
 }

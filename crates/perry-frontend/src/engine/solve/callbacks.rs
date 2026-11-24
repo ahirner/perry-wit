@@ -346,7 +346,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             if cb_val == Ty::BOTTOM {
                 return Ok(Some(Ty::BOTTOM));
             }
-            if let Some(idents) = self.types.func_union_members(cb_val) {
+            if let Some(idents) = self.types.func_dispatch_members(cb_val, false) {
                 let mut arms = Vec::with_capacity(idents.len());
                 let mut cb_ret = Ty::BOTTOM;
                 let mut widest_inputs: &[Ty] = &[];

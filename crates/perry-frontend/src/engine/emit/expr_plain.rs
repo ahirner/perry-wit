@@ -105,14 +105,7 @@ impl<'h> Emitter<'h, '_> {
                 }
                 out_args
             };
-            let env_expr = Expr::New {
-                class_name,
-                args,
-                type_args: Vec::new(),
-                byte_offset: 0,
-                byte_end: 0,
-                cap_args_appended: 0,
-            };
+            let env_expr = Self::synth_new(class_name, args);
             return Ok(Self::emit_env_wrapper(ident, env_expr));
         }
         if let Expr::LocalGet(id) = expr {
@@ -200,13 +193,7 @@ impl<'h> Emitter<'h, '_> {
             && let Some(box_obj) = self.boxed_target(rctx, *id)
         {
             let val = self.rewrite_expr(rctx, value)?;
-            return Ok(Expr::PropertySet {
-                object: Box::new(box_obj),
-                property: "v".into(),
-                value: Box::new(val),
-                byte_offset: 0,
-                byte_end: 0,
-            });
+            return Ok(Self::prop_set(box_obj, "v", val));
         }
         if let Expr::Conditional {
             condition,

@@ -50,63 +50,32 @@ pub(super) trait KindExt {
         Self: Sized;
 }
 
-impl KindExt for Kind {
-    fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
-        let ty = ty.deref(ctx);
-        if ty.is::<FP64Type>() {
-            return Some(Self::Number);
+macro_rules! impl_kind_of {
+    (
+        primitives { $($prim:ident $plabel:literal;)* }
+        references { $($refk:ident $rlabel:literal $(builtin $(($($alias:literal)|+))?)? => $mir:ident;)* }
+    ) => {
+        impl KindExt for Kind {
+            fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
+                let ty = ty.deref(ctx);
+                if ty.is::<FP64Type>() {
+                    return Some(Self::Number);
+                }
+                if let Some(integer) = ty.downcast_ref::<IntegerType>() {
+                    return match integer.width() {
+                        1 => Some(Self::Boolean),
+                        64 => Some(Self::BigInt),
+                        _ => None,
+                    };
+                }
+                $(if ty.is::<perry_mir::$mir>() { return Some(Self::$refk); })*
+                None
+            }
         }
-        if let Some(integer) = ty.downcast_ref::<IntegerType>() {
-            return match integer.width() {
-                1 => Some(Self::Boolean),
-                64 => Some(Self::BigInt),
-                _ => None,
-            };
-        }
-        macro_rules! reference_kinds {
-            ($($kind:ident => $mir:ident),+ $(,)?) => { $(
-                if ty.is::<perry_mir::$mir>() { return Some(Self::$kind); }
-            )+ };
-        }
-        reference_kinds! {
-            String => StringType,
-            BigInt => BigIntType,
-            Bytes => BytesType,
-            Url => UrlType,
-            SearchParams => SearchParamsType,
-            Json => JsonType,
-            Date => DateType,
-            Stats => StatsType,
-            Headers => HeadersType,
-            Response => ResponseType,
-            Request => RequestType,
-            Writable => WritableType,
-            Writer => WriterType,
-            Readable => ReadableType,
-            ByteBuffer => ByteBufferType,
-            DataView => DataViewType,
-            ByobReader => ByobReaderType,
-            Reader => ReaderType,
-            ReadResult => ReadResultType,
-            Instant => InstantType,
-            PlainDate => PlainDateType,
-            PlainDateTime => PlainDateTimeType,
-            Abort => AbortType,
-            Incoming => IncomingType,
-            Exception => ExceptionType,
-            Encoder => EncoderType,
-            Decoder => DecoderType,
-            Regex => RegexType,
-            ValueUnion => ValueUnionType,
-            Array => ArrayType,
-            Record => RecordType,
-            Variant => VariantType,
-            Resource => ResourceType,
-            Settled => SettledType,
-        }
-        None
-    }
+    };
 }
+
+perry_frontend::kind_catalog!(impl_kind_of);
 
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     Kind::of(ctx, value.get_type(ctx))

@@ -83,6 +83,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let (&class_name, &(_, class)) = self
             .shapes
+            .decls
             .classes
             .named
             .get_key_value(class_name)
@@ -107,8 +108,7 @@ impl<'s> FunctionBuilder<'s> {
                 order.push_unique(index as u32);
             }
         }
-        if class.extends.is_none()
-            && class.fields.len() == field_defs.len()
+        if class.fields.len() == field_defs.len()
             && class.fields.iter().all(|f| f.init.is_none())
             && let Some(ctor) = &class.constructor
             && ctor.params.len() == class.fields.len()
@@ -355,14 +355,12 @@ impl<'s> FunctionBuilder<'s> {
         func: &'s Function,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        let slot = self.entry_slot(ctx, receiver.get_type(ctx));
-        self.store(ctx, slot, receiver);
         self.inline_class_callable(
             ctx,
             owner_class,
             func,
             ClassArguments::Expressions(args),
-            ClassReceiver::Instance(slot),
+            ClassReceiver::Instance(receiver),
         )
     }
 
@@ -373,14 +371,12 @@ impl<'s> FunctionBuilder<'s> {
         owner_class: &'s str,
         getter: &'s Function,
     ) -> Result<Value> {
-        let slot = self.entry_slot(ctx, receiver.get_type(ctx));
-        self.store(ctx, slot, receiver);
         self.inline_class_callable(
             ctx,
             owner_class,
             getter,
             ClassArguments::Expressions(&[]),
-            ClassReceiver::Instance(slot),
+            ClassReceiver::Instance(receiver),
         )?
         .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "class getter produced no value"))
     }
@@ -410,14 +406,12 @@ impl<'s> FunctionBuilder<'s> {
         setter: &'s Function,
         val: Value,
     ) -> Result<Value> {
-        let slot = self.entry_slot(ctx, receiver.get_type(ctx));
-        self.store(ctx, slot, receiver);
         self.inline_class_callable(
             ctx,
             owner_class,
             setter,
             ClassArguments::Evaluated(std::slice::from_ref(&val)),
-            ClassReceiver::Instance(slot),
+            ClassReceiver::Instance(receiver),
         )?;
         Ok(val)
     }
@@ -462,12 +456,7 @@ impl<'s> FunctionBuilder<'s> {
         for param in &func.params {
             let param_ty = self.shapes.value_type(ctx, &param.ty)?;
             let value = if param.is_rest {
-                let element = TypedHandle::<ArrayType>::from_handle(param_ty, ctx)
-                    .map_err(|_| {
-                        Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")
-                    })?
-                    .deref(ctx)
-                    .element();
+                let element = Self::rest_element_type(ctx, param_ty)?;
                 let mut items = Vec::new();
                 while let Some(value) = next_arg(self, ctx, Some(element), None)? {
                     items.push(self.fit(ctx, value, element)?);
@@ -488,12 +477,15 @@ impl<'s> FunctionBuilder<'s> {
             ClassExpansion::Callable(func),
             owner_class,
             |this, ctx| {
-                if let ClassReceiver::Constructor(slot, class, initializers) = receiver {
-                    this.init_own_class_fields(ctx, owner_class, class, slot, initializers)?;
-                }
                 let this_slot = match receiver {
                     ClassReceiver::Static => None,
-                    ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot, _, _) => {
+                    ClassReceiver::Instance(receiver) => {
+                        let slot = this.entry_slot(ctx, receiver.get_type(ctx));
+                        this.store(ctx, slot, receiver);
+                        Some(slot)
+                    }
+                    ClassReceiver::Constructor(slot, class, initializers) => {
+                        this.init_own_class_fields(ctx, owner_class, class, slot, initializers)?;
                         Some(slot)
                     }
                 };
@@ -510,7 +502,7 @@ impl<'s> FunctionBuilder<'s> {
                     } else {
                         InlineResult::Declared(this.shapes.value_type(ctx, &func.return_type)?)
                     };
-                    this.inline_body(ctx, &func.body, &func.params, result_type)
+                    this.inline_body(ctx, &func.body, result_type)
                 })?;
                 if let ClassReceiver::Constructor(slot, _, _) = receiver {
                     return this.load(ctx, slot).map(Some);

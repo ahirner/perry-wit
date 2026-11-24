@@ -368,22 +368,20 @@ impl<'s> FunctionBuilder<'s> {
                 .with_help("Add a concrete type annotation to this binding."));
             }
             Err(error)
-                if error.code() == codes::UNSUPPORTED_TYPE
-                    && self.shapes.metadata.json_eligible_bindings.contains(&id) =>
-            {
-                perry_mir::JsonType::get(ctx).into()
-            }
-            Err(error)
                 if !explicit
                     && self.shapes.deferred_binding(id)
                     && error.code() == codes::UNSUPPORTED_TYPE =>
             {
-                let name = self.shapes.local_name(id).unwrap_or("binding");
-                return Err(diag!(
-                    codes::UNSUPPORTED_TYPE,
-                    "local '{name}' receives incompatible write types ({})",
-                    error.message()
-                ));
+                if is_json_encodable_union(ty) {
+                    perry_mir::JsonType::get(ctx).into()
+                } else {
+                    let name = self.shapes.local_name(id).unwrap_or("binding");
+                    return Err(diag!(
+                        codes::UNSUPPORTED_TYPE,
+                        "local '{name}' receives incompatible write types ({})",
+                        error.message()
+                    ));
+                }
             }
             result => result?,
         };
@@ -515,4 +513,36 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
         self.optional_operand(ctx, expr, None).map(|_| ())
     }
+}
+
+fn is_json_encodable_union(ty: &HirType) -> bool {
+    fn encodable_value(ty: &HirType) -> bool {
+        match ty {
+            HirType::Null
+            | HirType::Void
+            | HirType::Boolean
+            | HirType::Number
+            | HirType::Int32
+            | HirType::String
+            | HirType::StringLiteral(_)
+            | HirType::Unknown => true,
+            HirType::Array(elem) => encodable_value(elem),
+            HirType::Tuple(items) | HirType::Union(items) => items.iter().all(encodable_value),
+            HirType::Object(obj) => {
+                (!obj.properties.is_empty() || obj.index_signature.is_some())
+                    && obj.properties.values().all(|p| encodable_value(&p.ty))
+                    && obj.index_signature.as_deref().is_none_or(encodable_value)
+            }
+            _ => false,
+        }
+    }
+    let HirType::Union(members) = ty else {
+        return false;
+    };
+    members
+        .iter()
+        .filter(|m| !matches!(m, HirType::Null | HirType::Void))
+        .count()
+        >= 2
+        && members.iter().all(encodable_value)
 }

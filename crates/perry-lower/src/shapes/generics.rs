@@ -1,20 +1,8 @@
 //! MIR representation of instantiated frontend declarations.
 use super::*;
-use perry_frontend::hir::ir::{Class, Interface, TypeAlias};
 use perry_frontend::shapes::generics::{
-    Declaration, DeclarationId, DeclarationLookup, Query, Resolver, Utility, substitute_id,
+    Declaration, DeclarationId, Query, Resolver, Utility, substitute_id,
 };
-impl<'h> DeclarationLookup<'h> for Shapes<'h> {
-    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)> {
-        self.decls.interface(name)
-    }
-    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)> {
-        self.decls.type_alias(name)
-    }
-    fn class(&self, name: &str) -> Option<(usize, &'h Class)> {
-        self.classes.named.get(name).copied()
-    }
-}
 
 impl<'s> Shapes<'s> {
     /// The MIR type of `base<arguments>`: missing arguments take their declared defaults,
@@ -31,7 +19,7 @@ impl<'s> Shapes<'s> {
         {
             return self.value_type(ctx, inner);
         }
-        let resolver = Resolver::new(ctx, self);
+        let resolver = Resolver::new(ctx, &self.decls);
         let arg_ids = TypeId::intern_slice(ctx, arguments);
         if !self.is_user_type(base) {
             if matches!(base, "Exclude" | "Extract" | "NonNullable") {
@@ -73,7 +61,7 @@ impl<'s> Shapes<'s> {
                 return Ok(ty);
             }
         }
-        let (identity, declaration) = Declaration::find(self, base).ok_or_else(|| {
+        let (identity, declaration) = Declaration::find(&self.decls, base).ok_or_else(|| {
             diag!(
                 codes::UNSUPPORTED_TYPE,
                 "unresolved generic type {base} is not supported yet"

@@ -88,7 +88,7 @@ impl<'s> FunctionBuilder<'s> {
                 );
                 this.bind_parameter(ctx, param, value, BindingType::plain(ty))?;
             }
-            this.inline_body(ctx, body, params, result_type)
+            this.inline_body(ctx, body, result_type)
         })?;
         match slot {
             Some(slot) => self.load(ctx, slot),

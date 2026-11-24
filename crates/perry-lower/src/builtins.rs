@@ -175,7 +175,7 @@ impl<'s> FunctionBuilder<'s> {
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
-        let is_known_class = self.shapes.classes.named.contains_key(ty)
+        let is_known_class = self.shapes.decls.classes.named.contains_key(ty)
             || self
                 .shapes
                 .metadata

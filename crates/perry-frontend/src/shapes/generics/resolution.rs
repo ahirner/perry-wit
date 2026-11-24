@@ -44,14 +44,14 @@ impl View {
     }
 }
 
-pub struct Resolver<'a, L> {
+pub struct Resolver<'a, 'h> {
     ctx: &'a Context,
-    lookup: &'a L,
+    decls: &'a Declarations<'h>,
 }
 
-impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
-    pub fn new(ctx: &'a Context, lookup: &'a L) -> Self {
-        Self { ctx, lookup }
+impl<'a, 'h> Resolver<'a, 'h> {
+    pub fn new(ctx: &'a Context, decls: &'a Declarations<'h>) -> Self {
+        Self { ctx, decls }
     }
 
     pub fn fields(
@@ -107,7 +107,7 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
             return None;
         }
         let declaration = if plain && query.aliases_only() {
-            let (_, alias) = self.lookup.type_alias(base)?;
+            let &(_, alias) = self.decls.type_aliases.get(base)?;
             if !alias.type_params.is_empty() {
                 return None;
             }
@@ -116,8 +116,11 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
             if let Some(expanded) = self.utility(base, arguments, query, depth) {
                 return Some(expanded);
             }
-            Declaration::find(self.lookup, base)?.1
+            Declaration::find(self.decls, base)?.1
         };
+        if matches!(declaration, Declaration::Class(_)) && query == Query::Dictionary {
+            return None;
+        }
         let bindings = declaration.bind(self.ctx, base, arguments).ok()?;
         if let Declaration::Alias(alias) = declaration {
             let mut remaining = ARGUMENT_LIMIT;
@@ -246,8 +249,8 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
 
     pub fn utility_type(&self, base: &str, arguments: &[TypeId], depth: usize) -> Option<TypeId> {
         if depth >= RESOLUTION_DEPTH
-            || self.lookup.interface(base).is_some()
-            || self.lookup.type_alias(base).is_some()
+            || self.decls.interfaces.contains_key(base)
+            || self.decls.type_aliases.contains_key(base)
         {
             return None;
         }
@@ -282,8 +285,8 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
         depth: usize,
     ) -> Option<(View, usize)> {
         if depth >= RESOLUTION_DEPTH
-            || self.lookup.interface(base).is_some()
-            || self.lookup.type_alias(base).is_some()
+            || self.decls.interfaces.contains_key(base)
+            || self.decls.type_aliases.contains_key(base)
         {
             return None;
         }
@@ -342,7 +345,7 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
         Some((View::Fields(properties), depth))
     }
 
-    pub fn property(
+    pub(crate) fn property(
         &self,
         base: &str,
         arguments: &[TypeId],
@@ -369,7 +372,7 @@ impl<'a, 'h, L: DeclarationLookup<'h>> Resolver<'a, L> {
         }
     }
 
-    pub fn dictionary(&self, ty: TypeId) -> Option<(HirType, HirType)> {
+    pub(crate) fn dictionary(&self, ty: TypeId) -> Option<(HirType, HirType)> {
         let value = match self.resolve(ty, Query::Dictionary, 0)?.0 {
             View::Index(value) => value.hir(self.ctx).clone(),
             View::Fields(fields) => self.uniform(

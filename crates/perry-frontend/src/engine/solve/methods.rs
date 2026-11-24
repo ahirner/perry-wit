@@ -211,7 +211,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             builtins::property_type(self.ctx, self.decls, self.types, stripped, name)
         };
         if let Some(prop_ty) = prop_ty
-            && let Some(idents) = self.types.func_union_members(prop_ty)
+            && let Some(idents) = self.types.func_dispatch_members(prop_ty, true)
         {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
@@ -225,25 +225,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 &arg_tys,
                 byte_offset,
             );
-        }
-        if let Some(prop_ty) = prop_ty {
-            let (stripped_prop, nullish) = self.types.strip_nullish(prop_ty);
-            if nullish.is_some()
-                && let TyKind::Func(ident) = self.types.kind(stripped_prop)
-            {
-                if arg_tys.contains(&Ty::BOTTOM) {
-                    return Ok(Ty::BOTTOM);
-                }
-                return self.eval_dispatch_call(
-                    s,
-                    expr,
-                    prop_ty,
-                    &[ident],
-                    Some(stripped),
-                    &arg_tys,
-                    byte_offset,
-                );
-            }
         }
         if let Some(prop_ty) = prop_ty
             && let TyKind::Func(ident) = self.types.kind(prop_ty)

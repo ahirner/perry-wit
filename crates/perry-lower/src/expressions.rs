@@ -456,9 +456,16 @@ impl<'s> FunctionBuilder<'s> {
                 args,
                 byte_offset,
                 ..
-            } if self.shapes.classes.named.contains_key(class_name.as_str()) => self
-                .class_new(ctx, class_name, args)
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+            } if self
+                .shapes
+                .decls
+                .classes
+                .named
+                .contains_key(class_name.as_str()) =>
+            {
+                self.class_new(ctx, class_name, args)
+                    .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?
+            }
             Expr::New {
                 class_name, args, ..
             } => self.object_literal(ctx, class_name, args, expected)?,

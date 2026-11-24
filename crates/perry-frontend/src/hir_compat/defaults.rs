@@ -1,9 +1,7 @@
 use super::*;
 
-pub fn strip_synthetic_default_guards<'a, 'p>(
-    mut body: &'a [Stmt],
-    params: impl Iterator<Item = &'p perry_hir::ir::Param> + Clone,
-) -> &'a [Stmt] {
+pub(super) fn strip_body(body: &mut Vec<Stmt>, params: &[perry_hir::ir::Param]) {
+    let mut drop_count = 0usize;
     while let Some(Stmt::If {
         condition:
             Expr::Compare {
@@ -13,7 +11,7 @@ pub fn strip_synthetic_default_guards<'a, 'p>(
             },
         then_branch,
         else_branch: None,
-    }) = body.first()
+    }) = body.get(drop_count)
     {
         let param_id = match (&**left, &**right) {
             (Expr::LocalGet(id), Expr::Undefined) | (Expr::Undefined, Expr::LocalGet(id)) => {
@@ -22,16 +20,18 @@ pub fn strip_synthetic_default_guards<'a, 'p>(
             _ => None,
         };
         if let Some(id) = param_id
-            && params.clone().any(|p| p.id == id && p.default.is_some())
+            && params.iter().any(|p| p.id == id && p.default.is_some())
             && matches!(
                 then_branch.as_slice(),
                 [Stmt::Expr(Expr::LocalSet(set_id, _))] if *set_id == id
             )
         {
-            body = &body[1..];
+            drop_count += 1;
         } else {
             break;
         }
     }
-    body
+    if drop_count > 0 {
+        body.drain(..drop_count);
+    }
 }

@@ -43,9 +43,8 @@ use crate::{
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        attributes::IntegerAttr,
         op_interfaces::{OneRegionInterface, OneResultInterface},
-        ops::{ConstantOp, FuncOp},
+        ops::FuncOp,
         types::{FP64Type, IntegerType, Signedness},
     },
     context::{Context, Ptr},
@@ -56,7 +55,6 @@ use pliron::{
     operation::Operation,
     result::Result,
     r#type::{Typed, TypedHandle},
-    utils::apint::{APInt, bw},
     value::Value,
 };
 use std::collections::HashMap;
@@ -228,31 +226,24 @@ pub(crate) fn prove_bounds(
             }
             status = IRStatus::Changed;
         }
-        for op in always_true {
-            let ty = IntegerType::get(ctx, 1, Signedness::Signless);
-            let constant = ConstantOp::new(
-                ctx,
-                Box::new(IntegerAttr::new(ty, APInt::from_u64(1, bw(1)))),
-            );
-            constant.get_operation().insert_before(ctx, op);
+        let mut replace_int = |ctx: &mut Context, op: Ptr<Operation>, bits: u32, value: u64| {
+            let constant = crate::constants::integer_constant(ctx, bits, value);
+            constant.insert_before(ctx, op);
             let result = op.deref(ctx).get_result(0);
-            result.replace_all_uses_with(ctx, &constant.get_result(ctx));
+            let replacement = constant.deref(ctx).get_result(0);
+            result.replace_all_uses_with(ctx, &replacement);
             Operation::erase(op, ctx);
             status = IRStatus::Changed;
+        };
+        for op in always_true {
+            replace_int(ctx, op, 1, 1);
         }
         for op in lengths {
             let array = op.deref(ctx).get_operand(0);
             if let Some((minimum, maximum)) = numeric.array_length(&function, array)
                 && minimum == maximum
             {
-                let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-                let attr = IntegerAttr::new(ty, APInt::from_u64(minimum.into(), bw(32)));
-                let constant = ConstantOp::new(ctx, Box::new(attr));
-                constant.get_operation().insert_before(ctx, op);
-                let result = op.deref(ctx).get_result(0);
-                result.replace_all_uses_with(ctx, &constant.get_result(ctx));
-                Operation::erase(op, ctx);
-                status = IRStatus::Changed;
+                replace_int(ctx, op, 32, minimum.into());
             }
         }
     }

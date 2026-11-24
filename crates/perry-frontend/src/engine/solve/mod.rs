@@ -14,8 +14,8 @@ use super::boundary::{ClassInfo, LocalFlags, ModuleIndex, SourceFacts, TemplateK
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
     CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity,
-    HelperId, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp, ParamLocSpan, Pool, TemplateId, Ty,
-    TyKind, TypeParamSpan, TypeTable,
+    HelperId, Idx, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp, ParamLocSpan, Pool, TemplateId,
+    Ty, TyKind, TypeParamSpan, TypeTable,
 };
 use crate::{
     Absence,
