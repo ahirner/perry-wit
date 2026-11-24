@@ -300,6 +300,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.param_locs.push(loc);
             if let Some(local) = self.index.local_idx(param.id) {
                 local_slots.push(InstanceLocalSlot { local, loc });
+                if let Some(cloc) = self
+                    .collapsed_local_locs
+                    .get(local.index())
+                    .copied()
+                    .flatten()
+                {
+                    self.write_loc(cloc, bound_ty);
+                }
+            }
+        }
+        for &cap_local in self.index.template_captured_locals(template) {
+            if !local_slots.iter().any(|s| s.local == cap_local) {
+                let loc = self.alloc_loc(Ty::BOTTOM);
+                local_slots.push(InstanceLocalSlot {
+                    local: cap_local,
+                    loc,
+                });
             }
         }
         let param_locs = TySpan {
@@ -375,8 +392,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.inst_written.push(BitSet::default());
         self.inst_captures.push(inst_caps);
         self.inst_sites
-            .push(vec![None; self.index.site_count(template)]);
-        self.inst_coercions.push(Vec::new());
+            .push(vec![SiteEntry::default(); self.index.site_count(template)]);
         self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
@@ -386,12 +402,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         template: TemplateId,
         receiver: Option<Receiver>,
-        capture_owner: Option<InstanceId>,
+        capture_owner: CaptureOwner,
         args: &[Ty],
         explicit_type_args: &[Ty],
     ) -> Vec<(shapes::TypeId, Ty)> {
-        let mut bindings =
-            capture_owner.map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
+        let mut bindings = capture_owner
+            .instance()
+            .map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
         if let Some(cinst) = receiver
             .and_then(Receiver::class)
             .and_then(|id| self.class_insts.get(id))
@@ -524,13 +541,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             .collect();
         let field_loc_start = self.field_locs.len() as u32;
         for field in &hir_class.fields {
+            let is_func_ty = matches!(field.ty, HirType::Function(_));
             let ty = self.types.intern_hir(
                 self.ctx,
                 &field.ty,
-                !matches!(field.ty, HirType::Any | HirType::Unknown),
+                !matches!(
+                    field.ty,
+                    HirType::Any | HirType::Unknown | HirType::Function(_)
+                ),
             );
             let ty = self.types.substitute(self.ctx, ty, &bindings);
-            let declared = !self.types.is_open(ty);
+            let declared = !is_func_ty && !self.types.is_open(ty);
             let loc = self.alloc_loc(if declared { ty } else { Ty::BOTTOM });
             if declared {
                 self.declared_locs.insert(loc.index());
@@ -557,6 +578,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         });
         self.class_index.insert(key, cinst_id);
 
+        let mut has_field_inits = false;
         let field_loc_slice: Vec<LocId> = self
             .field_locs
             .get(field_locs.range())
@@ -564,6 +586,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .to_vec();
         for (field, field_loc) in hir_class.fields.iter().zip(field_loc_slice) {
             if let Some(init) = &field.init {
+                has_field_inits = true;
                 if matches!(init, Expr::Array(items, _) if items.is_empty())
                     && self.types.is_open(self.locations[field_loc])
                 {
@@ -573,12 +596,16 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else if let Some(init_inst) = self.init_inst {
                     let mut state = EvalState::new(init_inst, Some(Receiver::Class(cinst_id)));
                     let init_ty = self.eval_expr(&mut state, init)?;
+                    self.check_escaping_func(init_inst, init_ty, 0, None)?;
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, init_ty);
                     self.write_loc(field_loc, norm);
                 }
             }
+        }
+        if has_field_inits && let Some(init_inst) = self.init_inst {
+            self.enqueue(init_inst);
         }
         if let Some(ctor_tid) = cinfo.ctor {
             let ctor_inst = self.request_instance(

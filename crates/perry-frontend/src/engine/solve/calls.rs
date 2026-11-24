@@ -285,10 +285,18 @@ impl<'h, 'a> Solver<'h, 'a> {
             let Some(template) = self.index.template_of_func(*func_id) else {
                 return Ok(None);
             };
+            let capture_owner = if self.index.template_captures(template).is_empty() {
+                CaptureOwner::None
+            } else if self.collapsed_closures.contains(template.index())
+                && let Some(owner_tid) = self.instances.get(s.inst).map(|i| i.template)
+            {
+                CaptureOwner::Template(owner_tid)
+            } else {
+                CaptureOwner::Instance(s.inst)
+            };
             FuncIdentity {
                 template,
-                capture_owner: (!self.index.template_captures(template).is_empty())
-                    .then_some(s.inst),
+                capture_owner,
             }
         } else {
             let cb_val = self.eval_expr(s, callback)?;
@@ -323,11 +331,20 @@ impl<'h, 'a> Solver<'h, 'a> {
                 inputs.truncate(max_params);
                 let arms_span = self.intern_dispatch_arms(&arms);
                 let input_tys = self.types.tuple(&inputs);
-                self.set_coercion(
+                let helper = self.intern_helper(
+                    HelperSpec::Dispatcher {
+                        callee_ty: cb_val,
+                        arms: arms_span,
+                        arg_tys: input_tys,
+                        recv_ty: None,
+                    },
+                    0,
+                );
+                self.record_site_coercion(
                     s.inst,
                     callback,
                     FuncCoercion::DispatchCallback {
-                        callee_ty: cb_val,
+                        helper,
                         arms: arms_span,
                         input_tys,
                     },
@@ -363,7 +380,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let TyKind::Func(ident) = self.types.kind(cb_val) else {
                 return Ok(None);
             };
-            if self.escaping_env_templates.contains(ident.template.index()) {
+            if self.is_escaping_env(ident.template, s.inst) {
                 let Some(cb_view) = self.index.view(ident.template) else {
                     return Ok(None);
                 };
@@ -376,7 +393,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         .owner(ident.capture_owner),
                 )?;
                 let input_tys = self.types.tuple(&inputs);
-                self.set_coercion(
+                self.record_site_coercion(
                     s.inst,
                     callback,
                     FuncCoercion::EnvCallback {
@@ -421,10 +438,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(cb_view) = self.index.view(ident.template) else {
             return Ok(None);
         };
-        let caller_is_env = self
-            .instances
-            .get(s.inst)
-            .is_some_and(|i| self.escaping_env_templates.contains(i.template.index()));
+        let caller_tid = self.instances.get(s.inst).map(|i| i.template);
+        let caller_is_env = caller_tid.is_some_and(|t| self.is_escaping_env(t, s.inst));
         let keep_inline = matches!(callback, Expr::Closure { .. })
             && (cb_view.captures_this
                 || cb_view.captures_new_target
@@ -528,7 +543,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         let obj_ty = self.types.object(&props, None);
-        if has_zero_sized_func || matches!(site_expr, Expr::Object(_)) {
+        if has_zero_sized_func {
             self.record_site(s.inst, site_expr, SiteResolution::ObjectLiteral(obj_ty));
         }
         Ok(obj_ty)
@@ -777,7 +792,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError);
+            let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
+            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError(helper));
             return Ok(Ty::NEVER);
         }
         if let Some(idents) = self.types.func_union_members(callee_ty) {
@@ -853,7 +869,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.check_callback_params(s.inst, target_view, &arg_tys, byte_offset)?;
 
         let explicit_targs = self.eval_type_args(s.inst, type_args);
-        let pass_env = self.escaping_env_templates.contains(ident.template.index());
+        let pass_env = self.is_escaping_env(ident.template, s.inst);
         let (target_inst, ret) = self.dispatch_call_site(
             s.inst,
             expr,
@@ -929,7 +945,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in &expanded {
             self.invalidate_conservative_cell(a);
         }
-        let pass_env = self.escaping_env_templates.contains(ident.template.index());
+        let pass_env = self.is_escaping_env(ident.template, s.inst);
         let (_, ret) = self.dispatch_call_site(
             s.inst,
             expr,
@@ -1098,7 +1114,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
             let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
-            let pass_env = self.escaping_env_templates.contains(ident.template.index());
+            let pass_env = self.is_escaping_env(ident.template, s.inst);
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
@@ -1207,15 +1223,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let arms_span = self.intern_dispatch_arms(&arms);
         let arg_tuple = self.types.tuple(arg_tys);
+        let needs_recv = recv_ty.is_some()
+            && arms
+                .iter()
+                .any(|&(ident, _)| self.index.view(ident.template).is_some_and(|v| v.uses_this));
+        let helper = self.intern_helper(
+            HelperSpec::Dispatcher {
+                callee_ty,
+                arms: arms_span,
+                arg_tys: arg_tuple,
+                recv_ty: needs_recv.then_some(recv_ty).flatten(),
+            },
+            byte_offset,
+        );
         self.record_site(
             s.inst,
             expr,
             SiteResolution::DispatchCall {
-                callee_ty,
-                arms: arms_span,
-                arg_tys: arg_tuple,
-                recv_ty,
-                call_byte_offset: byte_offset,
+                helper,
+                argument_types: arg_tuple,
+                needs_recv,
             },
         );
         Ok(ret)

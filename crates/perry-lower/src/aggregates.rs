@@ -159,7 +159,8 @@ impl<'s> FunctionBuilder<'s> {
             names.len() == args.len(),
             "object literal arity differs from its shape"
         );
-        self.record_literal(ctx, names, args, expected, RecordKind::Object)
+        let fields: Vec<(&str, &'s Expr)> = names.iter().copied().zip(args).collect();
+        self.record_literal(ctx, &fields, expected, RecordKind::Object)
     }
 
     /// `[…]`, with the element type from `expected` or from the items.

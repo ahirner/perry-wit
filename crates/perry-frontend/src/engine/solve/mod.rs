@@ -7,8 +7,8 @@ use super::bitset::BitSet;
 use super::boundary::{ClassInfo, ModuleIndex, SourceFacts, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
-    CellKind, ClassId, ClassInstId, FuncIdentity, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp,
-    TemplateId, Ty, TyKind, TySpan, TypeTable,
+    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, IdxVec, InstanceId,
+    LocId, LocalIdx, ObjectProp, TemplateId, Ty, TyKind, TySpan, TypeTable,
 };
 use crate::{
     Absence,
@@ -46,7 +46,7 @@ impl Receiver {
 pub(crate) struct Instance {
     pub(crate) template: TemplateId,
     pub(crate) receiver: Option<Receiver>,
-    pub(crate) capture_owner: Option<InstanceId>,
+    pub(crate) capture_owner: CaptureOwner,
     pub(crate) args: Ty,
     pub(crate) explicit_type_args: Ty,
     pub(crate) return_loc: LocId,
@@ -69,17 +69,34 @@ pub(crate) struct ClassInst {
     pub(crate) emitted_name: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum HelperSpec {
+    Dispatcher {
+        callee_ty: Ty,
+        arms: TySpan,
+        arg_tys: Ty,
+        recv_ty: Option<Ty>,
+    },
+    Widener {
+        from: Ty,
+        to: Ty,
+    },
+    Comparer {
+        left_ty: Ty,
+        right_ty: Ty,
+    },
+    TypeOfFn(Ty),
+    ThrowTypeError,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FuncCoercion {
     Zero,
     Tag(FuncIdentity),
     BoxEnv(FuncIdentity),
-    Widen {
-        from: Ty,
-        to: Ty,
-    },
+    Widen(HelperId),
     DispatchCallback {
-        callee_ty: Ty,
+        helper: HelperId,
         arms: TySpan,
         input_tys: Ty,
     },
@@ -98,18 +115,17 @@ pub(crate) enum SiteResolution {
         pass_env: bool,
     },
     DispatchCall {
-        callee_ty: Ty,
-        arms: TySpan,
-        arg_tys: Ty,
-        recv_ty: Option<Ty>,
-        call_byte_offset: u32,
+        helper: HelperId,
+        argument_types: Ty,
+        needs_recv: bool,
     },
-    ThrowTypeError,
-    FuncTypeOf(Ty),
+    ThrowTypeError(HelperId),
+    FuncTypeOf(Option<HelperId>),
     FuncCompare {
         left_ty: Ty,
         right_ty: Ty,
         op: CompareOp,
+        helper: Option<HelperId>,
     },
     MethodCall {
         target: InstanceId,
@@ -135,6 +151,12 @@ pub(crate) enum SiteResolution {
     FoldBool(bool),
 }
 
+#[derive(Clone, Default, Debug)]
+pub(crate) struct SiteEntry {
+    pub(crate) resolution: Option<SiteResolution>,
+    pub(crate) coercion: Option<FuncCoercion>,
+}
+
 pub(crate) struct Solved {
     pub(crate) init_inst: InstanceId,
     pub(crate) instances: IdxVec<InstanceId, Instance>,
@@ -143,15 +165,18 @@ pub(crate) struct Solved {
     pub(crate) param_locs: Vec<LocId>,
     pub(crate) field_locs: Vec<LocId>,
     pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
+    pub(crate) helpers: IdxVec<HelperId, HelperSpec>,
+    pub(crate) helper_byte_offsets: Vec<u32>,
     pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
-    pub(crate) inst_sites: Vec<Vec<Option<SiteResolution>>>,
-    pub(crate) inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
+    pub(crate) inst_sites: Vec<Vec<SiteEntry>>,
     pub(crate) inst_captures: Vec<Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
     pub(crate) escaping_env_templates: BitSet,
+    pub(crate) collapsed_closures: BitSet,
     pub(crate) boxed_locals: BitSet,
     pub(crate) module_local_tys: Vec<Option<Ty>>,
+    pub(crate) collapsed_local_tys: Vec<Option<Ty>>,
     pub(crate) class_static_field_tys: Vec<Vec<Ty>>,
     pub(crate) class_inst_methods: Vec<Vec<InstanceId>>,
     pub(crate) class_inst_getters: Vec<Vec<(usize, InstanceId)>>,
@@ -163,7 +188,7 @@ pub(crate) struct Solved {
     pub(crate) deletes_array_elements: bool,
 }
 
-type InstanceKey = (TemplateId, Option<Receiver>, Option<InstanceId>, Ty, Ty);
+type InstanceKey = (TemplateId, Option<Receiver>, CaptureOwner, Ty, Ty);
 
 struct ResultContract {
     inst: InstanceId,
@@ -175,7 +200,7 @@ struct ResultContract {
 struct InstanceReq<'a> {
     template: TemplateId,
     receiver: Option<Receiver>,
-    capture_owner: Option<InstanceId>,
+    capture_owner: CaptureOwner,
     args: &'a [Ty],
     explicit_type_args: &'a [Ty],
     call_byte_offset: u32,
@@ -188,7 +213,7 @@ impl<'a> InstanceReq<'a> {
         Self {
             template,
             receiver: None,
-            capture_owner: None,
+            capture_owner: CaptureOwner::None,
             args,
             explicit_type_args: &[],
             call_byte_offset: 0,
@@ -200,7 +225,7 @@ impl<'a> InstanceReq<'a> {
         self.receiver = r;
         self
     }
-    fn owner(mut self, o: Option<InstanceId>) -> Self {
+    fn owner(mut self, o: CaptureOwner) -> Self {
         self.capture_owner = o;
         self
     }
@@ -303,14 +328,19 @@ struct Solver<'h, 'a> {
     field_locs: Vec<LocId>,
     dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     dispatch_arm_spans: Vec<TySpan>,
+    helpers: IdxVec<HelperId, HelperSpec>,
+    helper_index: HashMap<HelperSpec, HelperId>,
+    helper_byte_offsets: Vec<u32>,
     inst_locals: Vec<Vec<InstanceLocalSlot>>,
     inst_frame_locals: Vec<Vec<Ty>>,
     inst_written: Vec<BitSet>,
     inst_captures: Vec<Vec<LocalId>>,
-    inst_sites: Vec<Vec<Option<SiteResolution>>>,
-    inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
+    inst_sites: Vec<Vec<SiteEntry>>,
     inst_superseded: BitSet,
     escaping_env_templates: BitSet,
+    template_escape_locs: Vec<LocId>,
+    collapsed_closures: BitSet,
+    collapsed_local_locs: Vec<Option<LocId>>,
     boxed_locals: BitSet,
     dict_reads: BitSet,
     self_nested_locs: BitSet,
@@ -375,6 +405,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         if locations.is_empty() {
             locations.push(Ty::VOID);
         }
+        let template_escape_locs: Vec<LocId> = (0..index.views.len())
+            .map(|_| locations.push(Ty::BOTTOM))
+            .collect();
         let static_field_locs = index
             .classes
             .iter_enumerated()
@@ -433,14 +466,19 @@ impl<'h, 'a> Solver<'h, 'a> {
             field_locs: Vec::new(),
             dispatch_arms: Vec::new(),
             dispatch_arm_spans: Vec::new(),
+            helpers: IdxVec::default(),
+            helper_index: HashMap::with_capacity(16),
+            helper_byte_offsets: Vec::new(),
             inst_locals: Vec::new(),
             inst_frame_locals: Vec::new(),
             inst_written: Vec::new(),
             inst_captures: Vec::new(),
             inst_sites: Vec::new(),
-            inst_coercions: Vec::new(),
             inst_superseded: BitSet::default(),
             escaping_env_templates: BitSet::default(),
+            template_escape_locs,
+            collapsed_closures: BitSet::default(),
+            collapsed_local_locs: vec![None; index.local_count()],
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
@@ -477,6 +515,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .inst_sites
             .get(inst_id.index())
             .and_then(|s| s.get(local_site))
+            .map(|e| &e.resolution)
         {
             return self.types.cell(*loc, kind);
         }
@@ -486,7 +525,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .get_mut(inst_id.index())
             .and_then(|s| s.get_mut(local_site))
         {
-            *slot = Some(SiteResolution::Cell(loc));
+            slot.resolution = Some(SiteResolution::Cell(loc));
         }
         self.types.cell(loc, kind)
     }
@@ -556,8 +595,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             SiteResolution::DirectCall { target, .. }
             | SiteResolution::MethodCall { target, .. }
             | SiteResolution::Callback { target, .. } => f(target),
-            SiteResolution::DispatchCall { arms, .. } => {
-                if let Some(slice) = self.dispatch_arms.get(arms.range()) {
+            SiteResolution::DispatchCall { helper, .. } => {
+                if let Some(HelperSpec::Dispatcher { arms, .. }) = self.helpers.get(helper)
+                    && let Some(slice) = self.dispatch_arms.get(arms.range())
+                {
                     for &(_, target) in slice {
                         f(target);
                     }
@@ -585,32 +626,21 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut head = 0usize;
         while let Some(&caller) = queue.get(head) {
             head += 1;
-            for res in self
-                .inst_sites
-                .get(caller.index())
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
-                self.for_each_site_target(res, |t| {
-                    if live.insert(t.index()) {
-                        queue.push(t);
-                    }
-                });
-            }
-            for &(_, coercion) in self
-                .inst_coercions
-                .get(caller.index())
-                .into_iter()
-                .flatten()
-            {
-                match coercion {
-                    FuncCoercion::EnvCallback { target, .. } => {
+            for entry in self.inst_sites.get(caller.index()).into_iter().flatten() {
+                if let Some(res) = &entry.resolution {
+                    self.for_each_site_target(res, |t| {
+                        if live.insert(t.index()) {
+                            queue.push(t);
+                        }
+                    });
+                }
+                match entry.coercion {
+                    Some(FuncCoercion::EnvCallback { target, .. }) => {
                         if live.insert(target.index()) {
                             queue.push(target);
                         }
                     }
-                    FuncCoercion::DispatchCallback { arms, .. } => {
+                    Some(FuncCoercion::DispatchCallback { arms, .. }) => {
                         if let Some(slice) = self.dispatch_arms.get(arms.range()) {
                             for &(_, target) in slice {
                                 if live.insert(target.index()) {
@@ -635,7 +665,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 bump_count(&mut self.template_counts, inst.template);
             } else if self.inst_superseded.insert(idx) {
                 if let Some(sites) = self.inst_sites.get_mut(idx) {
-                    sites.fill(None);
+                    sites.fill(SiteEntry::default());
                 }
                 if let Some(reads) = self.inst_reads.get_mut(idx)
                     && !reads.is_empty()
@@ -770,6 +800,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let prev_locs = self.locations.as_slice().to_vec();
         let prev_frames = self.inst_frame_locals.clone();
         let prev_escaping = self.escaping_env_templates.clone();
+        let prev_collapsed = self.collapsed_closures.clone();
         self.dirty_locs.clear();
         for id in live_ids {
             self.evaluate_instance(id)?;
@@ -777,6 +808,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.escaping_env_templates != prev_escaping {
             return Err(Diagnostic::internal(
                 "fixed-point check marked a new escaping closure",
+            ));
+        }
+        if self.collapsed_closures != prev_collapsed {
+            return Err(Diagnostic::internal(
+                "fixed-point check collapsed a new closure",
             ));
         }
         if self.instances.len() != prev_inst_count {
@@ -817,7 +853,113 @@ impl<'h, 'a> Solver<'h, 'a> {
         span
     }
 
-    pub(super) fn mark_escaping_env(&mut self, caller: InstanceId, ty: Ty) {
+    pub(super) fn intern_helper(&mut self, spec: HelperSpec, byte_offset: u32) -> HelperId {
+        if let Some(&id) = self.helper_index.get(&spec) {
+            if byte_offset != 0
+                && let Some(slot) = self.helper_byte_offsets.get_mut(id.index())
+                && *slot == 0
+            {
+                *slot = byte_offset;
+            }
+            return id;
+        }
+        let id = self.helpers.push(spec);
+        self.helper_byte_offsets.push(byte_offset);
+        self.helper_index.insert(spec, id);
+        id
+    }
+
+    pub(super) fn collapse_closure(&mut self, tid: TemplateId, owner_tid: TemplateId) {
+        if !self.collapsed_closures.insert(tid.index()) {
+            return;
+        }
+        let caps: Vec<LocalId> = self.index.template_captures(tid).to_vec();
+        for cap_id in caps {
+            let Some(lidx) = self.index.local_idx(cap_id) else {
+                continue;
+            };
+            if self.index.local_module.contains(lidx.index()) {
+                continue;
+            }
+            let cloc = match self
+                .collapsed_local_locs
+                .get(lidx.index())
+                .copied()
+                .flatten()
+            {
+                Some(loc) => loc,
+                None => {
+                    let loc = self.alloc_loc(Ty::BOTTOM);
+                    if let Some(slot) = self.collapsed_local_locs.get_mut(lidx.index()) {
+                        *slot = Some(loc);
+                    }
+                    loc
+                }
+            };
+            let cap_owner_tid = self.index.local_owner.get(lidx.index()).copied();
+            let seed_tys: Vec<Ty> = self
+                .instances
+                .iter_enumerated()
+                .filter_map(|(id, inst)| {
+                    if self.inst_superseded.contains(id.index())
+                        || Some(inst.template) != cap_owner_tid
+                    {
+                        return None;
+                    }
+                    if let Some(slot) = self.local_frame_slot_in(id, lidx) {
+                        self.inst_frame_locals
+                            .get(id.index())
+                            .and_then(|f| f.get(slot))
+                            .copied()
+                    } else {
+                        self.inst_locals
+                            .get(id.index())
+                            .and_then(|sl| sl.iter().find(|s| s.local == lidx))
+                            .and_then(|s| self.locations.get(s.loc).copied())
+                    }
+                })
+                .collect();
+            for ty in seed_tys {
+                self.write_loc(cloc, ty);
+            }
+        }
+        let owners: Vec<InstanceId> = self
+            .instances
+            .iter_enumerated()
+            .filter_map(|(id, inst)| {
+                (!self.inst_superseded.contains(id.index()) && inst.template == owner_tid)
+                    .then_some(id)
+            })
+            .collect();
+        for id in owners {
+            self.enqueue(id);
+        }
+    }
+
+    pub(super) fn is_escaping_env(&mut self, tid: TemplateId, reader: InstanceId) -> bool {
+        let Some(&loc) = self.template_escape_locs.get(tid.index()) else {
+            return false;
+        };
+        self.read_loc(loc, reader) != Ty::BOTTOM
+    }
+
+    pub(super) fn is_tagged_func_union_in(&mut self, ty: Ty, reader: InstanceId) -> bool {
+        if let TyKind::Union(span) = self.types.kind(ty) {
+            let members: Vec<Ty> = self.types.ty_slice(span).to_vec();
+            for m in members {
+                if let TyKind::Func(ident) = self.types.kind(m) {
+                    let _ = self.is_escaping_env(ident.template, reader);
+                }
+            }
+        }
+        self.types.is_tagged_func_union(
+            ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        )
+    }
+
+    pub(super) fn mark_escaping_env(&mut self, _caller: InstanceId, ty: Ty) {
         let members = self.types.func_members(ty);
         for ident in members {
             let tid = ident.template;
@@ -829,6 +971,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             if !self.escaping_env_templates.insert(tid.index()) {
                 continue;
             }
+            if let Some(&loc) = self.template_escape_locs.get(tid.index()) {
+                self.write_loc(loc, Ty::BOOLEAN);
+            }
             for &cap_id in self.index.template_captures(tid) {
                 if let Some(lidx) = self.index.local_idx(cap_id) {
                     let li = lidx.index();
@@ -836,48 +981,39 @@ impl<'h, 'a> Solver<'h, 'a> {
                         && (self.index.local_reassigned.contains(li)
                             || self.index.local_written_from_closure.contains(li)
                             || self.index.local_deferred.contains(li)
-                            || self.index.local_for_head.contains(li))
+                            || self.index.local_for_head.contains(li)
+                            || self.index.local_forward_captured.contains(li))
                     {
                         self.boxed_locals.insert(li);
                     }
                 }
             }
-            self.enqueue(caller);
-            if let Some(owner) = ident.capture_owner {
-                self.enqueue(owner);
-                if let Some(grand_caller) = self.instances.get(owner).and_then(|i| i.caller) {
-                    self.enqueue(grand_caller);
-                }
-            }
-            let to_requeue: Vec<InstanceId> =
-                self.instances
-                    .iter_enumerated()
-                    .filter_map(|(id, inst)| {
-                        if self.inst_superseded.contains(id.index()) {
-                            return None;
-                        }
-                        let matches = inst.template == tid
-                            || inst.capture_owner == ident.capture_owner
-                            || self.types.tuple_slice(inst.args).iter().any(|&a| {
-                                self.types.func_members(a).iter().any(|m| m.template == tid)
-                            });
-                        matches.then_some(id)
-                    })
-                    .collect();
-            for id in to_requeue {
-                self.enqueue(id);
-            }
         }
     }
 
-    pub(super) fn set_coercion(&mut self, inst_id: InstanceId, expr: &Expr, c: FuncCoercion) {
-        let key = std::ptr::from_ref(expr) as usize;
-        if let Some(list) = self.inst_coercions.get_mut(inst_id.index()) {
-            if let Some(slot) = list.iter_mut().find(|(k, _)| *k == key) {
-                slot.1 = c;
-            } else {
-                list.push((key, c));
-            }
+    pub(super) fn record_site_coercion(
+        &mut self,
+        inst_id: InstanceId,
+        expr: &Expr,
+        c: FuncCoercion,
+    ) {
+        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
+            return;
+        };
+        let Some(local_site) = self.index.site_of(template, expr) else {
+            debug_assert!(
+                false,
+                "unindexed coercion site in template {}",
+                template.index()
+            );
+            return;
+        };
+        if let Some(slot) = self
+            .inst_sites
+            .get_mut(inst_id.index())
+            .and_then(|s| s.get_mut(local_site))
+        {
+            slot.coercion = Some(c);
         }
     }
 
@@ -893,7 +1029,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .get_mut(inst_id.index())
             .and_then(|s| s.get_mut(local_site))
         {
-            *slot = None;
+            slot.resolution = None;
         }
     }
 
@@ -918,13 +1054,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(elem_ty, &self.index.capture_free_templates)
         {
             for a in args {
-                self.set_coercion(inst_id, a, FuncCoercion::Zero);
+                self.record_site_coercion(inst_id, a, FuncCoercion::Zero);
             }
-        } else if self.types.is_tagged_func_union(
-            elem_ty,
-            &self.index.capture_free_templates,
-            &self.escaping_env_templates,
-        ) {
+        } else if self.is_tagged_func_union_in(elem_ty, inst_id) {
             for (a, &at) in args.iter().zip(arg_tys) {
                 self.record_coercion(inst_id, a, at, elem_ty);
             }
@@ -941,11 +1073,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if src_ty == Ty::BOTTOM || dst_ty == Ty::BOTTOM {
             return;
         }
-        if !self.types.is_tagged_func_union(
-            dst_ty,
-            &self.index.capture_free_templates,
-            &self.escaping_env_templates,
-        ) {
+        if !self.is_tagged_func_union_in(dst_ty, inst_id) {
             return;
         }
         let inner = match expr {
@@ -962,31 +1090,28 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
-            self.set_coercion(inst_id, expr, FuncCoercion::Tag(ident));
+            self.record_site_coercion(inst_id, expr, FuncCoercion::Tag(ident));
             return;
         }
-        if self.types.is_env_func(src_ty, &self.escaping_env_templates)
-            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        if let TyKind::Func(ident) = self.types.kind(src_ty)
+            && self.is_escaping_env(ident.template, inst_id)
         {
             if !matches!(expr, Expr::Closure { .. }) {
-                self.set_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
+                self.record_site_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
             }
             return;
         }
-        if self.types.is_tagged_func_union(
-            src_ty,
-            &self.index.capture_free_templates,
-            &self.escaping_env_templates,
-        ) && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
+        if self.is_tagged_func_union_in(src_ty, inst_id)
+            && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
         {
-            self.set_coercion(
-                inst_id,
-                expr,
-                FuncCoercion::Widen {
+            let helper = self.intern_helper(
+                HelperSpec::Widener {
                     from: src_ty,
                     to: dst_ty,
                 },
+                0,
             );
+            self.record_site_coercion(inst_id, expr, FuncCoercion::Widen(helper));
         }
     }
 
@@ -1004,11 +1129,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .ty_slice(u_span)
                 .iter()
                 .any(|&m| matches!(self.types.kind(m), TyKind::Func(_)))
-            && !self.types.is_tagged_func_union(
-                ty,
-                &self.index.capture_free_templates,
-                &self.escaping_env_templates,
-            )
+            && !self.is_tagged_func_union_in(ty, inst_id)
         {
             let mut err = Diagnostic::unsupported(
                 "joining function values with non-function values is not supported yet",

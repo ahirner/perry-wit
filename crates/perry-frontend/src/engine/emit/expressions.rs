@@ -9,7 +9,9 @@ enum CalleeValue {
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn rewrite_expr(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
-        let coercion = self.coercion_of(rctx.inst_id, expr);
+        let site_entry = self.site_entry(rctx.inst_id, expr).cloned();
+        let coercion = site_entry.as_ref().and_then(|e| e.coercion);
+        let resolution = site_entry.and_then(|e| e.resolution);
         if let Some(c) = coercion {
             match c {
                 FuncCoercion::Zero if is_pure_func_expr(expr) => return Ok(Expr::Number(0.0)),
@@ -19,7 +21,7 @@ impl<'h> Emitter<'h, '_> {
                 _ => {}
             }
         }
-        let rewritten = self.rewrite_expr_inner(rctx, expr)?;
+        let rewritten = self.rewrite_expr_inner(rctx, expr, resolution)?;
         match coercion {
             Some(FuncCoercion::Zero) => Ok(Expr::Sequence(vec![rewritten, Expr::Number(0.0)])),
             Some(FuncCoercion::Tag(ident)) => {
@@ -30,30 +32,30 @@ impl<'h> Emitter<'h, '_> {
                 let val_expr = Self::prop_get(rewritten, "val");
                 Ok(self.emit_env_wrapper(ident, val_expr))
             }
-            Some(FuncCoercion::Widen { from, to }) => {
-                let fid = self.intern_widener(from, to)?;
+            Some(FuncCoercion::Widen(helper)) => {
+                let fid = self.emit_helper(helper)?;
                 Ok(Self::synth_call(fid, vec![rewritten], 0, 0))
             }
             Some(FuncCoercion::EnvCallback { target, input_tys }) => {
                 let target_fid = self
                     .instance(target, "missing env callback target instance")?
                     .emitted_func_id;
-                let inputs = self.types.tuple_slice(input_tys).to_vec();
+                let inputs = self.types.tuple_slice(input_tys);
                 let arm_ret = self.arm_return_hir(target)?;
                 self.emit_callback_wrapper(
                     target_fid,
                     Self::prop_get(rewritten, "val"),
-                    &inputs,
+                    inputs,
                     arm_ret,
                 )
             }
             Some(FuncCoercion::DispatchCallback {
-                callee_ty,
+                helper,
                 arms,
                 input_tys,
             }) => {
-                let arm_slice = self.dispatch_arms_slice(arms)?.to_vec();
-                let inputs = self.types.tuple_slice(input_tys).to_vec();
+                let arm_slice = self.dispatch_arms_slice(arms)?;
+                let inputs = self.types.tuple_slice(input_tys);
                 let max_params = arm_slice
                     .iter()
                     .filter_map(|&(ident, _)| self.index.view(ident.template))
@@ -67,8 +69,7 @@ impl<'h> Emitter<'h, '_> {
                     .max()
                     .unwrap_or(0)
                     .min(inputs.len());
-                let (disp_fid, _) =
-                    self.intern_dispatcher(callee_ty, &arm_slice, input_tys, None, 0)?;
+                let disp_fid = self.emit_helper(helper)?;
                 let disp_ret = self
                     .synth_functions
                     .iter()
@@ -76,19 +77,19 @@ impl<'h> Emitter<'h, '_> {
                     .ok_or_else(|| Diagnostic::internal("missing synthesized dispatcher"))?
                     .return_type
                     .clone();
-                self.emit_callback_wrapper(
-                    disp_fid,
-                    rewritten,
-                    inputs.get(..max_params).unwrap_or(&inputs),
-                    disp_ret,
-                )
+                self.emit_callback_wrapper(disp_fid, rewritten, &inputs[..max_params], disp_ret)
             }
             None => Ok(rewritten),
         }
     }
 
-    fn rewrite_expr_inner(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
-        if let Some(site) = self.site_of(rctx.inst_id, expr).cloned() {
+    fn rewrite_expr_inner(
+        &mut self,
+        rctx: &RewriteCtx<'_>,
+        expr: &'h Expr,
+        resolution: Option<SiteResolution>,
+    ) -> Result<Expr> {
+        if let Some(site) = resolution {
             match site {
                 SiteResolution::Cell(_) => {}
                 SiteResolution::FoldBool(b) => {
@@ -110,8 +111,8 @@ impl<'h> Emitter<'h, '_> {
                         cap_args_appended: 0,
                     });
                 }
-                SiteResolution::ThrowTypeError => {
-                    let fid = self.intern_throw_type_error()?;
+                SiteResolution::ThrowTypeError(helper) => {
+                    let fid = self.emit_helper(helper)?;
                     let call = Self::synth_call(fid, Vec::new(), 0, 0);
                     if let Expr::Call { callee, args, .. } = expr {
                         let mut effects = Vec::new();
@@ -132,18 +133,17 @@ impl<'h> Emitter<'h, '_> {
                     }
                     return Ok(call);
                 }
-                SiteResolution::FuncTypeOf(op_ty) => {
+                SiteResolution::FuncTypeOf(helper) => {
                     if let Expr::TypeOf(operand) = expr {
-                        let (has_null, has_undef) = self.nullish_flags(op_ty);
-                        if !has_null && !has_undef {
+                        let Some(helper) = helper else {
                             let s = Expr::String("function".into());
                             return Ok(if is_pure_func_expr(operand) {
                                 s
                             } else {
                                 Expr::Sequence(vec![self.rewrite_expr(rctx, operand)?, s])
                             });
-                        }
-                        let fid = self.intern_typeof_fn(op_ty)?;
+                        };
+                        let fid = self.emit_helper(helper)?;
                         let arg = self.rewrite_expr(rctx, operand)?;
                         return Ok(Self::synth_call(fid, vec![arg], 0, 0));
                     }
@@ -152,9 +152,12 @@ impl<'h> Emitter<'h, '_> {
                     target,
                     keep_inline_closure,
                 } => {
-                    let ti = self.instance(target, "missing callback target instance")?;
+                    let (emitted_func_id, return_loc, param_locs_span) = {
+                        let ti = self.instance(target, "missing callback target instance")?;
+                        (ti.emitted_func_id, ti.return_loc, ti.param_locs)
+                    };
                     if !keep_inline_closure {
-                        return Ok(Expr::FuncRef(ti.emitted_func_id));
+                        return Ok(Expr::FuncRef(emitted_func_id));
                     }
                     if let Expr::Closure { body, .. } = expr {
                         let mut out = expr.clone();
@@ -167,15 +170,16 @@ impl<'h> Emitter<'h, '_> {
                             ..
                         } = &mut out
                         {
-                            *return_type =
-                                self.materialize(self.solved.locations[ti.return_loc])?;
-                            for (p, &loc) in params.iter_mut().zip(
-                                self.solved
-                                    .param_locs
-                                    .get(ti.param_locs.range())
-                                    .unwrap_or(&[]),
-                            ) {
-                                let ty = self.solved.locations[loc];
+                            *return_type = self.materialize(self.solved.locations[return_loc])?;
+                            let param_tys: Vec<Ty> = self
+                                .solved
+                                .param_locs
+                                .get(param_locs_span.range())
+                                .unwrap_or(&[])
+                                .iter()
+                                .map(|&loc| self.solved.locations[loc])
+                                .collect();
+                            for (p, ty) in params.iter_mut().zip(param_tys) {
                                 if self.is_resolved(ty) {
                                     p.ty = self.materialize(ty)?;
                                 }
@@ -186,8 +190,6 @@ impl<'h> Emitter<'h, '_> {
                                 self_local: None,
                                 env_local: rctx.env_local,
                                 env_captures: rctx.env_captures,
-                                self_capture_locals: rctx.self_capture_locals,
-                                self_env_tag: rctx.self_env_tag,
                                 boxed_param_map: rctx.boxed_param_map,
                                 void_return: false,
                                 has_expected: false,
@@ -270,6 +272,7 @@ impl<'h> Emitter<'h, '_> {
                     left_ty,
                     right_ty,
                     op,
+                    helper,
                 } => {
                     if let Expr::Compare { left, right, .. } = expr {
                         let is_eq = matches!(op, CompareOp::Eq | CompareOp::LooseEq);
@@ -318,7 +321,10 @@ impl<'h> Emitter<'h, '_> {
                                 right: Box::new(Self::prop_get(r_rewritten, "val")),
                             });
                         }
-                        let cmp_fid = self.intern_comparer(left_ty, right_ty)?;
+                        let helper_id = helper.ok_or_else(|| {
+                            Diagnostic::internal("missing synthesized comparer helper")
+                        })?;
+                        let cmp_fid = self.emit_helper(helper_id)?;
                         let call = Self::synth_call(cmp_fid, vec![l_rewritten, r_rewritten], 0, 0);
                         return Ok(if is_eq {
                             call
@@ -379,29 +385,26 @@ impl<'h> Emitter<'h, '_> {
                     let effects = self.finish_operands(&mut kept_args, effects)?;
                     return Ok(sequence(
                         effects,
-                        self.emit_anon_new(&kept_names, kept_args),
+                        Expr::Object(
+                            kept_names
+                                .into_iter()
+                                .map(str::to_owned)
+                                .zip(kept_args)
+                                .collect(),
+                        ),
                     ));
                 }
                 SiteResolution::DispatchCall {
-                    callee_ty,
-                    arms,
-                    arg_tys,
-                    recv_ty,
-                    call_byte_offset,
+                    helper,
+                    argument_types,
+                    needs_recv,
                 } => {
-                    let arm_slice = self.dispatch_arms_slice(arms)?.to_vec();
-                    let (fid, needs_recv) = self.intern_dispatcher(
-                        callee_ty,
-                        &arm_slice,
-                        arg_tys,
-                        recv_ty,
-                        call_byte_offset,
-                    )?;
+                    let fid = self.emit_helper(helper)?;
                     return self.rewrite_call(
                         rctx,
                         expr,
                         fid,
-                        arg_tys,
+                        argument_types,
                         needs_recv,
                         CalleeValue::Tagged,
                     );
@@ -417,8 +420,41 @@ impl<'h> Emitter<'h, '_> {
                         if rctx.has_expected {
                             return Ok(arr);
                         }
-                        let caster = self.intern_caster(arr_ty)?;
-                        return Ok(Self::synth_call(caster, vec![arr], 0, 0));
+                        let arr_hir = self.materialize(arr_ty)?;
+                        let tmp_id = self.fresh_synthetic_local()?;
+                        let closure_fid = self.fresh_func_id()?;
+                        let closure = Expr::Closure {
+                            func_id: closure_fid,
+                            params: Vec::new(),
+                            return_type: arr_hir.clone(),
+                            body: vec![
+                                Stmt::Let {
+                                    id: tmp_id,
+                                    name: "__arr".into(),
+                                    ty: arr_hir,
+                                    mutable: false,
+                                    init: Some(arr),
+                                },
+                                Stmt::Return(Some(Expr::LocalGet(tmp_id))),
+                            ],
+                            captures: Vec::new(),
+                            mutable_captures: Vec::new(),
+                            captures_this: false,
+                            captures_new_target: false,
+                            enclosing_class: None,
+                            is_async: false,
+                            is_generator: false,
+                            is_strict: true,
+                            construct_only: false,
+                            is_arrow: true,
+                        };
+                        return Ok(Expr::Call {
+                            callee: Box::new(closure),
+                            args: Vec::new(),
+                            type_args: Vec::new(),
+                            byte_offset: 0,
+                            byte_end: 0,
+                        });
                     }
                 }
                 SiteResolution::ZeroSizedArray => {
@@ -549,6 +585,41 @@ impl<'h> Emitter<'h, '_> {
         self.rewrite_expr_plain(rctx, expr)
     }
 
+    fn local_read_override(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
+        let forward = self.is_forward_boxed(id);
+        let unwrap_box = |base: Expr| {
+            let val = Self::prop_get(base, "v");
+            if forward {
+                Self::non_null_unwrap(val)
+            } else {
+                val
+            }
+        };
+        if let Some(env_pid) = rctx.env_local
+            && let Some((_, field, boxed)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == id)
+        {
+            let base = Self::prop_get(Expr::LocalGet(env_pid), field);
+            return Some(if *boxed { unwrap_box(base) } else { base });
+        }
+        if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| *lid == id) {
+            return Some(unwrap_box(Expr::LocalGet(box_id)));
+        }
+        if self.is_boxed_local(id) {
+            return Some(unwrap_box(Expr::LocalGet(id)));
+        }
+        None
+    }
+
+    fn method_call_expr(recv: Expr, property: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            callee: Box::new(Self::prop_get(recv, property)),
+            args,
+            type_args: Vec::new(),
+            byte_offset: 0,
+            byte_end: 0,
+        }
+    }
+
     fn boxed_target(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
         if let Some(env_pid) = rctx.env_local
             && let Some((_, field, boxed)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == id)
@@ -574,20 +645,46 @@ impl<'h> Emitter<'h, '_> {
             && let Some(tid) = self.index.template_of_func(*func_id)
             && self.is_env_template(tid)
         {
+            let capture_owner = if self.index.template_captures(tid).is_empty() {
+                CaptureOwner::None
+            } else if self.solved.collapsed_closures.contains(tid.index())
+                && let Some(owner_tid) = self.solved.instances.get(rctx.inst_id).map(|i| i.template)
+            {
+                CaptureOwner::Template(owner_tid)
+            } else {
+                CaptureOwner::Instance(rctx.inst_id)
+            };
             let ident = FuncIdentity {
                 template: tid,
-                capture_owner: Some(rctx.inst_id),
+                capture_owner,
             };
-            let (fields, _) = self.env_layout(ident)?;
-            let env_expr = if fields.is_empty() {
-                self.emit_anon_new(&["_u"], vec![Expr::Number(0.0)])
+            let class_name = self.ensure_env_class(ident)?;
+            let fields = self.env_layout(ident)?;
+            let args = if fields.is_empty() {
+                vec![Expr::Number(0.0)]
             } else {
-                let names: Vec<&str> = fields.iter().map(|(_, f, _, _)| f.as_str()).collect();
-                let args = fields
-                    .iter()
-                    .map(|&(cap_id, _, _, _)| self.emit_capture_ref(rctx, cap_id))
-                    .collect();
-                self.emit_anon_new(&names, args)
+                let mut out_args = Vec::with_capacity(fields.len());
+                for (cap_id, _, dst_ty, boxed) in fields {
+                    let mut arg = self.emit_capture_ref(rctx, cap_id);
+                    if !boxed
+                        && matches!(capture_owner, CaptureOwner::Template(_))
+                        && let Some(src_ty) =
+                            self.local_ty_in_owner(CaptureOwner::Instance(rctx.inst_id), cap_id)
+                        && src_ty != dst_ty
+                    {
+                        arg = self.coerce_capture_expr(arg, src_ty, dst_ty)?;
+                    }
+                    out_args.push(arg);
+                }
+                out_args
+            };
+            let env_expr = Expr::New {
+                class_name,
+                args,
+                type_args: Vec::new(),
+                byte_offset: 0,
+                byte_end: 0,
+                cap_args_appended: 0,
             };
             return Ok(self.emit_env_wrapper(ident, env_expr));
         }
@@ -595,28 +692,82 @@ impl<'h> Emitter<'h, '_> {
             if let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id) {
                 return Ok(Expr::FuncRef(*fid));
             }
-            if rctx.self_capture_locals.contains(id)
-                && let (Some(env_pid), Some(tag)) = (rctx.env_local, rctx.self_env_tag)
-            {
-                return Ok(self.emit_env_wrapper_tag(tag, Expr::LocalGet(env_pid)));
+            if let Some(override_expr) = self.local_read_override(rctx, *id) {
+                return Ok(override_expr);
             }
-            if let Some(env_pid) = rctx.env_local
-                && let Some((_, field, boxed)) =
-                    rctx.env_captures.iter().find(|(lid, _, _)| lid == id)
+        }
+        match expr {
+            Expr::ArrayPush {
+                array_id, value, ..
+            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
+                let arg_ctx = rctx.with_expected(true);
+                let val = self.rewrite_expr(&arg_ctx, value)?;
+                return Ok(Self::method_call_expr(recv, "push", vec![val]));
+            }
+            Expr::ArrayPushSpread { array_id, source }
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
             {
-                let base = Self::prop_get(Expr::LocalGet(env_pid), field);
-                return Ok(if *boxed {
-                    Self::prop_get(base, "v")
-                } else {
-                    base
+                let src = self.rewrite_expr(rctx, source)?;
+                return Ok(Expr::CallSpread {
+                    callee: Box::new(Self::prop_get(recv, "push")),
+                    args: vec![CallArg::Spread(src)],
+                    type_args: Vec::new(),
+                    byte_offset: 0,
+                    byte_end: 0,
                 });
             }
-            if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| lid == id) {
-                return Ok(Self::prop_get(Expr::LocalGet(box_id), "v"));
+            Expr::ArrayPop(array_id)
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
+            {
+                return Ok(Self::method_call_expr(recv, "pop", Vec::new()));
             }
-            if self.is_boxed_local(*id) {
-                return Ok(Self::prop_get(Expr::LocalGet(*id), "v"));
+            Expr::ArrayShift(array_id)
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
+            {
+                return Ok(Self::method_call_expr(recv, "shift", Vec::new()));
             }
+            Expr::ArrayUnshift { array_id, value }
+                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
+            {
+                let arg_ctx = rctx.with_expected(true);
+                let val = self.rewrite_expr(&arg_ctx, value)?;
+                return Ok(Self::method_call_expr(recv, "unshift", vec![val]));
+            }
+            Expr::ArraySplice {
+                array_id,
+                start,
+                delete_count,
+                items,
+            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
+                let mut args = vec![self.rewrite_expr(rctx, start)?];
+                if let Some(dc) = delete_count {
+                    args.push(self.rewrite_expr(rctx, dc)?);
+                }
+                for item in items {
+                    args.push(self.rewrite_expr(rctx, item)?);
+                }
+                return Ok(Self::method_call_expr(recv, "splice", args));
+            }
+            Expr::ArrayCopyWithin {
+                array_id,
+                target,
+                start,
+                end,
+            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
+                return Ok(Expr::ArrayCopyWithinValue {
+                    receiver: Box::new(recv),
+                    target: Box::new(self.rewrite_expr(rctx, target)?),
+                    start: Box::new(self.rewrite_expr(rctx, start)?),
+                    end: self.rewrite_opt_expr(rctx, end.as_deref())?.map(Box::new),
+                });
+            }
+            Expr::SetAdd { set_id, value }
+                if let Some(recv) = self.local_read_override(rctx, *set_id) =>
+            {
+                let val = self.rewrite_expr(rctx, value)?;
+                return Ok(Self::method_call_expr(recv, "add", vec![val]));
+            }
+            _ => {}
         }
         if let Expr::LocalSet(id, value) = expr
             && let Some(box_obj) = self.boxed_target(rctx, *id)
@@ -636,8 +787,9 @@ impl<'h> Emitter<'h, '_> {
             else_expr,
         } = expr
         {
+            let cond_ctx = rctx.with_expected(false);
             return Ok(Expr::Conditional {
-                condition: Box::new(self.rewrite_condition(rctx, condition)?),
+                condition: Box::new(self.rewrite_condition(&cond_ctx, condition)?),
                 then_expr: Box::new(self.rewrite_expr(rctx, then_expr)?),
                 else_expr: Box::new(self.rewrite_expr(rctx, else_expr)?),
             });
@@ -685,8 +837,6 @@ impl<'h> Emitter<'h, '_> {
                 self_local: None,
                 env_local: rctx.env_local,
                 env_captures: rctx.env_captures,
-                self_capture_locals: rctx.self_capture_locals,
-                self_env_tag: rctx.self_env_tag,
                 boxed_param_map: rctx.boxed_param_map,
                 void_return: false,
                 has_expected: false,
@@ -695,6 +845,9 @@ impl<'h> Emitter<'h, '_> {
         } else {
             rctx
         };
+        let child_expected =
+            rctx.has_expected && matches!(expr, Expr::Logical { .. } | Expr::Sequence(_));
+        let child_ctx = rctx.with_expected(child_expected);
         let mut cloned = expr.clone();
         let mut orig_children: Vec<&'h Expr> = Vec::new();
         perry_hir::walker::walk_expr_children(expr, &mut |child| orig_children.push(child));
@@ -704,7 +857,7 @@ impl<'h> Emitter<'h, '_> {
                 && let Some(&orig) = orig_children.get(idx)
             {
                 idx += 1;
-                match self.rewrite_expr(rctx, orig) {
+                match self.rewrite_expr(&child_ctx, orig) {
                     Ok(r) => *child = r,
                     Err(e) => err = Some(e),
                 }
@@ -756,13 +909,6 @@ impl<'h> Emitter<'h, '_> {
                 operands.push(Expr::LocalGet(id));
                 Some(Self::prop_get(Expr::LocalGet(id), property))
             }
-        } else if matches!(mode, CalleeValue::Environment)
-            && let Expr::LocalGet(id) = callee.as_ref()
-            && rctx.self_capture_locals.contains(id)
-            && let Some(env_pid) = rctx.env_local
-        {
-            operands.push(Expr::LocalGet(env_pid));
-            None
         } else if matches!(mode, CalleeValue::Static) {
             if !is_pure_func_expr(callee) {
                 let operand = match callee.as_ref() {

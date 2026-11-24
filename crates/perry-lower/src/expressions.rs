@@ -500,11 +500,10 @@ impl<'s> FunctionBuilder<'s> {
             Expr::New {
                 class_name,
                 args,
-                type_args,
                 byte_offset,
                 ..
             } if self.shapes.classes.named.contains_key(class_name.as_str()) => self
-                .class_new(ctx, class_name, args, type_args, expected)
+                .class_new(ctx, class_name, args)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
                 class_name, args, ..
@@ -517,8 +516,9 @@ impl<'s> FunctionBuilder<'s> {
                 }) =>
             {
                 let names: Vec<String> = (0..items.len()).map(|i| format!("_{i}")).collect();
-                let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                self.record_literal(ctx, &names, items, expected, RecordKind::Tuple)?
+                let fields: Vec<(&str, &'s Expr)> =
+                    names.iter().map(String::as_str).zip(items).collect();
+                self.record_literal(ctx, &fields, expected, RecordKind::Tuple)?
             }
             Expr::Array(items, _) => self.array_literal(ctx, items, expected)?,
             Expr::ArraySpread(items) => self.array_spread(ctx, items, expected)?,
@@ -545,7 +545,11 @@ impl<'s> FunctionBuilder<'s> {
             } => self
                 .set_index(ctx, object, index, value)
                 .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
-            Expr::Object(_) => bail_unsupported!("this object literal form is not supported yet"),
+            Expr::Object(fields) => {
+                let pairs: Vec<(&str, &'s Expr)> =
+                    fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                self.record_literal(ctx, &pairs, expected, RecordKind::Object)?
+            }
             _ => bail_unsupported!("this expression form is not supported yet"),
         };
         self.narrow_value(ctx, expr, value)
