@@ -34,10 +34,10 @@ impl<'s> FunctionBuilder<'s> {
         let object = self.expression(ctx, object)?;
         let object = self.defined(ctx, object)?;
         let class_info = self.shapes.class_of_type(ctx, object.get_type(ctx));
-        let previous = if let Some((class_name, ref type_args)) = class_info
+        let previous = if let Some(class_name) = class_info
             && let Some((owner_class, getter)) = self.shapes.class_getter(class_name, property)
         {
-            self.class_getter_call(ctx, object, owner_class, type_args, getter)?
+            self.class_getter_call(ctx, object, owner_class, getter)?
         } else {
             let get = FieldGetOp::new(ctx, object, property.to_string()).map_err(|_| {
                 Diagnostic::new(
@@ -62,10 +62,10 @@ impl<'s> FunctionBuilder<'s> {
         };
         let next = self.binary(ctx, kind, old, one);
         let stored = self.fit(ctx, next, field_type)?;
-        if let Some((class_name, ref type_args)) = class_info
+        if let Some(class_name) = class_info
             && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, property)
         {
-            self.class_setter_call_value(ctx, object, owner_class, type_args, setter, stored)?;
+            self.class_setter_call_value(ctx, object, owner_class, setter, stored)?;
         } else {
             self.emit(ctx, |ctx| {
                 FieldSetOp::new(ctx, object, property.to_string(), stored)
@@ -193,11 +193,11 @@ impl<'s> FunctionBuilder<'s> {
                 self.number(ctx, len as f64)
             }
             (Kind::Record, field)
-                if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, ty)
+                if let Some(class_name) = self.shapes.class_of_type(ctx, ty)
                     && let Some((owner_class, getter)) =
                         self.shapes.class_getter(class_name, field) =>
             {
-                self.class_getter_call(ctx, value, owner_class, &type_args, getter)?
+                self.class_getter_call(ctx, value, owner_class, getter)?
             }
             (Kind::Record, field) => match FieldGetOp::new(ctx, value, field.to_string()) {
                 Ok(op) => self.field_read(ctx, &op)?,

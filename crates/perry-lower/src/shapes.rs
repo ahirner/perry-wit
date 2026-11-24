@@ -87,7 +87,7 @@ pub(super) struct Shapes<'h> {
             &'h perry_frontend::hir::ir::ClassField,
         ),
     >,
-    pub(super) class_records: RefCell<HashMap<TypeHandle, (&'h str, Vec<TypeId>)>>,
+    class_records: RefCell<HashMap<TypeHandle, &'h str>>,
     pub(super) lexical_functions: HashMap<perry_frontend::hir::types::FuncId, &'h Expr>,
     function_names: HashSet<&'h str>,
     local_source_spans:
@@ -324,13 +324,9 @@ impl<'h> Shapes<'h> {
         self.decls.is_user_type(name)
     }
 
-    pub(super) fn class_of_type(
-        &self,
-        ctx: &Context,
-        ty: TypeHandle,
-    ) -> Option<(&'h str, Vec<TypeId>)> {
+    pub(super) fn class_of_type(&self, ctx: &Context, ty: TypeHandle) -> Option<&'h str> {
         let inner = crate::present_type(ctx, ty);
-        self.class_records.borrow().get(&inner).cloned()
+        self.class_records.borrow().get(&inner).copied()
     }
 
     pub(super) fn static_field(

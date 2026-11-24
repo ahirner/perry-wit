@@ -1,6 +1,5 @@
 //! Return frames for inline callbacks and class callables.
 use super::*;
-use perry_mir::OptionalType;
 
 /// The result an inline body stores. The frontend types every inline callable's result, so
 /// lowering never infers one from the returned values.
@@ -59,14 +58,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         let done = self.new_block(ctx, "inline_done");
         let slot = match result_type {
-            InlineResult::Declared(ty) => {
-                let ty = if returns_optional(body) {
-                    OptionalType::get(ctx, ty).into()
-                } else {
-                    ty
-                };
-                Some(self.entry_slot(ctx, ty))
-            }
+            InlineResult::Declared(ty) => Some(self.entry_slot(ctx, ty)),
             InlineResult::Void => None,
         };
         self.inline_returns.push(ReturnFrame { done, slot });
@@ -138,6 +130,3 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 }
-
-// How a statement list may complete, as a bit set.
-pub(super) use perry_frontend::completion::returns_optional;

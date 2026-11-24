@@ -199,7 +199,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 param.binding
             };
-            builder.bind_parameter(ctx, param.source, Some(arg_val), Some(binding))?;
+            builder.bind_parameter(ctx, param.source, Some(arg_val), binding)?;
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);

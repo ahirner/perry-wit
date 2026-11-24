@@ -2,8 +2,7 @@
 use super::*;
 use perry_frontend::hir::ir::{Class, Interface, TypeAlias};
 use perry_frontend::shapes::generics::{
-    ARGUMENT_LIMIT, Declaration, DeclarationId, DeclarationLookup, Query, Resolver, Utility,
-    substitute_id,
+    Declaration, DeclarationId, DeclarationLookup, Query, Resolver, Utility, substitute_id,
 };
 impl<'h> DeclarationLookup<'h> for Shapes<'h> {
     fn interface(&self, name: &str) -> Option<(usize, &'h Interface)> {
@@ -18,25 +17,6 @@ impl<'h> DeclarationLookup<'h> for Shapes<'h> {
 }
 
 impl<'s> Shapes<'s> {
-    pub(crate) fn class_value_type(
-        &self,
-        ctx: &Context,
-        class_name: &str,
-        type_args: &[TypeId],
-        ty: &HirType,
-    ) -> Result<TypeHandle> {
-        let Some((_, class)) = self.classes.named.get(class_name) else {
-            return self.value_type(ctx, ty);
-        };
-        if class.type_params.is_empty() {
-            return self.value_type(ctx, ty);
-        }
-        let bindings = Declaration::Class(class).bind(ctx, class_name, type_args)?;
-        let mut remaining = ARGUMENT_LIMIT;
-        let arg = substitute_id(ctx, ty, &bindings, &mut remaining)?;
-        self.value_type(ctx, arg.hir(ctx))
-    }
-
     /// The MIR type of `base<arguments>`: missing arguments take their declared defaults,
     /// and each distinct instantiation is one named record (or the aliased type).
     pub(crate) fn generic(
@@ -155,7 +135,7 @@ impl<'s> Shapes<'s> {
                 if let Declaration::Class(class) = declaration {
                     self.class_records
                         .borrow_mut()
-                        .insert(ty, (class.name.as_str(), key.1.clone()));
+                        .insert(ty, class.name.as_str());
                 }
                 ty
             }

@@ -289,7 +289,7 @@ macro_rules! registry {
 
             pub(crate) fn named_property(type_name: &str, name: &str) -> Option<MethodResult> {
                 let receiver = Receiver::Value(Kind::builtin(type_name)?);
-                Self::lookup(receiver, name).filter(|m| m.is_property()).map(Self::result)
+                Self::lookup(receiver, name).filter(|m| m.is_property()).map(Self::result_rule)
             }
 
             pub(crate) fn is_property(self) -> bool {
@@ -300,13 +300,9 @@ macro_rules! registry {
                 match self { $($(Self::$variant => MethodResult::$result $(($result_arg))?,)*)* }
             }
 
-            fn result(self) -> MethodResult {
-                self.result_rule()
-            }
-
             pub(crate) fn inferred(receiver: &HirType, name: &str, property: bool) -> Option<MethodResult> {
                 if let Some(receiver) = Receiver::inferred(receiver) {
-                    return Self::lookup(receiver, name).filter(|m| m.is_property() == property).map(Self::result);
+                    return Self::lookup(receiver, name).filter(|m| m.is_property() == property).map(Self::result_rule);
                 }
                 if property { return None; }
                 let mut result = None;
@@ -333,6 +329,10 @@ macro_rules! registry {
         }
 
         impl<'s> Call<'s> {
+            pub(crate) fn result_rule(&self) -> MethodResult {
+                match self { $($(Self::$variant(..) => Method::$variant.result_rule(),)*)* }
+            }
+
             pub fn parse(receiver: Receiver, name: &str, args: &'s [Expr]) -> Result<Option<Self>> {
                 Self::member(receiver, name, Some(args))
             }

@@ -924,7 +924,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.deletes_array_elements = true;
                     }
                 } else {
-                    self.eval_children(s, expr)?;
+                    self.eval_children(s, expr, None)?;
                 }
                 Ok(Ty::BOOLEAN)
             }
@@ -936,25 +936,33 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(Ty::NUMBER)
             }
             _ => {
-                self.eval_children(s, expr)?;
+                if let Some((receiver, call)) = crate::methods::Call::expression(expr) {
+                    let (ty, evaluated) = match receiver {
+                        crate::methods::CallReceiver::Expression(e) => (self.eval_expr(s, e)?, Some(e)),
+                        crate::methods::CallReceiver::Local(id) => (self.eval_local_get(s, id)?, None),
+                    };
+                    self.eval_children(s, expr, evaluated)?;
+                    return Ok(self.apply_resolved_method(s.inst, ty, call.result_rule()));
+                }
+                self.eval_children(s, expr, None)?;
                 Ok(builtins::leaf_expr_type(self.ctx, self.types, expr))
             }
         }
     }
 
-    fn eval_children(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<()> {
-        let mut err = None;
+    fn eval_children(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        evaluated: Option<&Expr>,
+    ) -> Result<()> {
+        let mut result = Ok(());
         perry_hir::walker::walk_expr_children(expr, &mut |child| {
-            if err.is_none()
-                && let Err(e) = self.eval_expr(s, child)
-            {
-                err = Some(e);
+            if result.is_ok() && !evaluated.is_some_and(|e| std::ptr::eq(e, child)) {
+                result = self.eval_expr(s, child).map(drop);
             }
         });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        result
     }
 
     fn check_objlit_func_write(

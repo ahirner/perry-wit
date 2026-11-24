@@ -102,13 +102,12 @@ impl<'s> FunctionBuilder<'s> {
             Expr::NumberCoerce(expr) => self.number_coerce(ctx, expr)?,
             Expr::StringCoerce(expr) | Expr::TemplateStringCoerce(expr) => {
                 let value = self.expression(ctx, expr)?;
-                if let Some((class_name, type_args)) =
-                    self.shapes.class_of_type(ctx, value.get_type(ctx))
+                if let Some(class_name) = self.shapes.class_of_type(ctx, value.get_type(ctx))
                     && let Some((owner_class, func)) =
                         self.shapes.class_method(class_name, "toString")
                 {
                     let recv = self.defined(ctx, value)?;
-                    self.class_method_call(ctx, recv, owner_class, &type_args, func, &[])?
+                    self.class_method_call(ctx, recv, owner_class, func, &[])?
                         .ok_or_else(|| {
                             Diagnostic::new(codes::TYPE_MISMATCH, "toString() produced no value")
                         })?
@@ -299,7 +298,7 @@ impl<'s> FunctionBuilder<'s> {
                     && int_ty.deref(ctx).width() == 64
                 {
                     int_ty.into()
-                } else if perry_frontend::contextual_type(ty).is_none() {
+                } else if matches!(ty, HirType::Any | HirType::Unknown) {
                     expected.unwrap_or_else(|| JsonType::get(ctx).into())
                 } else {
                     self.shapes.value_type(ctx, ty)?

@@ -18,9 +18,9 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         param: &'s perry_frontend::hir::ir::Param,
         value: Option<Value>,
-        mut expected: Option<BindingType>,
+        binding: BindingType,
     ) -> Result<()> {
-        let integer = expected.and_then(|binding| binding.integer);
+        let integer = binding.integer;
         let slot = match (value, &param.default) {
             (Some(value), Some(default))
                 if !matches!(default, Expr::Undefined)
@@ -35,30 +35,15 @@ impl<'s> FunctionBuilder<'s> {
                 self.switch_to(else_block);
                 let present = self.strip_undefined(ctx, value)?;
                 let else_end = self.block;
-                let present_type = present.get_type(ctx);
 
                 self.switch_to(then_block);
-                let hint = expected.map_or(present_type, |binding| binding.carrier);
-                let default = self.expression_with(ctx, default, Some(hint))?;
+                let default = self.expression_with(ctx, default, Some(binding.carrier))?;
                 let then_end = self.block;
-                let terminated = self.terminated(ctx);
-                let target = expected.unwrap_or_else(|| {
-                    BindingType::plain(if terminated {
-                        present_type
-                    } else {
-                        crate::coerce::merged_type(
-                            ctx,
-                            present_type,
-                            present_type,
-                            default.get_type(ctx),
-                        )
-                    })
-                });
-                let slot = self.entry_slot(ctx, target.carrier);
+                let slot = self.entry_slot(ctx, binding.carrier);
                 for (block, value) in [(then_end, default), (else_end, present)] {
                     self.switch_to(block);
                     if !self.terminated(ctx) {
-                        let value = self.fit_binding(ctx, value, target)?;
+                        let value = self.fit_binding(ctx, value, binding)?;
                         self.store(ctx, slot, value);
                         self.jump(ctx, join);
                     }
@@ -70,25 +55,21 @@ impl<'s> FunctionBuilder<'s> {
                 let value = match (value, default) {
                     (Some(value), _) => value,
                     (None, Some(default)) => {
-                        self.expression_with(ctx, default, expected.map(|b| b.carrier))?
+                        self.expression_with(ctx, default, Some(binding.carrier))?
                     }
                     (None, None) => {
-                        let ty = expected.map_or_else(|| FP64Type::get(ctx).into(), |b| b.carrier);
-                        let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);
-                        expected = None;
-                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, binding.carrier))
                     }
                 };
-                let target = expected.unwrap_or_else(|| BindingType::plain(value.get_type(ctx)));
                 let value = if default
                     .as_ref()
                     .is_some_and(|expr| !matches!(expr, Expr::Undefined))
                 {
-                    self.fit_binding(ctx, value, target)?
+                    self.fit_binding(ctx, value, binding)?
                 } else {
-                    self.fit(ctx, value, target.carrier)?
+                    self.fit(ctx, value, binding.carrier)?
                 };
-                let slot = self.entry_slot(ctx, target.carrier);
+                let slot = self.entry_slot(ctx, binding.carrier);
                 self.store(ctx, slot, value);
                 slot
             }
@@ -523,7 +504,7 @@ impl<'s> FunctionBuilder<'s> {
             self.inline_functions.push(function.id);
             let result = self.with_inline_scope(ctx, self.this_slot, |this, ctx| {
                 for (param, value) in signature.params.iter().zip(values) {
-                    this.bind_parameter(ctx, param.source, Some(value), Some(param.binding))?;
+                    this.bind_parameter(ctx, param.source, Some(value), param.binding)?;
                 }
                 let result = signature
                     .result

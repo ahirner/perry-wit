@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
-use swc_common::Span;
+use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 const OPERATOR: &str = "\0perry_operator:";
@@ -81,56 +81,35 @@ pub struct Locations<'s> {
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
-    pub(super) callable_comparisons: HashSet<Span>,
     pub(crate) generic_templates: Vec<(FuncId, String)>,
     origins: HashMap<String, CallerOrigin>,
 }
 
 impl<'s> Locations<'s> {
     /// Preserve operator spans and non-null assertions as inert sequences before HIR erases them.
-    pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module) {
-        struct Preserver<'a>(&'a mut Vec<Span>, HashSet<Span>);
+    pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module, spans: &HashSet<Span>) {
+        struct Preserver<'a>(&'a mut Vec<Span>, &'a HashSet<Span>);
         impl VisitMut for Preserver<'_> {
             // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
             fn visit_mut_ts_enum_decl(&mut self, _: &mut ast::TsEnumDecl) {}
 
             fn visit_mut_expr(&mut self, expr: &mut ast::Expr) {
                 expr.visit_mut_children_with(self);
-                let (span, token) = match expr {
-                    ast::Expr::Bin(binary)
-                        if self.1.contains(&binary.span)
-                            || matches!(
-                                binary.op,
-                                ast::BinaryOp::Exp
-                                    | ast::BinaryOp::BitAnd
-                                    | ast::BinaryOp::BitOr
-                                    | ast::BinaryOp::BitXor
-                                    | ast::BinaryOp::LShift
-                                    | ast::BinaryOp::RShift
-                                    | ast::BinaryOp::ZeroFillRShift
-                            ) =>
-                    {
-                        let token = format!("{OPERATOR}{}", self.0.len());
-                        self.0.push(binary.span);
-                        (binary.span, token)
-                    }
-                    ast::Expr::Cond(cond) if self.1.contains(&cond.span) => {
-                        let token = format!("{OPERATOR}{}", self.0.len());
-                        self.0.push(cond.span);
-                        (cond.span, token)
-                    }
-                    ast::Expr::Assign(assign) if self.1.contains(&assign.span) => {
-                        let token = format!("{OPERATOR}{}", self.0.len());
-                        self.0.push(assign.span);
-                        (assign.span, token)
-                    }
-                    ast::Expr::Call(call) if self.1.contains(&call.span) => {
-                        let token = format!("{OPERATOR}{}", self.0.len());
-                        self.0.push(call.span);
-                        (call.span, token)
-                    }
-                    ast::Expr::TsNonNull(assertion) => (assertion.span, NON_NULL.into()),
-                    _ => return,
+                let span = expr.span();
+                let token = if matches!(expr, ast::Expr::TsNonNull(_)) {
+                    NON_NULL.to_owned()
+                } else if self.1.contains(&span)
+                    || matches!(expr, ast::Expr::Bin(binary) if matches!(
+                        binary.op,
+                        ast::BinaryOp::Exp | ast::BinaryOp::BitAnd | ast::BinaryOp::BitOr | ast::BinaryOp::BitXor
+                        | ast::BinaryOp::LShift | ast::BinaryOp::RShift | ast::BinaryOp::ZeroFillRShift
+                    ))
+                {
+                    let token = format!("{OPERATOR}{}", self.0.len());
+                    self.0.push(span);
+                    token
+                } else {
+                    return;
                 };
                 let token = ast::Expr::Lit(ast::Lit::Str(ast::Str {
                     span,
@@ -144,10 +123,7 @@ impl<'s> Locations<'s> {
                 });
             }
         }
-        module.visit_mut_with(&mut Preserver(
-            &mut self.operators,
-            std::mem::take(&mut self.callable_comparisons),
-        ));
+        module.visit_mut_with(&mut Preserver(&mut self.operators, spans));
     }
 
     pub(crate) fn operator_raw_span(&self, parts: &[Expr]) -> Option<Span> {
@@ -376,7 +352,9 @@ impl<'s> Locations<'s> {
     }
 
     pub fn import_span(&self, source: &str) -> Option<SourceSpan> {
-        self.imports.get(source).and_then(|span| self.span(*span))
+        self.imports
+            .get(source.strip_prefix("node:").unwrap_or(source))
+            .and_then(|span| self.span(*span))
     }
 
     pub(crate) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
@@ -515,9 +493,11 @@ impl<'s> Locations<'s> {
                 method.visit_children_with(self);
             }
             fn visit_import_decl(&mut self, import: &ast::ImportDecl) {
-                self.locations
-                    .imports
-                    .insert(import.src.value.to_string_lossy().into_owned(), import.span);
+                let source = import.src.value.to_string_lossy();
+                self.locations.imports.insert(
+                    source.strip_prefix("node:").unwrap_or(&source).to_owned(),
+                    import.span,
+                );
             }
         }
         module.visit_with(&mut Collector {

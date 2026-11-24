@@ -1,7 +1,6 @@
 //! User-defined class construction, field initialization, methods, accessors, and inheritance.
 use super::*;
 use crate::inline::InlineResult;
-use perry_frontend::shapes::TypeId;
 use pliron::utils::vec_exns::VecExtns;
 
 enum ClassArguments<'a, 's> {
@@ -189,7 +188,6 @@ impl<'s> FunctionBuilder<'s> {
             self.inline_class_callable(
                 ctx,
                 class_name,
-                &[],
                 ctor,
                 ClassArguments::Expressions(args),
                 ClassReceiver::Constructor(this_slot, &pre_initialized),
@@ -306,22 +304,11 @@ impl<'s> FunctionBuilder<'s> {
         self.load(ctx, slot)
     }
 
-    pub(super) fn active_class(&self, ctx: &Context) -> Option<(&'s str, Vec<TypeId>)> {
-        let slot = self.this_slot?;
-        let ty = self.slot_type(ctx, slot).ok()?;
-        self.shapes.class_of_type(ctx, ty)
-    }
-
     pub(super) fn is_proven_this_class(&self, ctx: &Context, class_name: &str) -> bool {
-        self.active_class(ctx)
-            .is_some_and(|(owner, _)| owner == class_name)
-    }
-
-    pub(super) fn active_value_type(&self, ctx: &Context, ty: &HirType) -> Result<TypeHandle> {
-        match self.active_class(ctx) {
-            Some((owner, type_args)) => self.shapes.class_value_type(ctx, owner, &type_args, ty),
-            None => self.shapes.value_type(ctx, ty),
-        }
+        self.this_slot
+            .and_then(|slot| self.slot_type(ctx, slot).ok())
+            .and_then(|ty| self.shapes.class_of_type(ctx, ty))
+            == Some(class_name)
     }
 
     pub(super) fn class_static_method_call(
@@ -343,7 +330,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            &[],
             func,
             ClassArguments::Expressions(args),
             ClassReceiver::Static,
@@ -386,7 +372,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         func: &'s Function,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
@@ -395,7 +380,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            type_args,
             func,
             ClassArguments::Expressions(args),
             ClassReceiver::Instance(slot),
@@ -407,7 +391,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         getter: &'s Function,
     ) -> Result<Value> {
         let slot = self.entry_slot(ctx, receiver.get_type(ctx));
@@ -415,7 +398,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            type_args,
             getter,
             ClassArguments::Expressions(&[]),
             ClassReceiver::Instance(slot),
@@ -428,25 +410,16 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         setter: &'s Function,
         value: &'s Expr,
     ) -> Result<Value> {
-        let param_ty = setter
-            .params
-            .first()
-            .and_then(|param| perry_frontend::contextual_type(&param.ty))
-            .and_then(|ty| {
-                self.shapes
-                    .class_value_type(ctx, owner_class, type_args, ty)
-                    .ok()
-            });
-        let val = self.expression_with(ctx, value, param_ty)?;
-        let val = match param_ty {
-            Some(ty) => self.fit(ctx, val, ty)?,
-            None => val,
+        let [param] = setter.params.as_slice() else {
+            bail_internal!("emitted setter requires one parameter");
         };
-        self.class_setter_call_value(ctx, receiver, owner_class, type_args, setter, val)
+        let param_ty = self.shapes.value_type(ctx, &param.ty)?;
+        let val = self.expression_with(ctx, value, Some(param_ty))?;
+        let val = self.fit(ctx, val, param_ty)?;
+        self.class_setter_call_value(ctx, receiver, owner_class, setter, val)
     }
 
     pub(super) fn class_setter_call_value(
@@ -454,7 +427,6 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        type_args: &[TypeId],
         setter: &'s Function,
         val: Value,
     ) -> Result<Value> {
@@ -463,7 +435,6 @@ impl<'s> FunctionBuilder<'s> {
         self.inline_class_callable(
             ctx,
             owner_class,
-            type_args,
             setter,
             ClassArguments::Evaluated(std::slice::from_ref(&val)),
             ClassReceiver::Instance(slot),
@@ -475,7 +446,6 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         owner_class: &'s str,
-        type_args: &[TypeId],
         func: &'s Function,
         args: ClassArguments<'_, 's>,
         receiver: ClassReceiver<'_>,
@@ -510,20 +480,9 @@ impl<'s> FunctionBuilder<'s> {
         };
         let mut evaluated_args = Vec::with_capacity(func.params.len());
         for param in &func.params {
-            let param_ty = if perry_frontend::contextual_type(&param.ty).is_none() && !param.is_rest
-            {
-                None
-            } else {
-                Some(
-                    self.shapes
-                        .class_value_type(ctx, owner_class, type_args, &param.ty)?,
-                )
-            };
+            let param_ty = self.shapes.value_type(ctx, &param.ty)?;
             let value = if param.is_rest {
-                let rest_ty = param_ty.ok_or_else(|| {
-                    Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")
-                })?;
-                let element = TypedHandle::<ArrayType>::from_handle(rest_ty, ctx)
+                let element = TypedHandle::<ArrayType>::from_handle(param_ty, ctx)
                     .map_err(|_| {
                         Diagnostic::new(codes::TYPE_MISMATCH, "rest parameter must have array type")
                     })?
@@ -535,7 +494,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 Some(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)))
             } else {
-                next_arg(self, ctx, param_ty, param.default.as_ref())?
+                next_arg(self, ctx, Some(param_ty), param.default.as_ref())?
             };
             evaluated_args.push((param_ty, value));
             if param.is_rest {
@@ -561,12 +520,7 @@ impl<'s> FunctionBuilder<'s> {
 
                 let slot = this.with_inline_scope(ctx, this_slot, |this, ctx| {
                     for (param, (param_ty, eval_arg)) in func.params.iter().zip(evaluated_args) {
-                        this.bind_parameter(
-                            ctx,
-                            param,
-                            eval_arg,
-                            param_ty.map(BindingType::plain),
-                        )?;
+                        this.bind_parameter(ctx, param, eval_arg, BindingType::plain(param_ty))?;
                     }
 
                     let result_type = if matches!(receiver, ClassReceiver::Constructor(_, _))
@@ -574,18 +528,7 @@ impl<'s> FunctionBuilder<'s> {
                     {
                         InlineResult::Void
                     } else {
-                        ensure_diag!(
-                            perry_frontend::contextual_type(&func.return_type).is_some(),
-                            codes::MISSING_TYPE_ANNOTATION,
-                            "cannot infer the return type of '{}'; annotate it",
-                            func.name
-                        );
-                        InlineResult::Declared(this.shapes.class_value_type(
-                            ctx,
-                            owner_class,
-                            type_args,
-                            &func.return_type,
-                        )?)
+                        InlineResult::Declared(this.shapes.value_type(ctx, &func.return_type)?)
                     };
                     this.inline_body(ctx, &func.body, &func.params, result_type)
                 })?;

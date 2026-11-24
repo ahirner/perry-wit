@@ -1,15 +1,17 @@
 //! Contextual typing for built-in callbacks.
 use super::*;
+use crate::engine::boundary::TemplateView;
 use crate::methods::{Callback as Cb, Method, MethodResult};
 
 struct CallbackSite<'h> {
     callback: &'h Expr,
     inputs: Vec<Ty>,
-    rule: MethodResult,
-    recv_ty: Ty,
-    init_ty: Option<Ty>,
-    sparse_arrays: bool,
-    group_elem: Option<Ty>,
+    result: CallbackResult,
+}
+
+enum CallbackResult {
+    Method(MethodResult, MethodResultArgs<'static>),
+    GroupBy(Ty),
 }
 
 impl<'h> CallbackSite<'h> {
@@ -17,11 +19,17 @@ impl<'h> CallbackSite<'h> {
         Self {
             callback,
             inputs,
-            rule,
-            recv_ty,
-            init_ty: None,
-            sparse_arrays: false,
-            group_elem: None,
+            result: CallbackResult::Method(rule, MethodResultArgs::receiver_only(recv_ty)),
+        }
+    }
+}
+
+impl TemplateView<'_> {
+    fn callback_inputs<'i>(&self, inputs: &'i [Ty]) -> &'i [Ty] {
+        if self.params.iter().any(|p| p.is_rest) {
+            inputs
+        } else {
+            inputs.get(..self.params.len()).unwrap_or(inputs)
         }
     }
 }
@@ -48,6 +56,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         s: &mut EvalState<'h>,
         expr: &'h Expr,
     ) -> Result<Option<Result<CallbackSite<'h>, Ty>>> {
+        if let Expr::JsonStringifyFull(value, callback, space) = expr
+            && matches!(callback.as_ref(), Expr::Closure { .. } | Expr::FuncRef(_))
+        {
+            let receiver = self.eval_expr(s, value)?;
+            self.eval_expr(s, space)?;
+            return Ok(Some(Ok(CallbackSite::new(
+                callback,
+                vec![Ty::STRING, Ty::DYNAMIC],
+                MethodResult::Optional(crate::methods::Kind::String),
+                receiver,
+            ))));
+        }
         let group_by = match expr {
             Expr::MapGroupBy { items, key_fn } => Some((items.as_ref(), key_fn.as_ref())),
             Expr::Call { callee, args, .. }
@@ -74,10 +94,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(Some(Err(Ty::BOTTOM)));
             }
             let elem = builtins::iterated_element(self.ctx, self.types, src).unwrap_or(Ty::OPEN);
-            let mut site =
-                CallbackSite::new(key_fn, vec![elem, Ty::NUMBER], MethodResult::Void, src);
-            site.group_elem = Some(elem);
-            return Ok(Some(Ok(site)));
+            return Ok(Some(Ok(CallbackSite {
+                callback: key_fn,
+                inputs: vec![elem, Ty::NUMBER],
+                result: CallbackResult::GroupBy(elem),
+            })));
         }
 
         if let Expr::ArrayFromMapped {
@@ -157,10 +178,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             && let HirType::Named(base_name) = base.hir(self.ctx)
             && let Some(cb) = args.first()
         {
-            let inputs = match (
-                base_name.as_str(),
-                self.types.ty_slice(gargs).to_vec().as_slice(),
-            ) {
+            let inputs = match (base_name.as_str(), self.types.ty_slice(gargs)) {
                 ("Map" | "ReadonlyMap", [k, v]) => vec![*v, *k, raw_stripped],
                 ("Set" | "ReadonlySet", [v]) => vec![*v, *v, raw_stripped],
                 _ => return Ok(None),
@@ -252,10 +270,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         } else {
             (self.array_cb_inputs(cb_kind, stripped, elem), None)
         };
-        let mut site = CallbackSite::new(first_arg, inputs, method.result_rule(), obj_ty);
-        site.init_ty = init_ty;
-        site.sparse_arrays = self.facts.sparse_arrays;
-        Ok(Some(Ok(site)))
+        Ok(Some(Ok(CallbackSite {
+            callback: first_arg,
+            inputs,
+            result: CallbackResult::Method(
+                method.result_rule(),
+                MethodResultArgs {
+                    arg0: init_ty,
+                    sparse_arrays: self.facts.sparse_arrays,
+                    ..MethodResultArgs::receiver_only(obj_ty)
+                },
+            ),
+        })))
     }
 
     pub(super) fn try_eval_builtin_callback(
@@ -266,21 +292,44 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(matched) = self.match_builtin_callback(s, expr)? else {
             return Ok(None);
         };
-        let CallbackSite {
-            callback,
-            mut inputs,
-            rule,
-            recv_ty,
-            init_ty,
-            sparse_arrays,
-            group_elem,
-        } = match matched {
+        let site = match matched {
             Ok(site) => site,
             Err(early) => return Ok(Some(early)),
         };
-        if inputs.contains(&Ty::BOTTOM) {
+        if site.inputs.contains(&Ty::BOTTOM) {
             return Ok(Some(Ty::BOTTOM));
         }
+        let Some(result) = self.contextual_callback(s, expr, site.callback, &site.inputs)? else {
+            return Ok(None);
+        };
+        Ok(Some(match site.result {
+            CallbackResult::Method(rule, args) => builtins::apply_method_result(
+                self.ctx,
+                self.types,
+                rule,
+                MethodResultArgs {
+                    callback_result: Some(result),
+                    ..args
+                },
+            ),
+            CallbackResult::GroupBy(_) if result == Ty::BOTTOM => Ty::BOTTOM,
+            CallbackResult::GroupBy(element) => {
+                let values = self.types.array(element);
+                self.types.generic(
+                    shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
+                    &[result, values],
+                )
+            }
+        }))
+    }
+
+    fn contextual_callback(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        callback: &'h Expr,
+        inputs: &[Ty],
+    ) -> Result<Option<Ty>> {
         let ident = if let Expr::Closure { func_id, .. } = callback {
             let Some(template) = self.index.template_of_func(*func_id) else {
                 return Ok(None);
@@ -306,20 +355,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(idents) = self.types.func_union_members(cb_val) {
                 let mut arms = Vec::with_capacity(idents.len());
                 let mut cb_ret = Ty::BOTTOM;
-                let mut max_params = 0usize;
+                let mut widest_inputs: &[Ty] = &[];
                 for ident in idents {
                     let Some(cb_view) = self.index.view(ident.template) else {
                         return Ok(None);
                     };
-                    let mut arm_inputs = inputs.clone();
-                    if !cb_view.params.iter().any(|p| p.is_rest)
-                        && arm_inputs.len() > cb_view.params.len()
-                    {
-                        arm_inputs.truncate(cb_view.params.len());
+                    let arm_inputs = cb_view.callback_inputs(inputs);
+                    if arm_inputs.len() > widest_inputs.len() {
+                        widest_inputs = arm_inputs;
                     }
-                    max_params = max_params.max(arm_inputs.len());
                     let cb_inst = self.request_instance(
-                        InstanceReq::new(ident.template, &arm_inputs, Some(s.inst))
+                        InstanceReq::new(ident.template, arm_inputs, Some(s.inst))
                             .owner(ident.capture_owner),
                     )?;
                     if let Some(ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) {
@@ -328,9 +374,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     arms.push((ident, cb_inst));
                 }
-                inputs.truncate(max_params);
                 let arms_span = self.intern_dispatch_arms(&arms);
-                let input_tys = self.types.tuple(&inputs);
+                let input_tys = self.types.tuple(widest_inputs);
                 let helper = self.intern_helper(
                     HelperSpec::Dispatcher {
                         callee_ty: cb_val,
@@ -349,33 +394,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         input_tys,
                     },
                 );
-                if let Some(elem) = group_elem {
-                    if cb_ret == Ty::BOTTOM {
-                        return Ok(Some(Ty::BOTTOM));
-                    }
-                    let key = if self.types.is_open(cb_ret) {
-                        Ty::STRING
-                    } else {
-                        cb_ret
-                    };
-                    let arr = self.types.array(elem);
-                    return Ok(Some(self.types.generic(
-                        shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
-                        &[key, arr],
-                    )));
-                }
-                return Ok(Some(builtins::apply_method_result(
-                    self.ctx,
-                    self.types,
-                    rule,
-                    MethodResultArgs {
-                        receiver: recv_ty,
-                        arg0: init_ty,
-                        arg0_expr: None,
-                        callback_result: Some(cb_ret),
-                        sparse_arrays,
-                    },
-                )));
+                return Ok(Some(cb_ret));
             }
             let TyKind::Func(ident) = self.types.kind(cb_val) else {
                 return Ok(None);
@@ -384,15 +403,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let Some(cb_view) = self.index.view(ident.template) else {
                     return Ok(None);
                 };
-                if !cb_view.params.iter().any(|p| p.is_rest) && inputs.len() > cb_view.params.len()
-                {
-                    inputs.truncate(cb_view.params.len());
-                }
+                let inputs = cb_view.callback_inputs(inputs);
                 let cb_inst = self.request_instance(
-                    InstanceReq::new(ident.template, &inputs, Some(s.inst))
+                    InstanceReq::new(ident.template, inputs, Some(s.inst))
                         .owner(ident.capture_owner),
                 )?;
-                let input_tys = self.types.tuple(&inputs);
+                let input_tys = self.types.tuple(inputs);
                 self.record_site_coercion(
                     s.inst,
                     callback,
@@ -404,34 +420,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
                     return Ok(None);
                 };
-                let cb_ret = self.read_loc(cb_ret_loc, s.inst);
-                if let Some(elem) = group_elem {
-                    if cb_ret == Ty::BOTTOM {
-                        return Ok(Some(Ty::BOTTOM));
-                    }
-                    let key = if self.types.is_open(cb_ret) {
-                        Ty::STRING
-                    } else {
-                        cb_ret
-                    };
-                    let arr = self.types.array(elem);
-                    return Ok(Some(self.types.generic(
-                        shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
-                        &[key, arr],
-                    )));
-                }
-                return Ok(Some(builtins::apply_method_result(
-                    self.ctx,
-                    self.types,
-                    rule,
-                    MethodResultArgs {
-                        receiver: recv_ty,
-                        arg0: init_ty,
-                        arg0_expr: None,
-                        callback_result: Some(cb_ret),
-                        sparse_arrays,
-                    },
-                )));
+                return Ok(Some(self.read_loc(cb_ret_loc, s.inst)));
             }
             ident
         };
@@ -441,14 +430,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         let caller_tid = self.instances.get(s.inst).map(|i| i.template);
         let caller_is_env = caller_tid.is_some_and(|t| self.is_escaping_env(t, s.inst));
         let keep_inline = matches!(callback, Expr::Closure { .. })
-            && (cb_view.captures_this
+            && (matches!(expr, Expr::JsonStringifyFull(..))
+                || cb_view.captures_this
                 || cb_view.captures_new_target
                 || (caller_is_env && !self.index.template_captures(ident.template).is_empty()));
-        if !cb_view.params.iter().any(|p| p.is_rest) && inputs.len() > cb_view.params.len() {
-            inputs.truncate(cb_view.params.len());
-        }
+        let inputs = cb_view.callback_inputs(inputs);
         let cb_inst = self.request_instance(
-            InstanceReq::new(ident.template, &inputs, Some(s.inst))
+            InstanceReq::new(ident.template, inputs, Some(s.inst))
                 .receiver(keep_inline.then_some(s.receiver).flatten())
                 .owner(ident.capture_owner)
                 .inline_cb(),
@@ -464,34 +452,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
             return Ok(None);
         };
-        let cb_ret = self.read_loc(cb_ret_loc, s.inst);
-
-        if let Some(elem) = group_elem {
-            if cb_ret == Ty::BOTTOM {
-                return Ok(Some(Ty::BOTTOM));
-            }
-            let key = if self.types.is_open(cb_ret) {
-                Ty::STRING
-            } else {
-                cb_ret
-            };
-            let arr = self.types.array(elem);
-            return Ok(Some(self.types.generic(
-                shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
-                &[key, arr],
-            )));
-        }
-        Ok(Some(builtins::apply_method_result(
-            self.ctx,
-            self.types,
-            rule,
-            MethodResultArgs {
-                receiver: recv_ty,
-                arg0: init_ty,
-                arg0_expr: None,
-                callback_result: Some(cb_ret),
-                sparse_arrays,
-            },
-        )))
+        Ok(Some(self.read_loc(cb_ret_loc, s.inst)))
     }
 }

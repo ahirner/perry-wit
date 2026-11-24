@@ -353,21 +353,29 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(());
         }
-        let type_state = perry_frontend::binding_type(ty, self.shapes.is_explicit_binding(id));
-        let inferred_deferred =
-            self.shapes.deferred_binding(id) && !self.shapes.is_explicit_binding(id);
-        let declared = match type_state
-            .resolved()
-            .map(|ty| self.active_value_type(ctx, ty))
-            .transpose()
-        {
+        let explicit = self.shapes.is_explicit_binding(id);
+        let declared = match self.shapes.value_type(ctx, ty) {
+            Err(error)
+                if error.code() == codes::MISSING_TYPE_ANNOTATION
+                    && let Some(name) = self.shapes.local_name(id) =>
+            {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "cannot infer the type of binding '{name}'"
+                )
+                .with_help("Add a concrete type annotation to this binding."));
+            }
             Err(error)
                 if error.code() == codes::UNSUPPORTED_TYPE
                     && self.shapes.metadata.json_eligible_bindings.contains(&id) =>
             {
-                Some(perry_mir::JsonType::get(ctx).into())
+                perry_mir::JsonType::get(ctx).into()
             }
-            Err(error) if inferred_deferred && error.code() == codes::UNSUPPORTED_TYPE => {
+            Err(error)
+                if !explicit
+                    && self.shapes.deferred_binding(id)
+                    && error.code() == codes::UNSUPPORTED_TYPE =>
+            {
                 let name = self.shapes.local_name(id).unwrap_or("binding");
                 return Err(diag!(
                     codes::UNSUPPORTED_TYPE,
@@ -377,48 +385,33 @@ impl<'s> FunctionBuilder<'s> {
             }
             result => result?,
         };
-        let mut integer = self.shapes.integer_type(ctx, ty).filter(|int_ty| {
-            self.shapes.is_explicit_binding(id) || int_ty.deref(ctx).width() == 64
-        });
-        let expr_expected = integer
-            .filter(|int_ty| int_ty.deref(ctx).width() == 64)
-            .map(TypeHandle::from)
-            .or(declared);
-        let deferred = declared.and_then(|ty| self.shapes.deferred_storage(ctx, id, ty));
+        let mut binding = BindingType {
+            carrier: declared,
+            integer: self
+                .shapes
+                .integer_type(ctx, ty)
+                .filter(|ty| explicit || ty.deref(ctx).width() == 64),
+        };
+        let deferred = self.shapes.deferred_storage(ctx, id, declared);
         let init = if deferred.is_some() {
             None
         } else {
-            init.map(|e| self.expression_with(ctx, e, expr_expected))
+            init.map(|e| self.expression_with(ctx, e, Some(binding.expected_type(ctx))))
                 .transpose()?
         };
-        if integer.is_none()
-            && let Some(value) = init
-            && let Some(src) = self.integer64_source(ctx, value)
+        if binding.integer.is_none()
+            && let Some(src) = init.and_then(|v| self.integer64_source(ctx, v))
         {
-            integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
+            binding.integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
         }
         let is_never = matches!(ty, HirType::Never);
-        // Inferred bindings preserve the initializer's absence states.
-        let carrier = match (declared, init) {
-            (Some(ty), Some(value))
-                if self.shapes.metadata.inferred_bindings.contains(&id)
-                    && present_type(ctx, value.get_type(ctx)) == present_type(ctx, ty) =>
-            {
-                value.get_type(ctx)
-            }
-            (Some(ty), _) => ty,
-            (None, Some(value)) => value.get_type(ctx),
-            (None, None) if is_never => self.shapes.value_type(ctx, ty)?,
-            (None, None) if matches!(type_state, perry_frontend::TypeState::Open) => {
-                return Err(missing_type_annotation());
-            }
-            (None, None) => bail_diag!(
-                codes::MISSING_TYPE_ANNOTATION,
-                "an untyped binding needs an initializer"
-            ),
-        };
-        let binding = BindingType { carrier, integer };
-        let storage = deferred.unwrap_or(carrier);
+        if let Some(value) = init
+            && self.shapes.metadata.inferred_bindings.contains(&id)
+            && present_type(ctx, value.get_type(ctx)) == present_type(ctx, declared)
+        {
+            binding.carrier = value.get_type(ctx);
+        }
+        let storage = deferred.unwrap_or(binding.carrier);
         let slot = if self.shapes.global_ids.contains(&id) {
             self.shapes.globals.borrow_mut().insert(id, binding);
             self.global_slot(ctx, id, storage)?
@@ -438,8 +431,8 @@ impl<'s> FunctionBuilder<'s> {
             id,
             LocalBinding {
                 slot,
-                integer,
-                deferred_write: deferred.map(|_| carrier),
+                integer: binding.integer,
+                deferred_write: deferred.map(|_| binding.carrier),
                 is_never,
             },
         );
