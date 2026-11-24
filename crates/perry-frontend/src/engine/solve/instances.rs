@@ -161,6 +161,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         } else {
             args
         };
+        let is_promise_handle = self.index.view(template).is_some_and(|v| {
+            matches!(
+                v.kind,
+                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+            )
+        });
+        let args = if is_promise_handle {
+            args.get(..1).unwrap_or(&[])
+        } else {
+            args
+        };
         let args_key = self.types.tuple(args);
         let targs_key = self.types.tuple(explicit_type_args);
         let key: InstanceKey = (template, receiver, capture_owner, args_key, targs_key);
@@ -332,7 +343,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 (!self.types.is_open(ret)).then_some(ret)
             })
             .flatten();
-        let return_loc = self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM));
+        let return_loc = if view.is_async && explicit_return.is_none() {
+            let inner_loc = self.alloc_loc(Ty::BOTTOM);
+            let cell = self.types.cell(inner_loc, CellKind::Promise);
+            self.alloc_loc(cell)
+        } else {
+            self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM))
+        };
 
         let keep_original = count == 0
             && (view.is_exported
@@ -391,8 +408,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
         self.inst_written.push(BitSet::default());
         self.inst_captures.push(inst_caps);
-        self.inst_sites
-            .push(vec![SiteEntry::default(); self.index.site_count(template)]);
+        self.inst_sites.push(
+            self.index
+                .sites(template)
+                .iter()
+                .map(|site| SiteEntry {
+                    resolution: site.handles.map(|(resolve_tid, reject_tid)| {
+                        SiteResolution::PromiseNew {
+                            value_loc: self.locations.push(Ty::BOTTOM),
+                            resolve_tid,
+                            reject_tid,
+                            executor: None,
+                        }
+                    }),
+                    coercion: None,
+                })
+                .collect(),
+        );
         self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
@@ -457,8 +489,22 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     continue;
                 }
+                let resolved_arg = match self.types.kind(arg_ty) {
+                    TyKind::Cell {
+                        loc,
+                        kind: CellKind::Promise,
+                    } => {
+                        let inner = self.locations.get(loc).copied().unwrap_or(Ty::BOTTOM);
+                        if inner == Ty::BOTTOM {
+                            self.types.promise(Ty::VOID)
+                        } else {
+                            self.types.promise(inner)
+                        }
+                    }
+                    _ => arg_ty,
+                };
                 let pat = self.types.intern_hir(self.ctx, &param.ty, true);
-                self.types.unify(self.ctx, pat, arg_ty, tps, bindings);
+                self.types.unify(self.ctx, pat, resolved_arg, tps, bindings);
             }
         }
     }

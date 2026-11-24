@@ -85,6 +85,8 @@ fn is_leaf(ctx: &Context, function: &FuncOp) -> Option<usize> {
                 OperationKind::Call { .. }
                     | OperationKind::Await
                     | OperationKind::Timer
+                    | OperationKind::PromisePending
+                    | OperationKind::PromiseSettle
                     | OperationKind::Foreign(_)
             ) || crate::intrinsics::may_throw(ctx, op)
                 || op.deref(ctx).num_regions() != 0

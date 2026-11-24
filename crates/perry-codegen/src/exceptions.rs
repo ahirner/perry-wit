@@ -106,8 +106,17 @@ impl FunctionLowering<'_, '_> {
 
     /// The exception object `op`'s operand throws: itself, or a thrown value boxed.
     pub(crate) fn thrown(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Result<Value> {
-        let value = self.operand(ctx, op, 0)?;
-        let ty = op.deref(ctx).get_operand(0).get_type(ctx);
+        self.thrown_operand(ctx, op, 0)
+    }
+
+    pub(crate) fn thrown_operand(
+        &mut self,
+        ctx: &mut Context,
+        op: Ptr<Operation>,
+        operand_index: usize,
+    ) -> Result<Value> {
+        let value = self.operand(ctx, op, operand_index)?;
+        let ty = op.deref(ctx).get_operand(operand_index).get_type(ctx);
         if ty.deref(ctx).is::<ExceptionType>() {
             return Ok(value);
         }

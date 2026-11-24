@@ -1,6 +1,9 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
-use crate::{builder::LocalBinding, hir_compat::RuntimeCall};
+use crate::{
+    builder::LocalBinding,
+    hir_compat::{GuestCall, RuntimeCall},
+};
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn signature(&self, id: FuncId) -> Result<&'s Signature<'s>> {
@@ -106,10 +109,58 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         callee: &'s Expr,
         args: &'s [Expr],
+        type_args: &'s [HirType],
         byte_offset: u32,
     ) -> Result<Option<Value>> {
-        if let Some(call) = hir_compat::runtime_call(callee, args) {
+        if let Some(call) = hir_compat::runtime_call(callee, args, type_args) {
             return match call {
+                RuntimeCall::Guest(GuestCall::Pending(ty)) => {
+                    let settled = self.shapes.settled_type(ctx, ty)?;
+                    Ok(Some(self.emit_value(ctx, |ctx| {
+                        PromisePendingOp::new(ctx, settled)
+                    })))
+                }
+                RuntimeCall::Guest(GuestCall::Resolve {
+                    promise: promise_expr,
+                    value: value_expr,
+                }) => {
+                    let promise = self.expression(ctx, promise_expr)?;
+                    let settled = perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx))
+                        .ok_or_else(|| internal!("promise resolve expects a promise"))?
+                        .deref(ctx)
+                        .value();
+                    let val = self.expression_with(ctx, value_expr, Some(settled))?;
+                    let val = self.fit(ctx, val, settled)?;
+                    self.emit(ctx, |ctx| {
+                        PromiseSettleOp::new(ctx, perry_mir::SettleKind::Fulfill, promise, val)
+                    });
+                    Ok(None)
+                }
+                RuntimeCall::Guest(GuestCall::Reject {
+                    promise: promise_expr,
+                    reason: reason_expr,
+                }) => {
+                    let promise = self.expression(ctx, promise_expr)?;
+                    let reason = self.expression(ctx, reason_expr)?;
+                    self.emit(ctx, |ctx| {
+                        PromiseSettleOp::new(ctx, perry_mir::SettleKind::Reject, promise, reason)
+                    });
+                    Ok(None)
+                }
+                RuntimeCall::Guest(GuestCall::Timer {
+                    delay: delay_expr,
+                    signal: signal_expr,
+                }) => {
+                    let delay = self.expression(ctx, delay_expr)?;
+                    let delay = self.arithmetic(ctx, delay);
+                    let number = FP64Type::get(ctx).into();
+                    let undef = self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number));
+                    let signal =
+                        self.typed_operand(ctx, signal_expr, Kind::Abort, "an AbortSignal")?;
+                    Ok(Some(self.emit_value(ctx, |ctx| {
+                        TimerOp::new(ctx, delay, undef, Some(signal))
+                    })))
+                }
                 RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
                     diag!(codes::TYPE_MISMATCH, "cannot find name '{ident}'"),
                     byte_offset,
@@ -211,6 +262,14 @@ impl<'s> FunctionBuilder<'s> {
                     };
                 }
                 if class == "Promise" {
+                    if property == "resolve" && args.is_empty() {
+                        let undef = self.emit_value(ctx, |ctx| {
+                            UndefinedOp::new(ctx, FP64Type::get(ctx).into())
+                        });
+                        return Ok(Some(
+                            self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, undef)),
+                        ));
+                    }
                     if let ("resolve" | "reject", [value]) = (property.as_str(), args) {
                         return self.promise_settled(ctx, property, value, None).map(Some);
                     }
@@ -337,10 +396,14 @@ impl<'s> FunctionBuilder<'s> {
             return self.clone_structured_value(ctx, val).map(Some);
         }
         let callee = self.shapes.callable(callee);
-        if matches!(callee, Expr::Closure { .. }) {
+        if let Expr::Closure { return_type, .. } = callee {
             let mut arg_vals = Vec::with_capacity(args.len());
             for arg in args {
                 arg_vals.push(self.expression(ctx, arg)?);
+            }
+            if *return_type == HirType::Void {
+                self.effect_callback(ctx, callee, &arg_vals)?;
+                return Ok(None);
             }
             return self.array_callback(ctx, callee, &arg_vals).map(Some);
         }

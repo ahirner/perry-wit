@@ -114,9 +114,44 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
             "reassigning function property 'f' on an object literal",
         ),
         (
-            "export function run(): number { new Promise((resolve) => resolve(1)); return 1; }",
-            "new Promise",
+            "export function run(): number { new PerformanceObserver(() => {}); return 1; }",
+            "new PerformanceObserver",
             "requires the runtime to call a guest function",
+        ),
+        (
+            "export function run(): number { new Promise((resolve) => resolve(Promise.resolve(1))); return 1; }",
+            "resolve(Promise.resolve(1))",
+            "resolving a Promise with another Promise is not supported yet",
+        ),
+        (
+            "export const api = { async slowDouble(n: number) { return n * 2; } };",
+            "slowDouble",
+            "async method 'slowDouble' of an exported object literal",
+        ),
+        (
+            "const m = new Map(); const alias = m; alias.set('k', () => 2);",
+            "alias.set",
+            "storing a function value with Map.set",
+        ),
+        (
+            "export function run(): number { queueMicrotask(() => {}); return 1; }",
+            "queueMicrotask(() => {})",
+            "queueMicrotask is not supported",
+        ),
+        (
+            "export function run(): number { process.nextTick(() => {}); return 1; }",
+            "process.nextTick(() => {})",
+            "process.nextTick is not supported",
+        ),
+        (
+            "export function run(): number { process.on('exit', () => {}); return 1; }",
+            "process.on('exit', () => {})",
+            "passing a callback to runtime 'on' requires the runtime to call a guest function",
+        ),
+        (
+            "export function run(): number { addEventListener('click', () => {}); return 1; }",
+            "addEventListener('click', () => {})",
+            "passing a callback to runtime 'addEventListener' requires the runtime to call a guest function",
         ),
     ] {
         let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();

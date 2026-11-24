@@ -19,7 +19,8 @@ use crate::{
     integers::BigIntConstOp,
     intrinsics::{
         Combinator, Intrinsic, IntrinsicOp, JsonCopyOp, JsonDecodeOp, JsonStringifyOp,
-        PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, SettledFieldOp,
+        PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp, PromiseResolvedOp,
+        PromiseSettleOp, SettledFieldOp,
     },
     locals::{LoadOp, StoreOp, UndefOp},
     optional::{
@@ -59,6 +60,8 @@ pub(crate) enum OperationKind {
     Alias,
     Resolved,
     Rejected,
+    PromisePending,
+    PromiseSettle,
     Return,
     Raise,
     Stringify,
@@ -168,6 +171,8 @@ primitive_semantics! { _ctx, _this;
         TimerOp => OperationKind::Timer;
         PromiseResolvedOp => OperationKind::Resolved;
         PromiseRejectedOp => OperationKind::Rejected;
+        PromisePendingOp => OperationKind::PromisePending;
+        PromiseSettleOp => OperationKind::PromiseSettle;
         PromiseCombinatorOp => OperationKind::Combine(_this.combinator(_ctx));
         RaiseOp => OperationKind::Raise;
         CatchOp, RecordOrderOp => OperationKind::Unknown;

@@ -1,4 +1,5 @@
 //! Final monomorphic HIR emission phase.
+mod async_helpers;
 mod expressions;
 mod funcs;
 use super::bitset::BitSet;
@@ -31,6 +32,7 @@ pub(crate) struct Emitted {
     pub(crate) inline_callbacks: Vec<FuncId>,
     pub(crate) class_origins: Vec<(String, String)>,
     pub(crate) json_eligible_bindings: Vec<LocalId>,
+    pub(crate) boxed_locals: Vec<LocalId>,
     pub(crate) deletes_array_elements: bool,
 }
 
@@ -49,6 +51,9 @@ impl Emitted {
             if metadata.inferred_bindings.contains(&old_id) {
                 metadata.inferred_bindings.insert(new_id);
             }
+        }
+        for id in self.boxed_locals {
+            metadata.deferred_bindings.remove(&id);
         }
         for (inst_name, template_name, offset, caller) in self.instantiations {
             metadata
@@ -99,7 +104,9 @@ pub(crate) fn build(
         inline_callbacks: Vec::new(),
         class_origins: Vec::new(),
         json_eligible_bindings: Vec::new(),
+        boxed_locals: Vec::new(),
         emitted_env_classes: std::collections::HashSet::new(),
+        emitted_timer_class: false,
         synth_classes: Vec::new(),
         synth_functions: Vec::new(),
         helper_fids: vec![None; solved.helpers.len()],
@@ -116,6 +123,7 @@ pub(crate) fn build(
         inline_callbacks: e.inline_callbacks,
         class_origins: e.class_origins,
         json_eligible_bindings: e.json_eligible_bindings,
+        boxed_locals: e.boxed_locals,
         deletes_array_elements: solved.deletes_array_elements,
     })
 }
@@ -137,7 +145,9 @@ struct Emitter<'h, 'a> {
     inline_callbacks: Vec<FuncId>,
     class_origins: Vec<(String, String)>,
     json_eligible_bindings: Vec<LocalId>,
+    boxed_locals: Vec<LocalId>,
     emitted_env_classes: std::collections::HashSet<FuncIdentity>,
+    emitted_timer_class: bool,
     synth_classes: Vec<Class>,
     synth_functions: Vec<Function>,
     helper_fids: Vec<Option<FuncId>>,
@@ -289,7 +299,13 @@ impl<'h> Emitter<'h, '_> {
             let Some(view) = self.index.view(inst.template) else {
                 continue;
             };
-            if !matches!(view.kind, TemplateKind::Function | TemplateKind::Closure) {
+            if !matches!(
+                view.kind,
+                TemplateKind::Function
+                    | TemplateKind::Closure
+                    | TemplateKind::PromiseResolve(_)
+                    | TemplateKind::PromiseReject(_)
+            ) {
                 continue;
             }
             let keep_original = view.is_exported
@@ -528,6 +544,15 @@ impl<'h> Emitter<'h, '_> {
         remap_locals: bool,
         inherited: Option<HashMap<LocalId, LocalId>>,
     ) -> Result<(Function, HashMap<LocalId, LocalId>)> {
+        if matches!(
+            view.kind,
+            TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+        ) {
+            return Ok((
+                self.emit_promise_handle_function(inst, view)?,
+                HashMap::new(),
+            ));
+        }
         let mut remap = inherited.unwrap_or_default();
         let has_inherited = !remap.is_empty();
         let mut params = Vec::with_capacity(view.params.len() + 2);
@@ -625,7 +650,7 @@ impl<'h> Emitter<'h, '_> {
             if self.is_boxed_local(param.id) {
                 let box_id = self.fresh_synthetic_local()?;
                 boxed_param_map.push((param.id, box_id));
-                let init_expr = self.emit_box_record(Expr::LocalGet(new_param.id));
+                let init_expr = Self::emit_box_record(Expr::LocalGet(new_param.id));
                 boxed_param_inits.push(Stmt::Let {
                     id: box_id,
                     name: format!("__box_{}", param.name),
@@ -783,12 +808,13 @@ impl<'h> Emitter<'h, '_> {
                 };
                 let inner_ty = self.resolve_let_ty(rctx.inst_id, *id, out_id, name, ty)?;
                 let box_ty = box_hir(Self::admitting_undefined_hir(inner_ty));
+                self.boxed_locals.push(out_id);
                 out.push(Stmt::Let {
                     id: out_id,
                     name: name.clone(),
                     ty: box_ty,
                     mutable: false,
-                    init: Some(self.emit_box_record(Expr::Undefined)),
+                    init: Some(Self::emit_box_record(Expr::Undefined)),
                 });
             }
         }
@@ -832,7 +858,7 @@ impl<'h> Emitter<'h, '_> {
                         let mut seq = Vec::with_capacity(box_ids.len() + 1);
                         for box_id in box_ids {
                             let fresh =
-                                self.emit_box_record(Self::prop_get(Expr::LocalGet(box_id), "v"));
+                                Self::emit_box_record(Self::prop_get(Expr::LocalGet(box_id), "v"));
                             seq.push(Expr::LocalSet(box_id, Box::new(fresh)));
                         }
                         if let Some(u) = rewritten_update {
@@ -987,16 +1013,29 @@ impl<'h> Emitter<'h, '_> {
                 let init_ctx = rctx.with_expected(init_has_expected);
                 let rewritten_init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
                 if self.is_boxed_local(*id) {
-                    let init_val = match rewritten_init {
-                        Some(v) => v,
-                        None => self.default_box_init(&new_ty, *id, rctx.inst_id)?,
-                    };
+                    self.boxed_locals.push(out_id);
+                    let undef_box = self.is_undef_boxed(*id);
+                    let (box_inner_ty, init_val) =
+                        if undef_box && matches!(init, None | Some(Expr::Undefined)) {
+                            (Self::admitting_undefined_hir(new_ty), Expr::Undefined)
+                        } else {
+                            let v = match rewritten_init {
+                                Some(v) => v,
+                                None => self.default_box_init(&new_ty, *id, rctx.inst_id)?,
+                            };
+                            let t = if undef_box {
+                                Self::admitting_undefined_hir(new_ty)
+                            } else {
+                                new_ty
+                            };
+                            (t, v)
+                        };
                     return Ok(Stmt::Let {
                         id: out_id,
                         name: name.clone(),
-                        ty: box_hir(new_ty),
+                        ty: box_hir(box_inner_ty),
                         mutable: self.index.is_for_head_local(*id),
-                        init: Some(self.emit_box_record(init_val)),
+                        init: Some(Self::emit_box_record(init_val)),
                     });
                 }
                 Ok(Stmt::Let {

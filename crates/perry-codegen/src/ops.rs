@@ -10,9 +10,9 @@ use perry_mir::{
     ArrayType, AsyncCallOp, AwaitOp, BinaryOp as MirBinaryOp, BrOp as MirBrOp, CallOp as MirCallOp,
     Combinator, CompareKind, CompareOp as MirCompareOp, ConcatOp, CondBrOp as MirCondBrOp,
     ErrorKind, IntrinsicOp, JsonStringifyOp, NumericCastOp, PlironResultExt as _,
-    PromiseCombinatorOp, PromiseRejectedOp, PromiseResolvedOp, PromiseType,
-    ReturnOp as MirReturnOp, SettledField, SettledFieldOp, SettledType, StringConstOp, StringLenOp,
-    StringType, TimerOp, UndefOp,
+    PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp, PromiseResolvedOp, PromiseSettleOp,
+    PromiseType, ReturnOp as MirReturnOp, SettleKind, SettledField, SettledFieldOp, SettledType,
+    StringConstOp, StringLenOp, StringType, TimerOp, UndefOp,
 };
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, bail_unsupported, ensure_internal};
 use pliron::{
@@ -535,6 +535,34 @@ impl FunctionLowering<'_, '_> {
             let promise = self.new_promise(ctx, payload)?;
             self.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
             self.define(ctx, op, promise);
+            return Ok(());
+        }
+        if Operation::get_op::<PromisePendingOp>(op, ctx).is_some() {
+            let payload = TypedHandle::<PromiseType>::from_handle(
+                op.deref(ctx).get_result(0).get_type(ctx),
+                ctx,
+            )
+            .to_diag(ctx)?
+            .deref(ctx)
+            .value();
+            let promise = self.new_promise(ctx, payload)?;
+            self.define(ctx, op, promise);
+            return Ok(());
+        }
+        if let Some(settle) = Operation::get_op::<PromiseSettleOp>(op, ctx) {
+            let promise = self.operand(ctx, op, 0)?;
+            match settle.kind(ctx) {
+                SettleKind::Fulfill => {
+                    let value = op.deref(ctx).get_operand(1);
+                    let bits = self.promise_value_bits(ctx, value)?;
+                    self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
+                }
+                SettleKind::Reject => {
+                    let exception = self.thrown_operand(ctx, op, 1)?;
+                    let status = self.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
+                    self.runtime_void(ctx, Runtime::PromiseReject, vec![promise, status]);
+                }
+            }
             return Ok(());
         }
         if Operation::get_op::<TimerOp>(op, ctx).is_some() {

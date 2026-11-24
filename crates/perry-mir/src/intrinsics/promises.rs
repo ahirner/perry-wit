@@ -77,6 +77,54 @@ op_schema! {
     error = IntrinsicErr::PromiseResult("perry.promise_rejected");
 }
 
+op_schema! {
+    /// A pending promise (`new Promise(...)`) settled later by [PromiseSettleOp].
+    pub PromisePendingOp() -> infallible;
+    name = "perry.promise_pending";
+    format = "` : ` type($0)";
+    constructors {
+        pub new(settled: TypeHandle) => explicit(PromiseType::get(ctx, settled).into());
+    }
+    result(ctx): impl OutputContract = Accepts(|ctx: &Context, ty: TypeHandle| {
+        ty.deref(ctx).is::<PromiseType>()
+    });
+    error = IntrinsicErr::PromiseResult("perry.promise_pending");
+}
+
+/// How [PromiseSettleOp] settles a pending promise.
+#[pliron::derive::pliron_attr(name = "perry.settle_kind", format, verifier = "succ")]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]
+pub enum SettleKind {
+    /// Fulfil with a value matching the promise's settled type.
+    Fulfill,
+    /// Reject with an error or value converted to an exception.
+    Reject,
+}
+
+op_schema! {
+    /// Settle a pending promise created by [PromisePendingOp]. Second settlements are ignored.
+    pub PromiseSettleOp(promise, value) -> infallible;
+    name = "perry.promise_settle";
+    format = "attr($perry_settle_kind, $SettleKind) ` ` $0 `, ` $1 ` : ` type($0) `, ` type($1)";
+    attributes = (perry_settle_kind: SettleKind);
+    constructors {
+        pub new(kind: SettleKind, promise: Value, value: Value) => empty();
+    }
+    attribute(kind: SettleKind, get_attr_perry_settle_kind, set_attr_perry_settle_kind) = kind => IntrinsicErr::Settle;
+    prepare(_this) {
+        let settled = crate::typed::<PromiseType>(ctx, promise.get_type(ctx))
+            .map(|p| p.deref(ctx).value());
+        let matches_payload = match (*kind, settled) {
+            (SettleKind::Fulfill, Some(ty)) => value.get_type(ctx) == ty,
+            (SettleKind::Reject, Some(_)) => true,
+            (_, None) => false,
+        };
+    }
+    result(ctx): () = ();
+    error = IntrinsicErr::Settle;
+    check matches_payload => IntrinsicErr::Settle;
+}
+
 /// A property of a `Promise.allSettled` result element.
 #[pliron::derive::pliron_attr(name = "perry.settled_field", format, verifier = "succ")]
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Hash)]

@@ -333,15 +333,44 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             Expr::Await(promise) => {
                 let ty = self.eval_expr(s, promise)?;
+                let ty = self.resolve_cell_read(s.inst, ty);
                 Ok(match self.types.kind(ty) {
                     TyKind::Promise(i) => i,
                     _ => ty,
                 })
             }
+            Expr::QueueMicrotask(_) => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "queueMicrotask is not supported: this runtime has no microtask queue",
+                ),
+                0,
+            )),
+            Expr::ProcessNextTick { .. } => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "process.nextTick is not supported: this runtime has no microtask queue",
+                ),
+                0,
+            )),
+            Expr::ProcessOn { .. } => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "passing a callback to runtime 'on' requires the runtime to call a guest function",
+                ),
+                0,
+            )),
+            Expr::ProcessOnce { .. } => Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(
+                    "passing a callback to runtime 'once' requires the runtime to call a guest function",
+                ),
+                0,
+            )),
             Expr::StructuredClone { value, .. } => self.eval_expr(s, value),
             Expr::Array(elements, _) => {
                 if elements.is_empty() {
-                    return Ok(self.alloc_expr_cell(s.inst, expr, CellKind::Array));
+                    return self.alloc_expr_cell(s.inst, expr, CellKind::Array);
                 }
                 let elem_tys = self.eval_args(s, elements)?;
                 if elem_tys.contains(&Ty::BOTTOM) {
@@ -373,7 +402,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     for (elem, &et) in elements.iter().zip(&elem_tys) {
                         self.record_coercion(s.inst, elem, et, joined);
                     }
-                    self.record_site(s.inst, expr, SiteResolution::TaggedArray(arr_ty));
+                    self.record_site(s.inst, expr, SiteResolution::TypedArray(arr_ty));
                 }
                 Ok(arr_ty)
             }
@@ -413,7 +442,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if inner == Ty::VOID && abs.is_some_and(Absence::admits_null) {
                     joined = self.types.with_absences(Ty::NUMBER, abs);
                 }
-                Ok(self.types.array(joined))
+                let array = self.types.array(joined);
+                self.record_site(s.inst, expr, SiteResolution::TypedArray(array));
+                Ok(array)
             }
             Expr::ArrayFrom(source, _) => {
                 let src = self.eval_expr(s, source)?;
@@ -627,6 +658,30 @@ impl<'h, 'a> Solver<'h, 'a> {
                 byte_offset,
                 ..
             } => self.eval_new(s, expr, class_name, args, type_args, *byte_offset),
+            Expr::NewDynamic {
+                callee,
+                args,
+                byte_offset,
+                ..
+            } => {
+                self.eval_expr(s, callee)?;
+                let arg_tys = self.eval_args(s, args)?;
+                if arg_tys.iter().any(|&a| self.types.has_func(a)) {
+                    let name = match callee.as_ref() {
+                        Expr::PropertyGet { property, .. } => property.as_str(),
+                        Expr::ExternFuncRef { name, .. } => name.as_str(),
+                        _ => "constructor",
+                    };
+                    return Err(self.annotate_expr_error(
+                        s,
+                        Diagnostic::unsupported(format!(
+                            "passing a callback to runtime '{name}' requires the runtime to call a guest function"
+                        )),
+                        *byte_offset,
+                    ));
+                }
+                Ok(Ty::OPEN)
+            }
             Expr::Call {
                 callee,
                 args,
@@ -699,6 +754,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                             },
                         ));
                     }
+                }
+                if arg_tys.iter().any(|&a| self.types.has_func(a)) {
+                    return Err(self.annotate_expr_error(
+                        s,
+                        Diagnostic::unsupported(format!(
+                            "passing a callback to runtime '{method}' requires the runtime to call a guest function"
+                        )),
+                        0,
+                    ));
                 }
                 Ok(Ty::OPEN)
             }
@@ -904,8 +968,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(None);
         }
         let prop_ty = builtins::property_type(self.ctx, self.decls, self.types, obj_def, property);
-        let touches_func = !self.types.func_members(val_ty).is_empty()
-            || prop_ty.is_some_and(|p| !self.types.func_members(p).is_empty());
+        let touches_func =
+            self.types.has_func(val_ty) || prop_ty.is_some_and(|p| self.types.has_func(p));
         if touches_func
             && val_ty != Ty::BOTTOM
             && !prop_ty.is_some_and(|p| self.types.accepts(self.ctx, p, val_ty))
@@ -948,15 +1012,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         self.mark_escaping_env(inst_id, l);
         self.mark_escaping_env(inst_id, r);
-        let l_members = self.types.func_members(l);
-        let r_members = self.types.func_members(r);
         let same_local = matches!((left, right), (Expr::LocalGet(a), Expr::LocalGet(b)) if a == b);
         if !same_local {
-            for &lm in &l_members {
-                let tid = lm.template;
-                if !r_members.iter().any(|rm| rm.template == tid) {
-                    continue;
-                }
+            let shared: Vec<_> = self
+                .types
+                .func_members(&l)
+                .map(|ident| ident.template)
+                .filter(|&template| {
+                    self.types
+                        .func_members(&r)
+                        .any(|ident| ident.template == template)
+                })
+                .collect();
+            for tid in shared {
                 if !self.is_escaping_env(tid, inst_id)
                     && self
                         .index
@@ -1064,7 +1132,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 ) && self.types.is_open(existing)
                 {
-                    let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array);
+                    let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array)?;
                     self.write_loc(loc, cell);
                 }
             } else if !self.types.is_open(norm) || self.types.is_open(existing) {
@@ -1198,7 +1266,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
         }
-        Ok(Ty::OPEN)
+        Ok(self.types.generic(
+            base,
+            if is_map {
+                &[Ty::OPEN, Ty::OPEN]
+            } else {
+                &[Ty::OPEN]
+            },
+        ))
     }
 
     pub(super) fn active_instance_type_bindings(

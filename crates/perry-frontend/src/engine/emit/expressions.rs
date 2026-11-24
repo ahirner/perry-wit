@@ -16,7 +16,7 @@ impl<'h> Emitter<'h, '_> {
             match c {
                 FuncCoercion::Zero if is_pure_func_expr(expr) => return Ok(Expr::Number(0.0)),
                 FuncCoercion::Tag(ident) if is_pure_func_expr(expr) => {
-                    return Ok(self.emit_tag_record(ident));
+                    return Ok(Self::emit_tag_record(ident));
                 }
                 _ => {}
             }
@@ -25,12 +25,12 @@ impl<'h> Emitter<'h, '_> {
         match coercion {
             Some(FuncCoercion::Zero) => Ok(Expr::Sequence(vec![rewritten, Expr::Number(0.0)])),
             Some(FuncCoercion::Tag(ident)) => {
-                let tag = self.emit_tag_record(ident);
+                let tag = Self::emit_tag_record(ident);
                 Ok(Expr::Sequence(vec![rewritten, tag]))
             }
             Some(FuncCoercion::BoxEnv(ident)) => {
                 let val_expr = Self::prop_get(rewritten, "val");
-                Ok(self.emit_env_wrapper(ident, val_expr))
+                Ok(Self::emit_env_wrapper(ident, val_expr))
             }
             Some(FuncCoercion::Widen(helper)) => {
                 let fid = self.emit_helper(helper)?;
@@ -285,7 +285,11 @@ impl<'h> Emitter<'h, '_> {
                                 (right_ty, left.as_ref(), left_ty)
                             };
                             if let TyKind::Func(ident) = self.types.kind(zero_ty) {
-                                if !self.types.func_members(union_ty).contains(&ident) {
+                                if !self
+                                    .types
+                                    .func_members(&union_ty)
+                                    .any(|member| member == ident)
+                                {
                                     return self.fold_comparison(rctx, left, right, !is_eq);
                                 }
                                 let u_rewritten = self.rewrite_expr(rctx, union_expr)?;
@@ -409,53 +413,46 @@ impl<'h> Emitter<'h, '_> {
                         CalleeValue::Tagged,
                     );
                 }
-                SiteResolution::TaggedArray(arr_ty) => {
-                    if let Expr::Array(elems, _) = expr {
-                        let elem_ctx = rctx.with_expected(true);
-                        let mut out_elems = Vec::with_capacity(elems.len());
-                        for e in elems {
-                            out_elems.push(self.rewrite_expr(&elem_ctx, e)?);
+                SiteResolution::TypedArray(ty) => {
+                    use perry_hir::ir::ArrayElement;
+                    let expected = rctx.with_expected(true);
+                    let array = match expr {
+                        Expr::Array(items, _) => Expr::Array(
+                            items
+                                .iter()
+                                .map(|item| self.rewrite_expr(&expected, item))
+                                .collect::<Result<_>>()?,
+                            None,
+                        ),
+                        Expr::ArraySpread(items) => {
+                            let untyped = rctx.with_expected(false);
+                            let items = items
+                                .iter()
+                                .map(|item| {
+                                    Ok(match item {
+                                        ArrayElement::Hole => ArrayElement::Hole,
+                                        ArrayElement::Expr(e) => {
+                                            ArrayElement::Expr(self.rewrite_expr(&expected, e)?)
+                                        }
+                                        ArrayElement::Spread(e) => {
+                                            ArrayElement::Spread(self.rewrite_expr(&untyped, e)?)
+                                        }
+                                    })
+                                })
+                                .collect::<Result<_>>()?;
+                            Expr::ArraySpread(items)
                         }
-                        let arr = Expr::Array(out_elems, None);
-                        if rctx.has_expected {
-                            return Ok(arr);
+                        _ => {
+                            return Err(Diagnostic::internal(
+                                "array site requires an array literal",
+                            ));
                         }
-                        let arr_hir = self.materialize(arr_ty)?;
-                        let tmp_id = self.fresh_synthetic_local()?;
-                        let closure_fid = self.fresh_func_id()?;
-                        let closure = Expr::Closure {
-                            func_id: closure_fid,
-                            params: Vec::new(),
-                            return_type: arr_hir.clone(),
-                            body: vec![
-                                Stmt::Let {
-                                    id: tmp_id,
-                                    name: "__arr".into(),
-                                    ty: arr_hir,
-                                    mutable: false,
-                                    init: Some(arr),
-                                },
-                                Stmt::Return(Some(Expr::LocalGet(tmp_id))),
-                            ],
-                            captures: Vec::new(),
-                            mutable_captures: Vec::new(),
-                            captures_this: false,
-                            captures_new_target: false,
-                            enclosing_class: None,
-                            is_async: false,
-                            is_generator: false,
-                            is_strict: true,
-                            construct_only: false,
-                            is_arrow: true,
-                        };
-                        return Ok(Expr::Call {
-                            callee: Box::new(closure),
-                            args: Vec::new(),
-                            type_args: Vec::new(),
-                            byte_offset: 0,
-                            byte_end: 0,
-                        });
+                    };
+                    if rctx.has_expected {
+                        return Ok(array);
                     }
+                    let ty = self.materialize(ty)?;
+                    return self.inline_iife(ty, vec![Stmt::Return(Some(array))]);
                 }
                 SiteResolution::ZeroSizedArray => {
                     if let Expr::Array(elems, _) = expr {
@@ -580,16 +577,95 @@ impl<'h> Emitter<'h, '_> {
                         }
                     }
                 }
+                SiteResolution::PromiseNew {
+                    value_loc,
+                    resolve_tid,
+                    reject_tid,
+                    executor,
+                } => {
+                    let (executor, pass_resolve, pass_reject) = executor
+                        .ok_or_else(|| Diagnostic::internal("unresolved promise executor"))?;
+                    if let Expr::New { args, .. } = expr {
+                        return self.emit_promise_new(
+                            rctx,
+                            args,
+                            value_loc,
+                            resolve_tid,
+                            reject_tid,
+                            executor,
+                            pass_resolve,
+                            pass_reject,
+                        );
+                    }
+                }
+                SiteResolution::PromiseReaction {
+                    helper,
+                    pass_first,
+                    pass_second,
+                    ..
+                } => {
+                    if let Expr::Call {
+                        callee,
+                        args,
+                        byte_offset,
+                        byte_end,
+                        ..
+                    } = expr
+                        && let Expr::PropertyGet { object, .. } = callee.as_ref()
+                    {
+                        let fid = self.emit_helper(helper)?;
+                        let arg_ctx = rctx.with_expected(true);
+                        let mut call_args = vec![self.rewrite_expr(&arg_ctx, object)?];
+                        let effects =
+                            self.project_arguments(&arg_ctx, args, &mut call_args, |_, i| {
+                                matches!(i, 0 if pass_first) || matches!(i, 1 if pass_second)
+                            })?;
+                        return Ok(sequence(
+                            effects,
+                            Self::synth_call(fid, call_args, *byte_offset, *byte_end),
+                        ));
+                    }
+                }
+                SiteResolution::TimerStart {
+                    helper,
+                    has_delay,
+                    is_immediate,
+                    pass_cb,
+                } => {
+                    if let Expr::Call {
+                        args,
+                        byte_offset,
+                        byte_end,
+                        ..
+                    } = expr
+                    {
+                        return self.emit_timer_start(
+                            rctx,
+                            args,
+                            helper,
+                            has_delay,
+                            is_immediate,
+                            pass_cb,
+                            *byte_offset,
+                            *byte_end,
+                        );
+                    }
+                }
+                SiteResolution::TimerClear { arg_ty } => {
+                    if let Expr::Call { args, .. } = expr {
+                        return self.emit_timer_clear(rctx, args, arg_ty);
+                    }
+                }
             }
         }
         self.rewrite_expr_plain(rctx, expr)
     }
 
     fn local_read_override(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
-        let forward = self.is_forward_boxed(id);
+        let undef_box = self.is_undef_boxed(id);
         let unwrap_box = |base: Expr| {
             let val = Self::prop_get(base, "v");
-            if forward {
+            if undef_box {
                 Self::non_null_unwrap(val)
             } else {
                 val
@@ -610,7 +686,7 @@ impl<'h> Emitter<'h, '_> {
         None
     }
 
-    fn method_call_expr(recv: Expr, property: &str, args: Vec<Expr>) -> Expr {
+    pub(super) fn method_call_expr(recv: Expr, property: &str, args: Vec<Expr>) -> Expr {
         Expr::Call {
             callee: Box::new(Self::prop_get(recv, property)),
             args,
@@ -686,7 +762,7 @@ impl<'h> Emitter<'h, '_> {
                 byte_end: 0,
                 cap_args_appended: 0,
             };
-            return Ok(self.emit_env_wrapper(ident, env_expr));
+            return Ok(Self::emit_env_wrapper(ident, env_expr));
         }
         if let Expr::LocalGet(id) = expr {
             if let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id) {
@@ -845,8 +921,8 @@ impl<'h> Emitter<'h, '_> {
         } else {
             rctx
         };
-        let child_expected =
-            rctx.has_expected && matches!(expr, Expr::Logical { .. } | Expr::Sequence(_));
+        let child_expected = matches!(expr, Expr::LocalSet(..))
+            || (rctx.has_expected && matches!(expr, Expr::Logical { .. } | Expr::Sequence(_)));
         let child_ctx = rctx.with_expected(child_expected);
         let mut cloned = expr.clone();
         let mut orig_children: Vec<&'h Expr> = Vec::new();
@@ -994,14 +1070,25 @@ impl<'h> Emitter<'h, '_> {
         argument_types: Ty,
         values: &mut Vec<Expr>,
     ) -> Result<Vec<Expr>> {
-        let mut effects = Vec::new();
-        for (i, arg) in args.iter().enumerate() {
-            if self
+        self.project_arguments(rctx, args, values, |emitter, i| {
+            emitter
                 .types
                 .tuple_slice(argument_types)
                 .get(i)
-                .is_some_and(|&ty| self.erases_argument(ty))
-            {
+                .is_some_and(|&ty| !emitter.erases_argument(ty))
+        })
+    }
+
+    pub(super) fn project_arguments(
+        &mut self,
+        rctx: &RewriteCtx<'_>,
+        args: &'h [Expr],
+        values: &mut Vec<Expr>,
+        keep: impl Fn(&Self, usize) -> bool,
+    ) -> Result<Vec<Expr>> {
+        let mut effects = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if !keep(self, i) {
                 if !is_pure_func_expr(arg) {
                     effects.push(self.rewrite_expr(rctx, arg)?);
                 }
