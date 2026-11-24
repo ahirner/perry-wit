@@ -241,10 +241,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
         match self.types.kind(ty) {
             TyKind::Leaf(id) => {
-                if matches!(id.hir(self.ctx), HirType::Named(n) if n == crate::engine::TIMER_CLASS)
-                {
-                    *needs_timer = true;
-                }
+                *needs_timer |= crate::hir_compat::is_timer_handle(id.hir(self.ctx));
             }
             TyKind::Func(ident) => {
                 if self.is_env_template(ident.template)

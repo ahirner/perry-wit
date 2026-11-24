@@ -10,7 +10,7 @@ use perry_hir::{
 };
 use perry_wit_diagnostics::{Diagnostic, Result};
 
-use crate::engine::TIMER_CLASS;
+use crate::hir_compat::TIMER_CLASS;
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn inline_iife(&mut self, return_type: HirType, body: Vec<Stmt>) -> Result<Expr> {

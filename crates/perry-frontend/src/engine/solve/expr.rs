@@ -1296,7 +1296,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn check_timer_member(&self, receiver: Ty, offset: u32) -> Result<()> {
-        if matches!(self.types.kind(receiver), TyKind::Leaf(id) if matches!(id.hir(self.ctx), HirType::Named(n) if n == crate::engine::TIMER_CLASS))
+        if matches!(self.types.kind(receiver), TyKind::Leaf(id) if crate::hir_compat::is_timer_handle(id.hir(self.ctx)))
         {
             let locations = &self.metadata.locations;
             let member = locations

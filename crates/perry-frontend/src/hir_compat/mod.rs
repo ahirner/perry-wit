@@ -38,6 +38,7 @@ pub(crate) use methods::Preservation;
 pub use methods::{Method, method};
 pub use streams::is_writable_to_web;
 pub use timers::is_timer_module;
+pub(crate) use timers::{TIMER_CLASS, is_timer_handle};
 
 pub struct Metadata<'s> {
     pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
