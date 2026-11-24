@@ -46,6 +46,8 @@ impl Receiver {
 }
 
 pub(crate) struct Instance {
+    pub(crate) is_witness: bool,
+    pub(crate) list_result: Option<Ty>,
     pub(crate) template: TemplateId,
     pub(crate) receiver: Option<Receiver>,
     pub(crate) capture_owner: CaptureOwner,
@@ -187,6 +189,7 @@ pub(crate) enum SiteResolution {
         class_inst: ClassInstId,
         argument_types: Ty,
     },
+    ResourceCall(usize),
     BranchResult(Ty),
     ObjectLiteral(Ty),
     ZeroSizedArray,
@@ -242,6 +245,7 @@ impl SiteEntry {
 }
 
 pub(crate) struct Solved {
+    pub(crate) witness_instances: Vec<Option<InstanceId>>,
     pub(crate) init_inst: InstanceId,
     pub(crate) instances: IdxVec<InstanceId, Instance>,
     pub(crate) class_insts: IdxVec<ClassInstId, ClassInst>,
@@ -272,7 +276,14 @@ pub(crate) struct Solved {
     pub(crate) deletes_array_elements: bool,
 }
 
-type InstanceKey = (TemplateId, Option<Receiver>, CaptureOwner, Ty, Ty);
+type InstanceKey = (
+    TemplateId,
+    Option<Receiver>,
+    CaptureOwner,
+    Ty,
+    Ty,
+    Option<Ty>,
+);
 
 struct ResultContract {
     inst: InstanceId,
@@ -282,6 +293,7 @@ struct ResultContract {
 }
 
 struct InstanceReq<'a> {
+    witness: Option<&'a hir_compat::Witness<perry_hir::types::FuncId>>,
     template: TemplateId,
     receiver: Option<Receiver>,
     capture_owner: CaptureOwner,
@@ -296,6 +308,7 @@ impl<'a> InstanceReq<'a> {
     fn new(template: TemplateId, args: &'a [Ty], caller: Option<InstanceId>) -> Self {
         Self {
             template,
+            witness: None,
             receiver: None,
             capture_owner: CaptureOwner::None,
             args,
@@ -405,6 +418,7 @@ struct Solver<'h, 'a> {
     worklist_head: usize,
     queued: BitSet,
     instances: IdxVec<InstanceId, Instance>,
+    witness_instances: Vec<Option<InstanceId>>,
     instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: IdxVec<TemplateId, u16>,
     param_locs: Vec<LocId>,
@@ -541,6 +555,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             worklist_head: 0,
             queued: BitSet::default(),
             instances: IdxVec::default(),
+            witness_instances: Vec::with_capacity(metadata.witnesses.len()),
             instance_index: HashMap::with_capacity(64),
             template_counts: index.views.filled(0),
             param_locs: Vec::new(),

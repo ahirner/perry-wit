@@ -56,7 +56,6 @@ fn unannotated_parameters_need_evidence_from_statically_known_calls() -> anyhow:
     for source in [
         "export function id(x) { return x; } export function run(): number { return id(1); }",
         "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
-        "function id(x) { return x; } export const other = {id}; export function run():number { return id(1); }",
         "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
     ] {
         let error = perry_wit::compile_core(source, "closed.ts")
@@ -122,11 +121,6 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
             "export function run(): number { new Promise((resolve) => resolve(Promise.resolve(1))); return 1; }",
             "resolve(Promise.resolve(1))",
             "resolving a Promise with another Promise is not supported yet",
-        ),
-        (
-            "export const api = { async slowDouble(n: number) { return n * 2; } };",
-            "slowDouble",
-            "async method 'slowDouble' of an exported object literal",
         ),
         (
             "const m = new Map(); const alias = m; alias.set('k', () => 2);",
@@ -296,23 +290,6 @@ fn diagnostics_locate_imported_modules_and_multibyte_columns() -> anyhow::Result
         assert_eq!(&helper[span.start_byte..span.end_byte], expression);
         assert_eq!((span.start_line, span.start_column), (2, 15));
     }
-
-    let destructured = "export const { value: binding } = { value: 7 };";
-    let error = api::compile_core(&program_with(
-        "src/main.ts",
-        "export { binding as run } from './helper';",
-        &[("src/helper.ts", destructured)],
-    ))
-    .err()
-    .context("expected a diagnostic for the re-exported constant")?;
-    let diagnostic = error.primary();
-    assert!(diagnostic.message().contains("Component export 'run'"));
-    let span = diagnostic.span().context("destructured declaration span")?;
-    assert_eq!(span.file.to_string_lossy(), "src/helper.ts");
-    assert_eq!(
-        destructured.get(span.start_byte..span.end_byte),
-        Some("binding")
-    );
 
     let parse_source = "// é🙂\r\n// cr\r// ls\u{2028}// ps\u{2029}export const missing;";
     let parse_error = api::compile_core(&program_with("parse.ts", parse_source, &[])).unwrap_err();
@@ -1080,29 +1057,6 @@ fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> any
 
 #[test]
 fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> anyhow::Result<()> {
-    // Exported object-literal method diagnostics report the source method name, never internal synthetic names.
-    for (source, file, expected_name) in [
-        (
-            "export const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
-            "obj_method.js",
-            "'greet'",
-        ),
-        (
-            "export const counter = { n: 0, bump(by) { this.n += by; } };\nexport function run(): number { counter.bump(1); return counter.n; }\n",
-            "obj_closure_method.js",
-            "'bump'",
-        ),
-    ] {
-        let obj_method = perry_wit::compile_core(source, file)
-            .err()
-            .context("expected missing annotation diagnostic for object method")?;
-        assert_eq!(obj_method.primary().code(), codes::MISSING_TYPE_ANNOTATION);
-        let msg = obj_method.to_string();
-        assert!(msg.contains(expected_name), "{obj_method}");
-        assert!(!msg.contains("__obj_method_"), "{obj_method}");
-        assert!(!msg.contains("callback_"), "{obj_method}");
-    }
-
     // Polymorphic recursion hits the explicit specialization budget instead of diverging.
     let poly = perry_wit::compile_core(
         "function wrap(x, n) { return n <= 0 ? x : wrap([x], n - 1); }\nexport function run(): number { wrap(1, 3); return 0; }\n",

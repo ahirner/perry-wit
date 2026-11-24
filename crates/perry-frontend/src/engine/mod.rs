@@ -27,10 +27,23 @@ pub(crate) fn run_engine(
     foreign: &HashMap<String, hir::Foreign>,
 ) -> Result<()> {
     let mut types = TypeTable::new();
+    if !metadata.class_roots.classes.is_empty() {
+        let (local, function) = perry_hir::lexical_frames::max_ids(hir);
+        hir_compat::resource_classes::bind(
+            hir,
+            &metadata.class_roots,
+            &mut metadata.witnesses,
+            local,
+            function,
+        )?;
+    }
     let emitted = {
         let index = ModuleIndex::build(ctx, hir, facts, &metadata.locations, &mut types);
         let solved = solve::solve(ctx, hir, &index, metadata, facts, foreign, &mut types)?;
-        emit::build(ctx, hir, &index, &metadata.locations, &types, &solved)?
+        for (witness, instance) in metadata.witnesses.iter_mut().zip(&solved.witness_instances) {
+            witness.target = instance.map(|id| solved.instances[id].emitted_func_id);
+        }
+        emit::build(ctx, hir, &index, metadata, &types, &solved)?
     };
     emitted.apply(hir, metadata);
     Ok(())

@@ -2,7 +2,7 @@
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_contract::export_names::core_export_name;
 use perry_contract::types::{Contract, Input, convert};
-use perry_mir::{PlironResultExt as _, is_exported};
+use perry_mir::PlironResultExt as _;
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, diag};
 use pliron::{
     builtin::{
@@ -16,7 +16,12 @@ use std::collections::HashMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 /// Validate source number/bigint distinctions before exposing integer domains to MIR.
-fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> Result<()> {
+fn constrain_numbers(
+    ctx: &mut Context,
+    function: &FuncOp,
+    export: &Export,
+    common_domain: bool,
+) -> Result<()> {
     use pliron::{
         builtin::{
             type_interfaces::FunctionTypeInterface,
@@ -49,10 +54,11 @@ fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> R
         return Ok(());
     }
     let mut constrained = false;
-    for (source, abi) in args
+    for (index, (source, abi)) in args
         .iter_mut()
         .zip(&export.params)
         .chain(results.iter_mut().zip(export.result.iter()))
+        .enumerate()
     {
         let Some(integer) = abi.integer_type(ctx) else {
             continue;
@@ -67,13 +73,15 @@ fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> R
                 crate::codes::CONTRACT_MISMATCH,
                 "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion",
             )
-            .with_optional_span(perry_mir::source_span(ctx, function))
+            .with_optional_span(export.annotation(index).or_else(|| perry_mir::source_span(ctx,function)))
             .with_help(format!(
                 "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
                 export.function, export.core_name
             )));
         }
-        if wide || source.deref(ctx).is::<FP64Type>() || source.deref(ctx).is::<IntegerType>() {
+        if common_domain
+            && (wide || source.deref(ctx).is::<FP64Type>() || source.deref(ctx).is::<IntegerType>())
+        {
             *source = integer;
             constrained = true;
         }
@@ -84,36 +92,35 @@ fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> R
     Ok(())
 }
 
-/// Bind each component export of `world` to the exported TypeScript function matching the
-/// SDK's implementation name. Missing implementations produce errors, and extra exports are ignored.
 pub(super) fn exports(
     ctx: &mut Context,
-    mir: &ModuleOp,
+    targets: &[perry_lower::ExportTarget],
     resolve: &Resolve,
     world_id: WorldId,
+    metadata: &perry_frontend::hir_compat::Metadata,
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
-    perry_contract::export_names::validate_implementation_names(resolve, world)
-        .map_err(|e| Diagnostic::new(crate::codes::CONTRACT_MISMATCH, e.to_string()))?;
-    let functions = module_functions(ctx, mir);
     let mut bound = Vec::new();
-    for entry in perry_contract::world_functions(resolve, world.exports.iter()) {
+    for (i, entry) in perry_contract::world_functions(resolve, world.exports.iter()).enumerate() {
         let function = entry.function;
-        let implementation = entry.implementation_name(resolve, world);
+        let target = targets
+            .get(i)
+            .ok_or_else(|| Diagnostic::internal("world export has no witness"))?;
         let core_name = if entry.interface.is_some() {
             core_export_name(resolve, entry.key, function)
         } else {
             function.name.clone()
         };
-        let candidate = functions.get(&implementation);
-        let Some(mir_function) = candidate.filter(|f| is_exported(ctx, f)) else {
-            // A command can implement wasi:cli/run.run with its top-level statements.
-            if is_cli_run(&core_name)
-                && let Some(main) = functions.get(perry_lower::MAIN)
-            {
+        let mir_function = match target {
+            perry_lower::ExportTarget::Function(func) => func,
+            perry_lower::ExportTarget::Destructor(..) => {
+                return Err(Diagnostic::internal("expected function witness"));
+            }
+            perry_lower::ExportTarget::Command(main) => {
                 bound.push((
                     main,
                     Export {
+                        annotations: Vec::new(),
                         core_name,
                         function: perry_lower::MAIN.to_string(),
                         params: vec![],
@@ -129,21 +136,8 @@ pub(super) fn exports(
                 ));
                 continue;
             }
-            let span = candidate.and_then(|function| perry_mir::source_span(ctx, function));
-            let help = if candidate.is_some() {
-                format!("Add the 'export' keyword to function '{implementation}'.")
-            } else {
-                format!(
-                    "Export 'export function {implementation}(...)' from your entry module, or run 'perry-wit gen-types' to generate the expected declarations."
-                )
-            };
-            return Err(diag!(
-                crate::codes::MISSING_EXPORT,
-                "WIT export {core_name} needs an exported TypeScript function {implementation}"
-            )
-            .with_optional_span(span)
-            .with_help(help));
         };
+        let implementation = mir_function.get_symbol_name(ctx).to_string();
         let expected_async = function.kind.is_async();
         if perry_mir::is_async(ctx, mir_function) != expected_async {
             let help = if expected_async {
@@ -190,6 +184,7 @@ pub(super) fn exports(
         bound.push((
             mir_function,
             Export {
+                annotations: metadata.witness_annotations(i),
                 core_name,
                 function: implementation,
                 params,
@@ -198,17 +193,32 @@ pub(super) fn exports(
             },
         ));
     }
-    bound
-        .into_iter()
-        .map(|(function, export)| {
-            constrain_numbers(ctx, function, &export)?;
-            Ok(export)
-        })
-        .collect()
-}
-
-fn is_cli_run(core_name: &str) -> bool {
-    core_name.starts_with("wasi:cli/run@") && core_name.ends_with("#run")
+    for target in targets.iter().skip(bound.len()) {
+        let perry_lower::ExportTarget::Destructor(function, core_name) = target else {
+            return Err(Diagnostic::internal(
+                "unexpected witness after world functions",
+            ));
+        };
+        bound.push((
+            function,
+            Export {
+                annotations: Vec::new(),
+                core_name: core_name.clone(),
+                function: function.get_symbol_name(ctx).into(),
+                params: vec![AbiType::U32],
+                result: None,
+                kind: ExportKind::Sync,
+            },
+        ));
+    }
+    for (function, export) in &bound {
+        let common_domain = bound.iter().all(|(other, abi)| {
+            function.get_operation() != other.get_operation()
+                || (abi.params == export.params && abi.result == export.result)
+        });
+        constrain_numbers(ctx, function, export, common_domain)?;
+    }
+    Ok(bound.into_iter().map(|(_, export)| export).collect())
 }
 
 fn module_functions(ctx: &Context, mir: &ModuleOp) -> HashMap<String, FuncOp> {

@@ -135,6 +135,7 @@ pub(crate) fn compile(
         .result
         .ok_or_else(|| Diagnostic::internal("handle returns a result"))?;
     let exports = vec![Export {
+        annotations: Vec::new(),
         core_name: format!("{name}#handle"),
         function: "__perryHttpHandle".into(),
         params: vec![AbiType::U32],

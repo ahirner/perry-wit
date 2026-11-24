@@ -93,7 +93,7 @@ struct SourceFile<'s> {
 pub struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
-    calls: HashMap<u32, Span>,
+    calls: HashMap<u32, (Span, Option<Span>)>,
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
@@ -170,6 +170,15 @@ impl<'s> Locations<'s> {
             positions: offset + 1..=end,
         });
         Ok(offset)
+    }
+
+    pub(super) fn module_text(&self) -> String {
+        let mut text = String::new();
+        for file in &self.files {
+            text.push_str(file.source);
+            text.push('\n');
+        }
+        text
     }
 
     fn template_name<'a>(&'a self, mut name: &'a str) -> &'a str {
@@ -335,10 +344,17 @@ impl<'s> Locations<'s> {
         ))
     }
 
+    pub(crate) fn calls_dispose(&self, start: u32, end: u32) -> bool {
+        self.calls
+            .get(&start)
+            .and_then(|(_, dispose)| *dispose)
+            .is_some_and(|span| span.hi.0 == end)
+    }
+
     pub fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.calls
             .get(&byte_offset)
-            .and_then(|span| self.span(*span))
+            .and_then(|(span, _)| self.span(*span))
             .or_else(|| self.offset_span(byte_offset, 1))
     }
 
@@ -378,7 +394,7 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.call_span(byte_offset))
     }
 
-    fn span(&self, span: Span) -> Option<SourceSpan> {
+    pub(super) fn span(&self, span: Span) -> Option<SourceSpan> {
         let file = self.file_at(span.lo.0)?;
         let start = (span.lo.0 - file.positions.start()) as usize;
         let end = span.hi.0.checked_sub(*file.positions.start())? as usize;
@@ -398,8 +414,13 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.span(span))
     }
 
-    pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
+    pub(super) fn collect(
+        &mut self,
+        module: &perry_parser::swc_ecma_ast::Module,
+        unresolved: swc_common::SyntaxContext,
+    ) {
         struct Collector<'a, 's> {
+            unresolved: swc_common::SyntaxContext,
             locations: &'a mut Locations<'s>,
             class_name: Option<String>,
         }
@@ -437,7 +458,21 @@ impl<'s> Locations<'s> {
             }
             fn visit_call_expr(&mut self, call: &ast::CallExpr) {
                 if call.span.lo.0 != 0 {
-                    self.locations.calls.insert(call.span.lo.0, call.span);
+                    let entry = self
+                        .locations
+                        .calls
+                        .entry(call.span.lo.0)
+                        .or_insert((call.span, None));
+                    entry.0 = call.span;
+                    if let ast::Callee::Expr(callee) = &call.callee
+                        && let ast::Expr::Member(member) = callee.unwrap_parens()
+                        && let ast::MemberProp::Computed(prop) = &member.prop
+                        && let ast::Expr::Member(symbol) = prop.expr.unwrap_parens()
+                        && matches!(&*symbol.obj, ast::Expr::Ident(id) if id.sym == "Symbol" && id.ctxt == self.unresolved)
+                        && matches!(&symbol.prop,ast::MemberProp::Ident(id) if id.sym=="dispose")
+                    {
+                        entry.1 = Some(call.span);
+                    }
                 }
                 call.visit_children_with(self);
             }
@@ -449,7 +484,9 @@ impl<'s> Locations<'s> {
                 if new_expr.span.lo.0 != 0 {
                     self.locations
                         .calls
-                        .insert(new_expr.span.lo.0, new_expr.span);
+                        .entry(new_expr.span.lo.0)
+                        .or_insert((new_expr.span, None))
+                        .0 = new_expr.span;
                 }
                 new_expr.visit_children_with(self);
             }
@@ -518,6 +555,7 @@ impl<'s> Locations<'s> {
             }
         }
         module.visit_with(&mut Collector {
+            unresolved,
             locations: self,
             class_name: None,
         });

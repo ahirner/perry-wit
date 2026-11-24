@@ -162,6 +162,7 @@ pub(crate) fn contracts() -> Vec<Contract> {
         check_equivalence,
     ));
     let namespace = Case::Reject {
+        wit: None,
         source: "import * as timers from 'node:timers';timers.setTimeout(()=>{},1);".into(),
         diagnostic: "timer import 'timers.setTimeout' is not supported".into(),
         form_sources: vec![],
@@ -176,6 +177,7 @@ pub(crate) fn contracts() -> Vec<Contract> {
         check_equivalence,
     ));
     let unawaited_initialization = Case::Reject {
+        wit: Some("package test:initialization; world generated { include wasi:cli/imports@0.3.0; export size: func() -> f64; }".into()),
         source: "import {readFile} from 'node:fs/promises';let text='';async function load():Promise<void>{text=await readFile('a.txt','utf8');}load();export function size():number{return text.length;}".into(),
         diagnostic: "top-level statements leave asynchronous work pending".into(),
         form_sources: vec![],

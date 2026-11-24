@@ -143,6 +143,25 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(val_ty)
             }
+            Expr::PrivateGuard {
+                class_id,
+                object,
+                field_name,
+                kind: 0,
+                ..
+            } => {
+                let ty = self.eval_expr(s, object)?;
+                if ty == Ty::BOTTOM
+                    || matches!(self.types.kind(ty), TyKind::ClassInst(id)
+                    if self.hir.classes.get(self.index.classes[self.class_insts[id].class].hir_idx)
+                        .is_some_and(|class| class.id == *class_id))
+                {
+                    return Ok(ty);
+                }
+                Err(Diagnostic::unsupported(format!(
+                    "receiver of private field '{field_name}' must have its declaring class"
+                )))
+            }
             Expr::This => Ok(match s.receiver {
                 Some(Receiver::Class(c)) => self.types.class_inst(c),
                 Some(Receiver::Object(ty)) => ty,
@@ -1216,10 +1235,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         );
         if let Some(mut arg_tys) = explicit_tys {
             let bindings = self.active_instance_type_bindings(s.inst);
+            let mut specialized = false;
             for ty in &mut arg_tys {
-                *ty = self.types.substitute(self.ctx, *ty, &bindings);
+                let bound = self.types.substitute(self.ctx, *ty, &bindings);
+                let concrete = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
+                specialized |= concrete != *ty;
+                *ty = concrete;
             }
-            if !bindings.is_empty() {
+            if specialized {
                 self.record_site(
                     s.inst,
                     expr,
@@ -1326,6 +1349,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
         self.check_timer_member(stripped, byte_offset)?;
+        if matches!(property, "payload" | "val") && stripped == self.types.named(self.ctx, "Error")
+        {
+            return Err(Diagnostic::unsupported(format!(
+                "property {property} is not supported on Error yet"
+            ))
+            .with_fallback_span(
+                self.metadata
+                    .locations
+                    .member_span(byte_offset)
+                    .or_else(|| {
+                        self.metadata
+                            .locations
+                            .offset_span(s.iteration.object_pattern_offset(object)?, 1)
+                    }),
+            ));
+        }
         if let TyKind::Cell {
             loc,
             kind: CellKind::Dict,

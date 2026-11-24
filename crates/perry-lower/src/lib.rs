@@ -132,6 +132,24 @@ pub fn lower_sources(
 
 /// Elaborate a resolved frontend program into MIR.
 pub fn lower_program(ctx: &mut Context, program: &perry_frontend::Program<'_>) -> Result<ModuleOp> {
+    Ok(lower_with_exports(ctx, program)?.module)
+}
+
+pub enum ExportTarget {
+    Destructor(FuncOp, String),
+    Function(FuncOp),
+    Command(FuncOp),
+}
+
+pub struct LoweredProgram {
+    pub module: ModuleOp,
+    pub exports: Vec<ExportTarget>,
+}
+
+pub fn lower_with_exports(
+    ctx: &mut Context,
+    program: &perry_frontend::Program<'_>,
+) -> Result<LoweredProgram> {
     program::build_module(ctx, program.module(), program.foreign(), program.metadata())
 }
 

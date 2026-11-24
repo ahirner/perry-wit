@@ -26,6 +26,112 @@ struct Counts {
 }
 
 #[test]
+fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()> {
+    let wit = "package test:counter; interface counters {
+        resource counter {constructor(value:u32); get:func()->u32;}
+        drops:func()->u32;
+    } world api {export counters;}";
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("counter.ts"),
+        "export let disposed=0;
+        export function drops() {return disposed;} function read(instance) {return instance.value;}
+        export class Local { constructor(value) {this.value=value;} get() {return read(this);}
+        [Symbol.dispose]() {disposed++;} }",
+    )?;
+    let source =
+        "import { Local, drops } from './counter'; export const counters={Counter:Local,drops};";
+    let entry = directory.path().join("entry.ts");
+    let engine = Engine::default();
+    let bytes = MemoryChecked.component(wit, "api", &entry.to_string_lossy(), source)?;
+    let component = Component::new(&engine, bytes)?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let counters = component.get_export_index(None, "test:counter/counters");
+    let member = |name| {
+        component
+            .get_export_index(counters.as_ref(), name)
+            .ok_or_else(|| anyhow::anyhow!("missing {name}"))
+    };
+    let new = instance
+        .get_typed_func::<(u32,), (ResourceAny,)>(&mut store, &member("[constructor]counter")?)?;
+    let get = instance
+        .get_typed_func::<(ResourceAny,), (u32,)>(&mut store, &member("[method]counter.get")?)?;
+    let drops = instance.get_typed_func::<(), (u32,)>(&mut store, &member("drops")?)?;
+    let (a,) = new.call(&mut store, (42,))?;
+    let (b,) = new.call(&mut store, (7,))?;
+    a.resource_drop(&mut store)?;
+    assert_eq!(get.call(&mut store, (b,))?, (7,));
+    assert_eq!(drops.call(&mut store, ())?, (1,));
+    b.resource_drop(&mut store)?;
+    assert_eq!(drops.call(&mut store, ())?, (2,));
+    Ok(())
+}
+
+#[test]
+fn imported_error_cases_throw_and_release_owned_payloads() -> Result<()> {
+    use wasmtime::component::{ComponentType, Lift, Lower};
+
+    #[derive(ComponentType, Lift, Lower)]
+    #[component(variant)]
+    enum Fault {
+        #[component(name = "closed")]
+        Closed,
+        #[component(name = "last-operation-failed")]
+        Failed(Resource<Secret>),
+    }
+
+    let wit = "package demo:io; interface streams {
+        resource failure; variant fault {closed,last-operation-failed(failure)}
+        resource reader {read:static func(closed:bool)->result<u8,fault>;}
+    } world app {import streams;export run:func(closed:bool)->string;}";
+    let source = "import {Reader} from 'demo:io/streams';
+export function run(closed) {try {Reader.read(closed); return 'ok';}
+catch(e) {return e.message;}}";
+    let compile = |source: &str| MemoryChecked.component(wit, "app", "read.js", source);
+    for (read, column) in [
+        ("return e.payload.val;", 18),
+        ("const {payload: p = 'none'} = e; return String(p);", 17),
+    ] {
+        let diagnostic = compile(&source.replace("return e.message;", read))
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("payload read compiled"))?
+            .to_string();
+        assert!(
+            diagnostic.contains(&format!("read.js:3:{column}: error[unsupported-construct]"))
+                && diagnostic.contains("payload"),
+            "{diagnostic}"
+        );
+    }
+
+    let engine = Engine::default();
+    let component = Component::new(&engine, compile(source)?)?;
+    let mut linker = Linker::<u32>::new(&engine);
+    let mut io = linker.instance("demo:io/streams")?;
+    io.resource("reader", ResourceType::host::<()>(), |_, _| Ok(()))?;
+    io.resource("failure", ResourceType::host::<Secret>(), |mut store, _| {
+        *store.data_mut() += 1;
+        Ok(())
+    })?;
+    io.func_wrap("[static]reader.read", |_, (closed,): (bool,)| {
+        let fault = if closed {
+            Fault::Closed
+        } else {
+            Fault::Failed(Resource::new_own(2))
+        };
+        Ok((Err::<u8, _>(fault),))
+    })?;
+    let mut store = Store::new(&engine, 0);
+    let instance = linker.instantiate(&mut store, &component)?;
+    let run = instance.get_typed_func::<(bool,), (String,)>(&mut store, "run")?;
+    assert_eq!(run.call(&mut store, (true,))?.0, "closed");
+    assert_eq!(*store.data(), 0);
+    assert_eq!(run.call(&mut store, (false,))?.0, "last-operation-failed");
+    assert_eq!(*store.data(), 1);
+    Ok(())
+}
+
+#[test]
 fn explicit_stdout_without_console_reaches_the_host() -> Result<()> {
     struct OutputStream;
     let bytes = MemoryChecked.component(

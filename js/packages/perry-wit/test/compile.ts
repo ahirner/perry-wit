@@ -52,7 +52,7 @@ test("resolves supplied modules and WIT dependencies", async () => {
 });
 
 test("reports diagnostics as a CompileError", async () => {
-  const error = await compile({ source: { path: "src/main.ts", contents: "export function run(n) { return n; }" }, wit }).then(
+  const error = await compile({ source: { path: "src/main.ts", contents: "export function run(n) { const values: any[] = []; return n + values.length; }" }, wit }).then(
     () => assert.fail("expected a CompileError"),
     (error: unknown) => error,
   );

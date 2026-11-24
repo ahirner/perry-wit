@@ -16,6 +16,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(inst) = self.instances.get(inst_id) else {
             return Ok(());
         };
+        let is_witness = inst.is_witness;
         let (template, receiver, return_loc, has_explicit_return, param_locs_span, args_ty) = (
             inst.template,
             inst.receiver,
@@ -58,7 +59,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         .types
                         .normalize_for_storage(self.ctx, self.decls, def_ty);
                     if matches!(default_expr, Expr::Undefined) {
-                        if !view.is_exported {
+                        if !is_witness {
                             self.write_loc(ploc, Ty::VOID);
                         }
                     } else if !self.types.is_open_with(
@@ -715,6 +716,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     Some(e) => self.eval_expr(s, e)?,
                     None => Ty::VOID,
                 };
+                if matches!(value, Some(Expr::Array(elements, _)) if elements.is_empty())
+                    && let Some(list) = self.instances[s.inst].list_result
+                {
+                    ty = list;
+                }
                 if let TyKind::Cell {
                     loc,
                     kind: CellKind::Dict,
@@ -963,6 +969,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .collect();
 
         Solved {
+            witness_instances: self.witness_instances,
             init_inst,
             instances: self.instances,
             class_insts: self.class_insts,

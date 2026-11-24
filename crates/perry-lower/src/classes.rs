@@ -97,7 +97,9 @@ impl<'s> FunctionBuilder<'s> {
                 .deref(ctx)
                 .field(&field.name)
                 .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
-            order.push_unique(index as u32);
+            if !(field.is_private && field.name.starts_with('#')) {
+                order.push_unique(index as u32);
+            }
         }
         if class.extends.is_none()
             && class.fields.iter().all(|f| f.init.is_none())

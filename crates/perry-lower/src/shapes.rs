@@ -244,7 +244,18 @@ impl<'h> Shapes<'h> {
         &self,
         local: &str,
     ) -> Option<(&'h str, &'h perry_frontend::hir::types::FunctionType)> {
-        self.decls.foreign_functions.get(local).copied()
+        self.decls
+            .foreign_functions
+            .get(local)
+            .copied()
+            .or_else(|| {
+                let (binding, crate::hir::Foreign::Function(sig)) =
+                    self.decls.foreign.get_key_value(local)?
+                else {
+                    return None;
+                };
+                Some((binding, sig))
+            })
     }
 
     pub(super) fn input_type(&self, ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {

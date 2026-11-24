@@ -51,6 +51,8 @@ pub enum Case {
         exit: ExitStatus,
     },
     Reject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wit: Option<String>,
         source: String,
         diagnostic: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -84,12 +86,14 @@ impl Case {
                 )
                 .collect(),
             Self::Reject {
+                wit,
                 diagnostic,
                 form_sources,
                 ..
             } if !form_sources.is_empty() => std::iter::once(Cow::Borrowed(self))
                 .chain(form_sources.iter().map(|source| {
                     Cow::Owned(Self::Reject {
+                        wit: wit.clone(),
                         source: source.clone(),
                         diagnostic: diagnostic.clone(),
                         form_sources: vec![],

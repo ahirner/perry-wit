@@ -137,9 +137,19 @@ pub(crate) fn compile_sources(
     let mut foreign = perry_frontend::wit::WorldTypes::new(resolve, Some(world));
     let mut bindings = imports::bindings(resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let program = perry_frontend::load_sources(ctx, source, identity, modules, foreign.foreign())?;
-    let mir = perry_lower::lower_program(ctx, &program)?;
-    let mut exports = bind::exports(ctx, &mir, resolve, world)?;
+    let program = perry_frontend::load_world(
+        ctx,
+        source,
+        identity,
+        modules,
+        foreign.foreign(),
+        Some((resolve, world)),
+    )?;
+    let perry_lower::LoweredProgram {
+        module: mir,
+        exports: targets,
+    } = perry_lower::lower_with_exports(ctx, &program)?;
+    let mut exports = bind::exports(ctx, &targets, resolve, world, program.metadata())?;
     let mut analyses = optimize(ctx, &mir)?;
     bind::finalize_exports(ctx, &mir, &mut exports)?;
     emit_component(

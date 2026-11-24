@@ -31,16 +31,22 @@ pub(crate) use parser::parse;
 mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
+pub(crate) mod resource_classes;
 mod streams;
 mod timers;
+mod witnesses;
 pub use constructors::{Constructor, Constructors};
 pub(crate) use methods::Preservation;
 pub use methods::{Method, method};
 pub use streams::is_writable_to_web;
 pub use timers::is_timer_module;
 pub(crate) use timers::{TIMER_CLASS, is_timer_handle};
+pub(crate) use witnesses::{ClassRoots, Operation, Witness};
 
 pub struct Metadata<'s> {
+    pub(crate) class_roots: ClassRoots,
+    pub(crate) witnesses: Vec<Witness<perry_hir::types::FuncId>>,
+    pub(crate) resource_members: Vec<crate::wit::ResourceMember>,
     pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
     pub locations: Locations<'s>,
     pub inferred_bindings: HashSet<LocalId>,
@@ -55,25 +61,59 @@ pub struct Metadata<'s> {
     pub json_eligible_bindings: HashSet<LocalId>,
 }
 
+impl Metadata<'_> {
+    pub fn witness_annotations(
+        &self,
+        ordinal: usize,
+    ) -> Vec<Option<perry_wit_diagnostics::SourceSpan>> {
+        self.witnesses
+            .get(ordinal)
+            .and_then(|w| w.signature.as_ref())
+            .into_iter()
+            .flat_map(|s| &s.annotations)
+            .map(|s| s.and_then(|s| self.locations.span(s)))
+            .collect()
+    }
+
+    pub fn witness_functions(
+        &self,
+    ) -> impl Iterator<Item = (Option<perry_hir::types::FuncId>, Option<&str>)> + '_ {
+        self.witnesses
+            .iter()
+            .zip(&self.class_roots.calls)
+            .map(|(w, call)| {
+                let destructor = call.as_ref().is_some_and(|c| c.kind == Operation::Drop);
+                (w.target, destructor.then_some(w.name.as_str()))
+            })
+    }
+}
+
 pub(crate) struct LoweredHir<'s> {
     pub facts: crate::engine::boundary::SourceFacts,
     pub module: HirModule,
     pub metadata: Metadata<'s>,
 }
 
-pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<LoweredHir<'s>> {
+pub(crate) fn lower<'s>(
+    loaded: modules::Loaded<'s>,
+    identity: &str,
+    world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
+) -> Result<LoweredHir<'s>> {
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
-    locations.collect(&ast);
-    let mut constructors = GLOBALS.set(&Globals::new(), || {
+    let (mut constructors, witnesses) = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
+        locations.collect(&ast, unresolved);
         timers::check_imports(&ast, &locations)?;
         regex::fold(&mut ast, unresolved);
         let constructors = constructors::preserve(&mut ast, unresolved)?;
         streams::preserve_options(&mut ast, unresolved, &locations)?;
-        Ok::<_, Diagnostic>(constructors)
+        Ok::<_, Diagnostic>((
+            constructors,
+            witnesses::resolve(&ast, &loaded.exports, world, &locations, unresolved)?,
+        ))
     })?;
     let facts = crate::engine::boundary::scan_ast(&ast);
     let mut names = names::FreshNames::new(&ast);
@@ -81,7 +121,14 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
     methods::preserve_arguments(&mut ast, &mut names);
     classes::preserve_field_types(&mut ast);
     locations.preserve_expressions(&mut ast, &facts.expression_spans);
-    let mut module = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
+    if !witnesses.witnesses.is_empty() {
+        perry_hir::ir::set_current_module_source(locations.module_text());
+    }
+    let result = perry_hir::lower_module(&ast, "main", identity);
+    if !witnesses.witnesses.is_empty() {
+        perry_hir::ir::clear_current_module_source();
+    }
+    let mut module = result.map_err(|error| {
         let lower_error = error.downcast_ref::<perry_hir::error::LowerError>();
         let span = lower_error.and_then(|error| error.span);
         let detail = format!("{error:#}");
@@ -96,6 +143,14 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
             None => diagnostic,
         }
     })?;
+    for class in &mut module.classes {
+        for field in &mut class.fields {
+            if field.is_private && field.name.starts_with('#') {
+                field.name = perry_hir::private_names::private_value_key(class.id, &field.name);
+            }
+        }
+    }
+    let (witnesses, class_roots) = witnesses.in_hir(&mut module)?;
     constructors.collect_types(&mut module)?;
     let inferred_bindings = module
         .local_source_spans
@@ -112,6 +167,11 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         facts,
         module,
         metadata: Metadata {
+            class_roots,
+            witnesses,
+            resource_members: world
+                .map(|(r, w)| crate::wit::resource_members(r, w))
+                .unwrap_or_default(),
             inline_callbacks: HashSet::new(),
             locations,
             inferred_bindings,
@@ -203,7 +263,7 @@ function builtin() { return new Set<string>(); }
 "#;
         let modules = std::collections::BTreeMap::new();
         let loaded = modules::load(source, "shadow.ts", &modules, &HashMap::new()).unwrap();
-        let lowered = lower(loaded, "shadow.ts").unwrap();
+        let lowered = lower(loaded, "shadow.ts", None).unwrap();
         for function in &lowered.module.functions {
             let Stmt::Return(Some(expr)) = &function.body[0] else {
                 panic!("expected constructor return");
@@ -247,7 +307,7 @@ function builtin() { return new Set<string>(); }
         ] {
             let modules = std::collections::BTreeMap::new();
             let loaded = modules::load(source, "names.ts", &modules, &HashMap::new()).unwrap();
-            let lowered = lower(loaded, "names.ts").unwrap();
+            let lowered = lower(loaded, "names.ts", None).unwrap();
             let function = &lowered.module.functions[0];
             let user = function.body.iter().find_map(|stmt| match stmt {
                 Stmt::Let {

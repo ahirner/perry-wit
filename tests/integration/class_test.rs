@@ -2,6 +2,13 @@ use crate::core_program::Program;
 use crate::node_oracle::assert_numbers;
 
 #[test]
+fn constructor_assignment_types_private_fields() -> anyhow::Result<()> {
+    assert_numbers(
+        "class Counter { #value; constructor(n) { this.#value=n; } next() { this.#value+=1; return this.#value; } }
+         export function run() { const counter=new Counter(41); return counter.next()+Object.keys(counter).length; }", &[("run", &[], 42.0)])
+}
+
+#[test]
 fn class_calls_preserve_evaluation_order_and_finite_nesting() -> anyhow::Result<()> {
     assert_numbers(
         r#"

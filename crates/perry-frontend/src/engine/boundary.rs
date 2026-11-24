@@ -39,7 +39,6 @@ pub(crate) struct TemplateView<'h> {
     pub(crate) is_generator: bool,
     pub(crate) is_strict: bool,
     pub(crate) construct_only: bool,
-    pub(crate) is_exported: bool,
     pub(crate) captures_this: bool,
     pub(crate) captures_new_target: bool,
     pub(crate) uses_this: bool,
@@ -77,7 +76,6 @@ impl<'h> TemplateView<'h> {
             is_generator: f.is_generator,
             is_strict: f.is_strict,
             construct_only: f.construct_only,
-            is_exported: f.is_exported,
             captures_this: false,
             captures_new_target: false,
             uses_this: stmts_use_this(&f.body),
@@ -142,8 +140,8 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) local_captured: BitSet,
     pub(crate) local_written_from_closure: BitSet,
     pub(crate) local_forward_captured: BitSet,
-    pub(crate) exported_obj_methods: BitSet,
     pub(crate) capture_free_templates: BitSet,
+    pub(crate) returns_empty_list: BitSet,
     pub(crate) closure_in_loop: BitSet,
     pub(crate) closure_owner_template: Vec<Option<TemplateId>>,
     template_captures: Vec<Vec<LocalId>>,
@@ -191,7 +189,6 @@ impl<'h> ModuleIndex<'h> {
             is_generator: false,
             is_strict: true,
             construct_only: false,
-            is_exported: false,
             captures_this: false,
             captures_new_target: false,
             uses_this: false,
@@ -457,49 +454,7 @@ impl<'h> ModuleIndex<'h> {
             }
         }
         idx.template_captures = template_captures;
-        for stmt in &hir.init {
-            if let Stmt::Let {
-                id,
-                init: Some(init_expr),
-                ..
-            } = stmt
-                && hir
-                    .local_source_spans
-                    .get(id)
-                    .is_some_and(|s| facts.is_exported_var(s.start))
-            {
-                idx.mark_exported_obj_methods(init_expr);
-            }
-        }
         idx
-    }
-
-    fn mark_exported_obj_methods(&mut self, expr: &Expr) {
-        match expr {
-            Expr::FuncRef(fid) | Expr::Closure { func_id: fid, .. } => {
-                if let Some(tid) = self.template_of_func(*fid) {
-                    self.exported_obj_methods.insert(tid.index());
-                }
-            }
-            Expr::Call { callee, args, .. } => {
-                if let Expr::Closure { body, .. } = callee.as_ref() {
-                    self.mark_exported_obj_methods_stmts(body);
-                }
-                for arg in args {
-                    self.mark_exported_obj_methods(arg);
-                }
-            }
-            _ => walk_expr_children(expr, &mut |child| self.mark_exported_obj_methods(child)),
-        }
-    }
-
-    fn mark_exported_obj_methods_stmts(&mut self, stmts: &[Stmt]) {
-        for stmt in stmts {
-            stmt_any_expr(stmt, &mut |e| {
-                self.mark_exported_obj_methods(e);
-                false
-            });
-        }
     }
 
     pub(crate) fn local_frame_slot(&self, local: LocalIdx) -> Option<usize> {
@@ -615,7 +570,6 @@ impl<'h> ModuleIndex<'h> {
             is_generator: false,
             is_strict: true,
             construct_only: false,
-            is_exported: false,
             captures_this: false,
             captures_new_target: false,
             uses_this: false,
@@ -757,6 +711,9 @@ impl<'h> ModuleIndex<'h> {
                     scan.defined_locals.insert(*id as usize);
                 }
                 Stmt::Return(Some(val)) => {
+                    if matches!(val, Expr::Array(items, _) if items.is_empty()) {
+                        self.returns_empty_list.insert(owner.index());
+                    }
                     Self::record_site_expr(scan, owner, val);
                     self.scan_expr(scan, val, owner, in_loop);
                 }
@@ -972,7 +929,6 @@ impl<'h> ModuleIndex<'h> {
                     is_generator: *is_generator,
                     is_strict: *is_strict,
                     construct_only: *construct_only,
-                    is_exported: false,
                     captures_this: *captures_this,
                     captures_new_target: *captures_new_target,
                     uses_this: stmts_use_this(body),

@@ -57,8 +57,19 @@ pub fn load_sources<'s>(
     sources: &'s BTreeMap<String, String>,
     foreign: &'s HashMap<String, hir::Foreign>,
 ) -> Result<Program<'s>> {
+    load_world(ctx, source, identity, sources, foreign, None)
+}
+
+pub fn load_world<'s>(
+    ctx: &mut Context,
+    source: &'s str,
+    identity: &str,
+    sources: &'s BTreeMap<String, String>,
+    foreign: &'s HashMap<String, hir::Foreign>,
+    world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
+) -> Result<Program<'s>> {
     let loaded = modules::load(source, identity, sources, foreign)?;
-    let mut lowered = hir_compat::lower(loaded, identity)?;
+    let mut lowered = hir_compat::lower(loaded, identity, world)?;
     engine::run_engine(
         ctx,
         &mut lowered.module,
