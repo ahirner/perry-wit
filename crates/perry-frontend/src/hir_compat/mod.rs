@@ -65,7 +65,13 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
-    let facts = crate::engine::boundary::scan_ast(&ast, &locations)?;
+    let facts = crate::engine::boundary::scan_ast(&ast)?;
+    locations
+        .callable_comparisons
+        .extend(facts.callable_comparisons.iter().copied());
+    locations
+        .callable_comparisons
+        .extend(facts.conditional_spans.iter().copied());
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);

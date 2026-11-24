@@ -114,6 +114,16 @@ impl<'s> Locations<'s> {
                         self.0.push(binary.span);
                         (binary.span, token)
                     }
+                    ast::Expr::Cond(cond) if self.1.contains(&cond.span) => {
+                        let token = format!("{OPERATOR}{}", self.0.len());
+                        self.0.push(cond.span);
+                        (cond.span, token)
+                    }
+                    ast::Expr::Assign(assign) if self.1.contains(&assign.span) => {
+                        let token = format!("{OPERATOR}{}", self.0.len());
+                        self.0.push(assign.span);
+                        (assign.span, token)
+                    }
                     ast::Expr::TsNonNull(assertion) => (assertion.span, NON_NULL.into()),
                     _ => return,
                 };
@@ -135,12 +145,17 @@ impl<'s> Locations<'s> {
         ));
     }
 
-    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
+    pub(crate) fn operator_raw_span(&self, parts: &[Expr]) -> Option<Span> {
         let [Expr::String(token), _] = parts else {
             return None;
         };
         let index: usize = token.strip_prefix(OPERATOR)?.parse().ok()?;
-        self.operators.get(index).and_then(|span| self.span(*span))
+        self.operators.get(index).copied()
+    }
+
+    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
+        self.operator_raw_span(parts)
+            .and_then(|span| self.span(span))
     }
 
     pub(crate) fn add(&mut self, path: PathBuf, source: &'s str) -> Result<u32> {
@@ -292,6 +307,12 @@ impl<'s> Locations<'s> {
         self.functions
             .get(self.template_name(name))
             .and_then(|info| self.span(info.span))
+            .or_else(|| match self.origins.get(name)?.site {
+                CallSite::Instantiation { ref note, .. } => {
+                    note.as_ref().and_then(Note::span).cloned()
+                }
+                CallSite::Import(ref note) => note.span().cloned(),
+            })
     }
 
     pub fn source_at(&self, position: u32) -> Option<&'s str> {

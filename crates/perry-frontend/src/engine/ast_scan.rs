@@ -3,7 +3,7 @@ use crate::hir_compat::{self, Locations};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 use std::collections::HashMap;
-use swc_common::{Span, Spanned};
+use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Default)]
@@ -11,10 +11,12 @@ pub(crate) struct SourceFacts {
     pub(crate) sparse_arrays: bool,
     pub(crate) inferred_spans: Vec<(u32, u32)>,
     pub(crate) deferred_starts: Vec<u32>,
+    pub(crate) for_head_let_starts: Vec<u32>,
     pub(crate) param_annotated_starts: Vec<u32>,
+    pub(crate) exported_var_starts: Vec<u32>,
     pub(crate) callable_comparisons: Vec<Span>,
+    pub(crate) conditional_spans: Vec<Span>,
     pub(crate) param_value_uses: Vec<(u32, Span)>,
-    pub(crate) escaping_closure: Option<(String, Span)>,
 }
 
 impl SourceFacts {
@@ -24,8 +26,14 @@ impl SourceFacts {
     pub(crate) fn is_deferred(&self, start: u32) -> bool {
         self.deferred_starts.binary_search(&start).is_ok()
     }
+    pub(crate) fn is_for_head_let(&self, start: u32) -> bool {
+        self.for_head_let_starts.binary_search(&start).is_ok()
+    }
     pub(crate) fn is_param_annotated(&self, start: u32) -> bool {
         self.param_annotated_starts.binary_search(&start).is_ok()
+    }
+    pub(crate) fn is_exported_var(&self, start: u32) -> bool {
+        self.exported_var_starts.binary_search(&start).is_ok()
     }
     pub(crate) fn param_value_use(&self, start: u32) -> Option<Span> {
         let idx = self
@@ -96,13 +104,14 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
     Ok(())
 }
 
-pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<SourceFacts> {
+pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
     #[derive(Default)]
     struct AstScanner {
         facts: SourceFacts,
         parameters: HashMap<ast::Id, u32>,
         closures: HashMap<ast::Id, Span>,
-        enclosing: Option<swc_atoms::Atom>,
+        top_vars: HashMap<ast::Id, u32>,
+        enclosing_depth: u32,
     }
 
     impl AstScanner {
@@ -131,6 +140,29 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
     }
 
     impl Visit for AstScanner {
+        fn visit_export_decl(&mut self, export: &ast::ExportDecl) {
+            if let ast::Decl::Var(var) = &export.decl {
+                for decl in &var.decls {
+                    hir_compat::pattern_bindings(&decl.name, false, &mut |id, _| {
+                        self.facts.exported_var_starts.push(id.span.lo.0);
+                    });
+                }
+            }
+            export.visit_children_with(self);
+        }
+        fn visit_named_export(&mut self, export: &ast::NamedExport) {
+            if export.src.is_none() {
+                for spec in &export.specifiers {
+                    if let ast::ExportSpecifier::Named(named) = spec
+                        && let ast::ModuleExportName::Ident(ident) = &named.orig
+                        && let Some(&start) = self.top_vars.get(&ident.to_id())
+                    {
+                        self.facts.exported_var_starts.push(start);
+                    }
+                }
+            }
+            export.visit_children_with(self);
+        }
         fn visit_array_lit(&mut self, array: &ast::ArrayLit) {
             self.facts.sparse_arrays |= array.elems.iter().any(Option::is_none);
             array.visit_children_with(self);
@@ -143,15 +175,29 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             for pat in &arrow.params {
                 self.record_param(pat);
             }
+            self.enclosing_depth += 1;
             arrow.visit_children_with(self);
+            self.enclosing_depth -= 1;
         }
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
-            if self.enclosing.is_some() {
+            if self.enclosing_depth > 0 {
                 self.closures.insert(decl.ident.to_id(), decl.ident.span);
             }
-            let prev = self.enclosing.replace(decl.ident.sym.clone());
+            self.enclosing_depth += 1;
             decl.function.visit_with(self);
-            self.enclosing = prev;
+            self.enclosing_depth -= 1;
+        }
+        fn visit_for_stmt(&mut self, stmt: &ast::ForStmt) {
+            if let Some(ast::VarDeclOrExpr::VarDecl(var)) = &stmt.init
+                && var.kind == ast::VarDeclKind::Let
+            {
+                for decl in &var.decls {
+                    hir_compat::pattern_bindings(&decl.name, false, &mut |id, _| {
+                        self.facts.for_head_let_starts.push(id.span.lo.0);
+                    });
+                }
+            }
+            stmt.visit_children_with(self);
         }
         fn visit_for_head(&mut self, head: &ast::ForHead) {
             if let ast::ForHead::VarDecl(var) = head {
@@ -171,6 +217,9 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                     self.facts.deferred_starts.push(b.id.span.lo.0);
                 }
                 hir_compat::pattern_bindings(&decl.name, false, &mut |id, annotated| {
+                    if self.enclosing_depth == 0 {
+                        self.top_vars.insert(id.to_id(), id.span.lo.0);
+                    }
                     if !annotated {
                         self.facts.inferred_spans.push((id.span.lo.0, id.span.hi.0));
                     }
@@ -203,20 +252,25 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
             {
                 self.facts.param_value_uses.push((origin, id.span));
             }
-            if self.is_closure_expr(expr) {
-                self.facts.escaping_closure.get_or_insert_with(|| {
-                    let name = match expr {
-                        ast::Expr::Ident(id) => format!("function '{}'", id.sym),
-                        _ => self.enclosing.as_ref().map_or_else(
-                            || "anonymous function".into(),
-                            |n| format!("closure in '{}'", hir_compat::display_name(n)),
-                        ),
-                    };
-                    (name, expr.span())
-                });
-            } else {
-                expr.visit_children_with(self);
+            expr.visit_children_with(self);
+        }
+        fn visit_cond_expr(&mut self, cond: &ast::CondExpr) {
+            self.facts.conditional_spans.push(cond.span);
+            cond.visit_children_with(self);
+        }
+        fn visit_assign_expr(&mut self, assign: &ast::AssignExpr) {
+            if matches!(
+                &assign.left,
+                ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(_))
+            ) && (self.is_closure_expr(&assign.right)
+                || matches!(
+                    &*assign.right,
+                    ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
+                ))
+            {
+                self.facts.conditional_spans.push(assign.span);
             }
+            assign.visit_children_with(self);
         }
         fn visit_bin_expr(&mut self, expr: &ast::BinExpr) {
             if matches!(
@@ -226,7 +280,20 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
                     | ast::BinaryOp::EqEq
                     | ast::BinaryOp::NotEq
             ) {
-                if self.is_closure_expr(&expr.left) || self.is_closure_expr(&expr.right) {
+                let is_undef =
+                    |e: &ast::Expr| matches!(e, ast::Expr::Ident(id) if id.sym == "undefined");
+                if !is_undef(&expr.left)
+                    && !is_undef(&expr.right)
+                    && (self.is_closure_expr(&expr.left)
+                        || self.is_closure_expr(&expr.right)
+                        || matches!(
+                            (&*expr.left, &*expr.right),
+                            (
+                                ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_),
+                                ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
+                            )
+                        ))
+                {
                     self.facts.callable_comparisons.push(expr.span);
                 }
                 self.visit_callable_position(&expr.left);
@@ -248,20 +315,16 @@ pub(crate) fn scan_ast(module: &ast::Module, locations: &Locations<'_>) -> Resul
 
     let mut scanner = AstScanner::default();
     module.visit_with(&mut scanner);
-    if let Some((name, span)) = scanner.facts.escaping_closure {
-        return Err(locations.annotate(
-            unsupported!(
-                "{name} escapes its static call site. Storing, returning or joining function values requires a runtime function representation"
-            ),
-            span,
-        ));
-    }
     scanner.facts.inferred_spans.sort_unstable();
     scanner.facts.inferred_spans.dedup();
     scanner.facts.deferred_starts.sort_unstable();
     scanner.facts.deferred_starts.dedup();
+    scanner.facts.for_head_let_starts.sort_unstable();
+    scanner.facts.for_head_let_starts.dedup();
     scanner.facts.param_annotated_starts.sort_unstable();
     scanner.facts.param_annotated_starts.dedup();
+    scanner.facts.exported_var_starts.sort_unstable();
+    scanner.facts.exported_var_starts.dedup();
     scanner
         .facts
         .param_value_uses

@@ -788,21 +788,111 @@ impl TypeTable {
         }
     }
 
-    pub(crate) fn materialize_hir_with(
+    pub(crate) fn is_zero_sized_func(&self, ty: Ty, capture_free: &BitSet) -> bool {
+        matches!(
+            self.kind(ty),
+            TyKind::Func(id) if id.capture_owner.is_none() && capture_free.contains(id.template.index())
+        )
+    }
+
+    pub(crate) fn is_env_func(&self, ty: Ty, escaping_env: &BitSet) -> bool {
+        matches!(
+            self.kind(ty),
+            TyKind::Func(id) if escaping_env.contains(id.template.index())
+        )
+    }
+
+    pub(crate) fn is_tagged_func_union(
+        &self,
+        ty: Ty,
+        capture_free: &BitSet,
+        escaping_env: &BitSet,
+    ) -> bool {
+        let TyKind::Union(span) = self.kind(ty) else {
+            return false;
+        };
+        let members = self.ty_slice(span);
+        let mut func_count = 0usize;
+        for &m in members {
+            if matches!(m, Ty::NULL | Ty::VOID) {
+                continue;
+            }
+            if self.is_zero_sized_func(m, capture_free) || self.is_env_func(m, escaping_env) {
+                func_count += 1;
+            } else {
+                return false;
+            }
+        }
+        func_count >= 1
+    }
+
+    pub(crate) fn func_union_members(&self, ty: Ty) -> Option<Vec<FuncIdentity>> {
+        let TyKind::Union(span) = self.kind(ty) else {
+            return None;
+        };
+        let members = self.ty_slice(span);
+        let mut out = Vec::with_capacity(members.len());
+        for &m in members {
+            if matches!(m, Ty::NULL | Ty::VOID) {
+                continue;
+            }
+            match self.kind(m) {
+                TyKind::Func(id) => out.push(id),
+                _ => return None,
+            }
+        }
+        (out.len() >= 2).then_some(out)
+    }
+
+    pub(crate) fn func_members(&self, ty: Ty) -> Vec<FuncIdentity> {
+        match self.kind(ty) {
+            TyKind::Func(id) => vec![id],
+            TyKind::Union(span) => self
+                .ty_slice(span)
+                .iter()
+                .filter_map(|&m| match self.kind(m) {
+                    TyKind::Func(id) => Some(id),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn has_func(&self, ty: Ty) -> bool {
+        match self.kind(ty) {
+            TyKind::Func(_) => true,
+            TyKind::Union(span) => self
+                .ty_slice(span)
+                .iter()
+                .any(|&m| matches!(self.kind(m), TyKind::Func(_))),
+            _ => false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn materialize_hir_with<Err>(
         &self,
         ctx: &Context,
         ty: Ty,
         locations: &[Ty],
         dict_reads: &super::bitset::BitSet,
+        capture_free: &super::bitset::BitSet,
+        escaping_env: &super::bitset::BitSet,
         class_name: &impl Fn(ClassInstId) -> Option<String>,
-    ) -> HirType {
+        env_fields: &impl Fn(FuncIdentity) -> std::result::Result<Vec<(String, Ty, bool)>, Err>,
+    ) -> std::result::Result<HirType, Err> {
         Materializer {
             table: self,
             ctx,
             locations,
             dict_reads,
+            capture_free,
+            escaping_env,
             class_name,
+            env_fields,
             visiting: Vec::new(),
+            visiting_funcs: Vec::new(),
         }
         .run(ty)
     }
@@ -813,7 +903,19 @@ impl TypeTable {
         ty: Ty,
         class_name: &impl Fn(ClassInstId) -> Option<String>,
     ) -> HirType {
-        self.materialize_hir_with(ctx, ty, &[], &super::bitset::BitSet::default(), class_name)
+        let empty = super::bitset::BitSet::default();
+        match self.materialize_hir_with::<std::convert::Infallible>(
+            ctx,
+            ty,
+            &[],
+            &empty,
+            &empty,
+            &empty,
+            class_name,
+            &|_| Ok(Vec::new()),
+        ) {
+            Ok(h) => h,
+        }
     }
 
     pub(crate) fn is_valid_dict_value(&self, elem: Ty, dict_read: bool) -> bool {
@@ -973,7 +1075,12 @@ impl TypeTable {
             }
             TyKind::Union(s) => {
                 let ms = self.ty_slice(s);
+                let all_funcs = ms
+                    .iter()
+                    .filter(|&&m| m != Ty::NULL && m != Ty::VOID)
+                    .all(|&m| matches!(self.kind(m), TyKind::Func(_)));
                 (nested
+                    && !all_funcs
                     && ms
                         .iter()
                         .filter(|&&m| m != Ty::NULL && m != Ty::VOID)
@@ -1071,16 +1178,25 @@ impl TypeTable {
     }
 }
 
-struct Materializer<'a, F> {
+struct Materializer<'a, F, E> {
     table: &'a TypeTable,
     ctx: &'a Context,
     locations: &'a [Ty],
     dict_reads: &'a super::bitset::BitSet,
+    capture_free: &'a super::bitset::BitSet,
+    escaping_env: &'a super::bitset::BitSet,
     class_name: &'a F,
+    env_fields: &'a E,
     visiting: Vec<LocId>,
+    visiting_funcs: Vec<FuncIdentity>,
 }
 
-impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
+impl<
+    Err,
+    F: Fn(ClassInstId) -> Option<String>,
+    E: Fn(FuncIdentity) -> std::result::Result<Vec<(String, Ty, bool)>, Err>,
+> Materializer<'_, F, E>
+{
     fn empty_object(index_signature: Option<Box<HirType>>) -> HirType {
         HirType::Object(ObjectType {
             name: None,
@@ -1089,14 +1205,73 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
             index_signature,
         })
     }
-    fn run_cell(&mut self, loc: LocId, ty: Ty) -> HirType {
+    fn run_cell(&mut self, loc: LocId, ty: Ty) -> std::result::Result<HirType, Err> {
         self.visiting.push(loc);
         let hir = self.run(ty);
         self.visiting.pop();
         hir
     }
-    fn run(&mut self, ty: Ty) -> HirType {
-        match self.table.kind(ty) {
+    fn run_slot(&mut self, ty: Ty) -> std::result::Result<HirType, Err> {
+        if self.table.is_zero_sized_func(ty, self.capture_free) {
+            Ok(HirType::Number)
+        } else {
+            self.run(ty)
+        }
+    }
+    fn func_env_hir(&mut self, ident: FuncIdentity) -> std::result::Result<HirType, Err> {
+        if self.visiting_funcs.contains(&ident) {
+            return Ok(func_tag_hir(ident));
+        }
+        self.visiting_funcs.push(ident);
+        let fields = (self.env_fields)(ident)?;
+        let mut env_props = HashMap::with_capacity(fields.len());
+        let mut env_order = Vec::with_capacity(fields.len());
+        for (name, fty, is_boxed) in fields {
+            let inner = self.run(fty)?;
+            let ty = if is_boxed { box_hir(inner) } else { inner };
+            env_order.push(name.clone());
+            env_props.insert(
+                name,
+                PropertyInfo {
+                    ty,
+                    optional: false,
+                    readonly: false,
+                },
+            );
+        }
+        self.visiting_funcs.pop();
+        let env_obj = HirType::Object(ObjectType {
+            name: None,
+            properties: env_props,
+            property_order: (!env_order.is_empty()).then_some(env_order),
+            index_signature: None,
+        });
+        let mut properties = HashMap::with_capacity(2);
+        properties.insert(
+            "tag".to_owned(),
+            PropertyInfo {
+                ty: HirType::StringLiteral(func_tag(ident)),
+                optional: false,
+                readonly: false,
+            },
+        );
+        properties.insert(
+            "val".to_owned(),
+            PropertyInfo {
+                ty: env_obj,
+                optional: false,
+                readonly: false,
+            },
+        );
+        Ok(HirType::Object(ObjectType {
+            name: None,
+            properties,
+            property_order: Some(vec!["tag".to_owned(), "val".to_owned()]),
+            index_signature: None,
+        }))
+    }
+    fn run(&mut self, ty: Ty) -> std::result::Result<HirType, Err> {
+        Ok(match self.table.kind(ty) {
             TyKind::Bottom | TyKind::Open => HirType::Any,
             TyKind::Dynamic => HirType::Unknown,
             TyKind::Never => HirType::Never,
@@ -1109,24 +1284,33 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
             TyKind::String => HirType::String,
             TyKind::Symbol => HirType::Symbol,
             TyKind::Leaf(id) | TyKind::TypeVar(id) => id.hir(self.ctx).clone(),
-            TyKind::Array(i) => HirType::Array(Box::new(self.run(i))),
-            TyKind::Promise(i) => HirType::Promise(Box::new(self.run(i))),
+            TyKind::Array(i) => HirType::Array(Box::new(self.run_slot(i)?)),
+            TyKind::Promise(i) => HirType::Promise(Box::new(self.run(i)?)),
             TyKind::Cell { loc, kind } => {
                 if self.visiting.contains(&loc) {
-                    return if kind.is_array() {
+                    return Ok(if kind.is_array() {
                         HirType::Array(Box::new(HirType::Any))
                     } else {
                         Self::empty_object(None)
-                    };
+                    });
                 }
                 let elem = self.locations.get(loc.index()).copied().unwrap_or(Ty::OPEN);
                 if kind.is_array() {
-                    HirType::Array(Box::new(self.run_cell(loc, elem)))
+                    let inner = if self.table.is_zero_sized_func(elem, self.capture_free) {
+                        HirType::Number
+                    } else {
+                        self.run_cell(loc, elem)?
+                    };
+                    HirType::Array(Box::new(inner))
                 } else {
-                    let idx = self
+                    let idx = if self
                         .table
                         .is_valid_dict_value(elem, self.dict_reads.contains(loc.index()))
-                        .then(|| Box::new(self.run_cell(loc, elem)));
+                    {
+                        Some(Box::new(self.run_cell(loc, elem)?))
+                    } else {
+                        None
+                    };
                     Self::empty_object(idx)
                 }
             }
@@ -1134,13 +1318,25 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                 self.table
                     .ty_slice(s)
                     .iter()
-                    .map(|&t| self.run(t))
-                    .collect(),
+                    .map(|&t| self.run_slot(t))
+                    .collect::<std::result::Result<Vec<_>, Err>>()?,
             ),
             TyKind::Union(s) => {
+                let slice = self.table.ty_slice(s);
+                let has_func = slice
+                    .iter()
+                    .any(|&m| matches!(self.table.kind(m), TyKind::Func(_)));
                 let mut members = Vec::with_capacity(s.len as usize);
-                for &t in self.table.ty_slice(s) {
-                    let h = self.run(t);
+                for &t in slice {
+                    let h = if has_func && let TyKind::Func(ident) = self.table.kind(t) {
+                        if self.escaping_env.contains(ident.template.index()) {
+                            self.func_env_hir(ident)?
+                        } else {
+                            func_tag_hir(ident)
+                        }
+                    } else {
+                        self.run(t)?
+                    };
                     if !members.contains(&h) {
                         members.push(h);
                     }
@@ -1161,37 +1357,90 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                     .ty_slice(args)
                     .iter()
                     .map(|&t| self.run(t))
-                    .collect(),
+                    .collect::<std::result::Result<Vec<_>, Err>>()?,
             },
             TyKind::Object { props, index } => {
                 let mut properties = HashMap::with_capacity(props.len as usize);
                 let mut order = Vec::with_capacity(props.len as usize);
                 for prop in self.table.object_slice(props) {
+                    if self.table.is_zero_sized_func(prop.ty, self.capture_free) {
+                        continue;
+                    }
                     let name = self.table.name_str(prop.name).to_owned();
                     order.push(name.clone());
                     properties.insert(
                         name,
                         PropertyInfo {
-                            ty: self.run(prop.ty),
+                            ty: self.run(prop.ty)?,
                             optional: prop.optional,
                             readonly: prop.readonly,
                         },
                     );
                 }
+                let idx = match index {
+                    Some(t) => Some(Box::new(self.run(t)?)),
+                    None => None,
+                };
                 HirType::Object(ObjectType {
                     name: None,
                     properties,
                     property_order: (!order.is_empty()).then_some(order),
-                    index_signature: index.map(|t| Box::new(self.run(t))),
+                    index_signature: idx,
                 })
             }
             TyKind::ClassInst(inst) => HirType::Named((self.class_name)(inst).unwrap_or_default()),
+            TyKind::Func(ident) if self.escaping_env.contains(ident.template.index()) => {
+                self.func_env_hir(ident)?
+            }
             TyKind::Func(_) => HirType::Function(perry_hir::types::FunctionType {
                 params: Vec::new(),
                 return_type: Box::new(HirType::Void),
                 is_async: false,
                 is_generator: false,
             }),
-        }
+        })
     }
+}
+
+pub(crate) fn func_tag(ident: FuncIdentity) -> String {
+    match ident.capture_owner {
+        Some(owner) => format!("fn_{}_{}", ident.template.index(), owner.index()),
+        None => format!("fn_{}", ident.template.index()),
+    }
+}
+
+pub(crate) fn box_hir(inner: HirType) -> HirType {
+    let mut properties = HashMap::with_capacity(1);
+    properties.insert(
+        "v".to_owned(),
+        PropertyInfo {
+            ty: inner,
+            optional: false,
+            readonly: false,
+        },
+    );
+    HirType::Object(ObjectType {
+        name: None,
+        properties,
+        property_order: Some(vec!["v".to_owned()]),
+        index_signature: None,
+    })
+}
+
+fn func_tag_hir(ident: FuncIdentity) -> HirType {
+    let mut properties = HashMap::with_capacity(1);
+    properties.insert(
+        "tag".to_owned(),
+        PropertyInfo {
+            ty: HirType::StringLiteral(func_tag(ident)),
+            optional: false,
+            readonly: false,
+        },
+    );
+    HirType::Object(ObjectType {
+        name: None,
+        properties,
+        property_order: Some(vec!["tag".to_owned()]),
+        index_signature: None,
+    })
 }

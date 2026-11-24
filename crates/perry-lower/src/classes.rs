@@ -148,12 +148,17 @@ impl<'s> FunctionBuilder<'s> {
             .to_vec();
         let mut init_operands = Vec::with_capacity(field_defs.len());
         for (field, field_ty) in &field_defs {
+            let field_init = class
+                .fields
+                .iter()
+                .find(|f| f.name == *field)
+                .and_then(|f| f.init.as_ref());
             let val = if admits_undefined(ctx, *field_ty) {
                 self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *field_ty))
             } else if absence(ctx, *field_ty).is_some_and(|a| a.admits_null()) {
                 self.emit_value(ctx, |ctx| NullOp::new(ctx, *field_ty))
             } else {
-                self.unassigned_field(ctx, class_name, field, *field_ty)?
+                self.unassigned_field(ctx, class_name, field, *field_ty, field_init)?
             };
             init_operands.push(val);
         }
@@ -197,13 +202,14 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// Initial placeholder value for a non-optional field before its constructor assignment.
-    /// Requires a reference-free zero or empty value for `ty`.
+    /// Requires a reference-free zero or empty value for `ty`, or a tagged-union placeholder.
     fn unassigned_field(
         &mut self,
         ctx: &mut Context,
         class_name: &str,
         field: &str,
         ty: TypeHandle,
+        init: Option<&'s Expr>,
     ) -> Result<Value> {
         if ty.deref(ctx).is::<FP64Type>() {
             Ok(self.number(ctx, 0.0))
@@ -213,6 +219,24 @@ impl<'s> FunctionBuilder<'s> {
             Ok(self.boolean(ctx, false))
         } else if let Some(zero) = self.zero_value_for_type(ctx, ty) {
             Ok(zero)
+        } else if let Ok(variant) = TypedHandle::<perry_mir::VariantType>::from_handle(ty, ctx) {
+            let payload_free = variant
+                .deref(ctx)
+                .cases()
+                .iter()
+                .find_map(|(tag, payload)| payload.is_none().then(|| tag.clone()));
+            if let Some(tag) = payload_free {
+                return Ok(
+                    self.emit_value(ctx, |ctx| perry_mir::VariantNewOp::new(ctx, ty, &tag, None))
+                );
+            }
+            if let Some(init_expr) = init {
+                let val = self.expression_with(ctx, init_expr, Some(ty))?;
+                return self.fit(ctx, val, ty);
+            }
+            bail_unsupported!(
+                "class {class_name} field {field} has no placeholder before its constructor assignment"
+            )
         } else {
             bail_unsupported!(
                 "class {class_name} field {field} has no placeholder before its constructor assignment"

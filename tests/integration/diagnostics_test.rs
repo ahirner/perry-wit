@@ -56,7 +56,7 @@ fn unannotated_parameters_need_evidence_from_statically_known_calls() -> anyhow:
     for source in [
         "export function id(x) { return x; } export function run(): number { return id(1); }",
         "function id(x) { return x; } export function run():number { return [1].map(n => id(n, n))[0]; }",
-        "function id(x) { return x; } export function run():number { const other = {id}; return id(1); }",
+        "function id(x) { return x; } export const other = {id}; export function run():number { return id(1); }",
         "function id(x) { return x; } export function run():number { return id(1,2) + id(1); }",
     ] {
         let error = perry_wit::compile_core(source, "closed.ts")
@@ -92,40 +92,66 @@ fn named_generic_functions_specialize_through_aliases_and_builtin_callbacks() ->
 
 #[test]
 fn function_arguments_check_declared_results_and_locate_escaping_values() -> anyhow::Result<()> {
-    for (body, at, name) in [
-        ("return () => n;", "() => n", "run"),
-        ("const keep=()=>n; return [keep].length;", "keep]", "keep"),
+    for (source, at, needle) in [
         (
-            "const keep=()=>n; return keep === keep;",
-            "keep === keep",
-            "keep",
+            "function make() { return () => 1; } export function run(): boolean { const a = make(); const b = make(); const r = a === b; const x = 1; const y = 2; return r && x === y; }",
+            "a === b",
+            "capture-free closure literal",
         ),
         (
-            "const a=()=>n, b=()=>n+1; const f=n?a:b; return f();",
-            "a:b",
-            "a",
+            "export function run(): boolean { const xs = []; for (let i = 0; i < 2; i++) xs.push(() => 1); return xs[0] === xs[1]; }",
+            "xs[0] === xs[1]",
+            "capture-free closure literal",
+        ),
+        (
+            "export function run(n: number) { return n ? (() => 1) : 42; }",
+            "n ? (() => 1) : 42",
+            "joining function values with non-function values",
+        ),
+        (
+            "export function run(): number { const o = { f: () => 1 }; o.f = () => 2; return o.f(); }",
+            "o.f = () => 2",
+            "reassigning function property 'f' on an object literal",
+        ),
+        (
+            "export function run(): number { new Promise((resolve) => resolve(1)); return 1; }",
+            "new Promise",
+            "requires the runtime to call a guest function",
         ),
     ] {
-        let source = format!("export function run(n:number) {{ {body} }}");
-        let err = perry_wit::compile_core(&source, "escape.ts").unwrap_err();
+        let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();
         let diagnostic = err.primary();
         assert_eq!(diagnostic.code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
-        assert!(diagnostic.message().contains(name), "{err}");
+        assert!(
+            diagnostic.message().contains(needle),
+            "expected '{needle}' in: {err}"
+        );
         assert_eq!(
-            diagnostic.span().context("escape use")?.start_byte,
+            diagnostic.span().context("diagnostic span")?.start_byte,
             source.rfind(at).unwrap(),
             "{err}"
         );
     }
-    let source = "function stash(f) {const alias=f; return [alias];} export function run(n:number) {return stash(()=>n).length;}";
-    let err = perry_wit::compile_core(source, "escape.ts").unwrap_err();
-    assert_eq!(err.primary().code(), codes::UNSUPPORTED_CONSTRUCT, "{err}");
+    let non_callable = "export function run(): number { const x = 1; return x(); }";
+    let err = perry_wit::compile_core(non_callable, "call.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::TYPE_MISMATCH, "{err}");
     assert_eq!(
         err.primary()
             .span()
-            .context("escaping callback parameter")?
+            .context("non-callable span")?
             .start_byte,
-        source.find("alias]").unwrap(),
+        non_callable.rfind("x()").unwrap(),
+        "{err}"
+    );
+    let async_mixed = "export function run(): number { const fs = [async () => 1, () => 2]; let n = 0; for (const f of fs) { f(); n++; } return n; }";
+    let err = perry_wit::compile_core(async_mixed, "dispatch.ts").unwrap_err();
+    assert_eq!(err.primary().code(), codes::UNSUPPORTED_TYPE, "{err}");
+    assert_eq!(
+        err.primary()
+            .span()
+            .context("dispatcher union span")?
+            .start_byte,
+        async_mixed.rfind("f()").unwrap(),
         "{err}"
     );
     let source = "function use(f:(n:number)=>number):number {return 1;} export function run():number {return use(2);}";
@@ -719,7 +745,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("export function run(x: number): number { return x ** (2 ** x); }".into(), "case.ts:1:55: error[unsupported-operator]: operator Pow is not supported yet".into()),
         ("function* count(): Generator<number> { yield 1; } export function run(x: number): number { return x; }".into(), "case.ts:1:1: error[unsupported-construct]: generator function count is not supported yet".into()),
         ("export function run(x: number): number { const d: WeakMap<object, number> = null as any; return x; }".into(), "case.ts:1:48: error[unsupported-type]: unresolved generic type WeakMap is not supported yet".into()),
-        ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), "case.ts:2:10: error[unsupported-construct]: indirect calls through local or parameter bindings are not supported yet; call a declared module function directly".into()),
+        ("export function run(cb: number): number {\n  return (cb as any)(1);\n}".into(), "case.ts:2:10: error[type-mismatch]: expression is not callable".into()),
         ("export function run(s: string): number {\n  return (s as any).byteLength;\n}".into(), "case.ts:2:10: error[unsupported-construct]: property byteLength is not supported on string yet".into()),
         ("export function run(a: bigint, b: bigint): bigint {\n  return a ** b;\n}".into(), "case.ts:2:10: error[unsupported-operator]: operator Pow on bigint and bigint is not supported yet".into()),
         ("export function f(): string { return Temporal.ZonedDateTime.from('2024-01-01T00:00:00[UTC]').toString(); }".into(), "case.ts:1:38: error[unsupported-construct]: Temporal.ZonedDateTime.from is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now".into()),
@@ -1013,15 +1039,15 @@ fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> any
 
 #[test]
 fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> anyhow::Result<()> {
-    // Object-literal method diagnostics report the source method name, never internal synthetic names.
+    // Exported object-literal method diagnostics report the source method name, never internal synthetic names.
     for (source, file, expected_name) in [
         (
-            "const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
+            "export const obj = { greet(name) { return 'hi ' + name; } };\nexport function run(): string { return obj.greet('a'); }\n",
             "obj_method.js",
             "'greet'",
         ),
         (
-            "const counter = { n: 0, bump(by) { this.n += by; } };\nexport function run(): number { counter.bump(1); return counter.n; }\n",
+            "export const counter = { n: 0, bump(by) { this.n += by; } };\nexport function run(): number { counter.bump(1); return counter.n; }\n",
             "obj_closure_method.js",
             "'bump'",
         ),
@@ -1030,7 +1056,7 @@ fn inference_engine_diagnostics_strip_internal_names_and_bound_recursion() -> an
             .err()
             .context("expected missing annotation diagnostic for object method")?;
         assert_eq!(obj_method.primary().code(), codes::MISSING_TYPE_ANNOTATION);
-        let msg = obj_method.primary().message();
+        let msg = obj_method.to_string();
         assert!(msg.contains(expected_name), "{obj_method}");
         assert!(!msg.contains("__obj_method_"), "{obj_method}");
         assert!(!msg.contains("callback_"), "{obj_method}");

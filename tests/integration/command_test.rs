@@ -586,12 +586,270 @@ console.log(beforeSize, lf.size(), lf.first().toUpperCase(), readCap(), typeof a
 "#,
             "0 1 A 2 number 2 number 2 number object [1] {\"b\":1,\"a\":\"x\"}\n",
         ),
+        (
+            "annotated_fields_keep_declared_types",
+            r#"
+class Mode { mode: "a" | "b" = "a"; constructor(m: "a" | "b") { this.mode = m; } }
+class Late { n = null; set(v) { this.n = v; } }
+const late = new Late();
+late.set(3);
+console.log(new Mode("b").mode, late.n);
+"#,
+            "b 3\n",
+        ),
         ("deep_call_chain_300", chain.as_str(), "301\n"),
+        (
+            "function_identities_in_storage_and_object_methods",
+            r#"
+function apply(f, x) { return f(x); }
+const twice = (n) => n * 2;
+const holder = { f: twice };
+const counter = { n: 0, bump(by) { this.n += by; return this.n; } };
+const greeter = { greet(name) { return "hi " + name; } };
+function getFn() { return twice; }
+function selfRef() { return selfRef; }
+class FnBox { constructor() { this.op = twice; } run(x) { return this.op(x); } }
+const fs = [(x) => x + 1];
+counter.bump(2);
+console.log(
+  apply(twice, 4),
+  apply(holder.f, 5),
+  holder.f(6),
+  counter.bump(3),
+  greeter.greet("a"),
+  getFn()(7),
+  selfRef()()() === selfRef,
+  new FnBox().run(8),
+  fs[0](1),
+);
+"#,
+            "8 10 12 5 hi a 14 true 16 2\n",
+        ),
+        (
+            "tagged_function_unions_dispatch_and_callbacks",
+            r#"
+const events = [];
+const handlers = [() => events.push("a"), () => events.push("b")];
+handlers.forEach((h) => h());
+const inc = (x) => x + 1;
+const dbl = (x) => x * 2;
+const pick = (flag) => (flag ? inc : dbl);
+function applyAll(f, xs) { return xs.map(f); }
+const f0 = pick(true);
+const f1 = pick(false);
+let chosen = inc;
+chosen = dbl;
+const dynamicHandlers = [];
+let added = false;
+function addMore() {
+  if (!added) {
+    added = true;
+    dynamicHandlers.push(() => events.push("c"));
+  }
+}
+dynamicHandlers.push(addMore);
+for (let i = 0; i < dynamicHandlers.length; i++) {
+  dynamicHandlers[i]();
+}
+class FnHolder {
+  constructor(f) { this.f = f; }
+  run(x) { return this.f(x); }
+}
+const h1 = new FnHolder(f0);
+const h2 = new FnHolder(f1);
+console.log(
+  events.join(","),
+  f0(3),
+  f1(3),
+  chosen(4),
+  applyAll(f0, [1, 2]).join(","),
+  applyAll(f1, [3]).join(","),
+  h1.run(5),
+  h2.run(5),
+);
+"#,
+            "a,b,c 4 6 8 2,3 6 6 10\n",
+        ),
+        (
+            "escaping_closures_environments_boxed_captures_and_equality",
+            r#"
+function scale(k) {
+  return (x) => x * k;
+}
+function counter() {
+  let n = 0;
+  return () => ++n;
+}
+function pair() {
+  let n = 0;
+  return [() => ++n, () => n];
+}
+function boxedParam(n) {
+  return () => ++n;
+}
+function stash(f) {
+  const alias = f;
+  return [alias];
+}
+const base = (x) => x + 10;
+function pickFn(flag, k) {
+  return flag ? scale(k) : base;
+}
+function selfRet(k) {
+  let count = k;
+  const f = () => {
+    count++;
+    return f;
+  };
+  return { f, get: () => count };
+}
+function nestedInline(start) {
+  let acc = start;
+  return (xs) => xs.map((x) => {
+    acc += x;
+    return acc;
+  });
+}
+
+const s3 = scale(3);
+const s3b = scale(3);
+const c1 = counter();
+const c2 = counter();
+const p = pair();
+const bp = boxedParam(10);
+const stashed = stash(() => 7);
+const u1 = pickFn(true, 4);
+const u2 = pickFn(false, 4);
+const sr = selfRet(0);
+const sf = sr.f;
+const sget = sr.get;
+const sfAfter = sf()();
+const ni = nestedInline(5);
+
+console.log(
+  s3(2),
+  c1(),
+  c1(),
+  c2(),
+  p[0](),
+  p[1](),
+  p[0](),
+  p[1](),
+  bp(),
+  bp(),
+  stashed[0](),
+  [1, 2].map(s3).join(","),
+  [1, 2].map(scale(5)).join(","),
+  [1, 2].map(u1).join(","),
+  [1, 2].map(u2).join(","),
+  s3 === s3,
+  s3 === s3b,
+  s3 !== s3b,
+  u1 === u1,
+  u1 === u2,
+  u2 === u2,
+  sfAfter === sf,
+  sget(),
+  ni([1, 2, 3]).join(","),
+);
+"#,
+            "6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
+        ),
+        (
+            "erased_function_values_preserve_evaluation_order",
+            r#"
+let trace = "";
+function id(n) { return n; }
+function other(n) { return -n; }
+function get(label) { trace += label; return id; }
+function num(label) { trace += label; return 2; }
+function apply(a, f, b) { return f(a + b); }
+function last(n, f) { return f(n); }
+function only(f) { trace += "n"; return f(1); }
+const same = get("a") === get("b");
+const distinct = get("c") !== other;
+const obj = { first: num("d"), middle: get("e"), last: num("f"), end: get("g") };
+const result = apply(num("h"), get("i"), num("j"));
+const tail = last(num("k"), get("l"));
+only(get("m"));
+let reads = 0;
+function make(n) { return { x:n, f:function(a) { return this.x + a + n; } }; }
+const receiver = make(2);
+function getReceiver() { reads++; return receiver; }
+getReceiver().f(0);
+console.log(getReceiver().f(1), reads);
+console.log(trace, same, distinct, obj.first, obj.end(1), result, tail);
+"#,
+            "5 2\nabcdefghijklmn true true 2 1 4 2\n",
+        ),
+        (
+            "loop_let_boxes_nullable_functions_typeof_and_wide_objects",
+            r#"
+function makeLoopFns() {
+  const fs = [];
+  for (let i = 0; i < 3; i++) {
+    fs.push(() => i);
+    i += 0;
+  }
+  return fs;
+}
+const modLoopFns = [];
+for (let i = 0; i < 3; i++) modLoopFns.push(() => i);
+
+function maybeFn(b) { return b ? () => 1 : null; }
+function runOpt(cb) { if (cb) return cb(2); return 0; }
+const mf1 = maybeFn(true);
+const mf2 = maybeFn(false);
+let ifRes = -1;
+if (mf1) ifRes = mf1();
+let unguardedErr = "none";
+try { mf2(); } catch (e) { unguardedErr = "TypeError"; }
+
+const f0 = () => 1;
+const arr0 = [f0];
+const wide = {
+  p0: 0, p1: 1, p2: 2, p3: 3, p4: 4, p5: 5, p6: 6, p7: 7, p8: 8, p9: 9,
+  p10: 10, p11: 11, p12: 12, p13: 13, p14: 14, p15: 15, p16: 16, p17: 17, p18: 18, p19: 19,
+  p20: 20, p21: 21, p22: 22, p23: 23, p24: 24, p25: 25, p26: 26, p27: 27, p28: 28, p29: 29,
+  p30: 30, p31: 31, p32: 32, p33: 33, p34: 34, p35: 35, p36: 36, p37: 37, p38: 38, p39: 39,
+  p40: 40, p41: 41, p42: 42, p43: 43, p44: 44, p45: 45, p46: 46, p47: 47, p48: 48, p49: 49,
+  p50: 50, p51: 51, p52: 52, p53: 53, p54: 54, p55: 55, p56: 56, p57: 57, p58: 58, p59: 59,
+  p60: 60, p61: 61, p62: 62, p63: 63, p64: 64, p65: 65, p66: 66, p67: 67, p68: 68, p69: 69,
+  m: f0,
+};
+console.log(
+  makeLoopFns().map((f) => f()).join(","),
+  modLoopFns.map((f) => f()).join(","),
+  mf1 ? mf1() : -1,
+  mf2 ? mf2() : -1,
+  ifRes,
+  runOpt((x) => x * 3),
+  runOpt(undefined),
+  unguardedErr,
+  typeof f0,
+  typeof arr0[0],
+  typeof wide.m,
+  typeof mf1,
+  typeof mf2,
+  wide.p69,
+  wide.m(),
+);
+"#,
+            "0,1,2 0,1,2 1 -1 1 6 0 TypeError function function function function object 69 1\n",
+        ),
     ];
     for &(name, source, expected) in cases {
         let run = execute(source).await?;
         assert!(run.ok, "case {name} failed: {}", run.stderr);
         assert_eq!(run.stdout, expected, "case {name} output mismatch");
     }
+    let parameters = (0..64)
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let arguments = (0..64).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let run = execute(&format!("function f({parameters}, cb) {{ return cb(a63); }} console.log(f({arguments}, n => n + 1));")).await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "64\n");
     Ok(())
 }

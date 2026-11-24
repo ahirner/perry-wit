@@ -1,13 +1,19 @@
 //! Final monomorphic HIR emission phase.
+mod expressions;
+mod funcs;
 use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
-use super::solve::{ClassInst, Instance, SiteResolution, Solved};
+use super::solve::{ClassInst, FuncCoercion, Instance, Receiver, SiteResolution, Solved};
 use super::types::{
-    CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TypeTable,
+    CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind, TypeTable, box_hir,
+    func_tag,
 };
 use crate::hir_compat::{Locations, Metadata};
 use perry_hir::{
-    ir::{CallArg, CatchClause, Class, Expr, Function, Module as HirModule, Stmt, SwitchCase},
+    ir::{
+        BinaryOp, CallArg, CatchClause, Class, CompareOp, Expr, Function, Module as HirModule,
+        Stmt, SwitchCase, UnaryOp, UpdateOp,
+    },
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
@@ -64,6 +70,12 @@ pub(crate) fn build(
     types: &TypeTable,
     solved: &Solved,
 ) -> Result<Emitted> {
+    let max_inst_fid = solved
+        .instances
+        .iter()
+        .map(|i| i.emitted_func_id)
+        .max()
+        .unwrap_or(0);
     let mut e = Emitter {
         ctx,
         hir,
@@ -72,13 +84,32 @@ pub(crate) fn build(
         types,
         solved,
         next_local: index.max_local_id.saturating_add(1),
+        next_func_id: index.max_func_id.max(max_inst_fid).saturating_add(1),
+        next_class_id: hir
+            .classes
+            .iter()
+            .map(|c| c.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
         remapped_locals: Vec::new(),
         instantiations: Vec::new(),
         inline_callbacks: Vec::new(),
         class_origins: Vec::new(),
         json_eligible_bindings: Vec::new(),
+        synth_shapes: HashMap::new(),
+        synth_classes: Vec::new(),
+        synth_functions: Vec::new(),
+        dispatchers: HashMap::new(),
+        wideners: HashMap::new(),
+        casters: HashMap::new(),
+        comparers: HashMap::new(),
+        typeof_fns: HashMap::new(),
+        throw_type_error_fn: None,
     };
-    let (init, functions, classes) = e.build_all()?;
+    let (init, mut functions, mut classes) = e.build_all()?;
+    functions.extend(e.synth_functions);
+    classes.extend(e.synth_classes);
     Ok(Emitted {
         init,
         functions,
@@ -92,6 +123,9 @@ pub(crate) fn build(
     })
 }
 
+type DispatcherKey = (Ty, Vec<(FuncIdentity, InstanceId)>, Ty, Option<Ty>);
+type EnvField = (LocalId, String, Ty, bool);
+
 struct Emitter<'h, 'a> {
     ctx: &'a Context,
     hir: &'h HirModule,
@@ -100,16 +134,35 @@ struct Emitter<'h, 'a> {
     types: &'a TypeTable,
     solved: &'a Solved,
     next_local: LocalId,
+    next_func_id: FuncId,
+    next_class_id: u32,
     remapped_locals: Vec<(LocalId, LocalId)>,
     instantiations: Vec<(String, String, u32, Option<String>)>,
     inline_callbacks: Vec<FuncId>,
     class_origins: Vec<(String, String)>,
     json_eligible_bindings: Vec<LocalId>,
+    synth_shapes: HashMap<Vec<String>, String>,
+    synth_classes: Vec<Class>,
+    synth_functions: Vec<Function>,
+    dispatchers: HashMap<DispatcherKey, FuncId>,
+    wideners: HashMap<(Ty, Ty), FuncId>,
+    casters: HashMap<Ty, FuncId>,
+    comparers: HashMap<(Ty, Ty), FuncId>,
+    typeof_fns: HashMap<Ty, FuncId>,
+    throw_type_error_fn: Option<FuncId>,
 }
 
 struct RewriteCtx<'a> {
     inst_id: InstanceId,
     func_params: &'a [(LocalId, FuncId)],
+    self_local: Option<LocalId>,
+    env_local: Option<LocalId>,
+    env_captures: &'a [(LocalId, String, bool)],
+    self_capture_locals: &'a [LocalId],
+    self_env_tag: Option<&'a str>,
+    boxed_param_map: &'a [(LocalId, LocalId)],
+    void_return: bool,
+    has_expected: bool,
     remap: Option<&'a mut HashMap<LocalId, LocalId>>,
 }
 impl RewriteCtx<'_> {
@@ -117,6 +170,29 @@ impl RewriteCtx<'_> {
         Self {
             inst_id,
             func_params: &[],
+            self_local: None,
+            env_local: None,
+            env_captures: &[],
+            self_capture_locals: &[],
+            self_env_tag: None,
+            boxed_param_map: &[],
+            void_return: false,
+            has_expected: false,
+            remap: None,
+        }
+    }
+    fn with_expected(&self, has_expected: bool) -> RewriteCtx<'_> {
+        RewriteCtx {
+            inst_id: self.inst_id,
+            func_params: self.func_params,
+            self_local: self.self_local,
+            env_local: self.env_local,
+            env_captures: self.env_captures,
+            self_capture_locals: self.self_capture_locals,
+            self_env_tag: self.self_env_tag,
+            boxed_param_map: self.boxed_param_map,
+            void_return: self.void_return,
+            has_expected,
             remap: None,
         }
     }
@@ -131,15 +207,6 @@ impl<'h> Emitter<'h, '_> {
     }
     fn class_inst_name(&self, id: ClassInstId) -> Option<String> {
         Some(self.solved.class_insts[id].emitted_name.clone())
-    }
-    fn materialize(&self, ty: Ty) -> HirType {
-        self.types.materialize_hir_with(
-            self.ctx,
-            ty,
-            self.solved.locations.as_slice(),
-            &self.solved.dict_reads,
-            &|cid| self.class_inst_name(cid),
-        )
     }
     fn is_resolved(&self, ty: Ty) -> bool {
         !self.types.is_open_with(
@@ -244,7 +311,11 @@ impl<'h> Emitter<'h, '_> {
             if !matches!(view.kind, TemplateKind::Function | TemplateKind::Closure) {
                 continue;
             }
-            let keep_original = view.is_exported || view.is_obj_method();
+            let keep_original = view.is_exported
+                || self
+                    .index
+                    .exported_obj_methods
+                    .contains(inst.template.index());
             let remap_locals = !keep_original && !seen_templates.insert(inst.template.index());
             let inherited = inst
                 .capture_owner
@@ -257,7 +328,9 @@ impl<'h> Emitter<'h, '_> {
             {
                 *slot = Some(remap);
             }
-            if inst.is_inline_callback || inst.captures_non_global {
+            if !self.is_env_template(inst.template)
+                && (inst.is_inline_callback || inst.captures_non_global)
+            {
                 self.inline_callbacks.push(func.id);
             }
             new_functions.push(func);
@@ -345,7 +418,7 @@ impl<'h> Emitter<'h, '_> {
                 if let Some(&ty) = static_tys.and_then(|tys| tys.get(f_idx))
                     && self.is_resolved(ty)
                 {
-                    f.ty = self.materialize(ty);
+                    f.ty = self.materialize(ty)?;
                 }
                 f.init = self.rewrite_opt_expr(&init_ctx, field.init.as_ref())?;
                 Ok(f)
@@ -366,22 +439,47 @@ impl<'h> Emitter<'h, '_> {
             .field_locs
             .get(cinst.field_locs.range())
             .unwrap_or(&[]);
-        cls.fields = orig.fields.iter().enumerate().map(|(f_idx, field)| {
+        let mut fields = Vec::with_capacity(orig.fields.len());
+        for (f_idx, field) in orig.fields.iter().enumerate() {
             let resolved = field_locs
                 .get(f_idx)
                 .map_or(Ty::OPEN, |&loc| self.solved.locations[loc]);
+            if self.is_zero_sized_func(resolved) {
+                continue;
+            }
             let mut f = field.clone();
-            if self.is_resolved(resolved) { f.ty = self.materialize(resolved); }
-            else if matches!(self.types.kind(resolved), TyKind::Cell { kind: CellKind::Array, .. }) {
-                return Err(diag!(codes::MISSING_TYPE_ANNOTATION, "an empty array literal needs a declared element type")
-                    .with_help(format!("Add a concrete element type annotation to field '{}'.", field.name)));
-            } else if resolved == Ty::BOTTOM && matches!(field.ty, HirType::Any | HirType::Unknown) {
-                return Err(diag!(codes::MISSING_TYPE_ANNOTATION, "the value type cannot be inferred in field '{}'", field.name)
-                    .with_help("Add a concrete type annotation to this binding, parameter, or function return."));
+            if self.is_resolved(resolved) {
+                f.ty = self.materialize(resolved)?;
+            } else if matches!(
+                self.types.kind(resolved),
+                TyKind::Cell {
+                    kind: CellKind::Array,
+                    ..
+                }
+            ) {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "an empty array literal needs a declared element type"
+                )
+                .with_help(format!(
+                    "Add a concrete element type annotation to field '{}'.",
+                    field.name
+                )));
+            } else if resolved == Ty::BOTTOM && matches!(field.ty, HirType::Any | HirType::Unknown)
+            {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "the value type cannot be inferred in field '{}'",
+                    field.name
+                )
+                .with_help(
+                    "Add a concrete type annotation to this binding, parameter, or function return.",
+                ));
             }
             f.init = self.rewrite_opt_expr(&init_ctx, field.init.as_ref())?;
-            Ok(f)
-        }).collect::<Result<Vec<_>>>()?;
+            fields.push(f);
+        }
+        cls.fields = fields;
         cls.constructor = match cinst.ctor_inst {
             Some(ctor_id)
                 if let Some(inst) = self.solved.instances.get(ctor_id)
@@ -450,9 +548,72 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<(Function, HashMap<LocalId, LocalId>)> {
         let mut remap = inherited.unwrap_or_default();
         let has_inherited = !remap.is_empty();
-        let mut params = Vec::with_capacity(view.params.len());
+        let mut params = Vec::with_capacity(view.params.len() + 2);
         let mut static_func_params: Vec<(LocalId, FuncId)> = Vec::new();
+        let is_env_fn = self.is_env_template(inst.template);
+        let self_ident = FuncIdentity {
+            template: inst.template,
+            capture_owner: inst.capture_owner,
+        };
+        let self_env_tag_owned = is_env_fn.then(|| func_tag(self_ident));
+        let (env_local, env_captures, self_capture_locals) = if is_env_fn {
+            let (fields, self_caps) = self.env_layout(self_ident)?;
+            let env_pid = self.fresh_synthetic_local()?;
+            let mut env_props = HashMap::with_capacity(fields.len().max(1));
+            let mut env_order = Vec::with_capacity(fields.len().max(1));
+            let mut cap_entries = Vec::with_capacity(fields.len());
+            if fields.is_empty() {
+                env_order.push("_u".to_owned());
+                env_props.insert(
+                    "_u".to_owned(),
+                    perry_hir::types::PropertyInfo {
+                        ty: HirType::Number,
+                        optional: false,
+                        readonly: false,
+                    },
+                );
+            } else {
+                for (cap_id, fname, fty, boxed) in fields {
+                    let inner = self.materialize(fty)?;
+                    let ty = if boxed { box_hir(inner) } else { inner };
+                    env_order.push(fname.clone());
+                    env_props.insert(
+                        fname.clone(),
+                        perry_hir::types::PropertyInfo {
+                            ty,
+                            optional: false,
+                            readonly: false,
+                        },
+                    );
+                    cap_entries.push((cap_id, fname, boxed));
+                }
+            }
+            let env_ty = HirType::Object(perry_hir::types::ObjectType {
+                name: None,
+                properties: env_props,
+                property_order: Some(env_order),
+                index_signature: None,
+            });
+            params.push(Self::synth_param(env_pid, "__env".to_owned(), env_ty));
+            (Some(env_pid), cap_entries, self_caps)
+        } else {
+            (None, Vec::new(), Vec::new())
+        };
+        let self_local = match inst.receiver {
+            Some(Receiver::Object(obj_ty)) => {
+                let sid = self.fresh_synthetic_local()?;
+                params.push(Self::synth_param(
+                    sid,
+                    "__self".to_owned(),
+                    self.materialize(obj_ty)?,
+                ));
+                Some(sid)
+            }
+            _ => None,
+        };
 
+        let mut boxed_param_map: Vec<(LocalId, LocalId)> = Vec::new();
+        let mut boxed_param_inits: Vec<Stmt> = Vec::new();
         for (p_idx, param) in view.params.iter().enumerate() {
             let param_loc = *self
                 .solved
@@ -467,7 +628,9 @@ impl<'h> Emitter<'h, '_> {
                 .locations
                 .get(param_loc)
                 .ok_or_else(|| Diagnostic::internal("parameter location out of range"))?;
-            if let TyKind::Func(ident) = self.types.kind(param_ty) {
+            if let TyKind::Func(ident) = self.types.kind(param_ty)
+                && !self.is_env_template(ident.template)
+            {
                 if let Some(fid) = self.find_func_identity_instance(ident) {
                     static_func_params.push((param.id, fid));
                 }
@@ -475,10 +638,13 @@ impl<'h> Emitter<'h, '_> {
             }
             let mut new_param = param.clone();
             if self.is_resolved(param_ty) {
-                new_param.ty = self.materialize(param_ty);
+                new_param.ty = self.materialize(param_ty)?;
             } else if !self.index.is_param_annotated(param.id)
                 && !view.is_exported
-                && !view.is_obj_method()
+                && !self
+                    .index
+                    .exported_obj_methods
+                    .contains(inst.template.index())
                 && matches!(param.ty, HirType::Any | HirType::Unknown)
             {
                 let err = diag!(codes::MISSING_TYPE_ANNOTATION, "cannot infer the type of parameter '{}' of '{}'", param.name, view.display_name())
@@ -492,15 +658,38 @@ impl<'h> Emitter<'h, '_> {
             let param_ctx = RewriteCtx {
                 inst_id,
                 func_params: &static_func_params,
+                self_local,
+                env_local,
+                env_captures: &env_captures,
+                self_capture_locals: &self_capture_locals,
+                self_env_tag: self_env_tag_owned.as_deref(),
+                boxed_param_map: &boxed_param_map,
+                void_return: false,
+                has_expected: false,
                 remap: None,
             };
             new_param.default = self.rewrite_opt_expr(&param_ctx, param.default.as_ref())?;
+            if self.is_boxed_local(param.id) {
+                let box_id = self.fresh_synthetic_local()?;
+                boxed_param_map.push((param.id, box_id));
+                let init_expr = self.emit_box_record(Expr::LocalGet(new_param.id));
+                boxed_param_inits.push(Stmt::Let {
+                    id: box_id,
+                    name: format!("__box_{}", param.name),
+                    ty: box_hir(new_param.ty.clone()),
+                    mutable: false,
+                    init: Some(init_expr),
+                });
+            }
             params.push(new_param);
         }
 
         let ret_ty = self.solved.locations[inst.return_loc];
-        let return_type = if self.is_resolved(ret_ty) {
-            self.materialize(ret_ty)
+        let void_return = self.is_zero_sized_func(ret_ty);
+        let return_type = if void_return {
+            HirType::Void
+        } else if self.is_resolved(ret_ty) {
+            self.materialize(ret_ty)?
         } else if self
             .solved
             .self_nested_locs
@@ -523,6 +712,14 @@ impl<'h> Emitter<'h, '_> {
         let mut rctx = RewriteCtx {
             inst_id,
             func_params: &static_func_params,
+            self_local,
+            env_local,
+            env_captures: &env_captures,
+            self_capture_locals: &self_capture_locals,
+            self_env_tag: self_env_tag_owned.as_deref(),
+            boxed_param_map: &boxed_param_map,
+            void_return,
+            has_expected: false,
             remap: remap_locals.then_some(&mut remap),
         };
         let mut body = self.rewrite_stmts(&mut rctx, view.body)?;
@@ -534,20 +731,30 @@ impl<'h> Emitter<'h, '_> {
             }
             perry_hir::analysis::remap_local_ids_in_stmts(&mut body, &remap);
         }
-
-        let mut captures = view.captures.to_vec();
-        if let Some(extra) = self.solved.inst_captures.get(inst_id.index()) {
-            captures.extend(extra.iter().copied());
+        if !boxed_param_inits.is_empty() {
+            boxed_param_inits.extend(body);
+            body = boxed_param_inits;
         }
-        if !remap.is_empty() {
-            for cap in &mut captures {
-                if let Some(&m) = remap.get(cap) {
-                    *cap = m;
+
+        let mut captures = if is_env_fn {
+            Vec::new()
+        } else {
+            let mut caps = view.captures.to_vec();
+            if let Some(extra) = self.solved.inst_captures.get(inst_id.index()) {
+                caps.extend(extra.iter().copied());
+            }
+            if !remap.is_empty() {
+                for cap in &mut caps {
+                    if let Some(&m) = remap.get(cap) {
+                        *cap = m;
+                    }
                 }
             }
-        }
-        captures.sort_unstable();
-        captures.dedup();
+            caps.sort_unstable();
+            caps.dedup();
+            caps
+        };
+        captures.retain(|c| !self.is_boxed_local(*c) || !is_env_fn);
 
         if !view.is_exported && inst.caller.is_some() {
             let caller_name = inst
@@ -598,6 +805,14 @@ impl<'h> Emitter<'h, '_> {
             .or_else(|| self.index.view(ident.template).map(|v| v.func_id))
     }
 
+    fn rewrite_condition(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
+        let rewritten = self.rewrite_expr(rctx, expr)?;
+        Ok(match rewritten {
+            Expr::FuncRef(_) => Expr::Bool(true),
+            other => other,
+        })
+    }
+
     fn rewrite_opt_expr(
         &mut self,
         rctx: &RewriteCtx<'_>,
@@ -606,7 +821,69 @@ impl<'h> Emitter<'h, '_> {
         expr.map(|e| self.rewrite_expr(rctx, e)).transpose()
     }
     fn rewrite_stmts(&mut self, rctx: &mut RewriteCtx<'_>, stmts: &'h [Stmt]) -> Result<Vec<Stmt>> {
-        stmts.iter().map(|s| self.rewrite_stmt(rctx, s)).collect()
+        let mut out = Vec::with_capacity(stmts.len());
+        let mut pending_for_boxes: Vec<LocalId> = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Let { id, .. }
+                    if self.index.is_for_head_local(*id) && self.is_boxed_local(*id) =>
+                {
+                    let rewritten = self.rewrite_stmt(rctx, stmt)?;
+                    if let Stmt::Let { id: out_id, .. } = &rewritten {
+                        pending_for_boxes.push(*out_id);
+                    }
+                    out.push(rewritten);
+                }
+                Stmt::For {
+                    init,
+                    condition,
+                    update,
+                    body,
+                } => {
+                    let mut box_ids = std::mem::take(&mut pending_for_boxes);
+                    let rewritten_init = init
+                        .as_deref()
+                        .map(|s| {
+                            let r = self.rewrite_stmt(rctx, s)?;
+                            if let (Stmt::Let { id: orig_id, .. }, Stmt::Let { id: out_id, .. }) =
+                                (s, &r)
+                                && self.index.is_for_head_local(*orig_id)
+                                && self.is_boxed_local(*orig_id)
+                            {
+                                box_ids.push(*out_id);
+                            }
+                            Ok::<_, Diagnostic>(Box::new(r))
+                        })
+                        .transpose()?;
+                    let rewritten_cond = self.rewrite_opt_expr(rctx, condition.as_ref())?;
+                    let mut rewritten_update = self.rewrite_opt_expr(rctx, update.as_ref())?;
+                    let rewritten_body = self.rewrite_stmts(rctx, body)?;
+                    if !box_ids.is_empty() {
+                        let mut seq = Vec::with_capacity(box_ids.len() + 1);
+                        for box_id in box_ids {
+                            let fresh =
+                                self.emit_box_record(Self::prop_get(Expr::LocalGet(box_id), "v"));
+                            seq.push(Expr::LocalSet(box_id, Box::new(fresh)));
+                        }
+                        if let Some(u) = rewritten_update {
+                            seq.push(u);
+                        }
+                        rewritten_update = Some(Expr::Sequence(seq));
+                    }
+                    out.push(Stmt::For {
+                        init: rewritten_init,
+                        condition: rewritten_cond,
+                        update: rewritten_update,
+                        body: rewritten_body,
+                    });
+                }
+                _ => {
+                    pending_for_boxes.clear();
+                    out.push(self.rewrite_stmt(rctx, stmt)?);
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn rewrite_stmt(&mut self, rctx: &mut RewriteCtx<'_>, stmt: &'h Stmt) -> Result<Stmt> {
@@ -634,7 +911,13 @@ impl<'h> Emitter<'h, '_> {
                     .is_some_and(|li| self.index.local_deferred.contains(li.index()));
                 if let Some(t) = resolved
                     && let TyKind::Func(ident) = self.types.kind(t)
+                    && !self.is_env_template(ident.template)
                 {
+                    if let Some(init_expr) = init
+                        && !is_pure_func_expr(init_expr)
+                    {
+                        return Ok(Stmt::Expr(self.rewrite_expr(rctx, init_expr)?));
+                    }
                     let fid = self.find_func_identity_instance(ident).ok_or_else(|| {
                         Diagnostic::internal(format!(
                             "unresolved function identity for binding '{name}'"
@@ -667,7 +950,7 @@ impl<'h> Emitter<'h, '_> {
                         {
                             self.json_eligible_bindings.push(out_id);
                         }
-                        self.materialize(t)
+                        self.materialize(t)?
                     }
                     Some(t)
                         if is_inferred
@@ -705,23 +988,54 @@ impl<'h> Emitter<'h, '_> {
                     }
                     _ => ty.clone(),
                 };
+                let init_has_expected = !matches!(new_ty, HirType::Any | HirType::Unknown);
+                let init_ctx = rctx.with_expected(init_has_expected);
+                let rewritten_init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
+                if self.is_boxed_local(*id) {
+                    let init_val = match rewritten_init {
+                        Some(v) => v,
+                        None => self.default_box_init(&new_ty, *id, rctx.inst_id)?,
+                    };
+                    return Ok(Stmt::Let {
+                        id: out_id,
+                        name: name.clone(),
+                        ty: box_hir(new_ty),
+                        mutable: self.index.is_for_head_local(*id),
+                        init: Some(self.emit_box_record(init_val)),
+                    });
+                }
                 Ok(Stmt::Let {
                     id: out_id,
                     name: name.clone(),
                     ty: new_ty,
                     mutable: *mutable,
-                    init: self.rewrite_opt_expr(rctx, init.as_ref())?,
+                    init: rewritten_init,
                 })
             }
             Stmt::Expr(e) => Ok(Stmt::Expr(self.rewrite_expr(rctx, e)?)),
             Stmt::Throw(e) => Ok(Stmt::Throw(self.rewrite_expr(rctx, e)?)),
-            Stmt::Return(v) => Ok(Stmt::Return(self.rewrite_opt_expr(rctx, v.as_ref())?)),
+            Stmt::Return(v) if rctx.void_return => {
+                if let Some(e) = v
+                    && !is_pure_func_expr(e)
+                {
+                    let eff = self.rewrite_expr(rctx, e)?;
+                    return Ok(Stmt::Return(Some(Expr::Sequence(vec![
+                        eff,
+                        Expr::Undefined,
+                    ]))));
+                }
+                Ok(Stmt::Return(None))
+            }
+            Stmt::Return(v) => {
+                let ret_ctx = rctx.with_expected(true);
+                Ok(Stmt::Return(self.rewrite_opt_expr(&ret_ctx, v.as_ref())?))
+            }
             Stmt::If {
                 condition,
                 then_branch,
                 else_branch,
             } => Ok(Stmt::If {
-                condition: self.rewrite_expr(rctx, condition)?,
+                condition: self.rewrite_condition(rctx, condition)?,
                 then_branch: self.rewrite_stmts(rctx, then_branch)?,
                 else_branch: else_branch
                     .as_deref()
@@ -729,11 +1043,11 @@ impl<'h> Emitter<'h, '_> {
                     .transpose()?,
             }),
             Stmt::While { condition, body } => Ok(Stmt::While {
-                condition: self.rewrite_expr(rctx, condition)?,
+                condition: self.rewrite_condition(rctx, condition)?,
                 body: self.rewrite_stmts(rctx, body)?,
             }),
             Stmt::DoWhile { condition, body } => Ok(Stmt::DoWhile {
-                condition: self.rewrite_expr(rctx, condition)?,
+                condition: self.rewrite_condition(rctx, condition)?,
                 body: self.rewrite_stmts(rctx, body)?,
             }),
             Stmt::For {
@@ -801,211 +1115,41 @@ impl<'h> Emitter<'h, '_> {
         }
     }
 
-    fn rewrite_expr(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
-        if let Some(site) = self.site_of(rctx.inst_id, expr).cloned() {
-            match site {
-                SiteResolution::Cell(_) => {}
-                SiteResolution::FoldBool(b) => return Ok(Expr::Bool(b)),
-                SiteResolution::CollectionNew { is_map, type_args } => {
-                    return Ok(Expr::New {
-                        class_name: if is_map { "\0perry_Map" } else { "\0perry_Set" }.into(),
-                        type_args: type_args.into_iter().map(|t| self.materialize(t)).collect(),
-                        args: Vec::new(),
-                        byte_offset: 0,
-                        byte_end: 0,
-                        cap_args_appended: 0,
-                    });
-                }
-                SiteResolution::Callback {
-                    target,
-                    keep_inline_closure,
-                } => {
-                    let ti = self.instance(target, "missing callback target instance")?;
-                    if !keep_inline_closure {
-                        return Ok(Expr::FuncRef(ti.emitted_func_id));
-                    }
-                    if let Expr::Closure { body, .. } = expr {
-                        let mut out = expr.clone();
-                        if let Expr::Closure {
-                            params,
-                            return_type,
-                            body: out_body,
-                            ..
-                        } = &mut out
-                        {
-                            *return_type = self.materialize(self.solved.locations[ti.return_loc]);
-                            for (p, &loc) in params.iter_mut().zip(
-                                self.solved
-                                    .param_locs
-                                    .get(ti.param_locs.range())
-                                    .unwrap_or(&[]),
-                            ) {
-                                let ty = self.solved.locations[loc];
-                                if self.is_resolved(ty) {
-                                    p.ty = self.materialize(ty);
-                                }
-                            }
-                            *out_body = self.rewrite_stmts(&mut RewriteCtx::plain(target), body)?;
-                        }
-                        return Ok(out);
-                    }
-                }
-                SiteResolution::DirectCall {
-                    target,
-                    strip_arg_mask,
-                } => {
-                    let fid = self
-                        .instance(target, "missing direct call target instance")?
-                        .emitted_func_id;
-                    let mut out = expr.clone();
-                    match (expr, &mut out) {
-                        (
-                            Expr::Call { args, .. },
-                            Expr::Call {
-                                callee,
-                                args: out_args,
-                                type_args,
-                                ..
-                            },
-                        ) => {
-                            **callee = Expr::FuncRef(fid);
-                            *out_args = self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
-                            type_args.clear();
-                            return Ok(out);
-                        }
-                        (
-                            Expr::CallSpread { args, .. },
-                            Expr::CallSpread {
-                                callee,
-                                args: out_args,
-                                ..
-                            },
-                        ) => {
-                            **callee = Expr::FuncRef(fid);
-                            for (a, o) in args.iter().zip(out_args.iter_mut()) {
-                                let (
-                                    CallArg::Expr(e) | CallArg::Spread(e),
-                                    CallArg::Expr(dst) | CallArg::Spread(dst),
-                                ) = (a, o);
-                                *dst = self.rewrite_expr(rctx, e)?;
-                            }
-                            return Ok(out);
-                        }
-                        _ => {}
-                    }
-                }
-                SiteResolution::MethodCall {
-                    target,
-                    strip_arg_mask,
-                } => {
-                    let method_name = self
-                        .instance(target, "missing method call target instance")?
-                        .emitted_method_name
-                        .clone();
-                    let mut out = expr.clone();
-                    match (expr, &mut out) {
-                        (
-                            Expr::StaticMethodCall { args, .. },
-                            Expr::StaticMethodCall {
-                                method_name: out_name,
-                                args: out_args,
-                                ..
-                            },
-                        ) => {
-                            *out_name = method_name;
-                            *out_args = self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
-                            return Ok(out);
-                        }
-                        (
-                            Expr::Call { callee, args, .. },
-                            Expr::Call {
-                                callee: out_callee,
-                                args: out_args,
-                                type_args,
-                                ..
-                            },
-                        ) if matches!(callee.as_ref(), Expr::PropertyGet { .. }) => {
-                            if let (
-                                Expr::PropertyGet { object, .. },
-                                Expr::PropertyGet {
-                                    object: out_obj,
-                                    property,
-                                    ..
-                                },
-                            ) = (callee.as_ref(), out_callee.as_mut())
-                            {
-                                **out_obj = self.rewrite_expr(rctx, object)?;
-                                *property = method_name;
-                            }
-                            *out_args = self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
-                            type_args.clear();
-                            return Ok(out);
-                        }
-                        _ => {}
-                    }
-                }
-                SiteResolution::ClassNew {
-                    class_inst,
-                    strip_arg_mask,
-                } => {
-                    if let Expr::New { args, .. } = expr {
-                        let name = self
-                            .class_inst_name(class_inst)
-                            .ok_or_else(|| Diagnostic::internal("missing class instance name"))?;
-                        let mut out = expr.clone();
-                        if let Expr::New {
-                            class_name,
-                            type_args,
-                            args: out_args,
-                            ..
-                        } = &mut out
-                        {
-                            *class_name = name;
-                            type_args.clear();
-                            *out_args = self.rewrite_filtered_args(rctx, args, strip_arg_mask)?;
-                        }
-                        return Ok(out);
-                    }
-                }
+    fn default_box_init(&self, ty: &HirType, id: LocalId, inst_id: InstanceId) -> Result<Expr> {
+        match ty {
+            HirType::Void => Ok(Expr::Undefined),
+            HirType::Null => Ok(Expr::Null),
+            HirType::Union(members) if members.contains(&HirType::Void) => Ok(Expr::Undefined),
+            HirType::Union(members) if members.contains(&HirType::Null) => Ok(Expr::Null),
+            HirType::Number | HirType::Int32 => Ok(Expr::Number(0.0)),
+            HirType::Boolean => Ok(Expr::Bool(false)),
+            HirType::String => Ok(Expr::String(String::new())),
+            _ => {
+                let err = self.annotate_local(
+                    Diagnostic::unsupported(
+                        "captured local declared without an initializer has no placeholder value",
+                    ),
+                    id,
+                );
+                Err(self.attach_inst_chain(err, inst_id))
             }
-        }
-        if let Expr::LocalGet(id) = expr
-            && let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id)
-        {
-            return Ok(Expr::FuncRef(*fid));
-        }
-        let mut cloned = expr.clone();
-        let mut orig_children: Vec<&'h Expr> = Vec::new();
-        perry_hir::walker::walk_expr_children(expr, &mut |child| orig_children.push(child));
-        let (mut idx, mut err) = (0usize, None);
-        perry_hir::walker::walk_expr_children_mut(&mut cloned, &mut |child| {
-            if err.is_none()
-                && let Some(&orig) = orig_children.get(idx)
-            {
-                idx += 1;
-                match self.rewrite_expr(rctx, orig) {
-                    Ok(r) => *child = r,
-                    Err(e) => err = Some(e),
-                }
-            }
-        });
-        match err {
-            Some(e) => Err(e),
-            None => Ok(cloned),
         }
     }
+}
 
-    fn rewrite_filtered_args(
-        &mut self,
-        rctx: &RewriteCtx<'_>,
-        args: &'h [Expr],
-        mask: u64,
-    ) -> Result<Vec<Expr>> {
-        args.iter()
-            .enumerate()
-            .filter(|&(i, _)| i >= 64 || (mask & (1u64 << i)) == 0)
-            .map(|(_, arg)| self.rewrite_expr(rctx, arg))
-            .collect()
+fn sequence(mut effects: Vec<Expr>, value: Expr) -> Expr {
+    if effects.is_empty() {
+        return value;
+    }
+    effects.push(value);
+    Expr::Sequence(effects)
+}
+
+fn is_pure_func_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::FuncRef(_) | Expr::Closure { .. } | Expr::LocalGet(_) | Expr::This => true,
+        Expr::PropertyGet { object, .. } => is_pure_func_expr(object),
+        _ => false,
     }
 }
 

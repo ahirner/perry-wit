@@ -474,7 +474,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if !matches!(init_expr, Expr::Undefined) {
                         self.mark_written(s.inst, lidx);
                     }
-                    if matches!(self.types.kind(init_ty), TyKind::Func(_)) {
+                    if matches!(self.types.kind(init_ty), TyKind::Func(_))
+                        || self.types.is_tagged_func_union(
+                            init_ty,
+                            &self.index.capture_free_templates,
+                            &self.escaping_env_templates,
+                        )
+                    {
                         self.write_local_value(s, lidx, init_ty);
                     } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
                         let is_kind = |t, k| {
@@ -494,6 +500,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 .normalize_for_storage(self.ctx, self.decls, init_ty)
                         };
                         self.write_local_value(s, lidx, stored);
+                    }
+                    if let Some(cur) = self.read_local_value(s.inst, lidx) {
+                        self.record_coercion(s.inst, init_expr, init_ty, cur);
                     }
                 }
             }
@@ -525,7 +534,17 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
                 let norm = self.types.normalize_for_storage(self.ctx, self.decls, ty);
+                self.check_escaping_func(s.inst, norm, 0, s.current_span)?;
                 s.returned = self.types.join(s.returned, norm);
+                self.check_escaping_func(s.inst, s.returned, 0, s.current_span)?;
+                if let Some(e) = value {
+                    let dst = self
+                        .instances
+                        .get(s.inst)
+                        .and_then(|i| self.locations.get(i.return_loc).copied())
+                        .map_or(s.returned, |r| self.types.join(r, s.returned));
+                    self.record_coercion(s.inst, e, norm, dst);
+                }
             }
             Stmt::If {
                 condition,
@@ -697,21 +716,21 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             match view.kind {
                 TemplateKind::ClassMethod => {
-                    if let Some(ci) = inst.receiver
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
                         && let Some(list) = class_inst_methods.get_mut(ci.index())
                     {
                         list.push(id);
                     }
                 }
                 TemplateKind::ClassGetter(getter_idx) => {
-                    if let Some(ci) = inst.receiver
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
                         && let Some(list) = class_inst_getters.get_mut(ci.index())
                     {
                         list.push((getter_idx, id));
                     }
                 }
                 TemplateKind::ClassSetter(setter_idx) => {
-                    if let Some(ci) = inst.receiver
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
                         && let Some(list) = class_inst_setters.get_mut(ci.index())
                     {
                         list.push((setter_idx, id));
@@ -733,11 +752,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             locations: self.locations,
             param_locs: self.param_locs,
             field_locs: self.field_locs,
+            dispatch_arms: self.dispatch_arms,
             inst_local_tys,
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,
+            inst_coercions: self.inst_coercions,
             inst_captures: self.inst_captures,
             live_instances,
+            escaping_env_templates: self.escaping_env_templates,
+            boxed_locals: self.boxed_locals,
             module_local_tys,
             class_static_field_tys,
             class_inst_methods,
@@ -763,16 +786,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             _ => false,
         }
     }
-}
-
-pub(super) fn callable_arg_mask(types: &TypeTable, args: &[Ty]) -> u64 {
-    args.iter().enumerate().take(64).fold(0u64, |m, (i, &ty)| {
-        if matches!(types.kind(ty), TyKind::Func(_)) {
-            m | (1u64 << i)
-        } else {
-            m
-        }
-    })
 }
 
 pub(super) fn first_type_var_name(ty: &HirType) -> Option<&str> {

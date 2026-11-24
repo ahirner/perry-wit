@@ -145,17 +145,9 @@ impl<'s> FunctionBuilder<'s> {
             Expr::Compare { op, left, right } => self.comparison(ctx, op, left, right)?,
             Expr::Logical { op, left, right } => self.logical(ctx, op, left, right, expected)?,
             Expr::ScopedTemp { id, value, body } => {
-                let temp = self.expression(ctx, value)?;
-                let slot = self.entry_slot(ctx, temp.get_type(ctx));
-                self.store(ctx, slot, temp);
-                let prev = self.locals.insert(*id, LocalBinding::plain(slot));
-                let out = self.expression_with(ctx, body, expected);
-                if let Some(prev) = prev {
-                    self.locals.insert(*id, prev);
-                } else {
-                    self.locals.remove(id);
-                }
-                out?
+                self.with_temp(ctx, *id, value, |this, ctx| {
+                    this.expression_with(ctx, body, expected)
+                })?
             }
             Expr::Conditional {
                 condition,
@@ -560,6 +552,26 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     /// A bigint literal (`0x…n`, `1_000n`), independent of WIT transport widths.
+    pub(super) fn with_temp<T>(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        expr: &'s Expr,
+        body: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
+    ) -> Result<T> {
+        let value = self.expression(ctx, expr)?;
+        let slot = self.entry_slot(ctx, value.get_type(ctx));
+        self.store(ctx, slot, value);
+        let previous = self.locals.insert(id, LocalBinding::plain(slot));
+        let result = body(self, ctx);
+        if let Some(previous) = previous {
+            self.locals.insert(id, previous);
+        } else {
+            self.locals.remove(&id);
+        }
+        result
+    }
+
     fn bigint_literal(&mut self, ctx: &mut Context, text: &str) -> Result<Value> {
         use pliron::utils::apint::{APInt, bw};
         let text = text.trim_end_matches('n').replace('_', "");

@@ -2,6 +2,7 @@
 mod calls;
 mod eval;
 mod expr;
+mod instances;
 use super::bitset::BitSet;
 use super::boundary::{ClassInfo, ModuleIndex, SourceFacts, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
@@ -16,7 +17,7 @@ use crate::{
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
 };
-use eval::{callable_arg_mask, first_type_var_name};
+use eval::first_type_var_name;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Module as HirModule, Stmt},
     types::{LocalId, Type as HirType},
@@ -27,9 +28,24 @@ use std::collections::HashMap;
 
 const INSTANCE_BUDGET: u16 = 256;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Receiver {
+    Class(ClassInstId),
+    Object(Ty),
+}
+
+impl Receiver {
+    pub(crate) fn class(self) -> Option<ClassInstId> {
+        match self {
+            Self::Class(id) => Some(id),
+            Self::Object(_) => None,
+        }
+    }
+}
+
 pub(crate) struct Instance {
     pub(crate) template: TemplateId,
-    pub(crate) receiver: Option<ClassInstId>,
+    pub(crate) receiver: Option<Receiver>,
     pub(crate) capture_owner: Option<InstanceId>,
     pub(crate) args: Ty,
     pub(crate) explicit_type_args: Ty,
@@ -53,15 +69,51 @@ pub(crate) struct ClassInst {
     pub(crate) emitted_name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FuncCoercion {
+    Zero,
+    Tag(FuncIdentity),
+    BoxEnv(FuncIdentity),
+    Widen {
+        from: Ty,
+        to: Ty,
+    },
+    DispatchCallback {
+        callee_ty: Ty,
+        arms: TySpan,
+        input_tys: Ty,
+    },
+    EnvCallback {
+        target: InstanceId,
+        input_tys: Ty,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum SiteResolution {
     DirectCall {
         target: InstanceId,
-        strip_arg_mask: u64,
+        argument_types: Ty,
+        pass_receiver: bool,
+        pass_env: bool,
+    },
+    DispatchCall {
+        callee_ty: Ty,
+        arms: TySpan,
+        arg_tys: Ty,
+        recv_ty: Option<Ty>,
+        call_byte_offset: u32,
+    },
+    ThrowTypeError,
+    FuncTypeOf(Ty),
+    FuncCompare {
+        left_ty: Ty,
+        right_ty: Ty,
+        op: CompareOp,
     },
     MethodCall {
         target: InstanceId,
-        strip_arg_mask: u64,
+        argument_types: Ty,
     },
     Callback {
         target: InstanceId,
@@ -69,8 +121,12 @@ pub(crate) enum SiteResolution {
     },
     ClassNew {
         class_inst: ClassInstId,
-        strip_arg_mask: u64,
+        argument_types: Ty,
     },
+    ObjectLiteral(Ty),
+    ZeroSizedArray,
+    TaggedArray(Ty),
+    ZeroSizedFieldSet,
     CollectionNew {
         is_map: bool,
         type_args: Vec<Ty>,
@@ -86,11 +142,15 @@ pub(crate) struct Solved {
     pub(crate) locations: IdxVec<LocId, Ty>,
     pub(crate) param_locs: Vec<LocId>,
     pub(crate) field_locs: Vec<LocId>,
+    pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
     pub(crate) inst_sites: Vec<Vec<Option<SiteResolution>>>,
+    pub(crate) inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
     pub(crate) inst_captures: Vec<Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
+    pub(crate) escaping_env_templates: BitSet,
+    pub(crate) boxed_locals: BitSet,
     pub(crate) module_local_tys: Vec<Option<Ty>>,
     pub(crate) class_static_field_tys: Vec<Vec<Ty>>,
     pub(crate) class_inst_methods: Vec<Vec<InstanceId>>,
@@ -103,7 +163,7 @@ pub(crate) struct Solved {
     pub(crate) deletes_array_elements: bool,
 }
 
-type InstanceKey = (TemplateId, Option<ClassInstId>, Option<InstanceId>, Ty, Ty);
+type InstanceKey = (TemplateId, Option<Receiver>, Option<InstanceId>, Ty, Ty);
 
 struct ResultContract {
     inst: InstanceId,
@@ -114,7 +174,7 @@ struct ResultContract {
 
 struct InstanceReq<'a> {
     template: TemplateId,
-    receiver: Option<ClassInstId>,
+    receiver: Option<Receiver>,
     capture_owner: Option<InstanceId>,
     args: &'a [Ty],
     explicit_type_args: &'a [Ty],
@@ -136,7 +196,7 @@ impl<'a> InstanceReq<'a> {
             is_inline_callback: false,
         }
     }
-    fn receiver(mut self, r: Option<ClassInstId>) -> Self {
+    fn receiver(mut self, r: Option<Receiver>) -> Self {
         self.receiver = r;
         self
     }
@@ -160,16 +220,17 @@ impl<'a> InstanceReq<'a> {
 
 struct EvalState<'h> {
     inst: InstanceId,
-    receiver: Option<ClassInstId>,
+    receiver: Option<Receiver>,
     returned: Ty,
     has_return_value: bool,
     guards: Guards<'h>,
     iteration: hir_compat::Iteration,
     local_changed: bool,
+    current_span: Option<swc_common::Span>,
 }
 
 impl EvalState<'_> {
-    fn new(inst: InstanceId, receiver: Option<ClassInstId>) -> Self {
+    fn new(inst: InstanceId, receiver: Option<Receiver>) -> Self {
         Self {
             inst,
             receiver,
@@ -178,6 +239,7 @@ impl EvalState<'_> {
             guards: Guards::default(),
             iteration: hir_compat::Iteration::default(),
             local_changed: false,
+            current_span: None,
         }
     }
 }
@@ -221,6 +283,8 @@ struct Solver<'h, 'a> {
     types: &'a mut TypeTable,
     init_inst: Option<InstanceId>,
     locations: IdxVec<LocId, Ty>,
+    /// Locations whose type an annotation fixes: writes are checked by lowering, never joined.
+    declared_locs: BitSet,
     dirty_locs: BitSet,
     inst_reads: Vec<Vec<LocId>>,
     reader_offsets: Vec<u32>,
@@ -237,12 +301,17 @@ struct Solver<'h, 'a> {
     template_counts: Vec<u16>,
     param_locs: Vec<LocId>,
     field_locs: Vec<LocId>,
+    dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
+    dispatch_arm_spans: Vec<TySpan>,
     inst_locals: Vec<Vec<InstanceLocalSlot>>,
     inst_frame_locals: Vec<Vec<Ty>>,
     inst_written: Vec<BitSet>,
     inst_captures: Vec<Vec<LocalId>>,
     inst_sites: Vec<Vec<Option<SiteResolution>>>,
+    inst_coercions: Vec<Vec<(usize, FuncCoercion)>>,
     inst_superseded: BitSet,
+    escaping_env_templates: BitSet,
+    boxed_locals: BitSet,
     dict_reads: BitSet,
     self_nested_locs: BitSet,
     self_nested_locals: BitSet,
@@ -345,6 +414,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             types,
             init_inst: None,
             locations,
+            declared_locs: BitSet::default(),
             dirty_locs: BitSet::default(),
             inst_reads: Vec::new(),
             reader_offsets: Vec::new(),
@@ -361,12 +431,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             template_counts: vec![0; index.views.len()],
             param_locs: Vec::new(),
             field_locs: Vec::new(),
+            dispatch_arms: Vec::new(),
+            dispatch_arm_spans: Vec::new(),
             inst_locals: Vec::new(),
             inst_frame_locals: Vec::new(),
             inst_written: Vec::new(),
             inst_captures: Vec::new(),
             inst_sites: Vec::new(),
+            inst_coercions: Vec::new(),
             inst_superseded: BitSet::default(),
+            escaping_env_templates: BitSet::default(),
+            boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
             self_nested_locals: BitSet::default(),
@@ -442,6 +517,9 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn write_loc(&mut self, loc: LocId, value: Ty) -> bool {
+        if self.declared_locs.contains(loc.index()) {
+            return false;
+        }
         let Some(&old) = self.locations.get(loc) else {
             return false;
         };
@@ -473,15 +551,24 @@ impl<'h, 'a> Solver<'h, 'a> {
             || self.contract_insts.contains(inst_id.index())
     }
 
-    fn site_target(&self, res: &SiteResolution) -> Option<InstanceId> {
+    fn for_each_site_target(&self, res: &SiteResolution, mut f: impl FnMut(InstanceId)) {
         match *res {
             SiteResolution::DirectCall { target, .. }
             | SiteResolution::MethodCall { target, .. }
-            | SiteResolution::Callback { target, .. } => Some(target),
-            SiteResolution::ClassNew { class_inst, .. } => {
-                self.class_insts.get(class_inst)?.ctor_inst
+            | SiteResolution::Callback { target, .. } => f(target),
+            SiteResolution::DispatchCall { arms, .. } => {
+                if let Some(slice) = self.dispatch_arms.get(arms.range()) {
+                    for &(_, target) in slice {
+                        f(target);
+                    }
+                }
             }
-            _ => None,
+            SiteResolution::ClassNew { class_inst, .. } => {
+                if let Some(ctor) = self.class_insts.get(class_inst).and_then(|c| c.ctor_inst) {
+                    f(ctor);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -505,10 +592,34 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .flatten()
                 .flatten()
             {
-                if let Some(t) = self.site_target(res)
-                    && live.insert(t.index())
-                {
-                    queue.push(t);
+                self.for_each_site_target(res, |t| {
+                    if live.insert(t.index()) {
+                        queue.push(t);
+                    }
+                });
+            }
+            for &(_, coercion) in self
+                .inst_coercions
+                .get(caller.index())
+                .into_iter()
+                .flatten()
+            {
+                match coercion {
+                    FuncCoercion::EnvCallback { target, .. } => {
+                        if live.insert(target.index()) {
+                            queue.push(target);
+                        }
+                    }
+                    FuncCoercion::DispatchCallback { arms, .. } => {
+                        if let Some(slice) = self.dispatch_arms.get(arms.range()) {
+                            for &(_, target) in slice {
+                                if live.insert(target.index()) {
+                                    queue.push(target);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -589,582 +700,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.csr_dirty = false;
     }
 
-    fn seed_roots(&mut self) -> Result<InstanceId> {
-        let init_inst = self.request_instance(InstanceReq::new(TemplateId::INIT, &[], None))?;
-        self.init_inst = Some(init_inst);
-        self.enqueue(init_inst);
-        let roots: Vec<TemplateId> = self
-            .index
-            .views
-            .iter_enumerated()
-            .skip(1)
-            .filter_map(|(tid, view)| (view.is_exported || view.is_obj_method()).then_some(tid))
-            .collect();
-        for tid in roots {
-            let Some(view) = self.index.view(tid) else {
-                continue;
-            };
-            let bindings = self.default_type_param_bindings(tid);
-            let mut arg_tys = Vec::with_capacity(view.params.len());
-            for param in view.params {
-                let ty = self.types.intern_hir(
-                    self.ctx,
-                    &param.ty,
-                    self.index.is_param_annotated(param.id),
-                );
-                let ty = self.types.substitute(self.ctx, ty, &bindings);
-                arg_tys.push(self.instantiate_annotated_class(ty, 0, None)?);
-            }
-            let inst = self.request_instance(InstanceReq::new(tid, &arg_tys, None))?;
-            self.enqueue(inst);
-        }
-        Ok(init_inst)
-    }
-
-    fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeId, Ty)> {
-        let Some(view) = self.index.view(tid) else {
-            return Vec::new();
-        };
-        let Some(tps) = self.template_type_params.get(tid.index()) else {
-            return Vec::new();
-        };
-        view.type_params
-            .iter()
-            .zip(tps)
-            .filter_map(|(tp, &tp_id)| {
-                Some((
-                    tp_id,
-                    self.types.intern_hir(
-                        self.ctx,
-                        tp.constraint.as_deref().or(tp.default.as_deref())?,
-                        true,
-                    ),
-                ))
-            })
-            .collect()
-    }
-
-    fn instantiate_annotated_class(
-        &mut self,
-        ty: Ty,
-        byte_offset: u32,
-        caller: Option<InstanceId>,
-    ) -> Result<Ty> {
-        match self.types.kind(ty) {
-            TyKind::Leaf(base) | TyKind::Generic { base, .. } => {
-                let args = match self.types.kind(ty) {
-                    TyKind::Generic { args, .. } => self.types.ty_slice(args).to_vec(),
-                    _ => Vec::new(),
-                };
-                if let HirType::Named(name) = base.hir(self.ctx) {
-                    let nid = self.types.intern_name(name);
-                    if let Some(cid) = self.index.class_by_name_id(nid) {
-                        let resolved: Vec<Ty> = args
-                            .into_iter()
-                            .map(|a| self.instantiate_annotated_class(a, byte_offset, caller))
-                            .collect::<Result<_>>()?;
-                        let cinst = self.request_class_inst(cid, &resolved, byte_offset, caller)?;
-                        return Ok(self.types.class_inst(cinst));
-                    }
-                }
-                Ok(ty)
-            }
-            TyKind::Array(i) => {
-                let n = self.instantiate_annotated_class(i, byte_offset, caller)?;
-                Ok(if n == i { ty } else { self.types.array(n) })
-            }
-            TyKind::Promise(i) => {
-                let n = self.instantiate_annotated_class(i, byte_offset, caller)?;
-                Ok(if n == i { ty } else { self.types.promise(n) })
-            }
-            TyKind::Union(s) => {
-                let mut changed = false;
-                let mut out = Vec::with_capacity(s.len as usize);
-                for m in self.types.ty_slice(s).to_vec() {
-                    let n = self.instantiate_annotated_class(m, byte_offset, caller)?;
-                    changed |= n != m;
-                    out.push(n);
-                }
-                Ok(if changed { self.types.union(&out) } else { ty })
-            }
-            _ => Ok(ty),
-        }
-    }
-
-    fn collect_non_global_caps(&self, captures: &[LocalId], out: &mut Vec<LocalId>) -> bool {
-        let mut any = false;
-        for &cap in captures {
-            if self.index.is_non_global_local(cap) {
-                any = true;
-                if !out.contains(&cap) {
-                    out.push(cap);
-                }
-            }
-        }
-        any
-    }
-
-    fn request_instance(&mut self, req: InstanceReq<'_>) -> Result<InstanceId> {
-        let InstanceReq {
-            template,
-            receiver,
-            capture_owner,
-            args,
-            explicit_type_args,
-            call_byte_offset,
-            caller,
-            is_inline_callback,
-        } = req;
-        let is_monomorphic_plain = self.index.view(template).is_some_and(|v| {
-            matches!(v.kind, TemplateKind::Function)
-                && v.type_params.is_empty()
-                && !args
-                    .iter()
-                    .any(|&t| matches!(self.types.kind(t), TyKind::Func(_)))
-                && v.params.iter().all(|p| {
-                    !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
-                        && !p.is_rest
-                        && p.default.is_none()
-                })
-        });
-        let canonical_buf: Vec<Ty>;
-        let args = if is_monomorphic_plain
-            && receiver.is_none()
-            && capture_owner.is_none()
-            && explicit_type_args.is_empty()
-            && let Some(view) = self.index.view(template)
-            && !view.params.is_empty()
-        {
-            let mut declared = Vec::with_capacity(view.params.len());
-            for param in view.params {
-                let ty = self.types.intern_hir(self.ctx, &param.ty, true);
-                declared.push(self.instantiate_annotated_class(ty, 0, None)?);
-            }
-            canonical_buf = declared;
-            canonical_buf.as_slice()
-        } else {
-            args
-        };
-        let args_key = self.types.tuple(args);
-        let targs_key = self.types.tuple(explicit_type_args);
-        let key: InstanceKey = (template, receiver, capture_owner, args_key, targs_key);
-        if let Some(&id) = self.instance_index.get(&key) {
-            if is_inline_callback && let Some(inst) = self.instances.get_mut(id) {
-                inst.is_inline_callback = true;
-            }
-            if self.inst_superseded.remove(id.index()) {
-                bump_count(&mut self.template_counts, template);
-                self.enqueue(id);
-            }
-            return Ok(id);
-        }
-
-        let mut count = self
-            .template_counts
-            .get(template.index())
-            .copied()
-            .unwrap_or(0);
-        if count >= INSTANCE_BUDGET {
-            self.prune_unreachable();
-            count = self
-                .template_counts
-                .get(template.index())
-                .copied()
-                .unwrap_or(0);
-            if count >= INSTANCE_BUDGET {
-                return Err(self.budget_error(template, args, caller, call_byte_offset));
-            }
-        }
-        bump_count(&mut self.template_counts, template);
-
-        let view = self
-            .index
-            .view(template)
-            .ok_or_else(|| Diagnostic::internal("inference engine requested unknown template"))?;
-
-        let mut inst_caps = Vec::new();
-        let mut captures_non_global = capture_owner.is_some();
-        if capture_owner.is_some() {
-            captures_non_global |= self.collect_non_global_caps(view.captures, &mut inst_caps);
-        }
-        for &arg in args {
-            if let TyKind::Func(ident) = self.types.kind(arg)
-                && let Some(cb) = self.index.view(ident.template)
-            {
-                captures_non_global |= self.collect_non_global_caps(cb.captures, &mut inst_caps);
-            }
-        }
-
-        let mut type_bindings = self.compute_type_param_bindings(
-            template,
-            receiver,
-            capture_owner,
-            args,
-            explicit_type_args,
-        );
-        if view.is_exported && type_bindings.is_empty() {
-            type_bindings = self.default_type_param_bindings(template);
-        }
-        if caller.is_some()
-            && !view.type_params.is_empty()
-            && let Some(own_tps) = self.template_type_params.get(template.index())
-        {
-            for (tp, &tp_id) in view.type_params.iter().zip(own_tps) {
-                if !type_bindings.iter().any(|(id, _)| *id == tp_id) {
-                    let mut err = diag!(
-                        codes::MISSING_TYPE_ANNOTATION,
-                        "cannot infer type argument '{}' for generic function '{}'",
-                        tp.name,
-                        hir_compat::display_name(view.name)
-                    );
-                    if call_byte_offset != 0 {
-                        err = self.metadata.locations.annotate_call(err, call_byte_offset);
-                    }
-                    if let Some(cid) = caller {
-                        err = attach_inst_chain(
-                            &self.instances,
-                            self.index,
-                            &self.metadata.locations,
-                            err,
-                            cid,
-                        );
-                    }
-                    return Err(err);
-                }
-            }
-        }
-
-        let param_loc_start = self.param_locs.len() as u32;
-        let mut local_slots = Vec::with_capacity(view.params.len() + 4);
-        let fixed_count = view
-            .params
-            .iter()
-            .position(|p| p.is_rest)
-            .unwrap_or(view.params.len());
-        for (p_idx, param) in view.params.iter().enumerate() {
-            let declared =
-                self.types
-                    .intern_hir(self.ctx, &param.ty, self.index.is_param_annotated(param.id));
-            let declared = self.types.substitute(self.ctx, declared, &type_bindings);
-            let bound_ty = if param.is_rest {
-                let extra_args = args.get(fixed_count..).unwrap_or(&[]);
-                if !extra_args.is_empty() {
-                    let elem = extra_args.iter().fold(Ty::BOTTOM, |acc, &x| {
-                        let norm = self.types.normalize_for_storage(self.ctx, self.decls, x);
-                        self.types.join(acc, norm)
-                    });
-                    self.types.array(elem)
-                } else if !self.types.is_open(declared) {
-                    declared
-                } else {
-                    self.types.array(Ty::NEVER)
-                }
-            } else {
-                let incoming = args.get(p_idx).copied().unwrap_or(Ty::VOID);
-                if incoming == Ty::OPEN || incoming == Ty::BOTTOM {
-                    declared
-                } else if matches!(self.types.kind(incoming), TyKind::Func(_)) {
-                    incoming
-                } else if param.default.is_some() {
-                    if !self.types.is_open(declared) {
-                        declared
-                    } else {
-                        let s = self.types.exclude_absences(incoming, Absence::Undefined);
-                        if s == Ty::NEVER { Ty::BOTTOM } else { s }
-                    }
-                } else if !self.types.is_open(declared)
-                    && !matches!(self.types.kind(declared), TyKind::Leaf(id) if matches!(id.hir(self.ctx), HirType::Function(_)))
-                {
-                    declared
-                } else {
-                    incoming
-                }
-            };
-            let loc = self.alloc_loc(bound_ty);
-            self.param_locs.push(loc);
-            if let Some(local) = self.index.local_idx(param.id) {
-                local_slots.push(InstanceLocalSlot { local, loc });
-            }
-        }
-        let param_locs = TySpan {
-            start: param_loc_start,
-            len: view.params.len() as u32,
-        };
-
-        let explicit_return = view
-            .explicit_return
-            .then(|| {
-                let ret = self.types.intern_hir(self.ctx, view.return_type, true);
-                let ret = self.types.substitute(self.ctx, ret, &type_bindings);
-                (!self.types.is_open(ret)).then_some(ret)
-            })
-            .flatten();
-        let return_loc = self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM));
-
-        let keep_original =
-            count == 0 && (view.is_exported || view.is_obj_method() || is_monomorphic_plain);
-        let emitted_func_id = if keep_original {
-            view.func_id
-        } else {
-            let id = self.next_func_id;
-            self.next_func_id = self.next_func_id.saturating_add(1);
-            id
-        };
-        let emitted_name = if template == TemplateId::INIT || keep_original {
-            view.raw_name()
-        } else {
-            format!("{}_instance_{emitted_func_id}", view.raw_name())
-        };
-        let emitted_method_name = match view.kind {
-            TemplateKind::ClassMethod
-            | TemplateKind::ClassStaticMethod(_)
-            | TemplateKind::ClassGetter(_)
-            | TemplateKind::ClassSetter(_) => {
-                if self
-                    .instances
-                    .iter()
-                    .any(|i| i.template == template && i.receiver == receiver)
-                {
-                    format!("{}__inst_{emitted_func_id}", view.name)
-                } else {
-                    view.name.to_owned()
-                }
-            }
-            _ => String::new(),
-        };
-
-        let inst_id = self.instances.push(Instance {
-            template,
-            receiver,
-            capture_owner,
-            args: args_key,
-            explicit_type_args: targs_key,
-            return_loc,
-            has_explicit_return: explicit_return.is_some(),
-            param_locs,
-            caller,
-            call_byte_offset,
-            is_inline_callback,
-            captures_non_global,
-            emitted_func_id,
-            emitted_name,
-            emitted_method_name,
-        });
-        self.instance_index.insert(key, inst_id);
-        self.inst_locals.push(local_slots);
-        self.inst_frame_locals
-            .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
-        self.inst_written.push(BitSet::default());
-        self.inst_captures.push(inst_caps);
-        self.inst_sites
-            .push(vec![None; self.index.site_count(template)]);
-        self.inst_reads.push(Vec::new());
-        self.enqueue(inst_id);
-        Ok(inst_id)
-    }
-
-    fn compute_type_param_bindings(
-        &mut self,
-        template: TemplateId,
-        receiver: Option<ClassInstId>,
-        capture_owner: Option<InstanceId>,
-        args: &[Ty],
-        explicit_type_args: &[Ty],
-    ) -> Vec<(shapes::TypeId, Ty)> {
-        let mut bindings =
-            capture_owner.map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
-        if let Some(cinst) = receiver.and_then(|id| self.class_insts.get(id))
-            && let Some(class_tps) = self.class_type_params.get(cinst.class.index())
-        {
-            bindings.extend(
-                class_tps
-                    .iter()
-                    .copied()
-                    .zip(self.types.tuple_slice(cinst.args).iter().copied()),
-            );
-        }
-        let Some(view) = self.index.view(template) else {
-            return bindings;
-        };
-        let Some(tps) = self
-            .template_type_params
-            .get(template.index())
-            .filter(|t| !t.is_empty())
-            .cloned()
-        else {
-            return bindings;
-        };
-        for (&tp_id, &et) in tps.iter().zip(explicit_type_args) {
-            if !self.types.is_open(et) {
-                bindings.push((tp_id, et));
-            }
-        }
-        self.unify_params(view.params, args, &tps, &mut bindings);
-        bindings
-    }
-
-    pub(super) fn unify_params(
-        &mut self,
-        params: &[perry_hir::ir::Param],
-        args: &[Ty],
-        tps: &[shapes::TypeId],
-        bindings: &mut Vec<(shapes::TypeId, Ty)>,
-    ) {
-        for skip_open in [true, false] {
-            for (param, &arg_ty) in params.iter().zip(args) {
-                if skip_open
-                    && self
-                        .types
-                        .is_open_with(arg_ty, self.locations.as_slice(), &self.dict_reads)
-                {
-                    continue;
-                }
-                let pat = self.types.intern_hir(self.ctx, &param.ty, true);
-                self.types.unify(self.ctx, pat, arg_ty, tps, bindings);
-            }
-        }
-    }
-
-    fn budget_error(
-        &self,
-        template: TemplateId,
-        next_args: &[Ty],
-        caller: Option<InstanceId>,
-        call_byte_offset: u32,
-    ) -> Diagnostic {
-        let name = self
-            .index
-            .view(template)
-            .map_or("function", |v| hir_compat::display_name(v.name));
-        let mut err = Diagnostic::unsupported(format!(
-            "generic specialization limit of {INSTANCE_BUDGET} distinct argument lists reached for {name}"
-        ));
-        if let Some(caller_inst) = caller
-            .and_then(|c| self.instances.get(c))
-            .filter(|i| i.template == template)
-        {
-            let prev_args = self.types.tuple_slice(caller_inst.args);
-            let view = self.index.view(template);
-            for (idx, (&prev, &next)) in prev_args.iter().zip(next_args).enumerate() {
-                if prev != next && self.types.contains_ty(next, prev) {
-                    let param_name = view
-                        .and_then(|v| {
-                            v.params
-                                .get(idx)
-                                .and_then(|p| first_type_var_name(&p.ty))
-                                .or_else(|| v.type_params.get(idx).map(|tp| tp.name.as_str()))
-                                .or_else(|| v.params.get(idx).map(|p| p.name.as_str()))
-                        })
-                        .unwrap_or("T");
-                    err = err.with_note(format!("this recursive call grows type argument {param_name} by nesting its previous type"));
-                    break;
-                }
-            }
-        }
-        self.metadata.locations.annotate_call(err, call_byte_offset)
-    }
-
-    fn request_class_inst(
-        &mut self,
-        class: ClassId,
-        args: &[Ty],
-        byte_offset: u32,
-        caller: Option<InstanceId>,
-    ) -> Result<ClassInstId> {
-        let args_key = self.types.tuple(args);
-        let key = (class, args_key);
-        if let Some(&id) = self.class_index.get(&key) {
-            return Ok(id);
-        }
-        let cinfo = self
-            .index
-            .class(class)
-            .ok_or_else(|| Diagnostic::internal("unknown class index"))?;
-        let hir_class = self
-            .hir
-            .classes
-            .get(cinfo.hir_idx)
-            .ok_or_else(|| Diagnostic::internal("unknown class in HIR"))?;
-
-        let bindings: Vec<_> = self
-            .class_type_params
-            .get(class.index())
-            .into_iter()
-            .flatten()
-            .copied()
-            .zip(args.iter().copied())
-            .collect();
-        let field_loc_start = self.field_locs.len() as u32;
-        for field in &hir_class.fields {
-            let ty = self.types.intern_hir(
-                self.ctx,
-                &field.ty,
-                !matches!(field.ty, HirType::Any | HirType::Unknown),
-            );
-            let ty = self.types.substitute(self.ctx, ty, &bindings);
-            let loc = self.alloc_loc(if self.types.is_open(ty) {
-                Ty::BOTTOM
-            } else {
-                ty
-            });
-            self.field_locs.push(loc);
-        }
-        let field_locs = TySpan {
-            start: field_loc_start,
-            len: hir_class.fields.len() as u32,
-        };
-        let next_idx = self.class_insts.len();
-        let emitted_name = if !self.class_insts.iter().any(|c| c.class == class) {
-            hir_class.name.clone()
-        } else {
-            format!("{}__inst_{next_idx}", hir_class.name)
-        };
-
-        let cinst_id = self.class_insts.push(ClassInst {
-            class,
-            args: args_key,
-            field_locs,
-            ctor_inst: None,
-            emitted_name,
-        });
-        self.class_index.insert(key, cinst_id);
-
-        let field_loc_slice: Vec<LocId> = self
-            .field_locs
-            .get(field_locs.range())
-            .unwrap_or(&[])
-            .to_vec();
-        for (field, field_loc) in hir_class.fields.iter().zip(field_loc_slice) {
-            if let Some(init) = &field.init {
-                if matches!(init, Expr::Array(items, _) if items.is_empty())
-                    && self.types.is_open(self.locations[field_loc])
-                {
-                    let elem_loc = self.alloc_loc(Ty::BOTTOM);
-                    let cell = self.types.cell(elem_loc, CellKind::Array);
-                    self.write_loc(field_loc, cell);
-                } else if let Some(init_inst) = self.init_inst {
-                    let mut state = EvalState::new(init_inst, Some(cinst_id));
-                    let init_ty = self.eval_expr(&mut state, init)?;
-                    let norm = self
-                        .types
-                        .normalize_for_storage(self.ctx, self.decls, init_ty);
-                    self.write_loc(field_loc, norm);
-                }
-            }
-        }
-        if let Some(ctor_tid) = cinfo.ctor {
-            let ctor_inst = self.request_instance(
-                InstanceReq::new(ctor_tid, args, caller)
-                    .receiver(Some(cinst_id))
-                    .at(byte_offset),
-            )?;
-            if let Some(ci) = self.class_insts.get_mut(cinst_id) {
-                ci.ctor_inst = Some(ctor_inst);
-            }
-        }
-        Ok(cinst_id)
-    }
-
     fn run_worklist(&mut self) -> Result<()> {
         let mut waves = 0usize;
         loop {
@@ -1234,9 +769,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         let prev_inst_count = self.instances.len();
         let prev_locs = self.locations.as_slice().to_vec();
         let prev_frames = self.inst_frame_locals.clone();
+        let prev_escaping = self.escaping_env_templates.clone();
         self.dirty_locs.clear();
         for id in live_ids {
             self.evaluate_instance(id)?;
+        }
+        if self.escaping_env_templates != prev_escaping {
+            return Err(Diagnostic::internal(
+                "fixed-point check marked a new escaping closure",
+            ));
         }
         if self.instances.len() != prev_inst_count {
             return Err(Diagnostic::internal(
@@ -1256,6 +797,240 @@ impl<'h, 'a> Solver<'h, 'a> {
         if !self.dirty_locs.is_empty() {
             return Err(Diagnostic::internal(
                 "fixed-point check dirtied a storage location",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn intern_dispatch_arms(&mut self, arms: &[(FuncIdentity, InstanceId)]) -> TySpan {
+        for &span in &self.dispatch_arm_spans {
+            if self.dispatch_arms.get(span.range()) == Some(arms) {
+                return span;
+            }
+        }
+        let span = TySpan {
+            start: self.dispatch_arms.len() as u32,
+            len: arms.len() as u32,
+        };
+        self.dispatch_arms.extend_from_slice(arms);
+        self.dispatch_arm_spans.push(span);
+        span
+    }
+
+    pub(super) fn mark_escaping_env(&mut self, caller: InstanceId, ty: Ty) {
+        let members = self.types.func_members(ty);
+        for ident in members {
+            let tid = ident.template;
+            if ident.capture_owner.is_none()
+                && self.index.capture_free_templates.contains(tid.index())
+            {
+                continue;
+            }
+            if !self.escaping_env_templates.insert(tid.index()) {
+                continue;
+            }
+            for &cap_id in self.index.template_captures(tid) {
+                if let Some(lidx) = self.index.local_idx(cap_id) {
+                    let li = lidx.index();
+                    if !self.index.local_module.contains(li)
+                        && (self.index.local_reassigned.contains(li)
+                            || self.index.local_written_from_closure.contains(li)
+                            || self.index.local_deferred.contains(li)
+                            || self.index.local_for_head.contains(li))
+                    {
+                        self.boxed_locals.insert(li);
+                    }
+                }
+            }
+            self.enqueue(caller);
+            if let Some(owner) = ident.capture_owner {
+                self.enqueue(owner);
+                if let Some(grand_caller) = self.instances.get(owner).and_then(|i| i.caller) {
+                    self.enqueue(grand_caller);
+                }
+            }
+            let to_requeue: Vec<InstanceId> =
+                self.instances
+                    .iter_enumerated()
+                    .filter_map(|(id, inst)| {
+                        if self.inst_superseded.contains(id.index()) {
+                            return None;
+                        }
+                        let matches = inst.template == tid
+                            || inst.capture_owner == ident.capture_owner
+                            || self.types.tuple_slice(inst.args).iter().any(|&a| {
+                                self.types.func_members(a).iter().any(|m| m.template == tid)
+                            });
+                        matches.then_some(id)
+                    })
+                    .collect();
+            for id in to_requeue {
+                self.enqueue(id);
+            }
+        }
+    }
+
+    pub(super) fn set_coercion(&mut self, inst_id: InstanceId, expr: &Expr, c: FuncCoercion) {
+        let key = std::ptr::from_ref(expr) as usize;
+        if let Some(list) = self.inst_coercions.get_mut(inst_id.index()) {
+            if let Some(slot) = list.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = c;
+            } else {
+                list.push((key, c));
+            }
+        }
+    }
+
+    pub(super) fn clear_site(&mut self, inst_id: InstanceId, expr: &Expr) {
+        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
+            return;
+        };
+        let Some(local_site) = self.index.site_of(template, expr) else {
+            return;
+        };
+        if let Some(slot) = self
+            .inst_sites
+            .get_mut(inst_id.index())
+            .and_then(|s| s.get_mut(local_site))
+        {
+            *slot = None;
+        }
+    }
+
+    pub(super) fn coerce_array_write(
+        &mut self,
+        inst_id: InstanceId,
+        arr_def: Ty,
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) {
+        for &at in arg_tys {
+            self.mark_escaping_env(inst_id, at);
+        }
+        let elem_ty = match self.types.kind(arr_def) {
+            TyKind::Cell { loc, kind } if kind.is_array() => Some(self.read_loc(loc, inst_id)),
+            TyKind::Array(elem) => Some(elem),
+            _ => None,
+        };
+        let Some(elem_ty) = elem_ty else { return };
+        if self
+            .types
+            .is_zero_sized_func(elem_ty, &self.index.capture_free_templates)
+        {
+            for a in args {
+                self.set_coercion(inst_id, a, FuncCoercion::Zero);
+            }
+        } else if self.types.is_tagged_func_union(
+            elem_ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        ) {
+            for (a, &at) in args.iter().zip(arg_tys) {
+                self.record_coercion(inst_id, a, at, elem_ty);
+            }
+        }
+    }
+
+    pub(super) fn record_coercion(
+        &mut self,
+        inst_id: InstanceId,
+        expr: &Expr,
+        src_ty: Ty,
+        dst_ty: Ty,
+    ) {
+        if src_ty == Ty::BOTTOM || dst_ty == Ty::BOTTOM {
+            return;
+        }
+        if !self.types.is_tagged_func_union(
+            dst_ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        ) {
+            return;
+        }
+        let inner = match expr {
+            Expr::Sequence(parts) if self.metadata.locations.operator_span(parts).is_some() => {
+                parts.last().unwrap_or(expr)
+            }
+            _ => expr,
+        };
+        if matches!(inner, Expr::Conditional { .. } | Expr::Logical { .. }) {
+            return;
+        }
+        if self
+            .types
+            .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
+            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        {
+            self.set_coercion(inst_id, expr, FuncCoercion::Tag(ident));
+            return;
+        }
+        if self.types.is_env_func(src_ty, &self.escaping_env_templates)
+            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        {
+            if !matches!(expr, Expr::Closure { .. }) {
+                self.set_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
+            }
+            return;
+        }
+        if self.types.is_tagged_func_union(
+            src_ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        ) && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
+        {
+            self.set_coercion(
+                inst_id,
+                expr,
+                FuncCoercion::Widen {
+                    from: src_ty,
+                    to: dst_ty,
+                },
+            );
+        }
+    }
+
+    pub(super) fn check_escaping_func(
+        &mut self,
+        inst_id: InstanceId,
+        ty: Ty,
+        byte_offset: u32,
+        span: Option<swc_common::Span>,
+    ) -> Result<()> {
+        self.mark_escaping_env(inst_id, ty);
+        if let TyKind::Union(u_span) = self.types.kind(ty)
+            && self
+                .types
+                .ty_slice(u_span)
+                .iter()
+                .any(|&m| matches!(self.types.kind(m), TyKind::Func(_)))
+            && !self.types.is_tagged_func_union(
+                ty,
+                &self.index.capture_free_templates,
+                &self.escaping_env_templates,
+            )
+        {
+            let mut err = Diagnostic::unsupported(
+                "joining function values with non-function values is not supported yet",
+            );
+            if byte_offset != 0 {
+                err = self.metadata.locations.annotate_call(err, byte_offset);
+            } else if let Some(sp) = span {
+                err = self.metadata.locations.annotate(err, sp);
+            } else if let Some(sp) = self
+                .instances
+                .get(inst_id)
+                .and_then(|i| self.index.view(i.template))
+                .and_then(|v| self.metadata.locations.function_span(v.name))
+            {
+                err = err.with_span(sp);
+            }
+            return Err(attach_inst_chain(
+                &self.instances,
+                self.index,
+                &self.metadata.locations,
+                err,
+                inst_id,
             ));
         }
         Ok(())
