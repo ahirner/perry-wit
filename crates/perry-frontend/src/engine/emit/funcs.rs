@@ -7,6 +7,7 @@ use crate::engine::types::{
     CaptureOwner, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
     env_class_name, func_tag,
 };
+use crate::hir_compat;
 use perry_hir::{
     ir::{Class, ClassField, ClassFieldOrigin, CompareOp, Expr, Function, Param, Stmt, SwitchCase},
     types::{FuncId, LocalId, Type as HirType},
@@ -46,10 +47,6 @@ impl<'h, 'a> Emitter<'h, 'a> {
             }
             other => HirType::Union(vec![other, HirType::Void]),
         }
-    }
-
-    pub(super) fn non_null_unwrap(expr: Expr) -> Expr {
-        Expr::Sequence(vec![Expr::String("\0perry_non_null".into()), expr])
     }
 
     pub(super) fn local_ty_in_owner(&self, owner: CaptureOwner, id: LocalId) -> Option<Ty> {
@@ -799,7 +796,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             });
         }
         let disp_name = format!("__dispatch_{fid}");
-        if call_byte_offset != 0 {
+        if hir_compat::has_source_offset(call_byte_offset) {
             self.instantiations.push((
                 disp_name.clone(),
                 "dispatch".to_owned(),

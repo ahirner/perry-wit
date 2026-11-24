@@ -244,7 +244,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         tp.name,
                         hir_compat::display_name(view.name)
                     );
-                    if call_byte_offset != 0 {
+                    if hir_compat::has_source_offset(call_byte_offset) {
                         err = self.metadata.locations.annotate_call(err, call_byte_offset);
                     }
                     if let Some(cid) = caller {
@@ -516,17 +516,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         caller: Option<InstanceId>,
         call_byte_offset: u32,
     ) -> Diagnostic {
-        let name = self.index.view(template).map_or_else(
-            || "function".to_owned(),
-            |v| {
-                let n = hir_compat::display_name(v.name);
-                if n.is_empty() || n.starts_with("callback_") {
-                    "anonymous function".to_owned()
-                } else {
-                    n.to_owned()
-                }
-            },
-        );
+        let name = self
+            .index
+            .view(template)
+            .map_or("function", |v| hir_compat::function_label(v.name));
         let mut err = Diagnostic::unsupported(format!(
             "generic specialization limit of {INSTANCE_BUDGET} distinct argument lists reached for {name}"
         ));

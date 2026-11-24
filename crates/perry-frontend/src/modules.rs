@@ -368,7 +368,7 @@ fn bind_module<'a>(
     let mut exports = Exports::new();
     let module_binding = |id: &ast::Ident| {
         ast::Ident::new(
-            format!("__perry_module_{index}_{}", id.sym).into(),
+            crate::hir_compat::module_binding_name(index, &id.sym).into(),
             id.span,
             id.ctxt,
         )
@@ -381,7 +381,7 @@ fn bind_module<'a>(
             }))
             | ast::ModuleItem::Stmt(ast::Stmt::Decl(decl)) => {
                 for id in declared(decl)? {
-                    if id.sym.starts_with("__perry_") {
+                    if crate::hir_compat::is_reserved_binding(&id.sym) {
                         return Err(locations
                             .annotate(unsupported!("Reserved compiler name in source"), id.span));
                     }

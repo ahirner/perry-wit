@@ -690,21 +690,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::CallSpread { callee, args, .. } => self.eval_call_spread(s, expr, callee, args),
             Expr::NativeMethodCall {
                 module,
-                class_name,
                 object,
                 method,
                 args,
                 ..
             } => {
-                if matches!(module.as_str(), "stream" | "node:stream")
-                    && class_name.as_deref() == Some("Writable")
-                    && object.is_none()
-                    && method == "toWeb"
-                {
+                if hir_compat::is_writable_to_web(expr) {
                     self.eval_args(s, args)?;
                     return Ok(self.types.named(self.ctx, "WritableStream"));
                 }
-                if module == "__perry_runtime" && method == "requireObjectCoercible" {
+                if hir_compat::is_object_coercibility_check(module, method) {
                     return match args.first() {
                         Some(a) => {
                             let ty = self.eval_expr(s, a)?;
@@ -720,7 +715,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         return Ok(Ty::BOTTOM);
                     }
                     let (stripped, _) = self.types.strip_nullish(obj_ty);
-                    if matches!(method.as_str(), "push" | "push_single" | "unshift")
+                    if hir_compat::is_array_insertion(method)
                         && self.push_into_cells(stripped, &arg_tys)
                     {
                         return Ok(Ty::NUMBER);
@@ -987,7 +982,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let mut err = Diagnostic::unsupported(format!(
                 "reassigning function property '{property}' on an object literal is not supported yet"
             ));
-            if byte_offset != 0 {
+            if hir_compat::has_source_offset(byte_offset) {
                 if let Some(sp) = self.metadata.locations.member_span(byte_offset) {
                     err = err.with_span(sp);
                 }

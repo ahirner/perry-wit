@@ -454,7 +454,7 @@ pub(crate) fn attach_inst_chain(
         if inst.template == TemplateId::INIT {
             break;
         }
-        if inst.call_byte_offset != 0
+        if hir_compat::has_source_offset(inst.call_byte_offset)
             && let Some(view) = index.view(inst.template)
         {
             let msg = format!("while instantiating '{}'", view.display_name());
@@ -974,9 +974,9 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn intern_helper(&mut self, spec: HelperSpec, byte_offset: u32) -> HelperId {
         if let Some(&id) = self.helper_index.get(&spec) {
-            if byte_offset != 0
+            if hir_compat::has_source_offset(byte_offset)
                 && let Some(slot) = self.helper_byte_offsets.get_mut(id.index())
-                && *slot == 0
+                && !hir_compat::has_source_offset(*slot)
             {
                 *slot = byte_offset;
             }
@@ -1245,7 +1245,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         mut err: Diagnostic,
         byte_offset: u32,
     ) -> Diagnostic {
-        if byte_offset != 0 {
+        if hir_compat::has_source_offset(byte_offset) {
             err = self.metadata.locations.annotate_call(err, byte_offset);
         } else if let Some(sp) = s.current_span {
             err = self.metadata.locations.annotate(err, sp);
@@ -1285,7 +1285,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let mut err = Diagnostic::unsupported(
                 "joining function values with non-function values is not supported yet",
             );
-            if byte_offset != 0 {
+            if hir_compat::has_source_offset(byte_offset) {
                 err = self.metadata.locations.annotate_call(err, byte_offset);
             } else if let Some(sp) = span {
                 err = self.metadata.locations.annotate(err, sp);

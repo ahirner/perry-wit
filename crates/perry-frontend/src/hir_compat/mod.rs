@@ -18,8 +18,12 @@ pub use calls::{GuestCall, RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;
-pub(crate) use locations::display_name;
+pub(crate) use calls::{is_array_insertion, is_source_extern};
+pub(crate) use constructors::typed_collection;
+pub(crate) use iteration::is_object_coercibility_check;
 pub use locations::{Locations, non_null_assertion};
+pub(crate) use locations::{display_name, function_label, has_source_offset, mark_non_null};
+pub(crate) use names::{is_reserved_binding, module_binding_name};
 mod methods;
 mod names;
 mod parser;
@@ -30,7 +34,9 @@ pub use iteration::{Availability, Iteration, RecordExpr};
 mod streams;
 mod timers;
 pub use constructors::{Constructor, Constructors};
+pub(crate) use methods::Preservation;
 pub use methods::{Method, method};
+pub use streams::is_writable_to_web;
 pub use timers::is_timer_module;
 
 pub struct Metadata<'s> {

@@ -1,6 +1,6 @@
 //! Emit expressions from solved call sites and function-value coercions.
 use super::*;
-use crate::hir_compat::GuestCall;
+use crate::hir_compat::{self, GuestCall};
 
 enum CalleeValue {
     Static,
@@ -108,14 +108,7 @@ impl<'h> Emitter<'h, '_> {
                         .into_iter()
                         .map(|t| self.materialize(t))
                         .collect::<Result<Vec<_>>>()?;
-                    return Ok(Expr::New {
-                        class_name: if is_map { "\0perry_Map" } else { "\0perry_Set" }.into(),
-                        type_args: mat_args,
-                        args: Vec::new(),
-                        byte_offset: 0,
-                        byte_end: 0,
-                        cap_args_appended: 0,
-                    });
+                    return Ok(hir_compat::typed_collection(is_map, mat_args));
                 }
                 SiteResolution::ThrowTypeError(helper) => {
                     let fid = self.emit_helper(helper)?;
@@ -672,7 +665,7 @@ impl<'h> Emitter<'h, '_> {
         let unwrap_box = |base: Expr| {
             let val = Self::prop_get(base, "v");
             if undef_box {
-                Self::non_null_unwrap(val)
+                hir_compat::mark_non_null(val)
             } else {
                 val
             }

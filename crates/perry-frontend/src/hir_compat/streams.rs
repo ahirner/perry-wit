@@ -9,6 +9,12 @@ use std::collections::HashSet;
 use swc_common::{DUMMY_SP, Span, SyntaxContext};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
+pub fn is_writable_to_web(expr: &perry_hir::ir::Expr) -> bool {
+    matches!(expr, perry_hir::ir::Expr::NativeMethodCall {
+        module, class_name: Some(class), object: None, method, ..
+    } if matches!(module.as_str(), "stream" | "node:stream") && class == "Writable" && method == "toWeb")
+}
+
 /// The synthetic method a synchronous `for...of` calls on its source: lowering checks that
 /// the receiver is an array or string and yields it unchanged.
 pub(super) const ITERATION: &str = "$$perryIteration";

@@ -7,6 +7,14 @@ const RESOLVE: &str = "\0perry_promise_resolve";
 const REJECT: &str = "\0perry_promise_reject";
 const TIMER: &str = "\0perry_timer";
 
+pub(crate) fn is_source_extern(name: &str, offset: u32) -> bool {
+    has_source_offset(offset) && !name.starts_with("js_") && !name.starts_with("__")
+}
+
+pub(crate) fn is_array_insertion(method: &str) -> bool {
+    matches!(method, "push" | "push_single" | "unshift")
+}
+
 pub enum GuestCall<E, T> {
     Typed { value: E, ty: T },
     Pending(T),

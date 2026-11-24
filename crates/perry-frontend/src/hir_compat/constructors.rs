@@ -6,6 +6,20 @@ use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 const CONSTRUCTOR: &str = "\0perry_constructor:";
 
+const MAP: &str = "\0perry_Map";
+const SET: &str = "\0perry_Set";
+
+pub(crate) fn typed_collection(is_map: bool, type_args: Vec<HirType>) -> Expr {
+    Expr::New {
+        class_name: if is_map { MAP } else { SET }.into(),
+        type_args,
+        args: Vec::new(),
+        byte_offset: 0,
+        byte_end: 0,
+        cap_args_appended: 0,
+    }
+}
+
 #[derive(Default)]
 pub struct Constructors(Vec<ConstructorTypes>);
 
@@ -80,13 +94,13 @@ impl Constructors {
         } = expr
         {
             match (class_name.as_str(), type_args.as_slice()) {
-                ("\0perry_Map", [key, value]) => {
+                (MAP, [key, value]) => {
                     return Some(Constructor::Map {
                         types: Some((key, value)),
                         init: args.first(),
                     });
                 }
-                ("\0perry_Set", [element]) => {
+                (SET, [element]) => {
                     return Some(Constructor::Set {
                         element: Some(element),
                         init: args.first(),
