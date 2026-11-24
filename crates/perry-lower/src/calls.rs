@@ -393,8 +393,8 @@ impl<'s> FunctionBuilder<'s> {
                 && self.shapes.local_name(*id).is_none()
             {
                 let solved = match expected {
-                    Some(slot) => slot,
-                    None => self.shapes.value_type(ctx, ty)?,
+                    Some(slot) if crate::value_unions::is_value_union(ctx, slot) => slot,
+                    _ => self.shapes.value_type(ctx, ty)?,
                 };
                 return self.expression_with(ctx, value, Some(solved)).map(Some);
             }
