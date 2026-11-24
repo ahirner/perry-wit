@@ -134,14 +134,18 @@ function edited(message = 'Edits ready to compile') {
   clearOutput('Your edits have not been compiled yet.');
   status(message);
 }
-function fail(error, phase = 'compile') {
+function fail(error, phase = 'compile', diagnostics = []) {
   const message = typeof error === 'string' ? error : error?.message || String(error);
-  const missing = message.match(/WIT export (\S+) needs an exported TypeScript function (\S+)/);
+  const missing = diagnostics.find(diagnostic => diagnostic.code === 'missing-export');
   let title = { arguments: 'Check the arguments', input: 'Choose an interface', compile: 'Could not compile', run: 'Could not run the function', inspect: 'Compiled, but cannot run in this browser', load: 'Could not load the compiler', timeout: 'Run stopped after 30 seconds', folder: 'Could not open this folder' }[phase] || 'Could not complete this operation';
   let explanation = message;
   if (missing) {
     title = 'The WIT interface and TypeScript do not match';
-    explanation = `World “${$('world').value}” requires an exported ${missing[2]} function. Add it to the TypeScript source, or choose a world that matches the functions you implemented.`;
+    const declaration = missing.help?.match(/`export function ([$\w]+)`/);
+    const world = $('world').value;
+    explanation = declaration
+      ? `World “${world}” requires an exported ${declaration[1]} function.`
+      : `World “${world}” has an unimplemented export.`;
   } else if (/Parsing|Parse error/.test(message)) {
     explanation = 'Check the TypeScript syntax.';
   }
@@ -196,7 +200,7 @@ function compile(run) {
         status(data.needsExport ? 'Choose a function to run' : run ? 'Run complete' : 'Compiled successfully', 'complete');
         if (data.needsExport) $('function').focus({ preventScroll: true });
       }
-      if (data.kind === 'error') { views.log += data.log || ''; fail(data.message, data.phase); }
+      if (data.kind === 'error') { views.log += data.log || ''; fail(data.message, data.phase, data.diagnostics); }
     };
     worker.postMessage({ ...request, run, args, exportName: $('function').value || program?.export });
   } catch (error) { fail(error); }
