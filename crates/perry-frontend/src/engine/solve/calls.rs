@@ -605,21 +605,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
 
-        if let TyKind::Leaf(id) = self.types.kind(stripped)
-            && let HirType::Named(base) = id.hir(self.ctx)
-            && matches!(
-                self.decls.resolve_foreign(base),
-                Some(crate::hir::Foreign::Resource(_))
-            )
-        {
-            return Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported(format!(
-                    "method {name} is not supported on WIT resource yet"
-                )),
-                byte_offset,
-            ));
-        }
         self.check_timer_member(stripped, byte_offset)?;
 
         if matches!(name, "then" | "catch" | "finally")
@@ -781,6 +766,22 @@ impl<'h, 'a> Solver<'h, 'a> {
                     callback_result: None,
                     sparse_arrays: self.facts.sparse_arrays,
                 },
+            ));
+        }
+        if byte_offset != 0
+            && let TyKind::Leaf(id) = self.types.kind(stripped)
+            && let HirType::Named(base) = id.hir(self.ctx)
+            && matches!(
+                self.decls.resolve_foreign(base),
+                Some(crate::hir::Foreign::Resource(_))
+            )
+        {
+            return Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(format!(
+                    "method {name} is not supported on WIT resource yet"
+                )),
+                byte_offset,
             ));
         }
         let is_known_js_cb_method = matches!(

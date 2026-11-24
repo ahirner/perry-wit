@@ -621,15 +621,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else {
                     declared
                 };
-                let initial = if !is_inferred && !self.types.is_open(declared) {
-                    declared
-                } else {
-                    Ty::BOTTOM
-                };
+                let needs_context = is_inferred || self.types.is_open(declared);
+                let initial = if !needs_context { declared } else { Ty::BOTTOM };
                 if self.local_frame_slot_in(s.inst, lidx).is_none() {
                     let _ = self.ensure_instance_local(s.inst, lidx, initial);
                 }
-                if !is_inferred && !self.types.is_open(declared) {
+                if !needs_context {
                     self.write_local_value(s, lidx, declared);
                 }
                 let is_i64_cast = is_inferred
@@ -650,7 +647,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         } else {
                             None
                         }
-                    } else if (is_inferred || declared == Ty::OPEN)
+                    } else if needs_context
                         && !self.index.local_reassigned.contains(lidx.index())
                         && self.index.is_empty_object_expr(self.types, init_expr)
                     {
@@ -681,7 +678,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         || self.is_tagged_func_union_in(init_ty, s.inst)
                     {
                         self.write_local_value(s, lidx, init_ty);
-                    } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
+                    } else if !is_i64_cast && needs_context {
                         let is_kind = |t, k| {
                             matches!(self.types.kind(t), TyKind::Leaf(id)
                             if matches!(id.hir(self.ctx), HirType::Named(n) if crate::methods::Kind::builtin(n) == Some(k)))

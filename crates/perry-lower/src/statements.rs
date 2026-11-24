@@ -393,7 +393,13 @@ impl<'s> FunctionBuilder<'s> {
                 .filter(|ty| explicit || ty.deref(ctx).width() == 64),
         };
         let deferred = self.shapes.deferred_storage(ctx, id, declared);
-        let init = if deferred.is_some() {
+        let is_never = matches!(ty, HirType::Never);
+        let init = if is_never {
+            if let Some(expr) = init {
+                self.effect(ctx, expr)?;
+            }
+            None
+        } else if deferred.is_some() {
             None
         } else {
             init.map(|e| self.expression_with(ctx, e, Some(binding.expected_type(ctx))))
@@ -404,7 +410,6 @@ impl<'s> FunctionBuilder<'s> {
         {
             binding.integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
         }
-        let is_never = matches!(ty, HirType::Never);
         if let Some(value) = init
             && self.shapes.metadata.inferred_bindings.contains(&id)
             && present_type(ctx, value.get_type(ctx)) == present_type(ctx, declared)
