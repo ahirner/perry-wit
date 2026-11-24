@@ -1,5 +1,6 @@
 //! Emit expressions from solved call sites and function-value coercions.
 use super::*;
+use crate::hir_compat::GuestCall;
 
 enum CalleeValue {
     Static,
@@ -94,24 +95,7 @@ impl<'h> Emitter<'h, '_> {
                 SiteResolution::BranchResult(ty) => {
                     let value = self.rewrite_expr_inner(&rctx.with_expected(true), expr, None)?;
                     let ty = self.materialize(ty)?;
-                    let argument = self.fresh_synthetic_local()?;
-                    let local = self.fresh_synthetic_local()?;
-                    let param = Self::synth_param(argument, String::new(), ty.clone());
-                    return self.inline_call(
-                        ty.clone(),
-                        vec![
-                            Stmt::Let {
-                                id: local,
-                                name: String::new(),
-                                ty,
-                                mutable: false,
-                                init: Some(Expr::LocalGet(argument)),
-                            },
-                            Stmt::Return(Some(Expr::LocalGet(local))),
-                        ],
-                        vec![param],
-                        vec![value],
-                    );
+                    return Ok(GuestCall::Typed { value, ty }.into_hir());
                 }
                 SiteResolution::Cell(_) => {}
                 SiteResolution::FoldBool(b) => {

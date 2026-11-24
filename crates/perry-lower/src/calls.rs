@@ -85,6 +85,13 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Option<Value>> {
         if let Some(call) = hir_compat::runtime_call(callee, args, type_args) {
             return match call {
+                RuntimeCall::Guest(GuestCall::Typed { value, ty }) => {
+                    let slot = match expected {
+                        Some(slot) if crate::value_unions::is_value_union(ctx, slot) => slot,
+                        _ => self.shapes.value_type(ctx, ty)?,
+                    };
+                    self.expression_with(ctx, value, Some(slot)).map(Some)
+                }
                 RuntimeCall::Guest(GuestCall::Pending(ty)) => {
                     let settled = self.shapes.settled_type(ctx, ty)?;
                     Ok(Some(self.emit_value(ctx, |ctx| {
@@ -367,37 +374,7 @@ impl<'s> FunctionBuilder<'s> {
             return self.clone_structured_value(ctx, val).map(Some);
         }
         let callee = self.shapes.callable(callee);
-        if let Expr::Closure {
-            return_type,
-            params,
-            body,
-            ..
-        } = callee
-        {
-            if byte_offset == 0
-                && let ([param], [value]) = (params.as_slice(), args)
-                && let [
-                    Stmt::Let {
-                        id,
-                        ty,
-                        init: Some(Expr::LocalGet(source)),
-                        ..
-                    },
-                    Stmt::Return(Some(Expr::LocalGet(result))),
-                ] = body.as_slice()
-                && *source == param.id
-                && result == id
-                && ty == return_type
-                && param.ty == *ty
-                && param.default.is_none()
-                && self.shapes.local_name(*id).is_none()
-            {
-                let solved = match expected {
-                    Some(slot) if crate::value_unions::is_value_union(ctx, slot) => slot,
-                    _ => self.shapes.value_type(ctx, ty)?,
-                };
-                return self.expression_with(ctx, value, Some(solved)).map(Some);
-            }
+        if let Expr::Closure { return_type, .. } = callee {
             let mut arg_vals = Vec::with_capacity(args.len());
             for arg in args {
                 arg_vals.push(self.expression(ctx, arg)?);
