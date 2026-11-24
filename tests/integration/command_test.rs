@@ -93,6 +93,14 @@ console.log(contract(3),contract(1));
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn temporal_now_reads_the_utc_calendar_year() -> Result<()> {
+    let run = execute(r#"console.log(Temporal.Now.plainDateTimeISO("UTC").year > 0);"#).await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "true\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn console_timers_and_exceptions() -> Result<()> {
     let run = execute(
         r#"

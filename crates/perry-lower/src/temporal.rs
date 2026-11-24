@@ -432,7 +432,8 @@ impl<'s> FunctionBuilder<'s> {
                     let base = self.intrinsic(ctx, Intrinsic::PlainDateFrom, vec![epoch]);
                     return Ok(self.intrinsic(ctx, Intrinsic::PlainDateAddDays, vec![base, days]));
                 }
-                let iso = self.intrinsic(ctx, Intrinsic::DateIso, vec![ms]);
+                let date = self.intrinsic(ctx, Intrinsic::DateFromTime, vec![ms]);
+                let iso = self.intrinsic(ctx, Intrinsic::DateIso, vec![date]);
                 let start = self.number(ctx, 0.0);
                 let end = self.number(ctx, -1.0);
                 let local_iso = self.intrinsic(ctx, Intrinsic::StringSlice, vec![iso, start, end]);
