@@ -13,9 +13,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn evaluate_instance_inner(&mut self, inst_id: InstanceId) -> Result<()> {
-        let Some(inst) = self.instances.get(inst_id) else {
-            return Ok(());
-        };
+        let inst = &self.instances[inst_id];
         let is_witness = inst.is_witness;
         let (template, receiver, return_loc, has_explicit_return, param_locs_span, args_ty) = (
             inst.template,
@@ -25,9 +23,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst.param_locs,
             inst.args,
         );
-        let Some(view) = self.index.view(template) else {
-            return Ok(());
-        };
+        let view = self.index.view(template);
         if matches!(
             view.kind,
             TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
@@ -77,9 +73,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         if template == TemplateId::INIT {
             for (cid, f_idx, loc) in self.static_field_locs.clone() {
                 if let Some(init) = self
-                    .index
-                    .class(cid)
-                    .and_then(|c| self.hir.classes.get(c.hir_idx))
+                    .hir
+                    .classes
+                    .get(self.index.class(cid).hir_idx)
                     .and_then(|c| c.static_fields.get(f_idx))
                     .and_then(|f| f.init.as_ref())
                 {
@@ -192,37 +188,23 @@ impl<'h, 'a> Solver<'h, 'a> {
         local: LocalIdx,
     ) -> Option<usize> {
         let slot = self.index.local_frame_slot(local)?;
-        let owner = self.index.local_owner.get(local.index()).copied()?;
-        (owner == self.instances.get(inst_id)?.template).then_some(slot)
+        (self.index.local_owner[local] == self.instances[inst_id].template).then_some(slot)
     }
 
     pub(super) fn read_local_value(&mut self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
         if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
-            return self
-                .inst_frame_locals
-                .get(inst_id.index())?
-                .get(slot)
-                .copied();
+            return self.inst_frame_locals[inst_id].get(slot).copied();
         }
         let loc = self.local_loc_in_instance(inst_id, local)?;
         Some(self.read_loc(loc, inst_id))
     }
 
     pub(super) fn write_local_value(&mut self, s: &mut EvalState<'h>, local: LocalIdx, value: Ty) {
-        if let Some(cloc) = self
-            .collapsed_local_locs
-            .get(local.index())
-            .copied()
-            .flatten()
-        {
+        if let Some(cloc) = self.collapsed_local_locs[local] {
             self.write_loc(cloc, value);
         }
         if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
-            if let Some(cell) = self
-                .inst_frame_locals
-                .get_mut(s.inst.index())
-                .and_then(|f| f.get_mut(slot))
-            {
+            if let Some(cell) = self.inst_frame_locals[s.inst].get_mut(slot) {
                 let (next, self_nested) = self.types.join_bounded(*cell, value);
                 if self_nested {
                     self.self_nested_locals.insert(local.index());
@@ -249,31 +231,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         local: LocalIdx,
     ) -> Option<LocId> {
         if self.index.local_module.contains(local.index()) {
-            return self.index.local_loc.get(local.index()).copied().flatten();
+            return self.index.local_loc[local];
         }
         let mut cursor = CaptureOwner::Instance(inst_id);
         loop {
             match cursor {
                 CaptureOwner::Instance(cur) => {
-                    if let Some(slot) = self
-                        .inst_locals
-                        .get(cur.index())
-                        .and_then(|sl| sl.iter().find(|s| s.local == local))
-                    {
+                    if let Some(slot) = self.inst_locals[cur].iter().find(|s| s.local == local) {
                         return Some(slot.loc);
                     }
-                    cursor = self
-                        .instances
-                        .get(cur)
-                        .map_or(CaptureOwner::None, |i| i.capture_owner);
+                    cursor = self.instances[cur].capture_owner;
                 }
-                CaptureOwner::Template(_) => {
-                    return self
-                        .collapsed_local_locs
-                        .get(local.index())
-                        .copied()
-                        .flatten();
-                }
+                CaptureOwner::Template(_) => return self.collapsed_local_locs[local],
                 CaptureOwner::None => return None,
             }
         }
@@ -286,21 +255,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         initial: Ty,
     ) -> LocId {
         if self.index.local_module.contains(local.index())
-            && let Some(loc) = self.index.local_loc.get(local.index()).copied().flatten()
+            && let Some(loc) = self.index.local_loc[local]
         {
             return loc;
         }
-        if let Some(slot) = self
-            .inst_locals
-            .get(inst_id.index())
-            .and_then(|sl| sl.iter().find(|s| s.local == local))
-        {
+        if let Some(slot) = self.inst_locals[inst_id].iter().find(|s| s.local == local) {
             return slot.loc;
         }
         let loc = self.alloc_loc(initial);
-        if let Some(slots) = self.inst_locals.get_mut(inst_id.index()) {
-            slots.push(InstanceLocalSlot { local, loc });
-        }
+        self.inst_locals[inst_id].push(InstanceLocalSlot { local, loc });
         loc
     }
 
@@ -522,6 +485,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn propagate_writes(&mut self, caller: InstanceId, callee: InstanceId) {
         if let Ok([caller, callee]) = self
             .inst_written
+            .as_mut_slice()
             .get_disjoint_mut([caller.index(), callee.index()])
         {
             caller.union_with(callee);
@@ -531,29 +495,18 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn mark_written(&mut self, inst_id: InstanceId, local: LocalIdx) {
         let mut cursor = Some(inst_id);
         while let Some(cur) = cursor {
-            if let Some(w) = self.inst_written.get_mut(cur.index()) {
-                w.insert(local.index());
-            }
-            cursor = self
-                .instances
-                .get(cur)
-                .and_then(|i| i.capture_owner.instance());
+            self.inst_written[cur].insert(local.index());
+            cursor = self.instances[cur].capture_owner.instance();
         }
     }
 
     pub(super) fn record_site(&mut self, inst_id: InstanceId, expr: &Expr, res: SiteResolution) {
-        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
-            return;
-        };
+        let template = self.instances[inst_id].template;
         let Some(local_site) = self.index.site_of(template, expr) else {
             debug_assert!(false, "unindexed site in template {}", template.index());
             return;
         };
-        if let Some(slot) = self
-            .inst_sites
-            .get_mut(inst_id.index())
-            .and_then(|s| s.get_mut(local_site))
-        {
+        if let Some(slot) = self.inst_sites[inst_id].get_mut(local_site) {
             slot.resolution = Some(res);
         }
     }
@@ -740,12 +693,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     self.constrain_promise_loc(loc, expected_inner);
                 }
-                if self
-                    .instances
-                    .get(s.inst)
-                    .and_then(|i| self.index.view(i.template))
-                    .is_some_and(|v| v.is_async)
-                {
+                if self.index.view(self.instances[s.inst].template).is_async {
                     while let Some(inner) = self.unwrap_promise_once(s.inst, ty) {
                         ty = inner;
                     }
@@ -868,105 +816,71 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn finish(mut self, init_inst: InstanceId) -> Solved {
+    pub(super) fn finish(self, init_inst: InstanceId) -> Solved {
         let live_instances = self.compute_live_instances();
 
-        let inst_local_tys = std::mem::take(&mut self.inst_locals)
-            .iter()
-            .map(|slots| {
-                slots
-                    .iter()
-                    .filter_map(|sl| {
-                        Some((*self.index.local_ids.get(sl.local)?, self.locations[sl.loc]))
-                    })
-                    .collect()
-            })
-            .collect();
+        let inst_local_tys = self.inst_locals.map(|slots| {
+            slots
+                .iter()
+                .map(|sl| (self.index.local_ids[sl.local], self.locations[sl.loc]))
+                .collect()
+        });
 
-        let mut module_local_tys = vec![None; self.index.local_count()];
-        for l_idx in self.index.local_module.iter() {
-            let ty = self
-                .index
-                .local_loc
-                .get(l_idx)
-                .copied()
-                .flatten()
-                .map_or(Ty::OPEN, |loc| self.locations[loc]);
-            if let Some(slot) = module_local_tys.get_mut(l_idx) {
-                *slot = Some(ty);
-            }
-        }
-
-        let mut class_static_field_tys: Vec<Vec<Ty>> = self
+        let module_local_tys = self
             .index
-            .classes
-            .iter()
-            .map(|c| {
-                vec![
-                    Ty::OPEN;
-                    self.hir
-                        .classes
-                        .get(c.hir_idx)
-                        .map_or(0, |hc| hc.static_fields.len())
-                ]
-            })
-            .collect();
+            .local_loc
+            .map(|&opt| opt.map(|loc| self.locations[loc]));
+
+        let mut class_static_field_tys = self.index.classes.map(|c| {
+            vec![
+                Ty::OPEN;
+                self.hir
+                    .classes
+                    .get(c.hir_idx)
+                    .map_or(0, |hc| hc.static_fields.len())
+            ]
+        });
         for &(cid, f_idx, loc) in &self.static_field_locs {
-            if let Some(slot) = class_static_field_tys
-                .get_mut(cid.index())
-                .and_then(|f| f.get_mut(f_idx))
-            {
+            if let Some(slot) = class_static_field_tys[cid].get_mut(f_idx) {
                 *slot = self.locations[loc];
             }
         }
 
-        let mut class_inst_methods = vec![Vec::new(); self.class_insts.len()];
-        let mut class_inst_getters = vec![Vec::new(); self.class_insts.len()];
-        let mut class_inst_setters = vec![Vec::new(); self.class_insts.len()];
-        let mut class_static_methods = vec![Vec::new(); self.index.classes.len()];
+        let mut class_inst_methods = self.class_insts.filled(Vec::new());
+        let mut class_inst_getters = self.class_insts.filled(Vec::new());
+        let mut class_inst_setters = self.class_insts.filled(Vec::new());
+        let mut class_static_methods = self.index.classes.filled(Vec::new());
         for (id, inst) in self.instances.iter_enumerated() {
             if !live_instances.contains(id.index()) {
                 continue;
             }
-            let Some(view) = self.index.view(inst.template) else {
-                continue;
-            };
+            let view = self.index.view(inst.template);
             match view.kind {
                 TemplateKind::ClassMethod => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
-                        && let Some(list) = class_inst_methods.get_mut(ci.index())
-                    {
-                        list.push(id);
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
+                        class_inst_methods[ci].push(id);
                     }
                 }
                 TemplateKind::ClassGetter(getter_idx) => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
-                        && let Some(list) = class_inst_getters.get_mut(ci.index())
-                    {
-                        list.push((getter_idx, id));
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
+                        class_inst_getters[ci].push((getter_idx, id));
                     }
                 }
                 TemplateKind::ClassSetter(setter_idx) => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class)
-                        && let Some(list) = class_inst_setters.get_mut(ci.index())
-                    {
-                        list.push((setter_idx, id));
+                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
+                        class_inst_setters[ci].push((setter_idx, id));
                     }
                 }
                 TemplateKind::ClassStaticMethod(class) => {
-                    if let Some(list) = class_static_methods.get_mut(class.index()) {
-                        list.push(id);
-                    }
+                    class_static_methods[class].push(id);
                 }
                 _ => {}
             }
         }
 
-        let collapsed_local_tys: Vec<Option<Ty>> = self
+        let collapsed_local_tys = self
             .collapsed_local_locs
-            .iter()
-            .map(|opt| opt.and_then(|loc| self.locations.get(loc).copied()))
-            .collect();
+            .map(|&opt| opt.map(|loc| self.locations[loc]));
 
         Solved {
             witness_instances: self.witness_instances,

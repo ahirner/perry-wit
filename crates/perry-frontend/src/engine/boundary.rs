@@ -123,11 +123,11 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) hir_class_is_literal: BitSet,
     literal_classes: Vec<(NameId, &'h [perry_hir::ir::ClassField])>,
     pub(crate) local_ids: IdxVec<LocalIdx, LocalId>,
-    pub(crate) local_owner: Vec<TemplateId>,
+    pub(crate) local_owner: IdxVec<LocalIdx, TemplateId>,
     pub(crate) local_declared: IdxVec<LocalIdx, Ty>,
-    pub(crate) local_loc: Vec<Option<LocId>>,
-    pub(crate) local_value_use: Vec<Option<Span>>,
-    pub(crate) local_regex_pattern: Vec<Option<&'h str>>,
+    pub(crate) local_loc: IdxVec<LocalIdx, Option<LocId>>,
+    pub(crate) local_value_use: IdxVec<LocalIdx, Option<Span>>,
+    pub(crate) local_regex_pattern: IdxVec<LocalIdx, Option<&'h str>>,
     local_to_idx: Vec<Option<LocalIdx>>,
     pub(crate) local_inferred: BitSet,
     pub(crate) local_deferred: BitSet,
@@ -143,10 +143,10 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) capture_free_templates: BitSet,
     pub(crate) returns_empty_list: BitSet,
     pub(crate) closure_in_loop: BitSet,
-    pub(crate) closure_owner_template: Vec<Option<TemplateId>>,
-    template_captures: Vec<Vec<LocalId>>,
-    template_captured_locals: Vec<Vec<LocalIdx>>,
-    local_frame_slot: Vec<Option<u32>>,
+    pub(crate) closure_owner_template: IdxVec<TemplateId, Option<TemplateId>>,
+    template_captures: IdxVec<TemplateId, Vec<LocalId>>,
+    template_captured_locals: IdxVec<TemplateId, Vec<LocalIdx>>,
+    local_frame_slot: IdxVec<LocalIdx, Option<u32>>,
     pub(crate) location_types: IdxVec<LocId, Ty>,
     pub(crate) max_func_id: FuncId,
     pub(crate) max_local_id: LocalId,
@@ -379,38 +379,27 @@ impl<'h> ModuleIndex<'h> {
                 }
             }
         }
-        idx.local_frame_slot = vec![None; idx.local_ids.len()];
-        idx.template_captured_locals = vec![Vec::new(); idx.views.len()];
-        for (lidx_i, (&owner, slot_out)) in idx
-            .local_owner
-            .iter()
-            .zip(idx.local_frame_slot.iter_mut())
-            .enumerate()
-        {
-            if !idx.local_module.contains(lidx_i) && !idx.local_param.contains(lidx_i) {
-                if !idx.local_captured.contains(lidx_i) {
+        idx.local_frame_slot = idx.local_ids.filled(None);
+        idx.template_captured_locals = idx.views.filled(Vec::new());
+        for (lidx, &owner) in idx.local_owner.iter_enumerated() {
+            let li = lidx.index();
+            if !idx.local_module.contains(li) && !idx.local_param.contains(li) {
+                if !idx.local_captured.contains(li) {
                     let count = &mut idx.layouts[owner].frame_slots;
-                    *slot_out = Some(*count as u32);
+                    idx.local_frame_slot[lidx] = Some(*count as u32);
                     *count += 1;
-                } else if let Some(list) = idx.template_captured_locals.get_mut(owner.index())
-                    && let Some(&lid) = idx.local_ids.as_slice().get(lidx_i)
-                    && let Some(lidx) = idx.local_to_idx.get(lid as usize).copied().flatten()
-                {
-                    list.push(lidx);
+                } else {
+                    idx.template_captured_locals[owner].push(lidx);
                 }
             }
         }
-        let mut template_captures: Vec<Vec<LocalId>> = idx
-            .views
-            .iter()
-            .map(|v| {
-                v.captures
-                    .iter()
-                    .copied()
-                    .filter(|&c| idx.is_non_global_local(c))
-                    .collect()
-            })
-            .collect();
+        let mut template_captures = idx.views.map(|v| {
+            v.captures
+                .iter()
+                .copied()
+                .filter(|&c| idx.is_non_global_local(c))
+                .collect::<Vec<_>>()
+        });
         for (tid, view) in idx.views.iter_enumerated() {
             for &cap_id in view.captures {
                 let Some(lidx) = idx.local_idx(cap_id) else {
@@ -419,38 +408,27 @@ impl<'h> ModuleIndex<'h> {
                 if idx.local_module.contains(lidx.index()) {
                     continue;
                 }
-                let cap_owner = idx.local_owner.get(lidx.index()).copied();
-                let mut cur = idx
-                    .closure_owner_template
-                    .get(tid.index())
-                    .copied()
-                    .flatten();
+                let cap_owner = idx.local_owner[lidx];
+                let mut cur = idx.closure_owner_template[tid];
                 while let Some(parent) = cur {
-                    if Some(parent) == cap_owner || parent == TemplateId::INIT {
+                    if parent == cap_owner || parent == TemplateId::INIT {
                         break;
                     }
-                    if let Some(list) = template_captures.get_mut(parent.index()) {
-                        list.push(cap_id);
-                    }
-                    cur = idx
-                        .closure_owner_template
-                        .get(parent.index())
-                        .copied()
-                        .flatten();
+                    template_captures[parent].push(cap_id);
+                    cur = idx.closure_owner_template[parent];
                 }
             }
         }
-        for (i, caps) in template_captures.iter_mut().enumerate() {
+        for (tid, view) in idx.views.iter_enumerated() {
+            let caps = &mut template_captures[tid];
             caps.sort_unstable();
             caps.dedup();
-            let is_promise_handle = idx.views.as_slice().get(i).is_some_and(|v| {
-                matches!(
-                    v.kind,
-                    TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-                )
-            });
+            let is_promise_handle = matches!(
+                view.kind,
+                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+            );
             if caps.is_empty() && !is_promise_handle {
-                idx.capture_free_templates.insert(i);
+                idx.capture_free_templates.insert(tid.index());
             }
         }
         idx.template_captures = template_captures;
@@ -458,9 +436,7 @@ impl<'h> ModuleIndex<'h> {
     }
 
     pub(crate) fn local_frame_slot(&self, local: LocalIdx) -> Option<usize> {
-        self.local_frame_slot
-            .get(local.index())?
-            .map(|s| s as usize)
+        self.local_frame_slot[local].map(|s| s as usize)
     }
     pub(crate) fn template_frame_count(&self, t: TemplateId) -> usize {
         self.layouts[t].frame_slots
@@ -473,11 +449,11 @@ impl<'h> ModuleIndex<'h> {
             .binary_search_by_key(&(std::ptr::from_ref(expr) as usize), |s| s.address)
             .ok()
     }
-    pub(crate) fn view(&self, id: TemplateId) -> Option<&TemplateView<'h>> {
-        self.views.get(id)
+    pub(crate) fn view(&self, id: TemplateId) -> &TemplateView<'h> {
+        &self.views[id]
     }
-    pub(crate) fn class(&self, id: ClassId) -> Option<&ClassInfo> {
-        self.classes.get(id)
+    pub(crate) fn class(&self, id: ClassId) -> &ClassInfo {
+        &self.classes[id]
     }
     pub(crate) fn class_by_name_id(&self, name: NameId) -> Option<ClassId> {
         self.classes
@@ -521,23 +497,16 @@ impl<'h> ModuleIndex<'h> {
             .is_some_and(|li| !self.local_module.contains(li.index()))
     }
     pub(crate) fn template_captures(&self, t: TemplateId) -> &[LocalId] {
-        self.template_captures
-            .get(t.index())
-            .map_or(&[], Vec::as_slice)
+        &self.template_captures[t]
     }
     pub(crate) fn template_captured_locals(&self, t: TemplateId) -> &[LocalIdx] {
-        self.template_captured_locals
-            .get(t.index())
-            .map_or(&[], Vec::as_slice)
+        &self.template_captured_locals[t]
     }
     pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
         self.func_to_template.get(id as usize).copied().flatten()
     }
     pub(crate) fn local_idx(&self, id: LocalId) -> Option<LocalIdx> {
         self.local_to_idx.get(id as usize).copied().flatten()
-    }
-    pub(crate) fn local_count(&self) -> usize {
-        self.local_ids.len()
     }
 
     fn set_func_template(&mut self, func_id: FuncId, tid: TemplateId) {
@@ -635,10 +604,8 @@ impl<'h> ModuleIndex<'h> {
             if facts.is_param_annotated(span.start) {
                 self.local_param_annotated.insert(idx.index());
             }
-            if let Some(use_span) = facts.param_value_use(span.start)
-                && let Some(slot) = self.local_value_use.get_mut(idx.index())
-            {
-                *slot = Some(use_span);
+            if let Some(use_span) = facts.param_value_use(span.start) {
+                self.local_value_use[idx] = Some(use_span);
             }
         }
         idx
@@ -692,18 +659,14 @@ impl<'h> ModuleIndex<'h> {
                     if is_module_top && !self.local_for_head.contains(local.index()) {
                         self.local_module.insert(local.index());
                         let loc = self.add_location(Ty::BOTTOM);
-                        if let Some(slot) = self.local_loc.get_mut(local.index()) {
-                            *slot = Some(loc);
-                        }
+                        self.local_loc[local] = Some(loc);
                     }
                     if let Some(init) = init {
                         if matches!(init, Expr::Null | Expr::Undefined) {
                             self.local_nullish_init.insert(local.index());
                         }
-                        if let Expr::RegExp { pattern, .. } = init
-                            && let Some(slot) = self.local_regex_pattern.get_mut(local.index())
-                        {
-                            *slot = Some(pattern.as_str());
+                        if let Expr::RegExp { pattern, .. } = init {
+                            self.local_regex_pattern[local] = Some(pattern.as_str());
                         }
                         Self::record_site_expr(scan, owner, init);
                         self.scan_expr(scan, init, owner, in_loop);
@@ -935,9 +898,7 @@ impl<'h> ModuleIndex<'h> {
                     explicit_return: exp_ret,
                 });
                 scan.raw_sites.resize_with(self.views.len(), Vec::new);
-                if let Some(slot) = self.closure_owner_template.get_mut(tid.index()) {
-                    *slot = Some(owner);
-                }
+                self.closure_owner_template[tid] = Some(owner);
                 if in_loop {
                     self.closure_in_loop.insert(tid.index());
                 }
@@ -966,13 +927,9 @@ impl<'h> ModuleIndex<'h> {
             if is_write {
                 self.local_reassigned.insert(lidx.index());
             }
-            if self.local_owner.get(lidx.index()).copied() != Some(user_template) {
+            if self.local_owner[lidx] != user_template {
                 self.local_captured.insert(lidx.index());
-                if is_write
-                    && self
-                        .view(user_template)
-                        .is_some_and(|v| v.kind == TemplateKind::Closure)
-                {
+                if is_write && self.view(user_template).kind == TemplateKind::Closure {
                     self.local_written_from_closure.insert(lidx.index());
                 }
             }

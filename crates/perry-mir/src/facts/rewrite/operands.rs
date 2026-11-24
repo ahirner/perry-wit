@@ -102,7 +102,8 @@ fn replace_with_scalar(
     }
     if intrinsic == crate::intrinsics::Intrinsic::BigIntNegate
         && let Some(value) = first_arg
-        && let Some(domain) = state.representation(result.expect("intrinsic result"))
+        && let Some(res) = result
+        && let Some(domain) = state.representation(res)
     {
         let ty = domain.ty(ctx);
         let zero = domain.constant(ctx, 0);

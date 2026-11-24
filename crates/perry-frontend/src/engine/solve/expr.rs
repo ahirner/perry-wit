@@ -22,8 +22,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         );
         self.index
             .class_by_name_id(cn)
-            .and_then(|cid| self.index.class(cid))
-            .and_then(|c| ClassInfo::find(&c.static_field_locs, fn_))
+            .and_then(|cid| ClassInfo::find(&self.index.class(cid).static_field_locs, fn_))
             .map_or(Ty::OPEN, |loc| self.read_loc(loc, inst_id))
     }
 
@@ -191,8 +190,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else {
                     self.index
                         .template_of_func(*func_id)
-                        .and_then(|t| self.index.view(t))
-                        .map_or(&[][..], |v| v.body)
+                        .map_or(&[][..], |t| self.index.view(t).body)
                 };
                 for stmt in stmts {
                     perry_hir::analysis::collect_local_refs_stmt(stmt, &mut refs, &mut defined);
@@ -250,13 +248,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             && let Some(cap_ty) = self.read_local_value(s.inst, lidx)
                         {
                             self.mark_escaping_env(s.inst, cap_ty);
-                            if is_collapsed
-                                && let Some(cloc) = self
-                                    .collapsed_local_locs
-                                    .get(lidx.index())
-                                    .copied()
-                                    .flatten()
-                            {
+                            if is_collapsed && let Some(cloc) = self.collapsed_local_locs[lidx] {
                                 let dst_ty = self.read_loc(cloc, s.inst);
                                 if cap_ty != dst_ty
                                     && self.is_tagged_func_union_in(cap_ty, s.inst)
@@ -652,8 +644,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(loc) = self
                     .index
                     .class_by_name_id(cn)
-                    .and_then(|cid| self.index.class(cid))
-                    .and_then(|c| ClassInfo::find(&c.static_field_locs, fn_))
+                    .and_then(|cid| ClassInfo::find(&self.index.class(cid).static_field_locs, fn_))
                 {
                     let norm = self
                         .types
@@ -1050,17 +1041,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .collect();
             for tid in shared {
                 if !self.is_escaping_env(tid, inst_id)
-                    && self
-                        .index
-                        .view(tid)
-                        .is_some_and(|v| v.kind == TemplateKind::Closure)
+                    && self.index.view(tid).kind == TemplateKind::Closure
                     && (self.index.closure_in_loop.contains(tid.index())
-                        || self
-                            .index
-                            .closure_owner_template
-                            .get(tid.index())
-                            .copied()
-                            .flatten()
+                        || self.index.closure_owner_template[tid]
                             .is_some_and(|owner| owner != TemplateId::INIT))
                 {
                     let err = Diagnostic::unsupported(
@@ -1165,11 +1148,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let prop_id = self.types.intern_name(property);
         if norm != Ty::BOTTOM
-            && let Some(cinst) = self.class_insts.get(cinst_id)
-            && let Some(setter_tid) = self
-                .index
-                .class(cinst.class)
-                .and_then(|c| ClassInfo::find(&c.setters, prop_id))
+            && let Some(setter_tid) = ClassInfo::find(
+                &self.index.class(self.class_insts[cinst_id].class).setters,
+                prop_id,
+            )
         {
             self.request_instance(
                 InstanceReq::new(setter_tid, &[norm], Some(inst_id))
@@ -1187,10 +1169,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(self.index.local_declared[lidx]);
         };
         if self.index.local_deferred.contains(lidx.index())
-            && self
-                .inst_written
-                .get(s.inst.index())
-                .is_none_or(|w| !w.contains(lidx.index()))
+            && !self.inst_written[s.inst].contains(lidx.index())
             && ty == Ty::BOTTOM
         {
             return Ok(Ty::VOID);
@@ -1381,12 +1360,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(self.read_loc(loc, s.inst));
             }
             let pname = self.types.intern_name(property);
-            if let Some(cinst) = self.class_insts.get(cinst_id)
-                && let Some(getter_tid) = self
-                    .index
-                    .class(cinst.class)
-                    .and_then(|c| ClassInfo::find(&c.getters, pname))
-            {
+            if let Some(getter_tid) = ClassInfo::find(
+                &self.index.class(self.class_insts[cinst_id].class).getters,
+                pname,
+            ) {
                 let target = self.request_instance(
                     InstanceReq::new(getter_tid, &[], Some(s.inst))
                         .receiver(Some(Receiver::Class(cinst_id))),
@@ -1401,11 +1378,11 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
-        let cinst = self.class_insts.get(cinst_id)?;
+        let cinst = &self.class_insts[cinst_id];
         let f_idx = self
             .hir
             .classes
-            .get(self.index.class(cinst.class)?.hir_idx)?
+            .get(self.index.class(cinst.class).hir_idx)?
             .fields
             .iter()
             .position(|f| f.name == property)?;

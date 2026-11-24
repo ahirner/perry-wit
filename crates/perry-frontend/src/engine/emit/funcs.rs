@@ -55,9 +55,10 @@ impl<'h, 'a> Emitter<'h, 'a> {
             match cur {
                 CaptureOwner::Instance(c) => {
                     if let Some(inst) = self.solved.instances.get(c)
-                        && let Some(view) = self.index.view(inst.template)
                         && let Some(locs) = self.solved.param_locs.get(inst.param_locs.range())
-                        && let Some(&loc) = view
+                        && let Some(&loc) = self
+                            .index
+                            .view(inst.template)
                             .params
                             .iter()
                             .zip(locs)
@@ -80,12 +81,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 }
                 CaptureOwner::Template(_) => {
                     let lidx = self.index.local_idx(id)?;
-                    return self
-                        .solved
-                        .collapsed_local_tys
-                        .get(lidx.index())
-                        .copied()
-                        .flatten()
+                    return self.solved.collapsed_local_tys[lidx]
                         .filter(|&ty| !matches!(ty, Ty::BOTTOM | Ty::OPEN));
                 }
                 CaptureOwner::None => return None,
@@ -128,12 +124,10 @@ impl<'h, 'a> Emitter<'h, 'a> {
         if !self.emitted_env_classes.insert(ident) {
             return Ok(name);
         }
-        if self.index.view(ident.template).is_some_and(|v| {
-            matches!(
-                v.kind,
-                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-            )
-        }) {
+        if matches!(
+            self.index.view(ident.template).kind,
+            TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+        ) {
             return self.emit_promise_env_class(ident, name);
         }
         let layout = self.env_layout(ident)?;
@@ -417,12 +411,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
     }
 
     pub(super) fn arm_return_hir(&mut self, inst_id: InstanceId) -> Result<HirType> {
-        let inst = self.instance(inst_id, "missing dispatch arm instance")?;
-        let ret = *self
-            .solved
-            .locations
-            .get(inst.return_loc)
-            .ok_or_else(|| Diagnostic::internal("missing dispatch arm return location"))?;
+        let inst = &self.solved.instances[inst_id];
+        let ret = self.solved.locations[inst.return_loc];
         if matches!(ret, Ty::BOTTOM | Ty::VOID | Ty::NEVER) || self.is_zero_sized_func(ret) {
             Ok(HirType::Void)
         } else {
@@ -476,19 +466,13 @@ impl<'h, 'a> Emitter<'h, 'a> {
     }
 
     pub(super) fn emit_helper(&mut self, id: HelperId) -> Result<FuncId> {
-        if let Some(Some(fid)) = self.helper_fids.get(id.index()).copied() {
+        if let Some(fid) = self.helper_fids[id] {
             return Ok(fid);
         }
-        let spec = *self
-            .solved
-            .helpers
-            .get(id)
-            .ok_or_else(|| Diagnostic::internal("helper id out of range"))?;
+        let spec = self.solved.helpers[id];
         let byte_offset = self.solved.helper_byte_offsets[id];
         let fid = self.fresh_func_id()?;
-        if let Some(slot) = self.helper_fids.get_mut(id.index()) {
-            *slot = Some(fid);
-        }
+        self.helper_fids[id] = Some(fid);
         let func = match spec {
             HelperSpec::ThrowTypeError => self.build_throw_type_error(fid),
             HelperSpec::TypeOfFn(op_ty) => self.build_typeof_fn(fid, op_ty)?,
@@ -616,7 +600,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         let mut unique_rets: Vec<HirType> = Vec::new();
         let mut any_async = false;
         for &(ident, target_inst) in arms {
-            if self.index.view(ident.template).is_some_and(|v| v.is_async) {
+            if self.index.view(ident.template).is_async {
                 any_async = true;
             }
             let r = self.arm_return_hir(target_inst)?;
@@ -651,13 +635,9 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
         let mut cases = Vec::with_capacity(arms.len());
         for &(ident, target_inst) in arms {
-            let target_fid = self
-                .instance(target_inst, "missing dispatch arm instance")?
-                .emitted_func_id;
-            let view = self
-                .index
-                .view(ident.template)
-                .ok_or_else(|| Diagnostic::internal("missing dispatch arm template"))?;
+            let target = &self.solved.instances[target_inst];
+            let target_fid = target.emitted_func_id;
+            let view = self.index.view(ident.template);
             let mut call_args = Vec::with_capacity(arg_pids.len() + 2);
             if self.is_env_template(ident.template) {
                 call_args.push(Self::prop_get(Expr::LocalGet(fn_pid), "val"));
@@ -674,10 +654,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             let has_rest = view.params.iter().any(|p| p.is_rest);
             let max_args = if is_promise_handle {
                 self.types
-                    .tuple_slice(
-                        self.instance(target_inst, "missing dispatch arm instance")?
-                            .args,
-                    )
+                    .tuple_slice(target.args)
                     .len()
                     .min(arg_pids.len())
             } else if has_rest {

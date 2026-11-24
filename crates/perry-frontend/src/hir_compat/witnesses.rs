@@ -320,7 +320,8 @@ pub(super) fn resolve<'a>(
                 let method_name = to_camel_case(f.item_name());
                 class.body.iter().find_map(|m| match m {
                     ast::ClassMember::Method(m)
-                        if m.is_static == is_static && key(&m.key) == Some(method_name.as_str()) =>
+                        if m.is_static == is_static
+                            && key(&m.key) == Some(method_name.as_str()) =>
                     {
                         Some(m.span)
                     }
@@ -451,10 +452,7 @@ fn key(prop: &ast::PropName) -> Option<&str> {
 }
 
 impl Roots {
-    pub(super) fn in_hir(
-        self,
-        module: &mut perry_hir::ir::Module,
-    ) -> Result<Vec<Witness<FuncId>>> {
+    pub(super) fn in_hir(self, module: &mut perry_hir::ir::Module) -> Result<Vec<Witness<FuncId>>> {
         use perry_hir::ir::{Expr, Stmt};
         module.init.retain(|stmt| {
             let Stmt::Let {
@@ -530,7 +528,9 @@ impl Roots {
                         ResourceAction::New => ResourceAction::New,
                         ResourceAction::Call(span) => ResourceAction::Call(id(span)?),
                         ResourceAction::Static(span) => ResourceAction::Static(id(span)?),
-                        ResourceAction::Drop(span) => ResourceAction::Drop(span.map(id).transpose()?),
+                        ResourceAction::Drop(span) => {
+                            ResourceAction::Drop(span.map(id).transpose()?)
+                        }
                     };
                     (None, Some(ClassCall { owner, action }))
                 }
@@ -545,7 +545,14 @@ impl Roots {
         }
         if !classes.is_empty() {
             let (local, function) = perry_hir::lexical_frames::max_ids(module);
-            super::resource_classes::bind(module, &classes, &calls, &mut witnesses, local, function)?;
+            super::resource_classes::bind(
+                module,
+                &classes,
+                &calls,
+                &mut witnesses,
+                local,
+                function,
+            )?;
         }
         Ok(witnesses)
     }

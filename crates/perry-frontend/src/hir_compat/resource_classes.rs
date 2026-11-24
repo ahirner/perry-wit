@@ -141,14 +141,11 @@ pub(super) fn bind(
         let c = &hir.classes[resource.class];
         let table = fresh(&mut max_local)?;
         let next = fresh(&mut max_local)?;
-        let ctor = calls
-            .iter()
-            .zip(witnesses.iter())
-            .find_map(|(call, w)| {
-                call.as_ref()
-                    .filter(|call| matches!(call.action, ResourceAction::New) && call.owner == owner)?;
-                w.signature.as_ref()
-            });
+        let ctor = calls.iter().zip(witnesses.iter()).find_map(|(call, w)| {
+            call.as_ref()
+                .filter(|call| matches!(call.action, ResourceAction::New) && call.owner == owner)?;
+            w.signature.as_ref()
+        });
         let class_type = match ctor {
             Some(signature)
                 if !signature.params.is_empty()

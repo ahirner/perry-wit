@@ -38,9 +38,7 @@ impl<'h> Emitter<'h, '_> {
                 Ok(synth_call(fid, vec![rewritten], 0, 0))
             }
             Some(FuncCoercion::EnvCallback { target, input_tys }) => {
-                let target_fid = self
-                    .instance(target, "missing env callback target instance")?
-                    .emitted_func_id;
+                let target_fid = self.solved.instances[target].emitted_func_id;
                 let inputs = self.types.tuple_slice(input_tys);
                 let arm_ret = self.arm_return_hir(target)?;
                 self.emit_callback_wrapper(
@@ -59,7 +57,7 @@ impl<'h> Emitter<'h, '_> {
                 let inputs = self.types.tuple_slice(input_tys);
                 let max_params = arm_slice
                     .iter()
-                    .filter_map(|&(ident, _)| self.index.view(ident.template))
+                    .map(|&(ident, _)| self.index.view(ident.template))
                     .map(|v| {
                         if v.params.iter().any(|p| p.is_rest) {
                             inputs.len()
@@ -152,10 +150,9 @@ impl<'h> Emitter<'h, '_> {
                     target,
                     keep_inline_closure,
                 } => {
-                    let (emitted_func_id, return_loc, param_locs_span) = {
-                        let ti = self.instance(target, "missing callback target instance")?;
-                        (ti.emitted_func_id, ti.return_loc, ti.param_locs)
-                    };
+                    let ti = &self.solved.instances[target];
+                    let (emitted_func_id, return_loc, param_locs_span) =
+                        (ti.emitted_func_id, ti.return_loc, ti.param_locs);
                     if !keep_inline_closure {
                         return Ok(Expr::FuncRef(emitted_func_id));
                     }
@@ -229,9 +226,7 @@ impl<'h> Emitter<'h, '_> {
                     pass_receiver,
                     pass_env,
                 } => {
-                    let fid = self
-                        .instance(target, "missing direct call target instance")?
-                        .emitted_func_id;
+                    let fid = self.solved.instances[target].emitted_func_id;
                     if let Expr::CallSpread {
                         args,
                         type_args,
@@ -499,10 +494,7 @@ impl<'h> Emitter<'h, '_> {
                     target,
                     argument_types,
                 } => {
-                    let method_name = self
-                        .instance(target, "missing method call target instance")?
-                        .emitted_method_name
-                        .clone();
+                    let method_name = self.solved.instances[target].emitted_method_name.clone();
                     let mut out = expr.clone();
                     match (expr, &mut out) {
                         (

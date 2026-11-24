@@ -14,10 +14,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .index
                 .template_of_func(fid)
                 .ok_or_else(|| Diagnostic::internal("missing witness template"))?;
-            let view = self
-                .index
-                .view(tid)
-                .ok_or_else(|| Diagnostic::internal("missing witness declaration"))?;
+            let view = self.index.view(tid);
             let mut args = Vec::with_capacity(view.params.len());
             if let Some(signature) = &witness.signature {
                 for (i, ty) in signature.params.iter().enumerate() {
@@ -49,12 +46,8 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeId, Ty)> {
-        let Some(view) = self.index.view(tid) else {
-            return Vec::new();
-        };
-        let Some(tps) = self.template_type_params.get(tid.index()) else {
-            return Vec::new();
-        };
+        let view = self.index.view(tid);
+        let tps = &self.template_type_params[tid];
         view.type_params
             .iter()
             .zip(tps)
@@ -153,10 +146,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             caller,
             is_inline_callback,
         } = req;
-        let view = self
-            .index
-            .view(template)
-            .ok_or_else(|| Diagnostic::internal("inference engine requested unknown template"))?;
+        let view = self.index.view(template);
         let is_monomorphic_plain = matches!(view.kind, TemplateKind::Function)
             && view.type_params.is_empty()
             && !args
@@ -256,9 +246,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             captures_non_global |= self.collect_non_global_caps(view.captures, &mut inst_caps);
         }
         for &arg in args {
-            if let TyKind::Func(ident) = self.types.kind(arg)
-                && let Some(cb) = self.index.view(ident.template)
-            {
+            if let TyKind::Func(ident) = self.types.kind(arg) {
+                let cb = self.index.view(ident.template);
                 captures_non_global |= self.collect_non_global_caps(cb.captures, &mut inst_caps);
             }
         }
@@ -273,10 +262,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         if witness.is_some() && type_bindings.is_empty() {
             type_bindings = self.default_type_param_bindings(template);
         }
-        if caller.is_some()
-            && !view.type_params.is_empty()
-            && let Some(own_tps) = self.template_type_params.get(template.index())
-        {
+        if caller.is_some() && !view.type_params.is_empty() {
+            let own_tps = &self.template_type_params[template];
             for (tp, &tp_id) in view.type_params.iter().zip(own_tps) {
                 if !type_bindings.iter().any(|(id, _)| *id == tp_id) {
                     let mut err = diag!(
@@ -352,12 +339,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.param_locs.push(loc);
             if let Some(local) = self.index.local_idx(param.id) {
                 local_slots.push(InstanceLocalSlot { local, loc });
-                if let Some(cloc) = self
-                    .collapsed_local_locs
-                    .get(local.index())
-                    .copied()
-                    .flatten()
-                {
+                if let Some(cloc) = self.collapsed_local_locs[local] {
                     self.write_loc(cloc, bound_ty);
                 }
             }
@@ -483,29 +465,20 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut bindings = capture_owner
             .instance()
             .map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
-        if let Some(cinst) = receiver
-            .and_then(Receiver::class)
-            .and_then(|id| self.class_insts.get(id))
-            && let Some(class_tps) = self.class_type_params.get(cinst.class.index())
-        {
+        if let Some(id) = receiver.and_then(Receiver::class) {
+            let cinst = &self.class_insts[id];
             bindings.extend(
-                class_tps
+                self.class_type_params[cinst.class]
                     .iter()
                     .copied()
                     .zip(self.types.tuple_slice(cinst.args).iter().copied()),
             );
         }
-        let Some(view) = self.index.view(template) else {
+        let view = self.index.view(template);
+        if self.template_type_params[template].is_empty() {
             return bindings;
-        };
-        let Some(tps) = self
-            .template_type_params
-            .get(template.index())
-            .filter(|t| !t.is_empty())
-            .cloned()
-        else {
-            return bindings;
-        };
+        }
+        let tps = self.template_type_params[template].clone();
         for (&tp_id, &et) in tps.iter().zip(explicit_type_args) {
             if !self.types.is_open(et) {
                 bindings.push((tp_id, et));
@@ -558,29 +531,24 @@ impl<'h, 'a> Solver<'h, 'a> {
         caller: Option<InstanceId>,
         call_byte_offset: u32,
     ) -> Diagnostic {
-        let name = self
-            .index
-            .view(template)
-            .map_or("function", |v| hir_compat::function_label(v.name));
+        let view = self.index.view(template);
+        let name = hir_compat::function_label(view.name);
         let mut err = Diagnostic::unsupported(format!(
             "generic specialization limit of {INSTANCE_BUDGET} distinct argument lists reached for {name}"
         ));
         if let Some(caller_inst) = caller
-            .and_then(|c| self.instances.get(c))
+            .map(|c| &self.instances[c])
             .filter(|i| i.template == template)
         {
             let prev_args = self.types.tuple_slice(caller_inst.args);
-            let view = self.index.view(template);
             for (idx, (&prev, &next)) in prev_args.iter().zip(next_args).enumerate() {
                 if prev != next && self.types.contains_ty(next, prev) {
                     let param_name = view
-                        .and_then(|v| {
-                            v.params
-                                .get(idx)
-                                .and_then(|p| first_type_var_name(&p.ty))
-                                .or_else(|| v.type_params.get(idx).map(|tp| tp.name.as_str()))
-                                .or_else(|| v.params.get(idx).map(|p| p.name.as_str()))
-                        })
+                        .params
+                        .get(idx)
+                        .and_then(|p| first_type_var_name(&p.ty))
+                        .or_else(|| view.type_params.get(idx).map(|tp| tp.name.as_str()))
+                        .or_else(|| view.params.get(idx).map(|p| p.name.as_str()))
                         .unwrap_or("T");
                     err = err.with_note(format!("this recursive call grows type argument {param_name} by nesting its previous type"));
                     break;
@@ -602,21 +570,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(&id) = self.class_index.get(&key) {
             return Ok(id);
         }
-        let cinfo = self
-            .index
-            .class(class)
-            .ok_or_else(|| Diagnostic::internal("unknown class index"))?;
+        let cinfo = self.index.class(class);
         let hir_class = self
             .hir
             .classes
             .get(cinfo.hir_idx)
             .ok_or_else(|| Diagnostic::internal("unknown class in HIR"))?;
 
-        let bindings: Vec<_> = self
-            .class_type_params
-            .get(class.index())
-            .into_iter()
-            .flatten()
+        let bindings: Vec<_> = self.class_type_params[class]
+            .iter()
             .copied()
             .zip(args.iter().copied())
             .collect();

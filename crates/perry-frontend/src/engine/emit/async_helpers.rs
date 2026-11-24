@@ -66,8 +66,8 @@ impl<'h> Emitter<'h, '_> {
         ident: FuncIdentity,
         name: String,
     ) -> Result<String> {
-        let Some(TemplateKind::PromiseResolve(site) | TemplateKind::PromiseReject(site)) =
-            self.index.view(ident.template).map(|v| v.kind)
+        let (TemplateKind::PromiseResolve(site) | TemplateKind::PromiseReject(site)) =
+            self.index.view(ident.template).kind
         else {
             return Err(Diagnostic::internal("missing promise handle template"));
         };
@@ -158,14 +158,10 @@ impl<'h> Emitter<'h, '_> {
                 pass_env,
                 pass_receiver,
             } => {
-                let (fid, template, target_args, ret_loc) = {
-                    let ti = self.instance(target, "missing callback call target instance")?;
-                    (ti.emitted_func_id, ti.template, ti.args, ti.return_loc)
-                };
-                let view = self
-                    .index
-                    .view(template)
-                    .ok_or_else(|| Diagnostic::internal("missing callback target template"))?;
+                let ti = &self.solved.instances[target];
+                let (fid, template, target_args, ret_loc) =
+                    (ti.emitted_func_id, ti.template, ti.args, ti.return_loc);
+                let view = self.index.view(template);
                 let mut call_args = Vec::with_capacity(args.len() + 2);
                 if pass_env {
                     let val = cb_val.ok_or_else(|| {

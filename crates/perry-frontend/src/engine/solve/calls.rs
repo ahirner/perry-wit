@@ -101,8 +101,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(tid) = self
             .index
             .class_by_name_id(cn)
-            .and_then(|cid| self.index.class(cid))
-            .and_then(|c| ClassInfo::find(&c.static_methods, mn))
+            .and_then(|cid| ClassInfo::find(&self.index.class(cid).static_methods, mn))
         {
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
@@ -147,11 +146,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         };
         self.record_site(inst_id, expr, res);
-        let return_loc = self
-            .instances
-            .get(target)
-            .ok_or_else(|| Diagnostic::internal("missing call target instance"))?
-            .return_loc;
+        let return_loc = self.instances[target].return_loc;
         Ok((target, self.read_loc(return_loc, inst_id)))
     }
 
@@ -208,19 +203,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             let class_args = if !type_args.is_empty() {
                 self.eval_type_args(s.inst, type_args)
-            } else if let Some(tps) = self
-                .class_type_params
-                .get(cid.index())
-                .filter(|t| !t.is_empty())
-                .cloned()
-            {
+            } else if !self.class_type_params[cid].is_empty() {
+                let tps = self.class_type_params[cid].clone();
                 let mut bindings = Vec::new();
-                if let Some(ctor_view) = self
-                    .index
-                    .class(cid)
-                    .and_then(|c| c.ctor)
-                    .and_then(|t| self.index.view(t))
-                {
+                if let Some(ctor_tid) = self.index.class(cid).ctor {
+                    let ctor_view = self.index.view(ctor_tid);
                     self.unify_params(ctor_view.params, &arg_tys, &tps, &mut bindings);
                 }
                 tps.iter()
@@ -439,9 +426,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in &arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let Some(target_view) = self.index.view(ident.template) else {
-            return Ok(Ty::OPEN);
-        };
+        let target_view = self.index.view(ident.template);
         let is_promise_handle =
             self.apply_promise_handle_call(s, ident, &arg_tys, Some(args), byte_offset)?;
 
@@ -738,18 +723,16 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         let mname_id = self.types.intern_name(name);
         if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, byte_offset)?
-            && let Some(cinst) = self.class_insts.get(cinst_id)
-            && let Some(method_tid) = self
-                .index
-                .class(cinst.class)
-                .and_then(|c| ClassInfo::find(&c.methods, mname_id))
+            && let Some(method_tid) = ClassInfo::find(
+                &self.index.class(self.class_insts[cinst_id].class).methods,
+                mname_id,
+            )
         {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
-            if let Some(view) = self.index.view(method_tid) {
-                self.check_callback_params(s.inst, view, &arg_tys, byte_offset)?;
-            }
+            let view = self.index.view(method_tid);
+            self.check_callback_params(s.inst, view, &arg_tys, byte_offset)?;
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
                 expr,
@@ -811,9 +794,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
-            let Some(method_view) = self.index.view(ident.template) else {
-                return Ok(Ty::OPEN);
-            };
+            let method_view = self.index.view(ident.template);
             self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
             let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
             let pass_env = self.is_escaping_env(ident.template, s.inst);
@@ -918,9 +899,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut arms = Vec::with_capacity(idents.len());
         let mut ret = Ty::BOTTOM;
         for &ident in idents {
-            let Some(view) = self.index.view(ident.template) else {
-                return Ok(Ty::OPEN);
-            };
+            let view = self.index.view(ident.template);
             let is_promise_handle =
                 self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
             self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
@@ -937,12 +916,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .at(byte_offset),
             )?;
             self.propagate_writes(s.inst, target);
-            let return_loc = self
-                .instances
-                .get(target)
-                .ok_or_else(|| Diagnostic::internal("missing dispatch call target instance"))?
-                .return_loc;
-            let r = self.read_loc(return_loc, s.inst);
+            let r = self.read_loc(self.instances[target].return_loc, s.inst);
             ret = self.types.join(ret, r);
             arms.push((ident, target));
         }
@@ -951,7 +925,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let needs_recv = recv_ty.is_some()
             && arms
                 .iter()
-                .any(|&(ident, _)| self.index.view(ident.template).is_some_and(|v| v.uses_this));
+                .any(|&(ident, _)| self.index.view(ident.template).uses_this);
         let helper = self.intern_helper(
             HelperSpec::Dispatcher {
                 callee_ty,
@@ -1002,9 +976,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 continue;
             };
-            let Some(cb_view) = self.index.view(ident.template) else {
-                continue;
-            };
+            let cb_view = self.index.view(ident.template);
             let mismatch = || {
                 self.metadata.locations.annotate_call(
                     diag!(
@@ -1115,9 +1087,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         template: TemplateId,
         context_name: Option<&str>,
     ) -> Result<()> {
-        let Some(view) = self.index.view(template) else {
-            return Ok(());
-        };
+        let view = self.index.view(template);
         let owner_name = match context_name {
             Some(name) if view.name.is_empty() => hir_compat::display_name(name).to_owned(),
             _ => view.display_name(),

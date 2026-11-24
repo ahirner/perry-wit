@@ -10,9 +10,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         args: Option<&'h [Expr]>,
         byte_offset: u32,
     ) -> Result<bool> {
-        let Some(view) = self.index.view(ident.template) else {
-            return Ok(false);
-        };
+        let view = self.index.view(ident.template);
         match view.kind {
             TemplateKind::PromiseResolve(site) => {
                 if let Some(&arg0) = arg_tys.first()
@@ -51,10 +49,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         recv_ty: Option<Ty>,
         arg_tys: &[Ty],
         byte_offset: u32,
-    ) -> Result<Option<(InstanceId, Ty, bool)>> {
-        let Some(view) = self.index.view(ident.template) else {
-            return Ok(None);
-        };
+    ) -> Result<(InstanceId, Ty, bool)> {
+        let view = self.index.view(ident.template);
         let is_promise_handle =
             self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
         self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
@@ -72,7 +68,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         )?;
         self.propagate_writes(s.inst, target);
         let ret = self.read_loc(self.instances[target].return_loc, s.inst);
-        Ok(Some((target, ret, recv.is_some())))
+        Ok((target, ret, recv.is_some()))
     }
 
     fn resolve_callback_call(
@@ -110,11 +106,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             let mut ret = Ty::BOTTOM;
             let mut needs_recv = false;
             for ident in idents {
-                let Some((target, r, pass_receiver)) =
-                    self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?
-                else {
-                    return Ok(None);
-                };
+                let (target, r, pass_receiver) =
+                    self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
                 needs_recv |= pass_receiver;
                 ret = self.types.join(ret, r);
                 arms.push((ident, target));
@@ -145,11 +138,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let Some((target, ret, pass_receiver)) =
-            self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?
-        else {
-            return Ok(None);
-        };
+        let (target, ret, pass_receiver) =
+            self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
         let pass_env = self.is_escaping_env(ident.template, s.inst);
         Ok(Some((
             CallbackCall::Direct {
@@ -179,10 +169,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             resolve_tid,
             reject_tid,
             ..
-        }) = self
-            .inst_sites
-            .get(s.inst.index())
-            .and_then(|sites| sites.get(site))
+        }) = self.inst_sites[s.inst]
+            .get(site)
             .and_then(|entry| entry.resolution.as_ref())
         else {
             return Err(Diagnostic::internal(
@@ -230,10 +218,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         {
             let (pass_resolve, pass_reject) = match executor {
                 CallbackCall::Direct { target, .. } => {
-                    let view = self
-                        .index
-                        .view(self.instances[target].template)
-                        .ok_or_else(|| Diagnostic::internal("missing promise executor template"))?;
+                    let view = self.index.view(self.instances[target].template);
                     let arity = if view.params.iter().any(|p| p.is_rest) {
                         2
                     } else {
@@ -321,14 +306,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 ReactionKind::Then => {
                     let takes_zero = self.types.func_members(&ft).all(|id| {
-                        self.index.view(id.template).is_some_and(|v| {
-                            v.params.is_empty()
-                                && !matches!(
-                                    v.kind,
-                                    TemplateKind::PromiseResolve(_)
-                                        | TemplateKind::PromiseReject(_)
-                                )
-                        })
+                        let v = self.index.view(id.template);
+                        v.params.is_empty()
+                            && !matches!(
+                                v.kind,
+                                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+                            )
                     });
                     if inner_raw != Ty::BOTTOM || takes_zero {
                         let cb_args: &[Ty] = if inner_raw == Ty::BOTTOM {

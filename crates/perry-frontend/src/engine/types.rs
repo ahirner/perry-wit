@@ -41,6 +41,14 @@ impl<I, T: Clone> Clone for IdxVec<I, T> {
     }
 }
 
+impl<I, T: PartialEq> PartialEq for IdxVec<I, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+impl<I, T: Eq> Eq for IdxVec<I, T> {}
+
 #[allow(private_bounds)]
 impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
     pub(crate) fn push(&mut self, value: T) -> I {
@@ -63,6 +71,12 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
     pub(crate) fn filled<U: Clone>(&self, value: U) -> IdxVec<I, U> {
         IdxVec {
             data: vec![value; self.len()],
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub(crate) fn map<U>(&self, f: impl FnMut(&T) -> U) -> IdxVec<I, U> {
+        IdxVec {
+            data: self.data.iter().map(f).collect(),
             _marker: std::marker::PhantomData,
         }
     }

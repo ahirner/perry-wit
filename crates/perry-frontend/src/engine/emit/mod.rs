@@ -9,8 +9,8 @@ use super::solve::{
     ClassInst, FuncCoercion, Instance, Receiver, SiteEntry, SiteResolution, Solved,
 };
 use super::types::{
-    CaptureOwner, CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind,
-    TypeTable, box_hir, func_tag,
+    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, IdxVec, InstanceId,
+    TemplateId, Ty, TyKind, TypeTable, box_hir, func_tag,
 };
 use crate::hir_compat::resource_classes::{
     external, local, synth_call, synth_function, synth_param,
@@ -115,7 +115,7 @@ pub(crate) fn build(
         emitted_timer_class: false,
         synth_classes: Vec::new(),
         synth_functions: Vec::new(),
-        helper_fids: vec![None; solved.helpers.len()],
+        helper_fids: solved.helpers.filled(None),
     };
     let (init, mut functions, mut classes) = e.build_all()?;
     functions.extend(e.synth_functions);
@@ -158,7 +158,7 @@ struct Emitter<'h, 'a> {
     emitted_timer_class: bool,
     synth_classes: Vec<Class>,
     synth_functions: Vec<Function>,
-    helper_fids: Vec<Option<FuncId>>,
+    helper_fids: IdxVec<HelperId, Option<FuncId>>,
 }
 
 struct RewriteCtx<'a> {
@@ -202,12 +202,6 @@ impl RewriteCtx<'_> {
 }
 
 impl<'h> Emitter<'h, '_> {
-    fn instance(&self, id: InstanceId, msg: &str) -> Result<&Instance> {
-        self.solved
-            .instances
-            .get(id)
-            .ok_or_else(|| Diagnostic::internal(msg))
-    }
     fn class_inst_name(&self, id: ClassInstId) -> Option<String> {
         Some(self.solved.class_insts[id].emitted_name.clone())
     }
@@ -240,36 +234,23 @@ impl<'h> Emitter<'h, '_> {
     }
 
     fn site_entry(&self, inst_id: InstanceId, expr: &Expr) -> Option<&SiteEntry> {
-        let template = self.solved.instances.get(inst_id)?.template;
+        let template = self.solved.instances[inst_id].template;
         let local_site = self.index.site_of(template, expr)?;
-        self.solved.inst_sites.get(inst_id.index())?.get(local_site)
+        self.solved.inst_sites[inst_id].get(local_site)
     }
 
     fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
         if let Some(lidx) = self.index.local_idx(id) {
             if self.index.local_module.contains(lidx.index()) {
-                return self
-                    .solved
-                    .module_local_tys
-                    .get(lidx.index())
-                    .copied()
-                    .flatten();
+                return self.solved.module_local_tys[lidx];
             }
             if let Some(slot) = self.index.local_frame_slot(lidx)
-                && let Some(inst) = self.solved.instances.get(inst_id)
-                && self.index.local_owner.get(lidx.index()) == Some(&inst.template)
+                && self.index.local_owner[lidx] == self.solved.instances[inst_id].template
             {
-                return self
-                    .solved
-                    .inst_frame_locals
-                    .get(inst_id.index())?
-                    .get(slot)
-                    .copied();
+                return self.solved.inst_frame_locals[inst_id].get(slot).copied();
             }
         }
-        self.solved
-            .inst_local_tys
-            .get(inst_id.index())?
+        self.solved.inst_local_tys[inst_id]
             .iter()
             .find(|&&(lid, _)| lid == id)
             .map(|&(_, ty)| ty)
@@ -297,16 +278,14 @@ impl<'h> Emitter<'h, '_> {
         let new_init = self.rewrite_stmts(&mut RewriteCtx::plain(init_inst), &self.hir.init)?;
 
         let mut seen_templates = BitSet::default();
-        let mut inst_remaps: Vec<Option<HashMap<LocalId, LocalId>>> =
-            vec![None; self.solved.instances.len()];
+        let mut inst_remaps: IdxVec<InstanceId, Option<HashMap<LocalId, LocalId>>> =
+            self.solved.instances.filled(None);
         let mut new_functions = Vec::new();
         for (inst_id, inst) in self.solved.instances.iter_enumerated().skip(1) {
             if !self.solved.live_instances.contains(inst_id.index()) {
                 continue;
             }
-            let Some(view) = self.index.view(inst.template) else {
-                continue;
-            };
+            let view = self.index.view(inst.template);
             if !matches!(
                 view.kind,
                 TemplateKind::Function
@@ -320,14 +299,11 @@ impl<'h> Emitter<'h, '_> {
             let inherited = inst
                 .capture_owner
                 .instance()
-                .and_then(|o| inst_remaps.get(o.index()))
-                .and_then(Option::as_ref)
+                .and_then(|o| inst_remaps[o].as_ref())
                 .cloned();
             let (func, remap) = self.emit_function(inst_id, inst, view, remap_locals, inherited)?;
-            if !remap.is_empty()
-                && let Some(slot) = inst_remaps.get_mut(inst_id.index())
-            {
-                *slot = Some(remap);
+            if !remap.is_empty() {
+                inst_remaps[inst_id] = Some(remap);
             }
             if !self.is_env_template(inst.template)
                 && (inst.is_inline_callback || inst.captures_non_global)
@@ -360,13 +336,9 @@ impl<'h> Emitter<'h, '_> {
             .map(|(_, c)| c.clone())
             .collect();
         let mut emitted_classes = BitSet::default();
-        for (cinst_i, cinst) in self.solved.class_insts.iter().enumerate() {
+        for (cinst_id, cinst) in self.solved.class_insts.iter_enumerated() {
             emitted_classes.insert(cinst.class.index());
-            let Some(orig) = self
-                .index
-                .class(cinst.class)
-                .and_then(|c| self.hir.classes.get(c.hir_idx))
-            else {
+            let Some(orig) = self.hir.classes.get(self.index.class(cinst.class).hir_idx) else {
                 continue;
             };
             if cinst.emitted_name != orig.name {
@@ -375,25 +347,21 @@ impl<'h> Emitter<'h, '_> {
             }
             new_classes.push(self.emit_class(
                 init_inst,
-                cinst.class.index(),
-                Some((cinst_i, cinst)),
+                cinst.class,
+                Some((cinst_id, cinst)),
                 orig,
             )?);
         }
-        for (cid_i, cinfo) in self.index.classes.iter().enumerate() {
-            if emitted_classes.contains(cid_i) {
+        for (cid, cinfo) in self.index.classes.iter_enumerated() {
+            if emitted_classes.contains(cid.index()) {
                 continue;
             }
             let Some(orig) = self.hir.classes.get(cinfo.hir_idx) else {
                 continue;
             };
-            let has_statics = self
-                .solved
-                .class_static_methods
-                .get(cid_i)
-                .is_some_and(|v| !v.is_empty());
+            let has_statics = !self.solved.class_static_methods[cid].is_empty();
             if has_statics || !orig.static_fields.is_empty() || orig.extends_name.is_some() {
-                new_classes.push(self.emit_class(init_inst, cid_i, None, orig)?);
+                new_classes.push(self.emit_class(init_inst, cid, None, orig)?);
             }
         }
         Ok((new_init, new_functions, new_classes))
@@ -402,21 +370,21 @@ impl<'h> Emitter<'h, '_> {
     fn emit_class(
         &mut self,
         init_inst: InstanceId,
-        cid_i: usize,
-        instantiated: Option<(usize, &ClassInst)>,
+        cid: ClassId,
+        instantiated: Option<(ClassInstId, &ClassInst)>,
         orig: &'h Class,
     ) -> Result<Class> {
         let mut cls = orig.clone();
         cls.type_params.clear();
         let init_ctx = RewriteCtx::plain(init_inst);
-        let static_tys = self.solved.class_static_field_tys.get(cid_i);
+        let static_tys = &self.solved.class_static_field_tys[cid];
         cls.static_fields = orig
             .static_fields
             .iter()
             .enumerate()
             .map(|(f_idx, field)| {
                 let mut f = field.clone();
-                if let Some(&ty) = static_tys.and_then(|tys| tys.get(f_idx))
+                if let Some(&ty) = static_tys.get(f_idx)
                     && self.is_resolved(ty)
                 {
                     f.ty = self.materialize(ty)?;
@@ -425,9 +393,8 @@ impl<'h> Emitter<'h, '_> {
                 Ok(f)
             })
             .collect::<Result<Vec<_>>>()?;
-        cls.static_methods =
-            self.emit_named_methods(slice_at(&self.solved.class_static_methods, cid_i))?;
-        let Some((cinst_i, cinst)) = instantiated else {
+        cls.static_methods = self.emit_named_methods(&self.solved.class_static_methods[cid])?;
+        let Some((cinst_id, cinst)) = instantiated else {
             cls.constructor = None;
             cls.methods.clear();
             cls.getters.clear();
@@ -487,24 +454,18 @@ impl<'h> Emitter<'h, '_> {
         }
         cls.fields = fields;
         cls.constructor = match cinst.ctor_inst {
-            Some(ctor_id)
-                if let Some(inst) = self.solved.instances.get(ctor_id)
-                    && let Some(view) = self.index.view(inst.template) =>
-            {
+            Some(ctor_id) => {
+                let inst = &self.solved.instances[ctor_id];
+                let view = self.index.view(inst.template);
                 Some(self.emit_function(ctor_id, inst, view, false, None)?.0)
             }
-            _ => orig.constructor.clone(),
+            None => orig.constructor.clone(),
         };
-        cls.methods =
-            self.emit_named_methods(slice_at(&self.solved.class_inst_methods, cinst_i))?;
-        cls.getters = self.emit_accessors(
-            slice_at(&self.solved.class_inst_getters, cinst_i),
-            &orig.getters,
-        )?;
-        cls.setters = self.emit_accessors(
-            slice_at(&self.solved.class_inst_setters, cinst_i),
-            &orig.setters,
-        )?;
+        cls.methods = self.emit_named_methods(&self.solved.class_inst_methods[cinst_id])?;
+        cls.getters =
+            self.emit_accessors(&self.solved.class_inst_getters[cinst_id], &orig.getters)?;
+        cls.setters =
+            self.emit_accessors(&self.solved.class_inst_setters[cinst_id], &orig.setters)?;
         Ok(cls)
     }
 
@@ -512,9 +473,7 @@ impl<'h> Emitter<'h, '_> {
         let mut out = Vec::with_capacity(ids.len());
         for &id in ids {
             let inst = &self.solved.instances[id];
-            let Some(view) = self.index.view(inst.template) else {
-                continue;
-            };
+            let view = self.index.view(inst.template);
             let (mut m, _) = self.emit_function(id, inst, view, false, None)?;
             m.name = inst.emitted_method_name.clone();
             out.push(m);
@@ -530,9 +489,7 @@ impl<'h> Emitter<'h, '_> {
         let mut out = Vec::with_capacity(ids.len());
         for &(acc_idx, id) in ids {
             let inst = &self.solved.instances[id];
-            let Some(view) = self.index.view(inst.template) else {
-                continue;
-            };
+            let view = self.index.view(inst.template);
             let (f, _) = self.emit_function(id, inst, view, false, None)?;
             out.push((
                 orig.get(acc_idx)
@@ -720,9 +677,7 @@ impl<'h> Emitter<'h, '_> {
             Vec::new()
         } else {
             let mut caps = view.captures.to_vec();
-            if let Some(extra) = self.solved.inst_captures.get(inst_id.index()) {
-                caps.extend(extra.iter().copied());
-            }
+            caps.extend(self.solved.inst_captures[inst_id].iter().copied());
             if !remap.is_empty() {
                 for cap in &mut caps {
                     if let Some(&m) = remap.get(cap) {
@@ -782,7 +737,7 @@ impl<'h> Emitter<'h, '_> {
                     && inst.capture_owner == ident.capture_owner)
                     .then_some(inst.emitted_func_id)
             })
-            .or_else(|| self.index.view(ident.template).map(|v| v.func_id))
+            .or(Some(self.index.view(ident.template).func_id))
     }
 
     fn rewrite_condition(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
@@ -1220,8 +1175,4 @@ fn is_pure_func_expr(expr: &Expr) -> bool {
         Expr::PropertyGet { object, .. } => is_pure_func_expr(object),
         _ => false,
     }
-}
-
-fn slice_at<T>(lists: &[Vec<T>], idx: usize) -> &[T] {
-    lists.get(idx).map_or(&[], Vec::as_slice)
 }

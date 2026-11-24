@@ -231,10 +231,12 @@ pub(crate) struct SiteEntry {
 }
 
 impl SiteEntry {
-    pub(crate) fn promise(sites: &[Vec<Self>], owner: CaptureOwner, site: usize) -> Result<LocId> {
-        let entry = owner
-            .instance()
-            .and_then(|inst| sites.get(inst.index())?.get(site));
+    pub(crate) fn promise(
+        sites: &IdxVec<InstanceId, Vec<Self>>,
+        owner: CaptureOwner,
+        site: usize,
+    ) -> Result<LocId> {
+        let entry = owner.instance().and_then(|inst| sites[inst].get(site));
         match entry.and_then(|e| e.resolution.as_ref()) {
             Some(SiteResolution::PromiseNew { value_loc, .. }) => Ok(*value_loc),
             _ => Err(Diagnostic::internal(
@@ -255,21 +257,21 @@ pub(crate) struct Solved {
     pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     pub(crate) helpers: IdxVec<HelperId, HelperSpec>,
     pub(crate) helper_byte_offsets: IdxVec<HelperId, u32>,
-    pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
-    pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
-    pub(crate) inst_sites: Vec<Vec<SiteEntry>>,
-    pub(crate) inst_captures: Vec<Vec<LocalId>>,
+    pub(crate) inst_local_tys: IdxVec<InstanceId, Vec<(LocalId, Ty)>>,
+    pub(crate) inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
+    pub(crate) inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
+    pub(crate) inst_captures: IdxVec<InstanceId, Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
     pub(crate) escaping_env_templates: BitSet,
     pub(crate) collapsed_closures: BitSet,
     pub(crate) boxed_locals: BitSet,
-    pub(crate) module_local_tys: Vec<Option<Ty>>,
-    pub(crate) collapsed_local_tys: Vec<Option<Ty>>,
-    pub(crate) class_static_field_tys: Vec<Vec<Ty>>,
-    pub(crate) class_inst_methods: Vec<Vec<InstanceId>>,
-    pub(crate) class_inst_getters: Vec<Vec<(usize, InstanceId)>>,
-    pub(crate) class_inst_setters: Vec<Vec<(usize, InstanceId)>>,
-    pub(crate) class_static_methods: Vec<Vec<InstanceId>>,
+    pub(crate) module_local_tys: IdxVec<LocalIdx, Option<Ty>>,
+    pub(crate) collapsed_local_tys: IdxVec<LocalIdx, Option<Ty>>,
+    pub(crate) class_static_field_tys: IdxVec<ClassId, Vec<Ty>>,
+    pub(crate) class_inst_methods: IdxVec<ClassInstId, Vec<InstanceId>>,
+    pub(crate) class_inst_getters: IdxVec<ClassInstId, Vec<(usize, InstanceId)>>,
+    pub(crate) class_inst_setters: IdxVec<ClassInstId, Vec<(usize, InstanceId)>>,
+    pub(crate) class_static_methods: IdxVec<ClassId, Vec<InstanceId>>,
     pub(crate) dict_reads: BitSet,
     pub(crate) self_nested_locs: BitSet,
     pub(crate) self_nested_locals: BitSet,
@@ -407,7 +409,7 @@ struct Solver<'h, 'a> {
     /// Locations whose type an annotation fixes: writes are checked by lowering, never joined.
     declared_locs: BitSet,
     dirty_locs: BitSet,
-    inst_reads: Vec<Vec<LocId>>,
+    inst_reads: IdxVec<InstanceId, Vec<LocId>>,
     reader_ends: IdxVec<LocId, usize>,
     reader_instances: Vec<InstanceId>,
     csr_dirty: bool,
@@ -428,16 +430,16 @@ struct Solver<'h, 'a> {
     helpers: IdxVec<HelperId, HelperSpec>,
     helper_index: HashMap<HelperSpec, HelperId>,
     helper_byte_offsets: IdxVec<HelperId, u32>,
-    inst_locals: Vec<Vec<InstanceLocalSlot>>,
-    inst_frame_locals: Vec<Vec<Ty>>,
-    inst_written: Vec<BitSet>,
-    inst_captures: Vec<Vec<LocalId>>,
-    inst_sites: Vec<Vec<SiteEntry>>,
+    inst_locals: IdxVec<InstanceId, Vec<InstanceLocalSlot>>,
+    inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
+    inst_written: IdxVec<InstanceId, BitSet>,
+    inst_captures: IdxVec<InstanceId, Vec<LocalId>>,
+    inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
     inst_superseded: BitSet,
     escaping_env_templates: BitSet,
-    template_escape_locs: Vec<LocId>,
+    template_escape_locs: IdxVec<TemplateId, LocId>,
     collapsed_closures: BitSet,
-    collapsed_local_locs: Vec<Option<LocId>>,
+    collapsed_local_locs: IdxVec<LocalIdx, Option<LocId>>,
     boxed_locals: BitSet,
     dict_reads: BitSet,
     self_nested_locs: BitSet,
@@ -445,8 +447,8 @@ struct Solver<'h, 'a> {
     static_field_locs: Vec<(ClassId, usize, LocId)>,
     class_insts: IdxVec<ClassInstId, ClassInst>,
     class_index: HashMap<(ClassId, Ty), ClassInstId>,
-    template_type_params: Vec<Vec<shapes::TypeId>>,
-    class_type_params: Vec<Vec<shapes::TypeId>>,
+    template_type_params: IdxVec<TemplateId, Vec<shapes::TypeId>>,
+    class_type_params: IdxVec<ClassId, Vec<shapes::TypeId>>,
     result_contracts: Vec<ResultContract>,
     contract_insts: BitSet,
     next_func_id: u32,
@@ -467,10 +469,11 @@ pub(crate) fn attach_inst_chain(
         if inst.template == TemplateId::INIT {
             break;
         }
-        if hir_compat::has_source_offset(inst.call_byte_offset)
-            && let Some(view) = index.view(inst.template)
-        {
-            let msg = format!("while instantiating '{}'", view.display_name());
+        if hir_compat::has_source_offset(inst.call_byte_offset) {
+            let msg = format!(
+                "while instantiating '{}'",
+                index.view(inst.template).display_name()
+            );
             err = match locations.call_span(inst.call_byte_offset) {
                 Some(span) => err.with_spanned_note(span, msg),
                 None => err.with_note(msg),
@@ -501,9 +504,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if locations.is_empty() {
             locations.push(Ty::VOID);
         }
-        let template_escape_locs: Vec<LocId> = (0..index.views.len())
-            .map(|_| locations.push(Ty::BOTTOM))
-            .collect();
+        let template_escape_locs = index.views.map(|_| locations.push(Ty::BOTTOM));
         let static_field_locs = index
             .classes
             .iter_enumerated()
@@ -519,20 +520,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .map(|tp| shapes::TypeId::from_owned(ctx, HirType::Named(tp.name.clone())))
                 .collect()
         };
-        let template_type_params = index
-            .views
-            .iter()
-            .map(|v| intern_tps(v.type_params))
-            .collect();
-        let class_type_params = index
-            .classes
-            .iter()
-            .map(|c| {
-                hir.classes
-                    .get(c.hir_idx)
-                    .map_or_else(Vec::new, |hc| intern_tps(&hc.type_params))
-            })
-            .collect();
+        let template_type_params = index.views.map(|v| intern_tps(v.type_params));
+        let class_type_params = index.classes.map(|c| {
+            hir.classes
+                .get(c.hir_idx)
+                .map_or_else(Vec::new, |hc| intern_tps(&hc.type_params))
+        });
         Self {
             ctx,
             hir,
@@ -545,7 +538,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             locations,
             declared_locs: BitSet::default(),
             dirty_locs: BitSet::default(),
-            inst_reads: Vec::new(),
+            inst_reads: IdxVec::default(),
             reader_instances: Vec::new(),
             csr_dirty: true,
             evaluating_inst: None,
@@ -565,16 +558,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
             helper_byte_offsets: IdxVec::default(),
-            inst_locals: Vec::new(),
-            inst_frame_locals: Vec::new(),
-            inst_written: Vec::new(),
-            inst_captures: Vec::new(),
-            inst_sites: Vec::new(),
+            inst_locals: IdxVec::default(),
+            inst_frame_locals: IdxVec::default(),
+            inst_written: IdxVec::default(),
+            inst_captures: IdxVec::default(),
+            inst_sites: IdxVec::default(),
             inst_superseded: BitSet::default(),
             escaping_env_templates: BitSet::default(),
             template_escape_locs,
             collapsed_closures: BitSet::default(),
-            collapsed_local_locs: vec![None; index.local_count()],
+            collapsed_local_locs: index.local_ids.filled(None),
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
@@ -600,7 +593,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let entry = self
             .index
             .site_of(self.instances[inst].template, expr)
-            .and_then(|site| self.inst_sites.get_mut(inst.index())?.get_mut(site))
+            .and_then(|site| self.inst_sites[inst].get_mut(site))
             .ok_or_else(|| Diagnostic::internal("missing storage site for expression"))?;
         match entry.resolution {
             Some(
@@ -624,20 +617,20 @@ impl<'h, 'a> Solver<'h, 'a> {
             if self.current_reads.insert(loc.index()) {
                 self.current_read_list.push(loc);
             }
-        } else if let Some(reads) = self.inst_reads.get_mut(reader.index())
-            && let Err(pos) = reads.binary_search(&loc)
-        {
-            reads.insert(pos, loc);
-            self.csr_dirty = true;
+        } else {
+            let reads = &mut self.inst_reads[reader];
+            if let Err(pos) = reads.binary_search(&loc) {
+                reads.insert(pos, loc);
+                self.csr_dirty = true;
+            }
         }
         self.locations[loc]
     }
 
     pub(super) fn commit_reads(&mut self, inst_id: InstanceId) {
         self.current_read_list.sort_unstable();
-        if let Some(prev) = self.inst_reads.get_mut(inst_id.index())
-            && *prev != self.current_read_list
-        {
+        let prev = &mut self.inst_reads[inst_id];
+        if *prev != self.current_read_list {
             prev.clear();
             prev.extend_from_slice(&self.current_read_list);
             self.csr_dirty = true;
@@ -664,18 +657,14 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn is_non_site_root(&self, inst_id: InstanceId) -> bool {
-        let Some(inst) = self.instances.get(inst_id) else {
-            return false;
-        };
+        let inst = &self.instances[inst_id];
         inst.caller.is_none()
-            || self.index.view(inst.template).is_some_and(|v| {
-                matches!(
-                    v.kind,
-                    TemplateKind::ClassConstructor
-                        | TemplateKind::ClassGetter(_)
-                        | TemplateKind::ClassSetter(_)
-                )
-            })
+            || matches!(
+                self.index.view(inst.template).kind,
+                TemplateKind::ClassConstructor
+                    | TemplateKind::ClassGetter(_)
+                    | TemplateKind::ClassSetter(_)
+            )
             || self.contract_insts.contains(inst_id.index())
     }
 
@@ -758,7 +747,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut head = 0usize;
         while let Some(&caller) = queue.get(head) {
             head += 1;
-            for entry in self.inst_sites.get(caller.index()).into_iter().flatten() {
+            for entry in &self.inst_sites[caller] {
                 if let Some(res) = &entry.resolution {
                     self.for_each_site_target(res, |t| {
                         if live.insert(t.index()) {
@@ -796,12 +785,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             if live.contains(idx) {
                 bump_count(&mut self.template_counts, inst.template);
             } else if self.inst_superseded.insert(idx) {
-                if let Some(sites) = self.inst_sites.get_mut(idx) {
-                    sites.fill(SiteEntry::default());
-                }
-                if let Some(reads) = self.inst_reads.get_mut(idx)
-                    && !reads.is_empty()
-                {
+                self.inst_sites[id].fill(SiteEntry::default());
+                let reads = &mut self.inst_reads[id];
+                if !reads.is_empty() {
                     reads.clear();
                     self.csr_dirty = true;
                 }
@@ -817,7 +803,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     fn rebuild_csr(&mut self, init: InstanceId) -> Result<()> {
         self.reader_ends.as_mut_slice().fill(0);
-        for reads in &self.inst_reads {
+        for reads in self.inst_reads.iter() {
             for &loc in reads {
                 self.reader_ends[loc] += 1;
             }
@@ -827,7 +813,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             total += std::mem::replace(count, total);
         }
         self.reader_instances.resize(total, init);
-        for (reader, reads) in self.instances.ids().zip(&self.inst_reads) {
+        for (reader, reads) in self.inst_reads.iter_enumerated() {
             for &loc in reads {
                 let end = &mut self.reader_ends[loc];
                 let slot = self.reader_instances.get_mut(*end).ok_or_else(|| {
@@ -995,41 +981,29 @@ impl<'h, 'a> Solver<'h, 'a> {
             if self.index.local_module.contains(lidx.index()) {
                 continue;
             }
-            let cloc = match self
-                .collapsed_local_locs
-                .get(lidx.index())
-                .copied()
-                .flatten()
-            {
+            let cloc = match self.collapsed_local_locs[lidx] {
                 Some(loc) => loc,
                 None => {
                     let loc = self.alloc_loc(Ty::BOTTOM);
-                    if let Some(slot) = self.collapsed_local_locs.get_mut(lidx.index()) {
-                        *slot = Some(loc);
-                    }
+                    self.collapsed_local_locs[lidx] = Some(loc);
                     loc
                 }
             };
-            let cap_owner_tid = self.index.local_owner.get(lidx.index()).copied();
+            let cap_owner_tid = self.index.local_owner[lidx];
             let seed_tys: Vec<Ty> = self
                 .instances
                 .iter_enumerated()
                 .filter_map(|(id, inst)| {
-                    if self.inst_superseded.contains(id.index())
-                        || Some(inst.template) != cap_owner_tid
-                    {
+                    if self.inst_superseded.contains(id.index()) || inst.template != cap_owner_tid {
                         return None;
                     }
                     if let Some(slot) = self.local_frame_slot_in(id, lidx) {
-                        self.inst_frame_locals
-                            .get(id.index())
-                            .and_then(|f| f.get(slot))
-                            .copied()
+                        self.inst_frame_locals[id].get(slot).copied()
                     } else {
-                        self.inst_locals
-                            .get(id.index())
-                            .and_then(|sl| sl.iter().find(|s| s.local == lidx))
-                            .and_then(|s| self.locations.get(s.loc).copied())
+                        self.inst_locals[id]
+                            .iter()
+                            .find(|s| s.local == lidx)
+                            .map(|s| self.locations[s.loc])
                     }
                 })
                 .collect();
@@ -1051,9 +1025,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn is_escaping_env(&mut self, tid: TemplateId, reader: InstanceId) -> bool {
-        let Some(&loc) = self.template_escape_locs.get(tid.index()) else {
-            return false;
-        };
+        let loc = self.template_escape_locs[tid];
         self.read_loc(loc, reader) != Ty::BOTTOM
     }
 
@@ -1090,9 +1062,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             if !self.escaping_env_templates.insert(tid.index()) {
                 continue;
             }
-            if let Some(&loc) = self.template_escape_locs.get(tid.index()) {
-                self.write_loc(loc, Ty::BOOLEAN);
-            }
+            let loc = self.template_escape_locs[tid];
+            self.write_loc(loc, Ty::BOOLEAN);
             for &cap_id in self.index.template_captures(tid) {
                 if let Some(lidx) = self.index.local_idx(cap_id) {
                     let li = lidx.index();
@@ -1116,9 +1087,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         expr: &Expr,
         c: FuncCoercion,
     ) {
-        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
-            return;
-        };
+        let template = self.instances[inst_id].template;
         let Some(local_site) = self.index.site_of(template, expr) else {
             debug_assert!(
                 false,
@@ -1127,27 +1096,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             );
             return;
         };
-        if let Some(slot) = self
-            .inst_sites
-            .get_mut(inst_id.index())
-            .and_then(|s| s.get_mut(local_site))
-        {
+        if let Some(slot) = self.inst_sites[inst_id].get_mut(local_site) {
             slot.coercion = Some(c);
         }
     }
 
     pub(super) fn clear_site(&mut self, inst_id: InstanceId, expr: &Expr) {
-        let Some(template) = self.instances.get(inst_id).map(|i| i.template) else {
-            return;
-        };
+        let template = self.instances[inst_id].template;
         let Some(local_site) = self.index.site_of(template, expr) else {
             return;
         };
-        if let Some(slot) = self
-            .inst_sites
-            .get_mut(inst_id.index())
-            .and_then(|s| s.get_mut(local_site))
-        {
+        if let Some(slot) = self.inst_sites[inst_id].get_mut(local_site) {
             slot.resolution = None;
         }
     }
@@ -1234,21 +1193,21 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn annotate_expr_error(
+    fn annotate_inst_error(
         &self,
-        s: &EvalState<'h>,
+        inst_id: InstanceId,
         mut err: Diagnostic,
         byte_offset: u32,
+        span: Option<swc_common::Span>,
     ) -> Diagnostic {
         if hir_compat::has_source_offset(byte_offset) {
             err = self.metadata.locations.annotate_call(err, byte_offset);
-        } else if let Some(sp) = s.current_span {
+        } else if let Some(sp) = span {
             err = self.metadata.locations.annotate(err, sp);
         } else if let Some(sp) = self
-            .instances
-            .get(s.inst)
-            .and_then(|i| self.index.view(i.template))
-            .and_then(|v| self.metadata.locations.function_span(v.name))
+            .metadata
+            .locations
+            .function_span(self.index.view(self.instances[inst_id].template).name)
         {
             err = err.with_span(sp);
         }
@@ -1257,8 +1216,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.index,
             &self.metadata.locations,
             err,
-            s.inst,
+            inst_id,
         )
+    }
+
+    pub(super) fn annotate_expr_error(
+        &self,
+        s: &EvalState<'h>,
+        err: Diagnostic,
+        byte_offset: u32,
+    ) -> Diagnostic {
+        self.annotate_inst_error(s.inst, err, byte_offset, s.current_span)
     }
 
     pub(super) fn check_escaping_func(
@@ -1277,28 +1245,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .any(|&m| matches!(self.types.kind(m), TyKind::Func(_)))
             && !self.is_tagged_func_union_in(ty, inst_id)
         {
-            let mut err = Diagnostic::unsupported(
+            let err = Diagnostic::unsupported(
                 "joining function values with non-function values is not supported yet",
             );
-            if hir_compat::has_source_offset(byte_offset) {
-                err = self.metadata.locations.annotate_call(err, byte_offset);
-            } else if let Some(sp) = span {
-                err = self.metadata.locations.annotate(err, sp);
-            } else if let Some(sp) = self
-                .instances
-                .get(inst_id)
-                .and_then(|i| self.index.view(i.template))
-                .and_then(|v| self.metadata.locations.function_span(v.name))
-            {
-                err = err.with_span(sp);
-            }
-            return Err(attach_inst_chain(
-                &self.instances,
-                self.index,
-                &self.metadata.locations,
-                err,
-                inst_id,
-            ));
+            return Err(self.annotate_inst_error(inst_id, err, byte_offset, span));
         }
         Ok(())
     }
