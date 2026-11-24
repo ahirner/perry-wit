@@ -28,8 +28,10 @@ mod iteration;
 mod regex;
 pub use iteration::{Availability, Iteration, RecordExpr};
 mod streams;
+mod timers;
 pub use constructors::{Constructor, Constructors};
 pub use methods::{Method, method};
+pub use timers::is_timer_module;
 
 pub struct Metadata<'s> {
     pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
@@ -60,6 +62,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
+        timers::check_imports(&ast, &locations)?;
         regex::fold(&mut ast, unresolved);
         let constructors = constructors::preserve(&mut ast, unresolved)?;
         streams::preserve_options(&mut ast, unresolved)?;

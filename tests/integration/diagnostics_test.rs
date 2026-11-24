@@ -763,6 +763,7 @@ fn unsupported_forms_have_exact_diagnostics() {
     };
     const REGEX_CONST: &str = "case.ts:1:8: error[unsupported-regex]: ";
     let cases = [
+        ("import timers from 'timers';\ntimers.setImmediate(() => {});".into(), "case.ts:2:1: error[unsupported-construct]: timer import 'timers.setImmediate' is not supported".into()),
         (iteration("new Headers()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; this receiver has no supported iterator".into()),
         (iteration("new URLSearchParams()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported".into()),
         ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), "case.ts:1:40: error[unsupported-construct]: String.prototype.replaceAll called with a non-global RegExp argument".into()),
@@ -789,8 +790,13 @@ fn unsupported_forms_have_exact_diagnostics() {
         ("export function run(): number {\n  return (performance as any).mark();\n}".into(), "case.ts:2:10: error[unsupported-construct]: performance.mark is not supported yet".into()),
         ("enum Color { A }\nexport function run(): number { return 0; }".into(), "case.ts:1:1: error[unsupported-construct]: TypeScript enum declarations are not supported yet; use a union of string or number literals instead".into()),
     ];
+    let timeout_members = [".ref", ".hasRef", ".refresh", "[Symbol.dispose]"].map(|member| {
+        (format!("const h = setTimeout(() => {{}}, 1);\nh{member}();"),
+         format!("case.ts:2:1: error[unsupported-construct]: Timeout member 'h{member}' is not supported"))
+    });
     let mismatches: Vec<String> = cases
         .iter()
+        .chain(&timeout_members)
         .filter_map(|(source, expected)| {
             let actual = match perry_wit::compile_core(source, "case.ts") {
                 Ok(_) => "<compiled>".to_owned(),

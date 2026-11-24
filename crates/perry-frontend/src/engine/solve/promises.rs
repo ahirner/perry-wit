@@ -450,7 +450,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let extra_start = if is_immediate { 1 } else { 2 };
         let extra_args = args.get(extra_start..).unwrap_or(&[]);
         let extra_arg_tys = self.eval_args(s, extra_args)?;
-        let timer_ty = self.types.named(self.ctx, "__PerryTimer");
+        let timer_ty = self.types.named(self.ctx, crate::engine::TIMER_CLASS);
         if cb_ty == Ty::BOTTOM || extra_arg_tys.contains(&Ty::BOTTOM) {
             return Ok(timer_ty);
         }

@@ -67,6 +67,7 @@ pub struct Task {
     /// Size class of `chunk`.
     class: usize,
     pub(crate) signals: crate::promise::Signals,
+    pub(crate) rejections: Option<alloc::vec::Vec<*mut u8>>,
     spare_subtasks: *mut Subtask,
     pub(crate) subtasks: *mut Subtask,
     cancelled: *mut Subtask,
@@ -92,6 +93,9 @@ impl Task {
     /// Active observer and host-operation roots.
     pub(crate) unsafe fn trace_roots(&self, roots: &mut alloc::vec::Vec<*mut u8>) {
         roots.extend([self.result, self.exception]);
+        if let Some(rejections) = &self.rejections {
+            roots.extend(rejections.iter().copied());
+        }
         // SAFETY: active observers belong to this live task.
         unsafe {
             self.observers.trace(roots);
@@ -202,6 +206,7 @@ fn new_task() -> *mut Task {
         class: 0,
         observers: crate::promise::Observers::new(),
         signals: crate::promise::Signals::new(),
+        rejections: None,
         spare_subtasks: ptr::null_mut(),
         subtasks: ptr::null_mut(),
         cancelled: ptr::null_mut(),
@@ -365,7 +370,10 @@ pub extern "C" fn perry_task_free() {
             large = previous;
         }
         #[cfg(target_arch = "wasm32")]
-        dealloc(task as *mut u8, Layout::new::<Task>());
+        {
+            ptr::drop_in_place(task);
+            dealloc(task as *mut u8, Layout::new::<Task>());
+        }
         #[cfg(not(target_arch = "wasm32"))]
         crate::instance::native::with(|instance| {
             instance

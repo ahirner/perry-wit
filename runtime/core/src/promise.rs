@@ -11,7 +11,7 @@ use core::ptr;
 
 pub(crate) use crate::layout::promise::{COMBINATOR_KIND, FULFILLED, REJECTED, STATUS, VALUE};
 
-const PENDING: u32 = 0;
+pub(crate) const PENDING: u32 = 0;
 
 #[repr(C)]
 struct Promise {
@@ -24,6 +24,7 @@ struct Promise {
     owner: *mut u8,
     references: bool,
     cancellation_owned: bool,
+    observed: bool,
 }
 
 /// A pending promise in the current task.
@@ -75,6 +76,7 @@ unsafe fn pending(promise: *mut Promise, references: u32) -> *mut u8 {
             owner: ptr::null_mut(),
             references: references != 0,
             cancellation_owned: false,
+            observed: false,
         })
     };
     promise.cast()
@@ -95,6 +97,7 @@ pub extern "C" fn perry_promise_reuse(promise: *mut u8) -> *mut u8 {
     // SAFETY: a non-null argument is a live promise of the current task.
     unsafe {
         if reusable.is_null()
+            || ((*reusable).state == REJECTED && !(*reusable).observed)
             || (*reusable).state == PENDING
             || !(*reusable).waiters.is_null()
             || (*reusable).signal.state != SignalState::Dormant
@@ -106,6 +109,7 @@ pub extern "C" fn perry_promise_reuse(promise: *mut u8) -> *mut u8 {
         (*reusable).value = 0;
         (*reusable).owner = ptr::null_mut();
         (*reusable).cancellation_owned = false;
+        (*reusable).observed = false;
     }
     promise
 }
@@ -125,6 +129,12 @@ fn settle(promise: *mut u8, state: u32, status: i32, value: u64) {
         } else {
             ptr::null_mut()
         };
+        if state == REJECTED
+            && !(*promise).observed
+            && let Some(rejections) = &mut current().rejections
+        {
+            rejections.push(promise.cast());
+        }
         let mut observer = (*promise).waiters;
         while !observer.is_null() {
             let next = (*observer).promise_next;
@@ -155,12 +165,23 @@ pub extern "C" fn perry_promise_reject(promise: *mut u8, status: i32) {
     settle(promise, REJECTED, status, exception as usize as u64);
 }
 
+fn observe(promise: &mut Promise) {
+    if !promise.observed
+        && promise.state == REJECTED
+        && let Some(rejections) = &mut current().rejections
+    {
+        rejections.retain(|p| !ptr::eq(p.cast::<Promise>(), promise));
+    }
+    promise.observed = true;
+}
+
 /// Handle an `await` on a rejected `promise` by restoring its pending exception and returning its status.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_promise_rethrow(promise: *mut u8) -> i32 {
     let promise = promise as *mut Promise;
     // SAFETY: compiled code passes a live, rejected promise.
     unsafe {
+        observe(&mut *promise);
         if (*promise).value == 0 {
             let exception = crate::exception::perry_exception_catch((*promise).status as u32);
             (*promise).value = exception as usize as u64;
@@ -310,6 +331,7 @@ impl Signal {
         );
         unsafe {
             self.state = SignalState::Signalled;
+            current().signals.ready += 1;
             // The pending read accepts the unit payload at once.
             let written = host::reaction_write(self.writable, ptr::null());
             assert!(written == 0, "the pending read accepts the write at once");
@@ -323,6 +345,7 @@ impl Signal {
                 self.fire();
             }
             if self.state == SignalState::Signalled {
+                current().signals.ready -= 1;
                 host::waitable_join(self.readable, 0);
                 host::reaction_cancel_read(self.readable);
             }
@@ -338,12 +361,14 @@ impl Signal {
 pub(crate) struct Signals {
     buckets: &'static mut [*mut Signal],
     len: usize,
+    pub(crate) ready: usize,
 }
 impl Signals {
     pub(crate) const fn new() -> Self {
         Self {
             buckets: &mut [],
             len: 0,
+            ready: 0,
         }
     }
     unsafe fn insert_bucket(&mut self, signal: *mut Signal) {
@@ -462,6 +487,7 @@ pub(crate) extern "C" fn perry_promise_wait(promise: *mut u8, frame: *mut u8, st
             (*promise).state == PENDING,
             "only pending promises are awaited"
         );
+        observe(&mut *promise);
         observer.write(Observer {
             frame,
             promise,
@@ -499,6 +525,7 @@ pub(crate) extern "C" fn perry_promise_event(event: u32, handle: u32) -> *mut u8
         if signal.is_null() || (*signal).state != SignalState::Signalled {
             return ptr::null_mut();
         }
+        current().signals.ready -= 1;
         (*signal).state = SignalState::Dispatching;
         signal.cast()
     }
@@ -646,6 +673,7 @@ fn combine(mode: u32, inputs: *mut u8, collectible: bool, references: bool) -> *
         let data = *snapshot.add(crate::array::DATA as usize).cast::<*mut u64>();
         for index in 0..count {
             let promise = input(inputs, index);
+            observe(&mut *promise);
             *data.add(index as usize) = promise as usize as u64;
             pending += usize::from((*promise).state == PENDING);
         }

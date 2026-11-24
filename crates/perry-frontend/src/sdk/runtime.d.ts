@@ -55,6 +55,17 @@ declare namespace Temporal {
   }
 }
 
+declare module "timers" {
+  const handle: unique symbol;
+  interface Timeout { readonly [handle]: true; }
+  export function setTimeout<T extends unknown[]>(callback: (this: Timeout, ...args: T) => void, delay?: number, ...args: T): Timeout;
+  export function setInterval<T extends unknown[]>(callback: (this: Timeout, ...args: T) => void, delay?: number, ...args: T): Timeout;
+  export function setImmediate<T extends unknown[]>(callback: (this: Timeout, ...args: T) => void, ...args: T): Timeout;
+  export function clearTimeout(handle?: Timeout): void;
+  export function clearInterval(handle?: Timeout): void;
+}
+declare module "node:timers" { export * from "timers"; }
+
 declare module "node:timers/promises" {
   export function setTimeout<T = void>(milliseconds?: number, value?: T, options?: {signal?: AbortSignal}): Promise<T>;
 }

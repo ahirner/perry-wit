@@ -247,16 +247,35 @@ fn async_export(
         if uses_io {
             b.runtime_void(ctx, Runtime::IoPump, vec![]);
         }
-        let mut promise = b.runtime(ctx, Runtime::TaskResult, vec![]);
-        let mut settled = b.load(
-            ctx,
-            MemKind::I32,
-            promise,
-            perry_abi::layout::promise::STATE,
-        );
+        let mut promise = if command {
+            let mut pending = b.i32_const(ctx, 0);
+            for (used, check) in [
+                (b.state.uses_fetch, Runtime::WebFetchPending),
+                (b.state.uses_streams, Runtime::WebStreamsPending),
+                (b.state.uses_fs, Runtime::FsPending),
+            ] {
+                if used {
+                    let active = b.runtime(ctx, check, vec![]);
+                    pending = b.num(ctx, NumOpcode::I32Or, vec![pending, active]);
+                }
+            }
+            b.runtime(ctx, Runtime::CommandResult, vec![pending])
+        } else {
+            b.runtime(ctx, Runtime::TaskResult, vec![])
+        };
+        let ready = if command {
+            promise
+        } else {
+            b.load(
+                ctx,
+                MemKind::I32,
+                promise,
+                perry_abi::layout::promise::STATE,
+            )
+        };
         let wait = b.new_block(ctx, vec![]);
         let done = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, settled, (done, vec![]), (wait, vec![]));
+        b.cond_br(ctx, ready, (done, vec![]), (wait, vec![]));
 
         // Pending: leave the task and wait on its subtasks (none would wait forever).
         b.block = wait;
@@ -273,28 +292,26 @@ fn async_export(
         b.block = done;
         // Propagate combinator cancellation ownership before checking helper-owned work.
         let mut detached = b.runtime(ctx, Runtime::TaskCancel, vec![]);
-        for (used, function) in [
-            (b.state.uses_fetch, Runtime::WebFetchPending),
-            (b.state.uses_streams, Runtime::WebStreamsPending),
-        ] {
-            if used {
-                let pending = b.runtime(ctx, function, vec![]);
-                detached = b.num(ctx, NumOpcode::I32Add, vec![detached, pending]);
-            }
-        }
         b.cleanup_foreign(ctx)?;
         if b.state.uses_fs {
             let filesystem = b.runtime(ctx, Runtime::FsClose, vec![]);
-            detached = b.num(ctx, NumOpcode::I32Add, vec![detached, filesystem]);
+            if !command {
+                detached = b.num(ctx, NumOpcode::I32Add, vec![detached, filesystem]);
+            }
         }
-        if command {
-            let message = b
-                .state
-                .data
-                .string("Unresolved detached work at task boundary; pending operations cancelled");
-            let message = b.i32_const(ctx, message as i32);
-            b.runtime_void(ctx, Runtime::TaskDetached, vec![detached, message]);
+        let outcome = if command {
+            Some(b.runtime(ctx, Runtime::CommandOutcome, vec![promise]))
         } else {
+            let mut settled = ready;
+            for (used, check) in [
+                (b.state.uses_fetch, Runtime::WebFetchPending),
+                (b.state.uses_streams, Runtime::WebStreamsPending),
+            ] {
+                if used {
+                    let count = b.runtime(ctx, check, vec![]);
+                    detached = b.num(ctx, NumOpcode::I32Add, vec![detached, count]);
+                }
+            }
             let clean = b.new_block(ctx, vec![]);
             let failed = b.new_block(ctx, vec![]);
             let completion = b.new_block(ctx, vec![i32, i32]);
@@ -328,10 +345,6 @@ fn async_export(
             b.block = completion;
             promise = completion.deref(ctx).get_argument(0);
             settled = completion.deref(ctx).get_argument(1);
-        }
-        let outcome = if command {
-            Some(b.runtime(ctx, Runtime::CommandOutcome, vec![promise]))
-        } else {
             let rejected_state = b.i32_const(ctx, perry_abi::layout::promise::REJECTED as i32);
             let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
             let trap = b.new_block(ctx, vec![]);
@@ -470,6 +483,9 @@ fn async_export(
         flat.reverse();
         let mut b = FunctionLowering::glue(state, ctx, &lift);
         let task = b.task_enter(ctx);
+        if command {
+            b.runtime_void(ctx, Runtime::CommandStart, vec![]);
+        }
         b.host_void(ctx, EffectHost::ContextSet0, vec![task]);
         let initialization = b.initialization_status(ctx);
         let joined = initialization.map(|status| {

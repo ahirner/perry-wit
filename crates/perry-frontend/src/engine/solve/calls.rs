@@ -254,15 +254,28 @@ impl<'h, 'a> Solver<'h, 'a> {
             name, return_type, ..
         } = callee
         {
-            let is_imported = self.hir.imports.iter().any(|imp| {
-                imp.specifiers.iter().any(|sp| match sp {
-                    perry_hir::ir::ImportSpecifier::Named { local, .. }
-                    | perry_hir::ir::ImportSpecifier::Default { local }
-                    | perry_hir::ir::ImportSpecifier::Namespace { local } => local == name,
+            use perry_hir::ir::ImportSpecifier;
+            let binding = self.hir.imports.iter().find_map(|import| {
+                import.specifiers.iter().find_map(|specifier| {
+                    let local = match specifier {
+                        ImportSpecifier::Named { local, .. }
+                        | ImportSpecifier::Default { local }
+                        | ImportSpecifier::Namespace { local } => local,
+                    };
+                    (local == name).then_some((import.source.as_str(), specifier))
                 })
             });
-            if !is_imported {
-                match name.as_str() {
+            let named = binding.and_then(|(source, specifier)| match specifier {
+                ImportSpecifier::Named { imported, .. } => Some((source, imported.as_str())),
+                _ => None,
+            });
+            let builtin = match named {
+                Some((source, imported)) if hir_compat::is_timer_module(source) => Some(imported),
+                _ if binding.is_none() => Some(name.as_str()),
+                _ => None,
+            };
+            if let Some(builtin) = builtin {
+                match builtin {
                     "queueMicrotask" => {
                         return Err(self.annotate_expr_error(
                             s,
@@ -273,7 +286,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         ));
                     }
                     "setTimeout" | "setInterval" | "setImmediate" => {
-                        return self.eval_timer_start(s, expr, name, args, byte_offset);
+                        return self.eval_timer_start(s, expr, builtin, args, byte_offset);
                     }
                     "clearTimeout" | "clearInterval" | "clearImmediate" => {
                         return self.eval_timer_clear(s, expr, args);
@@ -282,11 +295,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
             let arg_tys = self.eval_args(s, args)?;
-            if let Some(res) = self.eval_builtin_import_call(name, args, &arg_tys) {
+            if let Some((source, imported)) = named
+                && let Some(res) = self.eval_builtin_import_call(source, imported, args, &arg_tys)
+            {
                 return Ok(res);
             }
             if byte_offset != 0
-                && !is_imported
+                && binding.is_none()
                 && !name.starts_with("js_")
                 && !name.starts_with("__")
                 && arg_tys.iter().any(|&a| self.types.has_func(a))
@@ -589,6 +604,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
+
+        self.check_timer_member(stripped, byte_offset)?;
 
         if matches!(name, "then" | "catch" | "finally")
             && matches!(
@@ -944,22 +961,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn eval_builtin_import_call(
+    fn eval_builtin_import_call(
         &mut self,
-        local_name: &str,
+        source: &str,
+        imported: &str,
         args: &[Expr],
         arg_tys: &[Ty],
     ) -> Option<Ty> {
-        let (source, imported) = self.hir.imports.iter().find_map(|imp| {
-            imp.specifiers.iter().find_map(|s| match s {
-                perry_hir::ir::ImportSpecifier::Named { imported, local }
-                    if local == local_name =>
-                {
-                    Some((imp.source.as_str(), imported.as_str()))
-                }
-                _ => None,
-            })
-        })?;
         match (source, imported) {
             ("timers/promises" | "node:timers/promises", "setTimeout") => {
                 match arg_tys.get(1).copied() {
