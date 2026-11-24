@@ -2,7 +2,7 @@
 use crate::hir_compat::{self, Locations};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -14,8 +14,7 @@ pub(crate) struct SourceFacts {
     pub(crate) for_head_let_starts: Vec<u32>,
     pub(crate) param_annotated_starts: Vec<u32>,
     pub(crate) exported_var_starts: Vec<u32>,
-    pub(crate) callable_comparisons: Vec<Span>,
-    pub(crate) conditional_spans: Vec<Span>,
+    pub(crate) expression_spans: HashSet<Span>,
     pub(crate) param_value_uses: Vec<(u32, Span)>,
 }
 
@@ -320,7 +319,7 @@ pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
             expr.visit_children_with(self);
         }
         fn visit_cond_expr(&mut self, cond: &ast::CondExpr) {
-            self.facts.conditional_spans.push(cond.span);
+            self.facts.expression_spans.insert(cond.span);
             cond.visit_children_with(self);
         }
         fn visit_assign_expr(&mut self, assign: &ast::AssignExpr) {
@@ -333,7 +332,7 @@ pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
                     ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
                 ))
             {
-                self.facts.conditional_spans.push(assign.span);
+                self.facts.expression_spans.insert(assign.span);
             }
             assign.visit_children_with(self);
         }
@@ -359,7 +358,7 @@ pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
                             )
                         ))
                 {
-                    self.facts.callable_comparisons.push(expr.span);
+                    self.facts.expression_spans.insert(expr.span);
                 }
                 self.visit_callable_position(&expr.left);
                 self.visit_callable_position(&expr.right);
@@ -377,8 +376,10 @@ pub(crate) fn scan_ast(module: &ast::Module) -> Result<SourceFacts> {
                     }
                     _ => false,
                 };
-                if is_special_host_call {
-                    self.facts.conditional_spans.push(call.span);
+                if is_special_host_call
+                    || call.args.iter().any(|arg| self.is_closure_expr(&arg.expr))
+                {
+                    self.facts.expression_spans.insert(call.span);
                 }
             }
             match &call.callee {

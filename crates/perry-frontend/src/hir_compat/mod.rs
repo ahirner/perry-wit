@@ -69,17 +69,11 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         Ok::<_, Diagnostic>(constructors)
     })?;
     let facts = crate::engine::boundary::scan_ast(&ast)?;
-    locations
-        .callable_comparisons
-        .extend(facts.callable_comparisons.iter().copied());
-    locations
-        .callable_comparisons
-        .extend(facts.conditional_spans.iter().copied());
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
     classes::preserve_field_types(&mut ast);
-    locations.preserve_expressions(&mut ast);
+    locations.preserve_expressions(&mut ast, &facts.expression_spans);
     let mut module = perry_hir::lower_module(&ast, "main", identity).map_err(|error| {
         let lower_error = error.downcast_ref::<perry_hir::error::LowerError>();
         let span = lower_error.and_then(|error| error.span);

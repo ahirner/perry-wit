@@ -67,6 +67,7 @@ pub(crate) struct ClassInst {
     pub(crate) class: ClassId,
     pub(crate) args: Ty,
     pub(crate) field_locs: TySpan,
+    pub(crate) field_init: Option<InstanceId>,
     pub(crate) ctor_inst: Option<InstanceId>,
     pub(crate) emitted_name: String,
 }
@@ -186,6 +187,7 @@ pub(crate) enum SiteResolution {
         class_inst: ClassInstId,
         argument_types: Ty,
     },
+    BranchResult(Ty),
     ObjectLiteral(Ty),
     ZeroSizedArray,
     TypedArray(Ty),
@@ -695,8 +697,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
             SiteResolution::ClassNew { class_inst, .. } => {
-                if let Some(ctor) = self.class_insts.get(class_inst).and_then(|c| c.ctor_inst) {
-                    f(ctor);
+                let instance = &self.class_insts[class_inst];
+                for target in instance.field_init.into_iter().chain(instance.ctor_inst) {
+                    f(target);
                 }
             }
             SiteResolution::PromiseNew {

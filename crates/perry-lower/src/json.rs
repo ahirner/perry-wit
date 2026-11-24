@@ -13,7 +13,7 @@ impl<'s> FunctionBuilder<'s> {
         if let Some(src) = self.integer64_source(ctx, value) {
             value = src;
         } else if let Expr::LocalGet(id) = expr
-            && let Some(int_ty) = self.locals.get(id).and_then(|local| local.integer)
+            && let Some(int_ty) = self.locals.get(id).and_then(|local| local.writes.integer)
             && int_ty.deref(ctx).width() == 64
         {
             let int_handle: TypeHandle = int_ty.into();

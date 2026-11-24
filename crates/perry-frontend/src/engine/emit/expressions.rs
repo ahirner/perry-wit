@@ -1,5 +1,6 @@
 //! Emit expressions from solved call sites and function-value coercions.
 use super::*;
+use crate::hir_compat::GuestCall;
 
 enum CalleeValue {
     Static,
@@ -91,6 +92,11 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<Expr> {
         if let Some(site) = resolution {
             match site {
+                SiteResolution::BranchResult(ty) => {
+                    let value = self.rewrite_expr_inner(&rctx.with_expected(true), expr, None)?;
+                    let ty = self.materialize(ty)?;
+                    return Ok(GuestCall::Typed { value, ty }.into_hir());
+                }
                 SiteResolution::Cell(_) => {}
                 SiteResolution::FoldBool(b) => {
                     if let Expr::Compare { left, right, .. } = expr {

@@ -115,10 +115,10 @@ impl<'s> FunctionBuilder<'s> {
             self.kv_set(ctx, record, key, val)?;
             return Ok(val);
         }
-        if let Some((class_name, type_args)) = self.shapes.class_of_type(ctx, record.get_type(ctx))
+        if let Some(class_name) = self.shapes.class_of_type(ctx, record.get_type(ctx))
             && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, field)
         {
-            return self.class_setter_call(ctx, record, owner_class, &type_args, setter, value);
+            return self.class_setter_call(ctx, record, owner_class, setter, value);
         }
         let rec_ty = perry_mir::typed::<RecordType>(ctx, record.get_type(ctx))
             .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object)

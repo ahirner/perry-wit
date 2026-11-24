@@ -18,87 +18,57 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         param: &'s perry_frontend::hir::ir::Param,
         value: Option<Value>,
-        mut expected: Option<BindingType>,
+        binding: BindingType,
     ) -> Result<()> {
-        let integer = expected.and_then(|binding| binding.integer);
-        let slot = match (value, &param.default) {
+        let slot = self.entry_slot(ctx, binding.carrier);
+        let has_default = param
+            .default
+            .as_ref()
+            .is_some_and(|expr| !matches!(expr, Expr::Undefined));
+        let mut join = None;
+        let value = match (value, &param.default) {
             (Some(value), Some(default))
-                if !matches!(default, Expr::Undefined)
-                    && admits_undefined(ctx, value.get_type(ctx)) =>
+                if has_default && admits_undefined(ctx, value.get_type(ctx)) =>
             {
-                let is_undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-                let then_block = self.new_block(ctx, "default_then");
-                let else_block = self.new_block(ctx, "default_else");
-                let join = self.new_block(ctx, "default_join");
-                self.branch(ctx, is_undefined, then_block, else_block);
-
-                self.switch_to(else_block);
-                let present = self.strip_undefined(ctx, value)?;
-                let else_end = self.block;
-                let present_type = present.get_type(ctx);
-
-                self.switch_to(then_block);
-                let hint = expected.map_or(present_type, |binding| binding.carrier);
-                let default = self.expression_with(ctx, default, Some(hint))?;
-                let then_end = self.block;
-                let terminated = self.terminated(ctx);
-                let target = expected.unwrap_or_else(|| {
-                    BindingType::plain(if terminated {
-                        present_type
-                    } else {
-                        crate::coerce::merged_type(
-                            ctx,
-                            present_type,
-                            present_type,
-                            default.get_type(ctx),
-                        )
-                    })
-                });
-                let slot = self.entry_slot(ctx, target.carrier);
-                for (block, value) in [(then_end, default), (else_end, present)] {
-                    self.switch_to(block);
-                    if !self.terminated(ctx) {
-                        let value = self.fit_binding(ctx, value, target)?;
-                        self.store(ctx, slot, value);
-                        self.jump(ctx, join);
-                    }
-                }
-                self.switch_to(join);
-                slot
-            }
-            (value, default) => {
-                let value = match (value, default) {
-                    (Some(value), _) => value,
-                    (None, Some(default)) => {
-                        self.expression_with(ctx, default, expected.map(|b| b.carrier))?
-                    }
-                    (None, None) => {
-                        let ty = expected.map_or_else(|| FP64Type::get(ctx).into(), |b| b.carrier);
-                        let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);
-                        expected = None;
-                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
-                    }
-                };
-                let target = expected.unwrap_or_else(|| BindingType::plain(value.get_type(ctx)));
-                let value = if default
-                    .as_ref()
-                    .is_some_and(|expr| !matches!(expr, Expr::Undefined))
-                {
-                    self.fit_binding(ctx, value, target)?
-                } else {
-                    self.fit(ctx, value, target.carrier)?
-                };
-                let slot = self.entry_slot(ctx, target.carrier);
+                let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                let use_default = self.new_block(ctx, "default_then");
+                let use_argument = self.new_block(ctx, "default_else");
+                let done = self.new_block(ctx, "default_join");
+                self.branch(ctx, absent, use_default, use_argument);
+                self.switch_to(use_argument);
+                let value = self.strip_undefined(ctx, value)?;
+                let value = self.fit_binding(ctx, value, binding)?;
                 self.store(ctx, slot, value);
-                slot
+                self.jump(ctx, done);
+                self.switch_to(use_default);
+                join = Some(done);
+                self.expression_with(ctx, default, Some(binding.carrier))?
+            }
+            (Some(value), _) => value,
+            (None, Some(default)) => self.expression_with(ctx, default, Some(binding.carrier))?,
+            (None, None) => {
+                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, binding.carrier))
             }
         };
+        if !self.terminated(ctx) {
+            let value = if has_default {
+                self.fit_binding(ctx, value, binding)?
+            } else {
+                self.fit(ctx, value, binding.carrier)?
+            };
+            self.store(ctx, slot, value);
+            if let Some(done) = join {
+                self.jump(ctx, done);
+            }
+        }
+        if let Some(done) = join {
+            self.switch_to(done);
+        }
         self.locals.insert(
             param.id,
             LocalBinding {
                 slot,
-                integer,
-                deferred_write: None,
+                writes: binding,
                 is_never: matches!(param.ty, HirType::Never),
             },
         );
@@ -111,9 +81,17 @@ impl<'s> FunctionBuilder<'s> {
         args: &'s [Expr],
         type_args: &'s [HirType],
         byte_offset: u32,
+        expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
         if let Some(call) = hir_compat::runtime_call(callee, args, type_args) {
             return match call {
+                RuntimeCall::Guest(GuestCall::Typed { value, ty }) => {
+                    let slot = match expected {
+                        Some(slot) if crate::value_unions::is_value_union(ctx, slot) => slot,
+                        _ => self.shapes.value_type(ctx, ty)?,
+                    };
+                    self.expression_with(ctx, value, Some(slot)).map(Some)
+                }
                 RuntimeCall::Guest(GuestCall::Pending(ty)) => {
                     let settled = self.shapes.settled_type(ctx, ty)?;
                     Ok(Some(self.emit_value(ctx, |ctx| {
@@ -523,7 +501,7 @@ impl<'s> FunctionBuilder<'s> {
             self.inline_functions.push(function.id);
             let result = self.with_inline_scope(ctx, self.this_slot, |this, ctx| {
                 for (param, value) in signature.params.iter().zip(values) {
-                    this.bind_parameter(ctx, param.source, Some(value), Some(param.binding))?;
+                    this.bind_parameter(ctx, param.source, Some(value), param.binding)?;
                 }
                 let result = signature
                     .result

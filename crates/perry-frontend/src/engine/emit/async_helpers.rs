@@ -14,10 +14,20 @@ use crate::engine::TIMER_CLASS;
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn inline_iife(&mut self, return_type: HirType, body: Vec<Stmt>) -> Result<Expr> {
+        self.inline_call(return_type, body, Vec::new(), Vec::new())
+    }
+
+    pub(super) fn inline_call(
+        &mut self,
+        return_type: HirType,
+        body: Vec<Stmt>,
+        params: Vec<perry_hir::ir::Param>,
+        args: Vec<Expr>,
+    ) -> Result<Expr> {
         let closure_fid = self.fresh_func_id()?;
         let closure = Expr::Closure {
             func_id: closure_fid,
-            params: Vec::new(),
+            params,
             return_type,
             body,
             captures: Vec::new(),
@@ -33,7 +43,7 @@ impl<'h> Emitter<'h, '_> {
         };
         Ok(Expr::Call {
             callee: Box::new(closure),
-            args: Vec::new(),
+            args,
             type_args: Vec::new(),
             byte_offset: 0,
             byte_end: 0,

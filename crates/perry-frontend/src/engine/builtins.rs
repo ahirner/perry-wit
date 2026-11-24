@@ -7,24 +7,10 @@ use crate::{
     shapes::{self, Declarations},
 };
 use perry_hir::{
-    analysis::{HirTypeFacts, infer_expr_type},
     ir::{BinaryOp, Expr, LogicalOp, UnaryOp},
-    types::{FuncId, GlobalId, LocalId, Type as HirType},
+    types::Type as HirType,
 };
 use pliron::context::Context;
-
-struct NoFacts;
-impl HirTypeFacts for NoFacts {
-    fn local_type(&self, _: LocalId) -> Option<&HirType> {
-        None
-    }
-    fn global_type(&self, _: GlobalId) -> Option<&HirType> {
-        None
-    }
-    fn function_return_type(&self, _: FuncId) -> Option<&HirType> {
-        None
-    }
-}
 
 pub(crate) const SETTLED: &str = "PromiseSettledResult";
 
@@ -430,7 +416,6 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
             types.with_absences(Ty::NUMBER, Absence::Undefined)
         }
         Expr::StringAt { .. } => types.with_absences(Ty::STRING, Absence::Undefined),
-        Expr::DateToJSON(_) => types.with_absences(Ty::STRING, Absence::Null),
         Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) | Expr::JsonParseReviver { .. } => {
             Ty::DYNAMIC
         }
@@ -438,18 +423,90 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
             let p = types.intern_hir(ctx, ty, true);
             if p == Ty::OPEN { Ty::DYNAMIC } else { p }
         }
-        _ => {
-            let hir = infer_expr_type(expr, &NoFacts);
-            if matches!(
-                hir,
-                HirType::Any | HirType::Unknown | HirType::Object(_) | HirType::Generic { .. }
-            ) {
-                Ty::OPEN
-            } else {
-                let ty = types.intern_hir(ctx, &hir, false);
-                if types.is_open(ty) { Ty::OPEN } else { ty }
-            }
+        Expr::MathAbs(_)
+        | Expr::MathCeil(_)
+        | Expr::MathFloor(_)
+        | Expr::MathTrunc(_)
+        | Expr::MathRound(_)
+        | Expr::MathSqrt(_)
+        | Expr::MathImul(..)
+        | Expr::MathMin(_)
+        | Expr::MathMax(_)
+        | Expr::MathMinSpread(_)
+        | Expr::MathMaxSpread(_)
+        | Expr::MathRandom
+        | Expr::NumberCoerce(_)
+        | Expr::ParseInt { .. }
+        | Expr::ParseFloat(_)
+        | Expr::PerformanceNow
+        | Expr::DateNow
+        | Expr::DateParse(_)
+        | Expr::DateUtc(_)
+        | Expr::MapSize(_)
+        | Expr::SetSize(_)
+        | Expr::Uint8ArrayLength(_)
+        | Expr::Uint8ArraySet { .. }
+        | Expr::PropertyUpdate { .. } => Ty::NUMBER,
+        Expr::IsNaN(_)
+        | Expr::IsFinite(_)
+        | Expr::NumberIsNaN(_)
+        | Expr::NumberIsFinite(_)
+        | Expr::NumberIsInteger(_)
+        | Expr::NumberIsSafeInteger(_)
+        | Expr::ArrayIsArray(_)
+        | Expr::ObjectIs(..)
+        | Expr::TextDecoderFatal(_)
+        | Expr::TextDecoderIgnoreBom(_) => Ty::BOOLEAN,
+        Expr::BigIntCoerce(_) => Ty::BIGINT,
+        Expr::StringCoerce(_)
+        | Expr::TemplateStringCoerce(_)
+        | Expr::StringFromCharCode(_)
+        | Expr::StringFromCharCodeSpread(_)
+        | Expr::StringFromCodePoint(_)
+        | Expr::PathJoin(..)
+        | Expr::PathResolve(_)
+        | Expr::TextDecoderEncoding(_)
+        | Expr::TextDecoderDecode { .. }
+        | Expr::ErrorMessage(_)
+        | Expr::CryptoRandomUUID
+        | Expr::EncodeURIComponent(_)
+        | Expr::UrlGetHref(_)
+        | Expr::UrlGetPathname(_)
+        | Expr::UrlGetProtocol(_)
+        | Expr::UrlGetHost(_)
+        | Expr::UrlGetHostname(_)
+        | Expr::UrlGetPort(_)
+        | Expr::UrlGetSearch(_)
+        | Expr::UrlGetHash(_)
+        | Expr::UrlGetOrigin(_)
+        | Expr::UrlSetPathname { .. }
+        | Expr::JsonStringify(_)
+        | Expr::JsonStringifyPretty { .. }
+        | Expr::JsonStringifyFull(..) => Ty::STRING,
+        Expr::EnvGet(_) => types.with_absences(Ty::STRING, Absence::Undefined),
+        Expr::ForInKeys(_) | Expr::ObjectKeys(_) => types.array(Ty::STRING),
+        Expr::ProcessExit(_) => Ty::NEVER,
+        Expr::TextEncoderNew => types.named(ctx, "TextEncoder"),
+        Expr::TextDecoderNew { .. } => types.named(ctx, "TextDecoder"),
+        Expr::ErrorNew(_) | Expr::ErrorNewWithCause { .. } | Expr::ErrorNewWithOptions { .. } => {
+            types.named(ctx, "Error")
         }
+        Expr::TypeErrorNew(_) => types.named(ctx, "TypeError"),
+        Expr::RangeErrorNew(_) => types.named(ctx, "RangeError"),
+        Expr::ReferenceErrorNew(_) => types.named(ctx, "ReferenceError"),
+        Expr::SyntaxErrorNew(_) => types.named(ctx, "SyntaxError"),
+        Expr::Uint8ArrayFrom(_) | Expr::Uint8ArrayNew(_) => types.named(ctx, "Uint8Array"),
+        Expr::DateNew(_) => types.named(ctx, "Date"),
+        Expr::RegExp { .. } | Expr::RegExpDynamic { .. } => types.named(ctx, "RegExp"),
+        Expr::UrlNew { .. } => types.named(ctx, "URL"),
+        Expr::UrlGetSearchParams(_) | Expr::UrlSearchParamsNew(_) => {
+            types.named(ctx, "URLSearchParams")
+        }
+        Expr::FetchWithOptions { .. } => {
+            let response = types.named(ctx, "Response");
+            types.promise(response)
+        }
+        _ => Ty::OPEN,
     }
 }
 
@@ -632,6 +689,11 @@ pub(crate) fn index_type(
     index: &Expr,
 ) -> Option<Ty> {
     let (stripped, _) = types.strip_nullish(object);
+    if let Expr::String(key) = index
+        && let Some(ty) = property_type(ctx, decls, types, stripped, key)
+    {
+        return Some(ty);
+    }
     match types.kind(stripped) {
         TyKind::Dynamic => Some(Ty::DYNAMIC),
         TyKind::Array(elem) => Some(elem),

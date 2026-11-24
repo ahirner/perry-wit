@@ -2,8 +2,6 @@
 use perry_wit_diagnostics::Result;
 use pliron::context::Context;
 use std::collections::{BTreeMap, HashMap};
-mod open_types;
-pub use open_types::{TypeState, binding_type, contextual_type};
 mod absence;
 pub mod collections;
 pub mod completion;

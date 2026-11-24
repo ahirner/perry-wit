@@ -15,6 +15,7 @@ use swc_common::Span;
 pub(crate) enum TemplateKind {
     ModuleInit,
     Function,
+    FieldInitializers,
     ClassConstructor,
     ClassMethod,
     ClassStaticMethod(ClassId),
@@ -88,6 +89,7 @@ impl<'h> TemplateView<'h> {
 pub(crate) struct ClassInfo {
     pub(crate) hir_idx: usize,
     pub(crate) name_id: NameId,
+    pub(crate) field_init: Option<TemplateId>,
     pub(crate) ctor: Option<TemplateId>,
     pub(crate) methods: Vec<(NameId, TemplateId)>,
     pub(crate) static_methods: Vec<(NameId, TemplateId)>,
@@ -222,6 +224,7 @@ impl<'h> ModuleIndex<'h> {
             let cid = idx.classes.push(ClassInfo {
                 hir_idx,
                 name_id: scan.types.intern_name(&class.name),
+                field_init: None,
                 ctor: None,
                 methods: Vec::new(),
                 static_methods: Vec::new(),
@@ -239,10 +242,19 @@ impl<'h> ModuleIndex<'h> {
                     idx.scan_expr(&mut scan, init, init_tid, false);
                 }
             }
-            for field in &class.fields {
-                if let Some(init) = &field.init {
-                    Self::record_site_expr(&mut scan, init_tid, init);
-                    idx.scan_expr(&mut scan, init, init_tid, false);
+            let mut initializers = class
+                .fields
+                .iter()
+                .filter_map(|field| field.init.as_ref())
+                .peekable();
+            if initializers.peek().is_some() {
+                let owner =
+                    idx.add_synthetic_template(TemplateKind::FieldInitializers, &class.name);
+                idx.classes[cid].field_init = Some(owner);
+                scan.raw_sites.resize_with(idx.views.len(), Vec::new);
+                for init in initializers {
+                    Self::record_site_expr(&mut scan, owner, init);
+                    idx.scan_expr(&mut scan, init, owner, false);
                 }
             }
             if class
@@ -347,14 +359,8 @@ impl<'h> ModuleIndex<'h> {
                     && entry.handles.is_none()
                 {
                     entry.handles = Some((
-                        idx.add_promise_handle_template(
-                            TemplateKind::PromiseResolve(site),
-                            "resolve",
-                        ),
-                        idx.add_promise_handle_template(
-                            TemplateKind::PromiseReject(site),
-                            "reject",
-                        ),
+                        idx.add_synthetic_template(TemplateKind::PromiseResolve(site), "resolve"),
+                        idx.add_synthetic_template(TemplateKind::PromiseReject(site), "reject"),
                     ));
                 }
             }
@@ -601,11 +607,7 @@ impl<'h> ModuleIndex<'h> {
         self.views.push(view)
     }
 
-    fn add_promise_handle_template(
-        &mut self,
-        kind: TemplateKind,
-        name: &'static str,
-    ) -> TemplateId {
+    fn add_synthetic_template(&mut self, kind: TemplateKind, name: &'h str) -> TemplateId {
         self.add_template(TemplateView {
             kind,
             name,
@@ -874,6 +876,7 @@ impl<'h> ModuleIndex<'h> {
                 Self::record_site_expr(scan, owner, value);
             }
             Expr::Logical { left, right, .. } => {
+                Self::record_site_expr(scan, owner, expr);
                 Self::record_site_expr(scan, owner, left);
                 Self::record_site_expr(scan, owner, right);
             }
@@ -882,6 +885,7 @@ impl<'h> ModuleIndex<'h> {
                 else_expr,
                 ..
             } => {
+                Self::record_site_expr(scan, owner, expr);
                 Self::record_site_expr(scan, owner, then_expr);
                 Self::record_site_expr(scan, owner, else_expr);
             }

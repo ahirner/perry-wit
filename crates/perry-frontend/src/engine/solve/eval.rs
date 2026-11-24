@@ -87,51 +87,53 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.write_loc(loc, norm);
                 }
             }
-            let class_inst_ids: Vec<(ClassInstId, ClassId, TySpan)> = self
-                .class_insts
-                .iter_enumerated()
-                .map(|(id, ci)| (id, ci.class, ci.field_locs))
-                .collect();
-            for (cinst_id, cid, field_locs_span) in class_inst_ids {
-                let Some(hir_class) = self
-                    .index
-                    .class(cid)
-                    .and_then(|c| self.hir.classes.get(c.hir_idx))
-                else {
-                    continue;
-                };
-                let locs: Vec<LocId> = self
+        }
+        if view.kind == TemplateKind::FieldInitializers {
+            let Some(Receiver::Class(id)) = receiver else {
+                return Err(Diagnostic::internal(
+                    "field initializer needs its class receiver",
+                ));
+            };
+            let instance = &self.class_insts[id];
+            let info = &self.index.classes[instance.class];
+            let fields = &self
+                .hir
+                .classes
+                .get(info.hir_idx)
+                .ok_or_else(|| Diagnostic::internal("missing class fields"))?
+                .fields;
+            for (field, offset) in fields.iter().zip(instance.field_locs.range()) {
+                let Some(init) = &field.init else { continue };
+                let loc = *self
                     .field_locs
-                    .get(field_locs_span.range())
-                    .unwrap_or(&[])
-                    .to_vec();
-                s.receiver = Some(Receiver::Class(cinst_id));
-                for (field, field_loc) in hir_class.fields.iter().zip(locs) {
-                    let Some(init) = &field.init else {
-                        continue;
-                    };
-                    if matches!(init, Expr::Array(items, _) if items.is_empty())
-                        && matches!(
-                            self.types.kind(self.locations[field_loc]),
-                            TyKind::Cell {
-                                kind: CellKind::Array,
-                                ..
-                            }
-                        )
+                    .get(offset)
+                    .ok_or_else(|| Diagnostic::internal("missing class field location"))?;
+                if matches!(init, Expr::Array(items, _) if items.is_empty()) {
+                    if self.types.is_open(self.locations[loc])
+                        && !matches!(self.types.kind(self.locations[loc]), TyKind::Cell { .. })
                     {
+                        let element = self.alloc_loc(Ty::BOTTOM);
+                        let cell = self.types.cell(element, CellKind::Array);
+                        self.write_loc(loc, cell);
+                    }
+                    if matches!(
+                        self.types.kind(self.locations[loc]),
+                        TyKind::Cell {
+                            kind: CellKind::Array,
+                            ..
+                        }
+                    ) {
                         continue;
                     }
-                    let init_ty = self.eval_expr(&mut s, init)?;
-                    self.check_escaping_func(s.inst, init_ty, 0, s.current_span)?;
-                    let norm = self
-                        .types
-                        .normalize_for_storage(self.ctx, self.decls, init_ty);
-                    self.write_loc(field_loc, norm);
-                    let cur = self.read_loc(field_loc, s.inst);
-                    self.record_coercion(s.inst, init, init_ty, cur);
                 }
+                let ty = self.eval_expr(&mut s, init)?;
+                self.check_escaping_func(inst_id, ty, 0, s.current_span)?;
+                let storage = self.types.normalize_for_storage(self.ctx, self.decls, ty);
+                self.write_loc(loc, storage);
+                let dest = self.read_loc(loc, inst_id);
+                self.record_coercion(inst_id, init, ty, dest);
             }
-            s.receiver = receiver;
+            return Ok(());
         }
 
         let body = hir_compat::strip_synthetic_default_guards(view.body, view.params.iter());
@@ -621,15 +623,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else {
                     declared
                 };
-                let initial = if !is_inferred && !self.types.is_open(declared) {
-                    declared
-                } else {
-                    Ty::BOTTOM
-                };
+                let needs_context = is_inferred || self.types.is_open(declared);
+                let initial = if !needs_context { declared } else { Ty::BOTTOM };
                 if self.local_frame_slot_in(s.inst, lidx).is_none() {
                     let _ = self.ensure_instance_local(s.inst, lidx, initial);
                 }
-                if !is_inferred && !self.types.is_open(declared) {
+                if !needs_context {
                     self.write_local_value(s, lidx, declared);
                 }
                 let is_i64_cast = is_inferred
@@ -650,7 +649,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         } else {
                             None
                         }
-                    } else if (is_inferred || declared == Ty::OPEN)
+                    } else if needs_context
                         && !self.index.local_reassigned.contains(lidx.index())
                         && self.index.is_empty_object_expr(self.types, init_expr)
                     {
@@ -681,7 +680,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         || self.is_tagged_func_union_in(init_ty, s.inst)
                     {
                         self.write_local_value(s, lidx, init_ty);
-                    } else if !is_i64_cast && (is_inferred || declared == Ty::OPEN) {
+                    } else if !is_i64_cast && needs_context {
                         let is_kind = |t, k| {
                             matches!(self.types.kind(t), TyKind::Leaf(id)
                             if matches!(id.hir(self.ctx), HirType::Named(n) if crate::methods::Kind::builtin(n) == Some(k)))

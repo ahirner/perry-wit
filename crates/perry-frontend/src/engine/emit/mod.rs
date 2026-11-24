@@ -474,7 +474,12 @@ impl<'h> Emitter<'h, '_> {
                     "Add a concrete type annotation to this binding, parameter, or function return.",
                 ));
             }
-            f.init = self.rewrite_opt_expr(&init_ctx, field.init.as_ref())?;
+            if let Some(init) = &field.init {
+                let owner = cinst
+                    .field_init
+                    .ok_or_else(|| Diagnostic::internal("missing field initializer instance"))?;
+                f.init = Some(self.rewrite_expr(&RewriteCtx::plain(owner), init)?);
+            }
             fields.push(f);
         }
         cls.fields = fields;
@@ -782,6 +787,28 @@ impl<'h> Emitter<'h, '_> {
     }
 
     fn rewrite_condition(&mut self, rctx: &RewriteCtx<'_>, expr: &'h Expr) -> Result<Expr> {
+        match expr {
+            Expr::Logical {
+                op: op @ (perry_hir::ir::LogicalOp::And | perry_hir::ir::LogicalOp::Or),
+                left,
+                right,
+            } => {
+                return Ok(Expr::Logical {
+                    op: *op,
+                    left: Box::new(self.rewrite_condition(rctx, left)?),
+                    right: Box::new(self.rewrite_condition(rctx, right)?),
+                });
+            }
+            Expr::Sequence(parts) if let Some((last, prefix)) = parts.split_last() => {
+                let mut values = Vec::with_capacity(parts.len());
+                for effect in prefix {
+                    values.push(self.rewrite_expr(rctx, effect)?);
+                }
+                values.push(self.rewrite_condition(rctx, last)?);
+                return Ok(Expr::Sequence(values));
+            }
+            _ => {}
+        }
         let rewritten = self.rewrite_expr(rctx, expr)?;
         Ok(match rewritten {
             Expr::FuncRef(_) => Expr::Bool(true),
@@ -922,20 +949,29 @@ impl<'h> Emitter<'h, '_> {
                 self.materialize(t)
             }
             Some(t)
-                if is_inferred
-                    && matches!(
-                        self.types.kind(t),
-                        TyKind::Cell {
-                            kind: CellKind::Array,
-                            ..
-                        }
-                    ) =>
+                if matches!(
+                    self.types.kind(t),
+                    TyKind::Cell {
+                        kind: CellKind::Dict,
+                        ..
+                    }
+                ) =>
             {
-                let mut err = diag!(codes::MISSING_TYPE_ANNOTATION, "an empty array literal needs a declared element type")
-                    .with_help("Add a concrete element type annotation to this binding (e.g. `const xs: number[] = []`).");
-                if let TyKind::Cell { loc, .. } = self.types.kind(t)
-                    && self.solved.self_nested_locs.contains(loc.index())
-                {
+                self.materialize(t)
+            }
+            Some(t)
+                if let TyKind::Cell { loc, kind } = self.types.kind(t)
+                    && kind.is_array()
+                    && !self.is_resolved(t) =>
+            {
+                let mut err = diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "an empty array literal needs a declared element type"
+                )
+                .with_help(format!(
+                    "Add a concrete element type annotation to '{name}'."
+                ));
+                if self.solved.self_nested_locs.contains(loc.index()) {
                     err = err.with_note("its inferred element type nests itself");
                 }
                 let err = self.annotate_local(err, id);

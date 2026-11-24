@@ -1,12 +1,14 @@
 //! Compiler-generated synthetic calls recognized during HIR lowering.
 use super::*;
 
+const TYPED: &str = "\0perry_typed";
 const PENDING: &str = "\0perry_promise_pending";
 const RESOLVE: &str = "\0perry_promise_resolve";
 const REJECT: &str = "\0perry_promise_reject";
 const TIMER: &str = "\0perry_timer";
 
 pub enum GuestCall<E, T> {
+    Typed { value: E, ty: T },
     Pending(T),
     Resolve { promise: E, value: E },
     Reject { promise: E, reason: E },
@@ -16,6 +18,7 @@ pub enum GuestCall<E, T> {
 impl GuestCall<Expr, HirType> {
     pub(crate) fn into_hir(self) -> Expr {
         let (name, args, type_args) = match self {
+            Self::Typed { value, ty } => (TYPED, vec![value], vec![ty]),
             Self::Pending(settled) => (PENDING, vec![], vec![settled]),
             Self::Resolve { promise, value } => (RESOLVE, vec![promise, value], vec![]),
             Self::Reject { promise, reason } => (REJECT, vec![promise, reason], vec![]),
@@ -60,6 +63,12 @@ pub fn runtime_call<'a>(
         return None;
     };
     Some(match (name.as_str(), args) {
+        (TYPED, [value]) => {
+            let [ty] = type_args else {
+                return None;
+            };
+            RuntimeCall::Guest(GuestCall::Typed { value, ty })
+        }
         (PENDING, []) => {
             let [ty] = type_args else {
                 return None;

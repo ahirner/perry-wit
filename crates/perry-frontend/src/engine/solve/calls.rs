@@ -768,6 +768,22 @@ impl<'h, 'a> Solver<'h, 'a> {
                 },
             ));
         }
+        if byte_offset != 0
+            && let TyKind::Leaf(id) = self.types.kind(stripped)
+            && let HirType::Named(base) = id.hir(self.ctx)
+            && matches!(
+                self.decls.resolve_foreign(base),
+                Some(crate::hir::Foreign::Resource(_))
+            )
+        {
+            return Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(format!(
+                    "method {name} is not supported on WIT resource yet"
+                )),
+                byte_offset,
+            ));
+        }
         let is_known_js_cb_method = matches!(
             name,
             "map"
