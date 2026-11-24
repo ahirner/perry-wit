@@ -11,7 +11,11 @@ enum ClassArguments<'a, 's> {
 enum ClassReceiver<'a, 's> {
     Static,
     Instance(Value),
-    Constructor(Value, &'a [(&'s str, Option<&'s Expr>)]),
+    Constructor(
+        Value,
+        &'s perry_frontend::hir::ir::Class,
+        &'a [(&'s str, TypeHandle, Option<&'s Expr>)],
+    ),
 }
 
 #[derive(Clone, Copy)]
@@ -92,16 +96,19 @@ impl<'s> FunctionBuilder<'s> {
             .map_err(|_| Diagnostic::internal("incomplete class record"))?
             .to_vec();
         let mut order = Vec::with_capacity(field_defs.len());
+        let mut field_slots = Vec::with_capacity(class.fields.len());
         for field in &class.fields {
-            let (index, _) = rec
+            let (index, field_ty) = rec
                 .deref(ctx)
                 .field(&field.name)
                 .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
+            field_slots.push((index, field_ty));
             if !(field.is_private && field.name.starts_with('#')) {
                 order.push_unique(index as u32);
             }
         }
         if class.extends.is_none()
+            && class.fields.len() == field_defs.len()
             && class.fields.iter().all(|f| f.init.is_none())
             && let Some(ctor) = &class.constructor
             && ctor.params.len() == class.fields.len()
@@ -125,25 +132,15 @@ impl<'s> FunctionBuilder<'s> {
                     )
                 })
         {
-            let mut arg_vals = Vec::with_capacity(args.len());
-            for (field, expr) in class.fields.iter().zip(args) {
-                let (_, field_ty) = rec
-                    .deref(ctx)
-                    .field(&field.name)
-                    .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
+            let mut slots = vec![None; field_defs.len()];
+            for (&(index, field_ty), expr) in field_slots.iter().zip(args) {
                 let val = self.expression_with(ctx, expr, Some(field_ty))?;
-                arg_vals.push((field.name.as_str(), self.fit(ctx, val, field_ty)?));
+                slots[index] = Some(self.fit(ctx, val, field_ty)?);
             }
-            let mut init_operands = Vec::with_capacity(field_defs.len());
-            for (field, _) in &field_defs {
-                let val = arg_vals
-                    .iter()
-                    .find_map(|&(name, v)| (name == field.as_str()).then_some(v))
-                    .ok_or_else(|| {
-                        internal!("missing direct-init field {field} on {class_name}")
-                    })?;
-                init_operands.push(val);
-            }
+            let init_operands: Vec<Value> = slots
+                .into_iter()
+                .collect::<Option<_>>()
+                .ok_or_else(|| internal!("incomplete direct-init fields on {class_name}"))?;
             let instance = self.emit_value(ctx, |ctx| {
                 let alloc = AllocOp::new(ctx, rec, init_operands);
                 alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(order));
@@ -155,11 +152,12 @@ impl<'s> FunctionBuilder<'s> {
         let mut initializers: Vec<_> = class
             .fields
             .iter()
-            .map(|field| (field.name.as_str(), field.init.as_ref()))
+            .zip(&field_slots)
+            .map(|(field, &(_, field_ty))| (field.name.as_str(), field_ty, field.init.as_ref()))
             .collect();
         for (field, field_ty) in &field_defs {
-            let initializer = initializers.iter_mut().find(|(name, _)| *name == field);
-            let field_init = initializer.as_ref().and_then(|(_, init)| *init);
+            let initializer = initializers.iter_mut().find(|(name, _, _)| *name == field);
+            let field_init = initializer.as_ref().and_then(|(_, _, init)| *init);
             let (val, used_init) = if admits_undefined(ctx, *field_ty) {
                 (
                     self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *field_ty)),
@@ -173,7 +171,7 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 self.unassigned_field(ctx, class_name, field, *field_ty, field_init)?
             };
-            if used_init && let Some((_, init)) = initializer {
+            if used_init && let Some((_, _, init)) = initializer {
                 *init = None;
             }
             init_operands.push(val);
@@ -191,13 +189,13 @@ impl<'s> FunctionBuilder<'s> {
                 class_name,
                 ctor,
                 ClassArguments::Expressions(args),
-                ClassReceiver::Constructor(this_slot, &initializers),
+                ClassReceiver::Constructor(this_slot, class, &initializers),
             )?;
         } else {
             for arg in args {
                 self.effect(ctx, arg)?;
             }
-            self.init_own_class_fields(ctx, class_name, this_slot, &initializers)?;
+            self.init_own_class_fields(ctx, class_name, class, this_slot, &initializers)?;
         }
         self.load(ctx, this_slot)
     }
@@ -213,14 +211,15 @@ impl<'s> FunctionBuilder<'s> {
         init: Option<&'s Expr>,
     ) -> Result<(Value, bool)> {
         if ty.deref(ctx).is::<FP64Type>() {
-            Ok((self.number(ctx, 0.0), false))
-        } else if perry_mir::typed::<IntegerType>(ctx, ty)
-            .is_some_and(|int| int.deref(ctx).width() == 1)
-        {
-            Ok((self.boolean(ctx, false), false))
-        } else if let Some(zero) = self.zero_value_for_type(ctx, ty) {
-            Ok((zero, false))
-        } else if let Ok(variant) = TypedHandle::<perry_mir::VariantType>::from_handle(ty, ctx) {
+            return Ok((self.number(ctx, 0.0), false));
+        }
+        if perry_mir::typed::<IntegerType>(ctx, ty).is_some_and(|int| int.deref(ctx).width() == 1) {
+            return Ok((self.boolean(ctx, false), false));
+        }
+        if let Some(zero) = self.zero_value_for_type(ctx, ty) {
+            return Ok((zero, false));
+        }
+        if let Ok(variant) = TypedHandle::<perry_mir::VariantType>::from_handle(ty, ctx) {
             let payload_free = variant
                 .deref(ctx)
                 .cases()
@@ -232,53 +231,34 @@ impl<'s> FunctionBuilder<'s> {
                     false,
                 ));
             }
-            if let Some(init_expr) = init {
-                let val = self.expression_with(ctx, init_expr, Some(ty))?;
-                return Ok((self.fit(ctx, val, ty)?, true));
-            }
-            bail_unsupported!(
-                "class {class_name} field {field} has no placeholder before its constructor assignment"
-            )
-        } else if let Some(init_expr) = init {
-            let val = self.expression_with(ctx, init_expr, Some(ty))?;
-            Ok((self.fit(ctx, val, ty)?, true))
-        } else {
-            bail_unsupported!(
-                "class {class_name} field {field} has no placeholder before its constructor assignment"
-            )
         }
+        let Some(init_expr) = init else {
+            bail_unsupported!(
+                "class {class_name} field {field} has no placeholder before its constructor assignment"
+            );
+        };
+        let val = self.expression_with(ctx, init_expr, Some(ty))?;
+        Ok((self.fit(ctx, val, ty)?, true))
     }
 
     fn init_own_class_fields(
         &mut self,
         ctx: &mut Context,
         class_name: &'s str,
+        class: &'s perry_frontend::hir::ir::Class,
         this_slot: Value,
-        initializers: &[(&'s str, Option<&'s Expr>)],
+        initializers: &[(&'s str, TypeHandle, Option<&'s Expr>)],
     ) -> Result<()> {
-        let (&class_name, &(_, class)) = self
-            .shapes
-            .classes
-            .named
-            .get_key_value(class_name)
-            .ok_or_else(|| internal!("unknown class {class_name}"))?;
-        let rec_val = self.load(ctx, this_slot)?;
-        let rec = TypedHandle::<RecordType>::from_handle(rec_val.get_type(ctx), ctx)
-            .map_err(|_| Diagnostic::internal("expected class record"))?;
         let saved_this = self.this_slot.replace(this_slot);
         let res = self.with_class_expansion(
             ctx,
             ClassExpansion::Fields(class),
             class_name,
             |this, ctx| {
-                for &(name, init) in initializers {
+                for &(name, field_ty, init) in initializers {
                     let Some(init_expr) = init else {
                         continue;
                     };
-                    let (_, field_ty) = rec
-                        .deref(ctx)
-                        .field(name)
-                        .ok_or_else(|| internal!("missing field {name} on {class_name}"))?;
                     let val = this.expression_with(ctx, init_expr, Some(field_ty))?;
                     let val = this.fit(ctx, val, field_ty)?;
                     let target = this.load(ctx, this_slot)?;
@@ -506,12 +486,12 @@ impl<'s> FunctionBuilder<'s> {
             ClassExpansion::Callable(func),
             owner_class,
             |this, ctx| {
-                if let ClassReceiver::Constructor(slot, initializers) = receiver {
-                    this.init_own_class_fields(ctx, owner_class, slot, initializers)?;
+                if let ClassReceiver::Constructor(slot, class, initializers) = receiver {
+                    this.init_own_class_fields(ctx, owner_class, class, slot, initializers)?;
                 }
                 let this_slot = match receiver {
                     ClassReceiver::Static => None,
-                    ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot, _) => {
+                    ClassReceiver::Instance(slot) | ClassReceiver::Constructor(slot, _, _) => {
                         Some(slot)
                     }
                 };
@@ -521,7 +501,7 @@ impl<'s> FunctionBuilder<'s> {
                         this.bind_parameter(ctx, param, eval_arg, BindingType::plain(param_ty))?;
                     }
 
-                    let result_type = if matches!(receiver, ClassReceiver::Constructor(_, _))
+                    let result_type = if matches!(receiver, ClassReceiver::Constructor(..))
                         || matches!(func.return_type, HirType::Void)
                     {
                         InlineResult::Void
@@ -530,7 +510,7 @@ impl<'s> FunctionBuilder<'s> {
                     };
                     this.inline_body(ctx, &func.body, &func.params, result_type)
                 })?;
-                if let ClassReceiver::Constructor(slot, _) = receiver {
+                if let ClassReceiver::Constructor(slot, _, _) = receiver {
                     return this.load(ctx, slot).map(Some);
                 }
                 match slot {

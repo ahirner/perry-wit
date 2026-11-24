@@ -1,7 +1,10 @@
 //! HIR adapters for class instances crossing canonical resource boundaries.
-use super::{ClassRoots, Operation, Witness, mark_non_null, witnesses::ResourceClass};
+use super::{
+    Witness, mark_non_null,
+    witnesses::{ClassCall, ResourceAction, ResourceClass},
+};
 use perry_hir::{
-    ir::{BinaryOp, ClassId, Expr, Function, Module, Param, Stmt},
+    ir::{BinaryOp, Expr, Function, Module, Param, Stmt},
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::{Diagnostic, Result};
@@ -56,7 +59,7 @@ pub(crate) fn synth_function(
 }
 
 struct Registry<'a> {
-    resource: &'a ResourceClass<ClassId>,
+    resource: &'a ResourceClass<usize>,
     table: LocalId,
     next: LocalId,
 }
@@ -124,30 +127,26 @@ impl Registry<'_> {
     }
 }
 
-pub(crate) fn bind(
+pub(super) fn bind(
     hir: &mut Module,
-    roots: &ClassRoots,
+    classes: &[ResourceClass<usize>],
+    calls: &[Option<ClassCall>],
     witnesses: &mut [Witness<FuncId>],
     mut max_local: LocalId,
     mut max_function: FuncId,
 ) -> Result<()> {
-    let mut registries = Vec::new();
-    let mut init = Vec::new();
-    for (owner, resource) in roots.classes.iter().enumerate() {
-        let c = hir
-            .classes
-            .iter()
-            .find(|c| c.id == resource.class)
-            .ok_or_else(|| Diagnostic::internal("lost resource class"))?;
+    let mut registries = Vec::with_capacity(classes.len());
+    let mut init = Vec::with_capacity(classes.len() * 2);
+    for (owner, resource) in classes.iter().enumerate() {
+        let c = &hir.classes[resource.class];
         let table = fresh(&mut max_local)?;
         let next = fresh(&mut max_local)?;
-        let ctor = roots
-            .calls
+        let ctor = calls
             .iter()
             .zip(witnesses.iter())
             .find_map(|(call, w)| {
                 call.as_ref()
-                    .filter(|call| call.kind == Operation::New && call.owner == owner)?;
+                    .filter(|call| matches!(call.action, ResourceAction::New) && call.owner == owner)?;
                 w.signature.as_ref()
             });
         let class_type = match ctor {
@@ -182,7 +181,7 @@ pub(crate) fn bind(
     }
     init.append(&mut hir.init);
     hir.init = init;
-    for (w, call) in witnesses.iter_mut().zip(&roots.calls) {
+    for (w, call) in witnesses.iter_mut().zip(calls) {
         let Some(sig) = &w.signature else { continue };
         let owner_of = |ty: &HirType| registries.iter().find(|r| &r.resource.source_ty == ty);
         if call.is_none()
@@ -191,8 +190,8 @@ pub(crate) fn bind(
         {
             continue;
         }
-        let mut params = Vec::new();
-        let mut args = Vec::new();
+        let mut params = Vec::with_capacity(sig.params.len());
+        let mut args = Vec::with_capacity(sig.params.len());
         for (i, p) in sig.params.iter().enumerate() {
             let id = fresh(&mut max_local)?;
             let mut value = Expr::LocalGet(id);
@@ -210,16 +209,10 @@ pub(crate) fn bind(
         }
         let mut body = Vec::new();
         let operation = if let Some(call) = call {
-            let table = registries
-                .get(call.owner)
-                .ok_or_else(|| Diagnostic::internal("missing handle table"))?;
-            let class = hir
-                .classes
-                .iter_mut()
-                .find(|c| c.id == table.resource.class)
-                .ok_or_else(|| Diagnostic::internal("missing class declaration"))?;
-            match call.kind {
-                Operation::New => Expr::New {
+            let table = &registries[call.owner];
+            let class = &mut hir.classes[table.resource.class];
+            match call.action {
+                ResourceAction::New => Expr::New {
                     class_name: class.name.clone(),
                     args,
                     type_args: vec![],
@@ -227,12 +220,12 @@ pub(crate) fn bind(
                     byte_end: 0,
                     cap_args_appended: 0,
                 },
-                Operation::Drop => {
+                ResourceAction::Drop(dispose) => {
                     let rep = params
                         .first()
                         .ok_or_else(|| Diagnostic::internal("missing destructor parameter"))?
                         .id;
-                    if let Some(fid) = call.function {
+                    if let Some(fid) = dispose {
                         let idx = class
                             .computed_members
                             .iter()
@@ -254,11 +247,11 @@ pub(crate) fn bind(
                         key: Box::new(Expr::LocalGet(rep)),
                     }
                 }
-                Operation::Static => {
+                ResourceAction::Static(fid) => {
                     let m = class
                         .static_methods
                         .iter()
-                        .find(|m| Some(m.id) == call.function)
+                        .find(|m| m.id == fid)
                         .ok_or_else(|| Diagnostic::internal("missing static method"))?;
                     Expr::StaticMethodCall {
                         class_name: class.name.clone(),
@@ -266,11 +259,11 @@ pub(crate) fn bind(
                         args,
                     }
                 }
-                Operation::Call => {
+                ResourceAction::Call(fid) => {
                     let m = class
                         .methods
                         .iter()
-                        .find(|m| Some(m.id) == call.function)
+                        .find(|m| m.id == fid)
                         .ok_or_else(|| Diagnostic::internal("missing instance method"))?;
                     let mut args = args.into_iter();
                     let object = args
