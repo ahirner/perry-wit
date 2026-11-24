@@ -922,20 +922,29 @@ impl<'h> Emitter<'h, '_> {
                 self.materialize(t)
             }
             Some(t)
-                if is_inferred
-                    && matches!(
-                        self.types.kind(t),
-                        TyKind::Cell {
-                            kind: CellKind::Array,
-                            ..
-                        }
-                    ) =>
+                if matches!(
+                    self.types.kind(t),
+                    TyKind::Cell {
+                        kind: CellKind::Dict,
+                        ..
+                    }
+                ) =>
             {
-                let mut err = diag!(codes::MISSING_TYPE_ANNOTATION, "an empty array literal needs a declared element type")
-                    .with_help("Add a concrete element type annotation to this binding (e.g. `const xs: number[] = []`).");
-                if let TyKind::Cell { loc, .. } = self.types.kind(t)
-                    && self.solved.self_nested_locs.contains(loc.index())
-                {
+                self.materialize(t)
+            }
+            Some(t)
+                if let TyKind::Cell { loc, kind } = self.types.kind(t)
+                    && kind.is_array()
+                    && !self.is_resolved(t) =>
+            {
+                let mut err = diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "an empty array literal needs a declared element type"
+                )
+                .with_help(format!(
+                    "Add a concrete element type annotation to '{name}'."
+                ));
+                if self.solved.self_nested_locs.contains(loc.index()) {
                     err = err.with_note("its inferred element type nests itself");
                 }
                 let err = self.annotate_local(err, id);
