@@ -1,0 +1,483 @@
+//! Entry-module declarations that implement the selected world's exports.
+use super::Locations;
+use crate::hir::Type as HirType;
+use perry_contract::types::Input;
+use perry_hir::types::FuncId;
+use perry_parser::swc_ecma_ast as ast;
+use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
+use std::collections::{BTreeMap, HashMap};
+use swc_common::{Span, Spanned};
+use wit_parser::{Resolve, WorldId, WorldKey};
+
+pub(crate) struct Signature {
+    pub(crate) params: Vec<HirType>,
+    pub(crate) result: HirType,
+}
+
+pub(crate) struct Witness<T> {
+    pub(crate) name: String,
+    pub(crate) signature: Option<Signature>,
+    pub(crate) target: Option<T>,
+}
+
+#[derive(Clone, Copy)]
+enum Declaration<'a> {
+    Function(Span),
+    Class(&'a ast::Class),
+    Value(&'a ast::Expr),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SourceTarget {
+    Function(Span),
+    Resource {
+        owner: usize,
+        member: Option<Span>,
+        kind: Operation,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Operation {
+    New,
+    Call,
+    Static,
+    Drop,
+}
+
+pub(crate) struct ResourceClass<T> {
+    pub(crate) class: T,
+    pub(crate) resource: wit_parser::TypeId,
+    pub(crate) create: String,
+    pub(crate) representation: String,
+    pub(crate) source_ty: HirType,
+}
+
+pub(super) struct Roots {
+    namespaces: Vec<Span>,
+    pub witnesses: Vec<Witness<SourceTarget>>,
+    pub classes: Vec<ResourceClass<Span>>,
+}
+
+struct Scope<'a>(HashMap<ast::Id, (&'a ast::Ident, Declaration<'a>)>);
+
+impl<'a> Scope<'a> {
+    fn declaration(&self, mut d: Declaration<'a>) -> Option<Declaration<'a>> {
+        for _ in 0..=self.0.len() {
+            d = match d {
+                Declaration::Value(v) => match v.unwrap_parens() {
+                    ast::Expr::Fn(f) => Declaration::Function(f.function.span),
+                    ast::Expr::Arrow(f) => Declaration::Function(f.span),
+                    ast::Expr::Ident(id) => self.0.get(&id.to_id())?.1,
+                    ast::Expr::Class(c) => Declaration::Class(&c.class),
+                    v => return Some(Declaration::Value(v)),
+                },
+                d => return Some(d),
+            };
+        }
+        None
+    }
+
+    fn member_declaration(
+        &self,
+        object: &'a ast::ObjectLit,
+        name: &str,
+    ) -> Option<Declaration<'a>> {
+        object.props.iter().rev().find_map(|p| {
+            let ast::PropOrSpread::Prop(p) = p else {
+                return None;
+            };
+            self.declaration(match &**p {
+                ast::Prop::Shorthand(id) if id.sym == name => self.0.get(&id.to_id())?.1,
+                ast::Prop::KeyValue(kv) if key(&kv.key) == Some(name) => {
+                    Declaration::Value(&kv.value)
+                }
+                ast::Prop::Method(m) if key(&m.key) == Some(name) => {
+                    Declaration::Function(m.span())
+                }
+                _ => return None,
+            })
+        })
+    }
+}
+
+pub(super) fn resolve<'a>(
+    module: &'a ast::Module,
+    exports: &BTreeMap<String, ast::Ident>,
+    world: Option<(&Resolve, WorldId)>,
+    locations: &Locations<'_>,
+    unresolved: swc_common::SyntaxContext,
+) -> Result<Roots> {
+    use perry_contract::names::{to_camel_case, to_pascal_case};
+    let mut scope = Scope(HashMap::new());
+    let mut insert = |id: &'a ast::Ident, decl| {
+        scope.0.insert(id.to_id(), (id, decl));
+    };
+    for item in &module.body {
+        let d = match item {
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(d)) => d,
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(d)) => &d.decl,
+            _ => continue,
+        };
+        match d {
+            ast::Decl::Fn(f) => insert(&f.ident, Declaration::Function(f.function.span)),
+            ast::Decl::Class(c) => insert(&c.ident, Declaration::Class(&c.class)),
+            ast::Decl::Var(v) => {
+                for d in &v.decls {
+                    if let (ast::Pat::Ident(i), Some(e)) = (&d.name, &d.init) {
+                        insert(&i.id, Declaration::Value(e));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let exported = |name: &str| {
+        let id = exports.get(name)?;
+        scope
+            .0
+            .values()
+            .find(|(i, _)| i.span == id.span)
+            .and_then(|(_, d)| scope.declaration(*d))
+    };
+    let mut roots = Roots {
+        namespaces: Vec::new(),
+        witnesses: Vec::new(),
+        classes: Vec::new(),
+    };
+    let Some((r, w)) = world else {
+        for name in exports.keys() {
+            if let Some(Declaration::Function(span)) = exported(name) {
+                roots.witnesses.push(Witness {
+                    name: name.clone(),
+                    signature: None,
+                    target: Some(SourceTarget::Function(span)),
+                });
+            }
+        }
+        return Ok(roots);
+    };
+    let world = &r.worlds[w];
+    let namespace = |k: &WorldKey, id| {
+        let n = match k {
+            WorldKey::Name(n) => n.as_str(),
+            WorldKey::Interface(_) => r.interfaces[id].name.as_deref()?,
+        };
+        match exported(&to_camel_case(n))? {
+            Declaration::Value(ast::Expr::Object(o)) => Some(o),
+            _ => None,
+        }
+    };
+    use swc_ecma_visit::{Visit, VisitWith};
+    struct Uses<'a>(&'a Scope<'a>, Vec<Span>);
+    impl Visit for Uses<'_> {
+        fn visit_ident(&mut self, id: &ast::Ident) {
+            if let Some((binding, _)) = self.0.0.get(&id.to_id())
+                && binding.span != id.span
+            {
+                self.1.retain(|&s| s != binding.span);
+            }
+        }
+    }
+    for (k, item) in &world.exports {
+        if let wit_parser::WorldItem::Interface { id, .. } = item
+            && namespace(k, *id).is_some()
+        {
+            let n = match k {
+                WorldKey::Name(n) => Some(n.as_str()),
+                WorldKey::Interface(_) => r.interfaces[*id].name.as_deref(),
+            };
+            if let Some(binding) = n.and_then(|n| exports.get(&to_camel_case(n))) {
+                roots.namespaces.push(binding.span);
+            }
+        }
+    }
+    let mut uses = Uses(&scope, std::mem::take(&mut roots.namespaces));
+    module.visit_with(&mut uses);
+    roots.namespaces = uses.1;
+    let mut disposals = Vec::new();
+    for (k, item) in &world.exports {
+        let wit_parser::WorldItem::Interface { id, .. } = item else {
+            continue;
+        };
+        let Some(obj) = namespace(k, *id) else {
+            continue;
+        };
+        for (name, resource) in &r.interfaces[*id].types {
+            if !matches!(r.types[*resource].kind, wit_parser::TypeDefKind::Resource) {
+                continue;
+            }
+            let Some(Declaration::Class(class)) =
+                scope.member_declaration(obj, &to_pascal_case(name))
+            else {
+                continue;
+            };
+            let module = r.name_world_key(k);
+            let source_ty = crate::wit::source_type(r, *resource)
+                .ok_or_else(|| Diagnostic::internal("unnamed exported resource"))?;
+            let owner = roots.classes.len();
+            roots.classes.push(ResourceClass {
+                resource: *resource,
+                class: class.span,
+                source_ty,
+                create: format!("{module}#new{}", to_pascal_case(name)),
+                representation: format!("{module}#{}Rep", to_camel_case(name)),
+            });
+            let member = class.body.iter().find_map(|m| {
+                let ast::ClassMember::Method(m) = m else {
+                    return None;
+                };
+                let ast::PropName::Computed(k) = &m.key else {
+                    return None;
+                };
+                let ast::Expr::Member(e) = k.expr.unwrap_parens() else {
+                    return None;
+                };
+                (matches!(&*e.obj,ast::Expr::Ident(id) if id.sym=="Symbol" && id.ctxt==unresolved)
+                    && matches!(&e.prop,ast::MemberProp::Ident(i) if i.sym=="dispose"))
+                .then_some(m.span)
+            });
+            disposals.push(Witness {
+                name: format!("{module}#[dtor]{name}"),
+                signature: Some(Signature {
+                    params: vec![HirType::Number],
+                    result: HirType::Void,
+                }),
+                target: Some(SourceTarget::Resource {
+                    owner,
+                    member,
+                    kind: Operation::Drop,
+                }),
+            });
+        }
+    }
+    let mut legacy_names = BTreeMap::new();
+    for entry in perry_contract::world_functions(r, world.exports.iter()) {
+        let f = entry.function;
+        let name = entry.implementation_name(r, world);
+        let requirement = if entry.interface.is_some() {
+            perry_contract::export_names::core_export_name(r, entry.key, f)
+        } else {
+            f.name.clone()
+        };
+        let object = entry.interface.and_then(|id| namespace(entry.key, id));
+        let mut target = None;
+        if let Some(resource) = f.kind.resource()
+            && let Some((owner, c)) = roots
+                .classes
+                .iter()
+                .enumerate()
+                .find(|(_, c)| c.resource == resource)
+        {
+            let class = scope
+                .0
+                .values()
+                .find_map(|(_, c0)| match c0 {
+                    Declaration::Class(class) if class.span == c.class => Some(*class),
+                    _ => None,
+                })
+                .ok_or_else(|| Diagnostic::internal("lost resource class declaration"))?;
+            let kind = match f.kind {
+                wit_parser::FunctionKind::Constructor(_) => Operation::New,
+                wit_parser::FunctionKind::Static(_) | wit_parser::FunctionKind::AsyncStatic(_) => {
+                    Operation::Static
+                }
+                _ => Operation::Call,
+            };
+            let member = class.body.iter().find_map(|m| match m {
+                ast::ClassMember::Method(m)
+                    if m.is_static == (kind == Operation::Static)
+                        && key(&m.key) == Some(&to_camel_case(f.item_name())) =>
+                {
+                    Some(m.span)
+                }
+                _ => None,
+            });
+            if kind == Operation::New || member.is_some() {
+                target = Some(SourceTarget::Resource {
+                    owner,
+                    member,
+                    kind,
+                });
+            }
+        } else if let Some(Declaration::Function(span)) =
+            object.and_then(|o| scope.member_declaration(o, &to_camel_case(&f.name)))
+        {
+            target = Some(SourceTarget::Function(span));
+        }
+        if target.is_none()
+            && let Some(Declaration::Function(span)) = exported(&name)
+        {
+            if let Some(previous) = legacy_names.insert(name.clone(), requirement.clone()) {
+                return Err(locations.annotate(diag!(codes::CONTRACT_MISMATCH,"WIT exports '{previous}' and '{requirement}' both require TypeScript implementation '{name}'"),span));
+            }
+            target = Some(SourceTarget::Function(span));
+        }
+        if target.is_none()
+            && !(requirement.starts_with("wasi:cli/run@") && requirement.ends_with("#run"))
+        {
+            let err = diag!(
+                codes::MISSING_EXPORT,
+                "WIT export {requirement} needs an implementation for '{name}'"
+            );
+            if let Some((id, _)) = scope
+                .0
+                .values()
+                .find(|(id, _)| super::display_name(&id.sym) == name)
+            {
+                return Err(locations.annotate(
+                    err.with_help(format!("Add the 'export' keyword to function '{name}'.")),
+                    id.span,
+                ));
+            }
+            return Err(
+                match exports.iter().max_by_key(|(e, _)| {
+                    e.bytes()
+                        .zip(name.bytes())
+                        .take_while(|(a, b)| a == b)
+                        .count()
+                }) {
+                    Some((near, id)) => locations.annotate(
+                        err.with_help(format!("The entry module exports '{near}'.")),
+                        id.span,
+                    ),
+                    None => err,
+                },
+            );
+        }
+        let ty = |t| {
+            use wit_parser::Type::*;
+            Ok(match t {
+                U8 | S8 | U16 | S16 | U32 | S32 => HirType::Number,
+                U64 | S64 => HirType::BigInt,
+                _ => crate::wit::source_type_of(r, Input::Reference(t)).ok_or_else(|| {
+                    Diagnostic::unsupported(format!(
+                        "WIT export {requirement} uses an unsupported type"
+                    ))
+                })?,
+            })
+        };
+        roots.witnesses.push(Witness {
+            name,
+            target,
+            signature: Some(Signature {
+                params: f.params.iter().map(|p| ty(p.ty)).collect::<Result<_>>()?,
+                result: f.result.map(ty).transpose()?.unwrap_or(HirType::Void),
+            }),
+        });
+    }
+    roots.witnesses.extend(disposals);
+    Ok(roots)
+}
+
+fn key(prop: &ast::PropName) -> Option<&str> {
+    match prop {
+        ast::PropName::Ident(id) => Some(&id.sym),
+        ast::PropName::Str(s) => s.value.as_str(),
+        _ => None,
+    }
+}
+
+pub(crate) struct ClassCall {
+    pub(crate) owner: usize,
+    pub(crate) function: Option<FuncId>,
+    pub(crate) kind: Operation,
+}
+pub(crate) struct ClassRoots {
+    pub(crate) classes: Vec<ResourceClass<perry_hir::ir::ClassId>>,
+    pub(crate) calls: Vec<Option<ClassCall>>,
+}
+
+impl Roots {
+    pub(super) fn in_hir(
+        self,
+        module: &mut perry_hir::ir::Module,
+    ) -> Result<(Vec<Witness<FuncId>>, ClassRoots)> {
+        use perry_hir::ir::{Expr, Stmt};
+        module.init.retain(|stmt| {
+            let Stmt::Let {
+                id,
+                mutable: false,
+                init: Some(init),
+                ..
+            } = stmt
+            else {
+                return true;
+            };
+            let refs = match init {
+                Expr::Object(fields) => fields
+                    .iter()
+                    .all(|(_, e)| matches!(e, Expr::FuncRef(_) | Expr::ClassRef(_))),
+                Expr::New {
+                    class_name, args, ..
+                } if super::is_object_literal(class_name) => args
+                    .iter()
+                    .all(|e| matches!(e, Expr::FuncRef(_) | Expr::ClassRef(_))),
+                _ => false,
+            };
+            !(refs
+                && module
+                    .local_source_spans
+                    .get(id)
+                    .is_some_and(|s| self.namespaces.iter().any(|span| span.lo.0 == s.start)))
+        });
+        let classes = self
+            .classes
+            .into_iter()
+            .map(|c| {
+                let range = c.class.lo.0.saturating_sub(1) as usize
+                    ..c.class.hi.0.saturating_sub(1) as usize;
+                let id = module
+                    .class_source_text
+                    .iter()
+                    .find_map(|(id, s)| (s.source_range() == range).then_some(*id))
+                    .ok_or_else(|| Diagnostic::internal("resource class has no HIR declaration"))?;
+                Ok(ResourceClass {
+                    class: id,
+                    resource: c.resource,
+                    create: c.create,
+                    representation: c.representation,
+                    source_ty: c.source_ty,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut calls = Vec::new();
+        let mut witnesses = Vec::new();
+        for w in self.witnesses {
+            let id = |span: Span| {
+                module
+                    .closure_source_text
+                    .iter()
+                    .find_map(|(id, meta)| {
+                        (meta.source_span == Some((span.lo.0, span.hi.0))).then_some(*id)
+                    })
+                    .ok_or_else(|| {
+                        Diagnostic::internal(format!("no HIR declaration for export '{}'", w.name))
+                    })
+            };
+            let (target, call) = match w.target {
+                None => (None, None),
+                Some(SourceTarget::Function(span)) => (Some(id(span)?), None),
+                Some(SourceTarget::Resource {
+                    owner,
+                    kind,
+                    member,
+                }) => (
+                    None,
+                    Some(ClassCall {
+                        owner,
+                        kind,
+                        function: member.map(id).transpose()?,
+                    }),
+                ),
+            };
+            calls.push(call);
+            witnesses.push(Witness {
+                name: w.name,
+                signature: w.signature,
+                target,
+            });
+        }
+        Ok((witnesses, ClassRoots { classes, calls }))
+    }
+}

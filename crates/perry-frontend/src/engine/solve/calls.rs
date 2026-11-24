@@ -1,6 +1,6 @@
 //! Call, method and constructor resolution.
 use super::*;
-use crate::methods::MethodResult;
+use crate::{methods::MethodResult, wit::MemberKind};
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_args(&mut self, s: &mut EvalState<'h>, args: &'h [Expr]) -> Result<Vec<Ty>> {
@@ -57,6 +57,29 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(obj_ty)
     }
 
+    fn resource_operation(
+        &mut self,
+        inst: InstanceId,
+        expr: &Expr,
+        owner: u32,
+        kind: MemberKind,
+        name: &str,
+    ) -> Option<Ty> {
+        let (id, member) = self
+            .metadata
+            .resource_members
+            .iter()
+            .enumerate()
+            .find(|(_, m)| {
+                m.owner == owner
+                    && m.kind == kind
+                    && (kind == MemberKind::Constructor || m.name == name)
+            })?;
+        let ty = self.types.intern_hir(self.ctx, &member.result, true);
+        self.record_site(inst, expr, SiteResolution::ResourceCall(id));
+        Some(ty)
+    }
+
     pub(super) fn eval_static_method_call(
         &mut self,
         s: &mut EvalState<'h>,
@@ -89,6 +112,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 false,
             )?;
             return Ok(ret);
+        }
+        if let Some(owner) = self.decls.resource(class_name)
+            && let Some(ty) =
+                self.resource_operation(s.inst, expr, owner, MemberKind::Static, method_name)
+        {
+            return Ok(ty);
         }
         Ok(Ty::OPEN)
     }
@@ -220,6 +249,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             );
             return Ok(self.types.class_inst(class_inst));
         }
+        if let Some(owner) = self.decls.resource(class_name)
+            && let Some(ty) =
+                self.resource_operation(s.inst, expr, owner, MemberKind::Constructor, "")
+        {
+            return Ok(ty);
+        }
         if arg_tys.iter().any(|&a| self.types.has_func(a)) {
             return Err(self.metadata.locations.annotate_call(
                 Diagnostic::unsupported(format!(
@@ -244,6 +279,27 @@ impl<'h, 'a> Solver<'h, 'a> {
         type_args: &'h [HirType],
         byte_offset: u32,
     ) -> Result<Ty> {
+        if let Expr::IndexGet { object, .. } = callee
+            && let Expr::Call { byte_end, .. } = expr
+            && self
+                .metadata
+                .locations
+                .calls_dispose(byte_offset, *byte_end)
+        {
+            let ty = self.eval_expr(s, object)?;
+            if ty == Ty::BOTTOM {
+                return Ok(Ty::BOTTOM);
+            }
+            if let TyKind::Leaf(id) = self.types.kind(ty)
+                && let HirType::Named(base) = id.hir(self.ctx)
+                && let Some(owner) = self.decls.resource(base)
+                && let Some(result) =
+                    self.resource_operation(s.inst, expr, owner, MemberKind::Dispose, "")
+            {
+                self.eval_args(s, args)?;
+                return Ok(result);
+            }
+        }
         if matches!(callee, Expr::ExternFuncRef { name, .. } if name == "structuredClone") {
             return match args.first() {
                 Some(a) => self.eval_expr(s, a),
@@ -517,6 +573,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         let method = hir_compat::method(property);
         let name = method.name();
 
+        if let Expr::ExternFuncRef { name: class, .. } = object
+            && let Some(owner) = self.decls.resource(class)
+            && let Some(ty) = self.resource_operation(s.inst, expr, owner, MemberKind::Static, name)
+        {
+            self.eval_args(s, args)?;
+            return Ok(ty);
+        }
         if matches!(object, Expr::GlobalGet(_)) {
             match name {
                 "log" | "info" | "debug" | "error" | "warn"
@@ -603,6 +666,25 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
 
+        if hir_compat::has_source_offset(byte_offset)
+            && let TyKind::Leaf(id) = self.types.kind(stripped)
+            && let HirType::Named(base) = id.hir(self.ctx)
+            && let Some(owner) = self.decls.resource(base)
+        {
+            self.eval_args(s, args)?;
+            if let Some(ty) =
+                self.resource_operation(s.inst, expr, owner, MemberKind::Instance, name)
+            {
+                return Ok(ty);
+            }
+            return Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported(format!(
+                    "method {name} is not supported on WIT resource yet"
+                )),
+                byte_offset,
+            ));
+        }
         self.check_timer_member(stripped, byte_offset)?;
 
         if matches!(name, "then" | "catch" | "finally")
@@ -764,22 +846,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                     callback_result: None,
                     sparse_arrays: self.facts.sparse_arrays,
                 },
-            ));
-        }
-        if hir_compat::has_source_offset(byte_offset)
-            && let TyKind::Leaf(id) = self.types.kind(stripped)
-            && let HirType::Named(base) = id.hir(self.ctx)
-            && matches!(
-                self.decls.resolve_foreign(base),
-                Some(crate::hir::Foreign::Resource(_))
-            )
-        {
-            return Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported(format!(
-                    "method {name} is not supported on WIT resource yet"
-                )),
-                byte_offset,
             ));
         }
         let is_known_js_cb_method = matches!(

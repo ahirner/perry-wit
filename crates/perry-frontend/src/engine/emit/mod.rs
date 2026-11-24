@@ -2,6 +2,7 @@
 mod async_helpers;
 mod expressions;
 mod funcs;
+mod resources;
 use super::bitset::BitSet;
 use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
 use super::solve::{
@@ -73,7 +74,7 @@ pub(crate) fn build(
     ctx: &Context,
     hir: &HirModule,
     index: &ModuleIndex<'_>,
-    locations: &Locations<'_>,
+    metadata: &Metadata<'_>,
     types: &TypeTable,
     solved: &Solved,
 ) -> Result<Emitted> {
@@ -87,7 +88,9 @@ pub(crate) fn build(
         ctx,
         hir,
         index,
-        locations,
+        locations: &metadata.locations,
+        resource_members: &metadata.resource_members,
+        resource_functions: vec![None; metadata.resource_members.len()],
         types,
         solved,
         next_local: index.max_local_id.saturating_add(1),
@@ -135,6 +138,8 @@ struct Emitter<'h, 'a> {
     hir: &'h HirModule,
     index: &'a ModuleIndex<'h>,
     locations: &'a Locations<'a>,
+    resource_members: &'a [crate::wit::ResourceMember],
+    resource_functions: Vec<Option<FuncId>>,
     types: &'a TypeTable,
     solved: &'a Solved,
     next_local: LocalId,
@@ -308,12 +313,7 @@ impl<'h> Emitter<'h, '_> {
             ) {
                 continue;
             }
-            let keep_original = view.is_exported
-                || self
-                    .index
-                    .exported_obj_methods
-                    .contains(inst.template.index());
-            let remap_locals = !keep_original && !seen_templates.insert(inst.template.index());
+            let remap_locals = !seen_templates.insert(inst.template.index());
             let inherited = inst
                 .capture_owner
                 .instance()
@@ -575,7 +575,7 @@ impl<'h> Emitter<'h, '_> {
                 .into_iter()
                 .map(|(cap_id, fname, _, boxed)| (cap_id, fname, boxed))
                 .collect();
-            params.push(Self::synth_param(
+            params.push(crate::hir_compat::resource_classes::synth_param(
                 env_pid,
                 "__env".to_owned(),
                 HirType::Named(env_class),
@@ -587,7 +587,7 @@ impl<'h> Emitter<'h, '_> {
         let self_local = match inst.receiver {
             Some(Receiver::Object(obj_ty)) => {
                 let sid = self.fresh_synthetic_local()?;
-                params.push(Self::synth_param(
+                params.push(crate::hir_compat::resource_classes::synth_param(
                     sid,
                     "__self".to_owned(),
                     self.materialize(obj_ty)?,
@@ -625,11 +625,7 @@ impl<'h> Emitter<'h, '_> {
             if self.is_resolved(param_ty) {
                 new_param.ty = self.materialize(param_ty)?;
             } else if !self.index.is_param_annotated(param.id)
-                && !view.is_exported
-                && !self
-                    .index
-                    .exported_obj_methods
-                    .contains(inst.template.index())
+                && inst.witness.is_none()
                 && matches!(param.ty, HirType::Any | HirType::Unknown)
             {
                 let err = diag!(codes::MISSING_TYPE_ANNOTATION, "cannot infer the type of parameter '{}' of '{}'", param.name, view.display_name())
@@ -737,7 +733,7 @@ impl<'h> Emitter<'h, '_> {
         };
         captures.retain(|c| !self.is_boxed_local(*c) || !is_env_fn);
 
-        if !view.is_exported && inst.caller.is_some() {
+        if inst.witness.is_none() && inst.caller.is_some() {
             let caller_name = inst
                 .caller
                 .and_then(|c| self.solved.instances.get(c))
@@ -764,7 +760,7 @@ impl<'h> Emitter<'h, '_> {
                 is_generator: view.is_generator,
                 is_strict: view.is_strict,
                 construct_only: view.construct_only,
-                is_exported: view.is_exported,
+                is_exported: inst.witness.is_some(),
                 decorators: Vec::new(),
                 was_plain_async: false,
                 was_unrolled: false,

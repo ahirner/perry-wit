@@ -9,7 +9,7 @@ use crate::engine::types::{
 };
 use crate::hir_compat;
 use perry_hir::{
-    ir::{Class, ClassField, ClassFieldOrigin, CompareOp, Expr, Function, Param, Stmt, SwitchCase},
+    ir::{Class, ClassField, ClassFieldOrigin, CompareOp, Expr, Function, Stmt, SwitchCase},
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
@@ -167,7 +167,11 @@ impl<'h, 'a> Emitter<'h, 'a> {
         let mut body = Vec::new();
         for (field, ty) in members {
             let pid = self.fresh_synthetic_local()?;
-            params.push(Self::synth_param(pid, field.clone(), ty.clone()));
+            params.push(crate::hir_compat::resource_classes::synth_param(
+                pid,
+                field.clone(),
+                ty.clone(),
+            ));
             body.push(Stmt::Expr(Expr::PropertySet {
                 object: Box::new(Expr::This),
                 property: field.clone(),
@@ -187,7 +191,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             });
         }
         let ctor_fid = self.fresh_func_id()?;
-        let ctor = Self::synth_function(
+        let ctor = crate::hir_compat::resource_classes::synth_function(
             ctor_fid,
             "constructor".to_owned(),
             params,
@@ -340,7 +344,12 @@ impl<'h, 'a> Emitter<'h, 'a> {
                     Diagnostic::internal("missing interned widener for collapsed capture")
                 })?;
             let fid = self.emit_helper(helper)?;
-            return Ok(Self::synth_call(fid, vec![arg], 0, 0));
+            return Ok(crate::hir_compat::resource_classes::synth_call(
+                fid,
+                vec![arg],
+                0,
+                0,
+            ));
         }
         Ok(arg)
     }
@@ -430,60 +439,6 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
     }
 
-    pub(super) fn synth_param(id: LocalId, name: String, ty: HirType) -> Param {
-        Param {
-            id,
-            name,
-            ty,
-            default: None,
-            is_rest: false,
-            decorators: Vec::new(),
-            arguments_object: None,
-        }
-    }
-
-    pub(super) fn synth_call(
-        fid: FuncId,
-        args: Vec<Expr>,
-        byte_offset: u32,
-        byte_end: u32,
-    ) -> Expr {
-        Expr::Call {
-            callee: Box::new(Expr::FuncRef(fid)),
-            args,
-            type_args: Vec::new(),
-            byte_offset,
-            byte_end,
-        }
-    }
-
-    pub(super) fn synth_function(
-        id: FuncId,
-        name: String,
-        params: Vec<Param>,
-        return_type: HirType,
-        body: Vec<Stmt>,
-        is_async: bool,
-    ) -> Function {
-        Function {
-            id,
-            name,
-            type_params: Vec::new(),
-            params,
-            return_type,
-            body,
-            is_async,
-            is_generator: false,
-            is_exported: false,
-            captures: Vec::new(),
-            decorators: Vec::new(),
-            is_strict: true,
-            construct_only: false,
-            was_unrolled: false,
-            was_plain_async: false,
-        }
-    }
-
     pub(super) fn emit_callback_wrapper(
         &mut self,
         target_fid: FuncId,
@@ -499,7 +454,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         call_args.push(first_arg);
         for (i, &ity) in inputs.iter().enumerate() {
             let pid = self.fresh_synthetic_local()?;
-            params.push(Self::synth_param(
+            params.push(crate::hir_compat::resource_classes::synth_param(
                 pid,
                 format!("__cb{i}"),
                 self.materialize(ity)?,
@@ -508,7 +463,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 call_args.push(Expr::LocalGet(pid));
             }
         }
-        let call = Self::synth_call(target_fid, call_args, 0, 0);
+        let call = crate::hir_compat::resource_classes::synth_call(target_fid, call_args, 0, 0);
         let body = if ret_ty == HirType::Void {
             vec![Stmt::Expr(call)]
         } else {
@@ -599,7 +554,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         let body = vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
             "callee is not a function".into(),
         ))))];
-        Self::synth_function(
+        crate::hir_compat::resource_classes::synth_function(
             fid,
             format!("__not_fn_{fid}"),
             Vec::new(),
@@ -628,10 +583,10 @@ impl<'h, 'a> Emitter<'h, 'a> {
             ));
         }
         stmts.push(Stmt::Return(Some(Expr::String("function".into()))));
-        Ok(Self::synth_function(
+        Ok(crate::hir_compat::resource_classes::synth_function(
             fid,
             format!("__typeof_fn_{fid}"),
-            vec![Self::synth_param(
+            vec![crate::hir_compat::resource_classes::synth_param(
                 pid,
                 "__v".into(),
                 self.materialize(op_ty)?,
@@ -654,14 +609,14 @@ impl<'h, 'a> Emitter<'h, 'a> {
     ) -> Result<Function> {
         let arms = self.dispatch_arms_slice(arms_span)?;
         let fn_pid = self.fresh_synthetic_local()?;
-        let mut params = vec![Self::synth_param(
+        let mut params = vec![crate::hir_compat::resource_classes::synth_param(
             fn_pid,
             "__fn".into(),
             self.materialize(callee_ty)?,
         )];
         let self_pid = if let Some(rty) = eff_recv {
             let sid = self.fresh_synthetic_local()?;
-            params.push(Self::synth_param(
+            params.push(crate::hir_compat::resource_classes::synth_param(
                 sid,
                 "__self".into(),
                 self.materialize(rty)?,
@@ -676,7 +631,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 continue;
             }
             let pid = self.fresh_synthetic_local()?;
-            params.push(Self::synth_param(
+            params.push(crate::hir_compat::resource_classes::synth_param(
                 pid,
                 format!("__p{i}"),
                 self.materialize(aty)?,
@@ -763,7 +718,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             for &pid in arg_pids.iter().take(max_args) {
                 call_args.push(Expr::LocalGet(pid));
             }
-            let call = Self::synth_call(target_fid, call_args, 0, 0);
+            let call = crate::hir_compat::resource_classes::synth_call(target_fid, call_args, 0, 0);
             let arm_ret = self.arm_return_hir(target_inst)?;
             let body = if disp_ret == HirType::Void {
                 vec![Stmt::Expr(call), Stmt::Return(None)]
@@ -796,7 +751,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 None,
             ));
         }
-        Ok(Self::synth_function(
+        Ok(crate::hir_compat::resource_classes::synth_function(
             fid, disp_name, params, disp_ret, stmts, any_async,
         ))
     }
@@ -829,10 +784,10 @@ impl<'h, 'a> Emitter<'h, 'a> {
             discriminant: Self::prop_get(Expr::LocalGet(pid), "tag"),
             cases,
         });
-        Ok(Self::synth_function(
+        Ok(crate::hir_compat::resource_classes::synth_function(
             fid,
             format!("__widen_{fid}"),
-            vec![Self::synth_param(
+            vec![crate::hir_compat::resource_classes::synth_param(
                 pid,
                 "__fn".into(),
                 self.materialize(from)?,
@@ -911,12 +866,20 @@ impl<'h, 'a> Emitter<'h, 'a> {
             });
         }
         stmts.push(Stmt::Return(Some(Expr::Bool(false))));
-        Ok(Self::synth_function(
+        Ok(crate::hir_compat::resource_classes::synth_function(
             fid,
             format!("__cmp_{fid}"),
             vec![
-                Self::synth_param(a_pid, "__a".into(), self.materialize(left_ty)?),
-                Self::synth_param(b_pid, "__b".into(), self.materialize(right_ty)?),
+                crate::hir_compat::resource_classes::synth_param(
+                    a_pid,
+                    "__a".into(),
+                    self.materialize(left_ty)?,
+                ),
+                crate::hir_compat::resource_classes::synth_param(
+                    b_pid,
+                    "__b".into(),
+                    self.materialize(right_ty)?,
+                ),
             ],
             HirType::Boolean,
             stmts,

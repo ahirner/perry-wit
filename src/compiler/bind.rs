@@ -2,7 +2,7 @@
 use perry_codegen::boundary::{AbiType, Export, ExportKind};
 use perry_contract::export_names::core_export_name;
 use perry_contract::types::{Contract, Input, convert};
-use perry_mir::{PlironResultExt as _, is_exported};
+use perry_mir::PlironResultExt as _;
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, diag};
 use pliron::{
     builtin::{
@@ -84,33 +84,30 @@ fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> R
     Ok(())
 }
 
-/// Bind each component export of `world` to the exported TypeScript function matching the
-/// SDK's implementation name. Missing implementations produce errors, and extra exports are ignored.
 pub(super) fn exports(
     ctx: &mut Context,
-    mir: &ModuleOp,
+    targets: &[perry_lower::ExportTarget],
     resolve: &Resolve,
     world_id: WorldId,
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
-    perry_contract::export_names::validate_implementation_names(resolve, world)
-        .map_err(|e| Diagnostic::new(crate::codes::CONTRACT_MISMATCH, e.to_string()))?;
-    let functions = module_functions(ctx, mir);
     let mut bound = Vec::new();
-    for entry in perry_contract::world_functions(resolve, world.exports.iter()) {
+    for (i, entry) in perry_contract::world_functions(resolve, world.exports.iter()).enumerate() {
         let function = entry.function;
-        let implementation = entry.implementation_name(resolve, world);
+        let target = targets
+            .get(i)
+            .ok_or_else(|| Diagnostic::internal("world export has no witness"))?;
         let core_name = if entry.interface.is_some() {
             core_export_name(resolve, entry.key, function)
         } else {
             function.name.clone()
         };
-        let candidate = functions.get(&implementation);
-        let Some(mir_function) = candidate.filter(|f| is_exported(ctx, f)) else {
-            // A command can implement wasi:cli/run.run with its top-level statements.
-            if is_cli_run(&core_name)
-                && let Some(main) = functions.get(perry_lower::MAIN)
-            {
+        let mir_function = match target {
+            perry_lower::ExportTarget::Function(func) => func,
+            perry_lower::ExportTarget::Destructor(..) => {
+                return Err(Diagnostic::internal("expected function witness"));
+            }
+            perry_lower::ExportTarget::Command(main) => {
                 bound.push((
                     main,
                     Export {
@@ -129,21 +126,8 @@ pub(super) fn exports(
                 ));
                 continue;
             }
-            let span = candidate.and_then(|function| perry_mir::source_span(ctx, function));
-            let help = if candidate.is_some() {
-                format!("Add the 'export' keyword to function '{implementation}'.")
-            } else {
-                format!(
-                    "Export 'export function {implementation}(...)' from your entry module, or run 'perry-wit gen-types' to generate the expected declarations."
-                )
-            };
-            return Err(diag!(
-                crate::codes::MISSING_EXPORT,
-                "WIT export {core_name} needs an exported TypeScript function {implementation}"
-            )
-            .with_optional_span(span)
-            .with_help(help));
         };
+        let implementation = mir_function.get_symbol_name(ctx).to_string();
         let expected_async = function.kind.is_async();
         if perry_mir::is_async(ctx, mir_function) != expected_async {
             let help = if expected_async {
@@ -198,6 +182,23 @@ pub(super) fn exports(
             },
         ));
     }
+    for target in targets.iter().skip(bound.len()) {
+        let perry_lower::ExportTarget::Destructor(function, core_name) = target else {
+            return Err(Diagnostic::internal(
+                "unexpected witness after world functions",
+            ));
+        };
+        bound.push((
+            function,
+            Export {
+                core_name: core_name.clone(),
+                function: function.get_symbol_name(ctx).into(),
+                params: vec![AbiType::U32],
+                result: None,
+                kind: ExportKind::Sync,
+            },
+        ));
+    }
     bound
         .into_iter()
         .map(|(function, export)| {
@@ -205,10 +206,6 @@ pub(super) fn exports(
             Ok(export)
         })
         .collect()
-}
-
-fn is_cli_run(core_name: &str) -> bool {
-    core_name.starts_with("wasi:cli/run@") && core_name.ends_with("#run")
 }
 
 fn module_functions(ctx: &Context, mir: &ModuleOp) -> HashMap<String, FuncOp> {

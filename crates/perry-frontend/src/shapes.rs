@@ -339,6 +339,18 @@ impl<'h> Declarations<'h> {
         }
     }
 
+    pub(crate) fn resource(&self, name: &str) -> Option<u32> {
+        let entry = if self.imported_types.contains_key(name) {
+            self.resolve_foreign(name)?
+        } else {
+            self.foreign.get(name)?
+        };
+        match entry {
+            crate::hir::Foreign::Resource(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     pub(crate) fn resolve_foreign(&self, type_name: &str) -> Option<&'h crate::hir::Foreign> {
         if self.is_user_type(type_name) {
             return None;

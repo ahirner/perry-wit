@@ -46,6 +46,7 @@ impl Receiver {
 }
 
 pub(crate) struct Instance {
+    pub(crate) witness: Option<usize>,
     pub(crate) template: TemplateId,
     pub(crate) receiver: Option<Receiver>,
     pub(crate) capture_owner: CaptureOwner,
@@ -187,6 +188,7 @@ pub(crate) enum SiteResolution {
         class_inst: ClassInstId,
         argument_types: Ty,
     },
+    ResourceCall(usize),
     BranchResult(Ty),
     ObjectLiteral(Ty),
     ZeroSizedArray,
@@ -272,7 +274,14 @@ pub(crate) struct Solved {
     pub(crate) deletes_array_elements: bool,
 }
 
-type InstanceKey = (TemplateId, Option<Receiver>, CaptureOwner, Ty, Ty);
+type InstanceKey = (
+    TemplateId,
+    Option<Receiver>,
+    CaptureOwner,
+    Ty,
+    Ty,
+    Option<usize>,
+);
 
 struct ResultContract {
     inst: InstanceId,
@@ -282,6 +291,7 @@ struct ResultContract {
 }
 
 struct InstanceReq<'a> {
+    witness: Option<usize>,
     template: TemplateId,
     receiver: Option<Receiver>,
     capture_owner: CaptureOwner,
@@ -296,6 +306,7 @@ impl<'a> InstanceReq<'a> {
     fn new(template: TemplateId, args: &'a [Ty], caller: Option<InstanceId>) -> Self {
         Self {
             template,
+            witness: None,
             receiver: None,
             capture_owner: CaptureOwner::None,
             args,

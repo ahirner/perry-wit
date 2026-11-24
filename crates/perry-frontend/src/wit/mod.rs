@@ -1,5 +1,6 @@
 //! Source types and ownership helpers for a resolved component contract.
 mod types;
+pub(crate) use types::ty as source_type_of;
 
 use crate::hir::{Foreign, FunctionType, Type as HirType};
 use perry_contract::{
@@ -131,8 +132,120 @@ impl WorldTypes {
     }
 }
 
-fn source_type(resolve: &Resolve, id: TypeId) -> Option<HirType> {
+pub(crate) fn source_type(resolve: &Resolve, id: TypeId) -> Option<HirType> {
     Some(HirType::Named(
         NamedType::get(resolve, canonical_type(resolve, id))?.qualified(),
     ))
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) enum MemberKind {
+    Instance,
+    Static,
+    Constructor,
+    Dispose,
+}
+
+pub(crate) enum ResourceError {
+    Value,
+    Tagged,
+}
+pub(crate) struct ResultInput {
+    pub(crate) index: usize,
+    pub(crate) tagged: HirType,
+    pub(crate) has_ok: bool,
+    pub(crate) has_err: bool,
+}
+
+pub(crate) struct ResourceMember {
+    pub(crate) owner: u32,
+    pub(crate) kind: MemberKind,
+    pub(crate) name: String,
+    pub(crate) binding: String,
+    pub(crate) params: Vec<HirType>,
+    pub(crate) result: HirType,
+    pub(crate) result_inputs: Vec<ResultInput>,
+    pub(crate) raw_result: Option<HirType>,
+    pub(crate) error: Option<ResourceError>,
+}
+
+pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<ResourceMember> {
+    use wit_parser::FunctionKind;
+    let mut members: Vec<_> =
+        perry_contract::world_functions(resolve, resolve.worlds[world].imports.iter())
+            .filter_map(|entry| {
+                let f = entry.function;
+                let id = f.kind.resource()?;
+                let kind = match f.kind {
+                    FunctionKind::Method(_) => MemberKind::Instance,
+                    FunctionKind::Static(_) => MemberKind::Static,
+                    FunctionKind::Constructor(_) => MemberKind::Constructor,
+                    _ => return None,
+                };
+                let ty = |t| types::ty(resolve, Input::Reference(t));
+                let raw = f.result.and_then(ty);
+                let sum = f
+                    .result
+                    .and_then(|t| perry_contract::result_type(resolve, t));
+                let result = if let Some(sum) = sum {
+                    sum.ok.and_then(ty)
+                } else {
+                    raw.clone()
+                };
+                Some(ResourceMember {
+                    owner: canonical_type(resolve, id).index() as u32,
+                    kind,
+                    name: to_camel_case(f.item_name()),
+                    binding: format!(
+                        "{}#{}",
+                        resolve.name_world_key(entry.key),
+                        to_camel_case(&f.name)
+                    ),
+                    params: f.params.iter().map(|p| ty(p.ty)).collect::<Option<_>>()?,
+                    result_inputs:f.params.iter().enumerate().filter_map(|(index,p)| {
+                        let sum=perry_contract::result_type(resolve,p.ty)?;
+                        let mut cases=Vec::new();
+                        for (tag,payload) in [("ok",sum.ok),("err",sum.err)] {
+                            let case=types::object(std::iter::once(Some(("tag".into(),HirType::StringLiteral(tag.into()))))
+                                .chain(payload.map(|t|Some(("val".into(),ty(t)?)))))?;
+                            cases.push(case);
+                        }
+                        Some(ResultInput{index,tagged:HirType::Union(cases),has_ok:sum.ok.is_some(),has_err:sum.err.is_some()})
+                    }).collect(),
+                    result: result.unwrap_or(HirType::Void),
+                    raw_result: sum.and(raw),
+                    error: sum.and_then(|r|r.err).map(|err|
+                    if matches!(err,wit_parser::Type::Id(id) if matches!(resolve.types[canonical_type(resolve,id)].kind,wit_parser::TypeDefKind::Variant(_))) {
+                        ResourceError::Tagged
+                    } else {ResourceError::Value}),
+                })
+            })
+            .collect();
+    for (key, item) in &resolve.worlds[world].imports {
+        let wit_parser::WorldItem::Interface { id, .. } = item else {
+            continue;
+        };
+        for (name, id) in &resolve.interfaces[*id].types {
+            if matches!(resolve.types[*id].kind, wit_parser::TypeDefKind::Resource)
+                && let Some(ty) = source_type(resolve, *id)
+            {
+                members.push(ResourceMember {
+                    owner: id.index() as u32,
+                    kind: MemberKind::Dispose,
+                    name: String::new(),
+                    binding: format!(
+                        "{}#drop{}",
+                        resolve.name_world_key(key),
+                        to_pascal_case(name)
+                    ),
+                    params: vec![ty],
+                    result: HirType::Void,
+                    result_inputs: vec![],
+                    raw_result: None,
+                    error: None,
+                });
+            }
+        }
+    }
+    members
 }

@@ -3,7 +3,7 @@ use crate::hir_compat::{self, Locations};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 use std::collections::{HashMap, HashSet};
-use swc_common::{Span, Spanned};
+use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Default)]
@@ -13,7 +13,6 @@ pub(crate) struct SourceFacts {
     pub(crate) deferred_starts: Vec<u32>,
     pub(crate) for_head_let_starts: Vec<u32>,
     pub(crate) param_annotated_starts: Vec<u32>,
-    pub(crate) exported_var_starts: Vec<u32>,
     pub(crate) expression_spans: HashSet<Span>,
     pub(crate) param_value_uses: Vec<(u32, Span)>,
 }
@@ -31,9 +30,6 @@ impl SourceFacts {
     pub(crate) fn is_param_annotated(&self, start: u32) -> bool {
         self.param_annotated_starts.binary_search(&start).is_ok()
     }
-    pub(crate) fn is_exported_var(&self, start: u32) -> bool {
-        self.exported_var_starts.binary_search(&start).is_ok()
-    }
     pub(crate) fn param_value_use(&self, start: u32) -> Option<Span> {
         let idx = self
             .param_value_uses
@@ -44,71 +40,6 @@ impl SourceFacts {
 }
 
 pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<()> {
-    let check_export =
-        |value: &ast::Expr| -> Result<()> {
-            if let ast::Expr::Object(object) = value.unwrap_parens() {
-                for item in &object.props {
-                    if let ast::PropOrSpread::Prop(prop) = item
-                        && let ast::Prop::Method(method) = prop.as_ref()
-                        && method.function.is_async
-                    {
-                        let span = method.key.span();
-                        let key = locations
-                            .source_at(span.lo.0)
-                            .and_then(|text| text.get(..(span.hi.0 - span.lo.0) as usize))
-                            .ok_or_else(|| {
-                                perry_wit_diagnostics::Diagnostic::internal("missing method source")
-                            })?;
-                        return Err(locations.annotate(unsupported!(
-                        "async method '{key}' of an exported object literal is not supported"
-                    ), span));
-                    }
-                }
-            }
-            Ok(())
-        };
-    let mut exported = Vec::new();
-    for item in &module.body {
-        match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportNamed(export))
-                if export.src.is_none() =>
-            {
-                for spec in &export.specifiers {
-                    if let ast::ExportSpecifier::Named(named) = spec
-                        && !named.is_type_only
-                        && let ast::ModuleExportName::Ident(id) = &named.orig
-                    {
-                        exported.push(&id.sym);
-                    }
-                }
-            }
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDefaultExpr(export)) => {
-                check_export(&export.expr)?;
-                if let ast::Expr::Ident(id) = export.expr.unwrap_parens() {
-                    exported.push(&id.sym);
-                }
-            }
-            _ => {}
-        }
-    }
-    for item in &module.body {
-        let (vars, public) = match item {
-            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
-                decl: ast::Decl::Var(vars),
-                ..
-            })) => (vars, true),
-            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Var(vars))) => (vars, false),
-            _ => continue,
-        };
-        for decl in &vars.decls {
-            if let Some(value) = &decl.init
-                && (public
-                    || matches!(&decl.name, ast::Pat::Ident(id) if exported.contains(&&id.sym)))
-            {
-                check_export(value)?;
-            }
-        }
-    }
     #[derive(Default)]
     struct SyntaxValidator {
         invalid_surrogate: Option<Span>,
@@ -174,7 +105,6 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
         facts: SourceFacts,
         parameters: HashMap<ast::Id, u32>,
         closures: HashMap<ast::Id, Span>,
-        top_vars: HashMap<ast::Id, u32>,
         enclosing_depth: u32,
     }
 
@@ -204,29 +134,6 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
     }
 
     impl Visit for AstScanner {
-        fn visit_export_decl(&mut self, export: &ast::ExportDecl) {
-            if let ast::Decl::Var(var) = &export.decl {
-                for decl in &var.decls {
-                    hir_compat::pattern_bindings(&decl.name, false, &mut |id, _| {
-                        self.facts.exported_var_starts.push(id.span.lo.0);
-                    });
-                }
-            }
-            export.visit_children_with(self);
-        }
-        fn visit_named_export(&mut self, export: &ast::NamedExport) {
-            if export.src.is_none() {
-                for spec in &export.specifiers {
-                    if let ast::ExportSpecifier::Named(named) = spec
-                        && let ast::ModuleExportName::Ident(ident) = &named.orig
-                        && let Some(&start) = self.top_vars.get(&ident.to_id())
-                    {
-                        self.facts.exported_var_starts.push(start);
-                    }
-                }
-            }
-            export.visit_children_with(self);
-        }
         fn visit_array_lit(&mut self, array: &ast::ArrayLit) {
             self.facts.sparse_arrays |= array.elems.iter().any(Option::is_none);
             array.visit_children_with(self);
@@ -281,9 +188,6 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
                     self.facts.deferred_starts.push(b.id.span.lo.0);
                 }
                 hir_compat::pattern_bindings(&decl.name, false, &mut |id, annotated| {
-                    if self.enclosing_depth == 0 {
-                        self.top_vars.insert(id.to_id(), id.span.lo.0);
-                    }
                     if !annotated {
                         self.facts.inferred_spans.push((id.span.lo.0, id.span.hi.0));
                     }
@@ -402,8 +306,6 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
     scanner.facts.for_head_let_starts.dedup();
     scanner.facts.param_annotated_starts.sort_unstable();
     scanner.facts.param_annotated_starts.dedup();
-    scanner.facts.exported_var_starts.sort_unstable();
-    scanner.facts.exported_var_starts.dedup();
     scanner
         .facts
         .param_value_uses

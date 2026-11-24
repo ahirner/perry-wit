@@ -26,6 +26,43 @@ struct Counts {
 }
 
 #[test]
+fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()> {
+    let wit = "package test:counter; interface counters {
+        resource counter {constructor(value:u32); get:func()->u32;}
+        drops:func()->u32;
+    } world api {export counters;}";
+    let source = "let disposed=0; class Local {
+        constructor(value) {this.value=value;}
+        get() {return this.value;}
+        [Symbol.dispose]() {disposed++;}
+    } export const counters={Counter:Local,drops(){return disposed;}};";
+    let engine = Engine::default();
+    let bytes = MemoryChecked.component(wit, "api", "counter.js", source)?;
+    let component = Component::new(&engine, bytes)?;
+    let mut store = Store::new(&engine, ());
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
+    let counters = component.get_export_index(None, "test:counter/counters");
+    let member = |name| {
+        component
+            .get_export_index(counters.as_ref(), name)
+            .ok_or_else(|| anyhow::anyhow!("missing {name}"))
+    };
+    let new = instance
+        .get_typed_func::<(u32,), (ResourceAny,)>(&mut store, &member("[constructor]counter")?)?;
+    let get = instance
+        .get_typed_func::<(ResourceAny,), (u32,)>(&mut store, &member("[method]counter.get")?)?;
+    let drops = instance.get_typed_func::<(), (u32,)>(&mut store, &member("drops")?)?;
+    let (a,) = new.call(&mut store, (42,))?;
+    let (b,) = new.call(&mut store, (7,))?;
+    a.resource_drop(&mut store)?;
+    assert_eq!(get.call(&mut store, (b,))?, (7,));
+    assert_eq!(drops.call(&mut store, ())?, (1,));
+    b.resource_drop(&mut store)?;
+    assert_eq!(drops.call(&mut store, ())?, (2,));
+    Ok(())
+}
+
+#[test]
 fn explicit_stdout_without_console_reaches_the_host() -> Result<()> {
     struct OutputStream;
     let bytes = MemoryChecked.component(

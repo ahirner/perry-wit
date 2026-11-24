@@ -1,0 +1,351 @@
+//! HIR adapters for class instances crossing canonical resource boundaries.
+use super::{ClassRoots, Operation, Witness, mark_non_null};
+use perry_hir::{
+    ir::{BinaryOp, Expr, Function, Module, Param, Stmt},
+    types::{FuncId, LocalId, Type as HirType},
+};
+use perry_wit_diagnostics::{Diagnostic, Result};
+
+pub(crate) fn synth_param(id: LocalId, name: String, ty: HirType) -> Param {
+    Param {
+        id,
+        name,
+        ty,
+        default: None,
+        is_rest: false,
+        decorators: Vec::new(),
+        arguments_object: None,
+    }
+}
+
+pub(crate) fn synth_call(fid: FuncId, args: Vec<Expr>, byte_offset: u32, byte_end: u32) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::FuncRef(fid)),
+        args,
+        type_args: Vec::new(),
+        byte_offset,
+        byte_end,
+    }
+}
+
+pub(crate) fn synth_function(
+    id: FuncId,
+    name: String,
+    params: Vec<Param>,
+    return_type: HirType,
+    body: Vec<Stmt>,
+    is_async: bool,
+) -> Function {
+    Function {
+        id,
+        name,
+        type_params: Vec::new(),
+        params,
+        return_type,
+        body,
+        is_async,
+        is_generator: false,
+        is_exported: false,
+        captures: Vec::new(),
+        decorators: Vec::new(),
+        is_strict: true,
+        construct_only: false,
+        was_unrolled: false,
+        was_plain_async: false,
+    }
+}
+
+struct Registry {
+    table: LocalId,
+    next: LocalId,
+    class: String,
+}
+
+struct Ids {
+    local: LocalId,
+    function: FuncId,
+}
+
+fn fresh(id: &mut u32) -> Result<u32> {
+    *id = id
+        .checked_add(1)
+        .ok_or_else(|| Diagnostic::internal("HIR ID space exhausted"))?;
+    Ok(*id)
+}
+
+fn external(name: &str, args: Vec<Expr>, result: HirType) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::ExternFuncRef {
+            name: name.into(),
+            param_types: vec![],
+            return_type: result,
+        }),
+        args,
+        type_args: vec![],
+        byte_offset: 0,
+        byte_end: 0,
+    }
+}
+
+fn local(id: LocalId, name: &str, ty: HirType, init: Expr, mutable: bool) -> Stmt {
+    Stmt::Let {
+        id,
+        name: name.into(),
+        ty,
+        init: Some(init),
+        mutable,
+    }
+}
+
+impl Registry {
+    fn get(&self, rep: Expr) -> Expr {
+        mark_non_null(Expr::MapGet {
+            map: Box::new(Expr::LocalGet(self.table)),
+            key: Box::new(rep),
+        })
+    }
+
+    fn store(&self, body: &mut Vec<Stmt>, id: LocalId, value: Expr) {
+        body.push(local(id, "instance", HirType::Any, value, false));
+        body.push(Stmt::Expr(Expr::LocalSet(
+            self.next,
+            Box::new(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::LocalGet(self.next)),
+                right: Box::new(Expr::Number(1.0)),
+            }),
+        )));
+        body.push(Stmt::Expr(Expr::MapSet {
+            map: Box::new(Expr::LocalGet(self.table)),
+            key: Box::new(Expr::LocalGet(self.next)),
+            value: Box::new(Expr::LocalGet(id)),
+        }));
+    }
+}
+
+pub(crate) fn bind(
+    hir: &mut Module,
+    roots: &ClassRoots,
+    witnesses: &mut [Witness<FuncId>],
+    max_local: LocalId,
+    max_function: FuncId,
+) -> Result<()> {
+    let mut ids = Ids {
+        local: max_local,
+        function: max_function,
+    };
+    let mut registries = Vec::new();
+    let mut init = Vec::new();
+    for (owner, resource) in roots.classes.iter().enumerate() {
+        let c = hir
+            .classes
+            .iter()
+            .find(|c| c.id == resource.class)
+            .ok_or_else(|| Diagnostic::internal("lost resource class"))?;
+        let table = fresh(&mut ids.local)?;
+        let next = fresh(&mut ids.local)?;
+        let ctor = roots
+            .calls
+            .iter()
+            .zip(witnesses.iter())
+            .find_map(|(call, w)| {
+                call.as_ref()
+                    .filter(|call| call.kind == Operation::New && call.owner == owner)?;
+                w.signature.as_ref()
+            });
+        let class_type = match ctor {
+            Some(signature)
+                if !signature.params.is_empty()
+                    && c.constructor
+                        .as_ref()
+                        .is_some_and(|f| f.params.iter().any(|p| p.ty == HirType::Any)) =>
+            {
+                HirType::Generic {
+                    base: c.name.clone(),
+                    type_args: signature.params.clone(),
+                }
+            }
+            _ => HirType::Named(c.name.clone()),
+        };
+        let types = vec![HirType::Number, class_type];
+        let map = super::typed_collection(true, types);
+        init.push(local(
+            table,
+            &format!("resource_table_{table}"),
+            HirType::Any,
+            map,
+            false,
+        ));
+        init.push(local(
+            next,
+            &format!("resource_rep_{next}"),
+            HirType::Number,
+            Expr::Number(0.0),
+            true,
+        ));
+        registries.push(Registry {
+            table,
+            next,
+            class: c.name.clone(),
+        });
+    }
+    init.append(&mut hir.init);
+    hir.init = init;
+    for (w, call) in witnesses.iter_mut().zip(&roots.calls) {
+        let Some(sig) = &w.signature else { continue };
+        let owner_of = |ty: &HirType| roots.classes.iter().position(|r| &r.source_ty == ty);
+        if call.is_none()
+            && !sig.params.iter().any(|p| owner_of(p).is_some())
+            && owner_of(&sig.result).is_none()
+        {
+            continue;
+        }
+        let mut params = Vec::new();
+        let mut args = Vec::new();
+        for (i, p) in sig.params.iter().enumerate() {
+            let id = fresh(&mut ids.local)?;
+            let mut value = Expr::LocalGet(id);
+            if let Some(owner) = owner_of(p) {
+                let r = roots
+                    .classes
+                    .get(owner)
+                    .ok_or_else(|| Diagnostic::internal("lost input resource"))?;
+                let table = registries
+                    .get(owner)
+                    .ok_or_else(|| Diagnostic::internal("lost handle table"))?;
+                value = table.get(external(&r.representation, vec![value], HirType::Number));
+            }
+            args.push(value);
+            params.push(synth_param(id, format!("arg{i}"), p.clone()));
+        }
+        let mut body = Vec::new();
+        let operation = if let Some(call) = call {
+            let resource = roots
+                .classes
+                .get(call.owner)
+                .ok_or_else(|| Diagnostic::internal("unknown exported resource"))?;
+            let table = registries
+                .get(call.owner)
+                .ok_or_else(|| Diagnostic::internal("missing handle table"))?;
+            let class = hir
+                .classes
+                .iter_mut()
+                .find(|c| c.id == resource.class)
+                .ok_or_else(|| Diagnostic::internal("missing class declaration"))?;
+            match call.kind {
+                Operation::New => Expr::New {
+                    class_name: table.class.clone(),
+                    args,
+                    type_args: vec![],
+                    byte_offset: 0,
+                    byte_end: 0,
+                    cap_args_appended: 0,
+                },
+                Operation::Drop => {
+                    let rep = params
+                        .first()
+                        .ok_or_else(|| Diagnostic::internal("missing destructor parameter"))?
+                        .id;
+                    if let Some(fid) = call.function {
+                        let idx = class
+                            .computed_members
+                            .iter()
+                            .position(|m| m.function.id == fid)
+                            .ok_or_else(|| Diagnostic::internal("missing disposal method"))?;
+                        let m = class.computed_members.remove(idx).function;
+                        let name = m.name.clone();
+                        class.methods.push(m);
+                        hir.init.retain(|s|!matches!(s,Stmt::Expr(Expr::RegisterClassComputedMethod{class_name,method_name,..})
+                            if class_name==&class.name && method_name==&name));
+                        body.push(Stmt::Expr(method(
+                            table.get(Expr::LocalGet(rep)),
+                            name,
+                            vec![],
+                        )));
+                    }
+                    Expr::MapDelete {
+                        map: Box::new(Expr::LocalGet(table.table)),
+                        key: Box::new(Expr::LocalGet(rep)),
+                    }
+                }
+                Operation::Static => {
+                    let m = class
+                        .static_methods
+                        .iter()
+                        .find(|m| Some(m.id) == call.function)
+                        .ok_or_else(|| Diagnostic::internal("missing static method"))?;
+                    Expr::StaticMethodCall {
+                        class_name: class.name.clone(),
+                        method_name: m.name.clone(),
+                        args,
+                    }
+                }
+                Operation::Call => {
+                    let m = class
+                        .methods
+                        .iter()
+                        .find(|m| Some(m.id) == call.function)
+                        .ok_or_else(|| Diagnostic::internal("missing instance method"))?;
+                    let mut args = args.into_iter();
+                    let object = args
+                        .next()
+                        .ok_or_else(|| Diagnostic::internal("missing method receiver"))?;
+                    method(object, m.name.clone(), args.collect())
+                }
+            }
+        } else {
+            synth_call(
+                w.target
+                    .ok_or_else(|| Diagnostic::internal("missing resource conversion target"))?,
+                args,
+                0,
+                0,
+            )
+        };
+        if let Some(owner) = owner_of(&sig.result) {
+            let r = roots
+                .classes
+                .get(owner)
+                .ok_or_else(|| Diagnostic::internal("unknown result resource"))?;
+            let table = registries
+                .get(owner)
+                .ok_or_else(|| Diagnostic::internal("missing result handle table"))?;
+            table.store(&mut body, fresh(&mut ids.local)?, operation);
+            body.push(Stmt::Return(Some(external(
+                &r.create,
+                vec![Expr::LocalGet(table.next)],
+                r.source_ty.clone(),
+            ))));
+        } else if sig.result == HirType::Void {
+            body.push(Stmt::Expr(operation));
+        } else {
+            body.push(Stmt::Return(Some(operation)));
+        }
+        let fid = fresh(&mut ids.function)?;
+        hir.functions.push(synth_function(
+            fid,
+            format!("resource_adapter_{fid}"),
+            params,
+            sig.result.clone(),
+            body,
+            false,
+        ));
+        w.target = Some(fid);
+    }
+    Ok(())
+}
+
+fn method(receiver: Expr, name: String, args: Vec<Expr>) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::PropertyGet {
+            object: Box::new(receiver),
+            property: name,
+            byte_offset: 0,
+            byte_end: 0,
+        }),
+        args,
+        type_args: vec![],
+        byte_offset: 0,
+        byte_end: 0,
+    }
+}

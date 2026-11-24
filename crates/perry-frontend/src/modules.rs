@@ -6,17 +6,18 @@ use perry_wit_diagnostics::{
     Diagnostic, Result, bail_diag, bail_unsupported, codes, diag, ensure_unsupported, unsupported,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
 };
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext, util::take::Take};
 use swc_ecma_transforms_base::{hygiene::hygiene, resolver};
-use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 type Exports = BTreeMap<String, ast::Ident>;
 
 pub(crate) struct Loaded<'s> {
     pub(crate) module: ast::Module,
+    pub(crate) exports: Exports,
     pub(crate) locations: crate::hir_compat::Locations<'s>,
 }
 
@@ -41,7 +42,17 @@ pub(crate) fn load<'s>(
         let mut locations = crate::hir_compat::Locations::default();
         locations.add(PathBuf::from(file), source)?;
         crate::engine::boundary::validate_ast(&initial, &locations)?;
+        let mut exports = Exports::new();
+        for item in &mut initial.body {
+            if let ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export)) = item {
+                for id in declared(&export.decl)? {
+                    insert_export(&mut exports, id.sym.to_string(), id.clone())?;
+                }
+                *item = ast::ModuleItem::Stmt(ast::Stmt::Decl(export.decl.take()));
+            }
+        }
         return Ok(Loaded {
+            exports,
             module: initial,
             locations,
         });
@@ -53,7 +64,6 @@ pub(crate) fn load<'s>(
             loaded: BTreeMap::new(),
             active: BTreeSet::new(),
             body: Vec::new(),
-            types: HashSet::new(),
             next: 0,
             locations: crate::hir_compat::Locations::default(),
             entry_path: normalize(Path::new(file)),
@@ -61,46 +71,6 @@ pub(crate) fn load<'s>(
         };
         let path = normalize(Path::new(file));
         let exports = graph.module(&path, initial)?;
-        // An exported function that nothing else names is renamed in place; one that the
-        // graph also calls, or exports twice, keeps its binding and gets an exported copy.
-        let mut bindings = ExportBindings::default();
-        for (name, binding) in &exports {
-            if !graph.types.contains(&binding.to_id()) {
-                bindings
-                    .0
-                    .entry(binding.to_id())
-                    .or_default()
-                    .names
-                    .push(name);
-            }
-        }
-        graph.body.visit_with(&mut bindings);
-        let mut copies = BTreeMap::new();
-        for item in graph.body.iter_mut().rev() {
-            if let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Fn(function))) = item
-                && let Some(binding) = bindings.0.remove(&function.ident.to_id())
-            {
-                if let [name] = binding.names.as_slice()
-                    && binding.occurrences == 1
-                {
-                    *item = export_function(function.take(), name);
-                } else {
-                    for name in binding.names {
-                        copies.insert(name, export_function(function.clone(), name));
-                    }
-                }
-            }
-        }
-        if let Some((name, declaration)) = exports
-            .iter()
-            .find(|(_, declaration)| bindings.0.contains_key(&declaration.to_id()))
-        {
-            return Err(graph.locations.annotate(
-                unsupported!("Component export '{name}' requires a named function declaration"),
-                declaration.span,
-            ));
-        }
-        graph.body.extend(copies.into_values());
         let mut module = ast::Module {
             body: graph.body,
             ..Default::default()
@@ -111,6 +81,7 @@ pub(crate) fn load<'s>(
         Ok(Loaded {
             module,
             locations: graph.locations,
+            exports,
         })
     })
 }
@@ -223,7 +194,6 @@ struct Graph<'a, 'f> {
     loaded: BTreeMap<PathBuf, Exports>,
     active: BTreeSet<PathBuf>,
     body: Vec<ast::ModuleItem>,
-    types: HashSet<ast::Id>,
     next: usize,
     locations: crate::hir_compat::Locations<'a>,
     entry_path: PathBuf,
@@ -328,26 +298,6 @@ impl Graph<'_, '_> {
                 item => item,
             };
             item.visit_mut_with(&mut renamer);
-            match &item {
-                ast::ModuleItem::Stmt(ast::Stmt::Decl(
-                    decl @ (ast::Decl::TsInterface(_)
-                    | ast::Decl::TsTypeAlias(_)
-                    | ast::Decl::Class(_)),
-                )) => {
-                    self.types
-                        .extend(declared(decl)?.into_iter().map(ast::Ident::to_id));
-                }
-                ast::ModuleItem::ModuleDecl(ast::ModuleDecl::Import(import)) => {
-                    for specifier in &import.specifiers {
-                        if let ast::ImportSpecifier::Named(named) = specifier
-                            && (import.type_only || named.is_type_only)
-                        {
-                            self.types.insert(named.local.to_id());
-                        }
-                    }
-                }
-                _ => {}
-            }
             self.body.push(item);
         }
         if let Some((error, span)) = renamer.error {
@@ -620,31 +570,6 @@ impl VisitMut for Rename<'_> {
         }
     }
 }
-fn export_function(mut function: ast::FnDecl, name: &str) -> ast::ModuleItem {
-    function.ident.sym = name.into();
-    ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
-        span: function.function.span,
-        decl: ast::Decl::Fn(function),
-    }))
-}
-
-#[derive(Default)]
-struct ExportBinding<'a> {
-    names: Vec<&'a str>,
-    occurrences: usize,
-}
-
-#[derive(Default)]
-struct ExportBindings<'a>(HashMap<ast::Id, ExportBinding<'a>>);
-
-impl Visit for ExportBindings<'_> {
-    fn visit_ident(&mut self, ident: &ast::Ident) {
-        if let Some(binding) = self.0.get_mut(&ident.to_id()) {
-            binding.occurrences += 1;
-        }
-    }
-}
-
 struct ClearContexts;
 impl VisitMut for ClearContexts {
     fn visit_mut_syntax_context(&mut self, context: &mut SyntaxContext) {

@@ -1216,10 +1216,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         );
         if let Some(mut arg_tys) = explicit_tys {
             let bindings = self.active_instance_type_bindings(s.inst);
+            let mut specialized = false;
             for ty in &mut arg_tys {
-                *ty = self.types.substitute(self.ctx, *ty, &bindings);
+                let bound = self.types.substitute(self.ctx, *ty, &bindings);
+                let concrete = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
+                specialized |= concrete != *ty;
+                *ty = concrete;
             }
-            if !bindings.is_empty() {
+            if specialized {
                 self.record_site(
                     s.inst,
                     expr,
