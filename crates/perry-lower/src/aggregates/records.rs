@@ -231,7 +231,9 @@ impl<'a> RecordAssembly<'a> {
                 .deref(ctx)
                 .field(&name)
                 .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "record has no field {name}"))?;
-            slots[index] = Some(
+            *slots
+                .get_mut(index)
+                .ok_or_else(|| internal!("record field slot {index} out of range"))? = Some(
                 b.fit(ctx, value, ty)
                     .map_err(|err| err.with_note(format!("in record field '{name}'")))?,
             );

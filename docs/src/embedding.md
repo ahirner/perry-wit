@@ -17,7 +17,7 @@ perry-wit compiles a statically typed subset of TypeScript into WebAssembly comp
 The npm package bundles the compiler for use in browsers and in Node.js 22 or later.
 
 ```sh
-npm install perry-wit  # todo: publishing still to come
+npm install perry-wit
 ```
 
 This script compiles a module against a WIT world and writes the component:

@@ -6,7 +6,7 @@ Perry-WIT builds typed components that export WIT functions, CLI commands that r
 ## Typed Components
 
 The WIT world declares the exports.
-Each `kebab-case` WIT export binds to the matching `camelCase` TypeScript export; remaining module functions stay internal.
+Each `kebab-case` WIT export binds to the matching `camelCase` TypeScript export, and exported interfaces also bind to an exported object whose properties name the interface's functions and `PascalCase` resource classes. Remaining module functions stay internal.
 The starter template contains this pair:
 
 ```wit check=task
@@ -65,9 +65,10 @@ wasmtime run -S p3=y -W component-model-async=y --dir . app.wasm
 ```
 
 `console` writes to WASI standard output and error, `process.env` reads the WASI environment, and `process.exitCode` or `process.exit(code)` sets the exit status.
+Commands drain pending timers and host-backed async operations before exiting.
 
 If the module also exports functions, its top-level statements initialize the module once instead, and `wasi:cli/run` and every export wait for that initialization.
-Top-level statements that start asynchronous work without awaiting it are then a compile error.
+In hybrid modules, top-level asynchronous operations must be awaited during initialization.
 
 ## HTTP Handlers
 

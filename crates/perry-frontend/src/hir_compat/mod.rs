@@ -41,10 +41,9 @@ pub use methods::{Method, method};
 pub use streams::is_writable_to_web;
 pub use timers::is_timer_module;
 pub(crate) use timers::{TIMER_CLASS, is_timer_handle};
-pub(crate) use witnesses::{ClassRoots, Operation, Witness};
+pub(crate) use witnesses::Witness;
 
 pub struct Metadata<'s> {
-    pub(crate) class_roots: ClassRoots,
     pub(crate) witnesses: Vec<Witness<perry_hir::types::FuncId>>,
     pub(crate) resource_members: Vec<crate::wit::ResourceMember>,
     pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
@@ -80,11 +79,7 @@ impl Metadata<'_> {
     ) -> impl Iterator<Item = (Option<perry_hir::types::FuncId>, Option<&str>)> + '_ {
         self.witnesses
             .iter()
-            .zip(&self.class_roots.calls)
-            .map(|(w, call)| {
-                let destructor = call.as_ref().is_some_and(|c| c.kind == Operation::Drop);
-                (w.target, destructor.then_some(w.name.as_str()))
-            })
+            .map(|w| (w.target, w.is_destructor.then_some(w.name.as_str())))
     }
 }
 
@@ -150,7 +145,7 @@ pub(crate) fn lower<'s>(
             }
         }
     }
-    let (witnesses, class_roots) = witnesses.in_hir(&mut module)?;
+    let witnesses = witnesses.in_hir(&mut module)?;
     constructors.collect_types(&mut module)?;
     let inferred_bindings = module
         .local_source_spans
@@ -167,7 +162,6 @@ pub(crate) fn lower<'s>(
         facts,
         module,
         metadata: Metadata {
-            class_roots,
             witnesses,
             resource_members: world
                 .map(|(r, w)| crate::wit::resource_members(r, w))

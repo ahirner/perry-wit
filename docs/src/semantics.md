@@ -3,15 +3,18 @@
 Perry-WIT accepts a statically typed subset of TypeScript.
 Names, object layouts and host capabilities are resolved at compile time, and a construct outside the subset is a compile error with a source location.
 Property reads through nullable values require narrowing: check for `null`, supply a non-null fallback, or use optional chaining before reading a property such as `.length`.
-A `typeof` or tag check narrows a union until its local is assigned, directly or by a closure; assigning a literal narrows the local to that alternative.
+A `typeof` or tag check narrows a union until its local is assigned directly or by a closure. Assigning a literal narrows the local to that alternative.
+A `let` declaration without an initializer infers its storage type from statically visible writes.
+Functions are specialized per distinct argument types at their call sites, up to 256 specializations per function.
 A narrowed read of a property or global that another reference or call has since changed throws `TypeError`.
 
 ## Objects
 
-- Interfaces, type aliases and object literals compile to records with fixed field offsets. Types with the same fields share a layout; classes and recursive types get their own.
+- Interfaces, type aliases and object literals compile to records with fixed field offsets. Types with the same fields share a layout, while classes and recursive types receive dedicated layouts.
 - Records keep their declared fields, and prototype mutation is rejected. `Record<string, V>` dictionaries accept new keys, and `delete` removes dictionary keys and optional properties.
 - An empty object, including `const object: any = {}`, becomes a dictionary when every write stores the same value type. Writes through local aliases, branches and loops count. An object that escapes, or whose writes store different types, needs a type annotation.
 - Unions of literals, records and WIT variants narrow through `typeof`, equality and discriminant properties.
+- Classes exported inside a WIT interface object adapt directly to exported WIT resources, keeping each instance alive until the host drops its canonical handle and running `[Symbol.dispose]()` on drop when defined.
 
 ## Arrays
 
@@ -20,7 +23,7 @@ A narrowed read of a property or global that another reference or call has since
 - Reading a hole, an index outside the array, or a fractional index yields `undefined`. Storing or passing it where the declared type excludes `undefined` throws `TypeError`.
 - Writing at `length` appends. Writing at any other index outside `0..length` throws `RangeError`.
 - At a WIT `list<T>` boundary, holes lower to `none` when `T` is `option<U>` and trap otherwise.
-- Fresh empty arrays (`[]`, including `any[]`) infer their element type from `push` calls and numeric-indexed writes across branches, loops, non-reassigned local aliases and helper returns, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, index reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer; other uses, unresolved writes or no writes require an explicit element type.
+- Fresh empty arrays (`[]`, including `any[]`) infer their element type from `push` calls and numeric-indexed writes across branches, loops, non-reassigned local aliases and helper returns, widening string literals to `string` and preserving nested record and array layouts. Inferred arrays support `.length`, index reads, `Object.keys`, `Array.isArray` and `JSON.stringify` without a replacer. Other uses, unresolved writes, or empty arrays with zero writes require an explicit element type.
 
 ## Strings
 
@@ -47,16 +50,16 @@ A narrowed read of a property or global that another reference or call has since
 ## Exceptions
 
 - `Error`, `TypeError`, `RangeError`, `ReferenceError` and `SyntaxError` keep `name`, `message` and `cause` through `try`, `catch` and `finally`.
-- A failed implicit check produces a fresh error object when caught. Successful checks bypass the exception runtime; explicitly thrown values retain their identity.
-- An export declared with a WIT `result<T, E>` turns an uncaught exception into `err`. Without a `result`, an uncaught exception traps, and a trap does not run pending `finally` blocks.
-- A jco resource import with a WIT error type throws at the call when the host returns `err`. A host failure without a declared error channel traps. For a variant error, the caught error's `message` names the case. The adapter drops the case's owned resource handle. Reading the variant payload in guest code is unsupported and produces a compile error.
+- A failed implicit check produces a fresh error object when caught. Successful checks bypass the exception runtime, and explicitly thrown values retain their identity.
+- An export declared with a WIT `result<T, E>` turns an uncaught exception into `err`. An uncaught exception in an export without a `result` traps, and a trap does not run pending `finally` blocks.
+- A jco resource import with a WIT error type throws at the call when the host returns `err`. A host failure on an infallible import traps. For a variant error, the caught error's `message` names the case, and the adapter drops the case's owned resource handle. Reading the variant payload in guest code produces a compile error.
 
 ## Async
 
-- An `async` function runs eagerly until its first suspension. Awaiting an already settled promise continues inline.
-- There is no microtask queue in the guest. Waiting tasks resume from WASI 0.3 callbacks, so the order of continuations for different host events follows the host, not Node.js. Observers of the same promise resume in registration order.
-- `Promise.race` leaves the losing tasks running. They must settle before the export returns, or the call traps.
-- `ReadableStream` supports default readers (`getReader()`), `for await` loops, BYOB readers (`getReader({ mode: "byob" })` with `read(view, { min })` into a caller-provided `Uint8Array`) and explicit cancellation. `for await` over a byte stream releases the reader lock and cancels the stream when the loop exits early. Releasing a reader lock rejects pending reads but keeps buffered chunks for the next reader.
+- An `async` function runs eagerly until its first suspension. Awaiting an already settled promise continues inline. Resolving a `Promise` with another `Promise` is a compile error.
+- Waiting tasks resume from WASI 0.3 callbacks, so continuation order across distinct host events follows the host scheduler. Observers of the same promise resume in registration order.
+- Commands (`wasi:cli/run`) drain pending timers and external async operations before exiting. Library exports cancel lingering detached tasks and trap if unresolved background work remains at return.
+- `ReadableStream` supports default readers (`getReader()`), `for await` loops, BYOB readers (`getReader({ mode: "byob" })` with `read(view, { min })` into a caller-provided `Uint8Array`) and explicit cancellation. `for await` over a byte stream releases the reader lock and cancels the stream when the loop exits early. Releasing a reader lock rejects pending reads while keeping buffered chunks for the next reader.
 
 ## Numbers
 
@@ -76,11 +79,11 @@ Each numeric SSA value carries an optional integer type (width, signedness) and 
 `ProgramFacts` propagates ranges forward through arithmetic, branches and calls (including recursion), and propagates required register widths and observation requirements backward through the same worklist to a fixed point [[1]](#ref-1).
 
 - **Register selection**: Refined integers whose interval fits in 32 bits lower to `i32`. Wider refined integers lower to `i64`. Unrefined values stay in `f64`.
-- **Bitwise results**: `&`, `|`, `^`, `~`, `<<`, `>>` and `Math.imul` produce `s32` values and `>>>` produces `u32`, so they lower to `i32` instructions even when their operands are unrefined `f64` values, which convert with `ToInt32`. When every use needs only the low bits, refined arithmetic feeding them, such as `(a * b) | 0` on `u32` values, computes in `i32`. This deliberately preserves integer wrapping before conversion: at `a = b = 4294967295`, the result is `1`, whereas JavaScript rounds the product before converting and returns `0`. A use that observes the full value, such as arithmetic or a comparison, requires a wider register when the result does not fit; a bitwise consumer then truncates at its own use.
+- **Bitwise results**: `&`, `|`, `^`, `~`, `<<`, `>>` and `Math.imul` produce `s32` values and `>>>` produces `u32`, so they lower to `i32` instructions even when their operands are unrefined `f64` values, which convert with `ToInt32`. When every use needs only the low bits, refined arithmetic feeding them, such as `(a * b) | 0` on `u32` values, computes in `i32`. This deliberately preserves integer wrapping before conversion: at `a = b = 4294967295`, the result is `1`, whereas JavaScript rounds the product before converting and returns `0`. A use that observes the full value, such as arithmetic or a comparison, requires a wider register when the result overflows. A bitwise consumer then truncates at its own use.
 - **Register-width intermediates**: Required widths stay at register size (32 or 64 bits) during computation. Narrowing to 8 or 16 bits happens only at the WIT boundary.
 - **Literals**: An integer literal adopts a required width only when its value fits. Larger literals stay in `f64` until converted at the boundary.
 - **Loops**: At a join point, an interval may grow once before widening to the bounds of its register type, or to unbounded endpoints for unrefined numbers. A specialized loop counter wraps at 32 or 64 bits on overflow.
-- **Guarded ranges**: Dominating comparisons of integral operands refine index ranges through the numeric solver’s shared arithmetic and integer bounds. Derived arithmetic and cast ranges must fit the result type. Addition and subtraction preserve one-sided bounds; arithmetic that may produce `NaN` stays unknown.
+- **Guarded ranges**: Dominating comparisons of integral operands refine index ranges through the numeric solver’s shared arithmetic and integer bounds. Derived arithmetic and cast ranges must fit the result type. Addition and subtraction preserve one-sided bounds, while arithmetic that may produce `NaN` stays unknown.
 - **Bounds checks**: A proof of `0 <= i < length` permits unchecked array stores, `Uint8Array` reads, and reads from arrays proven dense across aliases, calls and concatenations. Array bounds proofs account for mutations through aliases. Byte-view proofs use length comparisons or constructor, copy and subarray extents, and require the view to stay attached on every path to the access. Calls, awaits, foreign operations and BYOB reads invalidate these byte-view proofs.
 
 #### Type Join

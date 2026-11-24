@@ -228,16 +228,24 @@ const GLOBALS = [
   ['Errors', 'RangeError', 'new RangeError("x")'],
   ['Errors', 'ReferenceError', 'new ReferenceError("x")'],
   ['Errors', 'SyntaxError', 'new SyntaxError("x")'],
+  ['Promise', 'Promise', 'new Promise<number>(resolve => resolve(1))'],
   ['Promise', 'Promise.resolve', 'Promise.resolve(1)'],
+  ['Promise', 'Promise.reject', 'Promise.reject(new Error("x")).catch(() => 0)'],
   ['Promise', 'Promise.all', 'await Promise.all([Promise.resolve(1)])'],
   ['Promise', 'Promise.allSettled', 'await Promise.allSettled([Promise.resolve(1)])'],
   ['Promise', 'Promise.race', 'await Promise.race([Promise.resolve(1)])'],
+  ['Timers', 'setTimeout', 'setTimeout(() => {}, 1)'],
+  ['Timers', 'setInterval', 'setInterval(() => {}, 1)'],
+  ['Timers', 'setImmediate', 'setImmediate(() => {})'],
+  ['Timers', 'clearTimeout', 'clearTimeout(undefined)'],
+  ['Timers', 'clearInterval', 'clearInterval(undefined)'],
   ['Time', 'Date', 'new Date(0)'],
   ['Time', 'Date.now', 'Date.now()'],
   ['Time', 'Date.parse', 'Date.parse("2024-01-01")'],
   ['Time', 'Date.UTC', 'Date.UTC(2024, 0, 1)'],
   ['Time', 'performance.now', 'performance.now()'],
   ['Time', 'Temporal.Now.instant', 'Temporal.Now.instant()'],
+  ['Time', 'Temporal.Now.plainDateTimeISO', 'Temporal.Now.plainDateTimeISO()'],
   ['Time', 'Temporal.Instant.from', 'Temporal.Instant.from("2024-01-01T00:00:00Z")'],
   ['Time', 'Temporal.Instant.fromEpochMilliseconds', 'Temporal.Instant.fromEpochMilliseconds(0)'],
   ['Time', 'Temporal.PlainDate.from', 'Temporal.PlainDate.from("2024-02-29")'],
@@ -283,7 +291,7 @@ const RECEIVERS = new Map([
 
 /** The inventory: probed globals, then methods and module functions read from compiler tables. */
 async function inventory(repository, compiler) {
-  const lines = GLOBALS.map(([, , statement], index) => /^(console\.|process\.)/.test(statement) ? `${statement};` : `const probe${index} = ${statement};`);
+  const lines = GLOBALS.map(([, , statement], index) => /^(console\.|process\.|clear(?:Timeout|Interval)\()/.test(statement) ? `${statement};` : `const probe${index} = ${statement};`);
   try {
     compile(compiler, 'inventory probe', lines.join('\n') + '\n', PROBE_WIT);
   } catch {
@@ -320,6 +328,7 @@ async function inventory(repository, compiler) {
   const modules = [
     ['`Math`', math],
     ['`node:fs/promises`', [...program.matchAll(/\(BuiltinModule::Fs,\s*"([^"]+)"\)/g)].map(match => match[1])],
+    ['`node:timers`', ['setTimeout', 'setInterval', 'setImmediate', 'clearTimeout', 'clearInterval']],
     ['`node:timers/promises`', [...program.matchAll(/\(BuiltinModule::Timers,\s*"([^"]+)"\)/g)].map(match => match[1])],
     ['`node:stream`', [...program.matchAll(/\(BuiltinModule::Stream,\s*"([^"]+)"\)/g)].map(match => `${match[1]}.toWeb`)],
   ];

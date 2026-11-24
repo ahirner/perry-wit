@@ -4,7 +4,9 @@ use super::{
 };
 use crate::engine::boundary::{TemplateKind, TemplateView};
 use crate::engine::solve::{CallbackCall, HelperSpec, Instance, ReactionKind, SiteEntry};
-use crate::engine::types::{CaptureOwner, FuncIdentity, HelperId, LocId, TemplateId, Ty};
+use crate::engine::types::{
+    CaptureOwner, FuncIdentity, HelperId, InstanceId, LocId, TemplateId, Ty,
+};
 use crate::hir_compat::{self, GuestCall};
 use perry_hir::{
     ir::{CatchClause, Expr, Function, Stmt, UnaryOp},
@@ -13,6 +15,20 @@ use perry_hir::{
 use perry_wit_diagnostics::{Diagnostic, Result};
 
 use crate::hir_compat::TIMER_CLASS;
+
+enum BoundCallback {
+    ThrowTypeError(HelperId),
+    Direct {
+        target: InstanceId,
+        env: Option<Expr>,
+        receiver: Option<Expr>,
+    },
+    Dispatch {
+        helper: HelperId,
+        callee: Expr,
+        receiver: Option<Expr>,
+    },
+}
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn inline_iife(&mut self, return_type: HirType, body: Vec<Stmt>) -> Result<Expr> {
@@ -66,8 +82,8 @@ impl<'h> Emitter<'h, '_> {
         ident: FuncIdentity,
         name: String,
     ) -> Result<String> {
-        let Some(TemplateKind::PromiseResolve(site) | TemplateKind::PromiseReject(site)) =
-            self.index.view(ident.template).map(|v| v.kind)
+        let (TemplateKind::PromiseResolve(site) | TemplateKind::PromiseReject(site)) =
+            self.index.view(ident.template).kind
         else {
             return Err(Diagnostic::internal("missing promise handle template"));
         };
@@ -141,42 +157,78 @@ impl<'h> Emitter<'h, '_> {
         )
     }
 
-    fn emit_callback_call_expr(
+    fn bind_callback_param(
         &mut self,
         cb: CallbackCall,
-        cb_val: Option<Expr>,
-        recv: Option<Expr>,
-        args: Vec<Expr>,
-    ) -> Result<(Expr, bool)> {
-        match cb {
-            CallbackCall::ThrowTypeError(helper) => {
-                let fid = self.emit_helper(helper)?;
-                Ok((synth_call(fid, Vec::new(), 0, 0), false))
-            }
+        ty: Ty,
+        name: &str,
+        recv: Option<LocalId>,
+        params: &mut Vec<perry_hir::ir::Param>,
+    ) -> Result<(BoundCallback, Option<LocalId>)> {
+        let is_nullish = self.nullish_flags(ty) != (false, false);
+        let mut push_param = || -> Result<LocalId> {
+            let id = self.fresh_synthetic_local()?;
+            params.push(synth_param(id, name.into(), self.materialize(ty)?));
+            Ok(id)
+        };
+        let (bound, pid) = match cb {
+            CallbackCall::ThrowTypeError(helper) => (BoundCallback::ThrowTypeError(helper), None),
             CallbackCall::Direct {
                 target,
                 pass_env,
                 pass_receiver,
             } => {
-                let (fid, template, target_args, ret_loc) = {
-                    let ti = self.instance(target, "missing callback call target instance")?;
-                    (ti.emitted_func_id, ti.template, ti.args, ti.return_loc)
-                };
-                let view = self
-                    .index
-                    .view(template)
-                    .ok_or_else(|| Diagnostic::internal("missing callback target template"))?;
+                debug_assert!(!pass_receiver || recv.is_some());
+                let pid = pass_env.then(&mut push_param).transpose()?;
+                (
+                    BoundCallback::Direct {
+                        target,
+                        env: pid.map(Expr::LocalGet),
+                        receiver: recv.filter(|_| pass_receiver).map(Expr::LocalGet),
+                    },
+                    pid,
+                )
+            }
+            CallbackCall::Dispatch { helper, needs_recv } => {
+                debug_assert!(!needs_recv || recv.is_some());
+                let pid = push_param()?;
+                (
+                    BoundCallback::Dispatch {
+                        helper,
+                        callee: Expr::LocalGet(pid),
+                        receiver: recv.filter(|_| needs_recv).map(Expr::LocalGet),
+                    },
+                    Some(pid),
+                )
+            }
+        };
+        Ok((bound, pid.filter(|_| is_nullish)))
+    }
+
+    fn emit_callback_call_expr(
+        &mut self,
+        cb: BoundCallback,
+        args: Vec<Expr>,
+    ) -> Result<(Expr, bool)> {
+        match cb {
+            BoundCallback::ThrowTypeError(helper) => {
+                let fid = self.emit_helper(helper)?;
+                Ok((synth_call(fid, Vec::new(), 0, 0), false))
+            }
+            BoundCallback::Direct {
+                target,
+                env,
+                receiver,
+            } => {
+                let ti = &self.solved.instances[target];
+                let (fid, template, target_args, ret_loc) =
+                    (ti.emitted_func_id, ti.template, ti.args, ti.return_loc);
+                let view = self.index.view(template);
                 let mut call_args = Vec::with_capacity(args.len() + 2);
-                if pass_env {
-                    let val = cb_val.ok_or_else(|| {
-                        Diagnostic::internal("missing environment callback value")
-                    })?;
+                if let Some(val) = env {
                     call_args.push(Self::prop_get(val, "val"));
                 }
-                if pass_receiver {
-                    let r = recv.ok_or_else(|| {
-                        Diagnostic::internal("missing receiver for callback call")
-                    })?;
+                if let Some(r) = receiver {
                     call_args.push(r);
                 }
                 let arity = match view.kind {
@@ -191,24 +243,21 @@ impl<'h> Emitter<'h, '_> {
                 let returns_promise = view.is_async || self.types.is_promise_ty(ret_ty);
                 Ok((synth_call(fid, call_args, 0, 0), returns_promise))
             }
-            CallbackCall::Dispatch { helper, needs_recv } => {
-                let fid = self.emit_helper(helper)?;
-                let val = cb_val
-                    .ok_or_else(|| Diagnostic::internal("missing dispatcher callback value"))?;
+            BoundCallback::Dispatch {
+                helper,
+                callee,
+                receiver,
+            } => {
+                let disp = self.emit_helper_fn(helper)?;
+                let fid = disp.id;
+                let returns_promise =
+                    disp.is_async || matches!(disp.return_type, HirType::Promise(_));
                 let mut call_args = Vec::with_capacity(args.len() + 2);
-                call_args.push(val);
-                if needs_recv {
-                    let r = recv.ok_or_else(|| {
-                        Diagnostic::internal("missing receiver for dispatcher call")
-                    })?;
+                call_args.push(callee);
+                if let Some(r) = receiver {
                     call_args.push(r);
                 }
                 call_args.extend(args);
-                let returns_promise = self
-                    .synth_functions
-                    .iter()
-                    .find(|f| f.id == fid)
-                    .is_some_and(|f| f.is_async || matches!(f.return_type, HirType::Promise(_)));
                 Ok((synth_call(fid, call_args, 0, 0), returns_promise))
             }
         }
@@ -236,32 +285,66 @@ impl<'h> Emitter<'h, '_> {
         let effects = self.project_arguments(&arg_ctx, args, &mut evaluated, |_, i| {
             i == 0 && executor.needs_value()
         })?;
-        if let CallbackCall::ThrowTypeError(helper) = executor {
-            return Ok(sequence(
-                effects,
-                synth_call(self.emit_helper(helper)?, Vec::new(), 0, 0),
-            ));
-        }
         let binding = evaluated
             .pop()
             .map(|value| self.fresh_synthetic_local().map(|id| (id, value)))
             .transpose()?;
-        let exec_val = binding.as_ref().map(|(id, _)| Expr::LocalGet(*id));
-        if let (Some((id, _)), CallbackCall::Dispatch { helper, .. }) = (&binding, executor)
-            && let HelperSpec::Dispatcher { callee_ty, .. } = self.solved.helpers[helper]
-            && self.nullish_flags(callee_ty) != (false, false)
-        {
-            body.push(Stmt::If {
-                condition: Expr::Unary {
-                    op: UnaryOp::Not,
-                    operand: Box::new(Expr::LocalGet(*id)),
+        let bound_executor = match (executor, &binding) {
+            (CallbackCall::ThrowTypeError(helper), _) => {
+                return Ok(sequence(
+                    effects,
+                    synth_call(self.emit_helper(helper)?, Vec::new(), 0, 0),
+                ));
+            }
+            (
+                CallbackCall::Direct {
+                    target,
+                    pass_env: false,
+                    ..
                 },
-                then_branch: vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
-                    "Promise executor is not a function".into(),
-                ))))],
-                else_branch: None,
-            });
-        }
+                _,
+            ) => BoundCallback::Direct {
+                target,
+                env: None,
+                receiver: None,
+            },
+            (
+                CallbackCall::Direct {
+                    target,
+                    pass_env: true,
+                    ..
+                },
+                Some((id, _)),
+            ) => BoundCallback::Direct {
+                target,
+                env: Some(Expr::LocalGet(*id)),
+                receiver: None,
+            },
+            (CallbackCall::Dispatch { helper, .. }, Some((id, _))) => {
+                if let HelperSpec::Dispatcher { callee_ty, .. } = self.solved.helpers[helper].spec
+                    && self.nullish_flags(callee_ty) != (false, false)
+                {
+                    body.push(Stmt::If {
+                        condition: Expr::Unary {
+                            op: UnaryOp::Not,
+                            operand: Box::new(Expr::LocalGet(*id)),
+                        },
+                        then_branch: vec![Stmt::Throw(Expr::TypeErrorNew(Box::new(Expr::String(
+                            "Promise executor is not a function".into(),
+                        ))))],
+                        else_branch: None,
+                    });
+                }
+                BoundCallback::Dispatch {
+                    helper,
+                    callee: Expr::LocalGet(*id),
+                    receiver: None,
+                }
+            }
+            _ => {
+                return Err(Diagnostic::internal("missing promise executor argument"));
+            }
+        };
         body.push(Stmt::Let {
             id: p_id,
             name: "__p".to_owned(),
@@ -292,7 +375,7 @@ impl<'h> Emitter<'h, '_> {
             };
             exec_args.push(Self::emit_env_wrapper(ident, env_new));
         }
-        let (exec_call, _) = self.emit_callback_call_expr(executor, exec_val, None, exec_args)?;
+        let (exec_call, _) = self.emit_callback_call_expr(bound_executor, exec_args)?;
         let err_id = self.fresh_synthetic_local()?;
         body.push(Stmt::Try {
             body: vec![Stmt::Expr(exec_call)],
@@ -349,22 +432,12 @@ impl<'h> Emitter<'h, '_> {
         let p_pid = self.fresh_synthetic_local()?;
         let prom_hir = self.materialize(promise_ty)?;
         let mut params = vec![synth_param(p_pid, "__p".to_owned(), prom_hir)];
-        let mut handler_param =
-            |handler: Option<(CallbackCall, Ty)>, name: &str| -> Result<Option<LocalId>> {
-                let Some((_, ty)) = handler.filter(|(cb, _)| cb.needs_value()) else {
-                    return Ok(None);
-                };
-                let id = self.fresh_synthetic_local()?;
-                params.push(synth_param(id, name.into(), self.materialize(ty)?));
-                Ok(Some(id))
-            };
-        let f_pid = handler_param(on_fulfilled, "__f")?;
-        let g_pid = handler_param(on_rejected, "__g")?;
-        let optional = |handler: Option<(CallbackCall, Ty)>, id: Option<LocalId>| {
-            id.filter(|_| handler.is_some_and(|(_, ty)| self.nullish_flags(ty) != (false, false)))
-        };
-        let optional_f = optional(on_fulfilled, f_pid);
-        let optional_g = optional(on_rejected, g_pid);
+        let f_bound = on_fulfilled
+            .map(|(cb, ty)| self.bind_callback_param(cb, ty, "__f", None, &mut params))
+            .transpose()?;
+        let g_bound = on_rejected
+            .map(|(cb, ty)| self.bind_callback_param(cb, ty, "__g", None, &mut params))
+            .transpose()?;
         let when_callable =
             |id: Option<LocalId>, body: Vec<Stmt>, otherwise: Option<Vec<Stmt>>| match id {
                 Some(id) => vec![Stmt::If {
@@ -388,14 +461,9 @@ impl<'h> Emitter<'h, '_> {
         let is_void_inner = inner_hir == HirType::Void;
         let await_p = || Expr::Await(Box::new(Expr::LocalGet(p_pid)));
 
-        let body = match (kind, on_fulfilled, on_rejected) {
-            (ReactionKind::Finally, Some((f_call, _)), _) => {
-                let (call, asynchronous) = self.emit_callback_call_expr(
-                    f_call,
-                    f_pid.map(Expr::LocalGet),
-                    None,
-                    Vec::new(),
-                )?;
+        let body = match (kind, f_bound, g_bound) {
+            (ReactionKind::Finally, Some((f_call, optional_f)), _) => {
+                let (call, asynchronous) = self.emit_callback_call_expr(f_call, Vec::new())?;
                 let body = if is_void_inner {
                     vec![Stmt::Expr(await_p())]
                 } else {
@@ -416,7 +484,7 @@ impl<'h> Emitter<'h, '_> {
                     forof_completion: None,
                 }]
             }
-            (ReactionKind::Then, Some((f_call, _)), Some((g_call, _))) => {
+            (ReactionKind::Then, Some((f_call, optional_f)), Some((g_call, optional_g))) => {
                 let catch_id = self.fresh_synthetic_local()?;
                 let mut stmts = Vec::with_capacity(4);
                 let val_slot = if !is_void_inner {
@@ -436,12 +504,8 @@ impl<'h> Emitter<'h, '_> {
                     Some(vid) => Stmt::Expr(Expr::LocalSet(vid, Box::new(await_p()))),
                     None => Stmt::Expr(await_p()),
                 };
-                let (g_expr, g_is_prom) = self.emit_callback_call_expr(
-                    g_call,
-                    g_pid.map(Expr::LocalGet),
-                    None,
-                    vec![Expr::LocalGet(catch_id)],
-                )?;
+                let (g_expr, g_is_prom) =
+                    self.emit_callback_call_expr(g_call, vec![Expr::LocalGet(catch_id)])?;
                 stmts.push(Stmt::Try {
                     body: vec![try_stmt],
                     catch: Some(CatchClause {
@@ -469,12 +533,7 @@ impl<'h> Emitter<'h, '_> {
                 };
                 let passthrough =
                     optional_f.map(|_| vec![Stmt::Return((!is_void_ret).then(|| f_arg.clone()))]);
-                let (f_expr, f_is_prom) = self.emit_callback_call_expr(
-                    f_call,
-                    f_pid.map(Expr::LocalGet),
-                    None,
-                    vec![f_arg],
-                )?;
+                let (f_expr, f_is_prom) = self.emit_callback_call_expr(f_call, vec![f_arg])?;
                 stmts.extend(when_callable(
                     optional_f,
                     Self::return_cb_stmts(f_expr, f_is_prom, is_void_ret),
@@ -482,7 +541,7 @@ impl<'h> Emitter<'h, '_> {
                 ));
                 stmts
             }
-            (ReactionKind::Then, Some((f_call, _)), None) => {
+            (ReactionKind::Then, Some((f_call, optional_f)), None) => {
                 let mut stmts = Vec::with_capacity(3);
                 let f_arg = if is_void_inner {
                     stmts.push(Stmt::Expr(await_p()));
@@ -500,12 +559,7 @@ impl<'h> Emitter<'h, '_> {
                 };
                 let passthrough =
                     optional_f.map(|_| vec![Stmt::Return((!is_void_ret).then(|| f_arg.clone()))]);
-                let (f_expr, f_is_prom) = self.emit_callback_call_expr(
-                    f_call,
-                    f_pid.map(Expr::LocalGet),
-                    None,
-                    vec![f_arg],
-                )?;
+                let (f_expr, f_is_prom) = self.emit_callback_call_expr(f_call, vec![f_arg])?;
                 stmts.extend(when_callable(
                     optional_f,
                     Self::return_cb_stmts(f_expr, f_is_prom, is_void_ret),
@@ -513,7 +567,7 @@ impl<'h> Emitter<'h, '_> {
                 ));
                 stmts
             }
-            (_, None, Some((g_call, _))) => {
+            (_, None, Some((g_call, optional_g))) => {
                 let catch_id = self.fresh_synthetic_local()?;
                 let try_body = if is_void_ret {
                     vec![Stmt::Expr(await_p()), Stmt::Return(None)]
@@ -527,12 +581,8 @@ impl<'h> Emitter<'h, '_> {
                 } else {
                     vec![Stmt::Return(Some(await_p()))]
                 };
-                let (g_expr, g_is_prom) = self.emit_callback_call_expr(
-                    g_call,
-                    g_pid.map(Expr::LocalGet),
-                    None,
-                    vec![Expr::LocalGet(catch_id)],
-                )?;
+                let (g_expr, g_is_prom) =
+                    self.emit_callback_call_expr(g_call, vec![Expr::LocalGet(catch_id)])?;
                 vec![Stmt::Try {
                     body: try_body,
                     catch: Some(CatchClause {
@@ -587,13 +637,8 @@ impl<'h> Emitter<'h, '_> {
             "__timer".to_owned(),
             HirType::Named(timer_cls),
         )];
-        let cb_pid = if cb_call.needs_value() {
-            let id = self.fresh_synthetic_local()?;
-            params.push(synth_param(id, "__cb".to_owned(), self.materialize(cb_ty)?));
-            Some(id)
-        } else {
-            None
-        };
+        let (bound_cb, _) =
+            self.bind_callback_param(cb_call, cb_ty, "__cb", Some(timer_pid), &mut params)?;
         let delay_pid = if !is_immediate {
             let id = self.fresh_synthetic_local()?;
             params.push(synth_param(id, "__delay".to_owned(), HirType::Number));
@@ -635,9 +680,7 @@ impl<'h> Emitter<'h, '_> {
             else_branch: None,
         };
         let (cb_expr, _) = self.emit_callback_call_expr(
-            cb_call,
-            cb_pid.map(Expr::LocalGet),
-            Some(Expr::LocalGet(timer_pid)),
+            bound_cb,
             extra_pids.into_iter().map(Expr::LocalGet).collect(),
         )?;
         let step = vec![wait_stmt, cancel_check, Stmt::Expr(cb_expr)];
