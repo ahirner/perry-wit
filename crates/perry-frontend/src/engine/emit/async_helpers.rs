@@ -3,14 +3,14 @@ use super::{Emitter, RewriteCtx, is_pure_func_expr, sequence};
 use crate::engine::boundary::{TemplateKind, TemplateView};
 use crate::engine::solve::{CallbackCall, HelperSpec, Instance, ReactionKind, SiteEntry};
 use crate::engine::types::{CaptureOwner, FuncIdentity, HelperId, LocId, TemplateId, Ty};
-use crate::hir_compat::GuestCall;
+use crate::hir_compat::{self, GuestCall};
 use perry_hir::{
     ir::{CatchClause, Expr, Function, Stmt, UnaryOp},
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::{Diagnostic, Result};
 
-use crate::engine::TIMER_CLASS;
+use crate::hir_compat::TIMER_CLASS;
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn inline_iife(&mut self, return_type: HirType, body: Vec<Stmt>) -> Result<Expr> {
@@ -460,7 +460,7 @@ impl<'h> Emitter<'h, '_> {
                         {
                             v
                         } else {
-                            Self::non_null_unwrap(v)
+                            hir_compat::mark_non_null(v)
                         }
                     }
                     None => Expr::Undefined,
@@ -763,7 +763,7 @@ impl<'h> Emitter<'h, '_> {
         };
         let h_id = self.fresh_synthetic_local()?;
         let target = if has_null || has_undef {
-            Self::non_null_unwrap(Expr::LocalGet(h_id))
+            hir_compat::mark_non_null(Expr::LocalGet(h_id))
         } else {
             Expr::LocalGet(h_id)
         };

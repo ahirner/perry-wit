@@ -743,10 +743,9 @@ pub(crate) fn static_global_method(
     match (class, method) {
         ("performance", "now") => Some(Ty::NUMBER),
         ("Promise", "allSettled" | "all" | "race") => {
-            let val = match args {
-                [Expr::Array(elems, _)] if elems.is_empty() => Ty::VOID,
-                [_] => {
-                    let src = arg_tys.first().copied().unwrap_or(Ty::OPEN);
+            let val = match (args, arg_tys) {
+                ([Expr::Array(elems, _)], [_]) if elems.is_empty() => Ty::VOID,
+                ([_], &[src]) => {
                     if src == Ty::BOTTOM {
                         return Some(Ty::BOTTOM);
                     }

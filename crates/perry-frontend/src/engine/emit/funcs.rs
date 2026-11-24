@@ -7,6 +7,7 @@ use crate::engine::types::{
     CaptureOwner, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
     env_class_name, func_tag,
 };
+use crate::hir_compat;
 use perry_hir::{
     ir::{Class, ClassField, ClassFieldOrigin, CompareOp, Expr, Function, Param, Stmt, SwitchCase},
     types::{FuncId, LocalId, Type as HirType},
@@ -46,10 +47,6 @@ impl<'h, 'a> Emitter<'h, 'a> {
             }
             other => HirType::Union(vec![other, HirType::Void]),
         }
-    }
-
-    pub(super) fn non_null_unwrap(expr: Expr) -> Expr {
-        Expr::Sequence(vec![Expr::String("\0perry_non_null".into()), expr])
     }
 
     pub(super) fn local_ty_in_owner(&self, owner: CaptureOwner, id: LocalId) -> Option<Ty> {
@@ -244,10 +241,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
         match self.types.kind(ty) {
             TyKind::Leaf(id) => {
-                if matches!(id.hir(self.ctx), HirType::Named(n) if n == crate::engine::TIMER_CLASS)
-                {
-                    *needs_timer = true;
-                }
+                *needs_timer |= crate::hir_compat::is_timer_handle(id.hir(self.ctx));
             }
             TyKind::Func(ident) => {
                 if self.is_env_template(ident.template)
@@ -548,12 +542,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             .helpers
             .get(id)
             .ok_or_else(|| Diagnostic::internal("helper id out of range"))?;
-        let byte_offset = self
-            .solved
-            .helper_byte_offsets
-            .get(id.index())
-            .copied()
-            .unwrap_or(0);
+        let byte_offset = self.solved.helper_byte_offsets[id];
         let fid = self.fresh_func_id()?;
         if let Some(slot) = self.helper_fids.get_mut(id.index()) {
             *slot = Some(fid);
@@ -799,7 +788,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             });
         }
         let disp_name = format!("__dispatch_{fid}");
-        if call_byte_offset != 0 {
+        if hir_compat::has_source_offset(call_byte_offset) {
             self.instantiations.push((
                 disp_name.clone(),
                 "dispatch".to_owned(),

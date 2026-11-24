@@ -436,7 +436,7 @@ impl<'h> Emitter<'h, '_> {
             .solved
             .field_locs
             .get(cinst.field_locs.range())
-            .unwrap_or(&[]);
+            .ok_or_else(|| Diagnostic::internal("invalid class field range"))?;
         let mut fields = Vec::with_capacity(orig.fields.len());
         for (f_idx, field) in orig.fields.iter().enumerate() {
             let resolved = field_locs

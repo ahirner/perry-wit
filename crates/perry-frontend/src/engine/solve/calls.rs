@@ -300,10 +300,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             {
                 return Ok(res);
             }
-            if byte_offset != 0
-                && binding.is_none()
-                && !name.starts_with("js_")
-                && !name.starts_with("__")
+            if binding.is_none()
+                && hir_compat::is_source_extern(name, byte_offset)
                 && arg_tys.iter().any(|&a| self.types.has_func(a))
             {
                 return Err(self.metadata.locations.annotate_call(
@@ -768,7 +766,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 },
             ));
         }
-        if byte_offset != 0
+        if hir_compat::has_source_offset(byte_offset)
             && let TyKind::Leaf(id) = self.types.kind(stripped)
             && let HirType::Named(base) = id.hir(self.ctx)
             && matches!(
@@ -811,7 +809,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         ) || matches!(self.types.kind(stripped), TyKind::Generic { base, .. }
             if matches!(base.hir(self.ctx), HirType::Named(n) if matches!(n.as_str(), "Map" | "Set" | "ReadonlyMap" | "ReadonlySet")));
         let skip_host_cb = is_collection || (self.types.is_open(stripped) && is_known_js_cb_method);
-        if byte_offset != 0 && !skip_host_cb && arg_tys.iter().any(|&a| self.types.has_func(a)) {
+        if hir_compat::has_source_offset(byte_offset)
+            && !skip_host_cb
+            && arg_tys.iter().any(|&a| self.types.has_func(a))
+        {
             return Err(self.metadata.locations.annotate_call(
                 Diagnostic::unsupported(format!(
                     "passing a callback to runtime '{name}' requires the runtime to call a guest function"

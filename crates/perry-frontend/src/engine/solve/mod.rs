@@ -250,7 +250,7 @@ pub(crate) struct Solved {
     pub(crate) field_locs: Vec<LocId>,
     pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     pub(crate) helpers: IdxVec<HelperId, HelperSpec>,
-    pub(crate) helper_byte_offsets: Vec<u32>,
+    pub(crate) helper_byte_offsets: IdxVec<HelperId, u32>,
     pub(crate) inst_local_tys: Vec<Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: Vec<Vec<Ty>>,
     pub(crate) inst_sites: Vec<Vec<SiteEntry>>,
@@ -376,7 +376,7 @@ pub(crate) fn solve<'h>(
     );
     let mut solver = Solver::new(ctx, hir, index, metadata, facts, &decls, types);
     let init_inst = solver.seed_roots()?;
-    solver.run_worklist()?;
+    solver.run_worklist(init_inst)?;
     solver.verify_fixed_point()?;
     solver.verify_contracts()?;
     Ok(solver.finish(init_inst))
@@ -390,13 +390,12 @@ struct Solver<'h, 'a> {
     facts: &'a SourceFacts,
     decls: &'a Declarations<'a>,
     types: &'a mut TypeTable,
-    init_inst: Option<InstanceId>,
     locations: IdxVec<LocId, Ty>,
     /// Locations whose type an annotation fixes: writes are checked by lowering, never joined.
     declared_locs: BitSet,
     dirty_locs: BitSet,
     inst_reads: Vec<Vec<LocId>>,
-    reader_offsets: Vec<u32>,
+    reader_ends: IdxVec<LocId, usize>,
     reader_instances: Vec<InstanceId>,
     csr_dirty: bool,
     evaluating_inst: Option<InstanceId>,
@@ -407,14 +406,14 @@ struct Solver<'h, 'a> {
     queued: BitSet,
     instances: IdxVec<InstanceId, Instance>,
     instance_index: HashMap<InstanceKey, InstanceId>,
-    template_counts: Vec<u16>,
+    template_counts: IdxVec<TemplateId, u16>,
     param_locs: Vec<LocId>,
     field_locs: Vec<LocId>,
     dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
     dispatch_arm_spans: Vec<TySpan>,
     helpers: IdxVec<HelperId, HelperSpec>,
     helper_index: HashMap<HelperSpec, HelperId>,
-    helper_byte_offsets: Vec<u32>,
+    helper_byte_offsets: IdxVec<HelperId, u32>,
     inst_locals: Vec<Vec<InstanceLocalSlot>>,
     inst_frame_locals: Vec<Vec<Ty>>,
     inst_written: Vec<BitSet>,
@@ -454,7 +453,7 @@ pub(crate) fn attach_inst_chain(
         if inst.template == TemplateId::INIT {
             break;
         }
-        if inst.call_byte_offset != 0
+        if hir_compat::has_source_offset(inst.call_byte_offset)
             && let Some(view) = index.view(inst.template)
         {
             let msg = format!("while instantiating '{}'", view.display_name());
@@ -469,10 +468,9 @@ pub(crate) fn attach_inst_chain(
     err
 }
 
-fn bump_count(counts: &mut [u16], template: TemplateId) {
-    if let Some(slot) = counts.get_mut(template.index()) {
-        *slot = slot.saturating_add(1);
-    }
+fn bump_count(counts: &mut IdxVec<TemplateId, u16>, template: TemplateId) {
+    let count = &mut counts[template];
+    *count = count.saturating_add(1);
 }
 
 impl<'h, 'a> Solver<'h, 'a> {
@@ -529,12 +527,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             facts,
             decls,
             types,
-            init_inst: None,
+            reader_ends: locations.filled(0),
             locations,
             declared_locs: BitSet::default(),
             dirty_locs: BitSet::default(),
             inst_reads: Vec::new(),
-            reader_offsets: Vec::new(),
             reader_instances: Vec::new(),
             csr_dirty: true,
             evaluating_inst: None,
@@ -545,14 +542,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             queued: BitSet::default(),
             instances: IdxVec::default(),
             instance_index: HashMap::with_capacity(64),
-            template_counts: vec![0; index.views.len()],
+            template_counts: index.views.filled(0),
             param_locs: Vec::new(),
             field_locs: Vec::new(),
             dispatch_arms: Vec::new(),
             dispatch_arm_spans: Vec::new(),
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
-            helper_byte_offsets: Vec::new(),
+            helper_byte_offsets: IdxVec::default(),
             inst_locals: Vec::new(),
             inst_frame_locals: Vec::new(),
             inst_written: Vec::new(),
@@ -580,6 +577,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn alloc_loc(&mut self, initial: Ty) -> LocId {
+        self.reader_ends.push(self.reader_instances.len());
         self.locations.push(initial)
     }
 
@@ -594,8 +592,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 SiteResolution::Cell(loc) | SiteResolution::PromiseReaction { result: loc, .. },
             ) => Ok(loc),
             _ => {
-                let loc = self.locations.push(Ty::BOTTOM);
-                entry.resolution = Some(SiteResolution::Cell(loc));
+                let loc = self.alloc_loc(Ty::BOTTOM);
+                self.record_site(inst, expr, SiteResolution::Cell(loc));
                 Ok(loc)
             }
         }
@@ -777,7 +775,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     fn prune_unreachable(&mut self) {
         let live = self.compute_live_instances();
-        self.template_counts.fill(0);
+        self.template_counts.as_mut_slice().fill(0);
         for (id, inst) in self.instances.iter_enumerated() {
             let idx = id.index();
             if live.contains(idx) {
@@ -802,54 +800,33 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn rebuild_csr(&mut self) {
-        let Some(init_inst) = self.init_inst else {
-            return;
-        };
-        self.reader_offsets.clear();
-        self.reader_offsets.resize(self.locations.len() + 1, 0);
-        for (inst_i, reads) in self.inst_reads.iter().enumerate() {
-            if self.inst_superseded.contains(inst_i) {
-                continue;
-            }
+    fn rebuild_csr(&mut self, init: InstanceId) -> Result<()> {
+        self.reader_ends.as_mut_slice().fill(0);
+        for reads in &self.inst_reads {
             for &loc in reads {
-                if let Some(slot) = self.reader_offsets.get_mut(loc.index() + 1) {
-                    *slot = slot.saturating_add(1);
-                }
+                self.reader_ends[loc] += 1;
             }
         }
-        let mut acc = 0u32;
-        for off in &mut self.reader_offsets {
-            acc = acc.saturating_add(*off);
-            *off = acc;
+        let mut total = 0;
+        for count in self.reader_ends.as_mut_slice() {
+            total += std::mem::replace(count, total);
         }
-        let total = self.reader_offsets.last().copied().unwrap_or(0) as usize;
-        self.reader_instances.clear();
-        self.reader_instances.resize(total, init_inst);
-        let mut cursor = self.reader_offsets.clone();
-        for (reader, reads) in self
-            .instances
-            .iter_enumerated()
-            .map(|(id, _)| id)
-            .zip(&self.inst_reads)
-        {
-            if self.inst_superseded.contains(reader.index()) {
-                continue;
-            }
+        self.reader_instances.resize(total, init);
+        for (reader, reads) in self.instances.ids().zip(&self.inst_reads) {
             for &loc in reads {
-                if let Some(pos) = cursor.get_mut(loc.index()) {
-                    let idx = *pos as usize;
-                    *pos = pos.saturating_add(1);
-                    if let Some(slot) = self.reader_instances.get_mut(idx) {
-                        *slot = reader;
-                    }
-                }
+                let end = &mut self.reader_ends[loc];
+                let slot = self.reader_instances.get_mut(*end).ok_or_else(|| {
+                    Diagnostic::internal("location reader exceeds the allocated range")
+                })?;
+                *slot = reader;
+                *end += 1;
             }
         }
         self.csr_dirty = false;
+        Ok(())
     }
 
-    fn run_worklist(&mut self) -> Result<()> {
+    fn run_worklist(&mut self, init: InstanceId) -> Result<()> {
         let mut waves = 0usize;
         loop {
             let wave_limit = 1024usize.max(self.instances.len().saturating_mul(8));
@@ -879,18 +856,22 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             if !self.dirty_locs.is_empty() {
                 if self.csr_dirty {
-                    self.rebuild_csr();
+                    self.rebuild_csr(init)?;
                 }
-                let dirty: Vec<usize> = self.dirty_locs.iter().collect();
-                self.dirty_locs.clear();
-                for loc_idx in dirty {
-                    let start = self.reader_offsets.get(loc_idx).copied().unwrap_or(0) as usize;
-                    let end = self
-                        .reader_offsets
-                        .get(loc_idx + 1)
-                        .copied()
-                        .unwrap_or(start as u32) as usize;
-                    for &r in self.reader_instances.get(start..end).unwrap_or(&[]) {
+                for loc in self.dirty_locs.iter() {
+                    let range = match self.reader_ends.as_slice().get(..=loc) {
+                        Some([.., start, end]) => *start..*end,
+                        Some([end]) => 0..*end,
+                        _ => {
+                            return Err(Diagnostic::internal(
+                                "missing reader offset for dirty location",
+                            ));
+                        }
+                    };
+                    let readers = self.reader_instances.get(range).ok_or_else(|| {
+                        Diagnostic::internal("invalid reader range for dirty location")
+                    })?;
+                    for &r in readers {
                         if !self.inst_superseded.contains(r.index())
                             && self.queued.insert(r.index())
                         {
@@ -898,6 +879,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     }
                 }
+                self.dirty_locs.clear();
             }
             if self.worklist.is_empty() {
                 return Ok(());
@@ -974,11 +956,9 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn intern_helper(&mut self, spec: HelperSpec, byte_offset: u32) -> HelperId {
         if let Some(&id) = self.helper_index.get(&spec) {
-            if byte_offset != 0
-                && let Some(slot) = self.helper_byte_offsets.get_mut(id.index())
-                && *slot == 0
-            {
-                *slot = byte_offset;
+            let offset = &mut self.helper_byte_offsets[id];
+            if !hir_compat::has_source_offset(*offset) {
+                *offset = byte_offset;
             }
             return id;
         }
@@ -1245,7 +1225,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         mut err: Diagnostic,
         byte_offset: u32,
     ) -> Diagnostic {
-        if byte_offset != 0 {
+        if hir_compat::has_source_offset(byte_offset) {
             err = self.metadata.locations.annotate_call(err, byte_offset);
         } else if let Some(sp) = s.current_span {
             err = self.metadata.locations.annotate(err, sp);
@@ -1285,7 +1265,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let mut err = Diagnostic::unsupported(
                 "joining function values with non-function values is not supported yet",
             );
-            if byte_offset != 0 {
+            if hir_compat::has_source_offset(byte_offset) {
                 err = self.metadata.locations.annotate_call(err, byte_offset);
             } else if let Some(sp) = span {
                 err = self.metadata.locations.annotate(err, sp);
@@ -1326,7 +1306,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     loc,
                     kind: CellKind::Promise,
                 } => {
-                    let inner = self.locations.get(loc).copied().unwrap_or(Ty::BOTTOM);
+                    let inner = self.locations[loc];
                     self.types
                         .promise(if inner == Ty::BOTTOM { Ty::VOID } else { inner })
                 }

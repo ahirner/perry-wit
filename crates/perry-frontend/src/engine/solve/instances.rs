@@ -4,7 +4,6 @@ use super::*;
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn seed_roots(&mut self) -> Result<InstanceId> {
         let init_inst = self.request_instance(InstanceReq::new(TemplateId::INIT, &[], None))?;
-        self.init_inst = Some(init_inst);
         self.enqueue(init_inst);
         let roots: Vec<TemplateId> = self
             .index
@@ -186,22 +185,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(id);
         }
 
-        let mut count = self
-            .template_counts
-            .get(template.index())
-            .copied()
-            .unwrap_or(0);
-        if count >= INSTANCE_BUDGET {
+        if self.template_counts[template] >= INSTANCE_BUDGET {
             self.prune_unreachable();
-            count = self
-                .template_counts
-                .get(template.index())
-                .copied()
-                .unwrap_or(0);
-            if count >= INSTANCE_BUDGET {
+            if self.template_counts[template] >= INSTANCE_BUDGET {
                 return Err(self.budget_error(template, args, caller, call_byte_offset));
             }
         }
+        let first_instance = self.template_counts[template] == 0;
         bump_count(&mut self.template_counts, template);
 
         let view = self
@@ -244,7 +234,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         tp.name,
                         hir_compat::display_name(view.name)
                     );
-                    if call_byte_offset != 0 {
+                    if hir_compat::has_source_offset(call_byte_offset) {
                         err = self.metadata.locations.annotate_call(err, call_byte_offset);
                     }
                     if let Some(cid) = caller {
@@ -351,7 +341,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM))
         };
 
-        let keep_original = count == 0
+        let keep_original = first_instance
             && (view.is_exported
                 || self.index.exported_obj_methods.contains(template.index())
                 || is_monomorphic_plain);
@@ -408,23 +398,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
         self.inst_written.push(BitSet::default());
         self.inst_captures.push(inst_caps);
-        self.inst_sites.push(
-            self.index
-                .sites(template)
-                .iter()
-                .map(|site| SiteEntry {
-                    resolution: site.handles.map(|(resolve_tid, reject_tid)| {
-                        SiteResolution::PromiseNew {
-                            value_loc: self.locations.push(Ty::BOTTOM),
-                            resolve_tid,
-                            reject_tid,
-                            executor: None,
-                        }
-                    }),
-                    coercion: None,
-                })
-                .collect(),
-        );
+        let sites = self
+            .index
+            .sites(template)
+            .iter()
+            .map(|site| SiteEntry {
+                resolution: site.handles.map(|(resolve_tid, reject_tid)| {
+                    SiteResolution::PromiseNew {
+                        value_loc: self.alloc_loc(Ty::BOTTOM),
+                        resolve_tid,
+                        reject_tid,
+                        executor: None,
+                    }
+                }),
+                coercion: None,
+            })
+            .collect();
+        self.inst_sites.push(sites);
         self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
@@ -494,7 +484,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         loc,
                         kind: CellKind::Promise,
                     } => {
-                        let inner = self.locations.get(loc).copied().unwrap_or(Ty::BOTTOM);
+                        let inner = self.locations[loc];
                         if inner == Ty::BOTTOM {
                             self.types.promise(Ty::VOID)
                         } else {
@@ -516,17 +506,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         caller: Option<InstanceId>,
         call_byte_offset: u32,
     ) -> Diagnostic {
-        let name = self.index.view(template).map_or_else(
-            || "function".to_owned(),
-            |v| {
-                let n = hir_compat::display_name(v.name);
-                if n.is_empty() || n.starts_with("callback_") {
-                    "anonymous function".to_owned()
-                } else {
-                    n.to_owned()
-                }
-            },
-        );
+        let name = self
+            .index
+            .view(template)
+            .map_or("function", |v| hir_compat::function_label(v.name));
         let mut err = Diagnostic::unsupported(format!(
             "generic specialization limit of {INSTANCE_BUDGET} distinct argument lists reached for {name}"
         ));

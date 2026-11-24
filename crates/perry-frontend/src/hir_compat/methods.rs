@@ -4,7 +4,29 @@ use perry_parser::swc_ecma_ast as ast;
 use swc_common::{DUMMY_SP, SyntaxContext};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
-use crate::methods::{CONCAT, METHOD_PREFIX, PUSH};
+const PUSH: &str = "$$perryArrayPush";
+const CONCAT: &str = "$$perryArrayConcat";
+const METHOD_PREFIX: &str = "$$perryMethod_";
+
+pub(crate) enum Preservation {
+    Upstream,
+    Always,
+    Push,
+    Concat,
+    Arguments,
+}
+
+impl Preservation {
+    pub(crate) fn rewrite(&self, name: &str, count: usize, spread: bool) -> Option<String> {
+        match self {
+            Self::Push if count != 1 || spread => Some(PUSH.into()),
+            Self::Concat => Some(CONCAT.into()),
+            Self::Always => Some(format!("{METHOD_PREFIX}{name}")),
+            Self::Arguments if count > 0 => Some(format!("{METHOD_PREFIX}{name}")),
+            _ => None,
+        }
+    }
+}
 
 fn slice_call(obj: Box<ast::Expr>, start: usize) -> Box<ast::Expr> {
     Box::new(ast::Expr::Call(ast::CallExpr {

@@ -417,16 +417,7 @@ impl<'s> FunctionBuilder<'s> {
             {
                 self.web_new(ctx, class_name, args)?
             }
-            Expr::NativeMethodCall {
-                module,
-                class_name: Some(class),
-                object: None,
-                method,
-                args,
-            } if matches!(module.as_str(), "stream" | "node:stream")
-                && class == "Writable"
-                && method == "toWeb" =>
-            {
+            Expr::NativeMethodCall { args, .. } if hir_compat::is_writable_to_web(expr) => {
                 self.writable_to_web(ctx, args)?
             }
             Expr::NativeMethodCall {

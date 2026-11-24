@@ -16,11 +16,28 @@ use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
 
+pub(crate) fn has_source_offset(offset: u32) -> bool {
+    offset != 0
+}
+
+pub(crate) fn mark_non_null(value: Expr) -> Expr {
+    Expr::Sequence(vec![Expr::String(NON_NULL.into()), value])
+}
+
+pub(crate) fn function_label(name: &str) -> &str {
+    let name = display_name(name);
+    if name.is_empty() || name.starts_with("callback_") {
+        "anonymous function"
+    } else {
+        name
+    }
+}
+
 /// Strip internal module-mangling prefixes (`__perry_module_<N>_`) and object-literal method
 /// wrappers (`__obj_method_<name>_<N>`) for user-facing diagnostic names.
 pub(crate) fn display_name(name: &str) -> &str {
     let name = name
-        .strip_prefix("__perry_module_")
+        .strip_prefix(super::names::MODULE_PREFIX)
         .and_then(|rest| {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             (digits > 0)

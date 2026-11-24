@@ -1,7 +1,7 @@
 //! Single-pass boundary indexing over Perry HIR.
 pub(crate) use super::ast_scan::{SourceFacts, scan_ast, validate_ast};
 use super::bitset::BitSet;
-use super::types::{ClassId, IdxVec, LocId, LocalIdx, NameId, TemplateId, Ty, TySpan, TypeTable};
+use super::types::{ClassId, IdxVec, LocId, LocalIdx, NameId, TemplateId, Ty, TypeTable};
 use crate::hir_compat::{self, Locations};
 use perry_hir::{
     ir::{Expr, Function, Module as HirModule, Param, Stmt},
@@ -110,18 +110,23 @@ pub(crate) struct IndexedSite {
 }
 
 #[derive(Default)]
+struct TemplateLayout {
+    sites: Box<[IndexedSite]>,
+    frame_slots: usize,
+}
+
+#[derive(Default)]
 pub(crate) struct ModuleIndex<'h> {
     pub(crate) views: IdxVec<TemplateId, TemplateView<'h>>,
     func_to_template: Vec<Option<TemplateId>>,
-    template_site_spans: Vec<TySpan>,
-    site_entries: Vec<IndexedSite>,
+    layouts: IdxVec<TemplateId, TemplateLayout>,
     pub(crate) classes: IdxVec<ClassId, ClassInfo>,
     pub(crate) class_has_implicit_params: BitSet,
     pub(crate) hir_class_is_literal: BitSet,
     literal_classes: Vec<(NameId, &'h [perry_hir::ir::ClassField])>,
     pub(crate) local_ids: IdxVec<LocalIdx, LocalId>,
     pub(crate) local_owner: Vec<TemplateId>,
-    pub(crate) local_declared: Vec<Ty>,
+    pub(crate) local_declared: IdxVec<LocalIdx, Ty>,
     pub(crate) local_loc: Vec<Option<LocId>>,
     pub(crate) local_value_use: Vec<Option<Span>>,
     pub(crate) local_regex_pattern: Vec<Option<&'h str>>,
@@ -144,7 +149,6 @@ pub(crate) struct ModuleIndex<'h> {
     template_captures: Vec<Vec<LocalId>>,
     template_captured_locals: Vec<Vec<LocalIdx>>,
     local_frame_slot: Vec<Option<u32>>,
-    template_frame_counts: Vec<usize>,
     pub(crate) location_types: IdxVec<LocId, Ty>,
     pub(crate) max_func_id: FuncId,
     pub(crate) max_local_id: LocalId,
@@ -340,8 +344,7 @@ impl<'h> ModuleIndex<'h> {
         }
 
         raw_sites.resize_with(idx.views.len(), Vec::new);
-        idx.template_site_spans = Vec::with_capacity(idx.views.len());
-        for list in raw_sites {
+        for (template, list) in idx.views.ids().zip(raw_sites) {
             let mut sites: Vec<_> = list
                 .iter()
                 .map(|&expr| IndexedSite {
@@ -364,9 +367,7 @@ impl<'h> ModuleIndex<'h> {
                     ));
                 }
             }
-            let (start, len) = (idx.site_entries.len() as u32, sites.len() as u32);
-            idx.site_entries.extend(sites);
-            idx.template_site_spans.push(TySpan { start, len });
+            idx.layouts[template].sites = sites.into_boxed_slice();
         }
 
         for (cap_id, written, forward) in pending_captures {
@@ -382,7 +383,6 @@ impl<'h> ModuleIndex<'h> {
             }
         }
         idx.local_frame_slot = vec![None; idx.local_ids.len()];
-        idx.template_frame_counts = vec![0; idx.views.len()];
         idx.template_captured_locals = vec![Vec::new(); idx.views.len()];
         for (lidx_i, (&owner, slot_out)) in idx
             .local_owner
@@ -392,10 +392,9 @@ impl<'h> ModuleIndex<'h> {
         {
             if !idx.local_module.contains(lidx_i) && !idx.local_param.contains(lidx_i) {
                 if !idx.local_captured.contains(lidx_i) {
-                    if let Some(count) = idx.template_frame_counts.get_mut(owner.index()) {
-                        *slot_out = Some(*count as u32);
-                        *count += 1;
-                    }
+                    let count = &mut idx.layouts[owner].frame_slots;
+                    *slot_out = Some(*count as u32);
+                    *count += 1;
                 } else if let Some(list) = idx.template_captured_locals.get_mut(owner.index())
                     && let Some(&lid) = idx.local_ids.as_slice().get(lidx_i)
                     && let Some(lidx) = idx.local_to_idx.get(lid as usize).copied().flatten()
@@ -509,16 +508,10 @@ impl<'h> ModuleIndex<'h> {
             .map(|s| s as usize)
     }
     pub(crate) fn template_frame_count(&self, t: TemplateId) -> usize {
-        self.template_frame_counts
-            .get(t.index())
-            .copied()
-            .unwrap_or(0)
+        self.layouts[t].frame_slots
     }
     pub(crate) fn sites(&self, template: TemplateId) -> &[IndexedSite] {
-        self.template_site_spans
-            .get(template.index())
-            .and_then(|span| self.site_entries.get(span.range()))
-            .unwrap_or_default()
+        &self.layouts[template].sites
     }
     pub(crate) fn site_of(&self, template: TemplateId, expr: &Expr) -> Option<usize> {
         self.sites(template)
@@ -604,6 +597,7 @@ impl<'h> ModuleIndex<'h> {
 
     fn add_template(&mut self, view: TemplateView<'h>) -> TemplateId {
         self.closure_owner_template.push(None);
+        self.layouts.push(TemplateLayout::default());
         self.views.push(view)
     }
 

@@ -15,8 +15,6 @@ use pliron::context::Context;
 use std::collections::HashMap;
 use types::TypeTable;
 
-const TIMER_CLASS: &str = "__PerryTimer";
-
 /// Execute the new inference engine on a lowered HIR module.
 ///
 /// Phase split: borrows `hir` read-only across boundary indexing, worklist solving, and

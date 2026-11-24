@@ -1,4 +1,5 @@
 //! Built-in method signatures and HIR call normalization.
+use crate::hir_compat::Preservation;
 use perry_hir::{
     ir::Expr,
     types::{LocalId, Type as HirType},
@@ -117,30 +118,6 @@ impl Kind {
         }
     }
 }
-pub(crate) const PUSH: &str = "$$perryArrayPush";
-pub(crate) const CONCAT: &str = "$$perryArrayConcat";
-pub(crate) const METHOD_PREFIX: &str = "$$perryMethod_";
-
-enum Preservation {
-    Upstream,
-    Always,
-    Push,
-    Concat,
-    Arguments,
-}
-
-impl Preservation {
-    fn rewrite(&self, name: &str, count: usize, spread: bool) -> Option<String> {
-        match self {
-            Self::Push if count != 1 || spread => Some(PUSH.into()),
-            Self::Concat => Some(CONCAT.into()),
-            Self::Always => Some(format!("{METHOD_PREFIX}{name}")),
-            Self::Arguments if count > 0 => Some(format!("{METHOD_PREFIX}{name}")),
-            _ => None,
-        }
-    }
-}
-
 pub enum CallReceiver<'s> {
     Expression(&'s Expr),
     Local(LocalId),
