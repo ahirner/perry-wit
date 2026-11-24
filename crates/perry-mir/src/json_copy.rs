@@ -109,24 +109,17 @@ fn may_be_cyclic(ctx: &Context, ty: TypeHandle, path: &mut Vec<TypeHandle>) -> b
     let Some(schema) = JsonSchema::of(ctx, ty) else {
         return true;
     };
+    if matches!(schema, JsonSchema::Value) {
+        return true;
+    }
+    let mut children = Vec::new();
+    if !schema.push_children(ctx, &mut children) {
+        return true;
+    }
     path.push(ty);
-    let cyclic = match schema {
-        JsonSchema::Value => true,
-        JsonSchema::Optional(inner) => may_be_cyclic(ctx, inner, path),
-        JsonSchema::Record(record) => record.deref(ctx).fields().map_or(true, |fields| {
-            fields
-                .iter()
-                .any(|&(_, field)| may_be_cyclic(ctx, field, path))
-        }),
-        JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant) => {
-            variant.deref(ctx).cases().iter().any(|(_, payload)| {
-                payload.is_some_and(|payload| may_be_cyclic(ctx, payload, path))
-            })
-        }
-        _ => schema
-            .storage_element()
-            .is_some_and(|element| may_be_cyclic(ctx, element, path)),
-    };
+    let cyclic = children
+        .into_iter()
+        .any(|child| may_be_cyclic(ctx, child, path));
     path.pop();
     cyclic
 }
@@ -262,34 +255,20 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
     if !seen.insert(ty) {
         return false;
     }
-    let inner = present_type(ctx, ty);
-    let schema = JsonSchema::of(ctx, inner);
-    if let Some(JsonSchema::Record(rec)) = schema {
-        let rec = rec.deref(ctx);
-        if rec.is_tuple() {
-            return rec
-                .fields()
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, elem)| type_may_contain_record(ctx, *elem, seen))
-                })
-                .unwrap_or(true);
+    let Some(schema) = JsonSchema::of(ctx, present_type(ctx, ty)) else {
+        return false;
+    };
+    match schema {
+        JsonSchema::Value => true,
+        JsonSchema::Record(rec) if !rec.deref(ctx).is_tuple() => true,
+        _ => {
+            let mut children = Vec::new();
+            !schema.push_children(ctx, &mut children)
+                || children
+                    .into_iter()
+                    .any(|child| type_may_contain_record(ctx, child, seen))
         }
-        return true;
     }
-    if matches!(schema, Some(JsonSchema::Value)) {
-        return true;
-    }
-    if let Some(element) = schema.and_then(JsonSchema::storage_element) {
-        return type_may_contain_record(ctx, element, seen);
-    }
-    if let Some(JsonSchema::Variant(var) | JsonSchema::ValueUnion(var)) = schema {
-        return var.deref(ctx).cases().iter().any(|(_, payload)| {
-            payload.is_some_and(|payload| type_may_contain_record(ctx, payload, seen))
-        });
-    }
-    false
 }
 
 fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
@@ -401,29 +380,24 @@ fn schemas_compatible(
         return true;
     }
 
-    let s_abs = absence(ctx, source_ty);
-    let t_abs = absence(ctx, target_ty);
-
-    if s_abs == Some(Absence::Both) || t_abs == Some(Absence::Both) {
-        return false;
-    }
-
-    if t_abs == Some(Absence::Undefined) {
-        let t_inner = present_type(ctx, target_ty);
-        if s_abs == Some(Absence::Undefined) {
-            let s_inner = present_type(ctx, source_ty);
-            return schemas_compatible(ctx, s_inner, t_inner, seen);
+    match (absence(ctx, source_ty), absence(ctx, target_ty)) {
+        (Some(Absence::Both), _) | (_, Some(Absence::Both)) => return false,
+        (Some(Absence::Undefined), Some(Absence::Undefined)) => {
+            return schemas_compatible(
+                ctx,
+                present_type(ctx, source_ty),
+                present_type(ctx, target_ty),
+                seen,
+            );
         }
-        return schemas_compatible(ctx, source_ty, t_inner, seen);
-    }
-
-    if s_abs == Some(Absence::Undefined) {
-        let s_inner = present_type(ctx, source_ty);
-        return schemas_compatible(ctx, s_inner, target_ty, seen);
-    }
-
-    if s_abs == Some(Absence::Null) && t_abs != Some(Absence::Null) {
-        return false;
+        (Some(Absence::Undefined), _) => {
+            return schemas_compatible(ctx, present_type(ctx, source_ty), target_ty, seen);
+        }
+        (_, Some(Absence::Undefined)) => {
+            return schemas_compatible(ctx, source_ty, present_type(ctx, target_ty), seen);
+        }
+        (Some(Absence::Null), t) if t != Some(Absence::Null) => return false,
+        _ => {}
     }
 
     let s_inner = present_type(ctx, source_ty);

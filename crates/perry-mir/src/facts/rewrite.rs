@@ -487,13 +487,6 @@ fn verify_lossless_context(
     let key = &analysis.keys[id];
     let state = &analysis.states[id];
     let body = &analysis.bodies[&key.function];
-    let mut live_values = HashSet::new();
-    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        live_values.extend(block.deref(ctx).arguments());
-    }
-    for op in crate::aggregates::operations(ctx, &function) {
-        live_values.extend(op.deref(ctx).results());
-    }
     let entry = function.get_entry_block(ctx);
     let orig_arg_types = body.signature.deref(ctx).arg_types();
     for (pos, &param) in body.parameters.iter().enumerate() {
@@ -539,6 +532,13 @@ fn verify_lossless_context(
         }
     }
     if let Some(mapping) = mapping {
+        let mut live_values = HashSet::new();
+        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+            live_values.extend(block.deref(ctx).arguments());
+        }
+        for op in crate::aggregates::operations(ctx, &function) {
+            live_values.extend(op.deref(ctx).results());
+        }
         let values = state.values.keys().chain(
             state
                 .heap_values

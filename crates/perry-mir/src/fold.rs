@@ -6,11 +6,7 @@ use crate::{
     scalar::{CompareOp, NumericCastOp},
 };
 use pliron::{
-    builtin::{
-        attributes::IntegerAttr,
-        ops::ConstantOp,
-        types::{IntegerType, Signedness},
-    },
+    builtin::types::IntegerType,
     context::{Context, Ptr},
     irbuild::{
         inserter::Inserter,
@@ -22,7 +18,6 @@ use pliron::{
     operation::Operation,
     result::Result,
     r#type::Typed,
-    utils::apint::{APInt, bw},
     value::Value,
 };
 
@@ -155,9 +150,7 @@ impl MatchRewrite for Canonicalize {
                 cast.deref(ctx).get_result(0)
             }
             Replacement::Bool(flag) => {
-                let ty = IntegerType::get(ctx, 1, Signedness::Signless);
-                let attr = IntegerAttr::new(ty, APInt::from_u64(u64::from(flag), bw(1)));
-                let constant = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+                let constant = crate::constants::integer_constant(ctx, 1, u64::from(flag));
                 rewriter.insert_operation(ctx, constant);
                 constant.deref(ctx).get_result(0)
             }
