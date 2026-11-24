@@ -89,14 +89,12 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
 impl<I: Idx, T> std::ops::Index<I> for IdxVec<I, T> {
     type Output = T;
     fn index(&self, id: I) -> &T {
-        debug_assert!(id.index() < self.data.len());
         &self.data[id.index()]
     }
 }
 
 impl<I: Idx, T> std::ops::IndexMut<I> for IdxVec<I, T> {
     fn index_mut(&mut self, id: I) -> &mut T {
-        debug_assert!(id.index() < self.data.len());
         &mut self.data[id.index()]
     }
 }

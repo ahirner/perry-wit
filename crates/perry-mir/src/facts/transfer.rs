@@ -541,7 +541,13 @@ impl Solver {
         self.operation_effects(ctx, id, index, op, kind);
         let operation = op.deref(ctx);
         let dynamic = Operation::get_op_dyn(op, ctx);
-        if kind != OperationKind::Await && op_cast::<dyn BranchOpInterface>(&*dynamic).is_none() {
+        let branch = op_cast::<dyn BranchOpInterface>(&*dynamic);
+        let arithmetic = if dynamic.is::<BinaryOp>() {
+            integer_arithmetic(ctx, op)
+        } else {
+            None
+        };
+        if kind != OperationKind::Await && branch.is_none() {
             for value in operation.operands() {
                 if value.get_type(ctx).deref(ctx).is::<PromiseType>() {
                     self.require(id, value, Demand::Original);
@@ -549,7 +555,7 @@ impl Solver {
             }
         }
         let heap_facts = self.heap_operation(ctx, id, index, op, kind)?;
-        if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
+        if let Some(branch) = branch {
             for (position, input) in operation.operands().enumerate() {
                 if !(0..operation.get_num_successors()).any(|successor| {
                     branch
@@ -559,11 +565,13 @@ impl Solver {
                     self.require(id, input, Demand::Observed(None));
                 }
             }
-        } else if kind != OperationKind::Return
-            && crate::calls::callee(ctx, op).is_none()
-            && integer_arithmetic(ctx, op).is_none()
-            && kind != OperationKind::NumericCast
-            && kind != OperationKind::Await
+        } else if !matches!(
+            kind,
+            OperationKind::Return
+                | OperationKind::Call { .. }
+                | OperationKind::NumericCast
+                | OperationKind::Await
+        ) && arithmetic.is_none()
             && kind.promise_payload().is_none()
             && !matches!(kind, OperationKind::Intrinsic(intrinsic) if intrinsic.int32_operands())
         {
@@ -628,8 +636,9 @@ impl Solver {
             }
             return Ok(());
         }
-        let asynchronous = kind == OperationKind::Call { asynchronous: true };
-        if let Some(callee) = crate::calls::callee(ctx, op) {
+        if let OperationKind::Call { asynchronous } = kind
+            && let Some(callee) = crate::calls::callee(ctx, op)
+        {
             if !self.analysis.keys[id].specialize
                 && let Some(child) = self.analysis.generic_context(&callee)
             {
@@ -694,14 +703,14 @@ impl Solver {
             }
         }
         for result in operation.results() {
-            let mut facts = self.result_facts(ctx, id, op, result, (kind, heap_facts));
-            facts.presence = if Operation::is_op::<crate::NullOp>(op, ctx) {
+            let mut facts = self.result_facts(ctx, id, op, result, (kind, heap_facts), arithmetic);
+            facts.presence = if dynamic.is::<crate::NullOp>() {
                 Presence::absent(crate::Absence::Null)
-            } else if crate::is_any::<(crate::UndefinedOp, crate::OmittedOp)>(ctx, op) {
+            } else if dynamic.is::<crate::UndefinedOp>() || dynamic.is::<crate::OmittedOp>() {
                 Presence::absent(crate::Absence::Undefined)
-            } else if Operation::is_op::<crate::WrapOp>(op, ctx) {
+            } else if dynamic.is::<crate::WrapOp>() {
                 Presence::PRESENT
-            } else if let Some(cast) = Operation::get_op::<crate::OptionalCastOp>(op, ctx) {
+            } else if let Some(cast) = dynamic.downcast_ref::<crate::OptionalCastOp>() {
                 if cast.asserts_presence(ctx) {
                     Presence::PRESENT
                 } else {
@@ -710,7 +719,7 @@ impl Solver {
                         .presence
                         .intersect(Presence::declared(ctx, result.get_type(ctx)))
                 }
-            } else if Operation::is_op::<crate::FieldGetOp>(op, ctx)
+            } else if dynamic.is::<crate::FieldGetOp>()
                 && let Some(facts) = heap_facts
             {
                 facts.presence
@@ -729,6 +738,7 @@ impl Solver {
         op: Ptr<Operation>,
         result: Value,
         (kind, heap_facts): (OperationKind, Option<ValueFacts>),
+        arithmetic: Option<BinaryKind>,
     ) -> ValueFacts {
         let operation = op.deref(ctx);
         let input_index = match kind {
@@ -766,7 +776,7 @@ impl Solver {
             let domain = self.analysis.states[id].fact(input).join(Fact::Original);
             return ValueFacts::numeric(domain, Range::Unknown);
         }
-        if let Some(kind) = integer_arithmetic(ctx, op) {
+        if let Some(kind) = arithmetic {
             let (lhs, rhs) = (operation.get_operand(0), operation.get_operand(1));
             let bigint = result
                 .get_type(ctx)

@@ -4,7 +4,6 @@ use super::*;
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn seed_roots(&mut self) -> Result<InstanceId> {
         let init_inst = self.request_instance(InstanceReq::new(TemplateId::INIT, &[], None))?;
-        self.init_inst = Some(init_inst);
         self.enqueue(init_inst);
         let roots: Vec<TemplateId> = self
             .index

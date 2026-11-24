@@ -376,7 +376,7 @@ pub(crate) fn solve<'h>(
     );
     let mut solver = Solver::new(ctx, hir, index, metadata, facts, &decls, types);
     let init_inst = solver.seed_roots()?;
-    solver.run_worklist()?;
+    solver.run_worklist(init_inst)?;
     solver.verify_fixed_point()?;
     solver.verify_contracts()?;
     Ok(solver.finish(init_inst))
@@ -390,13 +390,12 @@ struct Solver<'h, 'a> {
     facts: &'a SourceFacts,
     decls: &'a Declarations<'a>,
     types: &'a mut TypeTable,
-    init_inst: Option<InstanceId>,
     locations: IdxVec<LocId, Ty>,
     /// Locations whose type an annotation fixes: writes are checked by lowering, never joined.
     declared_locs: BitSet,
     dirty_locs: BitSet,
     inst_reads: Vec<Vec<LocId>>,
-    reader_ranges: IdxVec<LocId, std::ops::Range<usize>>,
+    reader_ends: IdxVec<LocId, usize>,
     reader_instances: Vec<InstanceId>,
     csr_dirty: bool,
     evaluating_inst: Option<InstanceId>,
@@ -528,8 +527,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             facts,
             decls,
             types,
-            init_inst: None,
-            reader_ranges: locations.filled(0..0),
+            reader_ends: locations.filled(0),
             locations,
             declared_locs: BitSet::default(),
             dirty_locs: BitSet::default(),
@@ -579,7 +577,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn alloc_loc(&mut self, initial: Ty) -> LocId {
-        self.reader_ranges.push(0..0);
+        self.reader_ends.push(self.reader_instances.len());
         self.locations.push(initial)
     }
 
@@ -802,42 +800,33 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn rebuild_csr(&mut self) -> Result<()> {
-        let init = self
-            .init_inst
-            .ok_or_else(|| Diagnostic::internal("missing initial instance for location readers"))?;
-        self.reader_ranges.as_mut_slice().fill(0..0);
-        for (i, reads) in self.inst_reads.iter().enumerate() {
-            if !self.inst_superseded.contains(i) {
-                for &loc in reads {
-                    self.reader_ranges[loc].end += 1;
-                }
+    fn rebuild_csr(&mut self, init: InstanceId) -> Result<()> {
+        self.reader_ends.as_mut_slice().fill(0);
+        for reads in &self.inst_reads {
+            for &loc in reads {
+                self.reader_ends[loc] += 1;
             }
         }
         let mut total = 0;
-        for range in self.reader_ranges.as_mut_slice() {
-            let start = total;
-            total += range.end;
-            *range = start..start;
+        for count in self.reader_ends.as_mut_slice() {
+            total += std::mem::replace(count, total);
         }
         self.reader_instances.resize(total, init);
         for (reader, reads) in self.instances.ids().zip(&self.inst_reads) {
-            if !self.inst_superseded.contains(reader.index()) {
-                for &loc in reads {
-                    let range = &mut self.reader_ranges[loc];
-                    let slot = self.reader_instances.get_mut(range.end).ok_or_else(|| {
-                        Diagnostic::internal("location reader exceeds the allocated range")
-                    })?;
-                    *slot = reader;
-                    range.end += 1;
-                }
+            for &loc in reads {
+                let end = &mut self.reader_ends[loc];
+                let slot = self.reader_instances.get_mut(*end).ok_or_else(|| {
+                    Diagnostic::internal("location reader exceeds the allocated range")
+                })?;
+                *slot = reader;
+                *end += 1;
             }
         }
         self.csr_dirty = false;
         Ok(())
     }
 
-    fn run_worklist(&mut self) -> Result<()> {
+    fn run_worklist(&mut self, init: InstanceId) -> Result<()> {
         let mut waves = 0usize;
         loop {
             let wave_limit = 1024usize.max(self.instances.len().saturating_mul(8));
@@ -867,17 +856,21 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             if !self.dirty_locs.is_empty() {
                 if self.csr_dirty {
-                    self.rebuild_csr()?;
+                    self.rebuild_csr(init)?;
                 }
                 for loc in self.dirty_locs.iter() {
-                    let readers = self
-                        .reader_ranges
-                        .as_slice()
-                        .get(loc)
-                        .and_then(|range| self.reader_instances.get(range.clone()))
-                        .ok_or_else(|| {
-                            Diagnostic::internal("invalid reader range for dirty location")
-                        })?;
+                    let range = match self.reader_ends.as_slice().get(..=loc) {
+                        Some([.., start, end]) => *start..*end,
+                        Some([end]) => 0..*end,
+                        _ => {
+                            return Err(Diagnostic::internal(
+                                "missing reader offset for dirty location",
+                            ));
+                        }
+                    };
+                    let readers = self.reader_instances.get(range).ok_or_else(|| {
+                        Diagnostic::internal("invalid reader range for dirty location")
+                    })?;
                     for &r in readers {
                         if !self.inst_superseded.contains(r.index())
                             && self.queued.insert(r.index())
