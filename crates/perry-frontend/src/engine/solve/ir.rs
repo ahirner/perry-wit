@@ -1,8 +1,8 @@
 //! Solved inference tables, call-site resolutions, and synthesized helper specs.
 use super::super::bitset::BitSet;
 use super::super::types::{
-    CaptureOwner, ClassId, ClassInstId, FuncIdentity, HelperId, IdxVec, InstanceId, LocId,
-    LocalIdx, TemplateId, Ty, TySpan,
+    CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity, HelperId,
+    IdxVec, InstanceId, LocId, LocalIdx, ParamLocSpan, Pool, TemplateId, Ty,
 };
 use perry_hir::{ir::CompareOp, types::LocalId};
 use perry_wit_diagnostics::{Diagnostic, Result};
@@ -32,7 +32,7 @@ pub(crate) struct Instance {
     pub(crate) explicit_type_args: Ty,
     pub(crate) return_loc: LocId,
     pub(crate) has_explicit_return: bool,
-    pub(crate) param_locs: TySpan,
+    pub(crate) param_locs: ParamLocSpan,
     pub(crate) caller: Option<InstanceId>,
     pub(crate) call_byte_offset: u32,
     pub(crate) is_inline_callback: bool,
@@ -45,7 +45,7 @@ pub(crate) struct Instance {
 pub(crate) struct ClassInst {
     pub(crate) class: ClassId,
     pub(crate) args: Ty,
-    pub(crate) field_locs: TySpan,
+    pub(crate) field_locs: FieldLocSpan,
     pub(crate) field_init: Option<InstanceId>,
     pub(crate) ctor_inst: Option<InstanceId>,
     pub(crate) emitted_name: String,
@@ -85,7 +85,7 @@ impl CallbackCall {
 pub(crate) enum HelperSpec {
     Dispatcher {
         callee_ty: Ty,
-        arms: TySpan,
+        arms: DispatchArmSpan,
         arg_tys: Ty,
         recv_ty: Option<Ty>,
     },
@@ -124,7 +124,7 @@ pub(crate) enum FuncCoercion {
     Widen(HelperId),
     DispatchCallback {
         helper: HelperId,
-        arms: TySpan,
+        arms: DispatchArmSpan,
         input_tys: Ty,
     },
     EnvCallback {
@@ -229,9 +229,9 @@ pub(crate) struct Solved {
     pub(crate) instances: IdxVec<InstanceId, Instance>,
     pub(crate) class_insts: IdxVec<ClassInstId, ClassInst>,
     pub(crate) locations: IdxVec<LocId, Ty>,
-    pub(crate) param_locs: Vec<LocId>,
-    pub(crate) field_locs: Vec<LocId>,
-    pub(crate) dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
+    pub(crate) param_locs: Pool<ParamLocSpan, LocId>,
+    pub(crate) field_locs: Pool<FieldLocSpan, LocId>,
+    pub(crate) dispatch_arms: Pool<DispatchArmSpan, (FuncIdentity, InstanceId)>,
     pub(crate) helpers: IdxVec<HelperId, HelperSpec>,
     pub(crate) helper_byte_offsets: IdxVec<HelperId, u32>,
     pub(crate) inst_local_tys: IdxVec<InstanceId, Vec<(LocalId, Ty)>>,

@@ -234,7 +234,7 @@ pub(super) fn resolve<'a>(
         }
     }
     let mut disposals = Vec::new();
-    let mut class_asts: Vec<&'a ast::Class> = Vec::new();
+    let mut classes: Vec<(ResourceClass<Span>, &'a ast::Class)> = Vec::new();
     for (k, item) in &world.exports {
         let wit_parser::WorldItem::Interface { id, .. } = item else {
             continue;
@@ -259,15 +259,17 @@ pub(super) fn resolve<'a>(
             let module = r.name_world_key(k);
             let source_ty = crate::wit::source_type(r, *resource)
                 .ok_or_else(|| Diagnostic::internal("unnamed exported resource"))?;
-            let owner = roots.classes.len();
-            class_asts.push(class);
-            roots.classes.push(ResourceClass {
-                resource: *resource,
-                class: class.span,
-                source_ty,
-                create: format!("{module}#new{}", to_pascal_case(name)),
-                representation: format!("{module}#{}Rep", to_camel_case(name)),
-            });
+            let owner = classes.len();
+            classes.push((
+                ResourceClass {
+                    resource: *resource,
+                    class: class.span,
+                    source_ty,
+                    create: format!("{module}#new{}", to_pascal_case(name)),
+                    representation: format!("{module}#{}Rep", to_camel_case(name)),
+                },
+                class,
+            ));
             let member = class.body.iter().find_map(|m| {
                 let ast::ClassMember::Method(m) = m else {
                     return None;
@@ -313,9 +315,11 @@ pub(super) fn resolve<'a>(
         let mut target = None;
         let mut annotations = Vec::new();
         if let Some(resource) = f.kind.resource()
-            && let Some(owner) = roots.classes.iter().position(|c| c.resource == resource)
+            && let Some((owner, (_, class))) = classes
+                .iter()
+                .enumerate()
+                .find(|(_, (c, _))| c.resource == resource)
         {
-            let class = class_asts[owner];
             let find_method = |is_static: bool| {
                 let method_name = to_camel_case(f.item_name());
                 class.body.iter().find_map(|m| match m {
@@ -428,6 +432,7 @@ pub(super) fn resolve<'a>(
             is_destructor: false,
         });
     }
+    roots.classes = classes.into_iter().map(|(c, _)| c).collect();
     roots.witnesses.extend(disposals);
     Ok(roots)
 }

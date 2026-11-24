@@ -4,8 +4,8 @@ use crate::engine::bitset::BitSet;
 use crate::engine::boundary::TemplateKind;
 use crate::engine::solve::HelperSpec;
 use crate::engine::types::{
-    CaptureOwner, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
-    env_class_name, func_tag,
+    CaptureOwner, DispatchArmSpan, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind,
+    box_hir, env_class_name, func_tag,
 };
 use crate::hir_compat;
 use perry_hir::{
@@ -55,14 +55,14 @@ impl<'h, 'a> Emitter<'h, 'a> {
             match cur {
                 CaptureOwner::Instance(c) => {
                     let inst = &self.solved.instances[c];
-                    if let Some(locs) = self.solved.param_locs.get(inst.param_locs.range())
-                        && let Some(&loc) = self
-                            .index
-                            .view(inst.template)
-                            .params
-                            .iter()
-                            .zip(locs)
-                            .find_map(|(p, loc)| (p.id == id).then_some(loc))
+                    let locs = &self.solved.param_locs[inst.param_locs];
+                    if let Some(&loc) = self
+                        .index
+                        .view(inst.template)
+                        .params
+                        .iter()
+                        .zip(locs)
+                        .find_map(|(p, loc)| (p.id == id).then_some(loc))
                         && let ty = self.solved.locations[loc]
                         && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
                     {
@@ -333,16 +333,6 @@ impl<'h, 'a> Emitter<'h, 'a> {
         Ok(arg)
     }
 
-    pub(super) fn dispatch_arms_slice(
-        &self,
-        span: TySpan,
-    ) -> Result<&'a [(FuncIdentity, InstanceId)]> {
-        self.solved
-            .dispatch_arms
-            .get(span.range())
-            .ok_or_else(|| Diagnostic::internal("dispatch arm span out of range"))
-    }
-
     pub(super) fn is_zero_sized_func(&self, ty: Ty) -> bool {
         self.types
             .is_zero_sized_func(ty, &self.index.capture_free_templates)
@@ -570,12 +560,12 @@ impl<'h, 'a> Emitter<'h, 'a> {
         &mut self,
         fid: FuncId,
         callee_ty: Ty,
-        arms_span: TySpan,
+        arms_span: DispatchArmSpan,
         arg_tys: Ty,
         eff_recv: Option<Ty>,
         call_byte_offset: u32,
     ) -> Result<Function> {
-        let arms = self.dispatch_arms_slice(arms_span)?;
+        let arms = &self.solved.dispatch_arms[arms_span];
         let fn_pid = self.fresh_synthetic_local()?;
         let mut params = vec![synth_param(
             fn_pid,

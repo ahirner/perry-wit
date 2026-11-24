@@ -13,8 +13,9 @@ use super::bitset::BitSet;
 use super::boundary::{ClassInfo, ModuleIndex, SourceFacts, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
-    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, IdxVec, InstanceId,
-    LocId, LocalIdx, ObjectProp, TemplateId, Ty, TyKind, TySpan, TypeTable,
+    CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity,
+    HelperId, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp, ParamLocSpan, Pool, TemplateId, Ty,
+    TyKind, TypeTable,
 };
 use crate::{
     Absence,
@@ -180,10 +181,10 @@ struct Solver<'h, 'a> {
     witness_instances: Vec<Option<InstanceId>>,
     instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: IdxVec<TemplateId, u16>,
-    param_locs: Vec<LocId>,
-    field_locs: Vec<LocId>,
-    dispatch_arms: Vec<(FuncIdentity, InstanceId)>,
-    dispatch_arm_spans: Vec<TySpan>,
+    param_locs: Pool<ParamLocSpan, LocId>,
+    field_locs: Pool<FieldLocSpan, LocId>,
+    dispatch_arms: Pool<DispatchArmSpan, (FuncIdentity, InstanceId)>,
+    dispatch_arm_spans: Vec<DispatchArmSpan>,
     helpers: IdxVec<HelperId, HelperSpec>,
     helper_index: HashMap<HelperSpec, HelperId>,
     helper_byte_offsets: IdxVec<HelperId, u32>,
@@ -308,9 +309,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             witness_instances: Vec::with_capacity(metadata.witnesses.len()),
             instance_index: HashMap::with_capacity(64),
             template_counts: index.views.filled(0),
-            param_locs: Vec::new(),
-            field_locs: Vec::new(),
-            dispatch_arms: Vec::new(),
+            param_locs: Pool::default(),
+            field_locs: Pool::default(),
+            dispatch_arms: Pool::default(),
             dispatch_arm_spans: Vec::new(),
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
@@ -429,10 +430,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         match cb {
             CallbackCall::Direct { target, .. } => f(target),
             CallbackCall::Dispatch { helper, .. } => {
-                if let Some(HelperSpec::Dispatcher { arms, .. }) = self.helpers.get(helper)
-                    && let Some(slice) = self.dispatch_arms.get(arms.range())
-                {
-                    for &(_, target) in slice {
+                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper] {
+                    for &(_, target) in &self.dispatch_arms[arms] {
                         f(target);
                     }
                 }
@@ -447,10 +446,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             | SiteResolution::MethodCall { target, .. }
             | SiteResolution::Callback { target, .. } => f(target),
             SiteResolution::DispatchCall { helper, .. } => {
-                if let Some(HelperSpec::Dispatcher { arms, .. }) = self.helpers.get(helper)
-                    && let Some(slice) = self.dispatch_arms.get(arms.range())
-                {
-                    for &(_, target) in slice {
+                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper] {
+                    for &(_, target) in &self.dispatch_arms[arms] {
                         f(target);
                     }
                 }
@@ -519,11 +516,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     }
                     Some(FuncCoercion::DispatchCallback { arms, .. }) => {
-                        if let Some(slice) = self.dispatch_arms.get(arms.range()) {
-                            for &(_, target) in slice {
-                                if live.insert(target.index()) {
-                                    queue.push(target);
-                                }
+                        for &(_, target) in &self.dispatch_arms[arms] {
+                            if live.insert(target.index()) {
+                                queue.push(target);
                             }
                         }
                     }
@@ -697,17 +692,16 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn intern_dispatch_arms(&mut self, arms: &[(FuncIdentity, InstanceId)]) -> TySpan {
+    pub(super) fn intern_dispatch_arms(
+        &mut self,
+        arms: &[(FuncIdentity, InstanceId)],
+    ) -> DispatchArmSpan {
         for &span in &self.dispatch_arm_spans {
-            if self.dispatch_arms.get(span.range()) == Some(arms) {
+            if &self.dispatch_arms[span] == arms {
                 return span;
             }
         }
-        let span = TySpan {
-            start: self.dispatch_arms.len() as u32,
-            len: arms.len() as u32,
-        };
-        self.dispatch_arms.extend_from_slice(arms);
+        let span = self.dispatch_arms.extend_from_slice(arms);
         self.dispatch_arm_spans.push(span);
         span
     }

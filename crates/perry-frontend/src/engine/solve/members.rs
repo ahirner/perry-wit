@@ -433,10 +433,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .fields
             .iter()
             .position(|f| f.name == property)?;
-        self.field_locs
-            .get(cinst.field_locs.range())
-            .and_then(|sl| sl.get(f_idx))
-            .copied()
+        self.field_locs[cinst.field_locs].get(f_idx).copied()
     }
 
     pub(super) fn object_props_of(&mut self, stripped: Ty) -> Option<Vec<ObjectProp>> {

@@ -12,7 +12,7 @@ A narrowed read of a property or global that another reference or call has since
 - Functions and closures can be stored in locals, arrays, records, and class fields, passed as arguments, and returned from functions.
 - Mutable variables captured by escaping closures share boxed storage across invocations, preserving per-iteration bindings for loop-head `let` declarations.
 - Unions of function values dispatch dynamically on a compile-time function tag, preserve `typeof === "function"` and `===` / `!==` identity semantics, and throw `TypeError` when a nullable callable is invoked while `null` or `undefined`.
-- Private helper functions specialize on concrete call-site argument types when statically closed.
+- Functions are specialized per distinct argument types at their call sites (up to 256 specializations per function).
 
 ## Objects
 
@@ -58,7 +58,7 @@ A narrowed read of a property or global that another reference or call has since
 
 - `Error`, `TypeError`, `RangeError`, `ReferenceError` and `SyntaxError` keep `name`, `message` and `cause` through `try`, `catch` and `finally`.
 - A failed implicit check produces a fresh error object when caught. Successful checks bypass the exception runtime, and explicitly thrown values retain their identity.
-- An export declared with a WIT `result<T, E>` turns an uncaught exception into `err`. An uncaught exception in a non-`result` export traps immediately.
+- An export declared with a WIT `result<T, E>` turns an uncaught exception into `err`. An uncaught exception in an export without a `result` traps, and a trap does not run pending `finally` blocks.
 - A jco resource import with a WIT error type throws at the call when the host returns `err`. A host failure on an infallible import traps. For a variant error, the caught error's `message` names the case, and the adapter drops the case's owned resource handle. Reading the variant payload in guest code produces a compile error.
 
 ## Async

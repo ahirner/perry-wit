@@ -53,7 +53,7 @@ impl<'h> Emitter<'h, '_> {
                 arms,
                 input_tys,
             }) => {
-                let arm_slice = self.dispatch_arms_slice(arms)?;
+                let arm_slice = &self.solved.dispatch_arms[arms];
                 let inputs = self.types.tuple_slice(input_tys);
                 let max_params = arm_slice
                     .iter()
@@ -162,13 +162,7 @@ impl<'h> Emitter<'h, '_> {
                         } = &mut out
                         {
                             *return_type = self.materialize(self.solved.locations[return_loc])?;
-                            let param_tys: Vec<Ty> = self
-                                .solved
-                                .param_locs
-                                .get(param_locs_span.range())
-                                .ok_or_else(|| {
-                                    Diagnostic::internal("invalid callback parameter range")
-                                })?
+                            let param_tys: Vec<Ty> = self.solved.param_locs[param_locs_span]
                                 .iter()
                                 .map(|&loc| self.solved.locations[loc])
                                 .collect();

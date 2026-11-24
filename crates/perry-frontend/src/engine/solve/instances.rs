@@ -109,7 +109,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             TyKind::Union(s) => {
                 let mut changed = false;
-                let mut out = Vec::with_capacity(s.len as usize);
+                let mut out = Vec::with_capacity(s.len());
                 for m in self.types.ty_slice(s).to_vec() {
                     let n = self.instantiate_annotated_class(m, byte_offset, caller)?;
                     changed |= n != m;
@@ -289,7 +289,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        let param_loc_start = self.param_locs.len() as u32;
+        let mut param_loc_buf = Vec::with_capacity(view.params.len());
         let mut local_slots = Vec::with_capacity(view.params.len() + 4);
         let fixed_count = view
             .params
@@ -336,7 +336,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             };
             let loc = self.alloc_loc(bound_ty);
-            self.param_locs.push(loc);
+            param_loc_buf.push(loc);
             if let Some(local) = self.index.local_idx(param.id) {
                 local_slots.push(InstanceLocalSlot { local, loc });
                 if let Some(cloc) = self.collapsed_local_locs[local] {
@@ -353,10 +353,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 });
             }
         }
-        let param_locs = TySpan {
-            start: param_loc_start,
-            len: view.params.len() as u32,
-        };
+        let param_locs = self.param_locs.extend_from_slice(&param_loc_buf);
 
         let explicit_return = view
             .explicit_return
@@ -582,7 +579,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .copied()
             .zip(args.iter().copied())
             .collect();
-        let field_loc_start = self.field_locs.len() as u32;
+        let mut field_loc_buf = Vec::with_capacity(hir_class.fields.len());
         for field in &hir_class.fields {
             let is_func_ty = matches!(field.ty, HirType::Function(_));
             let ty = self.types.intern_hir(
@@ -599,12 +596,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             if declared {
                 self.declared_locs.insert(loc.index());
             }
-            self.field_locs.push(loc);
+            field_loc_buf.push(loc);
         }
-        let field_locs = TySpan {
-            start: field_loc_start,
-            len: hir_class.fields.len() as u32,
-        };
+        let field_locs = self.field_locs.extend_from_slice(&field_loc_buf);
         let next_idx = self.class_insts.len();
         let emitted_name = if !self.class_insts.iter().any(|c| c.class == class) {
             hir_class.name.clone()

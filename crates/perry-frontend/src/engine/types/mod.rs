@@ -24,9 +24,9 @@ pub(crate) struct TypeTable {
     meta: IdxVec<Ty, TyMeta>,
     kind_index: HashMap<TyKind, Ty>,
     members_index: HashMap<Box<[Ty]>, TySpan>,
-    props_index: HashMap<Box<[ObjectProp]>, TySpan>,
-    ty_pool: Vec<Ty>,
-    object_props: Vec<ObjectProp>,
+    props_index: HashMap<Box<[ObjectProp]>, PropSpan>,
+    ty_pool: Pool<TySpan, Ty>,
+    object_props: Pool<PropSpan, ObjectProp>,
     names: IdxVec<NameId, String>,
     name_index: HashMap<String, NameId>,
     scratch: Vec<Ty>,
@@ -108,8 +108,7 @@ impl TypeTable {
         self.kinds[ty]
     }
     pub(crate) fn ty_slice(&self, span: TySpan) -> &[Ty] {
-        debug_assert!(span.range().end <= self.ty_pool.len());
-        self.ty_pool.get(span.range()).unwrap_or(&[])
+        &self.ty_pool[span]
     }
     pub(crate) fn tuple_slice(&self, ty: Ty) -> &[Ty] {
         match self.kind(ty) {
@@ -117,9 +116,8 @@ impl TypeTable {
             _ => &[],
         }
     }
-    pub(crate) fn object_slice(&self, span: TySpan) -> &[ObjectProp] {
-        debug_assert!(span.range().end <= self.object_props.len());
-        self.object_props.get(span.range()).unwrap_or(&[])
+    pub(crate) fn object_slice(&self, span: PropSpan) -> &[ObjectProp] {
+        &self.object_props[span]
     }
     pub(crate) fn name_str(&self, id: NameId) -> &str {
         self.names[id].as_str()
@@ -135,20 +133,21 @@ impl TypeTable {
         id
     }
 
-    fn intern_span<T: Copy + Eq + std::hash::Hash>(
-        index: &mut HashMap<Box<[T]>, TySpan>,
-        pool: &mut Vec<T>,
-        items: &[T],
-    ) -> TySpan {
-        if let Some(&span) = index.get(items) {
+    fn intern_ty_span(&mut self, items: &[Ty]) -> TySpan {
+        if let Some(&span) = self.members_index.get(items) {
             return span;
         }
-        let span = TySpan {
-            start: pool.len() as u32,
-            len: items.len() as u32,
-        };
-        pool.extend_from_slice(items);
-        index.insert(items.into(), span);
+        let span = self.ty_pool.extend_from_slice(items);
+        self.members_index.insert(items.into(), span);
+        span
+    }
+
+    fn intern_prop_span(&mut self, items: &[ObjectProp]) -> PropSpan {
+        if let Some(&span) = self.props_index.get(items) {
+            return span;
+        }
+        let span = self.object_props.extend_from_slice(items);
+        self.props_index.insert(items.into(), span);
         span
     }
 
@@ -189,15 +188,15 @@ impl TypeTable {
     }
 
     pub(crate) fn tuple(&mut self, items: &[Ty]) -> Ty {
-        let span = Self::intern_span(&mut self.members_index, &mut self.ty_pool, items);
+        let span = self.intern_ty_span(items);
         self.intern_kind(TyKind::Tuple(span))
     }
     pub(crate) fn generic(&mut self, base: shapes::TypeId, args: &[Ty]) -> Ty {
-        let args = Self::intern_span(&mut self.members_index, &mut self.ty_pool, args);
+        let args = self.intern_ty_span(args);
         self.intern_kind(TyKind::Generic { base, args })
     }
     pub(crate) fn object(&mut self, props: &[ObjectProp], index: Option<Ty>) -> Ty {
-        let span = Self::intern_span(&mut self.props_index, &mut self.object_props, props);
+        let span = self.intern_prop_span(props);
         self.intern_kind(TyKind::Object { props: span, index })
     }
 
@@ -227,10 +226,8 @@ impl TypeTable {
     pub(crate) fn union_span(&mut self, span: TySpan) -> Ty {
         let mut flat = std::mem::take(&mut self.scratch);
         flat.clear();
-        let range = span.range();
-        debug_assert!(range.end <= self.ty_pool.len());
-        for i in range.start..range.end.min(self.ty_pool.len()) {
-            self.push_union_member(&mut flat, self.ty_pool[i]);
+        for &ty in self.ty_slice(span) {
+            self.push_union_member(&mut flat, ty);
         }
         let res = self.finish_union(&mut flat);
         self.scratch = flat;
@@ -253,7 +250,7 @@ impl TypeTable {
             [] => Ty::NEVER,
             [single] => *single,
             slice => {
-                let span = Self::intern_span(&mut self.members_index, &mut self.ty_pool, slice);
+                let span = self.intern_ty_span(slice);
                 self.intern_kind(TyKind::Union(span))
             }
         }

@@ -138,7 +138,10 @@ pub(super) fn bind(
     let mut registries = Vec::with_capacity(classes.len());
     let mut init = Vec::with_capacity(classes.len() * 2);
     for (owner, resource) in classes.iter().enumerate() {
-        let c = &hir.classes[resource.class];
+        let c = hir
+            .classes
+            .get(resource.class)
+            .ok_or_else(|| Diagnostic::internal("lost resource class"))?;
         let table = fresh(&mut max_local)?;
         let next = fresh(&mut max_local)?;
         let ctor = calls.iter().zip(witnesses.iter()).find_map(|(call, w)| {
@@ -206,8 +209,13 @@ pub(super) fn bind(
         }
         let mut body = Vec::new();
         let operation = if let Some(call) = call {
-            let table = &registries[call.owner];
-            let class = &mut hir.classes[table.resource.class];
+            let table = registries
+                .get(call.owner)
+                .ok_or_else(|| Diagnostic::internal("missing handle table"))?;
+            let class = hir
+                .classes
+                .get_mut(table.resource.class)
+                .ok_or_else(|| Diagnostic::internal("missing class declaration"))?;
             match call.action {
                 ResourceAction::New => Expr::New {
                     class_name: class.name.clone(),

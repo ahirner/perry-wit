@@ -401,11 +401,7 @@ impl<'h> Emitter<'h, '_> {
             return Ok(cls);
         };
         cls.name = cinst.emitted_name.clone();
-        let field_locs = self
-            .solved
-            .field_locs
-            .get(cinst.field_locs.range())
-            .ok_or_else(|| Diagnostic::internal("invalid class field range"))?;
+        let field_locs = &self.solved.field_locs[cinst.field_locs];
         let mut fields = Vec::with_capacity(orig.fields.len());
         for (f_idx, field) in orig.fields.iter().enumerate() {
             let resolved = field_locs
@@ -559,11 +555,8 @@ impl<'h> Emitter<'h, '_> {
         let mut boxed_param_map: Vec<(LocalId, LocalId)> = Vec::new();
         let mut boxed_param_inits: Vec<Stmt> = Vec::new();
         for (p_idx, param) in view.params.iter().enumerate() {
-            let param_loc = *self
-                .solved
-                .param_locs
-                .get(inst.param_locs.range())
-                .and_then(|s| s.get(p_idx))
+            let param_loc = *self.solved.param_locs[inst.param_locs]
+                .get(p_idx)
                 .ok_or_else(|| {
                     Diagnostic::internal("emitted function missing parameter location slot")
                 })?;

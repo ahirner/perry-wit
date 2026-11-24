@@ -5,6 +5,10 @@ mod sealed {
     pub(crate) trait MintIdx: Copy + Eq {
         fn from_usize(n: usize) -> Self;
     }
+    pub(crate) trait MintSpan: Copy + Eq {
+        fn from_range(start: usize, len: usize) -> Self;
+        fn range(self) -> std::ops::Range<usize>;
+    }
 }
 
 pub(crate) trait Idx: Copy + Eq {
@@ -149,17 +153,79 @@ impl TemplateId {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub(crate) struct TySpan {
-    pub(crate) start: u32,
-    pub(crate) len: u32,
+/// Append-only slice pool whose typed spans have private fields and are minted only by [`Pool`].
+pub(crate) struct Pool<S, T> {
+    data: Vec<T>,
+    _marker: std::marker::PhantomData<fn(S) -> S>,
 }
-impl TySpan {
-    pub(crate) fn range(self) -> std::ops::Range<usize> {
-        let s = self.start as usize;
-        s..s.saturating_add(self.len as usize)
+
+impl<S, T> Default for Pool<S, T> {
+    fn default() -> Self {
+        Self {
+            data: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
     }
 }
+
+#[allow(private_bounds)]
+impl<S: sealed::MintSpan, T> Pool<S, T> {
+    pub(crate) fn extend_from_slice(&mut self, items: &[T]) -> S
+    where
+        T: Copy,
+    {
+        let start = self.data.len();
+        self.data.extend_from_slice(items);
+        S::from_range(start, items.len())
+    }
+}
+
+#[allow(private_bounds)]
+impl<S: sealed::MintSpan, T> std::ops::Index<S> for Pool<S, T> {
+    type Output = [T];
+    fn index(&self, span: S) -> &[T] {
+        &self.data[span.range()]
+    }
+}
+
+macro_rules! span_type {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+            pub(crate) struct $name {
+                start: u32,
+                len: u32,
+            }
+            impl $name {
+                #[allow(dead_code)]
+                pub(crate) fn len(self) -> usize {
+                    self.len as usize
+                }
+            }
+            impl sealed::MintSpan for $name {
+                fn from_range(start: usize, len: usize) -> Self {
+                    debug_assert!(u32::try_from(start).is_ok() && u32::try_from(len).is_ok(), "pool span overflow");
+                    Self {
+                        start: start as u32,
+                        len: len as u32,
+                    }
+                }
+                fn range(self) -> std::ops::Range<usize> {
+                    let s = self.start as usize;
+                    s..s + self.len as usize
+                }
+            }
+        )*
+    };
+}
+
+span_type!(
+    TySpan,
+    PropSpan,
+    ParamLocSpan,
+    FieldLocSpan,
+    DispatchArmSpan,
+);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) enum CaptureOwner {
@@ -238,7 +304,7 @@ pub(crate) enum TyKind {
     Tuple(TySpan),
     Union(TySpan),
     Generic { base: shapes::TypeId, args: TySpan },
-    Object { props: TySpan, index: Option<Ty> },
+    Object { props: PropSpan, index: Option<Ty> },
     Func(FuncIdentity),
     ClassInst(ClassInstId),
 }

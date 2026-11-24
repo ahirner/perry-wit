@@ -135,7 +135,9 @@ impl<'s> FunctionBuilder<'s> {
             let mut slots = vec![None; field_defs.len()];
             for (&(index, field_ty), expr) in field_slots.iter().zip(args) {
                 let val = self.expression_with(ctx, expr, Some(field_ty))?;
-                slots[index] = Some(self.fit(ctx, val, field_ty)?);
+                *slots.get_mut(index).ok_or_else(|| {
+                    internal!("field slot {index} out of range on {class_name}")
+                })? = Some(self.fit(ctx, val, field_ty)?);
             }
             let init_operands: Vec<Value> = slots
                 .into_iter()

@@ -135,7 +135,7 @@ impl<'a, F: Fn(ClassInstId) -> &'a str> Materializer<'_, F> {
                 let has_func = slice
                     .iter()
                     .any(|&m| matches!(self.table.kind(m), TyKind::Func(_)));
-                let mut members = Vec::with_capacity(s.len as usize);
+                let mut members = Vec::with_capacity(s.len());
                 for &t in slice {
                     let h = if has_func && let TyKind::Func(ident) = self.table.kind(t) {
                         if self.escaping_env.contains(ident.template.index()) {
@@ -169,8 +169,8 @@ impl<'a, F: Fn(ClassInstId) -> &'a str> Materializer<'_, F> {
                     .collect(),
             },
             TyKind::Object { props, index } => {
-                let mut properties = HashMap::with_capacity(props.len as usize);
-                let mut order = Vec::with_capacity(props.len as usize);
+                let mut properties = HashMap::with_capacity(props.len());
+                let mut order = Vec::with_capacity(props.len());
                 for prop in self.table.object_slice(props) {
                     if self.table.is_zero_sized_func(prop.ty, self.capture_free) {
                         continue;

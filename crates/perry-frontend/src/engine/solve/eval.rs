@@ -45,12 +45,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     || incoming == Ty::BOTTOM
                     || abs.is_some_and(Absence::admits_undefined);
                 let def_ty = self.eval_expr(&mut s, default_expr)?;
-                if default_runs
-                    && let Some(&ploc) = self
-                        .param_locs
-                        .get(param_locs_span.range())
-                        .and_then(|sl| sl.get(p_idx))
-                {
+                if default_runs && let Some(&ploc) = self.param_locs[param_locs_span].get(p_idx) {
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, def_ty);
@@ -99,12 +94,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .get(info.hir_idx)
                 .ok_or_else(|| Diagnostic::internal("missing class fields"))?
                 .fields;
-            for (field, offset) in fields.iter().zip(instance.field_locs.range()) {
+            let field_locs = instance.field_locs;
+            for (f_idx, field) in fields.iter().enumerate() {
                 let Some(init) = &field.init else { continue };
-                let loc = *self
-                    .field_locs
-                    .get(offset)
-                    .ok_or_else(|| Diagnostic::internal("missing class field location"))?;
+                let Some(&loc) = self.field_locs[field_locs].get(f_idx) else {
+                    break;
+                };
                 if matches!(init, Expr::Array(items, _) if items.is_empty()) {
                     if self.types.is_open(self.locations[loc])
                         && !matches!(self.types.kind(self.locations[loc]), TyKind::Cell { .. })

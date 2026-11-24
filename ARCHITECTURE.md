@@ -51,7 +51,7 @@ The compiler workspace separates these responsibilities:
 
 The frontend returns a read-only monomorphic program and metadata. Type inference, record identity, closure lowering, and function specialization belong to the frontend. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the stages below it.
 
-## Type Inference
+## Type inference
 
 The frontend indexes templates, locals, storage cells, and call sites into dense tables and iterates a monotone worklist solver to fixed point.
 Empty arrays and objects become storage cells whose element or value types are inferred from writes across branches, loops, local aliases, and helper returns. Numeric indices infer an array, and string keys or property names infer a dictionary. An array storing several types widens to a value union, while a dictionary requires a single value type.
