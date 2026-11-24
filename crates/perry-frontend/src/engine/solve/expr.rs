@@ -1354,7 +1354,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Err(Diagnostic::unsupported(format!(
                 "property {property} is not supported on Error yet"
             ))
-            .with_fallback_span(self.metadata.locations.member_span(byte_offset)));
+            .with_fallback_span(
+                self.metadata
+                    .locations
+                    .member_span(byte_offset)
+                    .or_else(|| {
+                        self.metadata
+                            .locations
+                            .offset_span(s.iteration.object_pattern_offset(object)?, 1)
+                    }),
+            ));
         }
         if let TyKind::Cell {
             loc,

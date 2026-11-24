@@ -4,6 +4,7 @@ use super::*;
 #[derive(Default)]
 pub struct Iteration {
     guards: HashSet<LocalId>,
+    object_patterns: Vec<(LocalId, u32)>,
     released: HashSet<LocalId>,
     positions: HashMap<LocalId, usize>,
 }
@@ -54,6 +55,9 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
 
 impl Iteration {
     pub fn register_binding(&mut self, id: LocalId, name: &str, init: Option<&Expr>) {
+        if let Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) = init.and_then(runtime) {
+            self.object_patterns.push((id, *offset as u32));
+        }
         if matches!(
             init.and_then(runtime),
             Some(("arrayRecordIndex", [Expr::Integer(0)]))
@@ -67,6 +71,15 @@ impl Iteration {
         {
             self.released.insert(id);
         }
+    }
+
+    pub(crate) fn object_pattern_offset(&self, receiver: &Expr) -> Option<u32> {
+        let Expr::LocalGet(id) = receiver else {
+            return None;
+        };
+        self.object_patterns
+            .iter()
+            .find_map(|(local, offset)| (id == local).then_some(*offset))
     }
 
     pub fn guard<'a>(&mut self, id: LocalId, expr: &'a Expr) -> Option<Option<&'a Expr>> {
