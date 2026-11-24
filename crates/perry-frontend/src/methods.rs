@@ -381,7 +381,7 @@ impl<'s> Call<'s> {
             } if matches!((&**offset, &**size), (Expr::Undefined, Expr::Undefined)) => {
                 (buffer, Self::BytesCryptoFillRandom(&[]))
             }
-            Expr::DateGetTime(date) | Expr::DateValueOf(date) => (date, Self::DateGetTime(&[])),
+            Expr::DateGetTime(date) => (date, Self::DateGetTime(&[])),
             Expr::DateToISOString(date) => (date, Self::DateToISOString(&[])),
             Expr::DateToJSON(date) => (date, Self::DateToJSON(&[])),
             Expr::UrlInstanceToString(url) | Expr::UrlInstanceToJSON(url) => {
@@ -435,9 +435,6 @@ impl<'s> Call<'s> {
             | Expr::DateSetMilliseconds { date, args } => (date, Self::DateSetMilliseconds(args)),
             Expr::DateSetTime { date, args } => (date, Self::DateSetTime(args)),
             Expr::StringSplit(text, separator) => (text, Self::StringSplit(separator)),
-            Expr::StringCodePointAt { string, index } => {
-                (string, Self::StringCodePointAt(std::slice::from_ref(index)))
-            }
             Expr::ArrayMap { array, callback } => (array, Self::ArrayMap(callback)),
             Expr::ArrayFilter { array, callback } => (array, Self::ArrayFilter(callback)),
             Expr::ArrayFlatMap { array, callback } => (array, Self::ArrayFlatMap(callback)),

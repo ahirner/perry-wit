@@ -1,8 +1,8 @@
 //! Exception cause nodes, native reference reflection, and dynamic JSON equality/display.
 use super::{
-    address, append, array_index, json_number, new_node, node, set_word, std_json_from_i64,
-    std_json_from_number, std_json_from_scalar, std_json_from_string, std_json_from_u64,
-    std_json_to_string, string_bytes, word,
+    address, append, array_index, json_number, new_node, node, numeric_node, set_word,
+    std_json_from_number, std_json_from_scalar, std_json_from_string, std_json_to_string,
+    string_bytes, word,
 };
 use crate::runtime::from_static;
 use perry_rt_sys::{
@@ -232,9 +232,9 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
             descriptor::SIGNED_INT | descriptor::UNSIGNED_INT => {
                 let shift = 64 - word(desc, 4);
                 if kind == descriptor::SIGNED_INT {
-                    std_json_from_i64(((bits << shift) as i64) >> shift)
+                    numeric_node(Number::Signed(((bits << shift) as i64) >> shift))
                 } else {
-                    std_json_from_u64((bits << shift) >> shift)
+                    numeric_node(Number::Unsigned((bits << shift) >> shift))
                 }
             }
             descriptor::STRING => std_json_from_string(node(bits as u32)),

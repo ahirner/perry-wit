@@ -250,10 +250,8 @@ struct TyMeta {
 pub(crate) struct TypeTable {
     kinds: IdxVec<Ty, TyKind>,
     meta: IdxVec<Ty, TyMeta>,
-    simple_index: HashMap<TyKind, Ty>,
-    tuple_index: HashMap<Box<[Ty]>, Ty>,
-    union_index: HashMap<Box<[Ty]>, Ty>,
-    generic_index: HashMap<(shapes::TypeId, Ty), Ty>,
+    kind_index: HashMap<TyKind, Ty>,
+    members_index: HashMap<Box<[Ty]>, TySpan>,
     props_index: HashMap<Box<[ObjectProp]>, TySpan>,
     ty_pool: Vec<Ty>,
     object_props: Vec<ObjectProp>,
@@ -265,7 +263,7 @@ pub(crate) struct TypeTable {
 impl TypeTable {
     pub(crate) fn new() -> Self {
         let mut table = Self {
-            simple_index: HashMap::with_capacity(64),
+            kind_index: HashMap::with_capacity(64),
             name_index: HashMap::with_capacity(32),
             ..Self::default()
         };
@@ -284,7 +282,7 @@ impl TypeTable {
             TyKind::Symbol,
         ] {
             let id = table.push_kind(kind);
-            table.simple_index.insert(kind, id);
+            table.kind_index.insert(kind, id);
         }
         table
     }
@@ -365,25 +363,33 @@ impl TypeTable {
         id
     }
 
-    fn push_span<T: Copy>(buf: &mut Vec<T>, items: &[T]) -> TySpan {
-        let start = buf.len() as u32;
-        buf.extend_from_slice(items);
-        TySpan {
-            start,
-            len: items.len() as u32,
+    fn intern_span<T: Copy + Eq + std::hash::Hash>(
+        index: &mut HashMap<Box<[T]>, TySpan>,
+        pool: &mut Vec<T>,
+        items: &[T],
+    ) -> TySpan {
+        if let Some(&span) = index.get(items) {
+            return span;
         }
+        let span = TySpan {
+            start: pool.len() as u32,
+            len: items.len() as u32,
+        };
+        pool.extend_from_slice(items);
+        index.insert(items.into(), span);
+        span
     }
 
-    fn intern_simple(&mut self, kind: TyKind) -> Ty {
-        if let Some(&ty) = self.simple_index.get(&kind) {
+    fn intern_kind(&mut self, kind: TyKind) -> Ty {
+        if let Some(&ty) = self.kind_index.get(&kind) {
             return ty;
         }
         let ty = self.push_kind(kind);
-        self.simple_index.insert(kind, ty);
+        self.kind_index.insert(kind, ty);
         ty
     }
     pub(crate) fn leaf(&mut self, id: shapes::TypeId) -> Ty {
-        self.intern_simple(TyKind::Leaf(id))
+        self.intern_kind(TyKind::Leaf(id))
     }
     pub(crate) fn named(&mut self, ctx: &Context, name: &str) -> Ty {
         self.leaf(shapes::TypeId::from_owned(
@@ -392,58 +398,35 @@ impl TypeTable {
         ))
     }
     pub(crate) fn type_var(&mut self, id: shapes::TypeId) -> Ty {
-        self.intern_simple(TyKind::TypeVar(id))
+        self.intern_kind(TyKind::TypeVar(id))
     }
     pub(crate) fn array(&mut self, element: Ty) -> Ty {
-        self.intern_simple(TyKind::Array(element))
+        self.intern_kind(TyKind::Array(element))
     }
     pub(crate) fn cell(&mut self, loc: LocId, kind: CellKind) -> Ty {
-        self.intern_simple(TyKind::Cell { loc, kind })
+        self.intern_kind(TyKind::Cell { loc, kind })
     }
     pub(crate) fn promise(&mut self, inner: Ty) -> Ty {
-        self.intern_simple(TyKind::Promise(inner))
+        self.intern_kind(TyKind::Promise(inner))
     }
     pub(crate) fn func(&mut self, identity: FuncIdentity) -> Ty {
-        self.intern_simple(TyKind::Func(identity))
+        self.intern_kind(TyKind::Func(identity))
     }
     pub(crate) fn class_inst(&mut self, inst: ClassInstId) -> Ty {
-        self.intern_simple(TyKind::ClassInst(inst))
+        self.intern_kind(TyKind::ClassInst(inst))
     }
 
     pub(crate) fn tuple(&mut self, items: &[Ty]) -> Ty {
-        if let Some(&ty) = self.tuple_index.get(items) {
-            return ty;
-        }
-        let span = Self::push_span(&mut self.ty_pool, items);
-        let ty = self.push_kind(TyKind::Tuple(span));
-        self.tuple_index.insert(items.into(), ty);
-        ty
+        let span = Self::intern_span(&mut self.members_index, &mut self.ty_pool, items);
+        self.intern_kind(TyKind::Tuple(span))
     }
     pub(crate) fn generic(&mut self, base: shapes::TypeId, args: &[Ty]) -> Ty {
-        let args_tuple = self.tuple(args);
-        if let Some(&ty) = self.generic_index.get(&(base, args_tuple)) {
-            return ty;
-        }
-        let args_span = match self.kind(args_tuple) {
-            TyKind::Tuple(s) => s,
-            _ => TySpan { start: 0, len: 0 },
-        };
-        let ty = self.push_kind(TyKind::Generic {
-            base,
-            args: args_span,
-        });
-        self.generic_index.insert((base, args_tuple), ty);
-        ty
+        let args = Self::intern_span(&mut self.members_index, &mut self.ty_pool, args);
+        self.intern_kind(TyKind::Generic { base, args })
     }
     pub(crate) fn object(&mut self, props: &[ObjectProp], index: Option<Ty>) -> Ty {
-        let span = if let Some(&s) = self.props_index.get(props) {
-            s
-        } else {
-            let s = Self::push_span(&mut self.object_props, props);
-            self.props_index.insert(props.into(), s);
-            s
-        };
-        self.intern_simple(TyKind::Object { props: span, index })
+        let span = Self::intern_span(&mut self.props_index, &mut self.object_props, props);
+        self.intern_kind(TyKind::Object { props: span, index })
     }
 
     pub(crate) fn union(&mut self, members: &[Ty]) -> Ty {
@@ -481,13 +464,8 @@ impl TypeTable {
             [] => Ty::NEVER,
             [single] => *single,
             slice => {
-                if let Some(&ty) = self.union_index.get(slice) {
-                    return ty;
-                }
-                let span = Self::push_span(&mut self.ty_pool, slice);
-                let ty = self.push_kind(TyKind::Union(span));
-                self.union_index.insert(slice.into(), ty);
-                ty
+                let span = Self::intern_span(&mut self.members_index, &mut self.ty_pool, slice);
+                self.intern_kind(TyKind::Union(span))
             }
         }
     }

@@ -253,10 +253,6 @@ impl<'s> FunctionBuilder<'s> {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
                 self.set_byte_index(ctx, bytes, index, value)?
             }
-            Expr::Uint8ArrayLength(array) => {
-                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
-                self.intrinsic(ctx, Intrinsic::BytesLength, vec![bytes])
-            }
             Expr::TextEncoderNew => self.intrinsic(ctx, Intrinsic::EncoderNew, vec![]),
             Expr::TextDecoderNew {
                 label,
@@ -319,8 +315,7 @@ impl<'s> FunctionBuilder<'s> {
                 );
                 self.stringify_replaced(ctx, value, replacer)?
             }
-            Expr::JsonParseWithReviver(text, reviver)
-            | Expr::JsonParseReviver { text, reviver } => {
+            Expr::JsonParseWithReviver(text, reviver) => {
                 ensure_unsupported!(
                     matches!(&**reviver, Expr::Null | Expr::Undefined),
                     "{JSON_CALLBACKS}"
@@ -328,7 +323,6 @@ impl<'s> FunctionBuilder<'s> {
                 let text = self.string_operand(ctx, text)?;
                 self.parse_json_text(ctx, text, expected)?
             }
-            Expr::JsonStringifyPretty { .. } => bail_unsupported!("{JSON_CALLBACKS}"),
             Expr::MathRandom => self.intrinsic(ctx, Intrinsic::MathRandom, vec![]),
             Expr::CryptoRandomUUID => self.intrinsic(ctx, Intrinsic::RandomUuid, vec![]),
             Expr::TypeOf(value) => {
@@ -339,7 +333,6 @@ impl<'s> FunctionBuilder<'s> {
                 let name = self.string(ctx, name);
                 self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
             }
-            Expr::PerformanceNow => self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![]),
             Expr::DateNow => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
             Expr::ErrorNew(message) => {
                 let message = match message {
@@ -370,14 +363,6 @@ impl<'s> FunctionBuilder<'s> {
                 message,
                 options,
             } => self.error_with_options(ctx, *error_kind, message, options)?,
-            Expr::ErrorMessage(error) => {
-                let error = self.expression(ctx, error)?;
-                ensure_unsupported!(
-                    kind(ctx, error)? == Kind::Exception,
-                    ".message is only supported on caught exceptions and Error objects"
-                );
-                self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, error))
-            }
             Expr::InstanceOf {
                 expr: value, ty, ..
             } => self.instance_of(ctx, value, ty)?,
@@ -431,28 +416,6 @@ impl<'s> FunctionBuilder<'s> {
                 && !self.shapes.is_user_type(class_name) =>
             {
                 self.web_new(ctx, class_name, args)?
-            }
-            Expr::FetchWithOptions {
-                url,
-                method,
-                body,
-                headers,
-                headers_dynamic,
-                signal,
-                redirect,
-            } => {
-                ensure_unsupported!(
-                    signal.is_none() && redirect.is_none(),
-                    "fetch signal and redirect options are not supported yet"
-                );
-                self.fetch_with_options(
-                    ctx,
-                    url,
-                    method,
-                    body,
-                    headers,
-                    headers_dynamic.as_deref(),
-                )?
             }
             Expr::NativeMethodCall {
                 module,

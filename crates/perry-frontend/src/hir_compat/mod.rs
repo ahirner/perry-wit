@@ -68,7 +68,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         streams::preserve_options(&mut ast, unresolved)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
-    let facts = crate::engine::boundary::scan_ast(&ast)?;
+    let facts = crate::engine::boundary::scan_ast(&ast);
     let mut names = names::FreshNames::new(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
