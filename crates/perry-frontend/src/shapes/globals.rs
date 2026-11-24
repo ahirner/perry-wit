@@ -5,7 +5,7 @@ use perry_hir::{
 };
 use std::collections::HashSet;
 
-pub fn class_functions(class: &Class) -> impl Iterator<Item = &Function> {
+pub(crate) fn class_functions(class: &Class) -> impl Iterator<Item = &Function> {
     class
         .constructor
         .iter()

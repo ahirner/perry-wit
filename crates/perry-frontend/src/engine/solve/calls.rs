@@ -1,6 +1,6 @@
 //! Call, method and constructor resolution.
 use super::*;
-use crate::{methods::MethodResult, wit::MemberKind};
+use crate::wit::MemberKind;
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_args(&mut self, s: &mut EvalState<'h>, args: &'h [Expr]) -> Result<Vec<Ty>> {
@@ -57,7 +57,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(obj_ty)
     }
 
-    fn resource_operation(
+    pub(super) fn resource_operation(
         &mut self,
         inst: InstanceId,
         expr: &Expr,
@@ -101,8 +101,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(tid) = self
             .index
             .class_by_name_id(cn)
-            .and_then(|cid| self.index.class(cid))
-            .and_then(|c| ClassInfo::find(&c.static_methods, mn))
+            .and_then(|cid| ClassInfo::find(&self.index.class(cid).static_methods, mn))
         {
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
@@ -147,11 +146,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         };
         self.record_site(inst_id, expr, res);
-        let return_loc = self
-            .instances
-            .get(target)
-            .ok_or_else(|| Diagnostic::internal("missing call target instance"))?
-            .return_loc;
+        let return_loc = self.instances[target].return_loc;
         Ok((target, self.read_loc(return_loc, inst_id)))
     }
 
@@ -208,22 +203,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             let class_args = if !type_args.is_empty() {
                 self.eval_type_args(s.inst, type_args)
-            } else if let Some(tps) = self
-                .class_type_params
-                .get(cid.index())
-                .filter(|t| !t.is_empty())
-                .cloned()
-            {
+            } else if !self.class_type_params[cid].is_empty() {
+                let tp_span = self.class_type_params[cid];
                 let mut bindings = Vec::new();
-                if let Some(ctor_view) = self
-                    .index
-                    .class(cid)
-                    .and_then(|c| c.ctor)
-                    .and_then(|t| self.index.view(t))
-                {
-                    self.unify_params(ctor_view.params, &arg_tys, &tps, &mut bindings);
+                if let Some(ctor_tid) = self.index.class(cid).ctor {
+                    let ctor_view = self.index.view(ctor_tid);
+                    self.unify_params(ctor_view.params, &arg_tys, tp_span, &mut bindings);
                 }
-                tps.iter()
+                self.type_param_pool[tp_span]
+                    .iter()
                     .map(|tp| {
                         bindings
                             .iter()
@@ -439,9 +427,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in &arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let Some(target_view) = self.index.view(ident.template) else {
-            return Ok(Ty::OPEN);
-        };
+        let target_view = self.index.view(ident.template);
         let is_promise_handle =
             self.apply_promise_handle_call(s, ident, &arg_tys, Some(args), byte_offset)?;
 
@@ -561,348 +547,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(ret)
     }
 
-    pub(super) fn eval_method_call(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        object: &'h Expr,
-        property: &str,
-        args: &'h [Expr],
-        byte_offset: u32,
-    ) -> Result<Ty> {
-        let method = hir_compat::method(property);
-        let name = method.name();
-
-        if let Expr::ExternFuncRef { name: class, .. } = object
-            && let Some(owner) = self.decls.resource(class)
-            && let Some(ty) = self.resource_operation(s.inst, expr, owner, MemberKind::Static, name)
-        {
-            self.eval_args(s, args)?;
-            return Ok(ty);
-        }
-        if matches!(object, Expr::GlobalGet(_)) {
-            match name {
-                "log" | "info" | "debug" | "error" | "warn"
-                    if matches!(object, Expr::GlobalGet(0)) =>
-                {
-                    self.eval_args(s, args)?;
-                    return Ok(Ty::VOID);
-                }
-                "fetch" => {
-                    self.eval_args(s, args)?;
-                    let resp = self.types.named(self.ctx, "Response");
-                    return Ok(self.types.promise(resp));
-                }
-                "queueMicrotask" => {
-                    return Err(self.annotate_expr_error(
-                        s,
-                        Diagnostic::unsupported(
-                            "queueMicrotask is not supported: this runtime has no microtask queue",
-                        ),
-                        byte_offset,
-                    ));
-                }
-                "setTimeout" | "setInterval" | "setImmediate" => {
-                    return self.eval_timer_start(s, expr, name, args, byte_offset);
-                }
-                "clearTimeout" | "clearInterval" | "clearImmediate" => {
-                    return self.eval_timer_clear(s, expr, args);
-                }
-                _ => {}
-            }
-        }
-        if name == "toWeb" && let Expr::ExternFuncRef { name: local, .. } = object
-            && self.hir.imports.iter().any(|imp| matches!(imp.source.as_str(), "stream" | "node:stream")
-                && imp.specifiers.iter().any(|sp| matches!(sp, perry_hir::ir::ImportSpecifier::Named { imported, local: l } if imported == "Writable" && l == local)))
-        {
-            self.eval_args(s, args)?;
-            return Ok(self.types.named(self.ctx, "WritableStream"));
-        }
-        if let Expr::PropertyGet {
-            object: global,
-            property: class,
-            ..
-        } = object
-            && matches!(global.as_ref(), Expr::GlobalGet(_))
-        {
-            let mut arg_tys = self.eval_args(s, args)?;
-            if class == "Promise" {
-                for ty in &mut arg_tys {
-                    *ty = self.resolve_promise_cells(s.inst, *ty);
-                }
-            }
-            return Ok(builtins::static_global_method(
-                self.ctx, self.types, class, name, args, &arg_tys,
-            )
-            .unwrap_or(Ty::OPEN));
-        }
-        if let Expr::PropertyGet {
-            object: ns,
-            property: class,
-            ..
-        } = object
-            && let Expr::PropertyGet {
-                object: global,
-                property: ns_name,
-                ..
-            } = ns.as_ref()
-            && matches!(global.as_ref(), Expr::GlobalGet(_))
-            && ns_name == "Temporal"
-        {
-            self.eval_args(s, args)?;
-            return Ok(
-                builtins::temporal_static_method(self.ctx, self.types, class, property)
-                    .unwrap_or(Ty::OPEN),
-            );
-        }
-        if let Expr::ClassRef(class_name) = object {
-            return self.eval_static_method_call(s, expr, class_name, name, args, byte_offset);
-        }
-
-        let obj_ty = self.eval_expr(s, object)?;
-        if obj_ty == Ty::BOTTOM {
-            self.eval_args(s, args)?;
-            return Ok(Ty::BOTTOM);
-        }
-        let (stripped, _) = self.types.strip_nullish(obj_ty);
-
-        if let TyKind::Leaf(id) = self.types.kind(stripped)
-            && let HirType::Named(base) = id.hir(self.ctx)
-            && let Some(owner) = self.decls.resource(base)
-        {
-            self.eval_args(s, args)?;
-            if matches!(method, hir_compat::Method::UsingCheck)
-                && let Expr::LocalGet(id) = object
-            {
-                let span = self.hir.local_source_spans.get(id).and_then(|s| {
-                    self.metadata
-                        .locations
-                        .offset_span(s.start, s.end.saturating_sub(s.start))
-                });
-                return Err(Diagnostic::unsupported(
-                    "using declarations for imported resources are unsupported",
-                )
-                .with_fallback_span(span));
-            }
-            if let Some(ty) =
-                self.resource_operation(s.inst, expr, owner, MemberKind::Instance, name)
-            {
-                return Ok(ty);
-            }
-            return Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported(format!(
-                    "method {name} is not supported on WIT resource yet"
-                )),
-                byte_offset,
-            ));
-        }
-        self.check_timer_member(stripped, byte_offset)?;
-
-        if matches!(name, "then" | "catch" | "finally")
-            && matches!(
-                self.types.kind(stripped),
-                TyKind::Promise(_)
-                    | TyKind::Cell {
-                        kind: CellKind::Promise,
-                        ..
-                    }
-            )
-        {
-            return self.eval_promise_reaction(s, expr, stripped, name, args, byte_offset);
-        }
-
-        let arg_tys = self.eval_args(s, args)?;
-
-        if name == "set"
-            && arg_tys.get(1).is_some_and(|&ty| self.types.has_func(ty))
-            && builtins::receiver_of(self.ctx, self.types, stripped)
-                == Some(crate::methods::Receiver::Map)
-        {
-            return Err(self.annotate_expr_error(
-                s,
-                Diagnostic::unsupported("storing a function value with Map.set is not supported"),
-                byte_offset,
-            ));
-        }
-        if matches!(name, "push" | "unshift") {
-            let pushed_cell = self.push_into_cells(stripped, &arg_tys);
-            self.coerce_array_write(s.inst, stripped, args, &arg_tys);
-            if pushed_cell {
-                return Ok(Ty::NUMBER);
-            }
-        }
-        if method == hir_compat::Method::Iteration {
-            return Ok(obj_ty);
-        }
-
-        let mname_id = self.types.intern_name(name);
-        if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, byte_offset)?
-            && let Some(cinst) = self.class_insts.get(cinst_id)
-            && let Some(method_tid) = self
-                .index
-                .class(cinst.class)
-                .and_then(|c| ClassInfo::find(&c.methods, mname_id))
-        {
-            if arg_tys.contains(&Ty::BOTTOM) {
-                return Ok(Ty::BOTTOM);
-            }
-            if let Some(view) = self.index.view(method_tid) {
-                self.check_callback_params(s.inst, view, &arg_tys, byte_offset)?;
-            }
-            let (_, ret) = self.dispatch_call_site(
-                s.inst,
-                expr,
-                InstanceReq::new(method_tid, &arg_tys, Some(s.inst))
-                    .receiver(Some(Receiver::Class(cinst_id)))
-                    .at(byte_offset),
-                true,
-                false,
-            )?;
-            return Ok(ret);
-        }
-
-        let prop_ty = if let Some(cinst_id) =
-            self.resolve_class_inst(s.inst, stripped, byte_offset)?
-            && let Some(loc) = self.class_field_loc(cinst_id, name)
-        {
-            Some(self.read_loc(loc, s.inst))
-        } else {
-            builtins::property_type(self.ctx, self.decls, self.types, stripped, name)
-        };
-        if let Some(prop_ty) = prop_ty
-            && let Some(idents) = self.types.func_union_members(prop_ty)
-        {
-            if arg_tys.contains(&Ty::BOTTOM) {
-                return Ok(Ty::BOTTOM);
-            }
-            return self.eval_dispatch_call(
-                s,
-                expr,
-                prop_ty,
-                &idents,
-                Some(stripped),
-                &arg_tys,
-                byte_offset,
-            );
-        }
-        if let Some(prop_ty) = prop_ty {
-            let (stripped_prop, nullish) = self.types.strip_nullish(prop_ty);
-            if nullish.is_some()
-                && let TyKind::Func(ident) = self.types.kind(stripped_prop)
-            {
-                if arg_tys.contains(&Ty::BOTTOM) {
-                    return Ok(Ty::BOTTOM);
-                }
-                return self.eval_dispatch_call(
-                    s,
-                    expr,
-                    prop_ty,
-                    &[ident],
-                    Some(stripped),
-                    &arg_tys,
-                    byte_offset,
-                );
-            }
-        }
-        if let Some(prop_ty) = prop_ty
-            && let TyKind::Func(ident) = self.types.kind(prop_ty)
-        {
-            if arg_tys.contains(&Ty::BOTTOM) {
-                return Ok(Ty::BOTTOM);
-            }
-            let Some(method_view) = self.index.view(ident.template) else {
-                return Ok(Ty::OPEN);
-            };
-            self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
-            let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
-            let pass_env = self.is_escaping_env(ident.template, s.inst);
-            let (_, ret) = self.dispatch_call_site(
-                s.inst,
-                expr,
-                InstanceReq::new(ident.template, &arg_tys, Some(s.inst))
-                    .receiver(recv)
-                    .owner(ident.capture_owner)
-                    .at(byte_offset),
-                false,
-                pass_env,
-            )?;
-            return Ok(ret);
-        }
-
-        if let Some(rule) =
-            builtins::lookup_method_result(self.ctx, self.types, stripped, name, false)
-        {
-            let resolved_recv = if !matches!(
-                rule,
-                MethodResult::Number
-                    | MethodResult::Boolean
-                    | MethodResult::String
-                    | MethodResult::Void
-            ) {
-                self.resolve_cell_read(s.inst, obj_ty)
-            } else {
-                obj_ty
-            };
-            if resolved_recv == Ty::BOTTOM {
-                return Ok(Ty::BOTTOM);
-            }
-            return Ok(builtins::apply_method_result(
-                self.ctx,
-                self.types,
-                rule,
-                MethodResultArgs {
-                    receiver: resolved_recv,
-                    arg0: arg_tys.first().copied(),
-                    arg0_expr: args.first(),
-                    callback_result: None,
-                    sparse_arrays: self.facts.sparse_arrays,
-                },
-            ));
-        }
-        let is_known_js_cb_method = matches!(
-            name,
-            "map"
-                | "flatMap"
-                | "filter"
-                | "forEach"
-                | "reduce"
-                | "reduceRight"
-                | "some"
-                | "every"
-                | "find"
-                | "findIndex"
-                | "sort"
-                | "toSorted"
-                | "replace"
-                | "replaceAll"
-                | "then"
-                | "catch"
-                | "finally"
-                | "groupBy"
-        );
-        let is_collection = matches!(
-            self.types.kind(stripped),
-            TyKind::Array(_) | TyKind::Cell { .. }
-        ) || matches!(self.types.kind(stripped), TyKind::Generic { base, .. }
-            if matches!(base.hir(self.ctx), HirType::Named(n) if matches!(n.as_str(), "Map" | "Set" | "ReadonlyMap" | "ReadonlySet")));
-        let skip_host_cb = is_collection || (self.types.is_open(stripped) && is_known_js_cb_method);
-        if hir_compat::has_source_offset(byte_offset)
-            && !skip_host_cb
-            && arg_tys.iter().any(|&a| self.types.has_func(a))
-        {
-            return Err(self.metadata.locations.annotate_call(
-                Diagnostic::unsupported(format!(
-                    "passing a callback to runtime '{name}' requires the runtime to call a guest function"
-                )),
-                byte_offset,
-            ));
-        }
-        Ok(Ty::OPEN)
-    }
-
     #[allow(clippy::too_many_arguments)]
-    fn eval_dispatch_call(
+    pub(super) fn eval_dispatch_call(
         &mut self,
         s: &mut EvalState<'h>,
         expr: &'h Expr,
@@ -918,9 +564,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut arms = Vec::with_capacity(idents.len());
         let mut ret = Ty::BOTTOM;
         for &ident in idents {
-            let Some(view) = self.index.view(ident.template) else {
-                return Ok(Ty::OPEN);
-            };
+            let view = self.index.view(ident.template);
             let is_promise_handle =
                 self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
             self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
@@ -937,12 +581,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .at(byte_offset),
             )?;
             self.propagate_writes(s.inst, target);
-            let return_loc = self
-                .instances
-                .get(target)
-                .ok_or_else(|| Diagnostic::internal("missing dispatch call target instance"))?
-                .return_loc;
-            let r = self.read_loc(return_loc, s.inst);
+            let r = self.read_loc(self.instances[target].return_loc, s.inst);
             ret = self.types.join(ret, r);
             arms.push((ident, target));
         }
@@ -951,7 +590,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let needs_recv = recv_ty.is_some()
             && arms
                 .iter()
-                .any(|&(ident, _)| self.index.view(ident.template).is_some_and(|v| v.uses_this));
+                .any(|&(ident, _)| self.index.view(ident.template).uses_this);
         let helper = self.intern_helper(
             HelperSpec::Dispatcher {
                 callee_ty,
@@ -1002,9 +641,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 continue;
             };
-            let Some(cb_view) = self.index.view(ident.template) else {
-                continue;
-            };
+            let cb_view = self.index.view(ident.template);
             let mismatch = || {
                 self.metadata.locations.annotate_call(
                     diag!(
@@ -1115,9 +752,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         template: TemplateId,
         context_name: Option<&str>,
     ) -> Result<()> {
-        let Some(view) = self.index.view(template) else {
-            return Ok(());
-        };
+        let view = self.index.view(template);
         let owner_name = match context_name {
             Some(name) if view.name.is_empty() => hir_compat::display_name(name).to_owned(),
             _ => view.display_name(),

@@ -69,11 +69,7 @@ pub(crate) fn lookup_method_result(
     if property || matches!(types.kind(receiver), TyKind::ClassInst(_)) {
         return None;
     }
-    Method::inferred(
-        &types.materialize_hir(ctx, receiver, &|_| None),
-        name,
-        false,
-    )
+    Method::inferred(&types.materialize_hir(ctx, receiver), name, false)
 }
 
 pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> Option<Ty> {
@@ -81,10 +77,7 @@ pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> 
     match types.kind(ty) {
         TyKind::String => Some(Ty::STRING),
         TyKind::Array(elem) => Some(elem),
-        TyKind::Tuple(span) => {
-            let items = types.ty_slice(span).to_vec();
-            Some(types.union(&items))
-        }
+        TyKind::Tuple(span) => Some(types.union_span(span)),
         TyKind::Union(span) => {
             let mut elems = Vec::new();
             for m in types.ty_slice(span).to_vec() {
@@ -101,12 +94,12 @@ pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> 
             let HirType::Named(name) = base.hir(ctx) else {
                 return None;
             };
-            match (name.as_str(), types.ty_slice(args).to_vec().as_slice()) {
-                ("Set" | "ReadonlySet" | "SetValues" | "Array" | "ReadonlyArray", [e]) => Some(*e),
-                ("MapKeys", [k, _]) => Some(*k),
-                ("MapValues", [_, v]) => Some(*v),
-                ("Map" | "ReadonlyMap" | "MapEntries", [k, v]) => Some(types.tuple(&[*k, *v])),
-                ("SetEntries", [e]) => Some(types.tuple(&[*e, *e])),
+            match (name.as_str(), types.ty_slice(args)) {
+                ("Set" | "ReadonlySet" | "SetValues" | "Array" | "ReadonlyArray", &[e]) => Some(e),
+                ("MapKeys", &[k, _]) => Some(k),
+                ("MapValues", &[_, v]) => Some(v),
+                ("Map" | "ReadonlyMap" | "MapEntries", &[k, v]) => Some(types.tuple(&[k, v])),
+                ("SetEntries", &[e]) => Some(types.tuple(&[e, e])),
                 _ => None,
             }
         }
@@ -134,17 +127,14 @@ pub(crate) fn iterator_view(
             let HirType::Named(name) = base.hir(ctx) else {
                 return None;
             };
-            let slice = types.ty_slice(args).to_vec();
-            let (view_name, kept): (&str, &[Ty]) = match (name.as_str(), slice.as_slice()) {
-                ("Map" | "ReadonlyMap", [_, _]) => (method.map_view().type_name(), &slice),
-                ("Set" | "ReadonlySet", [e, ..]) => {
-                    (method.set_view().type_name(), std::slice::from_ref(e))
-                }
+            let (view_name, kept_buf, kept_len) = match (name.as_str(), types.ty_slice(args)) {
+                ("Map" | "ReadonlyMap", &[k, v]) => (method.map_view().type_name(), [k, v], 2),
+                ("Set" | "ReadonlySet", &[e, ..]) => (method.set_view().type_name(), [e, e], 1),
                 _ => return None,
             };
             Some(types.generic(
                 shapes::TypeId::from_owned(ctx, HirType::Named(view_name.to_owned())),
-                kept,
+                &kept_buf[..kept_len],
             ))
         }
         _ => None,
@@ -557,9 +547,13 @@ pub(crate) fn property_type(
                     return Some(Ty::NUMBER);
                 }
                 if base_name == SETTLED && !decls.is_user_type(base_name) {
-                    return match (property, types.ty_slice(args).to_vec().as_slice()) {
+                    let arg0 = match types.ty_slice(args) {
+                        &[v] => Some(v),
+                        _ => None,
+                    };
+                    return match (property, arg0) {
                         ("status", _) => Some(Ty::STRING),
-                        ("value", [v]) => Some(types.with_absences(*v, Absence::Undefined)),
+                        ("value", Some(v)) => Some(types.with_absences(v, Absence::Undefined)),
                         ("reason", _) => {
                             let e = types.named(ctx, "Error");
                             Some(types.with_absences(e, Absence::Undefined))
@@ -594,7 +588,7 @@ pub(crate) fn property_type(
                     types
                         .ty_slice(a)
                         .iter()
-                        .map(|&t| types.materialize_hir(ctx, t, &|_| None))
+                        .map(|&t| types.materialize_hir(ctx, t))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -682,13 +676,9 @@ pub(crate) fn index_type(
                 Expr::Integer(n) => usize::try_from(*n).ok(),
                 _ => None,
             };
-            let slice = types.ty_slice(span);
             match pos {
-                Some(i) => Some(slice.get(i).copied().unwrap_or(Ty::VOID)),
-                None => {
-                    let items = slice.to_vec();
-                    Some(types.union(&items))
-                }
+                Some(i) => Some(types.ty_slice(span).get(i).copied().unwrap_or(Ty::VOID)),
+                None => Some(types.union_span(span)),
             }
         }
         TyKind::Leaf(id) => match id.hir(ctx) {
@@ -725,7 +715,7 @@ pub(crate) fn index_type(
             (!items.is_empty()).then(|| types.union(&items))
         }
         TyKind::Generic { .. } => iterated_element(ctx, types, stripped).or_else(|| {
-            let hir = types.materialize_hir(ctx, stripped, &|_| None);
+            let hir = types.materialize_hir(ctx, stripped);
             dict_value_ty(ctx, decls, types, &hir)
         }),
         _ => None,

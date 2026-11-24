@@ -5,7 +5,8 @@ use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub mod generics;
 mod globals;
-pub use globals::{captured, class_functions};
+pub use globals::captured;
+pub(crate) use globals::class_functions;
 mod records;
 pub use records::{Classes, RecordId};
 #[derive(Clone, Debug, PartialEq)]
@@ -76,7 +77,7 @@ impl TypeId {
             .unwrap_or_else(|| Self::insert_miss(ctx, interner, hash, ty.clone()))
     }
 
-    pub fn from_owned(ctx: &Context, ty: HirType) -> Self {
+    pub(crate) fn from_owned(ctx: &Context, ty: HirType) -> Self {
         let interner = Self::interner(ctx);
         let hash = hir_type_hash(&ty);
         if let Some(id) = Self::lookup(ctx, interner, hash, &ty) {
@@ -271,7 +272,7 @@ impl<'h> Declarations<'h> {
         self.integer_spec_by_name(name, &mut seen)
     }
 
-    pub fn integer_carrier(&self, name: &str) -> Option<HirType> {
+    pub(crate) fn integer_carrier(&self, name: &str) -> Option<HirType> {
         self.integer_spec(name)
             .map(|(width, _)| integer_hir_carrier(width))
     }
@@ -332,7 +333,7 @@ impl<'h> Declarations<'h> {
         }
     }
 
-    pub fn resolve_foreign_type(&self, type_name: &str) -> Option<&'h HirType> {
+    pub(crate) fn resolve_foreign_type(&self, type_name: &str) -> Option<&'h HirType> {
         match self.resolve_foreign(type_name)? {
             crate::hir::Foreign::Type(ty) => Some(ty),
             _ => None,
@@ -392,7 +393,7 @@ fn integer_hir_carrier(width: u32) -> HirType {
     }
 }
 
-pub trait HirTypeExt {
+pub(crate) trait HirTypeExt {
     fn any(&self, f: &mut impl FnMut(&HirType) -> bool) -> bool;
     fn transform(&mut self, f: &mut impl FnMut(&mut HirType));
 }

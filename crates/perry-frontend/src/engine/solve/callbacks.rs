@@ -225,13 +225,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Expr::LocalGet(id) => self
                     .index
                     .local_idx(*id)
-                    .and_then(|li| {
-                        self.index
-                            .local_regex_pattern
-                            .get(li.index())
-                            .copied()
-                            .flatten()
-                    })
+                    .and_then(|li| self.index.local_regex_pattern(li))
                     .map(crate::methods::regex_captures),
                 Expr::String(_) => Some((0, false)),
                 _ => None,
@@ -357,9 +351,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let mut cb_ret = Ty::BOTTOM;
                 let mut widest_inputs: &[Ty] = &[];
                 for ident in idents {
-                    let Some(cb_view) = self.index.view(ident.template) else {
-                        return Ok(None);
-                    };
+                    let cb_view = self.index.view(ident.template);
                     let arm_inputs = cb_view.callback_inputs(inputs);
                     if arm_inputs.len() > widest_inputs.len() {
                         widest_inputs = arm_inputs;
@@ -368,10 +360,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                         InstanceReq::new(ident.template, arm_inputs, Some(s.inst))
                             .owner(ident.capture_owner),
                     )?;
-                    if let Some(ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) {
-                        let r = self.read_loc(ret_loc, s.inst);
-                        cb_ret = self.types.join(cb_ret, r);
-                    }
+                    let r = self.read_loc(self.instances[cb_inst].return_loc, s.inst);
+                    cb_ret = self.types.join(cb_ret, r);
                     arms.push((ident, cb_inst));
                 }
                 let arms_span = self.intern_dispatch_arms(&arms);
@@ -400,9 +390,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(None);
             };
             if self.is_escaping_env(ident.template, s.inst) {
-                let Some(cb_view) = self.index.view(ident.template) else {
-                    return Ok(None);
-                };
+                let cb_view = self.index.view(ident.template);
                 let inputs = cb_view.callback_inputs(inputs);
                 let cb_inst = self.request_instance(
                     InstanceReq::new(ident.template, inputs, Some(s.inst))
@@ -417,18 +405,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                         input_tys,
                     },
                 );
-                let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
-                    return Ok(None);
-                };
-                return Ok(Some(self.read_loc(cb_ret_loc, s.inst)));
+                return Ok(Some(
+                    self.read_loc(self.instances[cb_inst].return_loc, s.inst),
+                ));
             }
             ident
         };
-        let Some(cb_view) = self.index.view(ident.template) else {
-            return Ok(None);
-        };
-        let caller_tid = self.instances.get(s.inst).map(|i| i.template);
-        let caller_is_env = caller_tid.is_some_and(|t| self.is_escaping_env(t, s.inst));
+        let cb_view = self.index.view(ident.template);
+        let caller_tid = self.instances[s.inst].template;
+        let caller_is_env = self.is_escaping_env(caller_tid, s.inst);
         let keep_inline = matches!(callback, Expr::Closure { .. })
             && (matches!(expr, Expr::JsonStringifyFull(..))
                 || cb_view.captures_this

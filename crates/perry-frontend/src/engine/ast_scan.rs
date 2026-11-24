@@ -2,7 +2,7 @@
 use crate::hir_compat::{self, Locations};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
@@ -14,7 +14,6 @@ pub(crate) struct SourceFacts {
     pub(crate) for_head_let_starts: Vec<u32>,
     pub(crate) param_annotated_starts: Vec<u32>,
     pub(crate) expression_spans: HashSet<Span>,
-    pub(crate) param_value_uses: Vec<(u32, Span)>,
 }
 
 impl SourceFacts {
@@ -29,13 +28,6 @@ impl SourceFacts {
     }
     pub(crate) fn is_param_annotated(&self, start: u32) -> bool {
         self.param_annotated_starts.binary_search(&start).is_ok()
-    }
-    pub(crate) fn param_value_use(&self, start: u32) -> Option<Span> {
-        let idx = self
-            .param_value_uses
-            .binary_search_by_key(&start, |(s, _)| *s)
-            .ok()?;
-        self.param_value_uses.get(idx).map(|&(_, span)| span)
     }
 }
 
@@ -103,32 +95,19 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
     #[derive(Default)]
     struct AstScanner {
         facts: SourceFacts,
-        parameters: HashMap<ast::Id, u32>,
-        closures: HashMap<ast::Id, Span>,
+        closures: HashSet<ast::Id>,
         enclosing_depth: u32,
     }
 
     impl AstScanner {
         fn record_param(&mut self, pat: &ast::Pat) {
             record_pattern_annotations(pat, false, &mut self.facts.param_annotated_starts);
-            if let ast::Pat::Ident(binding) = pat {
-                self.parameters
-                    .insert(binding.id.to_id(), binding.id.span.lo.0);
-            }
         }
         fn is_closure_expr(&self, expr: &ast::Expr) -> bool {
             match expr {
-                ast::Expr::Ident(id) => self.closures.contains_key(&id.to_id()),
+                ast::Expr::Ident(id) => self.closures.contains(&id.to_id()),
                 ast::Expr::Paren(p) => self.is_closure_expr(&p.expr),
                 other => matches!(other, ast::Expr::Arrow(_) | ast::Expr::Fn(_)),
-            }
-        }
-        fn visit_callable_position(&mut self, expr: &ast::Expr) {
-            match expr {
-                ast::Expr::Arrow(_) | ast::Expr::Fn(_) => expr.visit_children_with(self),
-                ast::Expr::Paren(p) => self.visit_callable_position(&p.expr),
-                ast::Expr::Ident(_) => {}
-                _ => expr.visit_with(self),
             }
         }
     }
@@ -152,7 +131,7 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
         }
         fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
             if self.enclosing_depth > 0 {
-                self.closures.insert(decl.ident.to_id(), decl.ident.span);
+                self.closures.insert(decl.ident.to_id());
             }
             self.enclosing_depth += 1;
             decl.function.visit_with(self);
@@ -194,33 +173,15 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
                 });
                 decl.name.visit_with(self);
                 if let Some(init) = &decl.init {
-                    if is_const && let ast::Pat::Ident(b) = &decl.name {
-                        if self.is_closure_expr(init) {
-                            let origin = match init.as_ref() {
-                                ast::Expr::Ident(o) => {
-                                    self.closures.get(&o.to_id()).copied().unwrap_or(b.id.span)
-                                }
-                                _ => b.id.span,
-                            };
-                            self.closures.insert(b.id.to_id(), origin);
-                        }
-                        if let ast::Expr::Ident(src) = init.as_ref()
-                            && let Some(&origin) = self.parameters.get(&src.to_id())
-                        {
-                            self.parameters.insert(b.id.to_id(), origin);
-                        }
+                    if is_const
+                        && let ast::Pat::Ident(b) = &decl.name
+                        && self.is_closure_expr(init)
+                    {
+                        self.closures.insert(b.id.to_id());
                     }
-                    self.visit_callable_position(init);
+                    init.visit_with(self);
                 }
             }
-        }
-        fn visit_expr(&mut self, expr: &ast::Expr) {
-            if let ast::Expr::Ident(id) = expr
-                && let Some(&origin) = self.parameters.get(&id.to_id())
-            {
-                self.facts.param_value_uses.push((origin, id.span));
-            }
-            expr.visit_children_with(self);
         }
         fn visit_cond_expr(&mut self, cond: &ast::CondExpr) {
             self.facts.expression_spans.insert(cond.span);
@@ -264,11 +225,8 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
                 {
                     self.facts.expression_spans.insert(expr.span);
                 }
-                self.visit_callable_position(&expr.left);
-                self.visit_callable_position(&expr.right);
-            } else {
-                expr.visit_children_with(self);
             }
+            expr.visit_children_with(self);
         }
         fn visit_call_expr(&mut self, call: &ast::CallExpr) {
             if let ast::Callee::Expr(callee) = &call.callee {
@@ -286,13 +244,7 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
                     self.facts.expression_spans.insert(call.span);
                 }
             }
-            match &call.callee {
-                ast::Callee::Expr(e) => self.visit_callable_position(e),
-                callee => callee.visit_with(self),
-            }
-            for arg in &call.args {
-                self.visit_callable_position(&arg.expr);
-            }
+            call.visit_children_with(self);
         }
     }
 
@@ -306,11 +258,6 @@ pub(crate) fn scan_ast(module: &ast::Module) -> SourceFacts {
     scanner.facts.for_head_let_starts.dedup();
     scanner.facts.param_annotated_starts.sort_unstable();
     scanner.facts.param_annotated_starts.dedup();
-    scanner
-        .facts
-        .param_value_uses
-        .sort_unstable_by_key(|(s, _)| *s);
-    scanner.facts.param_value_uses.dedup_by_key(|(s, _)| *s);
     scanner.facts
 }
 

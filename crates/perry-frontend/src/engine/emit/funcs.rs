@@ -1,11 +1,11 @@
 //! Synthetic function-value records, dispatchers, wideners, comparers, and callback wrappers.
 use super::{Emitter, EnvField, RewriteCtx, synth_call, synth_function, synth_param};
 use crate::engine::bitset::BitSet;
-use crate::engine::boundary::TemplateKind;
+use crate::engine::boundary::{LocalFlags, TemplateKind};
 use crate::engine::solve::HelperSpec;
 use crate::engine::types::{
-    CaptureOwner, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind, TySpan, box_hir,
-    env_class_name, func_tag,
+    CaptureOwner, DispatchArmSpan, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind,
+    box_hir, env_class_name, func_tag,
 };
 use crate::hir_compat;
 use perry_hir::{
@@ -24,15 +24,18 @@ impl<'h, 'a> Emitter<'h, 'a> {
     pub(super) fn is_forward_boxed(&self, id: LocalId) -> bool {
         self.index.local_idx(id).is_some_and(|li| {
             self.solved.boxed_locals.contains(li.index())
-                && self.index.local_forward_captured.contains(li.index())
+                && self.index.locals[li]
+                    .flags
+                    .contains(LocalFlags::FORWARD_CAPTURED)
         })
     }
 
     pub(super) fn is_undef_boxed(&self, id: LocalId) -> bool {
         self.index.local_idx(id).is_some_and(|li| {
             self.solved.boxed_locals.contains(li.index())
-                && (self.index.local_forward_captured.contains(li.index())
-                    || self.index.local_deferred.contains(li.index()))
+                && self.index.locals[li]
+                    .flags
+                    .intersects(LocalFlags::UNDEF_BOXED)
         })
     }
 
@@ -54,15 +57,16 @@ impl<'h, 'a> Emitter<'h, 'a> {
         loop {
             match cur {
                 CaptureOwner::Instance(c) => {
-                    if let Some(inst) = self.solved.instances.get(c)
-                        && let Some(view) = self.index.view(inst.template)
-                        && let Some(locs) = self.solved.param_locs.get(inst.param_locs.range())
-                        && let Some(&loc) = view
-                            .params
-                            .iter()
-                            .zip(locs)
-                            .find_map(|(p, loc)| (p.id == id).then_some(loc))
-                        && let Some(&ty) = self.solved.locations.get(loc)
+                    let inst = &self.solved.instances[c];
+                    let locs = &self.solved.param_locs[inst.param_locs];
+                    if let Some(&loc) = self
+                        .index
+                        .view(inst.template)
+                        .params
+                        .iter()
+                        .zip(locs)
+                        .find_map(|(p, loc)| (p.id == id).then_some(loc))
+                        && let ty = self.solved.locations[loc]
                         && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
                     {
                         return Some(ty);
@@ -72,20 +76,12 @@ impl<'h, 'a> Emitter<'h, 'a> {
                     {
                         return Some(ty);
                     }
-                    cur = self
-                        .solved
-                        .instances
-                        .get(c)
-                        .map_or(CaptureOwner::None, |i| i.capture_owner);
+                    cur = inst.capture_owner;
                 }
                 CaptureOwner::Template(_) => {
                     let lidx = self.index.local_idx(id)?;
-                    return self
-                        .solved
-                        .collapsed_local_tys
-                        .get(lidx.index())
-                        .copied()
-                        .flatten()
+                    return self.solved.collapsed_local_locs[lidx]
+                        .map(|loc| self.solved.locations[loc])
                         .filter(|&ty| !matches!(ty, Ty::BOTTOM | Ty::OPEN));
                 }
                 CaptureOwner::None => return None,
@@ -128,12 +124,10 @@ impl<'h, 'a> Emitter<'h, 'a> {
         if !self.emitted_env_classes.insert(ident) {
             return Ok(name);
         }
-        if self.index.view(ident.template).is_some_and(|v| {
-            matches!(
-                v.kind,
-                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-            )
-        }) {
+        if matches!(
+            self.index.view(ident.template).kind,
+            TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+        ) {
             return self.emit_promise_env_class(ident, name);
         }
         let layout = self.env_layout(ident)?;
@@ -254,9 +248,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 self.collect_env_idents_in(i, seen, out, needs_timer)
             }
             TyKind::Cell { loc, .. } => {
-                if let Some(&elem) = self.solved.locations.get(loc) {
-                    self.collect_env_idents_in(elem, seen, out, needs_timer);
-                }
+                self.collect_env_idents_in(self.solved.locations[loc], seen, out, needs_timer);
             }
             TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
                 for &m in self.types.ty_slice(s) {
@@ -292,7 +284,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             &self.solved.dict_reads,
             &self.index.capture_free_templates,
             &self.solved.escaping_env_templates,
-            &|cid| self.class_inst_name(cid),
+            &|cid| self.solved.class_insts[cid].emitted_name.as_str(),
         ))
     }
 
@@ -335,7 +327,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 .solved
                 .helpers
                 .iter_enumerated()
-                .find_map(|(id, &spec)| (spec == target_spec).then_some(id))
+                .find_map(|(id, entry)| (entry.spec == target_spec).then_some(id))
                 .ok_or_else(|| {
                     Diagnostic::internal("missing interned widener for collapsed capture")
                 })?;
@@ -343,16 +335,6 @@ impl<'h, 'a> Emitter<'h, 'a> {
             return Ok(synth_call(fid, vec![arg], 0, 0));
         }
         Ok(arg)
-    }
-
-    pub(super) fn dispatch_arms_slice(
-        &self,
-        span: TySpan,
-    ) -> Result<&'a [(FuncIdentity, InstanceId)]> {
-        self.solved
-            .dispatch_arms
-            .get(span.range())
-            .ok_or_else(|| Diagnostic::internal("dispatch arm span out of range"))
     }
 
     pub(super) fn is_zero_sized_func(&self, ty: Ty) -> bool {
@@ -417,12 +399,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
     }
 
     pub(super) fn arm_return_hir(&mut self, inst_id: InstanceId) -> Result<HirType> {
-        let inst = self.instance(inst_id, "missing dispatch arm instance")?;
-        let ret = *self
-            .solved
-            .locations
-            .get(inst.return_loc)
-            .ok_or_else(|| Diagnostic::internal("missing dispatch arm return location"))?;
+        let inst = &self.solved.instances[inst_id];
+        let ret = self.solved.locations[inst.return_loc];
         if matches!(ret, Ty::BOTTOM | Ty::VOID | Ty::NEVER) || self.is_zero_sized_func(ret) {
             Ok(HirType::Void)
         } else {
@@ -475,66 +453,67 @@ impl<'h, 'a> Emitter<'h, 'a> {
         })
     }
 
-    pub(super) fn emit_helper(&mut self, id: HelperId) -> Result<FuncId> {
-        if let Some(Some(fid)) = self.helper_fids.get(id.index()).copied() {
-            return Ok(fid);
-        }
-        let spec = *self
-            .solved
-            .helpers
-            .get(id)
-            .ok_or_else(|| Diagnostic::internal("helper id out of range"))?;
-        let byte_offset = self.solved.helper_byte_offsets[id];
-        let fid = self.fresh_func_id()?;
-        if let Some(slot) = self.helper_fids.get_mut(id.index()) {
-            *slot = Some(fid);
-        }
-        let func = match spec {
-            HelperSpec::ThrowTypeError => self.build_throw_type_error(fid),
-            HelperSpec::TypeOfFn(op_ty) => self.build_typeof_fn(fid, op_ty)?,
-            HelperSpec::Dispatcher {
-                callee_ty,
-                arms,
-                arg_tys,
-                recv_ty,
-            } => self.build_dispatcher(fid, callee_ty, arms, arg_tys, recv_ty, byte_offset)?,
-            HelperSpec::Widener { from, to } => self.build_widener(fid, from, to)?,
-            HelperSpec::Comparer { left_ty, right_ty } => {
-                self.build_comparer(fid, left_ty, right_ty)?
-            }
-            HelperSpec::PromiseReaction {
-                kind,
-                promise_ty,
-                inner_ty,
-                on_fulfilled,
-                on_rejected,
-                ret_ty,
-            } => self.build_promise_reaction(
-                fid,
-                kind,
-                promise_ty,
-                inner_ty,
-                on_fulfilled,
-                on_rejected,
-                ret_ty,
-            )?,
-            HelperSpec::TimerRunner {
-                repeating,
-                is_immediate,
-                cb_call,
-                cb_ty,
-                extra_arg_tys,
-            } => self.build_timer_runner(
-                fid,
-                repeating,
-                is_immediate,
-                cb_call,
-                cb_ty,
-                extra_arg_tys,
-            )?,
+    pub(super) fn emit_helper_fn(&mut self, id: HelperId) -> Result<&Function> {
+        let slot = if let Some(slot) = self.helper_slots[id] {
+            slot
+        } else {
+            let entry = self.solved.helpers[id];
+            let (spec, byte_offset) = (entry.spec, entry.byte_offset);
+            let fid = self.fresh_func_id()?;
+            let func = match spec {
+                HelperSpec::ThrowTypeError => self.build_throw_type_error(fid),
+                HelperSpec::TypeOfFn(op_ty) => self.build_typeof_fn(fid, op_ty)?,
+                HelperSpec::Dispatcher {
+                    callee_ty,
+                    arms,
+                    arg_tys,
+                    recv_ty,
+                } => self.build_dispatcher(fid, callee_ty, arms, arg_tys, recv_ty, byte_offset)?,
+                HelperSpec::Widener { from, to } => self.build_widener(fid, from, to)?,
+                HelperSpec::Comparer { left_ty, right_ty } => {
+                    self.build_comparer(fid, left_ty, right_ty)?
+                }
+                HelperSpec::PromiseReaction {
+                    kind,
+                    promise_ty,
+                    inner_ty,
+                    on_fulfilled,
+                    on_rejected,
+                    ret_ty,
+                } => self.build_promise_reaction(
+                    fid,
+                    kind,
+                    promise_ty,
+                    inner_ty,
+                    on_fulfilled,
+                    on_rejected,
+                    ret_ty,
+                )?,
+                HelperSpec::TimerRunner {
+                    repeating,
+                    is_immediate,
+                    cb_call,
+                    cb_ty,
+                    extra_arg_tys,
+                } => self.build_timer_runner(
+                    fid,
+                    repeating,
+                    is_immediate,
+                    cb_call,
+                    cb_ty,
+                    extra_arg_tys,
+                )?,
+            };
+            let slot = self.synth_functions.len();
+            self.synth_functions.push(func);
+            self.helper_slots[id] = Some(slot);
+            slot
         };
-        self.synth_functions.push(func);
-        Ok(fid)
+        Ok(&self.synth_functions[slot])
+    }
+
+    pub(super) fn emit_helper(&mut self, id: HelperId) -> Result<FuncId> {
+        Ok(self.emit_helper_fn(id)?.id)
     }
 
     fn build_throw_type_error(&self, fid: FuncId) -> Function {
@@ -585,12 +564,12 @@ impl<'h, 'a> Emitter<'h, 'a> {
         &mut self,
         fid: FuncId,
         callee_ty: Ty,
-        arms_span: TySpan,
+        arms_span: DispatchArmSpan,
         arg_tys: Ty,
         eff_recv: Option<Ty>,
         call_byte_offset: u32,
     ) -> Result<Function> {
-        let arms = self.dispatch_arms_slice(arms_span)?;
+        let arms = &self.solved.dispatch_arms[arms_span];
         let fn_pid = self.fresh_synthetic_local()?;
         let mut params = vec![synth_param(
             fn_pid,
@@ -616,7 +595,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         let mut unique_rets: Vec<HirType> = Vec::new();
         let mut any_async = false;
         for &(ident, target_inst) in arms {
-            if self.index.view(ident.template).is_some_and(|v| v.is_async) {
+            if self.index.view(ident.template).is_async {
                 any_async = true;
             }
             let r = self.arm_return_hir(target_inst)?;
@@ -651,13 +630,9 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
         let mut cases = Vec::with_capacity(arms.len());
         for &(ident, target_inst) in arms {
-            let target_fid = self
-                .instance(target_inst, "missing dispatch arm instance")?
-                .emitted_func_id;
-            let view = self
-                .index
-                .view(ident.template)
-                .ok_or_else(|| Diagnostic::internal("missing dispatch arm template"))?;
+            let target = &self.solved.instances[target_inst];
+            let target_fid = target.emitted_func_id;
+            let view = self.index.view(ident.template);
             let mut call_args = Vec::with_capacity(arg_pids.len() + 2);
             if self.is_env_template(ident.template) {
                 call_args.push(Self::prop_get(Expr::LocalGet(fn_pid), "val"));
@@ -674,10 +649,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             let has_rest = view.params.iter().any(|p| p.is_rest);
             let max_args = if is_promise_handle {
                 self.types
-                    .tuple_slice(
-                        self.instance(target_inst, "missing dispatch arm instance")?
-                            .args,
-                    )
+                    .tuple_slice(target.args)
                     .len()
                     .min(arg_pids.len())
             } else if has_rest {

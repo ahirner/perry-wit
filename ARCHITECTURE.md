@@ -16,8 +16,8 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
 | 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
-| 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, types WIT imports under their SDK declaration names, resolves types and specializes function instances. Preserves inferred binding origins for contextual completion. |
-| 3. Elaboration | HIR to MIR | Completes types from context, fixes eager evaluation order and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention rather than Wasm stack unwinding. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
+| 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, binds WIT export witnesses and exported resource classes to source declarations, solves types in a data-oriented fixed-point engine over dense indices, and emits monomorphic HIR including closure environments, boxed mutable captures, tagged function dispatchers, and promise/timer helpers. |
+| 3. Elaboration | HIR to MIR | Consumes solved frontend types, fixes eager evaluation order, and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
 | 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
 | 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, emits Canonical ABI marshalling, and links referenced runtime and standard-library functions. |
@@ -30,7 +30,7 @@ Numeric refinements select `i32`, `i64`, or `f64` representations, specialize sy
 Closed non-escaping records decompose into scalar SSA values, read-only record parameters of internal synchronous functions promote to one scalar argument per field read, and `JSON.parse` / `JSON.stringify` on statically known shapes lower to specialized field decoders and schema-normalizing deep copies.
 Repeated string appends reuse spare capacity in place when ownership is unique, and single characters read by indexing stay Unicode scalars through comparisons and appends.
 
-During code generation, optional values avoid boxing by reserving sentinel encodings inside the value's own representation. `undefined`, `null` and an omitted property are the signaling-NaN payloads `0x7ff0000000000001` to `0x7ff0000000000003` in an `f64`, the addresses `0` to `2` for heap references, and `2` to `4` for booleans. WebAssembly arithmetic only produces quiet NaNs, so a computed number never matches a sentinel.
+During code generation, optional values reserve sentinel encodings inside the value's own representation. `undefined`, `null` and an omitted property are the signaling-NaN payloads `0x7ff0000000000001` to `0x7ff0000000000003` in an `f64`, the addresses `0` to `2` for heap references, and `2` to `4` for booleans. WebAssembly arithmetic produces quiet NaNs exclusively, keeping every computed number disjoint from these sentinels.
 Constants rematerialize at use sites, single-use expressions in the same basic block stay on the WebAssembly operand stack when effect and trap ordering permits, and remaining values share WebAssembly locals across non-overlapping live ranges.
 
 ## Workspace
@@ -40,8 +40,8 @@ The compiler workspace separates these responsibilities:
 | Crate | Responsibility |
 | --- | --- |
 | `perry-contract` | Traverses resolved WIT contracts and defines source naming conventions. |
-| `perry-frontend` | Loads source modules, reads Perry HIR, applies compatibility rewrites, resolves types, specializes instances and generates the TypeScript view of WIT. |
-| `perry-lower` | Elaborates the frontend program into eager MIR, completes types from context and chooses representations. |
+| `perry-frontend` | Loads source modules, reads Perry HIR, binds WIT export witnesses and resource classes, runs the dense fixed-point inference and specialization engine, and generates the TypeScript view of WIT. |
+| `perry-lower` | Elaborates solved frontend HIR into eager MIR and selects MIR representations. |
 | `perry-mir` | Defines typed executable IR and its analyses. |
 | `perry-codegen` | Lowers MIR to Wasm and implements Canonical ABI operations. |
 | `perry-wit-diagnostics` | Holds source spans and portable diagnostics. |
@@ -49,7 +49,7 @@ The compiler workspace separates these responsibilities:
 | `perry-rt-build` | Builds the runtime workspace's artifacts for the compiler build script. |
 | `perry-wit` | Loads WIT, binds exports, links runtime artifacts and encodes components. |
 
-The frontend returns a read-only program and metadata. Record identity and function instance specialization belong to this stage. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the compiler stages below it.
+The frontend returns a read-only monomorphic program and metadata. Type inference, record identity, closure lowering, and function specialization belong to the frontend. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the stages below it.
 
 ## Component target
 
@@ -72,11 +72,14 @@ The linker includes reachable helpers and resolves synchronous services against
 the selected world's interface versions. Native integration tests exercise P2
 exports with Component Model async disabled.
 
-## Aggregate inference
+## Type inference
 
-The frontend infers the contents of empty arrays and objects from the writes it can see, including writes through local aliases. Numeric indices make an array, and string keys or property names make a dictionary. An array that stores several types gets a value union, while a dictionary needs a single value type.
+The frontend indexes templates, locals, storage cells, and call sites into dense tables and iterates a monotone worklist solver to fixed point.
+Empty arrays and objects become storage cells whose element or value types are inferred from writes across branches, loops, local aliases, and helper returns. Numeric indices infer an array, and string keys or property names infer a dictionary. An array storing several types widens to a value union, while a dictionary requires a single value type.
 
-A dictionary is an array of key-value entries, so the MIR heap analysis treats its values like array elements. That analysis also tracks which parsed JSON records carry undeclared fields, and storing such a record in a dictionary keeps them.
+Escaping function values are represented by template-and-capture identities. Capture-free functions lower to zero-sized identities or tagged function unions with synthesized dispatchers, while escaping closures allocate environment classes and box mutable captures shared across calls.
+
+A dictionary is an array of key-value entries, so the MIR heap analysis treats its values like array elements. That analysis also tracks which parsed JSON records carry undeclared fields, preserving them when stored in a dictionary.
 
 A value union holds a number, string, boolean or one plain record shape, with `number | string` as the common case. Each value stores a tag, an eight-byte payload and a traced reference, and operators, property reads and `typeof` checks branch on the tag. Mixed arrays represent every element with this tagged layout.
 
@@ -85,25 +88,26 @@ A value union holds a number, string, boolean or one plain record shape, with `n
 A component has one linear memory, and the compiler picks its heap strategy per module from the effect summaries of `ProgramFacts`.
 `perry-wit --explain-tiers` prints the choice:
 
-- **Task regions** when every reachable function allocates a bounded amount, cannot suspend or re-enter, uses no host resources, and the module has no top-level state. Each export call bump-allocates in chunks that grow from 4 KiB to 64 KiB, with a dedicated chunk per larger object, and frees them in bulk when the call ends. A synchronous export frees its region in `cabi_post_<export>`, after the host has lifted the results, so arguments and results go with the region.
-- **Precise collection** otherwise. Objects up to 512 bytes allocate from non-moving 1 KiB pages across 11 size classes (powers of two and three-quarter midpoints) with mark bitmaps and lazy sweep. A larger object gets a dedicated page rounded up to a 1 KiB multiple, allocated from `talc` and marked and swept like the rest. Each record type carries a static pointer-offset descriptor so byte buffers and scalar payloads are never scanned for pointers. Compiled safe points clear dead reference slots in suspended async frames, publish exact live roots, and collect mid-call as well as when the last active task ends.
+- **Task regions** when every reachable function is synchronous, allocates a bounded amount, uses purely guest values, and the module has no top-level state. Each export call bump-allocates in chunks that grow from 4 KiB to 64 KiB, with a dedicated chunk per larger object, and frees them in bulk when the call ends. A synchronous export frees its region in `cabi_post_<export>`, after the host has lifted the results, so arguments and results go with the region.
+- **Precise collection** otherwise. Objects up to 512 bytes allocate from non-moving 1 KiB pages across 11 size classes (powers of two and three-quarter midpoints) with mark bitmaps and lazy sweep. A larger object gets a dedicated page rounded up to a 1 KiB multiple, allocated from `talc` and marked and swept like the rest. Each record type carries a static pointer-offset descriptor so tracing skips byte buffers and scalar payloads. Compiled safe points clear dead reference slots in suspended async frames, publish exact live roots, and collect mid-call as well as when the last active task ends.
 
 Non-escaping scalar records that still require an address (such as arguments passed to a non-retaining callee) pack into a single per-function activation frame (up to 448 bytes), reusing the same slots across loop iterations and freeing the frame on return.
 For streams, backward liveness analysis detects when `reader.read()` or `writer.write()` results die before the next operation on the same stream, leasing and reusing a single promise, `{ done, value }` record, and chunk buffer in constant memory.
 
-Strings are stored as validated UTF-8 byte sequences with cached Unicode scalar counts (precomputed in the data section for static literals) so character indexing avoids re-scanning ASCII strings.
+Strings are stored as validated UTF-8 byte sequences with cached Unicode scalar counts (precomputed in the data section for static literals) so character indexing reads ASCII strings directly.
 Canonical ABI return areas are zero-initialized and rooted before the host populates them, and export adapters release canonical scratch storage only after `task.return` completes or all pending host operations acknowledge cancellation.
 
 Static data starts at address `16`, above the reference sentinels, followed by relocated library data and the shared scratch stack. The `talc` allocator claims the remaining bytes of the initial 64 KiB page before growing memory, keeping small components within a single page.
 
 ## Async
 
-Codegen splits each `async` function into a ramp function and a resume-state step function. Backward liveness analysis spills only values whose live ranges cross an `await` into the heap-allocated coroutine frame. Awaiting an already-settled promise continues inline without suspending to the host.
+Codegen splits each `async` function into a ramp function and a resume-state step function. Backward liveness analysis spills only values whose live ranges cross an `await` into the heap-allocated coroutine frame. Awaiting an already-settled promise continues inline.
 
-Each pending call has a task record holding its settlement state, outcome, and an intrusive observer list whose nodes live directly inside suspended coroutine frames or combinator records. A settled outcome is retained for repeated observation [[4]](#ref-4), §3, so later observers borrow it without copying its object graph.
+Each pending promise holds a task record with its settlement state, outcome, and an intrusive observer list whose nodes live directly inside suspended coroutine frames or combinator records. A settled outcome is retained for repeated observation [[4]](#ref-4), §3, so later observers borrow it directly.
+Guest-settled promises (`new Promise`) allocate pending task records settled through synthesized `resolve` and `reject` handles. `.then`, `.catch`, and `.finally` register reaction tasks on the input promise, and timers (`setTimeout`, `setInterval`, `setImmediate`) drive background tasks over WASI monotonic clocks.
 Observers awaiting the same native operation share a single WASI 0.3 waitable handle, whose callback resumes them in registration order.
 `Promise.all`, `allSettled`, and `race` register as observers of their inputs and count settlements, advancing arbitrarily deep dependency chains through host events with bounded guest stack depth.
-Non-winning branches in `Promise.race` continue as background tasks, and the export adapter traps if unresolved background work remains when the top-level export finishes.
+Commands (`wasi:cli/run`) drain pending host-backed work such as active timers and async I/O before exiting, whereas library exports cancel lingering background work and trap when detached operations remain at return.
 
 Readable stream readers decouple public read promises from native transfer completion: releasing a reader lock rejects pending reads while preserving buffered chunks for subsequent readers, explicit cancellation retains the native transfer owner and its pinned buffers until the host acknowledges cancellation, and `for await` loops cancel and unlock the stream on early exit while giving loop exceptions precedence over cancellation errors.
 
@@ -111,9 +115,9 @@ Readable stream readers decouple public read promises from native transfer compl
 
 `runtime/` is a separate Cargo workspace containing the freestanding `#![no_std]` runtime and standard libraries. `perry-abi` supplies layouts, pure algorithms and the Wasm panic handler. `perry-rt-sys` supplies imports, guest-memory access and native stand-ins. `perry-runtime` owns allocation and instance state.
 
-Standard-library functions implement UTF-8 validation, Unicode normalization, regex bytecode execution, JSON parsing, number and `Decimal` conversion, URL and HTTP header parsing, and calendar math. Each artifact package declares its builds in Cargo metadata. The host crate `perry-rt-build` reads those declarations, builds `wasm32-unknown-unknown` modules and generates the JSON WAT codecs. The compiler build script embeds the resulting artifacts and the pinned WASI WIT packages, so compiling TypeScript requires no Rust or LLVM toolchain. `PERRY_PREBUILT_RUNTIME_DIR` selects a directory of prebuilt runtime modules.
+Standard-library functions implement UTF-8 validation, Unicode normalization, regex bytecode execution, JSON parsing, number and `Decimal` conversion, URL and HTTP header parsing, and calendar math. Each artifact package declares its builds in Cargo metadata. The host crate `perry-rt-build` reads those declarations, builds `wasm32-unknown-unknown` modules and generates the JSON WAT codecs. The compiler build script embeds the resulting artifacts and the pinned WASI WIT packages, making compilation self-contained. `PERRY_PREBUILT_RUNTIME_DIR` selects a directory of prebuilt runtime modules.
 
-Runtime release builds optimize each artifact as one unit: optimization level 2, fat LTO, one codegen unit and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies; each artifact invocation supplies the shared-library linker arguments.
+Runtime release builds optimize each artifact as one unit: optimization level 2, fat LTO, one codegen unit, and aborting panics. The compact profile uses size optimization for the bounded runtime. Target-specific Cargo configuration applies position-independent code to Wasm dependencies, and each artifact invocation supplies the shared-library linker arguments.
 
 During linking, a reachability pass from the runtime and standard-library calls emitted by MIR strips unused functions, globals and element tables, compacts type signatures, and relocates the survivors into direct local `call` instructions that share the guest module's linear memory, scratch stack and `talc` allocator.
 

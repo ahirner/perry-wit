@@ -19,6 +19,7 @@ pub(crate) struct Witness<T> {
     pub(crate) name: String,
     pub(crate) signature: Option<Signature>,
     pub(crate) target: Option<T>,
+    pub(crate) is_destructor: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -31,35 +32,39 @@ enum Declaration<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub(super) enum ResourceAction<F> {
+    New,
+    Call(F),
+    Static(F),
+    Drop(Option<F>),
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum SourceTarget {
     Function(Span),
     Resource {
         owner: usize,
-        member: Option<Span>,
-        kind: Operation,
+        action: ResourceAction<Span>,
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Operation {
-    New,
-    Call,
-    Static,
-    Drop,
+pub(super) struct ResourceClass<T> {
+    pub(super) class: T,
+    pub(super) resource: wit_parser::TypeId,
+    pub(super) create: String,
+    pub(super) representation: String,
+    pub(super) source_ty: HirType,
 }
 
-pub(crate) struct ResourceClass<T> {
-    pub(crate) class: T,
-    pub(crate) resource: wit_parser::TypeId,
-    pub(crate) create: String,
-    pub(crate) representation: String,
-    pub(crate) source_ty: HirType,
+pub(super) struct ClassCall {
+    pub(super) owner: usize,
+    pub(super) action: ResourceAction<FuncId>,
 }
 
 pub(super) struct Roots {
     namespaces: Vec<Span>,
-    pub witnesses: Vec<Witness<SourceTarget>>,
-    pub classes: Vec<ResourceClass<Span>>,
+    pub(super) witnesses: Vec<Witness<SourceTarget>>,
+    classes: Vec<ResourceClass<Span>>,
 }
 
 impl Declaration<'_> {
@@ -199,6 +204,7 @@ pub(super) fn resolve<'a>(
                     name: name.clone(),
                     signature: None,
                     target: Some(SourceTarget::Function(span)),
+                    is_destructor: false,
                 });
             }
         }
@@ -228,6 +234,7 @@ pub(super) fn resolve<'a>(
         }
     }
     let mut disposals = Vec::new();
+    let mut classes: Vec<(ResourceClass<Span>, &'a ast::Class)> = Vec::new();
     for (k, item) in &world.exports {
         let wit_parser::WorldItem::Interface { id, .. } = item else {
             continue;
@@ -252,14 +259,17 @@ pub(super) fn resolve<'a>(
             let module = r.name_world_key(k);
             let source_ty = crate::wit::source_type(r, *resource)
                 .ok_or_else(|| Diagnostic::internal("unnamed exported resource"))?;
-            let owner = roots.classes.len();
-            roots.classes.push(ResourceClass {
-                resource: *resource,
-                class: class.span,
-                source_ty,
-                create: format!("{module}#new{}", to_pascal_case(name)),
-                representation: format!("{module}#{}Rep", to_camel_case(name)),
-            });
+            let owner = classes.len();
+            classes.push((
+                ResourceClass {
+                    resource: *resource,
+                    class: class.span,
+                    source_ty,
+                    create: format!("{module}#new{}", to_pascal_case(name)),
+                    representation: format!("{module}#{}Rep", to_camel_case(name)),
+                },
+                class,
+            ));
             let member = class.body.iter().find_map(|m| {
                 let ast::ClassMember::Method(m) = m else {
                     return None;
@@ -283,9 +293,9 @@ pub(super) fn resolve<'a>(
                 }),
                 target: Some(SourceTarget::Resource {
                     owner,
-                    member,
-                    kind: Operation::Drop,
+                    action: ResourceAction::Drop(member),
                 }),
+                is_destructor: true,
             });
         }
     }
@@ -305,42 +315,32 @@ pub(super) fn resolve<'a>(
         let mut target = None;
         let mut annotations = Vec::new();
         if let Some(resource) = f.kind.resource()
-            && let Some((owner, c)) = roots
-                .classes
+            && let Some((owner, (_, class))) = classes
                 .iter()
                 .enumerate()
-                .find(|(_, c)| c.resource == resource)
+                .find(|(_, (c, _))| c.resource == resource)
         {
-            let class = scope
-                .0
-                .values()
-                .find_map(|(_, c0)| match c0 {
-                    Declaration::Class(class) if class.span == c.class => Some(*class),
+            let find_method = |is_static: bool| {
+                let method_name = to_camel_case(f.item_name());
+                class.body.iter().find_map(|m| match m {
+                    ast::ClassMember::Method(m)
+                        if m.is_static == is_static
+                            && key(&m.key) == Some(method_name.as_str()) =>
+                    {
+                        Some(m.span)
+                    }
                     _ => None,
                 })
-                .ok_or_else(|| Diagnostic::internal("lost resource class declaration"))?;
-            let kind = match f.kind {
-                wit_parser::FunctionKind::Constructor(_) => Operation::New,
-                wit_parser::FunctionKind::Static(_) | wit_parser::FunctionKind::AsyncStatic(_) => {
-                    Operation::Static
-                }
-                _ => Operation::Call,
             };
-            let member = class.body.iter().find_map(|m| match m {
-                ast::ClassMember::Method(m)
-                    if m.is_static == (kind == Operation::Static)
-                        && key(&m.key) == Some(&to_camel_case(f.item_name())) =>
-                {
-                    Some(m.span)
+            let action = match f.kind {
+                wit_parser::FunctionKind::Constructor(_) => Some(ResourceAction::New),
+                wit_parser::FunctionKind::Static(_) | wit_parser::FunctionKind::AsyncStatic(_) => {
+                    find_method(true).map(ResourceAction::Static)
                 }
-                _ => None,
-            });
-            if kind == Operation::New || member.is_some() {
-                target = Some(SourceTarget::Resource {
-                    owner,
-                    member,
-                    kind,
-                });
+                _ => find_method(false).map(ResourceAction::Call),
+            };
+            if let Some(action) = action {
+                target = Some(SourceTarget::Resource { owner, action });
             }
         } else if let Some(decl) =
             object.and_then(|o| scope.member_declaration(o, &to_camel_case(&f.name)))
@@ -429,8 +429,10 @@ pub(super) fn resolve<'a>(
                 params: f.params.iter().map(|p| ty(p.ty)).collect::<Result<_>>()?,
                 result: f.result.map(ty).transpose()?.unwrap_or(HirType::Void),
             }),
+            is_destructor: false,
         });
     }
+    roots.classes = classes.into_iter().map(|(c, _)| c).collect();
     roots.witnesses.extend(disposals);
     Ok(roots)
 }
@@ -454,21 +456,8 @@ fn key(prop: &ast::PropName) -> Option<&str> {
     }
 }
 
-pub(crate) struct ClassCall {
-    pub(crate) owner: usize,
-    pub(crate) function: Option<FuncId>,
-    pub(crate) kind: Operation,
-}
-pub(crate) struct ClassRoots {
-    pub(crate) classes: Vec<ResourceClass<perry_hir::ir::ClassId>>,
-    pub(crate) calls: Vec<Option<ClassCall>>,
-}
-
 impl Roots {
-    pub(super) fn in_hir(
-        self,
-        module: &mut perry_hir::ir::Module,
-    ) -> Result<(Vec<Witness<FuncId>>, ClassRoots)> {
+    pub(super) fn in_hir(self, module: &mut perry_hir::ir::Module) -> Result<Vec<Witness<FuncId>>> {
         use perry_hir::ir::{Expr, Stmt};
         module.init.retain(|stmt| {
             let Stmt::Let {
@@ -508,8 +497,13 @@ impl Roots {
                     .iter()
                     .find_map(|(id, s)| (s.source_range() == range).then_some(*id))
                     .ok_or_else(|| Diagnostic::internal("resource class has no HIR declaration"))?;
+                let class_idx = module
+                    .classes
+                    .iter()
+                    .position(|cls| cls.id == id)
+                    .ok_or_else(|| Diagnostic::internal("lost resource class"))?;
                 Ok(ResourceClass {
-                    class: id,
+                    class: class_idx,
                     resource: c.resource,
                     create: c.create,
                     representation: c.representation,
@@ -517,8 +511,8 @@ impl Roots {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut calls = Vec::new();
-        let mut witnesses = Vec::new();
+        let mut calls = Vec::with_capacity(self.witnesses.len());
+        let mut witnesses = Vec::with_capacity(self.witnesses.len());
         for w in self.witnesses {
             let id = |span: Span| {
                 module
@@ -534,26 +528,37 @@ impl Roots {
             let (target, call) = match w.target {
                 None => (None, None),
                 Some(SourceTarget::Function(span)) => (Some(id(span)?), None),
-                Some(SourceTarget::Resource {
-                    owner,
-                    kind,
-                    member,
-                }) => (
-                    None,
-                    Some(ClassCall {
-                        owner,
-                        kind,
-                        function: member.map(id).transpose()?,
-                    }),
-                ),
+                Some(SourceTarget::Resource { owner, action }) => {
+                    let action = match action {
+                        ResourceAction::New => ResourceAction::New,
+                        ResourceAction::Call(span) => ResourceAction::Call(id(span)?),
+                        ResourceAction::Static(span) => ResourceAction::Static(id(span)?),
+                        ResourceAction::Drop(span) => {
+                            ResourceAction::Drop(span.map(id).transpose()?)
+                        }
+                    };
+                    (None, Some(ClassCall { owner, action }))
+                }
             };
             calls.push(call);
             witnesses.push(Witness {
                 name: w.name,
                 signature: w.signature,
                 target,
+                is_destructor: w.is_destructor,
             });
         }
-        Ok((witnesses, ClassRoots { classes, calls }))
+        if !classes.is_empty() {
+            let (local, function) = perry_hir::lexical_frames::max_ids(module);
+            super::resource_classes::bind(
+                module,
+                &classes,
+                &calls,
+                &mut witnesses,
+                local,
+                function,
+            )?;
+        }
+        Ok(witnesses)
     }
 }

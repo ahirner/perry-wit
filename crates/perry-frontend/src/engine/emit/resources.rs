@@ -169,10 +169,7 @@ impl<'h> Emitter<'h, '_> {
                 body,
                 false,
             ));
-            *self
-                .resource_functions
-                .get_mut(id)
-                .ok_or_else(|| Diagnostic::internal("missing resource function slot"))? = Some(fid);
+            self.resource_functions[id] = Some(fid);
             fid
         };
         Ok(synth_call(fid, inputs, start, end))
