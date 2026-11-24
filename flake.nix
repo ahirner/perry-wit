@@ -254,7 +254,7 @@
               ./js/site/package.json
             ];
           };
-          hash = "sha256-84TFVbtZO/cEeBxPKOGp+9NQcpwxijqk6pAnC60Wn4g=";
+          hash = "sha256-9Y3qAvlTkHiJ4kmhubIMiWUkH1ec9nqLXTto6Bd3WEw=";
         };
 
         # npm package as the tarball `npm pack` writes, with bindings generated from the compiler component

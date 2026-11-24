@@ -1,6 +1,6 @@
 {
   "name": "perry-wit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Compile TypeScript into WASI 0.3 WebAssembly components from Node.js or the browser",
   "keywords": [
     "typescript",
