@@ -12,6 +12,9 @@ use super::types::{
     CaptureOwner, CellKind, ClassInstId, FuncIdentity, InstanceId, TemplateId, Ty, TyKind,
     TypeTable, box_hir, func_tag,
 };
+use crate::hir_compat::resource_classes::{
+    external, local, synth_call, synth_function, synth_param,
+};
 use crate::hir_compat::{Locations, Metadata};
 use perry_hir::{
     ir::{
@@ -575,7 +578,7 @@ impl<'h> Emitter<'h, '_> {
                 .into_iter()
                 .map(|(cap_id, fname, _, boxed)| (cap_id, fname, boxed))
                 .collect();
-            params.push(crate::hir_compat::resource_classes::synth_param(
+            params.push(synth_param(
                 env_pid,
                 "__env".to_owned(),
                 HirType::Named(env_class),
@@ -587,7 +590,7 @@ impl<'h> Emitter<'h, '_> {
         let self_local = match inst.receiver {
             Some(Receiver::Object(obj_ty)) => {
                 let sid = self.fresh_synthetic_local()?;
-                params.push(crate::hir_compat::resource_classes::synth_param(
+                params.push(synth_param(
                     sid,
                     "__self".to_owned(),
                     self.materialize(obj_ty)?,
@@ -625,7 +628,7 @@ impl<'h> Emitter<'h, '_> {
             if self.is_resolved(param_ty) {
                 new_param.ty = self.materialize(param_ty)?;
             } else if !self.index.is_param_annotated(param.id)
-                && inst.witness.is_none()
+                && !inst.is_witness
                 && matches!(param.ty, HirType::Any | HirType::Unknown)
             {
                 let err = diag!(codes::MISSING_TYPE_ANNOTATION, "cannot infer the type of parameter '{}' of '{}'", param.name, view.display_name())
@@ -733,7 +736,7 @@ impl<'h> Emitter<'h, '_> {
         };
         captures.retain(|c| !self.is_boxed_local(*c) || !is_env_fn);
 
-        if inst.witness.is_none() && inst.caller.is_some() {
+        if !inst.is_witness && inst.caller.is_some() {
             let caller_name = inst
                 .caller
                 .and_then(|c| self.solved.instances.get(c))
@@ -760,7 +763,7 @@ impl<'h> Emitter<'h, '_> {
                 is_generator: view.is_generator,
                 is_strict: view.is_strict,
                 construct_only: view.construct_only,
-                is_exported: inst.witness.is_some(),
+                is_exported: inst.is_witness,
                 decorators: Vec::new(),
                 was_plain_async: false,
                 was_unrolled: false,

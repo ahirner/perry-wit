@@ -1349,6 +1349,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
         self.check_timer_member(stripped, byte_offset)?;
+        if matches!(property, "payload" | "val") && stripped == self.types.named(self.ctx, "Error")
+        {
+            return Err(Diagnostic::unsupported(format!(
+                "property {property} is not supported on Error yet"
+            ))
+            .with_fallback_span(self.metadata.locations.member_span(byte_offset)));
+        }
         if let TyKind::Cell {
             loc,
             kind: CellKind::Dict,

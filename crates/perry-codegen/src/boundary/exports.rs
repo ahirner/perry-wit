@@ -41,14 +41,16 @@ pub(crate) fn export(
         .result
         .as_ref()
         .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
-    ensure_diag!(
-        completion || mir_results.len() == usize::from(export.result.is_some()),
-        codes::CONTRACT_MISMATCH,
-        "{} returns {} values but the WIT export returns {}",
-        export.function,
-        mir_results.len(),
-        usize::from(export.result.is_some())
-    );
+    if !completion && mir_results.len() != usize::from(export.result.is_some()) {
+        return Err(diag!(
+            codes::CONTRACT_MISMATCH,
+            "{} returns {} values but the WIT export returns {}",
+            export.function,
+            mir_results.len(),
+            usize::from(export.result.is_some())
+        )
+        .with_fallback_span(export.annotation(export.params.len())));
+    }
     let flat_params = parameters::export_signature(&export.params);
     let flat_result = export
         .result
@@ -95,7 +97,7 @@ pub(crate) fn export(
         b.block = active;
         joined
     });
-    let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
+    let args = b.lift_parameters(ctx, export, &mir_params, &mut flat)?;
     let throws = b.state.may_throw(&function.get_symbol_name(ctx));
     if throws {
         call_results.push(i32_type(ctx));
@@ -163,7 +165,9 @@ pub(crate) fn export(
         payload.map(|(mir, value)| BoundaryValue::Native(mir, value))
     };
     let returned = match (&export.result, source) {
-        (Some(ty), Some(source)) => b.lower_return(ctx, ty, source, flat_result_len != 1)?,
+        (Some(ty), Some(source)) => b
+            .lower_return(ctx, ty, source, flat_result_len != 1)
+            .map_err(|e| e.with_fallback_span(export.annotation(export.params.len())))?,
         _ => vec![],
     };
     b.commit_resources(ctx);
@@ -437,7 +441,9 @@ fn async_export(
             } else {
                 BoundaryValue::Native(*mir_ty, value)
             };
-            flat = b.lower_return(ctx, ty, source, indirect)?;
+            flat = b.lower_return(ctx, ty, source, indirect).map_err(|error| {
+                error.with_fallback_span(export.annotation(export.params.len()))
+            })?;
         }
         if b.state.uses_http_server {
             // Return the response once, then keep running until its body is written: the
@@ -500,7 +506,7 @@ fn async_export(
             b.block = active;
             joined
         });
-        let args = b.lift_parameters(ctx, &export.params, &mir_params, &mut flat)?;
+        let args = b.lift_parameters(ctx, export, &mir_params, &mut flat)?;
         let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
         let mut promise = b.result(ctx, ramp.get_operation());
         if let Some(joined) = joined {

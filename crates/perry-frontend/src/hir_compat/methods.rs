@@ -150,6 +150,7 @@ pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut names::Fr
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Method<'a> {
+    UsingCheck,
     Iteration,
     Push,
     Concat,
@@ -162,6 +163,7 @@ pub fn method(name: &str) -> Method<'_> {
         return Method::Ordinary(rest);
     }
     match name {
+        "__perry_using_check__" => Method::UsingCheck,
         streams::ITERATION => Method::Iteration,
         PUSH => Method::Push,
         CONCAT => Method::Concat,
@@ -173,6 +175,7 @@ pub fn method(name: &str) -> Method<'_> {
 impl<'a> Method<'a> {
     pub fn name(self) -> &'a str {
         match self {
+            Self::UsingCheck => "using",
             Self::Iteration => "[iteration]",
             Self::Push => "push",
             Self::Concat => "concat",

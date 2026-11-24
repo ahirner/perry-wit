@@ -148,7 +148,10 @@ pub(crate) enum MemberKind {
 
 pub(crate) enum ResourceError {
     Value,
-    Tagged,
+    Tagged {
+        ty: HirType,
+        owned: Vec<(String, u32)>,
+    },
 }
 pub(crate) struct ResultInput {
     pub(crate) index: usize,
@@ -176,6 +179,10 @@ pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<Resourc
             .filter_map(|entry| {
                 let f = entry.function;
                 let id = f.kind.resource()?;
+                if f.params.iter().any(|p| matches!(p.ty, wit_parser::Type::Id(id)
+                    if matches!(resolve.types[canonical_type(resolve,id)].kind, wit_parser::TypeDefKind::Flags(_)))) {
+                    return None;
+                }
                 let kind = match f.kind {
                     FunctionKind::Method(_) => MemberKind::Instance,
                     FunctionKind::Static(_) => MemberKind::Static,
@@ -214,10 +221,21 @@ pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<Resourc
                     }).collect(),
                     result: result.unwrap_or(HirType::Void),
                     raw_result: sum.and(raw),
-                    error: sum.and_then(|r|r.err).map(|err|
-                    if matches!(err,wit_parser::Type::Id(id) if matches!(resolve.types[canonical_type(resolve,id)].kind,wit_parser::TypeDefKind::Variant(_))) {
-                        ResourceError::Tagged
-                    } else {ResourceError::Value}),
+                    error: sum.and_then(|r| r.err).and_then(|err| {
+                        let wit_parser::Type::Id(id) = err else {return Some(ResourceError::Value)};
+                        let wit_parser::TypeDefKind::Variant(v) = &resolve.types[canonical_type(resolve,id)].kind else {return Some(ResourceError::Value)};
+                        let owned = v.cases.iter().filter_map(|case| {
+                            let wit_parser::Type::Id(id) = case.ty? else {return None};
+                            let id=canonical_type(resolve,id);
+                            let owner=match resolve.types[id].kind {
+                                wit_parser::TypeDefKind::Handle(wit_parser::Handle::Own(owner))=>canonical_type(resolve,owner),
+                                wit_parser::TypeDefKind::Resource=>id,
+                                _=>return None,
+                            };
+                            Some((case.name.clone(),owner.index() as u32))
+                        }).collect();
+                        Some(ResourceError::Tagged {ty:ty(err)?,owned})
+                    }),
                 })
             })
             .collect();

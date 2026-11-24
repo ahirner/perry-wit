@@ -48,16 +48,14 @@ impl<'h> Emitter<'h, '_> {
                 Expr::Null
             } else {value});
         }
-        let host_call = |args| Expr::Call {
-            callee: Box::new(Expr::ExternFuncRef {
-                name: member.binding.clone(),
-                param_types: Vec::new(),
-                return_type: member.raw_result.as_ref().unwrap_or(&member.result).clone(),
-            }),
-            args,
-            type_args: Vec::new(),
-            byte_offset: start,
-            byte_end: end,
+        let host_call = |args| {
+            external(
+                &member.binding,
+                args,
+                member.raw_result.as_ref().unwrap_or(&member.result).clone(),
+                start,
+                end,
+            )
         };
         if member.raw_result.is_none() && member.result_inputs.is_empty() {
             return Ok(host_call(inputs));
@@ -66,30 +64,18 @@ impl<'h> Emitter<'h, '_> {
             fid
         } else {
             let fid = self.fresh_func_id()?;
-            let params: Vec<_> = member
-                .params
-                .iter()
-                .enumerate()
-                .map(|(i, ty)| {
-                    Ok(crate::hir_compat::resource_classes::synth_param(
-                        self.fresh_synthetic_local()?,
-                        format!("arg{i}"),
-                        member
-                            .result_inputs
-                            .iter()
-                            .find(|r| r.index == i)
-                            .map_or(ty, |r| &r.tagged)
-                            .clone(),
-                    ))
-                })
-                .collect::<Result<_>>()?;
-            let mut body = Vec::new();
-            let mut raw_inputs: Vec<_> = params.iter().map(|p| Expr::LocalGet(p.id)).collect();
-            for input in &member.result_inputs {
-                let p = params
-                    .get(input.index)
-                    .ok_or_else(|| Diagnostic::internal("missing tagged result parameter"))?;
-                let field = |name| Self::prop_get(Expr::LocalGet(p.id), name);
+            let mut params = Vec::with_capacity(member.params.len());
+            let mut raw_inputs = Vec::with_capacity(member.params.len());
+            for (i, ty) in member.params.iter().enumerate() {
+                let id = self.fresh_synthetic_local()?;
+                let tagged = member.result_inputs.iter().find(|input| input.index == i);
+                let parameter = tagged.map_or(ty, |input| &input.tagged);
+                params.push(synth_param(id, format!("arg{i}"), parameter.clone()));
+                let Some(input) = tagged else {
+                    raw_inputs.push(Expr::LocalGet(id));
+                    continue;
+                };
+                let field = |name| Self::prop_get(Expr::LocalGet(id), name);
                 let case = |ok, payload| {
                     let mut fields = vec![("ok".into(), Expr::Bool(ok))];
                     if payload {
@@ -100,64 +86,74 @@ impl<'h> Emitter<'h, '_> {
                     }
                     Expr::Object(fields)
                 };
-                let result = self.fresh_synthetic_local()?;
-                body.push(Stmt::Let {
-                    id: result,
-                    name: "result".into(),
-                    ty: member
-                        .params
-                        .get(input.index)
-                        .ok_or_else(|| Diagnostic::internal("missing canonical result type"))?
-                        .clone(),
-                    mutable: true,
-                    init: None,
-                });
-                body.push(Stmt::If {
-                    condition: Expr::Compare {
+                raw_inputs.push(Expr::Conditional {
+                    condition: Box::new(Expr::Compare {
                         op: CompareOp::Eq,
                         left: Box::new(field("tag")),
                         right: Box::new(Expr::String("ok".into())),
-                    },
-                    then_branch: vec![Stmt::Expr(Expr::LocalSet(
-                        result,
-                        Box::new(case(true, input.has_ok)),
-                    ))],
-                    else_branch: Some(vec![Stmt::Expr(Expr::LocalSet(
-                        result,
-                        Box::new(case(false, input.has_err)),
-                    ))]),
+                    }),
+                    then_expr: Box::new(case(true, input.has_ok)),
+                    else_expr: Box::new(case(false, input.has_err)),
                 });
-                *raw_inputs
-                    .get_mut(input.index)
-                    .ok_or_else(|| Diagnostic::internal("missing raw argument"))? =
-                    Expr::LocalGet(result);
             }
+            let mut body = Vec::new();
             let init = host_call(raw_inputs);
             if let Some(raw) = &member.raw_result {
                 let r = self.fresh_synthetic_local()?;
 
                 let field = |name| Self::prop_get(Expr::LocalGet(r), name);
-                let error = match member.error {
-                    Some(crate::wit::ResourceError::Tagged) => Expr::ErrorNew(Some(Box::new(
-                        Self::prop_get(crate::hir_compat::mark_non_null(field("error")), "tag"),
-                    ))),
+                let mut failure = Vec::new();
+                let error = match &member.error {
+                    Some(crate::wit::ResourceError::Tagged { ty, owned }) => {
+                        let id = self.fresh_synthetic_local()?;
+                        failure.push(local(
+                            id,
+                            "error",
+                            ty.clone(),
+                            crate::hir_compat::mark_non_null(field("error")),
+                            false,
+                        ));
+                        let prop = |name| Self::prop_get(Expr::LocalGet(id), name);
+                        for (tag, owner) in owned {
+                            let drop = self
+                                .resource_members
+                                .iter()
+                                .find(|m| m.owner == *owner && m.kind == MemberKind::Dispose)
+                                .ok_or_else(|| {
+                                    Diagnostic::internal(
+                                        "owned WIT error has no resource destructor",
+                                    )
+                                })?;
+                            failure.push(Stmt::If {
+                                condition: Expr::Compare {
+                                    op: CompareOp::Eq,
+                                    left: Box::new(prop("tag")),
+                                    right: Box::new(Expr::String(tag.clone())),
+                                },
+                                then_branch: vec![Stmt::Expr(external(
+                                    &drop.binding,
+                                    vec![prop("val")],
+                                    HirType::Void,
+                                    start,
+                                    end,
+                                ))],
+                                else_branch: None,
+                            });
+                        }
+                        Expr::ErrorNew(Some(Box::new(prop("tag"))))
+                    }
                     Some(crate::wit::ResourceError::Value) => field("error"),
                     None => Expr::ErrorNew(None),
                 };
+                failure.push(Stmt::Throw(error));
                 body.extend([
-                    Stmt::Let {
-                        id: r,
-                        name: "result".into(),
-                        ty: raw.clone(),
-                        mutable: false,
-                        init: Some(init),
-                    },
+                    local(r, "result", raw.clone(), init, false),
                     Stmt::If {
                         condition: field("ok"),
                         then_branch: vec![Stmt::Return(
                             (member.result != HirType::Void).then(|| field("value")),
                         )],
-                        else_branch: Some(vec![Stmt::Throw(error)]),
+                        else_branch: Some(failure),
                     },
                 ]);
             } else if member.result == HirType::Void {
@@ -165,23 +161,20 @@ impl<'h> Emitter<'h, '_> {
             } else {
                 body.push(Stmt::Return(Some(init)));
             }
-            self.synth_functions
-                .push(crate::hir_compat::resource_classes::synth_function(
-                    fid,
-                    format!("__resource_call_{fid}"),
-                    params,
-                    member.result.clone(),
-                    body,
-                    false,
-                ));
+            self.synth_functions.push(synth_function(
+                fid,
+                format!("__resource_call_{fid}"),
+                params,
+                member.result.clone(),
+                body,
+                false,
+            ));
             *self
                 .resource_functions
                 .get_mut(id)
                 .ok_or_else(|| Diagnostic::internal("missing resource function slot"))? = Some(fid);
             fid
         };
-        Ok(crate::hir_compat::resource_classes::synth_call(
-            fid, inputs, start, end,
-        ))
+        Ok(synth_call(fid, inputs, start, end))
     }
 }

@@ -10,6 +10,7 @@ use swc_common::{Span, Spanned};
 use wit_parser::{Resolve, WorldId, WorldKey};
 
 pub(crate) struct Signature {
+    pub(super) annotations: Vec<Option<Span>>,
     pub(crate) params: Vec<HirType>,
     pub(crate) result: HirType,
 }
@@ -22,7 +23,9 @@ pub(crate) struct Witness<T> {
 
 #[derive(Clone, Copy)]
 enum Declaration<'a> {
-    Function(Span),
+    Function(Span, &'a ast::Function),
+    Arrow(&'a ast::ArrowExpr),
+    UnsupportedMethod(Span),
     Class(&'a ast::Class),
     Value(&'a ast::Expr),
 }
@@ -59,6 +62,43 @@ pub(super) struct Roots {
     pub classes: Vec<ResourceClass<Span>>,
 }
 
+impl Declaration<'_> {
+    fn function_span(self) -> Option<Span> {
+        match self {
+            Self::Function(s, _) => Some(s),
+            Self::Arrow(a) => Some(a.span),
+            _ => None,
+        }
+    }
+
+    fn annotations(self) -> Vec<Option<Span>> {
+        fn annotation(pat: &ast::Pat) -> Option<Span> {
+            let ty = match pat {
+                ast::Pat::Ident(i) => i.type_ann.as_ref(),
+                ast::Pat::Array(a) => a.type_ann.as_ref(),
+                ast::Pat::Object(o) => o.type_ann.as_ref(),
+                ast::Pat::Rest(r) => r.type_ann.as_ref(),
+                ast::Pat::Assign(a) => return annotation(&a.left),
+                _ => None,
+            };
+            ty.map(|t| t.type_ann.span())
+        }
+        let (mut params, result) = match self {
+            Self::Function(_, f) => (
+                f.params
+                    .iter()
+                    .map(|p| annotation(&p.pat))
+                    .collect::<Vec<_>>(),
+                &f.return_type,
+            ),
+            Self::Arrow(a) => (a.params.iter().map(annotation).collect(), &a.return_type),
+            _ => return Vec::new(),
+        };
+        params.push(result.as_ref().map(|t| t.type_ann.span()));
+        params
+    }
+}
+
 struct Scope<'a>(HashMap<ast::Id, (&'a ast::Ident, Declaration<'a>)>);
 
 impl<'a> Scope<'a> {
@@ -66,8 +106,8 @@ impl<'a> Scope<'a> {
         for _ in 0..=self.0.len() {
             d = match d {
                 Declaration::Value(v) => match v.unwrap_parens() {
-                    ast::Expr::Fn(f) => Declaration::Function(f.function.span),
-                    ast::Expr::Arrow(f) => Declaration::Function(f.span),
+                    ast::Expr::Fn(f) => Declaration::Function(f.function.span, &f.function),
+                    ast::Expr::Arrow(f) => Declaration::Arrow(f),
                     ast::Expr::Ident(id) => self.0.get(&id.to_id())?.1,
                     ast::Expr::Class(c) => Declaration::Class(&c.class),
                     v => return Some(Declaration::Value(v)),
@@ -93,7 +133,11 @@ impl<'a> Scope<'a> {
                     Declaration::Value(&kv.value)
                 }
                 ast::Prop::Method(m) if key(&m.key) == Some(name) => {
-                    Declaration::Function(m.span())
+                    if m.function.is_async || m.function.is_generator {
+                        Declaration::UnsupportedMethod(m.span())
+                    } else {
+                        Declaration::Function(m.span(), &m.function)
+                    }
                 }
                 _ => return None,
             })
@@ -120,7 +164,10 @@ pub(super) fn resolve<'a>(
             _ => continue,
         };
         match d {
-            ast::Decl::Fn(f) => insert(&f.ident, Declaration::Function(f.function.span)),
+            ast::Decl::Fn(f) => insert(
+                &f.ident,
+                Declaration::Function(f.function.span, &f.function),
+            ),
             ast::Decl::Class(c) => insert(&c.ident, Declaration::Class(&c.class)),
             ast::Decl::Var(v) => {
                 for d in &v.decls {
@@ -147,7 +194,7 @@ pub(super) fn resolve<'a>(
     };
     let Some((r, w)) = world else {
         for name in exports.keys() {
-            if let Some(Declaration::Function(span)) = exported(name) {
+            if let Some(span) = exported(name).and_then(Declaration::function_span) {
                 roots.witnesses.push(Witness {
                     name: name.clone(),
                     signature: None,
@@ -155,14 +202,15 @@ pub(super) fn resolve<'a>(
                 });
             }
         }
+        roots.witnesses.sort_by_key(|w| match w.target {
+            Some(SourceTarget::Function(span)) => Some(span.lo),
+            _ => None,
+        });
         return Ok(roots);
     };
     let world = &r.worlds[w];
     let namespace = |k: &WorldKey, id| {
-        let n = match k {
-            WorldKey::Name(n) => n.as_str(),
-            WorldKey::Interface(_) => r.interfaces[id].name.as_deref()?,
-        };
+        let n = interface_name(k, r, id)?;
         match exported(&to_camel_case(n))? {
             Declaration::Value(ast::Expr::Object(o)) => Some(o),
             _ => None,
@@ -179,22 +227,6 @@ pub(super) fn resolve<'a>(
             }
         }
     }
-    for (k, item) in &world.exports {
-        if let wit_parser::WorldItem::Interface { id, .. } = item
-            && namespace(k, *id).is_some()
-        {
-            let n = match k {
-                WorldKey::Name(n) => Some(n.as_str()),
-                WorldKey::Interface(_) => r.interfaces[*id].name.as_deref(),
-            };
-            if let Some(binding) = n.and_then(|n| exports.get(&to_camel_case(n))) {
-                roots.namespaces.push(binding.span);
-            }
-        }
-    }
-    let mut uses = Uses(&scope, std::mem::take(&mut roots.namespaces));
-    module.visit_with(&mut uses);
-    roots.namespaces = uses.1;
     let mut disposals = Vec::new();
     for (k, item) in &world.exports {
         let wit_parser::WorldItem::Interface { id, .. } = item else {
@@ -203,6 +235,11 @@ pub(super) fn resolve<'a>(
         let Some(obj) = namespace(k, *id) else {
             continue;
         };
+        if let Some(binding) =
+            interface_name(k, r, *id).and_then(|n| exports.get(&to_camel_case(n)))
+        {
+            roots.namespaces.push(binding.span);
+        }
         for (name, resource) in &r.interfaces[*id].types {
             if !matches!(r.types[*resource].kind, wit_parser::TypeDefKind::Resource) {
                 continue;
@@ -240,6 +277,7 @@ pub(super) fn resolve<'a>(
             disposals.push(Witness {
                 name: format!("{module}#[dtor]{name}"),
                 signature: Some(Signature {
+                    annotations: Vec::new(),
                     params: vec![HirType::Number],
                     result: HirType::Void,
                 }),
@@ -251,6 +289,9 @@ pub(super) fn resolve<'a>(
             });
         }
     }
+    let mut uses = Uses(&scope, std::mem::take(&mut roots.namespaces));
+    module.visit_with(&mut uses);
+    roots.namespaces = uses.1;
     let mut legacy_names = BTreeMap::new();
     for entry in perry_contract::world_functions(r, world.exports.iter()) {
         let f = entry.function;
@@ -262,6 +303,7 @@ pub(super) fn resolve<'a>(
         };
         let object = entry.interface.and_then(|id| namespace(entry.key, id));
         let mut target = None;
+        let mut annotations = Vec::new();
         if let Some(resource) = f.kind.resource()
             && let Some((owner, c)) = roots
                 .classes
@@ -300,26 +342,44 @@ pub(super) fn resolve<'a>(
                     kind,
                 });
             }
-        } else if let Some(Declaration::Function(span)) =
+        } else if let Some(decl) =
             object.and_then(|o| scope.member_declaration(o, &to_camel_case(&f.name)))
         {
-            target = Some(SourceTarget::Function(span));
+            match decl {
+                decl if decl.function_span().is_some() => {target = decl.function_span().map(SourceTarget::Function); annotations=decl.annotations();},
+                Declaration::UnsupportedMethod(span) => return Err(locations.annotate(
+                    Diagnostic::unsupported(format!("async and generator method syntax is unsupported for WIT export {requirement}"))
+                        .with_help("Export a reference to a function declaration in the interface object."), span)),
+                _ => {}
+            }
         }
         if target.is_none()
-            && let Some(Declaration::Function(span)) = exported(&name)
+            && let Some(decl) = exported(&name)
+            && let Some(span) = decl.function_span()
         {
             if let Some(previous) = legacy_names.insert(name.clone(), requirement.clone()) {
                 return Err(locations.annotate(diag!(codes::CONTRACT_MISMATCH,"WIT exports '{previous}' and '{requirement}' both require TypeScript implementation '{name}'"),span));
             }
             target = Some(SourceTarget::Function(span));
+            annotations = decl.annotations();
         }
-        if target.is_none()
-            && !(requirement.starts_with("wasi:cli/run@") && requirement.ends_with("#run"))
-        {
+        if target.is_none() && !entry.is_command(r) {
+            let form = entry
+                .interface
+                .and_then(|id| interface_name(entry.key, r, id))
+                .map(|interface| {
+                    format!(
+                        "export const {} = {{ {} }}",
+                        to_camel_case(interface),
+                        to_camel_case(f.item_name())
+                    )
+                })
+                .unwrap_or_else(|| format!("export function {name}"));
             let err = diag!(
                 codes::MISSING_EXPORT,
-                "WIT export {requirement} needs an implementation for '{name}'"
-            );
+                "WIT export {requirement} needs a source implementation"
+            )
+            .with_help(format!("Implement the requirement with `{form}`."));
             if let Some((id, _)) = scope
                 .0
                 .values()
@@ -330,22 +390,26 @@ pub(super) fn resolve<'a>(
                     id.span,
                 ));
             }
-            return Err(
-                match exports.iter().max_by_key(|(e, _)| {
-                    e.bytes()
-                        .zip(name.bytes())
-                        .take_while(|(a, b)| a == b)
-                        .count()
-                }) {
-                    Some((near, id)) => locations.annotate(
-                        err.with_help(format!("The entry module exports '{near}'.")),
-                        id.span,
-                    ),
-                    None => err,
-                },
-            );
+            let near = exports.iter().max_by_key(|(e, _)| {
+                e.bytes()
+                    .zip(name.bytes())
+                    .take_while(|(a, b)| a == b)
+                    .count()
+            });
+            return Err(match near {
+                Some((near, id)) => locations.annotate(
+                    err.with_note(format!("The entry module exports '{near}'.")),
+                    id.span,
+                ),
+                None => err.with_fallback_span(locations.offset_span(1, 1)),
+            });
         }
-        let ty = |t| {
+        let ty = |mut t| {
+            while let wit_parser::Type::Id(id) = t
+                && let wit_parser::TypeDefKind::Type(inner) = r.types[id].kind
+            {
+                t = inner;
+            }
             use wit_parser::Type::*;
             Ok(match t {
                 U8 | S8 | U16 | S16 | U32 | S32 => HirType::Number,
@@ -361,6 +425,7 @@ pub(super) fn resolve<'a>(
             name,
             target,
             signature: Some(Signature {
+                annotations,
                 params: f.params.iter().map(|p| ty(p.ty)).collect::<Result<_>>()?,
                 result: f.result.map(ty).transpose()?.unwrap_or(HirType::Void),
             }),
@@ -368,6 +433,17 @@ pub(super) fn resolve<'a>(
     }
     roots.witnesses.extend(disposals);
     Ok(roots)
+}
+
+fn interface_name<'a>(
+    key: &'a WorldKey,
+    r: &'a Resolve,
+    id: wit_parser::InterfaceId,
+) -> Option<&'a str> {
+    match key {
+        WorldKey::Name(n) => Some(n),
+        WorldKey::Interface(_) => r.interfaces[id].name.as_deref(),
+    }
 }
 
 fn key(prop: &ast::PropName) -> Option<&str> {

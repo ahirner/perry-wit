@@ -149,7 +149,7 @@ pub(crate) fn compile_sources(
         module: mir,
         exports: targets,
     } = perry_lower::lower_with_exports(ctx, &program)?;
-    let mut exports = bind::exports(ctx, &targets, resolve, world)?;
+    let mut exports = bind::exports(ctx, &targets, resolve, world, program.metadata())?;
     let mut analyses = optimize(ctx, &mir)?;
     bind::finalize_exports(ctx, &mir, &mut exports)?;
     emit_component(

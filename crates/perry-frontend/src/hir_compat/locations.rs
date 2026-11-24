@@ -394,7 +394,7 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.call_span(byte_offset))
     }
 
-    fn span(&self, span: Span) -> Option<SourceSpan> {
+    pub(super) fn span(&self, span: Span) -> Option<SourceSpan> {
         let file = self.file_at(span.lo.0)?;
         let start = (span.lo.0 - file.positions.start()) as usize;
         let end = span.hi.0.checked_sub(*file.positions.start())? as usize;

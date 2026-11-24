@@ -16,7 +16,12 @@ use std::collections::HashMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 /// Validate source number/bigint distinctions before exposing integer domains to MIR.
-fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> Result<()> {
+fn constrain_numbers(
+    ctx: &mut Context,
+    function: &FuncOp,
+    export: &Export,
+    common_domain: bool,
+) -> Result<()> {
     use pliron::{
         builtin::{
             type_interfaces::FunctionTypeInterface,
@@ -49,10 +54,11 @@ fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> R
         return Ok(());
     }
     let mut constrained = false;
-    for (source, abi) in args
+    for (index, (source, abi)) in args
         .iter_mut()
         .zip(&export.params)
         .chain(results.iter_mut().zip(export.result.iter()))
+        .enumerate()
     {
         let Some(integer) = abi.integer_type(ctx) else {
             continue;
@@ -67,13 +73,15 @@ fn constrain_numbers(ctx: &mut Context, function: &FuncOp, export: &Export) -> R
                 crate::codes::CONTRACT_MISMATCH,
                 "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion",
             )
-            .with_optional_span(perry_mir::source_span(ctx, function))
+            .with_optional_span(export.annotation(index).or_else(|| perry_mir::source_span(ctx,function)))
             .with_help(format!(
                 "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
                 export.function, export.core_name
             )));
         }
-        if wide || source.deref(ctx).is::<FP64Type>() || source.deref(ctx).is::<IntegerType>() {
+        if common_domain
+            && (wide || source.deref(ctx).is::<FP64Type>() || source.deref(ctx).is::<IntegerType>())
+        {
             *source = integer;
             constrained = true;
         }
@@ -89,6 +97,7 @@ pub(super) fn exports(
     targets: &[perry_lower::ExportTarget],
     resolve: &Resolve,
     world_id: WorldId,
+    metadata: &perry_frontend::hir_compat::Metadata,
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
     let mut bound = Vec::new();
@@ -111,6 +120,7 @@ pub(super) fn exports(
                 bound.push((
                     main,
                     Export {
+                        annotations: Vec::new(),
                         core_name,
                         function: perry_lower::MAIN.to_string(),
                         params: vec![],
@@ -174,6 +184,7 @@ pub(super) fn exports(
         bound.push((
             mir_function,
             Export {
+                annotations: metadata.witness_annotations(i),
                 core_name,
                 function: implementation,
                 params,
@@ -191,6 +202,7 @@ pub(super) fn exports(
         bound.push((
             function,
             Export {
+                annotations: Vec::new(),
                 core_name: core_name.clone(),
                 function: function.get_symbol_name(ctx).into(),
                 params: vec![AbiType::U32],
@@ -199,13 +211,14 @@ pub(super) fn exports(
             },
         ));
     }
-    bound
-        .into_iter()
-        .map(|(function, export)| {
-            constrain_numbers(ctx, function, &export)?;
-            Ok(export)
-        })
-        .collect()
+    for (function, export) in &bound {
+        let common_domain = bound.iter().all(|(other, abi)| {
+            function.get_operation() != other.get_operation()
+                || (abi.params == export.params && abi.result == export.result)
+        });
+        constrain_numbers(ctx, function, export, common_domain)?;
+    }
+    Ok(bound.into_iter().map(|(_, export)| export).collect())
 }
 
 fn module_functions(ctx: &Context, mir: &ModuleOp) -> HashMap<String, FuncOp> {

@@ -35,12 +35,7 @@ impl<'h> Emitter<'h, '_> {
             }
             Some(FuncCoercion::Widen(helper)) => {
                 let fid = self.emit_helper(helper)?;
-                Ok(crate::hir_compat::resource_classes::synth_call(
-                    fid,
-                    vec![rewritten],
-                    0,
-                    0,
-                ))
+                Ok(synth_call(fid, vec![rewritten], 0, 0))
             }
             Some(FuncCoercion::EnvCallback { target, input_tys }) => {
                 let target_fid = self
@@ -118,8 +113,7 @@ impl<'h> Emitter<'h, '_> {
                 }
                 SiteResolution::ThrowTypeError(helper) => {
                     let fid = self.emit_helper(helper)?;
-                    let call =
-                        crate::hir_compat::resource_classes::synth_call(fid, Vec::new(), 0, 0);
+                    let call = synth_call(fid, Vec::new(), 0, 0);
                     if let Expr::Call { callee, args, .. } = expr {
                         let mut effects = Vec::new();
                         if !is_pure_func_expr(callee) {
@@ -151,12 +145,7 @@ impl<'h> Emitter<'h, '_> {
                         };
                         let fid = self.emit_helper(helper)?;
                         let arg = self.rewrite_expr(rctx, operand)?;
-                        return Ok(crate::hir_compat::resource_classes::synth_call(
-                            fid,
-                            vec![arg],
-                            0,
-                            0,
-                        ));
+                        return Ok(synth_call(fid, vec![arg], 0, 0));
                     }
                 }
                 SiteResolution::Callback {
@@ -342,12 +331,7 @@ impl<'h> Emitter<'h, '_> {
                             Diagnostic::internal("missing synthesized comparer helper")
                         })?;
                         let cmp_fid = self.emit_helper(helper_id)?;
-                        let call = crate::hir_compat::resource_classes::synth_call(
-                            cmp_fid,
-                            vec![l_rewritten, r_rewritten],
-                            0,
-                            0,
-                        );
+                        let call = synth_call(cmp_fid, vec![l_rewritten, r_rewritten], 0, 0);
                         return Ok(if is_eq {
                             call
                         } else {
@@ -640,12 +624,7 @@ impl<'h> Emitter<'h, '_> {
                             })?;
                         return Ok(sequence(
                             effects,
-                            crate::hir_compat::resource_classes::synth_call(
-                                fid,
-                                call_args,
-                                *byte_offset,
-                                *byte_end,
-                            ),
+                            synth_call(fid, call_args, *byte_offset, *byte_end),
                         ));
                     }
                 }
@@ -1037,10 +1016,7 @@ impl<'h> Emitter<'h, '_> {
             );
         }
         effects.extend(self.rewrite_filtered_args(&ctx, args, argument_types, &mut operands)?);
-        let call = sequence(
-            effects,
-            crate::hir_compat::resource_classes::synth_call(fid, operands, *byte_offset, *byte_end),
-        );
+        let call = sequence(effects, synth_call(fid, operands, *byte_offset, *byte_end));
         Ok(match binding {
             Some((id, value)) => Expr::ScopedTemp {
                 id,

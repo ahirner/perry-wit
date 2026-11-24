@@ -1,7 +1,7 @@
 //! HIR adapters for class instances crossing canonical resource boundaries.
-use super::{ClassRoots, Operation, Witness, mark_non_null};
+use super::{ClassRoots, Operation, Witness, mark_non_null, witnesses::ResourceClass};
 use perry_hir::{
-    ir::{BinaryOp, Expr, Function, Module, Param, Stmt},
+    ir::{BinaryOp, ClassId, Expr, Function, Module, Param, Stmt},
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::{Diagnostic, Result};
@@ -55,15 +55,10 @@ pub(crate) fn synth_function(
     }
 }
 
-struct Registry {
+struct Registry<'a> {
+    resource: &'a ResourceClass<ClassId>,
     table: LocalId,
     next: LocalId,
-    class: String,
-}
-
-struct Ids {
-    local: LocalId,
-    function: FuncId,
 }
 
 fn fresh(id: &mut u32) -> Result<u32> {
@@ -73,7 +68,13 @@ fn fresh(id: &mut u32) -> Result<u32> {
     Ok(*id)
 }
 
-fn external(name: &str, args: Vec<Expr>, result: HirType) -> Expr {
+pub(crate) fn external(
+    name: &str,
+    args: Vec<Expr>,
+    result: HirType,
+    byte_offset: u32,
+    byte_end: u32,
+) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::ExternFuncRef {
             name: name.into(),
@@ -82,12 +83,12 @@ fn external(name: &str, args: Vec<Expr>, result: HirType) -> Expr {
         }),
         args,
         type_args: vec![],
-        byte_offset: 0,
-        byte_end: 0,
+        byte_offset,
+        byte_end,
     }
 }
 
-fn local(id: LocalId, name: &str, ty: HirType, init: Expr, mutable: bool) -> Stmt {
+pub(crate) fn local(id: LocalId, name: &str, ty: HirType, init: Expr, mutable: bool) -> Stmt {
     Stmt::Let {
         id,
         name: name.into(),
@@ -97,7 +98,7 @@ fn local(id: LocalId, name: &str, ty: HirType, init: Expr, mutable: bool) -> Stm
     }
 }
 
-impl Registry {
+impl Registry<'_> {
     fn get(&self, rep: Expr) -> Expr {
         mark_non_null(Expr::MapGet {
             map: Box::new(Expr::LocalGet(self.table)),
@@ -127,13 +128,9 @@ pub(crate) fn bind(
     hir: &mut Module,
     roots: &ClassRoots,
     witnesses: &mut [Witness<FuncId>],
-    max_local: LocalId,
-    max_function: FuncId,
+    mut max_local: LocalId,
+    mut max_function: FuncId,
 ) -> Result<()> {
-    let mut ids = Ids {
-        local: max_local,
-        function: max_function,
-    };
     let mut registries = Vec::new();
     let mut init = Vec::new();
     for (owner, resource) in roots.classes.iter().enumerate() {
@@ -142,8 +139,8 @@ pub(crate) fn bind(
             .iter()
             .find(|c| c.id == resource.class)
             .ok_or_else(|| Diagnostic::internal("lost resource class"))?;
-        let table = fresh(&mut ids.local)?;
-        let next = fresh(&mut ids.local)?;
+        let table = fresh(&mut max_local)?;
+        let next = fresh(&mut max_local)?;
         let ctor = roots
             .calls
             .iter()
@@ -169,16 +166,10 @@ pub(crate) fn bind(
         };
         let types = vec![HirType::Number, class_type];
         let map = super::typed_collection(true, types);
-        init.push(local(
-            table,
-            &format!("resource_table_{table}"),
-            HirType::Any,
-            map,
-            false,
-        ));
+        init.push(local(table, "instances", HirType::Any, map, false));
         init.push(local(
             next,
-            &format!("resource_rep_{next}"),
+            "representation",
             HirType::Number,
             Expr::Number(0.0),
             true,
@@ -186,14 +177,14 @@ pub(crate) fn bind(
         registries.push(Registry {
             table,
             next,
-            class: c.name.clone(),
+            resource,
         });
     }
     init.append(&mut hir.init);
     hir.init = init;
     for (w, call) in witnesses.iter_mut().zip(&roots.calls) {
         let Some(sig) = &w.signature else { continue };
-        let owner_of = |ty: &HirType| roots.classes.iter().position(|r| &r.source_ty == ty);
+        let owner_of = |ty: &HirType| registries.iter().find(|r| &r.resource.source_ty == ty);
         if call.is_none()
             && !sig.params.iter().any(|p| owner_of(p).is_some())
             && owner_of(&sig.result).is_none()
@@ -203,38 +194,33 @@ pub(crate) fn bind(
         let mut params = Vec::new();
         let mut args = Vec::new();
         for (i, p) in sig.params.iter().enumerate() {
-            let id = fresh(&mut ids.local)?;
+            let id = fresh(&mut max_local)?;
             let mut value = Expr::LocalGet(id);
-            if let Some(owner) = owner_of(p) {
-                let r = roots
-                    .classes
-                    .get(owner)
-                    .ok_or_else(|| Diagnostic::internal("lost input resource"))?;
-                let table = registries
-                    .get(owner)
-                    .ok_or_else(|| Diagnostic::internal("lost handle table"))?;
-                value = table.get(external(&r.representation, vec![value], HirType::Number));
+            if let Some(table) = owner_of(p) {
+                value = table.get(external(
+                    &table.resource.representation,
+                    vec![value],
+                    HirType::Number,
+                    0,
+                    0,
+                ));
             }
             args.push(value);
             params.push(synth_param(id, format!("arg{i}"), p.clone()));
         }
         let mut body = Vec::new();
         let operation = if let Some(call) = call {
-            let resource = roots
-                .classes
-                .get(call.owner)
-                .ok_or_else(|| Diagnostic::internal("unknown exported resource"))?;
             let table = registries
                 .get(call.owner)
                 .ok_or_else(|| Diagnostic::internal("missing handle table"))?;
             let class = hir
                 .classes
                 .iter_mut()
-                .find(|c| c.id == resource.class)
+                .find(|c| c.id == table.resource.class)
                 .ok_or_else(|| Diagnostic::internal("missing class declaration"))?;
             match call.kind {
                 Operation::New => Expr::New {
-                    class_name: table.class.clone(),
+                    class_name: class.name.clone(),
                     args,
                     type_args: vec![],
                     byte_offset: 0,
@@ -302,26 +288,22 @@ pub(crate) fn bind(
                 0,
             )
         };
-        if let Some(owner) = owner_of(&sig.result) {
-            let r = roots
-                .classes
-                .get(owner)
-                .ok_or_else(|| Diagnostic::internal("unknown result resource"))?;
-            let table = registries
-                .get(owner)
-                .ok_or_else(|| Diagnostic::internal("missing result handle table"))?;
-            table.store(&mut body, fresh(&mut ids.local)?, operation);
+        if let Some(table) = owner_of(&sig.result) {
+            let r = table.resource;
+            table.store(&mut body, fresh(&mut max_local)?, operation);
             body.push(Stmt::Return(Some(external(
                 &r.create,
                 vec![Expr::LocalGet(table.next)],
                 r.source_ty.clone(),
+                0,
+                0,
             ))));
         } else if sig.result == HirType::Void {
             body.push(Stmt::Expr(operation));
         } else {
             body.push(Stmt::Return(Some(operation)));
         }
-        let fid = fresh(&mut ids.function)?;
+        let fid = fresh(&mut max_function)?;
         hir.functions.push(synth_function(
             fid,
             format!("resource_adapter_{fid}"),

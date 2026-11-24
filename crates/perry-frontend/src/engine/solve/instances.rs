@@ -5,8 +5,11 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn seed_roots(&mut self) -> Result<InstanceId> {
         let init_inst = self.request_instance(InstanceReq::new(TemplateId::INIT, &[], None))?;
         self.enqueue(init_inst);
-        for (ordinal, witness) in self.metadata.witnesses.iter().enumerate() {
-            let Some(fid) = witness.target else { continue };
+        for witness in &self.metadata.witnesses {
+            let Some(fid) = witness.target else {
+                self.witness_instances.push(None);
+                continue;
+            };
             let tid = self
                 .index
                 .template_of_func(fid)
@@ -17,8 +20,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .ok_or_else(|| Diagnostic::internal("missing witness declaration"))?;
             let mut args = Vec::with_capacity(view.params.len());
             if let Some(signature) = &witness.signature {
-                for ty in &signature.params {
-                    args.push(self.types.intern_hir(self.ctx, ty, true));
+                for (i, ty) in signature.params.iter().enumerate() {
+                    let ty = view
+                        .params
+                        .get(i)
+                        .filter(|p| self.index.is_param_annotated(p.id))
+                        .map_or(ty, |p| &p.ty);
+                    let ty = self.types.intern_hir(self.ctx, ty, true);
+                    args.push(self.instantiate_annotated_class(ty, 0, None)?);
                 }
             } else {
                 let bindings = self.default_type_param_bindings(tid);
@@ -31,8 +40,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
             let mut request = InstanceReq::new(tid, &args, None);
-            request.witness = Some(ordinal);
+            request.witness = Some(witness);
             let inst = self.request_instance(request)?;
+            self.witness_instances.push(Some(inst));
             self.enqueue(inst);
         }
         Ok(init_inst)
@@ -143,24 +153,25 @@ impl<'h, 'a> Solver<'h, 'a> {
             caller,
             is_inline_callback,
         } = req;
-        let is_monomorphic_plain = self.index.view(template).is_some_and(|v| {
-            matches!(v.kind, TemplateKind::Function)
-                && v.type_params.is_empty()
-                && !args
-                    .iter()
-                    .any(|&t| matches!(self.types.kind(t), TyKind::Func(_)))
-                && v.params.iter().all(|p| {
-                    !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
-                        && !p.is_rest
-                        && p.default.is_none()
-                })
-        });
+        let view = self
+            .index
+            .view(template)
+            .ok_or_else(|| Diagnostic::internal("inference engine requested unknown template"))?;
+        let is_monomorphic_plain = matches!(view.kind, TemplateKind::Function)
+            && view.type_params.is_empty()
+            && !args
+                .iter()
+                .any(|&t| matches!(self.types.kind(t), TyKind::Func(_)))
+            && view.params.iter().all(|p| {
+                !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
+                    && !p.is_rest
+                    && p.default.is_none()
+            });
         let canonical_buf: Vec<Ty>;
         let args = if is_monomorphic_plain
             && receiver.is_none()
             && capture_owner.is_none()
             && explicit_type_args.is_empty()
-            && let Some(view) = self.index.view(template)
             && !view.params.is_empty()
         {
             let mut declared = Vec::with_capacity(view.params.len());
@@ -173,12 +184,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         } else {
             args
         };
-        let is_promise_handle = self.index.view(template).is_some_and(|v| {
-            matches!(
-                v.kind,
-                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-            )
-        });
+        let is_promise_handle = matches!(
+            view.kind,
+            TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+        );
         let args = if is_promise_handle {
             args.get(..1).unwrap_or(&[])
         } else {
@@ -186,13 +195,40 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         let args_key = self.types.tuple(args);
         let targs_key = self.types.tuple(explicit_type_args);
+        let list_result =
+            if self.index.returns_empty_list.contains(template.index()) && !view.explicit_return {
+                let signature = if let Some(w) = witness {
+                    w.signature.as_ref()
+                } else {
+                    let mut candidates = self
+                        .metadata
+                        .witnesses
+                        .iter()
+                        .filter(|w| w.target == Some(view.func_id))
+                        .filter_map(|w| w.signature.as_ref());
+                    candidates
+                        .next()
+                        .filter(|first| candidates.all(|s| s.result == first.result))
+                };
+                caller
+                    .and_then(|id| self.instances.get(id))
+                    .filter(|i| i.template == template)
+                    .and_then(|i| i.list_result)
+                    .or_else(|| {
+                        signature
+                            .filter(|s| matches!(s.result, HirType::Array(_)))
+                            .map(|s| self.types.intern_hir(self.ctx, &s.result, true))
+                    })
+            } else {
+                None
+            };
         let key: InstanceKey = (
             template,
             receiver,
             capture_owner,
             args_key,
             targs_key,
-            witness,
+            list_result,
         );
         if let Some(&id) = self.instance_index.get(&key) {
             if is_inline_callback && let Some(inst) = self.instances.get_mut(id) {
@@ -213,11 +249,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let first_instance = self.template_counts[template] == 0;
         bump_count(&mut self.template_counts, template);
-
-        let view = self
-            .index
-            .view(template)
-            .ok_or_else(|| Diagnostic::internal("inference engine requested unknown template"))?;
 
         let mut inst_caps = Vec::new();
         let mut captures_non_global = capture_owner.is_some();
@@ -369,10 +400,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.next_func_id = self.next_func_id.saturating_add(1);
             id
         };
-        let emitted_name = if let Some(w) = witness
-            .and_then(|i| self.metadata.witnesses.get(i))
-            .filter(|w| w.signature.is_none())
-        {
+        let emitted_name = if let Some(w) = witness.filter(|w| w.signature.is_none()) {
             w.name.clone()
         } else if template == TemplateId::INIT || keep_original {
             view.raw_name()
@@ -398,7 +426,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
 
         let inst_id = self.instances.push(Instance {
-            witness,
+            is_witness: witness.is_some(),
+            list_result,
             template,
             receiver,
             capture_owner,
@@ -416,14 +445,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             emitted_method_name,
         });
         self.instance_index.insert(key, inst_id);
-        if witness
-            .and_then(|i| self.metadata.witnesses.get(i))
-            .is_some_and(|w| w.signature.is_none())
-        {
-            self.instance_index
-                .entry((template, receiver, capture_owner, args_key, targs_key, None))
-                .or_insert(inst_id);
-        }
         self.inst_locals.push(local_slots);
         self.inst_frame_locals
             .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);

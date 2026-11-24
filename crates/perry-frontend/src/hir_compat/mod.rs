@@ -62,6 +62,19 @@ pub struct Metadata<'s> {
 }
 
 impl Metadata<'_> {
+    pub fn witness_annotations(
+        &self,
+        ordinal: usize,
+    ) -> Vec<Option<perry_wit_diagnostics::SourceSpan>> {
+        self.witnesses
+            .get(ordinal)
+            .and_then(|w| w.signature.as_ref())
+            .into_iter()
+            .flat_map(|s| &s.annotations)
+            .map(|s| s.and_then(|s| self.locations.span(s)))
+            .collect()
+    }
+
     pub fn witness_functions(
         &self,
     ) -> impl Iterator<Item = (Option<perry_hir::types::FuncId>, Option<&str>)> + '_ {

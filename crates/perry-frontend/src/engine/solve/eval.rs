@@ -16,7 +16,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(inst) = self.instances.get(inst_id) else {
             return Ok(());
         };
-        let is_witness = inst.witness.is_some();
+        let is_witness = inst.is_witness;
         let (template, receiver, return_loc, has_explicit_return, param_locs_span, args_ty) = (
             inst.template,
             inst.receiver,
@@ -717,13 +717,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                     None => Ty::VOID,
                 };
                 if matches!(value, Some(Expr::Array(elements, _)) if elements.is_empty())
-                    && let Some(signature) = self.instances[s.inst]
-                        .witness
-                        .and_then(|i| self.metadata.witnesses.get(i))
-                        .and_then(|w| w.signature.as_ref())
-                    && matches!(signature.result, HirType::Array(_))
+                    && let Some(list) = self.instances[s.inst].list_result
                 {
-                    ty = self.types.intern_hir(self.ctx, &signature.result, true);
+                    ty = list;
                 }
                 if let TyKind::Cell {
                     loc,
@@ -973,6 +969,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .collect();
 
         Solved {
+            witness_instances: self.witness_instances,
             init_inst,
             instances: self.instances,
             class_insts: self.class_insts,

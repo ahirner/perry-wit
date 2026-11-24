@@ -666,12 +666,24 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
 
-        if hir_compat::has_source_offset(byte_offset)
-            && let TyKind::Leaf(id) = self.types.kind(stripped)
+        if let TyKind::Leaf(id) = self.types.kind(stripped)
             && let HirType::Named(base) = id.hir(self.ctx)
             && let Some(owner) = self.decls.resource(base)
         {
             self.eval_args(s, args)?;
+            if matches!(method, hir_compat::Method::UsingCheck)
+                && let Expr::LocalGet(id) = object
+            {
+                let span = self.hir.local_source_spans.get(id).and_then(|s| {
+                    self.metadata
+                        .locations
+                        .offset_span(s.start, s.end.saturating_sub(s.start))
+                });
+                return Err(Diagnostic::unsupported(
+                    "using declarations for imported resources are unsupported",
+                )
+                .with_fallback_span(span));
+            }
             if let Some(ty) =
                 self.resource_operation(s.inst, expr, owner, MemberKind::Instance, name)
             {

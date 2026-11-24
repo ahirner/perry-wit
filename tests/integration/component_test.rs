@@ -48,8 +48,10 @@ fn witness_instances_preserve_function_identity_and_internal_results() -> Result
         "package test:witnesses; world boundary {
             export text:func(x:string)->u32; export raw:func(x:list<u8>)->u32;
             export echo:func(x:string)->list<u8>; export same:func()->bool;
+            export byte:func(x:u8)->u8; export real:func(x:f64)->f64;
         }",
         "function size(x) { return x.length; } export { size as text, size as raw };
+         function identity(x) {return x;} export {identity as byte, identity as real};
          export function echo(x) { return x; }
          const alias = size;
          export function same() { return alias === size && typeof echo('é') === 'string'; }",
@@ -57,6 +59,8 @@ fn witness_instances_preserve_function_identity_and_internal_results() -> Result
     guest.check("text", ("é",), &1u32)?;
     guest.check("raw", ("é".as_bytes(),), &2u32)?;
     guest.check("echo", ("é",), &"é".as_bytes().to_vec())?;
+    guest.check("byte", (255u8,), &255u8)?;
+    guest.check("real", (1.5f64,), &1.5f64)?;
     guest.check("same", (), &true)
 }
 
@@ -64,14 +68,16 @@ fn witness_instances_preserve_function_identity_and_internal_results() -> Result
 fn witness_context_types_empty_list_returns() -> Result<()> {
     for compiler in [Standard, crate::world::Compiler::MemoryChecked] {
         let bytes = compiler.component(
-            "package test:empty; world api {export empty:func()->list<string>;}",
+            "package test:empty; world api {export empty:func()->list<string>; export numbers:func()->list<u32>;}",
             "api",
             "empty.js",
-            "export function empty() {return [];}",
+            "export function empty() {return [];} export {empty as numbers};",
         )?;
         let (mut store, instance) = crate::world::instantiate(&Engine::default(), &bytes)?;
         let empty = instance.get_typed_func::<(), (Vec<String>,)>(&mut store, "empty")?;
         assert!(empty.call(&mut store, ())?.0.is_empty());
+        let numbers = instance.get_typed_func::<(), (Vec<u32>,)>(&mut store, "numbers")?;
+        assert!(numbers.call(&mut store, ())?.0.is_empty());
     }
     Ok(())
 }

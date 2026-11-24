@@ -1,5 +1,7 @@
 //! Emission of guest-settled promises (`new Promise`, `then`/`catch`/`finally`) and global timers.
-use super::{Emitter, RewriteCtx, is_pure_func_expr, sequence};
+use super::{
+    Emitter, RewriteCtx, is_pure_func_expr, sequence, synth_call, synth_function, synth_param,
+};
 use crate::engine::boundary::{TemplateKind, TemplateView};
 use crate::engine::solve::{CallbackCall, HelperSpec, Instance, ReactionKind, SiteEntry};
 use crate::engine::types::{CaptureOwner, FuncIdentity, HelperId, LocId, TemplateId, Ty};
@@ -85,7 +87,7 @@ impl<'h> Emitter<'h, '_> {
         };
         let env_class = self.ensure_env_class(self_ident)?;
         let env_pid = self.fresh_synthetic_local()?;
-        let mut params = vec![crate::hir_compat::resource_classes::synth_param(
+        let mut params = vec![synth_param(
             env_pid,
             "__env".to_owned(),
             HirType::Named(env_class),
@@ -94,11 +96,7 @@ impl<'h> Emitter<'h, '_> {
             [arg_ty] => {
                 let val_pid = self.fresh_synthetic_local()?;
                 let arg_hir = self.materialize(*arg_ty)?;
-                params.push(crate::hir_compat::resource_classes::synth_param(
-                    val_pid,
-                    "__v".to_owned(),
-                    arg_hir,
-                ));
+                params.push(synth_param(val_pid, "__v".to_owned(), arg_hir));
                 Expr::LocalGet(val_pid)
             }
             _ => Expr::Undefined,
@@ -116,7 +114,7 @@ impl<'h> Emitter<'h, '_> {
             }
         };
         let body = vec![Stmt::Expr(call.into_hir())];
-        Ok(crate::hir_compat::resource_classes::synth_function(
+        Ok(synth_function(
             inst.emitted_func_id,
             inst.emitted_name.clone(),
             params,
@@ -153,10 +151,7 @@ impl<'h> Emitter<'h, '_> {
         match cb {
             CallbackCall::ThrowTypeError(helper) => {
                 let fid = self.emit_helper(helper)?;
-                Ok((
-                    crate::hir_compat::resource_classes::synth_call(fid, Vec::new(), 0, 0),
-                    false,
-                ))
+                Ok((synth_call(fid, Vec::new(), 0, 0), false))
             }
             CallbackCall::Direct {
                 target,
@@ -194,10 +189,7 @@ impl<'h> Emitter<'h, '_> {
                 call_args.extend(args.into_iter().take(arity));
                 let ret_ty = self.solved.locations[ret_loc];
                 let returns_promise = view.is_async || self.types.is_promise_ty(ret_ty);
-                Ok((
-                    crate::hir_compat::resource_classes::synth_call(fid, call_args, 0, 0),
-                    returns_promise,
-                ))
+                Ok((synth_call(fid, call_args, 0, 0), returns_promise))
             }
             CallbackCall::Dispatch { helper, needs_recv } => {
                 let fid = self.emit_helper(helper)?;
@@ -217,10 +209,7 @@ impl<'h> Emitter<'h, '_> {
                     .iter()
                     .find(|f| f.id == fid)
                     .is_some_and(|f| f.is_async || matches!(f.return_type, HirType::Promise(_)));
-                Ok((
-                    crate::hir_compat::resource_classes::synth_call(fid, call_args, 0, 0),
-                    returns_promise,
-                ))
+                Ok((synth_call(fid, call_args, 0, 0), returns_promise))
             }
         }
     }
@@ -250,12 +239,7 @@ impl<'h> Emitter<'h, '_> {
         if let CallbackCall::ThrowTypeError(helper) = executor {
             return Ok(sequence(
                 effects,
-                crate::hir_compat::resource_classes::synth_call(
-                    self.emit_helper(helper)?,
-                    Vec::new(),
-                    0,
-                    0,
-                ),
+                synth_call(self.emit_helper(helper)?, Vec::new(), 0, 0),
             ));
         }
         let binding = evaluated
@@ -364,22 +348,14 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<Function> {
         let p_pid = self.fresh_synthetic_local()?;
         let prom_hir = self.materialize(promise_ty)?;
-        let mut params = vec![crate::hir_compat::resource_classes::synth_param(
-            p_pid,
-            "__p".to_owned(),
-            prom_hir,
-        )];
+        let mut params = vec![synth_param(p_pid, "__p".to_owned(), prom_hir)];
         let mut handler_param =
             |handler: Option<(CallbackCall, Ty)>, name: &str| -> Result<Option<LocalId>> {
                 let Some((_, ty)) = handler.filter(|(cb, _)| cb.needs_value()) else {
                     return Ok(None);
                 };
                 let id = self.fresh_synthetic_local()?;
-                params.push(crate::hir_compat::resource_classes::synth_param(
-                    id,
-                    name.into(),
-                    self.materialize(ty)?,
-                ));
+                params.push(synth_param(id, name.into(), self.materialize(ty)?));
                 Ok(Some(id))
             };
         let f_pid = handler_param(on_fulfilled, "__f")?;
@@ -585,7 +561,7 @@ impl<'h> Emitter<'h, '_> {
             ReactionKind::Catch => "__catch",
             ReactionKind::Finally => "__finally",
         };
-        Ok(crate::hir_compat::resource_classes::synth_function(
+        Ok(synth_function(
             fid,
             format!("{prefix}_{fid}"),
             params,
@@ -606,29 +582,21 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<Function> {
         let timer_cls = self.ensure_timer_class()?;
         let timer_pid = self.fresh_synthetic_local()?;
-        let mut params = vec![crate::hir_compat::resource_classes::synth_param(
+        let mut params = vec![synth_param(
             timer_pid,
             "__timer".to_owned(),
             HirType::Named(timer_cls),
         )];
         let cb_pid = if cb_call.needs_value() {
             let id = self.fresh_synthetic_local()?;
-            params.push(crate::hir_compat::resource_classes::synth_param(
-                id,
-                "__cb".to_owned(),
-                self.materialize(cb_ty)?,
-            ));
+            params.push(synth_param(id, "__cb".to_owned(), self.materialize(cb_ty)?));
             Some(id)
         } else {
             None
         };
         let delay_pid = if !is_immediate {
             let id = self.fresh_synthetic_local()?;
-            params.push(crate::hir_compat::resource_classes::synth_param(
-                id,
-                "__delay".to_owned(),
-                HirType::Number,
-            ));
+            params.push(synth_param(id, "__delay".to_owned(), HirType::Number));
             Some(id)
         } else {
             None
@@ -637,11 +605,7 @@ impl<'h> Emitter<'h, '_> {
         let mut extra_pids = Vec::with_capacity(extra_slice.len());
         for (i, &aty) in extra_slice.iter().enumerate() {
             let id = self.fresh_synthetic_local()?;
-            params.push(crate::hir_compat::resource_classes::synth_param(
-                id,
-                format!("__a{i}"),
-                self.materialize(aty)?,
-            ));
+            params.push(synth_param(id, format!("__a{i}"), self.materialize(aty)?));
             extra_pids.push(id);
         }
         let delay_expr = match delay_pid {
@@ -688,7 +652,7 @@ impl<'h> Emitter<'h, '_> {
         } else {
             step
         };
-        Ok(crate::hir_compat::resource_classes::synth_function(
+        Ok(synth_function(
             fid,
             format!("__timer_{fid}"),
             params,
@@ -761,7 +725,7 @@ impl<'h> Emitter<'h, '_> {
         for extra in args.get(extra_start..).unwrap_or(&[]) {
             call_args.push(self.rewrite_expr(&arg_ctx, extra)?);
         }
-        body.push(Stmt::Expr(crate::hir_compat::resource_classes::synth_call(
+        body.push(Stmt::Expr(synth_call(
             fid,
             call_args,
             byte_offset,

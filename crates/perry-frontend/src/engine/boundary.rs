@@ -141,6 +141,7 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) local_written_from_closure: BitSet,
     pub(crate) local_forward_captured: BitSet,
     pub(crate) capture_free_templates: BitSet,
+    pub(crate) returns_empty_list: BitSet,
     pub(crate) closure_in_loop: BitSet,
     pub(crate) closure_owner_template: Vec<Option<TemplateId>>,
     template_captures: Vec<Vec<LocalId>>,
@@ -710,6 +711,9 @@ impl<'h> ModuleIndex<'h> {
                     scan.defined_locals.insert(*id as usize);
                 }
                 Stmt::Return(Some(val)) => {
+                    if matches!(val, Expr::Array(items, _) if items.is_empty()) {
+                        self.returns_empty_list.insert(owner.index());
+                    }
                     Self::record_site_expr(scan, owner, val);
                     self.scan_expr(scan, val, owner, in_loop);
                 }

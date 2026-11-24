@@ -140,6 +140,8 @@ pub enum ExportKind {
 /// One component export bound to a TypeScript function.
 #[derive(Clone, Debug)]
 pub struct Export {
+    /// Parameter annotation spans followed by the return annotation.
+    pub annotations: Vec<Option<perry_wit_diagnostics::SourceSpan>>,
     /// Core export name: the WIT function name, or `interface#function`.
     pub core_name: String,
     /// The MIR function implementing it.
@@ -150,6 +152,9 @@ pub struct Export {
 }
 
 impl Export {
+    pub fn annotation(&self, i: usize) -> Option<perry_wit_diagnostics::SourceSpan> {
+        self.annotations.get(i).cloned().flatten()
+    }
     pub(crate) fn is_async(&self) -> bool {
         matches!(self.kind, ExportKind::Async { .. })
     }

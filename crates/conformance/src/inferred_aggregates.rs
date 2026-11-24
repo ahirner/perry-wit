@@ -261,6 +261,7 @@ impl AggregateCase {
 
     fn rejection(&self, conflict: UnresolvedWrite) -> Case {
         Case::Reject {
+            wit: Some(crate::program::WIT.into()),
             source: self.emit(Form::Aliased, Some(conflict)),
             form_sources: [Form::Branches, Form::Loop, Form::Temporaries]
                 .into_iter()
@@ -399,6 +400,7 @@ pub(crate) fn contract() -> Contract {
         witnesses.push(Witness {
             partition,
             case: Case::Reject {
+                wit: None,
                 source: source.into(),
                 diagnostic: if partition == "mutable-element-alias" {
                     "differs from the expected type"
@@ -479,6 +481,7 @@ pub(crate) fn dictionary_contract() -> Contract {
         witnesses.push(Witness {
             partition,
             case: Case::Reject {
+                wit: None,
                 source: source.into(),
                 diagnostic: "subset rule R1".into(),
                 form_sources: vec![],
