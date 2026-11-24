@@ -26,19 +26,8 @@ impl AbiType {
     pub(crate) fn accepts_exception(&self) -> bool {
         match self {
             Self::Result { err, .. } => err.as_deref().is_none_or(|err| match err {
-                Self::Bool
-                | Self::S8
-                | Self::U8
-                | Self::S16
-                | Self::U16
-                | Self::S32
-                | Self::U32
-                | Self::S64
-                | Self::U64
-                | Self::F32
-                | Self::F64
-                | Self::String
-                | Self::Enum(_) => true,
+                _ if err.is_scalar() => true,
+                Self::String | Self::Enum(_) => true,
                 Self::Record(fields) => {
                     fields.len() == 2
                         && ["name", "message"].iter().all(|name| {
@@ -212,14 +201,7 @@ impl FunctionLowering<'_, '_> {
                 IntegerType::get(ctx, 1, Signedness::Signless).into(),
                 MemKind::I32,
             ),
-            AbiType::F32
-            | AbiType::F64
-            | AbiType::S8
-            | AbiType::U8
-            | AbiType::S16
-            | AbiType::U16
-            | AbiType::S32
-            | AbiType::U32 => (
+            _ if err.is_scalar() => (
                 exception_layout::TAG_NUMBER,
                 FP64Type::get(ctx).into(),
                 MemKind::F64,
