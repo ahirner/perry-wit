@@ -21,8 +21,8 @@ pub(crate) enum TemplateKind {
     ClassGetter(usize),
     ClassSetter(usize),
     Closure,
-    PromiseResolve,
-    PromiseReject,
+    PromiseResolve(usize),
+    PromiseReject(usize),
 }
 
 pub(crate) struct TemplateView<'h> {
@@ -102,13 +102,17 @@ impl ClassInfo {
     }
 }
 
+pub(crate) struct IndexedSite {
+    address: usize,
+    pub(crate) handles: Option<(TemplateId, TemplateId)>,
+}
+
 #[derive(Default)]
 pub(crate) struct ModuleIndex<'h> {
     pub(crate) views: IdxVec<TemplateId, TemplateView<'h>>,
     func_to_template: Vec<Option<TemplateId>>,
     template_site_spans: Vec<TySpan>,
-    site_entries: Vec<(usize, u32)>,
-    promise_site_templates: Vec<(usize, TemplateId, TemplateId)>,
+    site_entries: Vec<IndexedSite>,
     pub(crate) classes: IdxVec<ClassId, ClassInfo>,
     pub(crate) class_has_implicit_params: BitSet,
     pub(crate) hir_class_is_literal: BitSet,
@@ -188,7 +192,7 @@ impl<'h> ModuleIndex<'h> {
             explicit_return: false,
         });
         debug_assert_eq!(init_tid, TemplateId::INIT);
-        let mut raw_sites: Vec<Vec<(usize, u32)>> = vec![Vec::new()];
+        let mut raw_sites: Vec<Vec<&'h Expr>> = vec![Vec::new()];
         let mut defined_locals = BitSet::default();
         let mut pending_captures: Vec<(LocalId, bool, bool)> = Vec::new();
         let mut scan = ScanCtx {
@@ -325,14 +329,37 @@ impl<'h> ModuleIndex<'h> {
 
         raw_sites.resize_with(idx.views.len(), Vec::new);
         idx.template_site_spans = Vec::with_capacity(idx.views.len());
-        for mut list in raw_sites {
-            list.sort_unstable_by_key(|&(addr, _)| addr);
-            list.dedup_by_key(|e| e.0);
-            for (i, e) in list.iter_mut().enumerate() {
-                e.1 = i as u32;
+        for list in raw_sites {
+            let mut sites: Vec<_> = list
+                .iter()
+                .map(|&expr| IndexedSite {
+                    address: std::ptr::from_ref(expr) as usize,
+                    handles: None,
+                })
+                .collect();
+            sites.sort_unstable_by_key(|site| site.address);
+            sites.dedup_by_key(|site| site.address);
+            for expr in list {
+                if matches!(expr, Expr::New { class_name, .. } if class_name == "Promise")
+                    && let Ok(site) = sites
+                        .binary_search_by_key(&(std::ptr::from_ref(expr) as usize), |s| s.address)
+                    && let Some(entry) = sites.get_mut(site)
+                    && entry.handles.is_none()
+                {
+                    entry.handles = Some((
+                        idx.add_promise_handle_template(
+                            TemplateKind::PromiseResolve(site),
+                            "resolve",
+                        ),
+                        idx.add_promise_handle_template(
+                            TemplateKind::PromiseReject(site),
+                            "reject",
+                        ),
+                    ));
+                }
             }
-            let (start, len) = (idx.site_entries.len() as u32, list.len() as u32);
-            idx.site_entries.extend(list);
+            let (start, len) = (idx.site_entries.len() as u32, sites.len() as u32);
+            idx.site_entries.extend(sites);
             idx.template_site_spans.push(TySpan { start, len });
         }
 
@@ -417,15 +444,13 @@ impl<'h> ModuleIndex<'h> {
             let is_promise_handle = idx.views.as_slice().get(i).is_some_and(|v| {
                 matches!(
                     v.kind,
-                    TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+                    TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
                 )
             });
             if caps.is_empty() && !is_promise_handle {
                 idx.capture_free_templates.insert(i);
             }
         }
-        idx.promise_site_templates
-            .sort_unstable_by_key(|&(addr, _, _)| addr);
         idx.template_captures = template_captures;
         for stmt in &hir.init {
             if let Stmt::Let {
@@ -483,29 +508,16 @@ impl<'h> ModuleIndex<'h> {
             .copied()
             .unwrap_or(0)
     }
-    pub(crate) fn site_count(&self, t: TemplateId) -> usize {
+    pub(crate) fn sites(&self, template: TemplateId) -> &[IndexedSite] {
         self.template_site_spans
-            .get(t.index())
-            .map_or(0, |s| s.len as usize)
+            .get(template.index())
+            .and_then(|span| self.site_entries.get(span.range()))
+            .unwrap_or_default()
     }
-    pub(crate) fn site_of(&self, t: TemplateId, expr: &Expr) -> Option<usize> {
-        let entries = self
-            .site_entries
-            .get(self.template_site_spans.get(t.index())?.range())?;
-        let pos = entries
-            .binary_search_by_key(&(std::ptr::from_ref(expr) as usize), |&(a, _)| a)
-            .ok()?;
-        entries.get(pos).map(|&(_, s)| s as usize)
-    }
-    pub(crate) fn promise_templates_of(&self, expr: &Expr) -> Option<(TemplateId, TemplateId)> {
-        let addr = std::ptr::from_ref(expr) as usize;
-        let pos = self
-            .promise_site_templates
-            .binary_search_by_key(&addr, |&(a, _, _)| a)
-            .ok()?;
-        self.promise_site_templates
-            .get(pos)
-            .map(|&(_, r, j)| (r, j))
+    pub(crate) fn site_of(&self, template: TemplateId, expr: &Expr) -> Option<usize> {
+        self.sites(template)
+            .binary_search_by_key(&(std::ptr::from_ref(expr) as usize), |s| s.address)
+            .ok()
     }
     pub(crate) fn view(&self, id: TemplateId) -> Option<&TemplateView<'h>> {
         self.views.get(id)
@@ -591,15 +603,10 @@ impl<'h> ModuleIndex<'h> {
 
     fn add_promise_handle_template(
         &mut self,
-        scan: &mut ScanCtx<'h, '_>,
         kind: TemplateKind,
+        name: &'static str,
     ) -> TemplateId {
-        let name = match kind {
-            TemplateKind::PromiseResolve => "resolve",
-            TemplateKind::PromiseReject => "reject",
-            _ => "",
-        };
-        let tid = self.add_template(TemplateView {
+        self.add_template(TemplateView {
             kind,
             name,
             func_id: 0,
@@ -617,9 +624,7 @@ impl<'h> ModuleIndex<'h> {
             captures_new_target: false,
             uses_this: false,
             explicit_return: true,
-        });
-        scan.raw_sites.resize_with(self.views.len(), Vec::new);
-        tid
+        })
     }
 
     fn register_member(
@@ -836,7 +841,7 @@ impl<'h> ModuleIndex<'h> {
 
     fn record_site_expr(scan: &mut ScanCtx<'h, '_>, owner: TemplateId, expr: &'h Expr) {
         if let Some(list) = scan.raw_sites.get_mut(owner.index()) {
-            list.push((std::ptr::from_ref(expr) as usize, 0));
+            list.push(expr);
         }
     }
 
@@ -880,23 +885,10 @@ impl<'h> ModuleIndex<'h> {
                 Self::record_site_expr(scan, owner, then_expr);
                 Self::record_site_expr(scan, owner, else_expr);
             }
-            Expr::New {
-                class_name, args, ..
-            } => {
+            Expr::New { args, .. } => {
                 Self::record_site_expr(scan, owner, expr);
                 for arg in args {
                     Self::record_site_expr(scan, owner, arg);
-                }
-                if class_name == "Promise" {
-                    let resolve_tid =
-                        self.add_promise_handle_template(scan, TemplateKind::PromiseResolve);
-                    let reject_tid =
-                        self.add_promise_handle_template(scan, TemplateKind::PromiseReject);
-                    self.promise_site_templates.push((
-                        std::ptr::from_ref(expr) as usize,
-                        resolve_tid,
-                        reject_tid,
-                    ));
                 }
             }
             Expr::Object(_)
@@ -1039,7 +1031,7 @@ struct ScanCtx<'h, 'a> {
     hir: &'h HirModule,
     facts: &'a SourceFacts,
     types: &'a mut TypeTable,
-    raw_sites: &'a mut Vec<Vec<(usize, u32)>>,
+    raw_sites: &'a mut Vec<Vec<&'h Expr>>,
     defined_locals: &'a mut BitSet,
     pending_captures: &'a mut Vec<(LocalId, bool, bool)>,
 }

@@ -118,14 +118,6 @@ impl<'s> FunctionBuilder<'s> {
         frame: &ReturnFrame,
         expression: Option<&'s Expr>,
     ) -> Result<()> {
-        let expression = if let Some(expr) = expression
-            && self.returns_no_value(expr)
-        {
-            self.effect(ctx, expr)?;
-            None
-        } else {
-            expression
-        };
         let Some(slot) = frame.slot else {
             if let Some(expr) = expression {
                 self.effect(ctx, expr)?;
@@ -133,8 +125,12 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(());
         };
         let ty = self.slot_type(ctx, slot)?;
-        let value = match expression {
-            Some(expression) => self.expression_with(ctx, expression, Some(ty))?,
+        let value = match expression
+            .map(|expr| self.optional_operand(ctx, expr, Some(ty)))
+            .transpose()?
+            .flatten()
+        {
+            Some(value) => value,
             None => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
         };
         let value = self.fit(ctx, value, ty)?;

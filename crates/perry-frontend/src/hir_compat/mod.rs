@@ -14,7 +14,7 @@ use swc_ecma_visit::VisitMutWith;
 mod calls;
 mod classes;
 mod constructors;
-pub use calls::{RuntimeCall, runtime_call};
+pub use calls::{GuestCall, RuntimeCall, runtime_call};
 mod defaults;
 pub use defaults::strip_synthetic_default_guards;
 mod locations;

@@ -14,7 +14,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(false);
         };
         match view.kind {
-            TemplateKind::PromiseResolve => {
+            TemplateKind::PromiseResolve(site) => {
                 if let Some(&arg0) = arg_tys.first()
                     && self.types.is_promise_ty(arg0)
                 {
@@ -26,24 +26,20 @@ impl<'h, 'a> Solver<'h, 'a> {
                         byte_offset,
                     ));
                 }
-                if let Some(&value_loc) = self
-                    .promise_handle_locs
-                    .get(&(ident.template, ident.capture_owner))
-                {
-                    let val = arg_tys.first().copied().unwrap_or(Ty::VOID);
-                    if val != Ty::BOTTOM {
-                        self.check_escaping_func(s.inst, val, byte_offset, s.current_span)?;
-                        let norm = self.types.normalize_for_storage(self.ctx, self.decls, val);
-                        self.write_loc(value_loc, norm);
-                        if let Some(arg0_expr) = args.and_then(|a| a.first()) {
-                            let cur = self.read_loc(value_loc, s.inst);
-                            self.record_coercion(s.inst, arg0_expr, val, cur);
-                        }
+                let value_loc = SiteEntry::promise(&self.inst_sites, ident.capture_owner, site)?;
+                let val = arg_tys.first().copied().unwrap_or(Ty::VOID);
+                if val != Ty::BOTTOM {
+                    self.check_escaping_func(s.inst, val, byte_offset, s.current_span)?;
+                    let norm = self.types.normalize_for_storage(self.ctx, self.decls, val);
+                    self.write_loc(value_loc, norm);
+                    if let Some(arg0_expr) = args.and_then(|a| a.first()) {
+                        let cur = self.read_loc(value_loc, s.inst);
+                        self.record_coercion(s.inst, arg0_expr, val, cur);
                     }
                 }
                 Ok(true)
             }
-            TemplateKind::PromiseReject => Ok(true),
+            TemplateKind::PromiseReject(_) => Ok(true),
             _ => Ok(false),
         }
     }
@@ -173,19 +169,27 @@ impl<'h, 'a> Solver<'h, 'a> {
         type_args: &'h [HirType],
         byte_offset: u32,
     ) -> Result<Ty> {
-        let Some((resolve_tid, reject_tid)) = self.index.promise_templates_of(expr) else {
-            return Err(Diagnostic::internal("missing promise handle templates"));
-        };
         let owner = CaptureOwner::Instance(s.inst);
-        let value_loc = match self.promise_handle_locs.get(&(resolve_tid, owner)).copied() {
-            Some(loc) => loc,
-            None => {
-                let loc = self.alloc_loc(Ty::BOTTOM);
-                self.promise_handle_locs.insert((resolve_tid, owner), loc);
-                self.promise_handle_locs.insert((reject_tid, owner), loc);
-                loc
-            }
+        let site = self
+            .index
+            .site_of(self.instances[s.inst].template, expr)
+            .ok_or_else(|| Diagnostic::internal("missing promise constructor site"))?;
+        let Some(SiteResolution::PromiseNew {
+            value_loc,
+            resolve_tid,
+            reject_tid,
+            ..
+        }) = self
+            .inst_sites
+            .get(s.inst.index())
+            .and_then(|sites| sites.get(site))
+            .and_then(|entry| entry.resolution.as_ref())
+        else {
+            return Err(Diagnostic::internal(
+                "missing promise constructor resolution",
+            ));
         };
+        let (value_loc, resolve_tid, reject_tid) = (*value_loc, *resolve_tid, *reject_tid);
         if !type_args.is_empty() {
             let targs = self.eval_type_args(s.inst, type_args);
             if let Some(&ta) = targs.first() {
@@ -247,9 +251,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     value_loc,
                     resolve_tid,
                     reject_tid,
-                    executor,
-                    pass_resolve,
-                    pass_reject,
+                    executor: Some((executor, pass_resolve, pass_reject)),
                 },
             );
         }
@@ -323,7 +325,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                             v.params.is_empty()
                                 && !matches!(
                                     v.kind,
-                                    TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+                                    TemplateKind::PromiseResolve(_)
+                                        | TemplateKind::PromiseReject(_)
                                 )
                         })
                     });

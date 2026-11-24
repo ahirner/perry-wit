@@ -1,8 +1,9 @@
 //! Emission of guest-settled promises (`new Promise`, `then`/`catch`/`finally`) and global timers.
 use super::{Emitter, RewriteCtx, is_pure_func_expr, sequence};
 use crate::engine::boundary::{TemplateKind, TemplateView};
-use crate::engine::solve::{CallbackCall, HelperSpec, Instance, ReactionKind};
+use crate::engine::solve::{CallbackCall, HelperSpec, Instance, ReactionKind, SiteEntry};
 use crate::engine::types::{CaptureOwner, FuncIdentity, HelperId, LocId, TemplateId, Ty};
+use crate::hir_compat::GuestCall;
 use perry_hir::{
     ir::{CatchClause, Expr, Function, Stmt, UnaryOp},
     types::{FuncId, LocalId, Type as HirType},
@@ -12,20 +13,6 @@ use perry_wit_diagnostics::{Diagnostic, Result};
 const TIMER_CLASS: &str = "__PerryTimer";
 
 impl<'h> Emitter<'h, '_> {
-    fn extern_call(name: &str, args: Vec<Expr>, type_args: Vec<HirType>) -> Expr {
-        Expr::Call {
-            callee: Box::new(Expr::ExternFuncRef {
-                name: name.to_owned(),
-                param_types: Vec::new(),
-                return_type: HirType::Any,
-            }),
-            args,
-            type_args,
-            byte_offset: 0,
-            byte_end: 0,
-        }
-    }
-
     pub(super) fn inline_iife(&mut self, return_type: HirType, body: Vec<Stmt>) -> Result<Expr> {
         let closure_fid = self.fresh_func_id()?;
         let closure = Expr::Closure {
@@ -67,11 +54,12 @@ impl<'h> Emitter<'h, '_> {
         ident: FuncIdentity,
         name: String,
     ) -> Result<String> {
-        let value_loc = *self
-            .solved
-            .promise_handle_locs
-            .get(&(ident.template, ident.capture_owner))
-            .ok_or_else(|| Diagnostic::internal("missing promise handle value location"))?;
+        let Some(TemplateKind::PromiseResolve(site) | TemplateKind::PromiseReject(site)) =
+            self.index.view(ident.template).map(|v| v.kind)
+        else {
+            return Err(Diagnostic::internal("missing promise handle template"));
+        };
+        let value_loc = SiteEntry::promise(&self.solved.inst_sites, ident.capture_owner, site)?;
         let prom_ty = HirType::Promise(Box::new(self.promise_inner_hir(value_loc)?));
         self.class_with_fields(name, [("c0".to_owned(), prom_ty)])
     }
@@ -101,16 +89,19 @@ impl<'h> Emitter<'h, '_> {
             }
             _ => Expr::Undefined,
         };
-        let marker = if view.kind == TemplateKind::PromiseResolve {
-            "\0perry_promise_resolve"
+        let promise = Self::prop_get(Expr::LocalGet(env_pid), "c0");
+        let call = if matches!(view.kind, TemplateKind::PromiseResolve(_)) {
+            GuestCall::Resolve {
+                promise,
+                value: val_expr,
+            }
         } else {
-            "\0perry_promise_reject"
+            GuestCall::Reject {
+                promise,
+                reason: val_expr,
+            }
         };
-        let body = vec![Stmt::Expr(Self::extern_call(
-            marker,
-            vec![Self::prop_get(Expr::LocalGet(env_pid), "c0"), val_expr],
-            Vec::new(),
-        ))];
+        let body = vec![Stmt::Expr(call.into_hir())];
         Ok(Self::synth_function(
             inst.emitted_func_id,
             inst.emitted_name.clone(),
@@ -177,7 +168,7 @@ impl<'h> Emitter<'h, '_> {
                     call_args.push(r);
                 }
                 let arity = match view.kind {
-                    TemplateKind::PromiseResolve | TemplateKind::PromiseReject => {
+                    TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_) => {
                         self.types.tuple_slice(target_args).len()
                     }
                     _ if view.params.iter().any(|p| p.is_rest) => args.len(),
@@ -264,11 +255,7 @@ impl<'h> Emitter<'h, '_> {
             name: "__p".to_owned(),
             ty: prom_hir.clone(),
             mutable: false,
-            init: Some(Self::extern_call(
-                "\0perry_promise_pending",
-                Vec::new(),
-                vec![inner_hir],
-            )),
+            init: Some(GuestCall::Pending(inner_hir).into_hir()),
         });
         let mut exec_args = Vec::with_capacity(2);
         for template in [
@@ -299,11 +286,13 @@ impl<'h> Emitter<'h, '_> {
             body: vec![Stmt::Expr(exec_call)],
             catch: Some(CatchClause {
                 param: Some((err_id, "__e".to_owned())),
-                body: vec![Stmt::Expr(Self::extern_call(
-                    "\0perry_promise_reject",
-                    vec![Expr::LocalGet(p_id), Expr::LocalGet(err_id)],
-                    Vec::new(),
-                ))],
+                body: vec![Stmt::Expr(
+                    GuestCall::Reject {
+                        promise: Expr::LocalGet(p_id),
+                        reason: Expr::LocalGet(err_id),
+                    }
+                    .into_hir(),
+                )],
             }),
             finally: None,
             forof_completion: None,
@@ -523,7 +512,7 @@ impl<'h> Emitter<'h, '_> {
                 let catch_id = self.fresh_synthetic_local()?;
                 let try_body = if is_void_ret {
                     vec![Stmt::Expr(await_p()), Stmt::Return(None)]
-                } else if inner_ty == Ty::BOTTOM {
+                } else if matches!(inner_ty, Ty::BOTTOM | Ty::NEVER) {
                     vec![
                         Stmt::Expr(await_p()),
                         Stmt::Throw(Expr::ErrorNew(Some(Box::new(Expr::String(
@@ -629,11 +618,13 @@ impl<'h> Emitter<'h, '_> {
         let signal_expr =
             Self::prop_get(Self::prop_get(Expr::LocalGet(timer_pid), "ctrl"), "signal");
         let wait_stmt = Stmt::Try {
-            body: vec![Stmt::Expr(Expr::Await(Box::new(Self::extern_call(
-                "\0perry_timer",
-                vec![delay_expr, signal_expr],
-                Vec::new(),
-            ))))],
+            body: vec![Stmt::Expr(Expr::Await(Box::new(
+                GuestCall::Timer {
+                    delay: delay_expr,
+                    signal: signal_expr,
+                }
+                .into_hir(),
+            )))],
             catch: Some(CatchClause {
                 param: None,
                 body: vec![Stmt::Return(None)],

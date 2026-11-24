@@ -134,7 +134,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         if self.index.view(ident.template).is_some_and(|v| {
             matches!(
                 v.kind,
-                TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
             )
         }) {
             return self.emit_promise_env_class(ident, name);
@@ -749,7 +749,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             }
             let is_promise_handle = matches!(
                 view.kind,
-                TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
             );
             let has_rest = view.params.iter().any(|p| p.is_rest);
             let max_args = if is_promise_handle {

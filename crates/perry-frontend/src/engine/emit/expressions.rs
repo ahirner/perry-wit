@@ -582,9 +582,9 @@ impl<'h> Emitter<'h, '_> {
                     resolve_tid,
                     reject_tid,
                     executor,
-                    pass_resolve,
-                    pass_reject,
                 } => {
+                    let (executor, pass_resolve, pass_reject) = executor
+                        .ok_or_else(|| Diagnostic::internal("unresolved promise executor"))?;
                     if let Expr::New { args, .. } = expr {
                         return self.emit_promise_new(
                             rctx,

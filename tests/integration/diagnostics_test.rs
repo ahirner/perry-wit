@@ -124,6 +124,16 @@ fn function_arguments_check_declared_results_and_locate_escaping_values() -> any
             "resolving a Promise with another Promise is not supported yet",
         ),
         (
+            "export const api = { async slowDouble(n: number) { return n * 2; } };",
+            "slowDouble",
+            "async method 'slowDouble' of an exported object literal",
+        ),
+        (
+            "const m = new Map(); const alias = m; alias.set('k', () => 2);",
+            "alias.set",
+            "storing a function value with Map.set",
+        ),
+        (
             "export function run(): number { queueMicrotask(() => {}); return 1; }",
             "queueMicrotask(() => {})",
             "queueMicrotask is not supported",

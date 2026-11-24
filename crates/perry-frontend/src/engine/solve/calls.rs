@@ -605,6 +605,17 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         let arg_tys = self.eval_args(s, args)?;
 
+        if name == "set"
+            && arg_tys.get(1).is_some_and(|&ty| self.types.has_func(ty))
+            && builtins::receiver_of(self.ctx, self.types, stripped)
+                == Some(crate::methods::Receiver::Map)
+        {
+            return Err(self.annotate_expr_error(
+                s,
+                Diagnostic::unsupported("storing a function value with Map.set is not supported"),
+                byte_offset,
+            ));
+        }
         if matches!(name, "push" | "unshift") {
             let pushed_cell = self.push_into_cells(stripped, &arg_tys);
             self.coerce_array_write(s.inst, stripped, args, &arg_tys);

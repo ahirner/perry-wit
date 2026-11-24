@@ -164,7 +164,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let is_promise_handle = self.index.view(template).is_some_and(|v| {
             matches!(
                 v.kind,
-                TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
             )
         });
         let args = if is_promise_handle {
@@ -408,8 +408,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
         self.inst_written.push(BitSet::default());
         self.inst_captures.push(inst_caps);
-        self.inst_sites
-            .push(vec![SiteEntry::default(); self.index.site_count(template)]);
+        self.inst_sites.push(
+            self.index
+                .sites(template)
+                .iter()
+                .map(|site| SiteEntry {
+                    resolution: site.handles.map(|(resolve_tid, reject_tid)| {
+                        SiteResolution::PromiseNew {
+                            value_loc: self.locations.push(Ty::BOTTOM),
+                            resolve_tid,
+                            reject_tid,
+                            executor: None,
+                        }
+                    }),
+                    coercion: None,
+                })
+                .collect(),
+        );
         self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)

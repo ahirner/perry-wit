@@ -917,13 +917,30 @@ async function verify() {
   try { new Promise(optionalExecutor(false)); } catch (e) { trace += "t"; }
   const p = new Promise(makeExecutor(), extra("a"));
   const value = await p.then(handler(), null, extra("b")).then(17);
-  clearTimeout(undefined, extra("c"));
+  const clear = () => clearTimeout(undefined, extra("c"));
+  clear();
   const rejection = await p.finally(() => Promise.reject(new Error("override"))).catch(e => e.message);
   console.log(trace, value, rejection, await p.then(optional(false)), await p.then(optional(true)));
 }
 await verify();
 "#,
             "teaxshbc 4 override 4 5\n",
+        ),
+        (
+            "promise_handles_keep_their_constructor_instance",
+            r#"
+function job(value) {
+  let send;
+  const promise = new Promise(resolve => { send = resolve; });
+  return { send: () => send(value), promise };
+}
+const first = job(42);
+const second = job("ok");
+second.send();
+first.send();
+console.log(await first.promise, await second.promise);
+"#,
+            "42 ok\n",
         ),
         (
             "guest_settled_promises_and_global_timers",
@@ -944,6 +961,7 @@ async function main() {
   const thrown = await new Promise(() => {
     throw new Error("sync-fail");
   }).catch((e) => e.message);
+  const fromHandler = await new Promise(r => r(1)).then(() => { throw new Error("reaction"); }).catch(e => e.message);
   const chained = await new Promise((resolve) => resolve(3))
     .then((n) => new Promise((resolve) => setTimeout(() => resolve(n * 4), 2)))
     .then((n) => n + 1);
@@ -961,7 +979,7 @@ async function main() {
   const cancelled = setTimeout(() => {
     cancelledRan = true;
   }, 50);
-  clearTimeout(cancelled);
+  setTimeout(() => clearTimeout(cancelled), 1);
 
   const ticks = await new Promise((resolve) => {
     let count = 0;
@@ -992,6 +1010,7 @@ async function main() {
     withArgs,
     caught,
     forwarded,
+    fromHandler,
     thrown,
     chained,
     finOk,
@@ -1005,7 +1024,7 @@ async function main() {
 }
 await main();
 "#,
-            "42 later 30 boom forwarded sync-fail 13 ok bad f1,f2 false 3 true imm\n",
+            "42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm\n",
         ),
     ];
     for &(name, source, expected) in cases {

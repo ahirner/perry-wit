@@ -1266,7 +1266,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
         }
-        Ok(Ty::OPEN)
+        Ok(self.types.generic(
+            base,
+            if is_map {
+                &[Ty::OPEN, Ty::OPEN]
+            } else {
+                &[Ty::OPEN]
+            },
+        ))
     }
 
     pub(super) fn active_instance_type_bindings(

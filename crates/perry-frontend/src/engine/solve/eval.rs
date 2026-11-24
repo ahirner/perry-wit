@@ -29,7 +29,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         if matches!(
             view.kind,
-            TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+            TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
         ) {
             return Ok(());
         }
@@ -155,6 +155,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else {
                     s.returned
                 }
+            } else if !crate::completion::falls_through(body) {
+                Ty::NEVER
             } else {
                 Ty::VOID
             };
@@ -987,7 +989,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             dict_reads: self.dict_reads,
             self_nested_locs: self.self_nested_locs,
             self_nested_locals: self.self_nested_locals,
-            promise_handle_locs: self.promise_handle_locs,
             deletes_array_elements: self.deletes_array_elements,
         }
     }

@@ -135,11 +135,10 @@ impl<'s> FunctionBuilder<'s> {
                         }
                         None => {
                             ensure_diag!(
-                                self.returns_no_value(expr),
+                                self.optional_operand(ctx, expr, None)?.is_none(),
                                 codes::TYPE_MISMATCH,
                                 "a void function returns a value"
                             );
-                            self.effect(ctx, expr)?;
                             (self.implicit_results(ctx), None)
                         }
                     },
@@ -447,76 +446,75 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    pub(super) fn returns_no_value(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Undefined => true,
-            Expr::LocalGet(id) => self.locals.get(id).is_some_and(|b| b.is_never),
-            Expr::Call { callee, .. } => {
-                matches!(callee.as_ref(), Expr::FuncRef(id) if self.signatures.get(id).is_some_and(|s| s.returns_never || (!s.is_async && s.result.is_none())))
-                    || matches!(callee.as_ref(), Expr::PropertyGet { object, property, .. } if matches!(**object, Expr::GlobalGet(0)) && matches!(property.as_str(), "log" | "info" | "debug" | "error" | "warn"))
-            }
-            _ => false,
+    pub(super) fn optional_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Option<Value>> {
+        if self.iteration.is_release(expr) {
+            return Ok(None);
         }
+        let value = match expr {
+            Expr::ScopedTemp { id, value, body } => {
+                return self.with_temp(ctx, *id, value, |this, ctx| {
+                    this.optional_operand(ctx, body, expected)
+                });
+            }
+            Expr::Sequence(parts) if hir_compat::non_null_assertion(expr).is_none() => {
+                let Some((last, effects)) = parts.split_last() else {
+                    return Ok(None);
+                };
+                if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+                    return self
+                        .optional_operand(ctx, last, expected)
+                        .map_err(|error| error.with_fallback_span(Some(span)));
+                }
+                for part in effects {
+                    self.effect(ctx, part)?;
+                }
+                return self.optional_operand(ctx, last, expected);
+            }
+            Expr::Undefined => None,
+            Expr::Call {
+                callee,
+                args,
+                type_args,
+                byte_offset,
+                ..
+            } => self
+                .call(ctx, callee, args, type_args, *byte_offset)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+            Expr::StaticMethodCall {
+                class_name,
+                method_name,
+                args,
+            } => self.class_static_method_call(ctx, class_name, method_name, args)?,
+            Expr::ProcessExit(code) => {
+                let code = match code {
+                    Some(code) => {
+                        let code = self.expression(ctx, code)?;
+                        let code = self.arithmetic(ctx, code);
+                        ensure_diag!(
+                            kind(ctx, code)? == Kind::Number,
+                            codes::TYPE_MISMATCH,
+                            "process.exit takes a number"
+                        );
+                        code
+                    }
+                    None => self.number(ctx, 0.0),
+                };
+                let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
+                self.propagate(ctx, status);
+                self.after_terminator(ctx);
+                None
+            }
+            _ => Some(self.expression_with(ctx, expr, expected)?),
+        };
+        Ok(value.filter(|v| !self.never_values.contains(v)))
     }
 
-    /// Lower an expression statement evaluated for its side effects, permitting `void` calls.
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {
-        if self.iteration.is_release(expr) {
-            return Ok(());
-        }
-        if let Expr::ScopedTemp { id, value, body } = expr {
-            return self.with_temp(ctx, *id, value, |this, ctx| this.effect(ctx, body));
-        }
-        if let Expr::Sequence(parts) = expr {
-            if let Some(span) = self.shapes.metadata.locations.operator_span(parts)
-                && let Some(last) = parts.last()
-            {
-                return self
-                    .effect(ctx, last)
-                    .map_err(|error| error.with_fallback_span(Some(span)));
-            }
-            for part in parts {
-                self.effect(ctx, part)?;
-            }
-            return Ok(());
-        }
-        if let Expr::Call {
-            callee,
-            args,
-            type_args,
-            byte_offset,
-            ..
-        } = expr
-        {
-            self.call(ctx, callee, args, type_args, *byte_offset)
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
-        } else if let Expr::StaticMethodCall {
-            class_name,
-            method_name,
-            args,
-        } = expr
-        {
-            self.class_static_method_call(ctx, class_name, method_name, args)?;
-        } else if let Expr::ProcessExit(code) = expr {
-            let code = match code {
-                Some(code) => {
-                    let code = self.expression(ctx, code)?;
-                    let code = self.arithmetic(ctx, code);
-                    ensure_diag!(
-                        kind(ctx, code)? == Kind::Number,
-                        codes::TYPE_MISMATCH,
-                        "process.exit takes a number"
-                    );
-                    code
-                }
-                None => self.number(ctx, 0.0),
-            };
-            let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
-            self.propagate(ctx, status);
-            self.after_terminator(ctx);
-        } else {
-            self.expression(ctx, expr)?;
-        }
-        Ok(())
+        self.optional_operand(ctx, expr, None).map(|_| ())
     }
 }

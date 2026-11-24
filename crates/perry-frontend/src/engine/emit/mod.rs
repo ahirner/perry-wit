@@ -303,8 +303,8 @@ impl<'h> Emitter<'h, '_> {
                 view.kind,
                 TemplateKind::Function
                     | TemplateKind::Closure
-                    | TemplateKind::PromiseResolve
-                    | TemplateKind::PromiseReject
+                    | TemplateKind::PromiseResolve(_)
+                    | TemplateKind::PromiseReject(_)
             ) {
                 continue;
             }
@@ -546,7 +546,7 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<(Function, HashMap<LocalId, LocalId>)> {
         if matches!(
             view.kind,
-            TemplateKind::PromiseResolve | TemplateKind::PromiseReject
+            TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
         ) {
             return Ok((
                 self.emit_promise_handle_function(inst, view)?,

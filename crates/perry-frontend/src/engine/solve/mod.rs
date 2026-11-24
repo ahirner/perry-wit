@@ -200,9 +200,7 @@ pub(crate) enum SiteResolution {
         value_loc: LocId,
         resolve_tid: TemplateId,
         reject_tid: TemplateId,
-        executor: CallbackCall,
-        pass_resolve: bool,
-        pass_reject: bool,
+        executor: Option<(CallbackCall, bool, bool)>,
     },
     PromiseReaction {
         result: LocId,
@@ -225,6 +223,20 @@ pub(crate) enum SiteResolution {
 pub(crate) struct SiteEntry {
     pub(crate) resolution: Option<SiteResolution>,
     pub(crate) coercion: Option<FuncCoercion>,
+}
+
+impl SiteEntry {
+    pub(crate) fn promise(sites: &[Vec<Self>], owner: CaptureOwner, site: usize) -> Result<LocId> {
+        let entry = owner
+            .instance()
+            .and_then(|inst| sites.get(inst.index())?.get(site));
+        match entry.and_then(|e| e.resolution.as_ref()) {
+            Some(SiteResolution::PromiseNew { value_loc, .. }) => Ok(*value_loc),
+            _ => Err(Diagnostic::internal(
+                "missing promise constructor for settlement handle",
+            )),
+        }
+    }
 }
 
 pub(crate) struct Solved {
@@ -255,7 +267,6 @@ pub(crate) struct Solved {
     pub(crate) dict_reads: BitSet,
     pub(crate) self_nested_locs: BitSet,
     pub(crate) self_nested_locals: BitSet,
-    pub(crate) promise_handle_locs: HashMap<(TemplateId, CaptureOwner), LocId>,
     pub(crate) deletes_array_elements: bool,
 }
 
@@ -423,7 +434,6 @@ struct Solver<'h, 'a> {
     class_type_params: Vec<Vec<shapes::TypeId>>,
     result_contracts: Vec<ResultContract>,
     contract_insts: BitSet,
-    promise_handle_locs: HashMap<(TemplateId, CaptureOwner), LocId>,
     next_func_id: u32,
     deletes_array_elements: bool,
 }
@@ -562,7 +572,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             class_type_params,
             result_contracts: Vec::new(),
             contract_insts: BitSet::default(),
-            promise_handle_locs: HashMap::new(),
             next_func_id: index.max_func_id.saturating_add(1),
             deletes_array_elements: false,
         }
@@ -690,7 +699,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                     f(ctor);
                 }
             }
-            SiteResolution::PromiseNew { executor, .. } => {
+            SiteResolution::PromiseNew {
+                executor: Some((executor, _, _)),
+                ..
+            } => {
                 self.for_each_callback_target(executor, f);
             }
             SiteResolution::PromiseReaction { helper, .. } => {

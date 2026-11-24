@@ -3,7 +3,7 @@ use crate::hir_compat::{self, Locations};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 use std::collections::HashMap;
-use swc_common::Span;
+use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Default)]
@@ -45,6 +45,71 @@ impl SourceFacts {
 }
 
 pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<()> {
+    let check_export =
+        |value: &ast::Expr| -> Result<()> {
+            if let ast::Expr::Object(object) = value.unwrap_parens() {
+                for item in &object.props {
+                    if let ast::PropOrSpread::Prop(prop) = item
+                        && let ast::Prop::Method(method) = prop.as_ref()
+                        && method.function.is_async
+                    {
+                        let span = method.key.span();
+                        let key = locations
+                            .source_at(span.lo.0)
+                            .and_then(|text| text.get(..(span.hi.0 - span.lo.0) as usize))
+                            .ok_or_else(|| {
+                                perry_wit_diagnostics::Diagnostic::internal("missing method source")
+                            })?;
+                        return Err(locations.annotate(unsupported!(
+                        "async method '{key}' of an exported object literal is not supported"
+                    ), span));
+                    }
+                }
+            }
+            Ok(())
+        };
+    let mut exported = Vec::new();
+    for item in &module.body {
+        match item {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportNamed(export))
+                if export.src.is_none() =>
+            {
+                for spec in &export.specifiers {
+                    if let ast::ExportSpecifier::Named(named) = spec
+                        && !named.is_type_only
+                        && let ast::ModuleExportName::Ident(id) = &named.orig
+                    {
+                        exported.push(&id.sym);
+                    }
+                }
+            }
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDefaultExpr(export)) => {
+                check_export(&export.expr)?;
+                if let ast::Expr::Ident(id) = export.expr.unwrap_parens() {
+                    exported.push(&id.sym);
+                }
+            }
+            _ => {}
+        }
+    }
+    for item in &module.body {
+        let (vars, public) = match item {
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(ast::ExportDecl {
+                decl: ast::Decl::Var(vars),
+                ..
+            })) => (vars, true),
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Var(vars))) => (vars, false),
+            _ => continue,
+        };
+        for decl in &vars.decls {
+            if let Some(value) = &decl.init
+                && (public
+                    || matches!(&decl.name, ast::Pat::Ident(id) if exported.contains(&&id.sym)))
+            {
+                check_export(value)?;
+            }
+        }
+    }
     #[derive(Default)]
     struct SyntaxValidator {
         invalid_surrogate: Option<Span>,
