@@ -71,7 +71,7 @@ pub(crate) fn lower<'s>(loaded: modules::Loaded<'s>, identity: &str) -> Result<L
         timers::check_imports(&ast, &locations)?;
         regex::fold(&mut ast, unresolved);
         let constructors = constructors::preserve(&mut ast, unresolved)?;
-        streams::preserve_options(&mut ast, unresolved)?;
+        streams::preserve_options(&mut ast, unresolved, &locations)?;
         Ok::<_, Diagnostic>(constructors)
     })?;
     let facts = crate::engine::boundary::scan_ast(&ast);

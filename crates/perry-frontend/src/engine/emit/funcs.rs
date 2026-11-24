@@ -545,12 +545,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             .helpers
             .get(id)
             .ok_or_else(|| Diagnostic::internal("helper id out of range"))?;
-        let byte_offset = self
-            .solved
-            .helper_byte_offsets
-            .get(id.index())
-            .copied()
-            .unwrap_or(0);
+        let byte_offset = self.solved.helper_byte_offsets[id];
         let fid = self.fresh_func_id()?;
         if let Some(slot) = self.helper_fids.get_mut(id.index()) {
             *slot = Some(fid);

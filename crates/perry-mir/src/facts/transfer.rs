@@ -731,8 +731,12 @@ impl Solver {
         (kind, heap_facts): (OperationKind, Option<ValueFacts>),
     ) -> ValueFacts {
         let operation = op.deref(ctx);
-        if kind == OperationKind::Await || kind.promise_payload().is_some() {
-            let input = operation.get_operand(kind.promise_payload().unwrap_or(0));
+        let input_index = match kind {
+            OperationKind::Await => Some(0),
+            other => other.promise_payload(),
+        };
+        if let Some(index) = input_index {
+            let input = operation.get_operand(index);
             let promise = if kind == OperationKind::Await {
                 input
             } else {

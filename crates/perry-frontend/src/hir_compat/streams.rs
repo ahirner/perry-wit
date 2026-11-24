@@ -195,16 +195,21 @@ impl VisitMut for Fill {
 
 pub(super) const DECODE: &str = "$$perryDecodeOptions";
 
-pub(super) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxContext) -> Result<()> {
-    struct Options {
+pub(super) fn preserve_options(
+    module: &mut ast::Module,
+    unresolved: SyntaxContext,
+    locations: &super::Locations,
+) -> Result<()> {
+    struct Options<'a> {
+        locations: &'a super::Locations<'a>,
         error: Option<Diagnostic>,
         unresolved: SyntaxContext,
     }
-    impl VisitMut for Options {
+    impl VisitMut for Options<'_> {
         fn visit_mut_new_expr(&mut self, new: &mut ast::NewExpr) {
             new.visit_mut_children_with(self);
             if matches!(&*new.callee, ast::Expr::Ident(name) if name.sym == "TextDecoder" && name.ctxt == self.unresolved)
-                && let Err(error) = normalize_decoder_constructor(new)
+                && let Err(error) = normalize_decoder_constructor(new, self.locations)
                 && self.error.is_none()
             {
                 self.error = Some(error);
@@ -223,6 +228,7 @@ pub(super) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxConte
         }
     }
     let mut options = Options {
+        locations,
         error: None,
         unresolved,
     };
@@ -230,7 +236,10 @@ pub(super) fn preserve_options(module: &mut ast::Module, unresolved: SyntaxConte
     options.error.map_or(Ok(()), Err)
 }
 
-fn normalize_decoder_constructor(new: &mut ast::NewExpr) -> Result<()> {
+fn normalize_decoder_constructor(
+    new: &mut ast::NewExpr,
+    locations: &super::Locations,
+) -> Result<()> {
     let Some(args) = new.args.as_mut() else {
         return Ok(());
     };
@@ -263,7 +272,12 @@ fn normalize_decoder_constructor(new: &mut ast::NewExpr) -> Result<()> {
         };
         let name = match &field.key {
             ast::PropName::Ident(id) => id.sym.as_ref(),
-            ast::PropName::Str(text) => text.value.as_str().unwrap_or(""),
+            ast::PropName::Str(text) => text.value.as_str().ok_or_else(|| {
+                locations.annotate(
+                    Diagnostic::unsupported("TextDecoder option key is not valid UTF-8"),
+                    text.span,
+                )
+            })?,
             _ => bail_unsupported!("TextDecoder option keys must be literal"),
         };
         ensure_unsupported!(

@@ -174,7 +174,9 @@ impl<'h> Emitter<'h, '_> {
                                 .solved
                                 .param_locs
                                 .get(param_locs_span.range())
-                                .unwrap_or(&[])
+                                .ok_or_else(|| {
+                                    Diagnostic::internal("invalid callback parameter range")
+                                })?
                                 .iter()
                                 .map(|&loc| self.solved.locations[loc])
                                 .collect();

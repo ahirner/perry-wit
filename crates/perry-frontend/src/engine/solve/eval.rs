@@ -559,7 +559,8 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn eval_stmts(&mut self, s: &mut EvalState<'h>, stmts: &'h [Stmt]) -> Result<()> {
         let depth = s.guards.depth();
-        for (idx, stmt) in stmts.iter().enumerate() {
+        let mut remaining = stmts;
+        while let Some((stmt, rest)) = remaining.split_first() {
             let mut handled = false;
             if let Stmt::Let { id, name, init, .. } = stmt {
                 s.iteration.register_binding(*id, name, init.as_ref());
@@ -580,7 +581,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                         handled = true;
                     } else if matches!(init, Expr::Undefined)
-                        && let Some(el) = s.iteration.element(stmts.get(idx..).unwrap_or(&[]))
+                        && let Some(el) = s.iteration.element(remaining)
                     {
                         let ty = self.eval_expr(s, el.value)?;
                         let ty = match el.available {
@@ -601,6 +602,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             if !handled {
                 self.eval_stmt(s, stmt)?;
             }
+            remaining = rest;
         }
         s.guards.truncate(depth);
         Ok(())

@@ -1165,12 +1165,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::OPEN);
         };
         let Some(mut ty) = self.read_local_value(s.inst, lidx) else {
-            return Ok(self
-                .index
-                .local_declared
-                .get(lidx.index())
-                .copied()
-                .unwrap_or(Ty::OPEN));
+            return Ok(self.index.local_declared[lidx]);
         };
         if self.index.local_deferred.contains(lidx.index())
             && self

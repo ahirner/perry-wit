@@ -8,10 +8,10 @@ enum ClassArguments<'a, 's> {
     Evaluated(&'a [Value]),
 }
 
-enum ClassReceiver<'a> {
+enum ClassReceiver<'a, 's> {
     Static,
     Instance(Value),
-    Constructor(Value, &'a [bool]),
+    Constructor(Value, &'a [(&'s str, Option<&'s Expr>)]),
 }
 
 #[derive(Clone, Copy)]
@@ -150,12 +150,14 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(instance);
         }
         let mut init_operands = Vec::with_capacity(field_defs.len());
-        let mut pre_initialized = vec![false; class.fields.len()];
+        let mut initializers: Vec<_> = class
+            .fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.init.as_ref()))
+            .collect();
         for (field, field_ty) in &field_defs {
-            let field_pos = class.fields.iter().position(|f| f.name == *field);
-            let field_init = field_pos
-                .and_then(|pos| class.fields.get(pos))
-                .and_then(|f| f.init.as_ref());
+            let initializer = initializers.iter_mut().find(|(name, _)| *name == field);
+            let field_init = initializer.as_ref().and_then(|(_, init)| *init);
             let (val, used_init) = if admits_undefined(ctx, *field_ty) {
                 (
                     self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, *field_ty)),
@@ -169,11 +171,8 @@ impl<'s> FunctionBuilder<'s> {
             } else {
                 self.unassigned_field(ctx, class_name, field, *field_ty, field_init)?
             };
-            if used_init
-                && let Some(pos) = field_pos
-                && let Some(slot) = pre_initialized.get_mut(pos)
-            {
-                *slot = true;
+            if used_init && let Some((_, init)) = initializer {
+                *init = None;
             }
             init_operands.push(val);
         }
@@ -190,13 +189,13 @@ impl<'s> FunctionBuilder<'s> {
                 class_name,
                 ctor,
                 ClassArguments::Expressions(args),
-                ClassReceiver::Constructor(this_slot, &pre_initialized),
+                ClassReceiver::Constructor(this_slot, &initializers),
             )?;
         } else {
             for arg in args {
                 self.effect(ctx, arg)?;
             }
-            self.init_own_class_fields(ctx, class_name, this_slot, &pre_initialized)?;
+            self.init_own_class_fields(ctx, class_name, this_slot, &initializers)?;
         }
         self.load(ctx, this_slot)
     }
@@ -253,7 +252,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         class_name: &'s str,
         this_slot: Value,
-        pre_initialized: &[bool],
+        initializers: &[(&'s str, Option<&'s Expr>)],
     ) -> Result<()> {
         let (&class_name, &(_, class)) = self
             .shapes
@@ -270,22 +269,19 @@ impl<'s> FunctionBuilder<'s> {
             ClassExpansion::Fields(class),
             class_name,
             |this, ctx| {
-                for (f_idx, field) in class.fields.iter().enumerate() {
-                    if pre_initialized.get(f_idx).copied().unwrap_or(false) {
-                        continue;
-                    }
-                    let Some(init_expr) = &field.init else {
+                for &(name, init) in initializers {
+                    let Some(init_expr) = init else {
                         continue;
                     };
                     let (_, field_ty) = rec
                         .deref(ctx)
-                        .field(&field.name)
-                        .ok_or_else(|| internal!("missing field {} on {class_name}", field.name))?;
+                        .field(name)
+                        .ok_or_else(|| internal!("missing field {name} on {class_name}"))?;
                     let val = this.expression_with(ctx, init_expr, Some(field_ty))?;
                     let val = this.fit(ctx, val, field_ty)?;
                     let target = this.load(ctx, this_slot)?;
                     this.emit(ctx, |ctx| {
-                        FieldSetOp::new(ctx, target, field.name.clone(), val)
+                        FieldSetOp::new(ctx, target, name.to_owned(), val)
                     });
                 }
                 Ok(())
@@ -448,7 +444,7 @@ impl<'s> FunctionBuilder<'s> {
         owner_class: &'s str,
         func: &'s Function,
         args: ClassArguments<'_, 's>,
-        receiver: ClassReceiver<'_>,
+        receiver: ClassReceiver<'_, 's>,
     ) -> Result<Option<Value>> {
         ensure_unsupported!(
             !func.is_async && !func.is_generator,
@@ -508,8 +504,8 @@ impl<'s> FunctionBuilder<'s> {
             ClassExpansion::Callable(func),
             owner_class,
             |this, ctx| {
-                if let ClassReceiver::Constructor(slot, pre_initialized) = receiver {
-                    this.init_own_class_fields(ctx, owner_class, slot, pre_initialized)?;
+                if let ClassReceiver::Constructor(slot, initializers) = receiver {
+                    this.init_own_class_fields(ctx, owner_class, slot, initializers)?;
                 }
                 let this_slot = match receiver {
                     ClassReceiver::Static => None,

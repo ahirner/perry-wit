@@ -57,6 +57,18 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
     pub(crate) fn len(&self) -> usize {
         self.data.len()
     }
+    pub(crate) fn ids(&self) -> impl Iterator<Item = I> + use<I, T> {
+        (0..self.len()).map(I::from_usize)
+    }
+    pub(crate) fn filled<U: Clone>(&self, value: U) -> IdxVec<I, U> {
+        IdxVec {
+            data: vec![value; self.len()],
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.data
+    }
     pub(crate) fn is_empty(&self) -> bool {
         self.data.is_empty()
     }

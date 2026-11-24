@@ -186,22 +186,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(id);
         }
 
-        let mut count = self
-            .template_counts
-            .get(template.index())
-            .copied()
-            .unwrap_or(0);
-        if count >= INSTANCE_BUDGET {
+        if self.template_counts[template] >= INSTANCE_BUDGET {
             self.prune_unreachable();
-            count = self
-                .template_counts
-                .get(template.index())
-                .copied()
-                .unwrap_or(0);
-            if count >= INSTANCE_BUDGET {
+            if self.template_counts[template] >= INSTANCE_BUDGET {
                 return Err(self.budget_error(template, args, caller, call_byte_offset));
             }
         }
+        let first_instance = self.template_counts[template] == 0;
         bump_count(&mut self.template_counts, template);
 
         let view = self
@@ -351,7 +342,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM))
         };
 
-        let keep_original = count == 0
+        let keep_original = first_instance
             && (view.is_exported
                 || self.index.exported_obj_methods.contains(template.index())
                 || is_monomorphic_plain);
@@ -408,23 +399,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
         self.inst_written.push(BitSet::default());
         self.inst_captures.push(inst_caps);
-        self.inst_sites.push(
-            self.index
-                .sites(template)
-                .iter()
-                .map(|site| SiteEntry {
-                    resolution: site.handles.map(|(resolve_tid, reject_tid)| {
-                        SiteResolution::PromiseNew {
-                            value_loc: self.locations.push(Ty::BOTTOM),
-                            resolve_tid,
-                            reject_tid,
-                            executor: None,
-                        }
-                    }),
-                    coercion: None,
-                })
-                .collect(),
-        );
+        let sites = self
+            .index
+            .sites(template)
+            .iter()
+            .map(|site| SiteEntry {
+                resolution: site.handles.map(|(resolve_tid, reject_tid)| {
+                    SiteResolution::PromiseNew {
+                        value_loc: self.alloc_loc(Ty::BOTTOM),
+                        resolve_tid,
+                        reject_tid,
+                        executor: None,
+                    }
+                }),
+                coercion: None,
+            })
+            .collect();
+        self.inst_sites.push(sites);
         self.inst_reads.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
@@ -494,7 +485,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         loc,
                         kind: CellKind::Promise,
                     } => {
-                        let inner = self.locations.get(loc).copied().unwrap_or(Ty::BOTTOM);
+                        let inner = self.locations[loc];
                         if inner == Ty::BOTTOM {
                             self.types.promise(Ty::VOID)
                         } else {
