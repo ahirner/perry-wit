@@ -204,13 +204,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             let class_args = if !type_args.is_empty() {
                 self.eval_type_args(s.inst, type_args)
             } else if !self.class_type_params[cid].is_empty() {
-                let tps = self.class_type_params[cid].clone();
+                let tp_span = self.class_type_params[cid];
                 let mut bindings = Vec::new();
                 if let Some(ctor_tid) = self.index.class(cid).ctor {
                     let ctor_view = self.index.view(ctor_tid);
-                    self.unify_params(ctor_view.params, &arg_tys, &tps, &mut bindings);
+                    self.unify_params(ctor_view.params, &arg_tys, tp_span, &mut bindings);
                 }
-                tps.iter()
+                self.type_param_pool[tp_span]
+                    .iter()
                     .map(|tp| {
                         bindings
                             .iter()

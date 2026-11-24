@@ -124,8 +124,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 self.write_loc(loc, Ty::OPEN);
                             }
                         } else if (is_inferred
-                            && (self.index.local_deferred.contains(lidx.index())
-                                || self.index.local_nullish_init.contains(lidx.index())))
+                            && self.index.locals[lidx]
+                                .flags
+                                .intersects(LocalFlags::DEFERRED_OR_NULLISH))
                             || self.types.is_open(existing)
                         {
                             self.check_escaping_func(

@@ -182,8 +182,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         inst_id: InstanceId,
         local: LocalIdx,
     ) -> Option<usize> {
-        let slot = self.index.local_frame_slot(local)?;
-        (self.index.local_owner[local] == self.instances[inst_id].template).then_some(slot)
+        let info = self.index.locals[local];
+        let slot = info.frame_slot()?;
+        (info.owner == self.instances[inst_id].template).then_some(slot)
     }
 
     pub(super) fn read_local_value(&mut self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
@@ -225,8 +226,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         inst_id: InstanceId,
         local: LocalIdx,
     ) -> Option<LocId> {
-        if self.index.local_module.contains(local.index()) {
-            return self.index.local_loc[local];
+        let info = self.index.locals[local];
+        if info.flags.contains(LocalFlags::MODULE) {
+            return info.module_loc();
         }
         let mut cursor = CaptureOwner::Instance(inst_id);
         loop {
@@ -249,9 +251,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         local: LocalIdx,
         initial: Ty,
     ) -> LocId {
-        if self.index.local_module.contains(local.index())
-            && let Some(loc) = self.index.local_loc[local]
-        {
+        if let Some(loc) = self.index.locals[local].module_loc() {
             return loc;
         }
         if let Some(slot) = self.inst_locals[inst_id].iter().find(|s| s.local == local) {
@@ -566,8 +566,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     return Ok(());
                 };
+                let local_flags = self.index.locals[lidx].flags;
                 let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                let is_deferred = self.index.local_deferred.contains(lidx.index());
+                let is_deferred = local_flags.contains(LocalFlags::DEFERRED);
                 let declared = self.types.intern_hir(self.ctx, ty, !is_inferred);
                 let declared = if !is_inferred {
                     self.instantiate_annotated_class(declared, 0, Some(s.inst))?
@@ -601,7 +602,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             None
                         }
                     } else if needs_context
-                        && !self.index.local_reassigned.contains(lidx.index())
+                        && !local_flags.contains(LocalFlags::REASSIGNED)
                         && self.index.is_empty_object_expr(self.types, init_expr)
                     {
                         Some(CellKind::Dict)
@@ -817,14 +818,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         let inst_local_tys = self.inst_locals.map(|slots| {
             slots
                 .iter()
-                .map(|sl| (self.index.local_ids[sl.local], self.locations[sl.loc]))
+                .map(|sl| (self.index.locals[sl.local].id, self.locations[sl.loc]))
                 .collect()
         });
-
-        let module_local_tys = self
-            .index
-            .local_loc
-            .map(|&opt| opt.map(|loc| self.locations[loc]));
 
         let mut class_static_field_tys = self.index.classes.map(|c| {
             vec![
@@ -841,9 +837,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        let mut class_inst_methods = self.class_insts.filled(Vec::new());
-        let mut class_inst_getters = self.class_insts.filled(Vec::new());
-        let mut class_inst_setters = self.class_insts.filled(Vec::new());
+        let mut class_inst_members = self.class_insts.filled(ClassInstMembers::default());
         let mut class_static_methods = self.index.classes.filled(Vec::new());
         for (id, inst) in self.instances.iter_enumerated() {
             if !live_instances.contains(id.index()) {
@@ -853,17 +847,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             match view.kind {
                 TemplateKind::ClassMethod => {
                     if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_methods[ci].push(id);
+                        class_inst_members[ci].methods.push(id);
                     }
                 }
                 TemplateKind::ClassGetter(getter_idx) => {
                     if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_getters[ci].push((getter_idx, id));
+                        class_inst_members[ci].getters.push((getter_idx, id));
                     }
                 }
                 TemplateKind::ClassSetter(setter_idx) => {
                     if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_setters[ci].push((setter_idx, id));
+                        class_inst_members[ci].setters.push((setter_idx, id));
                     }
                 }
                 TemplateKind::ClassStaticMethod(class) => {
@@ -872,10 +866,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 _ => {}
             }
         }
-
-        let collapsed_local_tys = self
-            .collapsed_local_locs
-            .map(|&opt| opt.map(|loc| self.locations[loc]));
 
         Solved {
             witness_instances: self.witness_instances,
@@ -887,7 +877,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             field_locs: self.field_locs,
             dispatch_arms: self.dispatch_arms,
             helpers: self.helpers,
-            helper_byte_offsets: self.helper_byte_offsets,
             inst_local_tys,
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,
@@ -896,12 +885,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             escaping_env_templates: self.escaping_env_templates,
             collapsed_closures: self.collapsed_closures,
             boxed_locals: self.boxed_locals,
-            module_local_tys,
-            collapsed_local_tys,
+            collapsed_local_locs: self.collapsed_local_locs,
             class_static_field_tys,
-            class_inst_methods,
-            class_inst_getters,
-            class_inst_setters,
+            class_inst_members,
             class_static_methods,
             dict_reads: self.dict_reads,
             self_nested_locs: self.self_nested_locs,

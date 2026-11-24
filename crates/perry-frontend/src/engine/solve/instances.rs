@@ -47,7 +47,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeId, Ty)> {
         let view = self.index.view(tid);
-        let tps = &self.template_type_params[tid];
+        let tps = &self.type_param_pool[self.template_type_params[tid]];
         view.type_params
             .iter()
             .zip(tps)
@@ -263,7 +263,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             type_bindings = self.default_type_param_bindings(template);
         }
         if caller.is_some() && !view.type_params.is_empty() {
-            let own_tps = &self.template_type_params[template];
+            let own_tps = &self.type_param_pool[self.template_type_params[template]];
             for (tp, &tp_id) in view.type_params.iter().zip(own_tps) {
                 if !type_bindings.iter().any(|(id, _)| *id == tp_id) {
                     let mut err = diag!(
@@ -465,23 +465,23 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(id) = receiver.and_then(Receiver::class) {
             let cinst = &self.class_insts[id];
             bindings.extend(
-                self.class_type_params[cinst.class]
+                self.type_param_pool[self.class_type_params[cinst.class]]
                     .iter()
                     .copied()
                     .zip(self.types.tuple_slice(cinst.args).iter().copied()),
             );
         }
         let view = self.index.view(template);
-        if self.template_type_params[template].is_empty() {
+        let tp_span = self.template_type_params[template];
+        if tp_span.is_empty() {
             return bindings;
         }
-        let tps = self.template_type_params[template].clone();
-        for (&tp_id, &et) in tps.iter().zip(explicit_type_args) {
+        for (&tp_id, &et) in self.type_param_pool[tp_span].iter().zip(explicit_type_args) {
             if !self.types.is_open(et) {
                 bindings.push((tp_id, et));
             }
         }
-        self.unify_params(view.params, args, &tps, &mut bindings);
+        self.unify_params(view.params, args, tp_span, &mut bindings);
         bindings
     }
 
@@ -489,7 +489,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         params: &[perry_hir::ir::Param],
         args: &[Ty],
-        tps: &[shapes::TypeId],
+        tps: TypeParamSpan,
         bindings: &mut Vec<(shapes::TypeId, Ty)>,
     ) {
         for skip_open in [true, false] {
@@ -516,7 +516,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                     _ => arg_ty,
                 };
                 let pat = self.types.intern_hir(self.ctx, &param.ty, true);
-                self.types.unify(self.ctx, pat, resolved_arg, tps, bindings);
+                self.types.unify(
+                    self.ctx,
+                    pat,
+                    resolved_arg,
+                    &self.type_param_pool[tps],
+                    bindings,
+                );
             }
         }
     }
@@ -574,7 +580,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .get(cinfo.hir_idx)
             .ok_or_else(|| Diagnostic::internal("unknown class in HIR"))?;
 
-        let bindings: Vec<_> = self.class_type_params[class]
+        let bindings: Vec<_> = self.type_param_pool[self.class_type_params[class]]
             .iter()
             .copied()
             .zip(args.iter().copied())

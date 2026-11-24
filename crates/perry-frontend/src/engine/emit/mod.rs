@@ -6,7 +6,7 @@ mod funcs;
 mod resources;
 mod stmts;
 use super::bitset::BitSet;
-use super::boundary::{ModuleIndex, TemplateKind, TemplateView};
+use super::boundary::{LocalFlags, ModuleIndex, TemplateKind, TemplateView};
 use super::solve::{
     ClassInst, FuncCoercion, Instance, Receiver, SiteEntry, SiteResolution, Solved,
 };
@@ -240,11 +240,12 @@ impl<'h> Emitter<'h, '_> {
 
     fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
         if let Some(lidx) = self.index.local_idx(id) {
-            if self.index.local_module.contains(lidx.index()) {
-                return self.solved.module_local_tys[lidx];
+            let local = self.index.locals[lidx];
+            if local.flags.contains(LocalFlags::MODULE) {
+                return local.module_loc().map(|loc| self.solved.locations[loc]);
             }
-            if let Some(slot) = self.index.local_frame_slot(lidx)
-                && self.index.local_owner[lidx] == self.solved.instances[inst_id].template
+            if let Some(slot) = local.frame_slot()
+                && local.owner == self.solved.instances[inst_id].template
             {
                 return self.solved.inst_frame_locals[inst_id].get(slot).copied();
             }
@@ -456,11 +457,10 @@ impl<'h> Emitter<'h, '_> {
             }
             None => orig.constructor.clone(),
         };
-        cls.methods = self.emit_named_methods(&self.solved.class_inst_methods[cinst_id])?;
-        cls.getters =
-            self.emit_accessors(&self.solved.class_inst_getters[cinst_id], &orig.getters)?;
-        cls.setters =
-            self.emit_accessors(&self.solved.class_inst_setters[cinst_id], &orig.setters)?;
+        let members = &self.solved.class_inst_members[cinst_id];
+        cls.methods = self.emit_named_methods(&members.methods)?;
+        cls.getters = self.emit_accessors(&members.getters, &orig.getters)?;
+        cls.setters = self.emit_accessors(&members.setters, &orig.setters)?;
         Ok(cls)
     }
 

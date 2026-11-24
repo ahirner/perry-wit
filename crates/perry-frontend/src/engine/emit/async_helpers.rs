@@ -321,7 +321,7 @@ impl<'h> Emitter<'h, '_> {
                 receiver: None,
             },
             (CallbackCall::Dispatch { helper, .. }, Some((id, _))) => {
-                if let HelperSpec::Dispatcher { callee_ty, .. } = self.solved.helpers[helper]
+                if let HelperSpec::Dispatcher { callee_ty, .. } = self.solved.helpers[helper].spec
                     && self.nullish_flags(callee_ty) != (false, false)
                 {
                     body.push(Stmt::If {

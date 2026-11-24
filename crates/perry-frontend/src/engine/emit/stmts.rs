@@ -142,15 +142,13 @@ impl<'h> Emitter<'h, '_> {
         ty: &HirType,
     ) -> Result<HirType> {
         let resolved = self.local_ty(inst_id, id);
-        let is_inferred = !self.hir.local_source_spans.contains_key(&id)
-            || self
-                .index
-                .local_idx(id)
-                .is_none_or(|li| self.index.local_inferred.contains(li.index()));
-        let is_deferred = self
+        let local_flags = self
             .index
             .local_idx(id)
-            .is_some_and(|li| self.index.local_deferred.contains(li.index()));
+            .map(|li| self.index.locals[li].flags);
+        let is_inferred = !self.hir.local_source_spans.contains_key(&id)
+            || local_flags.is_none_or(|f| f.contains(LocalFlags::INFERRED));
+        let is_deferred = local_flags.is_some_and(|f| f.contains(LocalFlags::DEFERRED));
         match resolved {
             Some(t)
                 if self.is_resolved(t)

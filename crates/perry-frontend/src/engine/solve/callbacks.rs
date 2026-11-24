@@ -225,7 +225,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Expr::LocalGet(id) => self
                     .index
                     .local_idx(*id)
-                    .and_then(|li| self.index.local_regex_pattern[li])
+                    .and_then(|li| self.index.local_regex_pattern(li))
                     .map(crate::methods::regex_captures),
                 Expr::String(_) => Some((0, false)),
                 _ => None,

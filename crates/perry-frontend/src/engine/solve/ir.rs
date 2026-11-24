@@ -223,6 +223,19 @@ impl SiteEntry {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct HelperEntry {
+    pub(crate) spec: HelperSpec,
+    pub(crate) byte_offset: u32,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ClassInstMembers {
+    pub(crate) methods: Vec<InstanceId>,
+    pub(crate) getters: Vec<(usize, InstanceId)>,
+    pub(crate) setters: Vec<(usize, InstanceId)>,
+}
+
 pub(crate) struct Solved {
     pub(crate) witness_instances: Vec<Option<InstanceId>>,
     pub(crate) init_inst: InstanceId,
@@ -232,8 +245,7 @@ pub(crate) struct Solved {
     pub(crate) param_locs: Pool<ParamLocSpan, LocId>,
     pub(crate) field_locs: Pool<FieldLocSpan, LocId>,
     pub(crate) dispatch_arms: Pool<DispatchArmSpan, (FuncIdentity, InstanceId)>,
-    pub(crate) helpers: IdxVec<HelperId, HelperSpec>,
-    pub(crate) helper_byte_offsets: IdxVec<HelperId, u32>,
+    pub(crate) helpers: IdxVec<HelperId, HelperEntry>,
     pub(crate) inst_local_tys: IdxVec<InstanceId, Vec<(LocalId, Ty)>>,
     pub(crate) inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
     pub(crate) inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
@@ -242,12 +254,9 @@ pub(crate) struct Solved {
     pub(crate) escaping_env_templates: BitSet,
     pub(crate) collapsed_closures: BitSet,
     pub(crate) boxed_locals: BitSet,
-    pub(crate) module_local_tys: IdxVec<LocalIdx, Option<Ty>>,
-    pub(crate) collapsed_local_tys: IdxVec<LocalIdx, Option<Ty>>,
+    pub(crate) collapsed_local_locs: IdxVec<LocalIdx, Option<LocId>>,
     pub(crate) class_static_field_tys: IdxVec<ClassId, Vec<Ty>>,
-    pub(crate) class_inst_methods: IdxVec<ClassInstId, Vec<InstanceId>>,
-    pub(crate) class_inst_getters: IdxVec<ClassInstId, Vec<(usize, InstanceId)>>,
-    pub(crate) class_inst_setters: IdxVec<ClassInstId, Vec<(usize, InstanceId)>>,
+    pub(crate) class_inst_members: IdxVec<ClassInstId, ClassInstMembers>,
     pub(crate) class_static_methods: IdxVec<ClassId, Vec<InstanceId>>,
     pub(crate) dict_reads: BitSet,
     pub(crate) self_nested_locs: BitSet,

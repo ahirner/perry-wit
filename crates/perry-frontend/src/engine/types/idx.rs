@@ -1,5 +1,6 @@
 //! Index-typed vectors, dense IDs, and canonical type keys.
 use crate::shapes;
+use perry_hir::types::LocalId;
 
 mod sealed {
     pub(crate) trait MintIdx: Copy + Eq {
@@ -191,7 +192,7 @@ impl<S: sealed::MintSpan, T> std::ops::Index<S> for Pool<S, T> {
 macro_rules! span_type {
     ($($name:ident),* $(,)?) => {
         $(
-            #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+            #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
             pub(crate) struct $name {
                 start: u32,
                 len: u32,
@@ -200,6 +201,10 @@ macro_rules! span_type {
                 #[allow(dead_code)]
                 pub(crate) fn len(self) -> usize {
                     self.len as usize
+                }
+                #[allow(dead_code)]
+                pub(crate) fn is_empty(self) -> bool {
+                    self.len == 0
                 }
             }
             impl sealed::MintSpan for $name {
@@ -225,6 +230,10 @@ span_type!(
     ParamLocSpan,
     FieldLocSpan,
     DispatchArmSpan,
+    SiteSpan,
+    CaptureSpan,
+    CapturedLocalSpan,
+    TypeParamSpan,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -322,4 +331,73 @@ impl Ty {
     pub(crate) const BIGINT: Self = Self(9);
     pub(crate) const STRING: Self = Self(10);
     pub(crate) const SYMBOL: Self = Self(11);
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct LocalFlags(u16);
+
+impl LocalFlags {
+    pub(crate) const INFERRED: Self = Self(1 << 0);
+    pub(crate) const DEFERRED: Self = Self(1 << 1);
+    pub(crate) const FOR_HEAD: Self = Self(1 << 2);
+    pub(crate) const NULLISH_INIT: Self = Self(1 << 3);
+    pub(crate) const REASSIGNED: Self = Self(1 << 4);
+    pub(crate) const PARAM: Self = Self(1 << 5);
+    pub(crate) const PARAM_ANNOTATED: Self = Self(1 << 6);
+    pub(crate) const MODULE: Self = Self(1 << 7);
+    pub(crate) const CAPTURED: Self = Self(1 << 8);
+    pub(crate) const WRITTEN_FROM_CLOSURE: Self = Self(1 << 9);
+    pub(crate) const FORWARD_CAPTURED: Self = Self(1 << 10);
+    pub(crate) const MODULE_OR_PARAM: Self = Self(Self::MODULE.0 | Self::PARAM.0);
+    pub(crate) const BOXED_TRIGGER: Self = Self(
+        Self::REASSIGNED.0
+            | Self::WRITTEN_FROM_CLOSURE.0
+            | Self::DEFERRED.0
+            | Self::FOR_HEAD.0
+            | Self::FORWARD_CAPTURED.0,
+    );
+    pub(crate) const UNDEF_BOXED: Self = Self(Self::FORWARD_CAPTURED.0 | Self::DEFERRED.0);
+    pub(crate) const DEFERRED_OR_NULLISH: Self = Self(Self::DEFERRED.0 | Self::NULLISH_INIT.0);
+
+    pub(crate) fn insert(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+    pub(crate) fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+    pub(crate) fn intersects(self, other: Self) -> bool {
+        (self.0 & other.0) != 0
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) enum LocalStorage {
+    #[default]
+    None,
+    Module(LocId),
+    Frame(u32),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LocalInfo {
+    pub(crate) id: LocalId,
+    pub(crate) owner: TemplateId,
+    pub(crate) declared: Ty,
+    pub(crate) storage: LocalStorage,
+    pub(crate) flags: LocalFlags,
+}
+
+impl LocalInfo {
+    pub(crate) fn module_loc(self) -> Option<LocId> {
+        match self.storage {
+            LocalStorage::Module(loc) => Some(loc),
+            _ => None,
+        }
+    }
+    pub(crate) fn frame_slot(self) -> Option<usize> {
+        match self.storage {
+            LocalStorage::Frame(slot) => Some(slot as usize),
+            _ => None,
+        }
+    }
 }

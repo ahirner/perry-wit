@@ -90,7 +90,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if !self.is_escaping_env(tid, inst_id)
                     && self.index.view(tid).kind == TemplateKind::Closure
                     && (self.index.closure_in_loop.contains(tid.index())
-                        || self.index.closure_owner_template[tid]
+                        || self
+                            .index
+                            .closure_owner(tid)
                             .is_some_and(|owner| owner != TemplateId::INIT))
                 {
                     let err = Diagnostic::unsupported(
@@ -212,16 +214,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(lidx) = self.index.local_idx(id) else {
             return Ok(Ty::OPEN);
         };
+        let local = self.index.locals[lidx];
         let Some(mut ty) = self.read_local_value(s.inst, lidx) else {
-            return Ok(self.index.local_declared[lidx]);
+            return Ok(local.declared);
         };
-        if self.index.local_deferred.contains(lidx.index())
+        if local.flags.contains(LocalFlags::DEFERRED)
             && !self.inst_written[s.inst].contains(lidx.index())
             && ty == Ty::BOTTOM
         {
             return Ok(Ty::VOID);
         }
-        if !self.index.local_written_from_closure.contains(lidx.index())
+        if !local.flags.contains(LocalFlags::WRITTEN_FROM_CLOSURE)
             && let Some(ex) = s.guards.excluded(id)
         {
             ty = self.types.exclude_absences(ty, ex);

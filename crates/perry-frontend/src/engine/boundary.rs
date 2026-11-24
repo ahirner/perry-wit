@@ -1,7 +1,11 @@
 //! Single-pass boundary indexing over Perry HIR.
 pub(crate) use super::ast_scan::{SourceFacts, scan_ast, validate_ast};
 use super::bitset::BitSet;
-use super::types::{ClassId, IdxVec, LocId, LocalIdx, NameId, TemplateId, Ty, TypeTable};
+pub(crate) use super::types::LocalFlags;
+use super::types::{
+    CaptureSpan, CapturedLocalSpan, ClassId, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage,
+    NameId, Pool, SiteSpan, TemplateId, Ty, TypeTable,
+};
 use crate::hir_compat::{self, Locations};
 use perry_hir::{
     ir::{Expr, Function, Module as HirModule, Param, Stmt},
@@ -9,7 +13,6 @@ use perry_hir::{
     walker::{stmt_any_expr, walk_expr_children},
 };
 use pliron::context::Context;
-use swc_common::Span;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TemplateKind {
@@ -102,15 +105,19 @@ impl ClassInfo {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct IndexedSite {
     address: usize,
     pub(crate) handles: Option<(TemplateId, TemplateId)>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct TemplateLayout {
-    sites: Box<[IndexedSite]>,
-    frame_slots: usize,
+    sites: SiteSpan,
+    captures: CaptureSpan,
+    captured_locals: CapturedLocalSpan,
+    closure_owner: Option<TemplateId>,
+    frame_slots: u32,
 }
 
 #[derive(Default)]
@@ -118,35 +125,19 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) views: IdxVec<TemplateId, TemplateView<'h>>,
     func_to_template: Vec<Option<TemplateId>>,
     layouts: IdxVec<TemplateId, TemplateLayout>,
+    site_pool: Pool<SiteSpan, IndexedSite>,
+    capture_pool: Pool<CaptureSpan, LocalId>,
+    captured_local_pool: Pool<CapturedLocalSpan, LocalIdx>,
     pub(crate) classes: IdxVec<ClassId, ClassInfo>,
     pub(crate) class_has_implicit_params: BitSet,
     pub(crate) hir_class_is_literal: BitSet,
     literal_classes: Vec<(NameId, &'h [perry_hir::ir::ClassField])>,
-    pub(crate) local_ids: IdxVec<LocalIdx, LocalId>,
-    pub(crate) local_owner: IdxVec<LocalIdx, TemplateId>,
-    pub(crate) local_declared: IdxVec<LocalIdx, Ty>,
-    pub(crate) local_loc: IdxVec<LocalIdx, Option<LocId>>,
-    pub(crate) local_value_use: IdxVec<LocalIdx, Option<Span>>,
-    pub(crate) local_regex_pattern: IdxVec<LocalIdx, Option<&'h str>>,
+    pub(crate) locals: IdxVec<LocalIdx, LocalInfo>,
+    local_regex_patterns: Vec<(LocalIdx, &'h str)>,
     local_to_idx: Vec<Option<LocalIdx>>,
-    pub(crate) local_inferred: BitSet,
-    pub(crate) local_deferred: BitSet,
-    pub(crate) local_for_head: BitSet,
-    pub(crate) local_nullish_init: BitSet,
-    pub(crate) local_reassigned: BitSet,
-    pub(crate) local_param: BitSet,
-    pub(crate) local_param_annotated: BitSet,
-    pub(crate) local_module: BitSet,
-    pub(crate) local_captured: BitSet,
-    pub(crate) local_written_from_closure: BitSet,
-    pub(crate) local_forward_captured: BitSet,
     pub(crate) capture_free_templates: BitSet,
     pub(crate) returns_empty_list: BitSet,
     pub(crate) closure_in_loop: BitSet,
-    pub(crate) closure_owner_template: IdxVec<TemplateId, Option<TemplateId>>,
-    template_captures: IdxVec<TemplateId, Vec<LocalId>>,
-    template_captured_locals: IdxVec<TemplateId, Vec<LocalIdx>>,
-    local_frame_slot: IdxVec<LocalIdx, Option<u32>>,
     pub(crate) location_types: IdxVec<LocId, Ty>,
     pub(crate) max_func_id: FuncId,
     pub(crate) max_local_id: LocalId,
@@ -364,33 +355,37 @@ impl<'h> ModuleIndex<'h> {
                     ));
                 }
             }
-            idx.layouts[template].sites = sites.into_boxed_slice();
+            idx.layouts[template].sites = idx.site_pool.extend_from_slice(&sites);
         }
 
         for (cap_id, written, forward) in pending_captures {
             if let Some(lidx) = idx.local_idx(cap_id) {
-                let li = lidx.index();
-                idx.local_captured.insert(li);
+                let flags = &mut idx.locals[lidx].flags;
+                flags.insert(LocalFlags::CAPTURED);
                 if written {
-                    idx.local_written_from_closure.insert(li);
+                    flags.insert(LocalFlags::WRITTEN_FROM_CLOSURE);
                 }
-                if forward && !idx.local_module.contains(li) && !idx.local_param.contains(li) {
-                    idx.local_forward_captured.insert(li);
+                if forward && !flags.intersects(LocalFlags::MODULE_OR_PARAM) {
+                    flags.insert(LocalFlags::FORWARD_CAPTURED);
                 }
             }
         }
-        idx.local_frame_slot = idx.local_ids.filled(None);
-        idx.template_captured_locals = idx.views.filled(Vec::new());
-        for (lidx, &owner) in idx.local_owner.iter_enumerated() {
-            let li = lidx.index();
-            if !idx.local_module.contains(li) && !idx.local_param.contains(li) {
-                if !idx.local_captured.contains(li) {
-                    let count = &mut idx.layouts[owner].frame_slots;
-                    idx.local_frame_slot[lidx] = Some(*count as u32);
+        let mut captured_locals = idx.views.filled(Vec::new());
+        for lidx in idx.locals.ids() {
+            let local = &mut idx.locals[lidx];
+            if !local.flags.intersects(LocalFlags::MODULE_OR_PARAM) {
+                if !local.flags.contains(LocalFlags::CAPTURED) {
+                    let count = &mut idx.layouts[local.owner].frame_slots;
+                    local.storage = LocalStorage::Frame(*count);
                     *count += 1;
                 } else {
-                    idx.template_captured_locals[owner].push(lidx);
+                    captured_locals[local.owner].push(lidx);
                 }
+            }
+        }
+        for (tid, list) in captured_locals.iter_enumerated() {
+            if !list.is_empty() {
+                idx.layouts[tid].captured_locals = idx.captured_local_pool.extend_from_slice(list);
             }
         }
         let mut template_captures = idx.views.map(|v| {
@@ -405,17 +400,18 @@ impl<'h> ModuleIndex<'h> {
                 let Some(lidx) = idx.local_idx(cap_id) else {
                     continue;
                 };
-                if idx.local_module.contains(lidx.index()) {
+                let local = idx.locals[lidx];
+                if local.flags.contains(LocalFlags::MODULE) {
                     continue;
                 }
-                let cap_owner = idx.local_owner[lidx];
-                let mut cur = idx.closure_owner_template[tid];
+                let cap_owner = local.owner;
+                let mut cur = idx.layouts[tid].closure_owner;
                 while let Some(parent) = cur {
                     if parent == cap_owner || parent == TemplateId::INIT {
                         break;
                     }
                     template_captures[parent].push(cap_id);
-                    cur = idx.closure_owner_template[parent];
+                    cur = idx.layouts[parent].closure_owner;
                 }
             }
         }
@@ -429,20 +425,27 @@ impl<'h> ModuleIndex<'h> {
             );
             if caps.is_empty() && !is_promise_handle {
                 idx.capture_free_templates.insert(tid.index());
+            } else if !caps.is_empty() {
+                idx.layouts[tid].captures = idx.capture_pool.extend_from_slice(caps);
             }
         }
-        idx.template_captures = template_captures;
         idx
     }
 
-    pub(crate) fn local_frame_slot(&self, local: LocalIdx) -> Option<usize> {
-        self.local_frame_slot[local].map(|s| s as usize)
+    pub(crate) fn local_regex_pattern(&self, local: LocalIdx) -> Option<&'h str> {
+        self.local_regex_patterns
+            .iter()
+            .find(|&&(k, _)| k == local)
+            .map(|&(_, pat)| pat)
     }
     pub(crate) fn template_frame_count(&self, t: TemplateId) -> usize {
-        self.layouts[t].frame_slots
+        self.layouts[t].frame_slots as usize
+    }
+    pub(crate) fn closure_owner(&self, t: TemplateId) -> Option<TemplateId> {
+        self.layouts[t].closure_owner
     }
     pub(crate) fn sites(&self, template: TemplateId) -> &[IndexedSite] {
-        &self.layouts[template].sites
+        &self.site_pool[self.layouts[template].sites]
     }
     pub(crate) fn site_of(&self, template: TemplateId, expr: &Expr) -> Option<usize> {
         self.sites(template)
@@ -483,24 +486,25 @@ impl<'h> ModuleIndex<'h> {
     }
     pub(crate) fn is_param_annotated(&self, id: LocalId) -> bool {
         self.local_idx(id)
-            .is_some_and(|li| self.local_param_annotated.contains(li.index()))
+            .is_some_and(|li| self.locals[li].flags.contains(LocalFlags::PARAM_ANNOTATED))
     }
     pub(crate) fn is_inferred_local(&self, hir: &HirModule, id: LocalId, lidx: LocalIdx) -> bool {
-        self.local_inferred.contains(lidx.index()) || !hir.local_source_spans.contains_key(&id)
+        self.locals[lidx].flags.contains(LocalFlags::INFERRED)
+            || !hir.local_source_spans.contains_key(&id)
     }
     pub(crate) fn is_for_head_local(&self, id: LocalId) -> bool {
         self.local_idx(id)
-            .is_some_and(|li| self.local_for_head.contains(li.index()))
+            .is_some_and(|li| self.locals[li].flags.contains(LocalFlags::FOR_HEAD))
     }
     pub(crate) fn is_non_global_local(&self, id: LocalId) -> bool {
         self.local_idx(id)
-            .is_some_and(|li| !self.local_module.contains(li.index()))
+            .is_some_and(|li| !self.locals[li].flags.contains(LocalFlags::MODULE))
     }
     pub(crate) fn template_captures(&self, t: TemplateId) -> &[LocalId] {
-        &self.template_captures[t]
+        &self.capture_pool[self.layouts[t].captures]
     }
     pub(crate) fn template_captured_locals(&self, t: TemplateId) -> &[LocalIdx] {
-        &self.template_captured_locals[t]
+        &self.captured_local_pool[self.layouts[t].captured_locals]
     }
     pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
         self.func_to_template.get(id as usize).copied().flatten()
@@ -520,7 +524,6 @@ impl<'h> ModuleIndex<'h> {
     }
 
     fn add_template(&mut self, view: TemplateView<'h>) -> TemplateId {
-        self.closure_owner_template.push(None);
         self.layouts.push(TemplateLayout::default());
         self.views.push(view)
     }
@@ -579,34 +582,33 @@ impl<'h> ModuleIndex<'h> {
         if let Some(existing) = self.local_to_idx.get(lid).copied().flatten() {
             return existing;
         }
-        let idx = self.local_ids.push(id);
-        self.local_owner.push(owner);
-        self.local_declared.push(declared);
-        self.local_loc.push(None);
-        self.local_value_use.push(None);
-        self.local_regex_pattern.push(None);
+        let mut flags = LocalFlags::default();
+        if let Some(span) = hir.local_source_spans.get(&id) {
+            if facts.is_inferred(span.start, span.end) {
+                flags.insert(LocalFlags::INFERRED);
+            }
+            if facts.is_deferred(span.start) {
+                flags.insert(LocalFlags::DEFERRED);
+            }
+            if facts.is_for_head_let(span.start) {
+                flags.insert(LocalFlags::FOR_HEAD);
+            }
+            if facts.is_param_annotated(span.start) {
+                flags.insert(LocalFlags::PARAM_ANNOTATED);
+            }
+        }
+        let idx = self.locals.push(LocalInfo {
+            id,
+            owner,
+            declared,
+            storage: LocalStorage::None,
+            flags,
+        });
         if lid >= self.local_to_idx.len() {
             self.local_to_idx.resize(lid + 1, None);
         }
         if let Some(slot) = self.local_to_idx.get_mut(lid) {
             *slot = Some(idx);
-        }
-        if let Some(span) = hir.local_source_spans.get(&id) {
-            if facts.is_inferred(span.start, span.end) {
-                self.local_inferred.insert(idx.index());
-            }
-            if facts.is_deferred(span.start) {
-                self.local_deferred.insert(idx.index());
-            }
-            if facts.is_for_head_let(span.start) {
-                self.local_for_head.insert(idx.index());
-            }
-            if facts.is_param_annotated(span.start) {
-                self.local_param_annotated.insert(idx.index());
-            }
-            if let Some(use_span) = facts.param_value_use(span.start) {
-                self.local_value_use[idx] = Some(use_span);
-            }
         }
         idx
     }
@@ -630,7 +632,7 @@ impl<'h> ModuleIndex<'h> {
                 .is_some_and(|s| scan.facts.is_param_annotated(s.start));
             let ty = scan.types.intern_hir(scan.ctx, &param.ty, explicit);
             let local = self.ensure_local(param.id, owner, ty, scan.hir, scan.facts);
-            self.local_param.insert(local.index());
+            self.locals[local].flags.insert(LocalFlags::PARAM);
             scan.defined_locals.insert(param.id as usize);
             if let Some(default) = &param.default {
                 self.scan_expr(scan, default, owner, false);
@@ -656,17 +658,18 @@ impl<'h> ModuleIndex<'h> {
                         .is_some_and(|s| !scan.facts.is_inferred(s.start, s.end));
                     let declared = scan.types.intern_hir(scan.ctx, ty, explicit);
                     let local = self.ensure_local(*id, owner, declared, scan.hir, scan.facts);
-                    if is_module_top && !self.local_for_head.contains(local.index()) {
-                        self.local_module.insert(local.index());
+                    if is_module_top && !self.locals[local].flags.contains(LocalFlags::FOR_HEAD) {
                         let loc = self.add_location(Ty::BOTTOM);
-                        self.local_loc[local] = Some(loc);
+                        let entry = &mut self.locals[local];
+                        entry.flags.insert(LocalFlags::MODULE);
+                        entry.storage = LocalStorage::Module(loc);
                     }
                     if let Some(init) = init {
                         if matches!(init, Expr::Null | Expr::Undefined) {
-                            self.local_nullish_init.insert(local.index());
+                            self.locals[local].flags.insert(LocalFlags::NULLISH_INIT);
                         }
                         if let Expr::RegExp { pattern, .. } = init {
-                            self.local_regex_pattern[local] = Some(pattern.as_str());
+                            self.local_regex_patterns.push((local, pattern.as_str()));
                         }
                         Self::record_site_expr(scan, owner, init);
                         self.scan_expr(scan, init, owner, in_loop);
@@ -898,7 +901,7 @@ impl<'h> ModuleIndex<'h> {
                     explicit_return: exp_ret,
                 });
                 scan.raw_sites.resize_with(self.views.len(), Vec::new);
-                self.closure_owner_template[tid] = Some(owner);
+                self.layouts[tid].closure_owner = Some(owner);
                 if in_loop {
                     self.closure_in_loop.insert(tid.index());
                 }
@@ -924,13 +927,16 @@ impl<'h> ModuleIndex<'h> {
 
     fn record_local_use(&mut self, id: LocalId, user_template: TemplateId, is_write: bool) {
         if let Some(lidx) = self.local_idx(id) {
+            let user_is_closure =
+                is_write && self.view(user_template).kind == TemplateKind::Closure;
+            let local = &mut self.locals[lidx];
             if is_write {
-                self.local_reassigned.insert(lidx.index());
+                local.flags.insert(LocalFlags::REASSIGNED);
             }
-            if self.local_owner[lidx] != user_template {
-                self.local_captured.insert(lidx.index());
-                if is_write && self.view(user_template).kind == TemplateKind::Closure {
-                    self.local_written_from_closure.insert(lidx.index());
+            if local.owner != user_template {
+                local.flags.insert(LocalFlags::CAPTURED);
+                if user_is_closure {
+                    local.flags.insert(LocalFlags::WRITTEN_FROM_CLOSURE);
                 }
             }
         }

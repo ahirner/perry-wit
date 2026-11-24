@@ -11,7 +11,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             let Some(lidx) = self.index.local_idx(cap_id) else {
                 continue;
             };
-            if self.index.local_module.contains(lidx.index()) {
+            let local = self.index.locals[lidx];
+            if local.flags.contains(LocalFlags::MODULE) {
                 continue;
             }
             let cloc = match self.collapsed_local_locs[lidx] {
@@ -22,7 +23,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     loc
                 }
             };
-            let cap_owner_tid = self.index.local_owner[lidx];
+            let cap_owner_tid = local.owner;
             let seed_tys: Vec<Ty> = self
                 .instances
                 .iter_enumerated()
@@ -99,15 +100,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.write_loc(loc, Ty::BOOLEAN);
             for &cap_id in self.index.template_captures(tid) {
                 if let Some(lidx) = self.index.local_idx(cap_id) {
-                    let li = lidx.index();
-                    if !self.index.local_module.contains(li)
-                        && (self.index.local_reassigned.contains(li)
-                            || self.index.local_written_from_closure.contains(li)
-                            || self.index.local_deferred.contains(li)
-                            || self.index.local_for_head.contains(li)
-                            || self.index.local_forward_captured.contains(li))
+                    let flags = self.index.locals[lidx].flags;
+                    if !flags.contains(LocalFlags::MODULE)
+                        && flags.intersects(LocalFlags::BOXED_TRIGGER)
                     {
-                        self.boxed_locals.insert(li);
+                        self.boxed_locals.insert(lidx.index());
                     }
                 }
             }

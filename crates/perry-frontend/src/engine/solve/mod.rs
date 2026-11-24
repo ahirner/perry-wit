@@ -10,12 +10,12 @@ mod members;
 mod methods;
 mod promises;
 use super::bitset::BitSet;
-use super::boundary::{ClassInfo, ModuleIndex, SourceFacts, TemplateKind};
+use super::boundary::{ClassInfo, LocalFlags, ModuleIndex, SourceFacts, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
     CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity,
     HelperId, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp, ParamLocSpan, Pool, TemplateId, Ty,
-    TyKind, TypeTable,
+    TyKind, TypeParamSpan, TypeTable,
 };
 use crate::{
     Absence,
@@ -185,9 +185,8 @@ struct Solver<'h, 'a> {
     field_locs: Pool<FieldLocSpan, LocId>,
     dispatch_arms: Pool<DispatchArmSpan, (FuncIdentity, InstanceId)>,
     dispatch_arm_spans: Vec<DispatchArmSpan>,
-    helpers: IdxVec<HelperId, HelperSpec>,
+    helpers: IdxVec<HelperId, HelperEntry>,
     helper_index: HashMap<HelperSpec, HelperId>,
-    helper_byte_offsets: IdxVec<HelperId, u32>,
     inst_locals: IdxVec<InstanceId, Vec<InstanceLocalSlot>>,
     inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
     inst_written: IdxVec<InstanceId, BitSet>,
@@ -205,8 +204,9 @@ struct Solver<'h, 'a> {
     static_field_locs: Vec<(ClassId, usize, LocId)>,
     class_insts: IdxVec<ClassInstId, ClassInst>,
     class_index: HashMap<(ClassId, Ty), ClassInstId>,
-    template_type_params: IdxVec<TemplateId, Vec<shapes::TypeId>>,
-    class_type_params: IdxVec<ClassId, Vec<shapes::TypeId>>,
+    type_param_pool: Pool<TypeParamSpan, shapes::TypeId>,
+    template_type_params: IdxVec<TemplateId, TypeParamSpan>,
+    class_type_params: IdxVec<ClassId, TypeParamSpan>,
     result_contracts: Vec<ResultContract>,
     contract_insts: BitSet,
     next_func_id: u32,
@@ -273,16 +273,24 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .map(move |(f_idx, &(_, loc))| (cid, f_idx, loc))
             })
             .collect();
-        let intern_tps = |tps: &[perry_hir::types::TypeParam]| -> Vec<shapes::TypeId> {
-            tps.iter()
-                .map(|tp| shapes::TypeId::from_owned(ctx, HirType::Named(tp.name.clone())))
-                .collect()
+        let mut type_param_pool = Pool::default();
+        let mut tp_buf = Vec::new();
+        let mut intern_tps = |tps: &[perry_hir::types::TypeParam]| -> TypeParamSpan {
+            if tps.is_empty() {
+                return TypeParamSpan::default();
+            }
+            tp_buf.clear();
+            tp_buf.extend(
+                tps.iter()
+                    .map(|tp| shapes::TypeId::from_owned(ctx, HirType::Named(tp.name.clone()))),
+            );
+            type_param_pool.extend_from_slice(&tp_buf)
         };
         let template_type_params = index.views.map(|v| intern_tps(v.type_params));
         let class_type_params = index.classes.map(|c| {
             hir.classes
                 .get(c.hir_idx)
-                .map_or_else(Vec::new, |hc| intern_tps(&hc.type_params))
+                .map_or_else(TypeParamSpan::default, |hc| intern_tps(&hc.type_params))
         });
         Self {
             ctx,
@@ -315,7 +323,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             dispatch_arm_spans: Vec::new(),
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
-            helper_byte_offsets: IdxVec::default(),
             inst_locals: IdxVec::default(),
             inst_frame_locals: IdxVec::default(),
             inst_written: IdxVec::default(),
@@ -325,7 +332,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             escaping_env_templates: BitSet::default(),
             template_escape_locs,
             collapsed_closures: BitSet::default(),
-            collapsed_local_locs: index.local_ids.filled(None),
+            collapsed_local_locs: index.locals.filled(None),
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
@@ -333,6 +340,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             static_field_locs,
             class_insts: IdxVec::default(),
             class_index: HashMap::with_capacity(16),
+            type_param_pool,
             template_type_params,
             class_type_params,
             result_contracts: Vec::new(),
@@ -430,7 +438,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         match cb {
             CallbackCall::Direct { target, .. } => f(target),
             CallbackCall::Dispatch { helper, .. } => {
-                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper] {
+                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper].spec {
                     for &(_, target) in &self.dispatch_arms[arms] {
                         f(target);
                     }
@@ -446,7 +454,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             | SiteResolution::MethodCall { target, .. }
             | SiteResolution::Callback { target, .. } => f(target),
             SiteResolution::DispatchCall { helper, .. } => {
-                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper] {
+                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper].spec {
                     for &(_, target) in &self.dispatch_arms[arms] {
                         f(target);
                     }
@@ -465,23 +473,23 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.for_each_callback_target(executor, f);
             }
             SiteResolution::PromiseReaction { helper, .. } => {
-                if let Some(HelperSpec::PromiseReaction {
+                if let HelperSpec::PromiseReaction {
                     on_fulfilled,
                     on_rejected,
                     ..
-                }) = self.helpers.get(helper)
+                } = self.helpers[helper].spec
                 {
-                    if let Some((cb, _)) = *on_fulfilled {
+                    if let Some((cb, _)) = on_fulfilled {
                         self.for_each_callback_target(cb, &mut f);
                     }
-                    if let Some((cb, _)) = *on_rejected {
+                    if let Some((cb, _)) = on_rejected {
                         self.for_each_callback_target(cb, &mut f);
                     }
                 }
             }
             SiteResolution::TimerStart { helper, .. } => {
-                if let Some(HelperSpec::TimerRunner { cb_call, .. }) = self.helpers.get(helper) {
-                    self.for_each_callback_target(*cb_call, f);
+                if let HelperSpec::TimerRunner { cb_call, .. } = self.helpers[helper].spec {
+                    self.for_each_callback_target(cb_call, f);
                 }
             }
             _ => {}
@@ -708,14 +716,13 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn intern_helper(&mut self, spec: HelperSpec, byte_offset: u32) -> HelperId {
         if let Some(&id) = self.helper_index.get(&spec) {
-            let offset = &mut self.helper_byte_offsets[id];
+            let offset = &mut self.helpers[id].byte_offset;
             if !hir_compat::has_source_offset(*offset) {
                 *offset = byte_offset;
             }
             return id;
         }
-        let id = self.helpers.push(spec);
-        self.helper_byte_offsets.push(byte_offset);
+        let id = self.helpers.push(HelperEntry { spec, byte_offset });
         self.helper_index.insert(spec, id);
         id
     }

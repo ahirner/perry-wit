@@ -1,7 +1,7 @@
 //! Synthetic function-value records, dispatchers, wideners, comparers, and callback wrappers.
 use super::{Emitter, EnvField, RewriteCtx, synth_call, synth_function, synth_param};
 use crate::engine::bitset::BitSet;
-use crate::engine::boundary::TemplateKind;
+use crate::engine::boundary::{LocalFlags, TemplateKind};
 use crate::engine::solve::HelperSpec;
 use crate::engine::types::{
     CaptureOwner, DispatchArmSpan, FuncIdentity, HelperId, InstanceId, TemplateId, Ty, TyKind,
@@ -24,15 +24,18 @@ impl<'h, 'a> Emitter<'h, 'a> {
     pub(super) fn is_forward_boxed(&self, id: LocalId) -> bool {
         self.index.local_idx(id).is_some_and(|li| {
             self.solved.boxed_locals.contains(li.index())
-                && self.index.local_forward_captured.contains(li.index())
+                && self.index.locals[li]
+                    .flags
+                    .contains(LocalFlags::FORWARD_CAPTURED)
         })
     }
 
     pub(super) fn is_undef_boxed(&self, id: LocalId) -> bool {
         self.index.local_idx(id).is_some_and(|li| {
             self.solved.boxed_locals.contains(li.index())
-                && (self.index.local_forward_captured.contains(li.index())
-                    || self.index.local_deferred.contains(li.index()))
+                && self.index.locals[li]
+                    .flags
+                    .intersects(LocalFlags::UNDEF_BOXED)
         })
     }
 
@@ -77,7 +80,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 }
                 CaptureOwner::Template(_) => {
                     let lidx = self.index.local_idx(id)?;
-                    return self.solved.collapsed_local_tys[lidx]
+                    return self.solved.collapsed_local_locs[lidx]
+                        .map(|loc| self.solved.locations[loc])
                         .filter(|&ty| !matches!(ty, Ty::BOTTOM | Ty::OPEN));
                 }
                 CaptureOwner::None => return None,
@@ -323,7 +327,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 .solved
                 .helpers
                 .iter_enumerated()
-                .find_map(|(id, &spec)| (spec == target_spec).then_some(id))
+                .find_map(|(id, entry)| (entry.spec == target_spec).then_some(id))
                 .ok_or_else(|| {
                     Diagnostic::internal("missing interned widener for collapsed capture")
                 })?;
@@ -453,8 +457,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
         let slot = if let Some(slot) = self.helper_slots[id] {
             slot
         } else {
-            let spec = self.solved.helpers[id];
-            let byte_offset = self.solved.helper_byte_offsets[id];
+            let entry = self.solved.helpers[id];
+            let (spec, byte_offset) = (entry.spec, entry.byte_offset);
             let fid = self.fresh_func_id()?;
             let func = match spec {
                 HelperSpec::ThrowTypeError => self.build_throw_type_error(fid),
