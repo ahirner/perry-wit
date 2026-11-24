@@ -952,12 +952,21 @@ console.log(c.read(), calls);
 console.log(await lazy(false, c), calls);
 console.log(await lazy(true, c), calls);
 function read(a: number[]) {
-  const x = a[0];
-  console.log(a.length === 0 ? x : 7);
+  const x = a[0], n = a.length;
+  const result: number | string = x ?? "missing";
+  console.log(n === 0 ? x : 7, x && 1, n && x, x || 3, n || x, x ?? 4, undefined ?? x, result, x && "ok");
 }
 read([]);
+read([0]);
+read([6]);
+class Bucket<T> {
+  values: T[] = [];
+  selected = this.values.length === 0 ? this.values : [];
+  constructor(value: T) { this.selected.push(value); }
+}
+console.log(new Bucket<number>(42).selected[0], new Bucket<string>("ok").selected[0]);
 "#,
-            "6 2\n20 2\n7 3\nfalse 3\ntrue 4\nundefined\n",
+            "6 2\n20 2\n7 3\nfalse 3\ntrue 4\nundefined undefined 0 3 undefined 4 undefined missing undefined\n7 0 0 3 1 0 0 0 0\n7 1 6 6 1 6 6 6 ok\n42 ok\n",
         ),
         (
             "promise_handles_keep_their_constructor_instance",

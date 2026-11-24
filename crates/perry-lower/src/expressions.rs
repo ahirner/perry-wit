@@ -163,7 +163,7 @@ impl<'s> FunctionBuilder<'s> {
                 byte_offset,
                 ..
             } => self
-                .call(ctx, callee, args, type_args, *byte_offset)
+                .call(ctx, callee, args, type_args, *byte_offset, expected)
                 .and_then(|value| {
                     value.ok_or_else(|| {
                         Diagnostic::new(codes::TYPE_MISMATCH, "a void call has no value")
@@ -707,7 +707,25 @@ impl<'s> FunctionBuilder<'s> {
         Ok(if prefix { stored } else { old })
     }
 
-    /// `condition ? then : otherwise`, joined through a result slot.
+    pub(super) fn branch_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        solved: TypeHandle,
+    ) -> Result<Value> {
+        let context = matches!(
+            expr,
+            Expr::Null
+                | Expr::Undefined
+                | Expr::Array(..)
+                | Expr::ArraySpread(_)
+                | Expr::Object(_)
+                | Expr::ObjectSpread { .. }
+                | Expr::Sequence(_)
+        );
+        self.expression_with(ctx, expr, context.then_some(solved))
+    }
+
     pub(super) fn conditional(
         &mut self,
         ctx: &mut Context,
@@ -716,56 +734,32 @@ impl<'s> FunctionBuilder<'s> {
         else_expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        let solved = expected
+            .ok_or_else(|| Diagnostic::internal("emitter omitted the conditional result type"))?;
         let test = self.condition(ctx, condition)?;
         let then = self.new_block(ctx, "then");
         let otherwise = self.new_block(ctx, "else");
         self.branch(ctx, test, then, otherwise);
-        let reverse = expected.is_none()
-            && matches!(then_expr, Expr::Null | Expr::Undefined)
-            && !matches!(else_expr, Expr::Null | Expr::Undefined);
-        let arms = if reverse {
-            [(otherwise, false, else_expr), (then, true, then_expr)]
-        } else {
-            [(then, true, then_expr), (otherwise, false, else_expr)]
-        };
         let guard = perry_frontend::narrowing::DefinedGuard::of(condition);
-        let lower_arm = |b: &mut Self,
-                         ctx: &mut Context,
-                         (block, truth, expr),
-                         opposite: &Expr,
-                         hint|
-         -> Result<_> {
-            b.switch_to(block);
-            let guards = b.variant_guards.depth();
-            b.variant_guards.condition(condition, truth);
-            let value = b.expression_with(ctx, expr, hint);
-            b.variant_guards.truncate(guards);
-            let value = value?;
-            let value = if guard
-                .as_ref()
-                .is_some_and(|guard| guard.proves(truth, expr))
+        let mut arm = |ctx: &mut Context, block, truth, expr, opposite: &Expr| -> Result<_> {
+            self.switch_to(block);
+            let depth = self.variant_guards.depth();
+            self.variant_guards.condition(condition, truth);
+            let value = self.branch_operand(ctx, expr, solved);
+            self.variant_guards.truncate(depth);
+            let mut value = value?;
+            if guard.as_ref().is_some_and(|g| g.proves(truth, expr))
                 && !matches!(opposite, Expr::Undefined)
             {
-                b.strip_undefined(ctx, value)?
-            } else {
-                value
-            };
-            Ok((b.block, [value]))
+                value = self.strip_undefined(ctx, value)?;
+            }
+            Ok((self.block, [value]))
         };
-        let left = lower_arm(self, ctx, arms[0], arms[1].2, expected)?;
-        let hint = expected.or_else(|| {
-            Some(crate::coerce::expression_hint(
-                ctx,
-                arms[1].2,
-                left.1[0].get_type(ctx),
-            ))
-        });
-        let right = lower_arm(self, ctx, arms[1], arms[0].2, hint)?;
-        let left_ty = left.1[0].get_type(ctx);
-        let right_ty = right.1[0].get_type(ctx);
-        let ty =
-            expected.unwrap_or_else(|| crate::coerce::merged_type(ctx, left_ty, left_ty, right_ty));
-        let [value] = self.merge_branches(ctx, [ty], [left, right])?;
+        let (left_end, [left]) = arm(ctx, then, true, then_expr, else_expr)?;
+        let (right_end, [right]) = arm(ctx, otherwise, false, else_expr, then_expr)?;
+        let carrier = crate::coerce::result_carrier(ctx, solved, &[left, right]);
+        let [value] =
+            self.merge_branches(ctx, [carrier], [(left_end, [left]), (right_end, [right])])?;
         Ok(value)
     }
 

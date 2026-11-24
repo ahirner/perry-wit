@@ -689,6 +689,11 @@ pub(crate) fn index_type(
     index: &Expr,
 ) -> Option<Ty> {
     let (stripped, _) = types.strip_nullish(object);
+    if let Expr::String(key) = index
+        && let Some(ty) = property_type(ctx, decls, types, stripped, key)
+    {
+        return Some(ty);
+    }
     match types.kind(stripped) {
         TyKind::Dynamic => Some(Ty::DYNAMIC),
         TyKind::Array(elem) => Some(elem),

@@ -21,6 +21,7 @@ pub enum Availability<'a> {
 }
 
 pub struct Element<'a> {
+    pub ty: &'a perry_hir::types::Type,
     pub id: LocalId,
     pub value: &'a Expr,
     pub advance: Option<&'a Expr>,
@@ -156,6 +157,7 @@ impl Iteration {
         let [
             Stmt::Let {
                 id,
+                ty,
                 init: Some(Expr::Undefined),
                 ..
             },
@@ -226,6 +228,7 @@ impl Iteration {
             None => Availability::Known(matches!(steps.last(), Some(Expr::Bool(false)))),
         };
         Some(Element {
+            ty,
             id: *id,
             value,
             advance,

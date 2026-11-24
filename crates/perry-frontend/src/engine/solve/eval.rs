@@ -87,51 +87,53 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.write_loc(loc, norm);
                 }
             }
-            let class_inst_ids: Vec<(ClassInstId, ClassId, TySpan)> = self
-                .class_insts
-                .iter_enumerated()
-                .map(|(id, ci)| (id, ci.class, ci.field_locs))
-                .collect();
-            for (cinst_id, cid, field_locs_span) in class_inst_ids {
-                let Some(hir_class) = self
-                    .index
-                    .class(cid)
-                    .and_then(|c| self.hir.classes.get(c.hir_idx))
-                else {
-                    continue;
-                };
-                let locs: Vec<LocId> = self
+        }
+        if view.kind == TemplateKind::FieldInitializers {
+            let Some(Receiver::Class(id)) = receiver else {
+                return Err(Diagnostic::internal(
+                    "field initializer needs its class receiver",
+                ));
+            };
+            let instance = &self.class_insts[id];
+            let info = &self.index.classes[instance.class];
+            let fields = &self
+                .hir
+                .classes
+                .get(info.hir_idx)
+                .ok_or_else(|| Diagnostic::internal("missing class fields"))?
+                .fields;
+            for (field, offset) in fields.iter().zip(instance.field_locs.range()) {
+                let Some(init) = &field.init else { continue };
+                let loc = *self
                     .field_locs
-                    .get(field_locs_span.range())
-                    .unwrap_or(&[])
-                    .to_vec();
-                s.receiver = Some(Receiver::Class(cinst_id));
-                for (field, field_loc) in hir_class.fields.iter().zip(locs) {
-                    let Some(init) = &field.init else {
-                        continue;
-                    };
-                    if matches!(init, Expr::Array(items, _) if items.is_empty())
-                        && matches!(
-                            self.types.kind(self.locations[field_loc]),
-                            TyKind::Cell {
-                                kind: CellKind::Array,
-                                ..
-                            }
-                        )
+                    .get(offset)
+                    .ok_or_else(|| Diagnostic::internal("missing class field location"))?;
+                if matches!(init, Expr::Array(items, _) if items.is_empty()) {
+                    if self.types.is_open(self.locations[loc])
+                        && !matches!(self.types.kind(self.locations[loc]), TyKind::Cell { .. })
                     {
+                        let element = self.alloc_loc(Ty::BOTTOM);
+                        let cell = self.types.cell(element, CellKind::Array);
+                        self.write_loc(loc, cell);
+                    }
+                    if matches!(
+                        self.types.kind(self.locations[loc]),
+                        TyKind::Cell {
+                            kind: CellKind::Array,
+                            ..
+                        }
+                    ) {
                         continue;
                     }
-                    let init_ty = self.eval_expr(&mut s, init)?;
-                    self.check_escaping_func(s.inst, init_ty, 0, s.current_span)?;
-                    let norm = self
-                        .types
-                        .normalize_for_storage(self.ctx, self.decls, init_ty);
-                    self.write_loc(field_loc, norm);
-                    let cur = self.read_loc(field_loc, s.inst);
-                    self.record_coercion(s.inst, init, init_ty, cur);
                 }
+                let ty = self.eval_expr(&mut s, init)?;
+                self.check_escaping_func(inst_id, ty, 0, s.current_span)?;
+                let storage = self.types.normalize_for_storage(self.ctx, self.decls, ty);
+                self.write_loc(loc, storage);
+                let dest = self.read_loc(loc, inst_id);
+                self.record_coercion(inst_id, init, ty, dest);
             }
-            s.receiver = receiver;
+            return Ok(());
         }
 
         let body = hir_compat::strip_synthetic_default_guards(view.body, view.params.iter());

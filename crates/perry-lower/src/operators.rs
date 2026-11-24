@@ -1,6 +1,6 @@
 //! Operators: arithmetic, comparison, logical, unary and truthiness.
 use super::*;
-use crate::coerce::{expression_hint, merged_type};
+use crate::coerce::result_carrier;
 
 /// Short-circuit truthiness operators `&&` and `||`. Nullish coalescing (`??`) lowers separately.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -502,37 +502,14 @@ impl<'s> FunctionBuilder<'s> {
         right: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        let solved = expected
+            .ok_or_else(|| Diagnostic::internal("emitter omitted the logical result type"))?;
         let op = match op {
             LogicalOp::And => ShortCircuit::And,
             LogicalOp::Or => ShortCircuit::Or,
-            LogicalOp::Coalesce => return self.coalesce(ctx, left, right, expected),
+            LogicalOp::Coalesce => return self.coalesce(ctx, left, right, solved),
         };
-        let i1_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let lhs = if expected == Some(i1_ty) {
-            self.condition(ctx, left)?
-        } else {
-            self.expression(ctx, left)?
-        };
-        if expected == Some(i1_ty) || (expected.is_none() && lhs.get_type(ctx) == i1_ty) {
-            let evaluate_rhs = match op {
-                ShortCircuit::And => lhs,
-                ShortCircuit::Or => self.not(ctx, lhs),
-            };
-            return self.choose(
-                ctx,
-                i1_ty,
-                evaluate_rhs,
-                |b, ctx| {
-                    let mark = b.variant_guards.depth();
-                    b.variant_guards.condition(left, op == ShortCircuit::And);
-                    let rhs = b.condition(ctx, right);
-                    b.variant_guards.truncate(mark);
-                    rhs
-                },
-                |_, _| Ok(lhs),
-            );
-        }
-
+        let lhs = self.branch_operand(ctx, left, solved)?;
         let cond = self.truthy(ctx, lhs)?;
         let truthy_block = self.new_block(ctx, "logical_truthy");
         let falsy_block = self.new_block(ctx, "logical_falsy");
@@ -550,69 +527,18 @@ impl<'s> FunctionBuilder<'s> {
         };
         let short_end = self.block;
         self.switch_to(rhs_block);
-        let rhs_expected = expected.or_else(|| {
-            Some(expression_hint(
-                ctx,
-                right,
-                present_type(ctx, lhs.get_type(ctx)),
-            ))
-        });
         let mark = self.variant_guards.depth();
         self.variant_guards.condition(left, op == ShortCircuit::And);
-        let rhs = self.expression_with(ctx, right, rhs_expected);
+        let rhs = self.branch_operand(ctx, right, solved);
         self.variant_guards.truncate(mark);
         let rhs = rhs?;
         let rhs_end = self.block;
-        let boolean =
-            expected.is_none() && rhs.get_type(ctx) == i1_ty && lhs.get_type(ctx) != i1_ty;
-        let result_ty = if boolean {
-            i1_ty
-        } else if let Some(ty) = expected {
-            ty
-        } else {
-            let left_ty = lhs.get_type(ctx);
-            let right_ty = rhs.get_type(ctx);
-            let inner = match op {
-                ShortCircuit::Or => present_type(ctx, left_ty),
-                ShortCircuit::And => optional_value(ctx, right_ty)
-                    .or_else(|| optional_value(ctx, left_ty))
-                    .unwrap_or(right_ty),
-            };
-            merged_type(ctx, inner, left_ty, right_ty)
-        };
-
-        self.switch_to(short_end);
-        let left_ty = lhs.get_type(ctx);
-        let lhs = if boolean {
-            self.boolean(ctx, op == ShortCircuit::Or)
-        } else if op == ShortCircuit::And
-            && optional_value(ctx, left_ty).is_some()
-            && optional_value(ctx, left_ty) != optional_value(ctx, result_ty)
-            && let Some((_, states)) = optional_parts(ctx, result_ty)
-        {
-            match states {
-                perry_mir::Absence::Null => self.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty)),
-                perry_mir::Absence::Undefined => {
-                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, result_ty))
-                }
-                perry_mir::Absence::Both => {
-                    let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, lhs));
-                    self.choose(
-                        ctx,
-                        result_ty,
-                        is_null,
-                        |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, result_ty))),
-                        |b, ctx| {
-                            Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, result_ty)))
-                        },
-                    )?
-                }
-            }
-        } else {
-            self.fit(ctx, lhs, result_ty)?
+        let result_ty = match op {
+            ShortCircuit::Or => result_carrier(ctx, solved, &[rhs]),
+            ShortCircuit::And => result_carrier(ctx, solved, &[lhs, rhs]),
         };
         let [value] =
-            self.merge_branches(ctx, [result_ty], [(self.block, [lhs]), (rhs_end, [rhs])])?;
+            self.merge_branches(ctx, [result_ty], [(short_end, [lhs]), (rhs_end, [rhs])])?;
         Ok(value)
     }
 
@@ -622,17 +548,14 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         left: &'s Expr,
         right: &'s Expr,
-        expected: Option<TypeHandle>,
+        solved: TypeHandle,
     ) -> Result<Value> {
         if matches!(left, Expr::Null | Expr::Undefined) {
-            return self.expression_with(ctx, right, expected);
+            return self.branch_operand(ctx, right, solved);
         }
         let lhs = self.expression(ctx, left)?;
         if !self.is_optional(ctx, lhs) && kind(ctx, lhs)? != Kind::Json {
-            return match expected {
-                Some(ty) => self.fit(ctx, lhs, ty),
-                None => Ok(lhs),
-            };
+            return self.fit(ctx, lhs, solved);
         }
         let nullish = self.is_nullish(ctx, lhs)?;
         let present = self.new_block(ctx, "coalesce_present");
@@ -642,13 +565,9 @@ impl<'s> FunctionBuilder<'s> {
         let defined_lhs = self.defined(ctx, lhs)?;
         let present_end = self.block;
         self.switch_to(fallback);
-        let rhs_expected =
-            expected.or_else(|| Some(expression_hint(ctx, right, defined_lhs.get_type(ctx))));
-        let rhs = self.expression_with(ctx, right, rhs_expected)?;
+        let rhs = self.branch_operand(ctx, right, solved)?;
         let fallback_end = self.block;
-        let left_ty = defined_lhs.get_type(ctx);
-        let result_ty =
-            expected.unwrap_or_else(|| merged_type(ctx, left_ty, left_ty, rhs.get_type(ctx)));
+        let result_ty = result_carrier(ctx, solved, &[rhs]);
         let [value] = self.merge_branches(
             ctx,
             [result_ty],
@@ -693,15 +612,41 @@ impl<'s> FunctionBuilder<'s> {
 
     /// The truthiness of `expr`, as a branch condition.
     pub(super) fn condition(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
-        if matches!(
-            expr,
-            Expr::Logical {
-                op: LogicalOp::And | LogicalOp::Or,
-                ..
+        if let Expr::Sequence(parts) = expr
+            && let Some((last, effects)) = parts.split_last()
+        {
+            if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+                return self
+                    .condition(ctx, last)
+                    .map_err(|e| e.with_fallback_span(Some(span)));
             }
-        ) {
-            let i1_ty: TypeHandle = IntegerType::get(ctx, 1, Signedness::Signless).into();
-            return self.expression_with(ctx, expr, Some(i1_ty));
+            for effect in effects {
+                self.effect(ctx, effect)?;
+            }
+            return self.condition(ctx, last);
+        }
+        if let Expr::Logical {
+            op: op @ (LogicalOp::And | LogicalOp::Or),
+            left,
+            right,
+        } = expr
+        {
+            let lhs = self.condition(ctx, left)?;
+            let is_and = *op == LogicalOp::And;
+            let eval_rhs = if is_and { lhs } else { self.not(ctx, lhs) };
+            return self.choose(
+                ctx,
+                lhs.get_type(ctx),
+                eval_rhs,
+                |b, ctx| {
+                    let mark = b.variant_guards.depth();
+                    b.variant_guards.condition(left, is_and);
+                    let value = b.condition(ctx, right);
+                    b.variant_guards.truncate(mark);
+                    value
+                },
+                |_, _| Ok(lhs),
+            );
         }
         let value = self.expression(ctx, expr)?;
         self.truthy(ctx, value)

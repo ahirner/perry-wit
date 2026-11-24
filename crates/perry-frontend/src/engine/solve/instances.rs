@@ -619,39 +619,19 @@ impl<'h, 'a> Solver<'h, 'a> {
             class,
             args: args_key,
             field_locs,
+            field_init: None,
             ctor_inst: None,
             emitted_name,
         });
         self.class_index.insert(key, cinst_id);
 
-        let mut has_field_inits = false;
-        let field_loc_slice: Vec<LocId> = self
-            .field_locs
-            .get(field_locs.range())
-            .unwrap_or(&[])
-            .to_vec();
-        for (field, field_loc) in hir_class.fields.iter().zip(field_loc_slice) {
-            if let Some(init) = &field.init {
-                has_field_inits = true;
-                if matches!(init, Expr::Array(items, _) if items.is_empty())
-                    && self.types.is_open(self.locations[field_loc])
-                {
-                    let elem_loc = self.alloc_loc(Ty::BOTTOM);
-                    let cell = self.types.cell(elem_loc, CellKind::Array);
-                    self.write_loc(field_loc, cell);
-                } else if let Some(init_inst) = self.init_inst {
-                    let mut state = EvalState::new(init_inst, Some(Receiver::Class(cinst_id)));
-                    let init_ty = self.eval_expr(&mut state, init)?;
-                    self.check_escaping_func(init_inst, init_ty, 0, None)?;
-                    let norm = self
-                        .types
-                        .normalize_for_storage(self.ctx, self.decls, init_ty);
-                    self.write_loc(field_loc, norm);
-                }
-            }
-        }
-        if has_field_inits && let Some(init_inst) = self.init_inst {
-            self.enqueue(init_inst);
+        if let Some(template) = cinfo.field_init {
+            let init = self.request_instance(
+                InstanceReq::new(template, &[], caller)
+                    .receiver(Some(Receiver::Class(cinst_id)))
+                    .at(byte_offset),
+            )?;
+            self.class_insts[cinst_id].field_init = Some(init);
         }
         if let Some(ctor_tid) = cinfo.ctor {
             let ctor_inst = self.request_instance(

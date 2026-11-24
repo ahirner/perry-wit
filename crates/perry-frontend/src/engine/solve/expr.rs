@@ -277,6 +277,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 s.guards.truncate(depth);
                 let res = builtins::logical_result(self.types, *op, l, r);
                 self.check_escaping_func(s.inst, res, 0, s.current_span)?;
+                self.record_site(s.inst, expr, SiteResolution::BranchResult(res));
                 self.record_coercion(s.inst, left, l, res);
                 self.record_coercion(s.inst, right, r, res);
                 Ok(res)
@@ -303,6 +304,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 s.guards.join(branch, then_writes, true, true);
                 let joined = self.types.join(then_ty, else_ty);
                 self.check_escaping_func(s.inst, joined, 0, s.current_span)?;
+                self.record_site(s.inst, expr, SiteResolution::BranchResult(joined));
                 self.record_coercion(s.inst, then_expr, then_ty, joined);
                 self.record_coercion(s.inst, else_expr, else_ty, joined);
                 Ok(joined)

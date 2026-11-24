@@ -8,12 +8,15 @@ impl<'s> FunctionBuilder<'s> {
         while let Some((first, tail)) = rest.split_first() {
             rest = match self.iteration.element(rest) {
                 Some(element) => {
+                    let element_ty = self.shapes.value_type(ctx, element.ty)?;
+                    let element_ty =
+                        crate::coerce::admitting(ctx, element_ty, perry_mir::Absence::Undefined);
                     let value = self.conditional(
                         ctx,
                         element.condition,
                         element.missing,
                         element.value,
-                        None,
+                        Some(element_ty),
                     )?;
                     let binding = self.initialized_local(ctx, value);
                     self.variant_guards.assign(element.id);
@@ -411,9 +414,8 @@ impl<'s> FunctionBuilder<'s> {
         }
         if let Some(value) = init
             && self.shapes.metadata.inferred_bindings.contains(&id)
-            && present_type(ctx, value.get_type(ctx)) == present_type(ctx, declared)
         {
-            binding.carrier = value.get_type(ctx);
+            binding.carrier = crate::coerce::result_carrier(ctx, declared, &[value]);
         }
         let storage = deferred.unwrap_or(binding.carrier);
         let slot = if self.shapes.global_ids.contains(&id) {
@@ -479,7 +481,7 @@ impl<'s> FunctionBuilder<'s> {
                 byte_offset,
                 ..
             } => self
-                .call(ctx, callee, args, type_args, *byte_offset)
+                .call(ctx, callee, args, type_args, *byte_offset, expected)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::StaticMethodCall {
                 class_name,

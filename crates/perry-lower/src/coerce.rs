@@ -25,24 +25,21 @@ pub(super) fn admitting(
     perry_mir::OptionalType::get_with(ctx, inner, states).into()
 }
 
-pub(super) fn expression_hint(ctx: &mut Context, expr: &Expr, base: TypeHandle) -> TypeHandle {
-    match expr {
-        Expr::Null => admitting(ctx, base, perry_mir::Absence::Null),
-        Expr::Undefined => admitting(ctx, base, perry_mir::Absence::Undefined),
-        _ => base,
-    }
-}
-
-pub(super) fn merged_type(
-    ctx: &Context,
-    base: TypeHandle,
-    left: TypeHandle,
-    right: TypeHandle,
+pub(super) fn result_carrier(
+    ctx: &mut Context,
+    solved: TypeHandle,
+    operands: &[Value],
 ) -> TypeHandle {
-    perry_mir::Absence::join_optional(absence(ctx, left), absence(ctx, right))
-        .map_or(base, |states| {
-            perry_mir::OptionalType::get_with(ctx, present_type(ctx, base), states).into()
-        })
+    if !admits_undefined(ctx, solved)
+        && !solved.deref(ctx).is::<JsonType>()
+        && operands
+            .iter()
+            .any(|v| admits_undefined(ctx, v.get_type(ctx)))
+    {
+        admitting(ctx, solved, perry_mir::Absence::Undefined)
+    } else {
+        solved
+    }
 }
 
 pub(super) use perry_frontend::methods::Kind;

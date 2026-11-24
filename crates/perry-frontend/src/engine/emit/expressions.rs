@@ -91,6 +91,28 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<Expr> {
         if let Some(site) = resolution {
             match site {
+                SiteResolution::BranchResult(ty) => {
+                    let value = self.rewrite_expr_inner(&rctx.with_expected(true), expr, None)?;
+                    let ty = self.materialize(ty)?;
+                    let argument = self.fresh_synthetic_local()?;
+                    let local = self.fresh_synthetic_local()?;
+                    let param = Self::synth_param(argument, String::new(), ty.clone());
+                    return self.inline_call(
+                        ty.clone(),
+                        vec![
+                            Stmt::Let {
+                                id: local,
+                                name: String::new(),
+                                ty,
+                                mutable: false,
+                                init: Some(Expr::LocalGet(argument)),
+                            },
+                            Stmt::Return(Some(Expr::LocalGet(local))),
+                        ],
+                        vec![param],
+                        vec![value],
+                    );
+                }
                 SiteResolution::Cell(_) => {}
                 SiteResolution::FoldBool(b) => {
                     if let Expr::Compare { left, right, .. } = expr {
