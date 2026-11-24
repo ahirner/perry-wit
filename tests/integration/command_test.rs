@@ -933,6 +933,33 @@ await verify();
             "teaxshbc 4 override 4 5\n",
         ),
         (
+            "conditional_evaluation_in_fields_defaults_and_lazy_operands",
+            r#"
+let calls = 0;
+function hit(value: number): number { calls++; return value; }
+class Counter {
+  seed = hit(5);
+  field = 1 + (this.seed === 5 ? hit(this.seed) : hit(100));
+  read(value = 1 + (this.seed === 5 ? hit(this.field) : hit(100))) { return value; }
+}
+async function lazy(run: boolean, c: Counter) {
+  return run && (1 + (c.seed === 5 ? await Promise.resolve(hit(c.field)) : hit(100))) > 0;
+}
+const c = new Counter();
+console.log(c.field, calls);
+console.log(c.read(20), calls);
+console.log(c.read(), calls);
+console.log(await lazy(false, c), calls);
+console.log(await lazy(true, c), calls);
+function read(a: number[]) {
+  const x = a[0];
+  console.log(a.length === 0 ? x : 7);
+}
+read([]);
+"#,
+            "6 2\n20 2\n7 3\nfalse 3\ntrue 4\nundefined\n",
+        ),
+        (
             "promise_handles_keep_their_constructor_instance",
             r#"
 function job(value) {

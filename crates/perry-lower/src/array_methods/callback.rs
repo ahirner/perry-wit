@@ -80,19 +80,13 @@ impl<'s> FunctionBuilder<'s> {
         let slot = self.with_inline_scope(ctx, self.this_slot, |this, ctx| {
             for (index, param) in params.iter().enumerate() {
                 let ty = this.shapes.value_type(ctx, &param.ty)?;
-                let value = match arguments.get(index) {
-                    Some(&value) => value,
-                    None => {
-                        ensure_diag!(
-                            param.default.is_some() || admits_undefined(ctx, ty),
-                            codes::TYPE_MISMATCH,
-                            "missing required callback argument"
-                        );
-                        let ty = crate::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined);
-                        this.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
-                    }
-                };
-                this.bind_parameter(ctx, param, Some(value), BindingType::plain(ty))?;
+                let value = arguments.get(index).copied();
+                ensure_diag!(
+                    value.is_some() || param.default.is_some() || admits_undefined(ctx, ty),
+                    codes::TYPE_MISMATCH,
+                    "missing required callback argument"
+                );
+                this.bind_parameter(ctx, param, value, BindingType::plain(ty))?;
             }
             this.inline_body(ctx, body, params, result_type)
         })?;

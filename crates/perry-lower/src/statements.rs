@@ -15,10 +15,9 @@ impl<'s> FunctionBuilder<'s> {
                         element.value,
                         None,
                     )?;
-                    let slot = self.entry_slot(ctx, value.get_type(ctx));
-                    self.store(ctx, slot, value);
+                    let binding = self.initialized_local(ctx, value);
                     self.variant_guards.assign(element.id);
-                    self.locals.insert(element.id, LocalBinding::plain(slot));
+                    self.locals.insert(element.id, binding);
                     let done = self.condition(ctx, element.condition)?;
                     let done = self.choose(
                         ctx,
@@ -436,8 +435,7 @@ impl<'s> FunctionBuilder<'s> {
             id,
             LocalBinding {
                 slot,
-                integer: binding.integer,
-                deferred_write: deferred.map(|_| binding.carrier),
+                writes: binding,
                 is_never,
             },
         );

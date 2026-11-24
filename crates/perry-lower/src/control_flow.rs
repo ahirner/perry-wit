@@ -199,11 +199,9 @@ impl<'s> FunctionBuilder<'s> {
             self.pass_exit(ctx, caught);
             let exception = self.emit_value(ctx, |ctx| CatchOp::new(ctx, caught));
             if let Some((id, _)) = &clause.param {
-                let ty = exception.get_type(ctx);
-                let slot = self.entry_slot(ctx, ty);
-                self.store(ctx, slot, exception);
+                let binding = self.initialized_local(ctx, exception);
                 self.variant_guards.assign(*id);
-                self.locals.insert(*id, LocalBinding::plain(slot));
+                self.locals.insert(*id, binding);
             }
             if let Some(rethrow) = rethrow_block {
                 self.finallies.push(outer);

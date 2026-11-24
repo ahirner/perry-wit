@@ -564,9 +564,8 @@ impl<'s> FunctionBuilder<'s> {
         body: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
     ) -> Result<T> {
         let value = self.expression(ctx, expr)?;
-        let slot = self.entry_slot(ctx, value.get_type(ctx));
-        self.store(ctx, slot, value);
-        let previous = self.locals.insert(id, LocalBinding::plain(slot));
+        let binding = self.initialized_local(ctx, value);
+        let previous = self.locals.insert(id, binding);
         let result = body(self, ctx);
         if let Some(previous) = previous {
             self.locals.insert(id, previous);
@@ -662,7 +661,7 @@ impl<'s> FunctionBuilder<'s> {
         value: &'s Expr,
     ) -> Result<Value> {
         let local = self.local_binding(id)?;
-        let writes = self.write_type(ctx, local)?;
+        let writes = local.writes;
         let assigned = self.expression_with(ctx, value, Some(writes.expected_type(ctx)))?;
         if writes.carrier.deref(ctx).is::<JsonType>()
             && self.shapes.deferred_binding(id)
@@ -676,7 +675,7 @@ impl<'s> FunctionBuilder<'s> {
                 "local '{name}' cannot store {kind} together with its other assigned types"
             );
         }
-        let result = self.assign_local(ctx, local, writes, assigned)?;
+        let result = self.assign_local(ctx, local, assigned)?;
         self.assignment_narrowing(ctx, id, (value, assigned), writes.carrier);
         Ok(result)
     }
@@ -703,8 +702,7 @@ impl<'s> FunctionBuilder<'s> {
             UpdateOp::Decrement => BinaryKind::Sub,
         };
         let new = self.binary(ctx, kind, old, one);
-        let writes = self.write_type(ctx, local)?;
-        let stored = self.assign_local(ctx, local, writes, new)?;
+        let stored = self.assign_local(ctx, local, new)?;
         self.variant_guards.assign(id);
         Ok(if prefix { stored } else { old })
     }

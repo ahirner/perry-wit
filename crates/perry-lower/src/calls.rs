@@ -20,66 +20,55 @@ impl<'s> FunctionBuilder<'s> {
         value: Option<Value>,
         binding: BindingType,
     ) -> Result<()> {
-        let integer = binding.integer;
-        let slot = match (value, &param.default) {
+        let slot = self.entry_slot(ctx, binding.carrier);
+        let has_default = param
+            .default
+            .as_ref()
+            .is_some_and(|expr| !matches!(expr, Expr::Undefined));
+        let mut join = None;
+        let value = match (value, &param.default) {
             (Some(value), Some(default))
-                if !matches!(default, Expr::Undefined)
-                    && admits_undefined(ctx, value.get_type(ctx)) =>
+                if has_default && admits_undefined(ctx, value.get_type(ctx)) =>
             {
-                let is_undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-                let then_block = self.new_block(ctx, "default_then");
-                let else_block = self.new_block(ctx, "default_else");
-                let join = self.new_block(ctx, "default_join");
-                self.branch(ctx, is_undefined, then_block, else_block);
-
-                self.switch_to(else_block);
-                let present = self.strip_undefined(ctx, value)?;
-                let else_end = self.block;
-
-                self.switch_to(then_block);
-                let default = self.expression_with(ctx, default, Some(binding.carrier))?;
-                let then_end = self.block;
-                let slot = self.entry_slot(ctx, binding.carrier);
-                for (block, value) in [(then_end, default), (else_end, present)] {
-                    self.switch_to(block);
-                    if !self.terminated(ctx) {
-                        let value = self.fit_binding(ctx, value, binding)?;
-                        self.store(ctx, slot, value);
-                        self.jump(ctx, join);
-                    }
-                }
-                self.switch_to(join);
-                slot
-            }
-            (value, default) => {
-                let value = match (value, default) {
-                    (Some(value), _) => value,
-                    (None, Some(default)) => {
-                        self.expression_with(ctx, default, Some(binding.carrier))?
-                    }
-                    (None, None) => {
-                        self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, binding.carrier))
-                    }
-                };
-                let value = if default
-                    .as_ref()
-                    .is_some_and(|expr| !matches!(expr, Expr::Undefined))
-                {
-                    self.fit_binding(ctx, value, binding)?
-                } else {
-                    self.fit(ctx, value, binding.carrier)?
-                };
-                let slot = self.entry_slot(ctx, binding.carrier);
+                let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                let use_default = self.new_block(ctx, "default_then");
+                let use_argument = self.new_block(ctx, "default_else");
+                let done = self.new_block(ctx, "default_join");
+                self.branch(ctx, absent, use_default, use_argument);
+                self.switch_to(use_argument);
+                let value = self.strip_undefined(ctx, value)?;
+                let value = self.fit_binding(ctx, value, binding)?;
                 self.store(ctx, slot, value);
-                slot
+                self.jump(ctx, done);
+                self.switch_to(use_default);
+                join = Some(done);
+                self.expression_with(ctx, default, Some(binding.carrier))?
+            }
+            (Some(value), _) => value,
+            (None, Some(default)) => self.expression_with(ctx, default, Some(binding.carrier))?,
+            (None, None) => {
+                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, binding.carrier))
             }
         };
+        if !self.terminated(ctx) {
+            let value = if has_default {
+                self.fit_binding(ctx, value, binding)?
+            } else {
+                self.fit(ctx, value, binding.carrier)?
+            };
+            self.store(ctx, slot, value);
+            if let Some(done) = join {
+                self.jump(ctx, done);
+            }
+        }
+        if let Some(done) = join {
+            self.switch_to(done);
+        }
         self.locals.insert(
             param.id,
             LocalBinding {
                 slot,
-                integer,
-                deferred_write: None,
+                writes: binding,
                 is_never: matches!(param.ty, HirType::Never),
             },
         );

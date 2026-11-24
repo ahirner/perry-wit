@@ -65,18 +65,16 @@ impl<'s> FunctionBuilder<'s> {
         let body = hir_compat::strip_synthetic_default_guards(body, params.iter());
         // An inline callback runs once per element.
         self.invalidate_inline_writes(body, []);
-        let mut result = self.statements(ctx, body);
-        if result.is_ok() && self.reachable(ctx, self.block) {
-            if matches!(result_type, InlineResult::Void) {
-                self.jump(ctx, done);
-            } else {
-                result = self.inline_return(ctx, None);
-            }
-        }
-        self.inline_returns
+        let result = self.statements(ctx, body);
+        let frame = self
+            .inline_returns
             .pop()
             .ok_or_else(|| Diagnostic::internal("inline return frame"))?;
         result?;
+        if self.reachable(ctx, self.block) {
+            self.store_inline_result(ctx, &frame, None)?;
+            self.jump(ctx, done);
+        }
         self.switch_to(done);
         Ok(slot)
     }
