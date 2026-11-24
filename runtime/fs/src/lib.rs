@@ -285,6 +285,20 @@ pub(crate) extern "C" fn fs_event(event: u32, handle: u32, code: u32) -> u32 {
     0
 }
 
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn fs_pending() -> u32 {
+    let task = perry_rt_sys::task();
+    let mut cursor = *ops();
+    // SAFETY: listed operations stay pinned until their final event.
+    while let Some(op) = unsafe { cursor.as_ref() } {
+        if op.task == task {
+            return 1;
+        }
+        cursor = op.next;
+    }
+    0
+}
+
 /// Cancel this task's outstanding operations before releasing any borrowed buffer.
 /// Returns the number of detached calls, for the task-boundary diagnostic.
 #[unsafe(no_mangle)]

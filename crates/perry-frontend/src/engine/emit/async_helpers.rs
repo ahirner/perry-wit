@@ -10,7 +10,7 @@ use perry_hir::{
 };
 use perry_wit_diagnostics::{Diagnostic, Result};
 
-const TIMER_CLASS: &str = "__PerryTimer";
+use crate::engine::TIMER_CLASS;
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn inline_iife(&mut self, return_type: HirType, body: Vec<Stmt>) -> Result<Expr> {

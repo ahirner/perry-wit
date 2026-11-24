@@ -244,7 +244,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
         match self.types.kind(ty) {
             TyKind::Leaf(id) => {
-                if matches!(id.hir(self.ctx), HirType::Named(n) if n == "__PerryTimer") {
+                if matches!(id.hir(self.ctx), HirType::Named(n) if n == crate::engine::TIMER_CLASS)
+                {
                     *needs_timer = true;
                 }
             }

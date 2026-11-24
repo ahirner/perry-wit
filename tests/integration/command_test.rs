@@ -378,11 +378,8 @@ try { const text: string = missing; console.log(text); } catch (e) { console.log
     Ok(())
 }
 
-/// Work still pending when a task ends is cancelled and fails the task: a command reports it
-/// directly, an async export as an uncaught `Error`. Detached imports, fetches and stream reads
-/// are covered by `import_test`, `examples_test` and `stream_test`.
 #[tokio::test(flavor = "current_thread")]
-async fn detached_work_is_cancelled_at_the_task_boundary() -> Result<()> {
+async fn command_drains_external_work_and_exports_cancel_it() -> Result<()> {
     const DETACHED: &str =
         "Unresolved detached work at task boundary; pending operations cancelled";
     let root = tempfile::tempdir()?;
@@ -391,20 +388,29 @@ async fn detached_work_is_cancelled_at_the_task_boundary() -> Result<()> {
         r#"
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { setTimeout } from 'node:timers/promises';
-readFile('fixture.txt');
-readdir('.');
-stat('fixture.txt');
-setTimeout(60_000);
+async function verify() {
+    const bytes = readFile('fixture.txt');
+    const names = readdir('.');
+    const info = stat('fixture.txt');
+    console.log((await bytes).length, (await names).length, (await info).size);
+    await setTimeout(1);
+    console.log('done');
+}
+verify();
 "#,
         Some(root.path()),
     )
     .await?;
-    assert!(!run.ok);
-    assert_eq!(run.stderr, format!("{DETACHED}\n"));
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "1048576 1 1048576\ndone\n");
 
-    let run = execute("setTimeout(() => {}, 60_000);").await?;
+    let run = execute("new Promise(() => {}); setTimeout(() => console.log('fired'), 1);").await?;
+    assert!(run.ok, "{}", run.stderr);
+    assert_eq!(run.stdout, "fired\n");
+
+    let run = execute("Promise.reject(new Error('handled')).catch(() => {}); setTimeout(() => { throw new Error('timer'); }, 1);").await?;
     assert!(!run.ok);
-    assert_eq!(run.stderr, format!("{DETACHED}\n"));
+    assert_eq!(run.stderr, "Uncaught Error: timer\n");
 
     let bytes = Standard.component(
         "package test:detached; world boundary {import wasi:clocks/monotonic-clock@0.3.0;import wasi:cli/stderr@0.3.0;export run:async func()->string;}",

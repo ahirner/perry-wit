@@ -489,8 +489,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(Ty::OPEN)
             }
             Expr::PropertyGet {
-                object, property, ..
-            } => self.eval_property_get(s, object, property),
+                object, property, byte_offset, ..
+            } => self.eval_property_get(s, object, property, *byte_offset),
             Expr::PropertySet {
                 object,
                 property,
@@ -535,9 +535,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(val_ty)
             }
-            Expr::IndexGet { object, index, .. } => {
-                let (obj_ty, idx_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, index)?);
+            Expr::IndexGet { object, index, element_offset, .. } => {
+                let obj_ty = self.eval_expr(s, object)?;
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
+                self.check_timer_member(obj_def, *element_offset)?;
+                let idx_ty = self.eval_expr(s, index)?;
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
                     if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
                         self.dirty_locs.insert(loc.index());
@@ -1295,11 +1297,27 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.compute_type_param_bindings(template, receiver, capture_owner, &args, &explicit_targs)
     }
 
-    pub(super) fn eval_property_get(
+    pub(super) fn check_timer_member(&self, receiver: Ty, offset: u32) -> Result<()> {
+        if matches!(self.types.kind(receiver), TyKind::Leaf(id) if matches!(id.hir(self.ctx), HirType::Named(n) if n == crate::engine::TIMER_CLASS))
+        {
+            let locations = &self.metadata.locations;
+            let member = locations
+                .member_text(offset)
+                .ok_or_else(|| Diagnostic::internal("Timeout member has no source expression"))?;
+            return Err(Diagnostic::unsupported(format!(
+                "Timeout member '{member}' is not supported"
+            ))
+            .with_fallback_span(locations.member_span(offset)));
+        }
+        Ok(())
+    }
+
+    fn eval_property_get(
         &mut self,
         s: &mut EvalState<'h>,
         object: &'h Expr,
         property: &str,
+        byte_offset: u32,
     ) -> Result<Ty> {
         if let Expr::ClassRef(class_name) = object {
             return Ok(self.read_static_field(s.inst, class_name, property));
@@ -1309,6 +1327,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
+        self.check_timer_member(stripped, byte_offset)?;
         if let TyKind::Cell {
             loc,
             kind: CellKind::Dict,

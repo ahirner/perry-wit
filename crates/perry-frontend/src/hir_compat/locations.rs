@@ -326,6 +326,15 @@ impl<'s> Locations<'s> {
             .get((position - file.positions.start()) as usize..)
     }
 
+    pub(super) fn source_text(&self, span: Span) -> Option<&'s str> {
+        self.source_at(span.lo.0)?
+            .get(..(span.hi.0.checked_sub(span.lo.0)?) as usize)
+    }
+
+    pub(crate) fn member_text(&self, offset: u32) -> Option<&'s str> {
+        self.source_text(*self.members.get(&offset)?)
+    }
+
     pub fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
         self.span(Span::new(
             swc_common::BytePos(start),

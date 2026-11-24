@@ -142,18 +142,37 @@ pub(crate) fn contracts() -> Vec<Contract> {
             .boxed(),
         check_equivalence,
     ));
-    let callback_timer = Case::Reject {
-        source: "import {setTimeout} from 'node:timers';setTimeout(()=>{},1);".into(),
-        diagnostic: "Unsupported capability import".into(),
+    let callback_timer = |module: &str, value: u8| Case::Command {
+        source: format!(
+            "import {{setTimeout as later, clearTimeout, setInterval, clearInterval, setImmediate}} from '{module}'; clearTimeout(later(()=>console.log('cancelled'),1000)); clearInterval(setInterval(()=>console.log('cancelled'),1000)); setImmediate(()=>later(x=>console.log(x),1,{value}));"
+        ),
+        exit: ExitStatus::Success,
+    };
+    contracts.push(Contract::new(
+        "node.timers.callbacks.named",
+        ["timers", "node:timers"]
+            .map(|module| Witness {
+                partition: module,
+                case: callback_timer(module, 42),
+            })
+            .into(),
+        any::<u8>()
+            .prop_map(move |value| callback_timer("node:timers", value))
+            .boxed(),
+        check_equivalence,
+    ));
+    let namespace = Case::Reject {
+        source: "import * as timers from 'node:timers';timers.setTimeout(()=>{},1);".into(),
+        diagnostic: "timer import 'timers.setTimeout' is not supported".into(),
         form_sources: vec![],
     };
     contracts.push(Contract::new(
-        "node.timers.callbacks.unsupported",
+        "node.timers.callbacks.namespace",
         vec![Witness {
-            partition: "callback-timer",
-            case: callback_timer.clone(),
+            partition: "namespace",
+            case: namespace.clone(),
         }],
-        Just(callback_timer).boxed(),
+        Just(namespace).boxed(),
         check_equivalence,
     ));
     let unawaited_initialization = Case::Reject {

@@ -67,6 +67,9 @@ pub(super) fn build_module(
     let mut builtins: HashMap<&str, Builtin> = HashMap::new();
     for import in &hir.imports {
         let source = import.source.as_str();
+        if hir_compat::is_timer_module(source) {
+            continue;
+        }
         let module = match source {
             "timers/promises" | "node:timers/promises" => Some(BuiltinModule::Timers),
             "fs/promises" | "node:fs/promises" => Some(BuiltinModule::Fs),
@@ -87,7 +90,7 @@ pub(super) fn build_module(
         }
         if module.is_none() && builtin {
             return Err(unsupported!(
-                "Unsupported capability import {source}: only node:timers/promises, node:fs/promises and Writable from node:stream are supported so far"
+                "Unsupported capability import {source}: supported Node imports are callback timers from node:timers, setTimeout from node:timers/promises, asynchronous filesystem operations from node:fs/promises and Writable from node:stream"
             )
             .with_fallback_span(locations.import_span(source)));
         }
