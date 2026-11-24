@@ -120,7 +120,7 @@ mod tests {
         let hir_u = HirType::Union(vec![HirType::String, HirType::Number, HirType::Void]);
         let interned = table.intern_hir(&ctx, &hir_u, true);
         assert_eq!(interned, u3);
-        let roundtrip = table.materialize_hir(&ctx, interned, &|_| None);
+        let roundtrip = table.materialize_hir(&ctx, interned);
         assert!(matches!(roundtrip, HirType::Union(ref members) if members.len() == 3));
 
         // Verify name interning roundtrips cleanly across many distinct identifiers.

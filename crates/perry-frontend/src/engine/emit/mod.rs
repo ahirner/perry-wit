@@ -117,7 +117,7 @@ pub(crate) fn build(
         emitted_timer_class: false,
         synth_classes: Vec::new(),
         synth_functions: Vec::new(),
-        helper_fids: solved.helpers.filled(None),
+        helper_slots: solved.helpers.filled(None),
     };
     let (init, mut functions, mut classes) = e.build_all()?;
     functions.extend(e.synth_functions);
@@ -160,7 +160,7 @@ struct Emitter<'h, 'a> {
     emitted_timer_class: bool,
     synth_classes: Vec<Class>,
     synth_functions: Vec<Function>,
-    helper_fids: IdxVec<HelperId, Option<FuncId>>,
+    helper_slots: IdxVec<HelperId, Option<usize>>,
 }
 
 struct RewriteCtx<'a> {
@@ -204,9 +204,6 @@ impl RewriteCtx<'_> {
 }
 
 impl<'h> Emitter<'h, '_> {
-    fn class_inst_name(&self, id: ClassInstId) -> Option<String> {
-        Some(self.solved.class_insts[id].emitted_name.clone())
-    }
     fn is_resolved(&self, ty: Ty) -> bool {
         !self.types.is_open_with(
             ty,
@@ -570,17 +567,11 @@ impl<'h> Emitter<'h, '_> {
                 .ok_or_else(|| {
                     Diagnostic::internal("emitted function missing parameter location slot")
                 })?;
-            let param_ty = *self
-                .solved
-                .locations
-                .get(param_loc)
-                .ok_or_else(|| Diagnostic::internal("parameter location out of range"))?;
+            let param_ty = self.solved.locations[param_loc];
             if let TyKind::Func(ident) = self.types.kind(param_ty)
                 && !self.is_env_template(ident.template)
             {
-                if let Some(fid) = self.find_func_identity_instance(ident) {
-                    static_func_params.push((param.id, fid));
-                }
+                static_func_params.push((param.id, self.find_func_identity_instance(ident)));
                 continue;
             }
             let mut new_param = param.clone();
@@ -675,7 +666,7 @@ impl<'h> Emitter<'h, '_> {
             body = boxed_param_inits;
         }
 
-        let mut captures = if is_env_fn {
+        let captures = if is_env_fn {
             Vec::new()
         } else {
             let mut caps = view.captures.to_vec();
@@ -691,12 +682,11 @@ impl<'h> Emitter<'h, '_> {
             caps.dedup();
             caps
         };
-        captures.retain(|c| !self.is_boxed_local(*c) || !is_env_fn);
 
         if !inst.is_witness && inst.caller.is_some() {
             let caller_name = inst
                 .caller
-                .and_then(|c| self.solved.instances.get(c))
+                .map(|c| &self.solved.instances[c])
                 .filter(|c| c.template != TemplateId::INIT)
                 .map(|c| c.emitted_name.clone());
             self.instantiations.push((
@@ -729,7 +719,7 @@ impl<'h> Emitter<'h, '_> {
         ))
     }
 
-    fn find_func_identity_instance(&self, ident: FuncIdentity) -> Option<FuncId> {
+    fn find_func_identity_instance(&self, ident: FuncIdentity) -> FuncId {
         self.solved
             .instances
             .iter_enumerated()
@@ -739,7 +729,7 @@ impl<'h> Emitter<'h, '_> {
                     && inst.capture_owner == ident.capture_owner)
                     .then_some(inst.emitted_func_id)
             })
-            .or(Some(self.index.view(ident.template).func_id))
+            .unwrap_or_else(|| self.index.view(ident.template).func_id)
     }
 }
 

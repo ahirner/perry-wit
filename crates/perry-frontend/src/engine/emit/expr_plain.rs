@@ -76,10 +76,8 @@ impl<'h> Emitter<'h, '_> {
         {
             let capture_owner = if self.index.template_captures(tid).is_empty() {
                 CaptureOwner::None
-            } else if self.solved.collapsed_closures.contains(tid.index())
-                && let Some(owner_tid) = self.solved.instances.get(rctx.inst_id).map(|i| i.template)
-            {
-                CaptureOwner::Template(owner_tid)
+            } else if self.solved.collapsed_closures.contains(tid.index()) {
+                CaptureOwner::Template(self.solved.instances[rctx.inst_id].template)
             } else {
                 CaptureOwner::Instance(rctx.inst_id)
             };

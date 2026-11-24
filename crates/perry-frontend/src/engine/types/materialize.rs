@@ -12,7 +12,7 @@ pub(super) struct Materializer<'a, F> {
     pub(super) visiting: Vec<LocId>,
 }
 
-impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
+impl<'a, F: Fn(ClassInstId) -> &'a str> Materializer<'_, F> {
     fn empty_object(index_signature: Option<Box<HirType>>) -> HirType {
         HirType::Object(ObjectType {
             name: None,
@@ -194,7 +194,7 @@ impl<F: Fn(ClassInstId) -> Option<String>> Materializer<'_, F> {
                     index_signature: idx,
                 })
             }
-            TyKind::ClassInst(inst) => HirType::Named((self.class_name)(inst).unwrap_or_default()),
+            TyKind::ClassInst(inst) => HirType::Named((self.class_name)(inst).to_owned()),
             TyKind::Func(ident) if self.escaping_env.contains(ident.template.index()) => {
                 Self::func_env_hir(ident)
             }

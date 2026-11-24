@@ -447,7 +447,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.types.kind(stripped),
             TyKind::Leaf(_) | TyKind::Generic { .. }
         ) {
-            let hir = self.types.materialize_hir(self.ctx, stripped, &|_| None);
+            let hir = self.types.materialize_hir(self.ctx, stripped);
             return Some(
                 self.decls
                     .object_properties(self.ctx, &hir)?

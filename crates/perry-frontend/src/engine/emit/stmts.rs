@@ -246,11 +246,7 @@ impl<'h> Emitter<'h, '_> {
                     {
                         return Ok(Stmt::Expr(self.rewrite_expr(rctx, init_expr)?));
                     }
-                    let fid = self.find_func_identity_instance(ident).ok_or_else(|| {
-                        Diagnostic::internal(format!(
-                            "unresolved function identity for binding '{name}'"
-                        ))
-                    })?;
+                    let fid = self.find_func_identity_instance(ident);
                     return Ok(Stmt::Let {
                         id: out_id,
                         name: name.clone(),

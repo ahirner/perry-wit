@@ -781,7 +781,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 let obj_ty = self.resolve_cell_read(s.inst, obj_ty);
                 let stripped = self.types.strip_nullish(obj_ty).0;
-                let hir = self.types.materialize_hir(self.ctx, stripped, &|_| None);
+                let hir = self.types.materialize_hir(self.ctx, stripped);
                 Ok(self
                     .decls
                     .dict_entry_types(self.ctx, &hir)

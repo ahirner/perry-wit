@@ -698,7 +698,7 @@ impl TypeTable {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn materialize_hir_with(
+    pub(crate) fn materialize_hir_with<'a>(
         &self,
         ctx: &Context,
         ty: Ty,
@@ -706,7 +706,7 @@ impl TypeTable {
         dict_reads: &BitSet,
         capture_free: &BitSet,
         escaping_env: &BitSet,
-        class_name: &impl Fn(ClassInstId) -> Option<String>,
+        class_name: &impl Fn(ClassInstId) -> &'a str,
     ) -> HirType {
         Materializer {
             table: self,
@@ -721,14 +721,9 @@ impl TypeTable {
         .run(ty)
     }
 
-    pub(crate) fn materialize_hir(
-        &self,
-        ctx: &Context,
-        ty: Ty,
-        class_name: &impl Fn(ClassInstId) -> Option<String>,
-    ) -> HirType {
+    pub(crate) fn materialize_hir(&self, ctx: &Context, ty: Ty) -> HirType {
         let empty = BitSet::default();
-        self.materialize_hir_with(ctx, ty, &[], &empty, &empty, &empty, class_name)
+        self.materialize_hir_with(ctx, ty, &[], &empty, &empty, &empty, &|_| "")
     }
 
     pub(crate) fn is_valid_dict_value(&self, elem: Ty, dict_read: bool) -> bool {

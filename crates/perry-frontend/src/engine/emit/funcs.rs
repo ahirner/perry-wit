@@ -54,8 +54,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
         loop {
             match cur {
                 CaptureOwner::Instance(c) => {
-                    if let Some(inst) = self.solved.instances.get(c)
-                        && let Some(locs) = self.solved.param_locs.get(inst.param_locs.range())
+                    let inst = &self.solved.instances[c];
+                    if let Some(locs) = self.solved.param_locs.get(inst.param_locs.range())
                         && let Some(&loc) = self
                             .index
                             .view(inst.template)
@@ -63,7 +63,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                             .iter()
                             .zip(locs)
                             .find_map(|(p, loc)| (p.id == id).then_some(loc))
-                        && let Some(&ty) = self.solved.locations.get(loc)
+                        && let ty = self.solved.locations[loc]
                         && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
                     {
                         return Some(ty);
@@ -73,11 +73,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                     {
                         return Some(ty);
                     }
-                    cur = self
-                        .solved
-                        .instances
-                        .get(c)
-                        .map_or(CaptureOwner::None, |i| i.capture_owner);
+                    cur = inst.capture_owner;
                 }
                 CaptureOwner::Template(_) => {
                     let lidx = self.index.local_idx(id)?;
@@ -248,9 +244,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
                 self.collect_env_idents_in(i, seen, out, needs_timer)
             }
             TyKind::Cell { loc, .. } => {
-                if let Some(&elem) = self.solved.locations.get(loc) {
-                    self.collect_env_idents_in(elem, seen, out, needs_timer);
-                }
+                self.collect_env_idents_in(self.solved.locations[loc], seen, out, needs_timer);
             }
             TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
                 for &m in self.types.ty_slice(s) {
@@ -286,7 +280,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
             &self.solved.dict_reads,
             &self.index.capture_free_templates,
             &self.solved.escaping_env_templates,
-            &|cid| self.class_inst_name(cid),
+            &|cid| self.solved.class_insts[cid].emitted_name.as_str(),
         ))
     }
 
@@ -465,60 +459,67 @@ impl<'h, 'a> Emitter<'h, 'a> {
         })
     }
 
-    pub(super) fn emit_helper(&mut self, id: HelperId) -> Result<FuncId> {
-        if let Some(fid) = self.helper_fids[id] {
-            return Ok(fid);
-        }
-        let spec = self.solved.helpers[id];
-        let byte_offset = self.solved.helper_byte_offsets[id];
-        let fid = self.fresh_func_id()?;
-        self.helper_fids[id] = Some(fid);
-        let func = match spec {
-            HelperSpec::ThrowTypeError => self.build_throw_type_error(fid),
-            HelperSpec::TypeOfFn(op_ty) => self.build_typeof_fn(fid, op_ty)?,
-            HelperSpec::Dispatcher {
-                callee_ty,
-                arms,
-                arg_tys,
-                recv_ty,
-            } => self.build_dispatcher(fid, callee_ty, arms, arg_tys, recv_ty, byte_offset)?,
-            HelperSpec::Widener { from, to } => self.build_widener(fid, from, to)?,
-            HelperSpec::Comparer { left_ty, right_ty } => {
-                self.build_comparer(fid, left_ty, right_ty)?
-            }
-            HelperSpec::PromiseReaction {
-                kind,
-                promise_ty,
-                inner_ty,
-                on_fulfilled,
-                on_rejected,
-                ret_ty,
-            } => self.build_promise_reaction(
-                fid,
-                kind,
-                promise_ty,
-                inner_ty,
-                on_fulfilled,
-                on_rejected,
-                ret_ty,
-            )?,
-            HelperSpec::TimerRunner {
-                repeating,
-                is_immediate,
-                cb_call,
-                cb_ty,
-                extra_arg_tys,
-            } => self.build_timer_runner(
-                fid,
-                repeating,
-                is_immediate,
-                cb_call,
-                cb_ty,
-                extra_arg_tys,
-            )?,
+    pub(super) fn emit_helper_fn(&mut self, id: HelperId) -> Result<&Function> {
+        let slot = if let Some(slot) = self.helper_slots[id] {
+            slot
+        } else {
+            let spec = self.solved.helpers[id];
+            let byte_offset = self.solved.helper_byte_offsets[id];
+            let fid = self.fresh_func_id()?;
+            let func = match spec {
+                HelperSpec::ThrowTypeError => self.build_throw_type_error(fid),
+                HelperSpec::TypeOfFn(op_ty) => self.build_typeof_fn(fid, op_ty)?,
+                HelperSpec::Dispatcher {
+                    callee_ty,
+                    arms,
+                    arg_tys,
+                    recv_ty,
+                } => self.build_dispatcher(fid, callee_ty, arms, arg_tys, recv_ty, byte_offset)?,
+                HelperSpec::Widener { from, to } => self.build_widener(fid, from, to)?,
+                HelperSpec::Comparer { left_ty, right_ty } => {
+                    self.build_comparer(fid, left_ty, right_ty)?
+                }
+                HelperSpec::PromiseReaction {
+                    kind,
+                    promise_ty,
+                    inner_ty,
+                    on_fulfilled,
+                    on_rejected,
+                    ret_ty,
+                } => self.build_promise_reaction(
+                    fid,
+                    kind,
+                    promise_ty,
+                    inner_ty,
+                    on_fulfilled,
+                    on_rejected,
+                    ret_ty,
+                )?,
+                HelperSpec::TimerRunner {
+                    repeating,
+                    is_immediate,
+                    cb_call,
+                    cb_ty,
+                    extra_arg_tys,
+                } => self.build_timer_runner(
+                    fid,
+                    repeating,
+                    is_immediate,
+                    cb_call,
+                    cb_ty,
+                    extra_arg_tys,
+                )?,
+            };
+            let slot = self.synth_functions.len();
+            self.synth_functions.push(func);
+            self.helper_slots[id] = Some(slot);
+            slot
         };
-        self.synth_functions.push(func);
-        Ok(fid)
+        Ok(&self.synth_functions[slot])
+    }
+
+    pub(super) fn emit_helper(&mut self, id: HelperId) -> Result<FuncId> {
+        Ok(self.emit_helper_fn(id)?.id)
     }
 
     fn build_throw_type_error(&self, fid: FuncId) -> Function {

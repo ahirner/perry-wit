@@ -69,11 +69,7 @@ pub(crate) fn lookup_method_result(
     if property || matches!(types.kind(receiver), TyKind::ClassInst(_)) {
         return None;
     }
-    Method::inferred(
-        &types.materialize_hir(ctx, receiver, &|_| None),
-        name,
-        false,
-    )
+    Method::inferred(&types.materialize_hir(ctx, receiver), name, false)
 }
 
 pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> Option<Ty> {
@@ -592,7 +588,7 @@ pub(crate) fn property_type(
                     types
                         .ty_slice(a)
                         .iter()
-                        .map(|&t| types.materialize_hir(ctx, t, &|_| None))
+                        .map(|&t| types.materialize_hir(ctx, t))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -719,7 +715,7 @@ pub(crate) fn index_type(
             (!items.is_empty()).then(|| types.union(&items))
         }
         TyKind::Generic { .. } => iterated_element(ctx, types, stripped).or_else(|| {
-            let hir = types.materialize_hir(ctx, stripped, &|_| None);
+            let hir = types.materialize_hir(ctx, stripped);
             dict_value_ty(ctx, decls, types, &hir)
         }),
         _ => None,

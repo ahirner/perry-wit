@@ -68,14 +68,8 @@ impl<'h> Emitter<'h, '_> {
                     .max()
                     .unwrap_or(0)
                     .min(inputs.len());
-                let disp_fid = self.emit_helper(helper)?;
-                let disp_ret = self
-                    .synth_functions
-                    .iter()
-                    .find(|f| f.id == disp_fid)
-                    .ok_or_else(|| Diagnostic::internal("missing synthesized dispatcher"))?
-                    .return_type
-                    .clone();
+                let disp = self.emit_helper_fn(helper)?;
+                let (disp_fid, disp_ret) = (disp.id, disp.return_type.clone());
                 self.emit_callback_wrapper(disp_fid, rewritten, &inputs[..max_params], disp_ret)
             }
             None => Ok(rewritten),
@@ -495,53 +489,59 @@ impl<'h> Emitter<'h, '_> {
                     argument_types,
                 } => {
                     let method_name = self.solved.instances[target].emitted_method_name.clone();
-                    let mut out = expr.clone();
-                    match (expr, &mut out) {
-                        (
-                            Expr::StaticMethodCall { args, .. },
-                            Expr::StaticMethodCall {
-                                method_name: out_name,
-                                args: out_args,
-                                ..
-                            },
-                        ) => {
-                            *out_name = method_name;
-                            out_args.clear();
-                            let before =
-                                self.rewrite_filtered_args(rctx, args, argument_types, out_args)?;
-                            return Ok(sequence(before, out));
-                        }
-                        (
-                            Expr::Call { callee, args, .. },
-                            Expr::Call {
-                                callee: out_callee,
-                                args: out_args,
-                                type_args,
-                                ..
-                            },
-                        ) if matches!(callee.as_ref(), Expr::PropertyGet { .. }) => {
-                            if let (
-                                Expr::PropertyGet { object, .. },
-                                Expr::PropertyGet {
-                                    object: out_obj,
-                                    property,
-                                    ..
+                    match expr {
+                        Expr::StaticMethodCall {
+                            class_name, args, ..
+                        } => {
+                            let mut out_args = Vec::with_capacity(args.len());
+                            let before = self.rewrite_filtered_args(
+                                rctx,
+                                args,
+                                argument_types,
+                                &mut out_args,
+                            )?;
+                            return Ok(sequence(
+                                before,
+                                Expr::StaticMethodCall {
+                                    class_name: class_name.clone(),
+                                    method_name,
+                                    args: out_args,
                                 },
-                            ) = (callee.as_ref(), out_callee.as_mut())
-                            {
-                                out_args.clear();
-                                let effects = self.rewrite_filtered_args(
-                                    rctx,
-                                    args,
-                                    argument_types,
-                                    out_args,
-                                )?;
-                                let receiver = self.rewrite_expr(rctx, object)?;
-                                **out_obj = self.followed_by(receiver, effects)?;
-                                *property = method_name;
-                                type_args.clear();
-                                return Ok(out);
-                            }
+                            ));
+                        }
+                        Expr::Call {
+                            callee,
+                            args,
+                            byte_offset,
+                            byte_end,
+                            ..
+                        } if let Expr::PropertyGet {
+                            object,
+                            byte_offset: prop_offset,
+                            byte_end: prop_end,
+                            ..
+                        } = callee.as_ref() =>
+                        {
+                            let mut out_args = Vec::with_capacity(args.len());
+                            let effects = self.rewrite_filtered_args(
+                                rctx,
+                                args,
+                                argument_types,
+                                &mut out_args,
+                            )?;
+                            let receiver = self.rewrite_expr(rctx, object)?;
+                            return Ok(Expr::Call {
+                                callee: Box::new(Expr::PropertyGet {
+                                    object: Box::new(self.followed_by(receiver, effects)?),
+                                    property: method_name,
+                                    byte_offset: *prop_offset,
+                                    byte_end: *prop_end,
+                                }),
+                                args: out_args,
+                                type_args: Vec::new(),
+                                byte_offset: *byte_offset,
+                                byte_end: *byte_end,
+                            });
                         }
                         _ => {}
                     }
@@ -550,25 +550,30 @@ impl<'h> Emitter<'h, '_> {
                     class_inst,
                     argument_types,
                 } => {
-                    if let Expr::New { args, .. } = expr {
-                        let name = self
-                            .class_inst_name(class_inst)
-                            .ok_or_else(|| Diagnostic::internal("missing class instance name"))?;
-                        let mut out = expr.clone();
-                        if let Expr::New {
-                            class_name,
-                            type_args,
-                            args: out_args,
-                            ..
-                        } = &mut out
-                        {
-                            *class_name = name;
-                            type_args.clear();
-                            out_args.clear();
-                            let before =
-                                self.rewrite_filtered_args(rctx, args, argument_types, out_args)?;
-                            return Ok(sequence(before, out));
-                        }
+                    if let Expr::New {
+                        args,
+                        byte_offset,
+                        byte_end,
+                        cap_args_appended,
+                        ..
+                    } = expr
+                    {
+                        let mut out_args = Vec::with_capacity(args.len());
+                        let before =
+                            self.rewrite_filtered_args(rctx, args, argument_types, &mut out_args)?;
+                        return Ok(sequence(
+                            before,
+                            Expr::New {
+                                class_name: self.solved.class_insts[class_inst]
+                                    .emitted_name
+                                    .clone(),
+                                args: out_args,
+                                type_args: Vec::new(),
+                                byte_offset: *byte_offset,
+                                byte_end: *byte_end,
+                                cap_args_appended: *cap_args_appended,
+                            },
+                        ));
                     }
                 }
                 SiteResolution::PromiseNew {
