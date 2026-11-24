@@ -4,7 +4,7 @@ use pliron::context::Context;
 use std::collections::{BTreeMap, HashMap};
 mod absence;
 pub mod collections;
-pub mod completion;
+mod completion;
 pub(crate) mod engine;
 pub mod hir_compat;
 pub mod methods;
@@ -88,6 +88,6 @@ pub fn load_world<'s>(
     })
 }
 
-pub fn is_identifier(name: &str) -> bool {
+pub(crate) fn is_identifier(name: &str) -> bool {
     perry_parser::swc_ecma_ast::Ident::verify_symbol(name).is_ok()
 }

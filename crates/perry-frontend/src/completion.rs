@@ -109,6 +109,6 @@ pub(crate) fn falls_through(statements: &[Stmt]) -> bool {
     completions(statements) & FALLTHROUGH != 0
 }
 
-pub fn returns_optional(statements: &[Stmt]) -> bool {
+pub(crate) fn returns_optional(statements: &[Stmt]) -> bool {
     completions(statements) & (FALLTHROUGH | EMPTY_RETURN) != 0
 }

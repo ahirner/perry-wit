@@ -47,7 +47,7 @@ fn interface_member_name(resolve: &Resolve, key: &WorldKey, function: &Function)
 }
 
 /// Uses an interface prefix for implementation functions, qualifying package collisions.
-pub fn interface_implementation_name(
+pub(crate) fn interface_implementation_name(
     resolve: &Resolve,
     world: &World,
     key: &WorldKey,

@@ -439,21 +439,38 @@ impl TypeTable {
         self.intern_kind(TyKind::Object { props: span, index })
     }
 
-    pub(crate) fn union(&mut self, members: &[Ty]) -> Ty {
-        let mut flat = std::mem::take(&mut self.scratch);
-        flat.clear();
-        for &m in members {
-            self.push_union_member(&mut flat, m);
-        }
-        let res = if flat.contains(&Ty::OPEN) {
+    fn finish_union(&mut self, flat: &mut Vec<Ty>) -> Ty {
+        if flat.contains(&Ty::OPEN) {
             Ty::OPEN
         } else if flat.contains(&Ty::DYNAMIC) {
             Ty::DYNAMIC
         } else {
             flat.sort_unstable();
             flat.dedup();
-            self.intern_sorted_union(&flat)
-        };
+            self.intern_sorted_union(flat)
+        }
+    }
+
+    pub(crate) fn union(&mut self, members: &[Ty]) -> Ty {
+        let mut flat = std::mem::take(&mut self.scratch);
+        flat.clear();
+        for &m in members {
+            self.push_union_member(&mut flat, m);
+        }
+        let res = self.finish_union(&mut flat);
+        self.scratch = flat;
+        res
+    }
+
+    pub(crate) fn union_span(&mut self, span: TySpan) -> Ty {
+        let mut flat = std::mem::take(&mut self.scratch);
+        flat.clear();
+        let range = span.range();
+        debug_assert!(range.end <= self.ty_pool.len());
+        for i in range.start..range.end.min(self.ty_pool.len()) {
+            self.push_union_member(&mut flat, self.ty_pool[i]);
+        }
+        let res = self.finish_union(&mut flat);
         self.scratch = flat;
         res
     }

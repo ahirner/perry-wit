@@ -9,7 +9,7 @@ pub use resolution::Query;
 pub use resolution::Resolver;
 
 const RESOLUTION_DEPTH: usize = 32;
-pub const ARGUMENT_LIMIT: usize = 4096;
+pub(crate) const ARGUMENT_LIMIT: usize = 4096;
 
 pub trait DeclarationLookup<'h> {
     fn interface(&self, name: &str) -> Option<(usize, &'h Interface)>;
@@ -251,7 +251,7 @@ fn strip_void(ctx: &Context, ty: TypeId) -> TypeId {
     }
 }
 
-pub fn optional_property(ty: HirType, optional: bool) -> HirType {
+pub(crate) fn optional_property(ty: HirType, optional: bool) -> HirType {
     if !optional {
         return ty;
     }
@@ -266,7 +266,7 @@ pub fn optional_property(ty: HirType, optional: bool) -> HirType {
 
 impl Declarations<'_> {
     /// HIR compatibility result for a selected member.
-    pub fn property_type(
+    pub(crate) fn property_type(
         &self,
         ctx: &Context,
         base: &str,
@@ -294,7 +294,7 @@ impl Declarations<'_> {
         Resolver::new(ctx, self).dictionary(id)
     }
 
-    pub fn object_properties(
+    pub(crate) fn object_properties(
         &self,
         ctx: &Context,
         ty: &HirType,
