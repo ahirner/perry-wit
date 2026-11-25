@@ -1,6 +1,6 @@
 //! Entry-module declarations that implement the selected world's exports.
 use super::Locations;
-use crate::hir::Type as HirType;
+use crate::wit::WitValue;
 use perry_contract::types::Input;
 use perry_hir::types::FuncId;
 use perry_parser::swc_ecma_ast as ast;
@@ -9,15 +9,16 @@ use std::collections::{BTreeMap, HashMap};
 use swc_common::{Span, Spanned};
 use wit_parser::{Resolve, WorldId, WorldKey};
 
-pub(crate) struct Signature {
-    pub(super) annotations: Vec<Option<Span>>,
-    pub(crate) params: Vec<HirType>,
-    pub(crate) result: HirType,
+pub(crate) struct Signature<'r> {
+    pub(crate) annotations: Vec<Option<Span>>,
+    pub(crate) registry: Option<(perry_hir::types::LocalId, String)>,
+    pub(crate) params: Vec<WitValue<'r>>,
+    pub(crate) result: Option<WitValue<'r>>,
 }
 
-pub(crate) struct Witness<T> {
+pub(crate) struct Witness<'r, T> {
     pub(crate) name: String,
-    pub(crate) signature: Option<Signature>,
+    pub(crate) signature: Option<Signature<'r>>,
     pub(crate) target: Option<T>,
     pub(crate) is_destructor: bool,
 }
@@ -53,7 +54,7 @@ pub(super) struct ResourceClass<T> {
     pub(super) resource: wit_parser::TypeId,
     pub(super) create: String,
     pub(super) representation: String,
-    pub(super) source_ty: HirType,
+    pub(super) source_name: String,
 }
 
 pub(super) struct ClassCall {
@@ -61,9 +62,9 @@ pub(super) struct ClassCall {
     pub(super) action: ResourceAction<FuncId>,
 }
 
-pub(super) struct Roots {
+pub(super) struct Roots<'r> {
     namespaces: Vec<Span>,
-    pub(super) witnesses: Vec<Witness<SourceTarget>>,
+    pub(super) witnesses: Vec<Witness<'r, SourceTarget>>,
     classes: Vec<ResourceClass<Span>>,
 }
 
@@ -150,13 +151,13 @@ impl<'a> Scope<'a> {
     }
 }
 
-pub(super) fn resolve<'a>(
+pub(super) fn resolve<'a, 'r>(
     module: &'a ast::Module,
     exports: &BTreeMap<String, ast::Ident>,
-    world: Option<(&Resolve, WorldId)>,
+    world: Option<(&'r Resolve, WorldId)>,
     locations: &Locations<'_>,
     unresolved: swc_common::SyntaxContext,
-) -> Result<Roots> {
+) -> Result<Roots<'r>> {
     use perry_contract::names::{to_camel_case, to_pascal_case};
     let mut scope = Scope(HashMap::new());
     let mut insert = |id: &'a ast::Ident, decl| {
@@ -257,14 +258,18 @@ pub(super) fn resolve<'a>(
                 continue;
             };
             let module = r.name_world_key(k);
-            let source_ty = crate::wit::source_type(r, *resource)
-                .ok_or_else(|| Diagnostic::internal("unnamed exported resource"))?;
+            let source_name = perry_contract::names::NamedType::get(
+                r,
+                perry_contract::names::canonical_type(r, *resource),
+            )
+            .map(|name| name.qualified())
+            .ok_or_else(|| Diagnostic::internal("unnamed exported resource"))?;
             let owner = classes.len();
             classes.push((
                 ResourceClass {
                     resource: *resource,
                     class: class.span,
-                    source_ty,
+                    source_name,
                     create: format!("{module}#new{}", to_pascal_case(name)),
                     representation: format!("{module}#{}Rep", to_camel_case(name)),
                 },
@@ -287,9 +292,13 @@ pub(super) fn resolve<'a>(
             disposals.push(Witness {
                 name: format!("{module}#[dtor]{name}"),
                 signature: Some(Signature {
+                    registry: None,
                     annotations: Vec::new(),
-                    params: vec![HirType::Number],
-                    result: HirType::Void,
+                    params: vec![WitValue {
+                        resolve: r,
+                        ty: wit_parser::Type::U32,
+                    }],
+                    result: None,
                 }),
                 target: Some(SourceTarget::Resource {
                     owner,
@@ -404,30 +413,28 @@ pub(super) fn resolve<'a>(
                 None => err.with_fallback_span(locations.offset_span(1, 1)),
             });
         }
-        let ty = |mut t| {
-            while let wit_parser::Type::Id(id) = t
+        let ty = |mut ty| {
+            while let wit_parser::Type::Id(id) = ty
                 && let wit_parser::TypeDefKind::Type(inner) = r.types[id].kind
             {
-                t = inner;
+                ty = inner;
             }
-            use wit_parser::Type::*;
-            Ok(match t {
-                U8 | S8 | U16 | S16 | U32 | S32 => HirType::Number,
-                U64 | S64 => HirType::BigInt,
-                _ => crate::wit::source_type_of(r, Input::Reference(t)).ok_or_else(|| {
+            crate::wit::supported(r, Input::Reference(ty))
+                .then_some(WitValue { resolve: r, ty })
+                .ok_or_else(|| {
                     Diagnostic::unsupported(format!(
                         "WIT export {requirement} uses an unsupported type"
                     ))
-                })?,
-            })
+                })
         };
         roots.witnesses.push(Witness {
             name,
             target,
             signature: Some(Signature {
+                registry: None,
                 annotations,
                 params: f.params.iter().map(|p| ty(p.ty)).collect::<Result<_>>()?,
-                result: f.result.map(ty).transpose()?.unwrap_or(HirType::Void),
+                result: f.result.map(ty).transpose()?,
             }),
             is_destructor: false,
         });
@@ -456,8 +463,11 @@ fn key(prop: &ast::PropName) -> Option<&str> {
     }
 }
 
-impl Roots {
-    pub(super) fn in_hir(self, module: &mut perry_hir::ir::Module) -> Result<Vec<Witness<FuncId>>> {
+impl<'r> Roots<'r> {
+    pub(super) fn in_hir(
+        self,
+        module: &mut perry_hir::ir::Module,
+    ) -> Result<Vec<Witness<'r, FuncId>>> {
         use perry_hir::ir::{Expr, Stmt};
         module.init.retain(|stmt| {
             let Stmt::Let {
@@ -507,7 +517,7 @@ impl Roots {
                     resource: c.resource,
                     create: c.create,
                     representation: c.representation,
-                    source_ty: c.source_ty,
+                    source_name: c.source_name,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

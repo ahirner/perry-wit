@@ -1,14 +1,14 @@
 //! Source collection iterator projections.
 /// `keys()`, `values()` or `entries()`, the iterator methods of `Map`, `Set` and arrays.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum IteratorMethod {
+pub(crate) enum IteratorMethod {
     Keys,
     Values,
     Entries,
 }
 
 impl IteratorMethod {
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Keys => "keys",
             Self::Values => "values",
@@ -17,7 +17,7 @@ impl IteratorMethod {
     }
 
     /// The live view this method returns on a `Map`.
-    pub fn map_view(self) -> CollectionViewKind {
+    pub(crate) fn map_view(self) -> CollectionViewKind {
         match self {
             Self::Keys => CollectionViewKind::MapKeys,
             Self::Values => CollectionViewKind::MapValues,
@@ -26,7 +26,7 @@ impl IteratorMethod {
     }
 
     /// The live view this method returns on a `Set`, whose keys are its values.
-    pub fn set_view(self) -> CollectionViewKind {
+    pub(crate) fn set_view(self) -> CollectionViewKind {
         match self {
             Self::Keys | Self::Values => CollectionViewKind::SetValues,
             Self::Entries => CollectionViewKind::SetEntries,
@@ -36,7 +36,7 @@ impl IteratorMethod {
 
 /// A live iterator view over a `Map` or `Set` box.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CollectionViewKind {
+pub(crate) enum CollectionViewKind {
     MapKeys,
     MapValues,
     MapEntries,
@@ -45,7 +45,7 @@ pub enum CollectionViewKind {
 }
 
 impl CollectionViewKind {
-    pub const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::MapKeys,
         Self::MapValues,
         Self::MapEntries,
@@ -54,7 +54,7 @@ impl CollectionViewKind {
     ];
 
     /// The generic name inference gives the view (`MapKeys<K, V>`, `SetValues<T>`).
-    pub fn type_name(self) -> &'static str {
+    pub(crate) fn type_name(self) -> &'static str {
         match self {
             Self::MapKeys => "MapKeys",
             Self::MapValues => "MapValues",
@@ -64,7 +64,7 @@ impl CollectionViewKind {
         }
     }
 
-    pub fn from_type_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_type_name(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|view| view.type_name() == name)
     }
 }

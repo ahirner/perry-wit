@@ -16,8 +16,8 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
 | 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
-| 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, binds WIT export witnesses and exported resource classes to source declarations, solves types in a data-oriented fixed-point engine over dense indices, and emits monomorphic HIR including closure environments, boxed mutable captures, tagged function dispatchers, and promise/timer helpers. |
-| 3. Elaboration | HIR to MIR | Consumes solved frontend types, fixes eager evaluation order, and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
+| 2. Frontend | Perry HIR and solved instances | Binds WIT export witnesses and resource classes to source declarations. A fixed-point solver determines each reachable instance’s types, capture layout, dispatch targets, and resource operations. Generic declarations and inferred types share one interned type table. Specialized HIR carries source statement bodies. |
+| 3. Elaboration | Typed SSA MIR | Projects solved types into MIR and emits closure environments, captured-variable reads and writes, function dispatchers, promise reactions, timers and resource operations. Preserves JavaScript evaluation order. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
 | 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
 | 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, emits Canonical ABI marshalling, and links referenced runtime and standard-library functions. |
@@ -40,8 +40,7 @@ The compiler workspace separates these responsibilities:
 | Crate | Responsibility |
 | --- | --- |
 | `perry-contract` | Traverses resolved WIT contracts and defines source naming conventions. |
-| `perry-frontend` | Loads source modules, reads Perry HIR, binds WIT export witnesses and resource classes, runs the dense fixed-point inference and specialization engine, and generates the TypeScript view of WIT. |
-| `perry-lower` | Elaborates solved frontend HIR into eager MIR and selects MIR representations. |
+| `perry-frontend` | Loads source modules, reads Perry HIR, binds WIT export witnesses and resource classes, runs the dense fixed-point inference and specialization engine, selects eager MIR representations, and generates the TypeScript view of WIT. |
 | `perry-mir` | Defines typed executable IR and its analyses. |
 | `perry-codegen` | Lowers MIR to Wasm and implements Canonical ABI operations. |
 | `perry-wit-diagnostics` | Holds source spans and portable diagnostics. |
@@ -49,7 +48,7 @@ The compiler workspace separates these responsibilities:
 | `perry-rt-build` | Builds the runtime workspace's artifacts for the compiler build script. |
 | `perry-wit` | Loads WIT, binds exports, links runtime artifacts and encodes components. |
 
-The frontend returns a read-only monomorphic program and metadata. Type inference, record identity, closure lowering, and function specialization belong to the frontend. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the stages below it.
+The frontend returns an eager MIR module and the functions bound to world exports. Type inference, record identity, closure lowering, and function specialization belong to the frontend. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the stages below it.
 
 ## Type inference
 

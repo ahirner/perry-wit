@@ -175,10 +175,9 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         if method_name == "forEach"
             && let TyKind::Generic { base, args: gargs } = self.types.kind(raw_stripped)
-            && let HirType::Named(base_name) = base.hir(self.ctx)
             && let Some(cb) = args.first()
         {
-            let inputs = match (base_name.as_str(), self.types.ty_slice(gargs)) {
+            let inputs = match (base.get(self.ctx).as_str(), self.types.ty_slice(gargs)) {
                 ("Map" | "ReadonlyMap", [k, v]) => vec![*v, *k, raw_stripped],
                 ("Set" | "ReadonlySet", [v]) => vec![*v, *v, raw_stripped],
                 _ => return Ok(None),
@@ -271,7 +270,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 method.result_rule(),
                 MethodResultArgs {
                     arg0: init_ty,
-                    sparse_arrays: self.facts.sparse_arrays,
+                    sparse_arrays: self.metadata.source.sparse_arrays,
                     ..MethodResultArgs::receiver_only(obj_ty)
                 },
             ),
@@ -310,7 +309,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             CallbackResult::GroupBy(element) => {
                 let values = self.types.array(element);
                 self.types.generic(
-                    shapes::TypeId::from_owned(self.ctx, HirType::Named("Map".into())),
+                    shapes::TypeName::new(self.ctx, "Map".into()),
                     &[result, values],
                 )
             }
@@ -368,6 +367,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let input_tys = self.types.tuple(widest_inputs);
                 let helper = self.intern_helper(
                     HelperSpec::Dispatcher {
+                        result: cb_ret,
                         callee_ty: cb_val,
                         arms: arms_span,
                         arg_tys: input_tys,

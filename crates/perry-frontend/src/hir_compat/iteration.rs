@@ -2,35 +2,35 @@
 use super::*;
 
 #[derive(Default)]
-pub struct Iteration {
+pub(crate) struct Iteration {
     guards: HashSet<LocalId>,
     object_patterns: Vec<(LocalId, u32)>,
     released: HashSet<LocalId>,
     positions: HashMap<LocalId, usize>,
 }
 
-pub enum RecordExpr<'a> {
+pub(crate) enum RecordExpr<'a> {
     Value(&'a Expr),
     RequireObject(&'a Expr),
     Length(&'a Expr),
     Close,
 }
 
-pub enum Availability<'a> {
+pub(crate) enum Availability<'a> {
     Test(&'a Expr),
     Known(bool),
 }
 
-pub struct Element<'a> {
-    pub ty: &'a perry_hir::types::Type,
-    pub id: LocalId,
-    pub value: &'a Expr,
-    pub advance: Option<&'a Expr>,
-    pub done: LocalId,
-    pub condition: &'a Expr,
-    pub missing: &'a Expr,
-    pub available: Availability<'a>,
-    pub rest: &'a [Stmt],
+pub(crate) struct Element<'a> {
+    pub(crate) ty: &'a perry_hir::types::Type,
+    pub(crate) id: LocalId,
+    pub(crate) value: &'a Expr,
+    pub(crate) advance: Option<&'a Expr>,
+    pub(crate) done: LocalId,
+    pub(crate) condition: &'a Expr,
+    pub(crate) missing: &'a Expr,
+    pub(crate) available: Availability<'a>,
+    pub(crate) rest: &'a [Stmt],
 }
 
 const RUNTIME: &str = "__perry_runtime";
@@ -54,7 +54,7 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
 }
 
 impl Iteration {
-    pub fn register_binding(&mut self, id: LocalId, name: &str, init: Option<&Expr>) {
+    pub(crate) fn register_binding(&mut self, id: LocalId, name: &str, init: Option<&Expr>) {
         if let Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) = init.and_then(runtime) {
             self.object_patterns.push((id, *offset as u32));
         }
@@ -82,7 +82,7 @@ impl Iteration {
             .find_map(|(local, offset)| (id == local).then_some(*offset))
     }
 
-    pub fn guard<'a>(&mut self, id: LocalId, expr: &'a Expr) -> Option<Option<&'a Expr>> {
+    pub(crate) fn guard<'a>(&mut self, id: LocalId, expr: &'a Expr) -> Option<Option<&'a Expr>> {
         let ("arrayRecordNeedsIterator", args) = runtime(expr)? else {
             return None;
         };
@@ -97,7 +97,7 @@ impl Iteration {
         Some(source)
     }
 
-    pub fn is_guard(&self, expr: &Expr) -> bool {
+    pub(crate) fn is_guard(&self, expr: &Expr) -> bool {
         match expr {
             Expr::LocalGet(id) => self.guards.contains(id),
             Expr::Compare {
@@ -109,7 +109,7 @@ impl Iteration {
         }
     }
 
-    pub fn expression<'a>(&self, expr: &'a Expr) -> Option<RecordExpr<'a>> {
+    pub(crate) fn expression<'a>(&self, expr: &'a Expr) -> Option<RecordExpr<'a>> {
         if let Expr::Conditional {
             condition,
             else_expr,
@@ -129,24 +129,24 @@ impl Iteration {
         })
     }
 
-    pub fn index(&self, expr: &Expr) -> Option<usize> {
+    pub(crate) fn index(&self, expr: &Expr) -> Option<usize> {
         let ("arrayRecordIndex", [Expr::LocalGet(id)]) = runtime(expr)? else {
             return None;
         };
         self.positions.get(id).copied()
     }
 
-    pub fn advance(&mut self, id: LocalId) {
+    pub(crate) fn advance(&mut self, id: LocalId) {
         if let Some(position) = self.positions.get_mut(&id) {
             *position += 1;
         }
     }
 
-    pub fn is_release(&self, expr: &Expr) -> bool {
+    pub(crate) fn is_release(&self, expr: &Expr) -> bool {
         matches!(expr, Expr::LocalSet(id, value) if self.released.contains(id) && matches!(&**value, Expr::Undefined))
     }
 
-    pub fn for_of_loop(&self, condition: Option<&Expr>) -> Option<(LocalId, LocalId)> {
+    pub(crate) fn for_of_loop(&self, condition: Option<&Expr>) -> Option<(LocalId, LocalId)> {
         let Some(Expr::Compare {
             op: CompareOp::Lt,
             left,
@@ -173,7 +173,7 @@ impl Iteration {
         Some((*index, *items))
     }
 
-    pub fn element<'a>(&self, statements: &'a [Stmt]) -> Option<Element<'a>> {
+    pub(crate) fn element<'a>(&self, statements: &'a [Stmt]) -> Option<Element<'a>> {
         let [
             Stmt::Let {
                 id,

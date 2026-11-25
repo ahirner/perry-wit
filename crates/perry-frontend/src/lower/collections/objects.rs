@@ -1,0 +1,404 @@
+//! `Record<K, V>` dictionaries and closed records: `Object.*`, `Array.isArray`, `in`, `delete`.
+
+use super::*;
+
+impl<'s> FunctionBuilder<'s> {
+    /// A read of an optional that admits `undefined`, normalized to the type's `undefined`.
+    pub(crate) fn normalize_optional_read(
+        &mut self,
+        ctx: &mut Context,
+        val: Value,
+    ) -> Result<Value> {
+        let ty = val.get_type(ctx);
+        if optional_value(ctx, ty).is_some() && admits_undefined(ctx, ty) {
+            let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, val));
+            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
+            return self.choose(ctx, ty, is_undef, |_, _| Ok(undef), |_, _| Ok(val));
+        }
+        Ok(val)
+    }
+
+    /// Lower an object literal `{ k1: v1, ... }` when expected type is `Record<K, V>`.
+    pub(crate) fn dict_literal(
+        &mut self,
+        ctx: &mut Context,
+        fields: &[(&str, &'s Expr)],
+        v_ty: TypeHandle,
+        tuple_rec: TypedHandle<RecordType>,
+    ) -> Result<Value> {
+        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+        for &(name, val_expr) in fields {
+            let k = self.string(ctx, name);
+            let v = self.expression_with(ctx, val_expr, Some(v_ty))?;
+            let v = self.fit(ctx, v, v_ty)?;
+            self.kv_set(ctx, dict, k, v)?;
+        }
+        Ok(dict)
+    }
+
+    /// Dispatch a dynamic string `key` against each field of a closed record.
+    fn match_record_key(
+        &mut self,
+        ctx: &mut Context,
+        rec: TypedHandle<RecordType>,
+        key: Value,
+        mut acc: Value,
+        mut on_match: impl FnMut(&mut Self, &mut Context, String, TypeHandle) -> Result<Value>,
+    ) -> Result<Value> {
+        let result_ty = acc.get_type(ctx);
+        let fields = rec.deref(ctx).fields().to_diag(ctx)?.to_vec();
+        for (name, field_ty) in fields.into_iter().rev() {
+            let name_val = self.string(ctx, &name);
+            let eq = self.compare(ctx, CompareKind::Eq, key, name_val);
+            acc = self.choose(
+                ctx,
+                result_ty,
+                eq,
+                |b, ctx| on_match(b, ctx, name, field_ty),
+                |_, _| Ok(acc),
+            )?;
+        }
+        Ok(acc)
+    }
+
+    /// Dynamic string indexing `rec[key]` on a closed `RecordType` when all fields share a uniform type.
+    pub(crate) fn record_dynamic_get(
+        &mut self,
+        ctx: &mut Context,
+        rec: Value,
+        key: Value,
+        rec_handle: TypedHandle<RecordType>,
+    ) -> Result<Value> {
+        let uniform_ty = record_uniform_field_type(ctx, rec_handle).ok_or_else(|| Diagnostic::unsupported("dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>"))?;
+        let opt_ty =
+            crate::lower::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
+        let init = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
+        self.match_record_key(ctx, rec_handle, key, init, |b, ctx, name, _| {
+            let op = FieldGetOp::new(ctx, rec, name).to_diag(ctx)?;
+            let field_val = b.append_value(ctx, &op);
+            let normalized = b.normalize_optional_read(ctx, field_val)?;
+            b.fit(ctx, normalized, opt_ty)
+        })
+    }
+
+    /// Closed-record enumeration shares presence checks and value normalization.
+    pub(super) fn object_members(
+        &mut self,
+        ctx: &mut Context,
+        obj_expr: &'s Expr,
+        method: IteratorMethod,
+    ) -> Result<Value> {
+        let obj = self.expression(ctx, obj_expr)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if dict_entry_types(ctx, ty).is_some() {
+            return self.collection_iterator(ctx, obj, method);
+        }
+        if ty.deref(ctx).is::<ArrayType>() {
+            return self.collect_items(
+                ctx,
+                crate::lower::control_flow::Input::Array(
+                    obj,
+                    crate::lower::control_flow::Holes::Skip,
+                ),
+                |b, ctx, item, index, _| {
+                    let value = match method {
+                        IteratorMethod::Keys => b.display(ctx, index)?,
+                        IteratorMethod::Values => item,
+                        IteratorMethod::Entries => {
+                            let key = b.display(ctx, index)?;
+                            b.pair(ctx, key, item)?
+                        }
+                    };
+                    Ok(crate::lower::control_flow::ArrayOutput::Item(value))
+                },
+            );
+        }
+        if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
+            && matches!(
+                rec.deref(ctx).kind(),
+                RecordKind::Object | RecordKind::Tuple
+            )
+        {
+            let str_ty: TypeHandle = StringType::get(ctx).into();
+            let elem_ty = if method == IteratorMethod::Keys {
+                str_ty
+            } else {
+                record_uniform_field_type(ctx, rec).ok_or_else(|| {
+                    unsupported!(
+                        "Object.{} on a closed record requires all fields to share a uniform value type",
+                        method.name(),
+                    )
+                })?
+            };
+            let pair = if method == IteratorMethod::Entries {
+                Some(self.shapes.pair_type(ctx, str_ty, elem_ty)?)
+            } else {
+                None
+            };
+            let output_ty = pair.map_or(elem_ty, Into::into);
+            let tuple = rec.deref(ctx).kind() == RecordKind::Tuple;
+            let fields = rec.deref(ctx).fields().to_diag(ctx)?.to_vec();
+            let mut values = Vec::with_capacity(fields.len());
+            for (index, (name, field_ty)) in fields.into_iter().enumerate() {
+                let position = tuple.then(|| index.to_string());
+                let key = position.as_deref().unwrap_or(&name);
+                let value = if method == IteratorMethod::Keys {
+                    self.string(ctx, key)
+                } else {
+                    let entry = pair.map(|pair| (pair, self.string(ctx, key)));
+                    let op = FieldGetOp::new(ctx, obj, name).to_diag(ctx)?;
+                    let value = self.append_value(ctx, &op);
+                    let value = if admits_undefined(ctx, field_ty) {
+                        self.normalize_optional_read(ctx, value)?
+                    } else {
+                        value
+                    };
+                    let value = self.fit(ctx, value, elem_ty)?;
+                    if let Some((pair, key)) = entry {
+                        self.emit_value(ctx, |ctx| AllocOp::new(ctx, pair, vec![key, value]))
+                    } else {
+                        value
+                    }
+                };
+                values.push(value);
+            }
+            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, output_ty, values));
+            if !tuple {
+                self.emit(ctx, |ctx| perry_mir::RecordOrderOp::new(ctx, obj, out));
+            }
+            return Ok(out);
+        }
+        if method == IteratorMethod::Keys {
+            if let Some(json) = self.json_operand(ctx, obj)? {
+                return Ok(self.intrinsic(ctx, Intrinsic::JsonKeys, vec![json]));
+            }
+            bail_unsupported!(
+                "Object.keys requires a Record, interface/object shape, or JSON value"
+            );
+        }
+        bail_unsupported!(
+            "Object.{} requires a Record<K, V> or uniform record shape",
+            method.name()
+        )
+    }
+
+    /// `Object.fromEntries(entries)`.
+    pub(super) fn object_from_entries(
+        &mut self,
+        ctx: &mut Context,
+        entries_expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let entries_val = self.expression_with(ctx, entries_expr, expected)?;
+        let entries_val = self.defined(ctx, entries_val)?;
+        let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
+            .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    codes::TYPE_MISMATCH,
+                    "Object.fromEntries requires an iterable of [key, value] pairs",
+                )
+            })?;
+        let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
+            Some(r) => r,
+            None => self.shapes.dict_tuple_type(ctx, k_ty, v_ty)?,
+        };
+        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
+        self.populate_from_entries(ctx, entries_val, dict)
+    }
+
+    /// `Array.isArray(val)`.
+    pub(super) fn array_is_array(
+        &mut self,
+        ctx: &mut Context,
+        val_expr: &'s Expr,
+    ) -> Result<Value> {
+        let val = self.expression(ctx, val_expr)?;
+        if let Some(json) = self.json_operand(ctx, val)? {
+            return Ok(self.intrinsic(ctx, Intrinsic::JsonIsArray, vec![json]));
+        }
+        let ty = val.get_type(ctx);
+        let inner = present_type(ctx, ty);
+        let is_plain_array = inner.deref(ctx).is::<ArrayType>()
+            && map_entry_types(ctx, inner).is_none()
+            && dict_entry_types(ctx, inner).is_none()
+            && set_entry_type(ctx, inner).is_none();
+        if ty.deref(ctx).is::<OptionalType>() {
+            if !is_plain_array {
+                return Ok(self.boolean(ctx, false));
+            }
+            let nullish = self.is_nullish(ctx, val)?;
+            return Ok(self.not(ctx, nullish));
+        }
+        Ok(self.boolean(ctx, is_plain_array))
+    }
+
+    /// `key in obj`.
+    pub(crate) fn in_operator(
+        &mut self,
+        ctx: &mut Context,
+        prop_expr: &'s Expr,
+        obj_expr: &'s Expr,
+    ) -> Result<Value> {
+        let obj = self.expression(ctx, obj_expr)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if let Some((k_ty, _, _)) = dict_entry_types(ctx, ty) {
+            let k = self.expression_with(ctx, prop_expr, Some(k_ty))?;
+            return self.kv_has(ctx, obj, k, k_ty);
+        }
+        if ty.deref(ctx).is::<ArrayType>() {
+            let (_, present, length) = self.array_property(ctx, obj, prop_expr)?;
+            let Some(length) = length else {
+                return Ok(present);
+            };
+            let predicate = present.get_type(ctx);
+            return self.choose(
+                ctx,
+                predicate,
+                length,
+                |b, ctx| Ok(b.boolean(ctx, true)),
+                |_, _| Ok(present),
+            );
+        }
+        if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
+            && rec.deref(ctx).kind() == RecordKind::Object
+        {
+            let k = self.string_operand(ctx, prop_expr)?;
+            let init = self.boolean(ctx, false);
+            return self.match_record_key(ctx, rec, k, init, |b, ctx, name, field_ty| {
+                if admits_undefined(ctx, field_ty) {
+                    let op = FieldPresentOp::new(ctx, obj, name).to_diag(ctx)?;
+                    Ok(b.append_value(ctx, &op))
+                } else {
+                    Ok(b.boolean(ctx, true))
+                }
+            });
+        }
+        bail_unsupported!("'in' operator requires a Record<K, V> or closed record shape")
+    }
+
+    /// `delete obj[key]` or `delete obj.prop` on a `Record<K, V>` dictionary or optional record field.
+    pub(super) fn delete_operator(&mut self, ctx: &mut Context, inner: &'s Expr) -> Result<Value> {
+        let (object, prop_or_idx) = match inner {
+            Expr::IndexGet { object, index, .. } => (object, Ok(index)),
+            Expr::PropertyGet {
+                object, property, ..
+            } => (object, Err(property)),
+            _ => bail_unsupported!(
+                "delete operator requires a property or index access on a Record<K, V>"
+            ),
+        };
+        let obj = self.expression(ctx, object)?;
+        let obj = self.defined(ctx, obj)?;
+        let ty = obj.get_type(ctx);
+        if let Some((k_ty, _, _)) = dict_entry_types(ctx, ty) {
+            let k = match prop_or_idx {
+                Ok(index) => self.expression_with(ctx, index, Some(k_ty))?,
+                Err(property) => self.string(ctx, property),
+            };
+            self.kv_delete(ctx, obj, k, k_ty)?;
+            return Ok(self.boolean(ctx, true));
+        }
+        if ty.deref(ctx).is::<ArrayType>() {
+            const LENGTH: &str = "Cannot delete property 'length' of an array";
+            let key = match prop_or_idx {
+                Ok(key) => key,
+                Err(property) if property == "length" => {
+                    self.raise_error(ctx, ErrorKind::TypeError, LENGTH);
+                    return Ok(self.boolean(ctx, false));
+                }
+                // Other named properties are never elements.
+                Err(_) => return Ok(self.boolean(ctx, true)),
+            };
+            // Hole-aware reads are enabled per module, so the frontend must have seen this delete.
+            ensure_internal!(
+                self.shapes.specialization.sparse_arrays,
+                "array element deletion was not detected before lowering"
+            );
+            let (index, present, length) = self.array_property(ctx, obj, key)?;
+            if let Some(length) = length {
+                let error = self.new_block(ctx, "delete_length_error");
+                let indexed = self.new_block(ctx, "delete_index");
+                self.branch(ctx, length, error, indexed);
+                self.switch_to(error);
+                self.raise_error(ctx, ErrorKind::TypeError, LENGTH);
+                self.switch_to(indexed);
+            }
+            let delete = self.new_block(ctx, "delete_element");
+            let done = self.new_block(ctx, "deleted_element");
+            self.branch(ctx, present, delete, done);
+            self.switch_to(delete);
+            self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, obj, index));
+            self.jump(ctx, done);
+            self.switch_to(done);
+            return Ok(self.boolean(ctx, true));
+        }
+        if let Err(property) = prop_or_idx
+            && let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty)
+            && rec.deref(ctx).kind() == RecordKind::Object
+        {
+            let field_ty = rec.deref(ctx).field(property).map(|(_, t)| t);
+            if let Some(field_ty) = field_ty
+                && admits_undefined(ctx, field_ty)
+            {
+                let omitted = self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, field_ty));
+                self.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, obj, property.clone(), omitted)
+                });
+                return Ok(self.boolean(ctx, true));
+            }
+        }
+        if prop_or_idx.is_ok() {
+            bail_unsupported!("delete operator is only supported on Record<K, V> dictionary types")
+        }
+        bail_unsupported!(
+            "delete operator is only supported on Record<K, V> dictionary types or optional record fields"
+        )
+    }
+
+    /// `array[key]` as `(index, present, length)`: `present` holds when `key` is a canonical
+    /// index naming an element, and `length` when a string `key` is `"length"`.
+    fn array_property(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        key: &'s Expr,
+    ) -> Result<(Value, Value, Option<Value>)> {
+        let key = match key {
+            Expr::Null => self.string(ctx, "null"),
+            Expr::Undefined => self.string(ctx, "undefined"),
+            key => self.expression(ctx, key)?,
+        };
+        let (index, canonical) = if kind(ctx, key)? == Kind::Number {
+            (self.arithmetic(ctx, key), None)
+        } else {
+            let name = self.display(ctx, key)?;
+            let index = self.intrinsic(ctx, Intrinsic::StringToNumber, vec![name]);
+            let canonical = self.display(ctx, index)?;
+            (
+                index,
+                Some(self.compare(ctx, CompareKind::Eq, name, canonical)),
+            )
+        };
+        let mut present =
+            self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
+        if let Some(canonical) = canonical {
+            let predicate = present.get_type(ctx);
+            present = self.choose(
+                ctx,
+                predicate,
+                canonical,
+                |_, _| Ok(present),
+                |b, ctx| Ok(b.boolean(ctx, false)),
+            )?;
+        }
+        let string = key.get_type(ctx).deref(ctx).is::<StringType>();
+        let length = string.then(|| {
+            let length = self.string(ctx, "length");
+            self.compare(ctx, CompareKind::Eq, key, length)
+        });
+        Ok((index, present, length))
+    }
+}

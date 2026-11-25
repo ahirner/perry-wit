@@ -1,4 +1,5 @@
 use super::execute;
+use anyhow::Context as _;
 use anyhow::Result;
 
 #[tokio::test(flavor = "current_thread")]
@@ -220,6 +221,11 @@ class FnHolder {
 }
 const h1 = new FnHolder(f0);
 const h2 = new FnHolder(f1);
+let selections = 0;
+function select(flag) { selections++; return pick(flag); }
+const empty: number[] = [];
+empty.map(select(true));
+const mapped = [3, 4].map(select(false));
 console.log(
   events.join(","),
   f0(3),
@@ -229,9 +235,10 @@ console.log(
   applyAll(f1, [3]).join(","),
   h1.run(5),
   h2.run(5),
+  selections, mapped.join(","),
 );
 "#,
-            "a,b,c 4 6 8 2,3 6 6 10\n",
+            "a,b,c 4 6 8 2,3 6 6 10 2 6,8\n",
         ),
         (
             "escaping_closures_environments_boxed_captures_and_equality",
@@ -623,7 +630,9 @@ await main();
         ),
     ];
     for &(name, source, expected) in cases {
-        let run = execute(source).await?;
+        let run = execute(source)
+            .await
+            .with_context(|| format!("compiling case {name}"))?;
         assert!(run.ok, "case {name} failed: {}", run.stderr);
         assert_eq!(run.stdout, expected, "case {name} output mismatch");
     }

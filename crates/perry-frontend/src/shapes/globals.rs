@@ -16,7 +16,7 @@ pub(crate) fn class_functions(class: &Class) -> impl Iterator<Item = &Function> 
 }
 
 /// Only bindings used outside module initialization need persistent storage.
-pub fn captured(module: &Module) -> HashSet<LocalId> {
+pub(crate) fn captured(module: &Module) -> HashSet<LocalId> {
     let methods = module.classes.iter().flat_map(class_functions);
     let mut references = Vec::new();
     let mut visited = HashSet::new();

@@ -108,9 +108,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
 
-        if let TyKind::Leaf(id) = self.types.kind(stripped)
-            && let HirType::Named(base) = id.hir(self.ctx)
-            && let Some(owner) = self.decls.resource(base)
+        if let TyKind::Named(id) = self.types.kind(stripped)
+            && let Some(owner) = self.decls.resource(id.get(self.ctx))
         {
             self.eval_args(s, args)?;
             if matches!(method, hir_compat::Method::UsingCheck)
@@ -275,7 +274,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     arg0: arg_tys.first().copied(),
                     arg0_expr: args.first(),
                     callback_result: None,
-                    sparse_arrays: self.facts.sparse_arrays,
+                    sparse_arrays: self.metadata.source.sparse_arrays,
                 },
             ));
         }
@@ -304,7 +303,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.types.kind(stripped),
             TyKind::Array(_) | TyKind::Cell { .. }
         ) || matches!(self.types.kind(stripped), TyKind::Generic { base, .. }
-            if matches!(base.hir(self.ctx), HirType::Named(n) if matches!(n.as_str(), "Map" | "Set" | "ReadonlyMap" | "ReadonlySet")));
+            if matches!(base.get(self.ctx).as_str(), "Map" | "Set" | "ReadonlyMap" | "ReadonlySet"));
         let skip_host_cb = is_collection || (self.types.is_open(stripped) && is_known_js_cb_method);
         if hir_compat::has_source_offset(byte_offset)
             && !skip_host_cb

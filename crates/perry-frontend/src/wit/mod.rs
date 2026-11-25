@@ -1,141 +1,112 @@
 //! Source types and ownership helpers for a resolved component contract.
 mod types;
-pub(crate) use types::ty as source_type_of;
+pub(crate) use types::supported;
 
-use crate::hir::{Foreign, FunctionType, Type as HirType};
 use perry_contract::{
-    names::{NamedType, canonical_type, to_camel_case, to_pascal_case},
+    names::{canonical_type, to_camel_case, to_pascal_case},
     types::Input,
 };
-use perry_wit_diagnostics::{Diagnostic, Result};
+use pliron::builtin::types::Signedness;
 use std::collections::HashMap;
-use wit_parser::{Function, FunctionKind, Handle, Resolve, Type, TypeDefKind, TypeId, WorldId};
+use wit_parser::{FunctionKind, Handle, Resolve, Type, TypeDefKind, TypeId, WorldId};
+
+#[derive(Clone, Copy)]
+pub(crate) struct WitValue<'r> {
+    pub(crate) resolve: &'r Resolve,
+    pub(crate) ty: Type,
+}
+
+impl<'r> WitValue<'r> {
+    pub(crate) fn result(self) -> Option<&'r wit_parser::Result_> {
+        perry_contract::result_type(self.resolve, self.ty)
+    }
+
+    pub(crate) fn integer(self) -> Option<(u32, Signedness)> {
+        let ty = match self.ty {
+            Type::Id(id) => match self.resolve.types[canonical_type(self.resolve, id)].kind {
+                TypeDefKind::Type(ty) => ty,
+                _ => return None,
+            },
+            ty => ty,
+        };
+        Some(match ty {
+            Type::U8 => (8, Signedness::Unsigned),
+            Type::S8 => (8, Signedness::Signed),
+            Type::U16 => (16, Signedness::Unsigned),
+            Type::S16 => (16, Signedness::Signed),
+            Type::U32 => (32, Signedness::Unsigned),
+            Type::S32 => (32, Signedness::Signed),
+            Type::U64 => (64, Signedness::Unsigned),
+            Type::S64 => (64, Signedness::Signed),
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn resource(self) -> Option<u32> {
+        let Type::Id(id) = self.ty else { return None };
+        let id = canonical_type(self.resolve, id);
+        let owner = match self.resolve.types[id].kind {
+            TypeDefKind::Resource => id,
+            TypeDefKind::Handle(Handle::Own(owner) | Handle::Borrow(owner)) => {
+                canonical_type(self.resolve, owner)
+            }
+            _ => return None,
+        };
+        Some(owner.index() as u32)
+    }
+}
+
+pub(crate) struct ImportSignature<'r> {
+    pub(crate) params: Vec<WitValue<'r>>,
+    pub(crate) result: Option<WitValue<'r>>,
+    pub(crate) is_async: bool,
+}
+
+pub(crate) enum Foreign<'r> {
+    Type(WitValue<'r>),
+    Input(WitValue<'r>),
+    Function(ImportSignature<'r>),
+}
 
 #[derive(Default)]
-pub struct WorldTypes {
-    foreign: HashMap<String, Foreign>,
+pub struct WorldTypes<'r> {
+    foreign: HashMap<String, Foreign<'r>>,
 }
 
-pub enum ResourceOperation {
-    Drop,
-    New,
-    Representation,
-}
-
-pub struct ResourceHelper {
-    pub binding: String,
-    pub name: String,
-    pub operation: ResourceOperation,
-}
-
-impl WorldTypes {
-    pub fn new(resolve: &Resolve, world: Option<WorldId>) -> Self {
+impl<'r> WorldTypes<'r> {
+    pub fn new(resolve: &'r Resolve, world: Option<WorldId>) -> Self {
         Self {
             foreign: types::foreign(resolve, world),
         }
     }
 
-    pub fn foreign(&self) -> &HashMap<String, Foreign> {
+    pub(crate) fn foreign(&self) -> &HashMap<String, Foreign<'r>> {
         &self.foreign
     }
 
     pub fn import_function(
         &mut self,
-        resolve: &Resolve,
-        module: &str,
-        function: &Function,
-    ) -> Option<String> {
-        let params = function
-            .params
-            .iter()
-            .map(|parameter| {
-                Some((
-                    parameter.name.clone(),
-                    HirType::Generic {
-                        base: "WitInput".into(),
-                        type_args: vec![types::ty(resolve, Input::Reference(parameter.ty))?],
-                    },
-                    false,
-                ))
-            })
-            .collect::<Option<_>>()?;
-        let result = match function.result {
-            Some(ty) => types::ty(resolve, Input::Reference(ty))?,
-            None => HirType::Void,
-        };
-        let binding = format!("{module}#{}", to_camel_case(&function.name));
-        self.foreign.insert(
-            binding.clone(),
-            Foreign::Function(FunctionType {
-                params,
-                return_type: Box::new(result),
-                is_async: function.kind.is_async(),
-                is_generator: false,
-            }),
-        );
-        Some(binding)
-    }
-
-    pub fn resource_helpers(
-        &mut self,
-        resolve: &Resolve,
-        id: TypeId,
+        resolve: &'r Resolve,
         module: &str,
         name: &str,
-        exported: bool,
-    ) -> Result<Vec<ResourceHelper>> {
-        let resource = source_type(resolve, id)
-            .ok_or_else(|| Diagnostic::internal("resource has no WIT declaration name"))?;
-        let suffix = to_pascal_case(name);
-        let mut helpers = vec![(
-            format!("drop{suffix}"),
-            ResourceOperation::Drop,
-            resource.clone(),
-            HirType::Void,
-        )];
-        if exported {
-            helpers.extend([
-                (
-                    format!("new{suffix}"),
-                    ResourceOperation::New,
-                    HirType::Number,
-                    resource.clone(),
-                ),
-                (
-                    format!("{}Rep", to_camel_case(name)),
-                    ResourceOperation::Representation,
-                    resource,
-                    HirType::Number,
-                ),
-            ]);
-        }
-        Ok(helpers
-            .into_iter()
-            .map(|(name, operation, input, output)| {
-                let binding = format!("{module}#{name}");
-                self.foreign.insert(
-                    binding.clone(),
-                    Foreign::Function(FunctionType {
-                        params: vec![("value".into(), input, false)],
-                        return_type: Box::new(output),
-                        is_async: false,
-                        is_generator: false,
-                    }),
-                );
-                ResourceHelper {
-                    binding,
-                    name,
-                    operation,
-                }
-            })
-            .collect())
+        params: impl IntoIterator<Item = Type>,
+        result: Option<Type>,
+        is_async: bool,
+    ) -> String {
+        let binding = format!("{module}#{name}");
+        self.foreign.insert(
+            binding.clone(),
+            Foreign::Function(ImportSignature {
+                params: params
+                    .into_iter()
+                    .map(|ty| WitValue { resolve, ty })
+                    .collect(),
+                result: result.map(|ty| WitValue { resolve, ty }),
+                is_async,
+            }),
+        );
+        binding
     }
-}
-
-pub(crate) fn source_type(resolve: &Resolve, id: TypeId) -> Option<HirType> {
-    Some(HirType::Named(
-        NamedType::get(resolve, canonical_type(resolve, id))?.qualified(),
-    ))
 }
 
 #[derive(PartialEq, Eq)]
@@ -146,50 +117,15 @@ pub(crate) enum MemberKind {
     Dispose,
 }
 
-pub(crate) enum ResourceError {
-    Value,
-    Tagged {
-        ty: HirType,
-        owned: Vec<(String, u32)>,
-    },
-}
-pub(crate) struct ResultInput {
-    pub(crate) index: usize,
-    pub(crate) tagged: HirType,
-    pub(crate) has_ok: bool,
-    pub(crate) has_err: bool,
-}
-
-pub(crate) struct ResourceMember {
+pub(crate) struct ResourceMember<'r> {
     pub(crate) owner: u32,
     pub(crate) kind: MemberKind,
     pub(crate) name: String,
     pub(crate) binding: String,
-    pub(crate) params: Vec<HirType>,
-    pub(crate) result: HirType,
-    pub(crate) result_inputs: Vec<ResultInput>,
-    pub(crate) raw_result: Option<HirType>,
-    pub(crate) error: Option<ResourceError>,
+    pub(crate) result: Option<WitValue<'r>>,
 }
 
-fn result_input(resolve: &Resolve, index: usize, ty: Type) -> Option<ResultInput> {
-    let result = perry_contract::result_type(resolve, ty)?;
-    let mut cases = Vec::new();
-    for (tag, payload) in [("ok", result.ok), ("err", result.err)] {
-        let tag = ("tag".into(), HirType::StringLiteral(tag.into()));
-        let value =
-            payload.map(|ty| Some(("val".into(), types::ty(resolve, Input::Reference(ty))?)));
-        cases.push(types::object(std::iter::once(Some(tag)).chain(value))?);
-    }
-    Some(ResultInput {
-        index,
-        tagged: HirType::Union(cases),
-        has_ok: result.ok.is_some(),
-        has_err: result.err.is_some(),
-    })
-}
-
-fn owned_resource(resolve: &Resolve, ty: Type) -> Option<TypeId> {
+pub(crate) fn owned_resource(resolve: &Resolve, ty: Type) -> Option<TypeId> {
     let Type::Id(id) = ty else { return None };
     let id = canonical_type(resolve, id);
     match resolve.types[id].kind {
@@ -199,31 +135,10 @@ fn owned_resource(resolve: &Resolve, ty: Type) -> Option<TypeId> {
     }
 }
 
-fn resource_error(resolve: &Resolve, ty: Type) -> Option<ResourceError> {
-    let Type::Id(id) = ty else {
-        return Some(ResourceError::Value);
-    };
-    let TypeDefKind::Variant(variant) = &resolve.types[canonical_type(resolve, id)].kind else {
-        return Some(ResourceError::Value);
-    };
-    let owned = variant
-        .cases
-        .iter()
-        .filter_map(|case| {
-            let owner = owned_resource(resolve, case.ty?)?;
-            Some((case.name.clone(), owner.index() as u32))
-        })
-        .collect();
-    Some(ResourceError::Tagged {
-        ty: types::ty(resolve, Input::Reference(ty))?,
-        owned,
-    })
-}
-
-fn imported_resource_member(
-    resolve: &Resolve,
+fn imported_resource_member<'r>(
+    resolve: &'r Resolve,
     entry: perry_contract::WorldFunction<'_>,
-) -> Option<ResourceMember> {
+) -> Option<ResourceMember<'r>> {
     let function = entry.function;
     let owner = function.kind.resource()?;
     let kind = match function.kind {
@@ -241,15 +156,17 @@ fn imported_resource_member(
     }) {
         return None;
     }
-    let ty = |t| types::ty(resolve, Input::Reference(t));
-    let raw = function.result.and_then(ty);
-    let sum = function
+    if !function
+        .params
+        .iter()
+        .all(|p| types::supported(resolve, Input::Reference(p.ty)))
+    {
+        return None;
+    }
+    let result = function
         .result
-        .and_then(|t| perry_contract::result_type(resolve, t));
-    let (result, raw_result) = match sum {
-        Some(sum) => (sum.ok.and_then(ty), raw),
-        None => (raw, None),
-    };
+        .and_then(|ty| perry_contract::result_type(resolve, ty).map_or(Some(ty), |sum| sum.ok))
+        .map(|ty| WitValue { resolve, ty });
     Some(ResourceMember {
         owner: canonical_type(resolve, owner).index() as u32,
         kind,
@@ -259,24 +176,11 @@ fn imported_resource_member(
             resolve.name_world_key(entry.key),
             to_camel_case(&function.name)
         ),
-        params: function
-            .params
-            .iter()
-            .map(|param| ty(param.ty))
-            .collect::<Option<_>>()?,
-        result_inputs: function
-            .params
-            .iter()
-            .enumerate()
-            .filter_map(|(index, param)| result_input(resolve, index, param.ty))
-            .collect(),
-        result: result.unwrap_or(HirType::Void),
-        raw_result,
-        error: sum.and_then(|sum| resource_error(resolve, sum.err?)),
+        result,
     })
 }
 
-pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<ResourceMember> {
+pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<ResourceMember<'_>> {
     let mut members: Vec<_> =
         perry_contract::world_functions(resolve, resolve.worlds[world].imports.iter())
             .filter_map(|entry| imported_resource_member(resolve, entry))
@@ -286,9 +190,7 @@ pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<Resourc
             continue;
         };
         for (name, id) in &resolve.interfaces[*id].types {
-            if matches!(resolve.types[*id].kind, wit_parser::TypeDefKind::Resource)
-                && let Some(ty) = source_type(resolve, *id)
-            {
+            if matches!(resolve.types[*id].kind, wit_parser::TypeDefKind::Resource) {
                 members.push(ResourceMember {
                     owner: id.index() as u32,
                     kind: MemberKind::Dispose,
@@ -298,11 +200,7 @@ pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<Resourc
                         resolve.name_world_key(key),
                         to_pascal_case(name)
                     ),
-                    params: vec![ty],
-                    result: HirType::Void,
-                    result_inputs: vec![],
-                    raw_result: None,
-                    error: None,
+                    result: None,
                 });
             }
         }

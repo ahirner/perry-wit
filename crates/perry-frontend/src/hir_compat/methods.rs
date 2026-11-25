@@ -49,9 +49,9 @@ fn slice_call(obj: Box<ast::Expr>, start: usize) -> Box<ast::Expr> {
 }
 
 /// Keep arguments together before HIR expands a variadic push into separate mutations.
-pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut names::FreshNames) {
+pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut crate::source::FreshNames) {
     struct Arguments<'n> {
-        names: &'n mut names::FreshNames,
+        names: &'n mut crate::source::FreshNames,
     }
     impl VisitMut for Arguments<'_> {
         fn visit_mut_var_decl(&mut self, var_decl: &mut ast::VarDecl) {
@@ -148,14 +148,14 @@ pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut names::Fr
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Method<'a> {
+pub(crate) enum Method<'a> {
     UsingCheck,
     Iteration,
     Push,
     Ordinary(&'a str),
 }
 
-pub fn method(name: &str) -> Method<'_> {
+pub(crate) fn method(name: &str) -> Method<'_> {
     if let Some(rest) = name.strip_prefix(METHOD_PREFIX) {
         return Method::Ordinary(rest);
     }
@@ -168,7 +168,7 @@ pub fn method(name: &str) -> Method<'_> {
 }
 
 impl<'a> Method<'a> {
-    pub fn name(self) -> &'a str {
+    pub(crate) fn name(self) -> &'a str {
         match self {
             Self::UsingCheck => "using",
             Self::Iteration => "[iteration]",

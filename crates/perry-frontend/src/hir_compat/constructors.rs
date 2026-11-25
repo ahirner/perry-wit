@@ -28,7 +28,7 @@ enum ConstructorTypes {
     Set(Option<HirType>),
 }
 
-pub enum Constructor<'e> {
+pub(crate) enum Constructor<'e> {
     Map {
         types: Option<(&'e HirType, &'e HirType)>,
         init: Option<&'e Expr>,
@@ -39,7 +39,7 @@ pub enum Constructor<'e> {
     },
 }
 
-pub fn constructor(expr: &Expr) -> Option<Constructor<'_>> {
+pub(crate) fn constructor(expr: &Expr) -> Option<Constructor<'_>> {
     let Expr::New {
         class_name,
         type_args,

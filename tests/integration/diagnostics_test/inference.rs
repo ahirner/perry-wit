@@ -308,7 +308,7 @@ fn generic_property_reads_require_a_live_argument_guard() -> anyhow::Result<()> 
 }
 
 /// MIR narrowing diagnostics reach the API with the span of the unproven read; the accepted
-/// and rejected control flow is covered by `perry-lower`'s tests.
+/// and rejected control flow is covered by the frontend's tests.
 
 #[test]
 fn deferred_local_reports_incompatible_native_writes_at_its_declaration() -> anyhow::Result<()> {

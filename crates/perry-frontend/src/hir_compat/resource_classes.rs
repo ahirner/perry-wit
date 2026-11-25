@@ -131,7 +131,7 @@ pub(super) fn bind(
     hir: &mut Module,
     classes: &[ResourceClass<usize>],
     calls: &[Option<ClassCall>],
-    witnesses: &mut [Witness<FuncId>],
+    witnesses: &mut [Witness<'_, FuncId>],
     mut max_local: LocalId,
     mut max_function: FuncId,
 ) -> Result<()> {
@@ -144,26 +144,24 @@ pub(super) fn bind(
             .ok_or_else(|| Diagnostic::internal("lost resource class"))?;
         let table = fresh(&mut max_local)?;
         let next = fresh(&mut max_local)?;
-        let ctor = calls.iter().zip(witnesses.iter()).find_map(|(call, w)| {
-            call.as_ref()
-                .filter(|call| matches!(call.action, ResourceAction::New) && call.owner == owner)?;
-            w.signature.as_ref()
-        });
-        let class_type = match ctor {
-            Some(signature)
-                if !signature.params.is_empty()
-                    && c.constructor
-                        .as_ref()
-                        .is_some_and(|f| f.params.iter().any(|p| p.ty == HirType::Any)) =>
-            {
-                HirType::Generic {
-                    base: c.name.clone(),
-                    type_args: signature.params.clone(),
-                }
-            }
-            _ => HirType::Named(c.name.clone()),
-        };
-        let types = vec![HirType::Number, class_type];
+        let ctor = calls
+            .iter()
+            .zip(witnesses.iter_mut())
+            .find_map(|(call, w)| {
+                call.as_ref().filter(|call| {
+                    matches!(call.action, ResourceAction::New) && call.owner == owner
+                })?;
+                w.signature.as_mut()
+            });
+        if let Some(signature) = ctor
+            && !signature.params.is_empty()
+            && c.constructor
+                .as_ref()
+                .is_some_and(|f| f.params.iter().any(|p| p.ty == HirType::Any))
+        {
+            signature.registry = Some((table, c.name.clone()));
+        }
+        let types = vec![HirType::Number, HirType::Named(c.name.clone())];
         let map = super::typed_collection(true, types, Vec::new());
         init.push(local(table, "instances", HirType::Any, map, false));
         init.push(local(
@@ -183,16 +181,20 @@ pub(super) fn bind(
     hir.init = init;
     for (w, call) in witnesses.iter_mut().zip(calls) {
         let Some(sig) = &w.signature else { continue };
-        let owner_of = |ty: &HirType| registries.iter().find(|r| &r.resource.source_ty == ty);
+        let owner_of = |value: crate::wit::WitValue| {
+            registries
+                .iter()
+                .find(|r| value.resource() == Some(r.resource.resource.index() as u32))
+        };
         if call.is_none()
-            && !sig.params.iter().any(|p| owner_of(p).is_some())
-            && owner_of(&sig.result).is_none()
+            && !sig.params.iter().any(|&p| owner_of(p).is_some())
+            && sig.result.and_then(owner_of).is_none()
         {
             continue;
         }
         let mut params = Vec::with_capacity(sig.params.len());
         let mut args = Vec::with_capacity(sig.params.len());
-        for (i, p) in sig.params.iter().enumerate() {
+        for (i, &p) in sig.params.iter().enumerate() {
             let id = fresh(&mut max_local)?;
             let mut value = Expr::LocalGet(id);
             if let Some(table) = owner_of(p) {
@@ -205,7 +207,7 @@ pub(super) fn bind(
                 ));
             }
             args.push(value);
-            params.push(synth_param(id, format!("arg{i}"), p.clone()));
+            params.push(synth_param(id, format!("arg{i}"), HirType::Any));
         }
         let mut body = Vec::new();
         let operation = if let Some(call) = call {
@@ -286,17 +288,17 @@ pub(super) fn bind(
                 0,
             )
         };
-        if let Some(table) = owner_of(&sig.result) {
+        if let Some(table) = sig.result.and_then(owner_of) {
             let r = table.resource;
             table.store(&mut body, fresh(&mut max_local)?, operation);
             body.push(Stmt::Return(Some(external(
                 &r.create,
                 vec![Expr::LocalGet(table.next)],
-                r.source_ty.clone(),
+                HirType::Named(r.source_name.clone()),
                 0,
                 0,
             ))));
-        } else if sig.result == HirType::Void {
+        } else if sig.result.is_none() {
             body.push(Stmt::Expr(operation));
         } else {
             body.push(Stmt::Return(Some(operation)));
@@ -306,7 +308,11 @@ pub(super) fn bind(
             fid,
             format!("resource_adapter_{fid}"),
             params,
-            sig.result.clone(),
+            if sig.result.is_some() {
+                HirType::Any
+            } else {
+                HirType::Void
+            },
             body,
             false,
         ));

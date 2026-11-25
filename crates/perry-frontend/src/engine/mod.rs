@@ -1,5 +1,4 @@
 //! Data-oriented monomorphization and type-inference engine over dense indices.
-pub(crate) mod ast_scan;
 pub(crate) mod bitset;
 pub(crate) mod boundary;
 pub(crate) mod builtins;
@@ -7,36 +6,231 @@ pub(crate) mod emit;
 pub(crate) mod solve;
 pub(crate) mod types;
 
-use crate::{hir, hir_compat};
-use boundary::{ModuleIndex, SourceFacts};
+use crate::{hir_compat, wit};
+use boundary::ModuleIndex;
 use perry_hir::ir::Module as HirModule;
 use perry_wit_diagnostics::Result;
 use pliron::context::Context;
 use std::collections::HashMap;
 use types::TypeTable;
 
-/// Execute the new inference engine on a lowered HIR module.
-///
-/// Phase split: borrows `hir` read-only across boundary indexing, worklist solving, and
-/// monomorphic emission building, then applies the emitted outputs to `hir` and `metadata`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CellInit {
+    AtDeclaration,
+    Deferred,
+    Hoisted,
+}
+
+impl CellInit {
+    pub(crate) fn admits_undefined(self) -> bool {
+        self != Self::AtDeclaration
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Storage {
+    Value(types::Ty),
+    Boxed { ty: types::Ty, init: CellInit },
+    Promise(types::Ty),
+    AbortController,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ExpressionOp {
+    Function {
+        identity: types::FuncIdentity,
+        target: types::Ty,
+    },
+    Matches {
+        identity: types::FuncIdentity,
+        source: types::Ty,
+        equal: bool,
+    },
+    Expected(types::Ty),
+    Map(types::Ty),
+    Set(types::Ty),
+    Promise {
+        settled: types::Ty,
+        executor: NativeCallback,
+        handles: [Option<types::FuncIdentity>; 2],
+    },
+    StartTimer(perry_hir::types::FuncId),
+    ClearTimer,
+}
+
+pub(crate) struct RecordLayout {
+    pub(crate) function: Option<types::FuncIdentity>,
+    pub(crate) name: String,
+    pub(crate) fields: Vec<(String, Storage)>,
+}
+
+pub(crate) struct CallbackBinding {
+    pub(crate) call: NativeCallback,
+    pub(crate) params: Vec<Option<types::Ty>>,
+}
+
+pub(crate) enum NativeOperation {
+    Callback(CallbackBinding),
+    Callable(solve::CallableOp),
+    Allocate(RecordLayout),
+    Expression(ExpressionOp),
+    Resource(usize),
+}
+
+pub(crate) struct InstanceSignature {
+    pub(crate) params: Vec<Option<types::Ty>>,
+    pub(crate) result: Option<types::Ty>,
+}
+
+type InstanceSignatures = HashMap<perry_hir::types::FuncId, InstanceSignature>;
+type NativeOperations = HashMap<perry_hir::types::FuncId, NativeOperation>;
+
+pub(crate) struct DispatchArm {
+    pub(crate) identity: types::FuncIdentity,
+    pub(crate) target: perry_hir::types::FuncId,
+    pub(crate) receiver: bool,
+    pub(crate) arguments: usize,
+}
+
+pub(crate) enum NativeParam {
+    Value(types::Ty),
+    Environment(types::FuncIdentity),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TimerKind {
+    Immediate,
+    Timeout,
+    Interval,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum CallbackOperand {
+    None,
+    Environment,
+    Callee,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum NativeCallback {
+    ThrowTypeError,
+    Call {
+        target: perry_hir::types::FuncId,
+        operand: CallbackOperand,
+        receiver: bool,
+    },
+}
+
+impl NativeCallback {
+    pub(crate) fn takes_value(self) -> bool {
+        matches!(
+            self,
+            Self::Call {
+                operand: CallbackOperand::Callee | CallbackOperand::Environment,
+                ..
+            }
+        )
+    }
+}
+
+pub(crate) enum Reaction {
+    Chain {
+        fulfilled: Option<NativeCallback>,
+        rejected: Option<NativeCallback>,
+        rejects_only: bool,
+    },
+    Finally(NativeCallback),
+}
+
+pub(crate) enum NativeBody {
+    Dispatch {
+        receiver: bool,
+        arms: Vec<DispatchArm>,
+    },
+    Settle(perry_mir::SettleKind),
+    Reaction {
+        reaction: Reaction,
+        returns_void: bool,
+    },
+    Timer {
+        kind: TimerKind,
+        callback: NativeCallback,
+    },
+}
+
+pub(crate) struct NativeFunction {
+    pub(crate) name: String,
+    pub(crate) params: Vec<NativeParam>,
+    pub(crate) result: types::Ty,
+    pub(crate) is_async: bool,
+    pub(crate) body: NativeBody,
+}
+
+#[derive(Default)]
+pub(crate) struct ClassFields {
+    pub(crate) instance: HashMap<String, types::Ty>,
+    pub(crate) statics: HashMap<String, types::Ty>,
+}
+
+pub(crate) struct Capture {
+    pub(crate) local: perry_hir::types::LocalId,
+    pub(crate) field: String,
+    pub(crate) storage: Storage,
+}
+
+#[derive(Default)]
+pub(crate) struct InstancePlans {
+    pub(crate) per_iteration: std::collections::HashSet<perry_hir::types::LocalId>,
+    pub(crate) boxed_parameters:
+        HashMap<(perry_hir::types::FuncId, perry_hir::types::LocalId), types::Ty>,
+    pub(crate) captures: HashMap<perry_hir::types::LocalId, Vec<Capture>>,
+    pub(crate) operations: NativeOperations,
+    pub(crate) class_fields: HashMap<String, ClassFields>,
+    pub(crate) locals:
+        HashMap<(Option<perry_hir::types::FuncId>, perry_hir::types::LocalId), Storage>,
+    pub(crate) signatures: InstanceSignatures,
+    pub(crate) closures: InstanceSignatures,
+    pub(crate) functions: std::collections::BTreeMap<perry_hir::types::FuncId, NativeFunction>,
+}
+
+pub(crate) struct Specialization {
+    pub(crate) sparse_arrays: bool,
+    pub(crate) types: std::cell::RefCell<TypeTable>,
+    pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
+    pub(crate) dict_reads: bitset::BitSet,
+    pub(crate) capture_free: bitset::BitSet,
+    pub(crate) class_names: types::IdxVec<types::ClassInstId, String>,
+    pub(crate) escaping_envs: bitset::BitSet,
+    pub(crate) instances: InstancePlans,
+}
+
 pub(crate) fn run_engine(
     ctx: &mut Context,
     hir: &mut HirModule,
     metadata: &mut hir_compat::Metadata<'_>,
-    facts: &SourceFacts,
-    foreign: &HashMap<String, hir::Foreign>,
-) -> Result<()> {
+    foreign: &HashMap<String, wit::Foreign>,
+) -> Result<Specialization> {
     let mut types = TypeTable::new();
-    let emitted = {
-        let index = ModuleIndex::build(ctx, hir, facts, &metadata.locations, &mut types);
-        let solved = solve::solve(ctx, hir, &index, metadata, facts, foreign, &mut types)?;
-        for (witness, instance) in metadata.witnesses.iter_mut().zip(&solved.witness_instances) {
-            witness.target = instance.map(|id| solved.instances[id].emitted_func_id);
-        }
-        emit::build(ctx, hir, &index, metadata, &types, &solved)?
-    };
-    emitted.apply(hir, metadata);
-    Ok(())
+    let index = ModuleIndex::build(ctx, hir, &metadata.source, &metadata.locations, &mut types);
+    let solved = solve::solve(ctx, hir, &index, metadata, foreign, &mut types)?;
+    for (witness, instance) in metadata.witnesses.iter_mut().zip(&solved.witness_instances) {
+        witness.target = instance.map(|id| solved.instances[id].emitted_func_id);
+    }
+    let emitted = emit::build(ctx, hir, &index, metadata, &types, &solved)?;
+    let capture_free = index.capture_free_templates;
+    let instances = emitted.apply(hir, metadata);
+    Ok(Specialization {
+        sparse_arrays: metadata.source.sparse_arrays || solved.deletes_array_elements,
+        types: types.into(),
+        escaping_envs: solved.escaping_env_templates,
+        locations: solved.locations,
+        dict_reads: solved.dict_reads,
+        class_names: solved
+            .class_insts
+            .map(|instance| instance.emitted_name.clone()),
+        capture_free,
+        instances,
+    })
 }
 
 #[cfg(test)]
@@ -46,7 +240,7 @@ mod tests {
     use crate::Absence;
     use perry_hir::types::Type as HirType;
     use pliron::context::Context;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     #[test]
     fn bitset_operations_and_iteration() {
@@ -120,8 +314,6 @@ mod tests {
         let hir_u = HirType::Union(vec![HirType::String, HirType::Number, HirType::Void]);
         let interned = table.intern_hir(&ctx, &hir_u, true);
         assert_eq!(interned, u3);
-        let roundtrip = table.materialize_hir(&ctx, interned);
-        assert!(matches!(roundtrip, HirType::Union(ref members) if members.len() == 3));
 
         // Verify name interning roundtrips cleanly across many distinct identifiers.
         for i in 0..200u32 {
@@ -139,7 +331,7 @@ mod tests {
     #[test]
     fn engine_resolves_core_generics_storage_and_classes() {
         let empty_sources = BTreeMap::new();
-        let empty_foreign = HashMap::new();
+        let empty_foreign = Default::default();
         let samples = [
             (
                 "add.ts",
@@ -164,10 +356,10 @@ mod tests {
         ];
         for (name, src) in samples {
             let mut ctx = Context::new();
-            let program = crate::load_sources(&mut ctx, src, name, &empty_sources, &empty_foreign)
+            let module = crate::lower_sources(&mut ctx, src, name, &empty_sources, &empty_foreign)
                 .unwrap_or_else(|e| panic!("{name} failed: {e}"));
             assert!(
-                !program.module().functions.is_empty() || !program.module().classes.is_empty(),
+                !perry_mir::functions(pliron::op::Op::get_operation(&module), &ctx).is_empty(),
                 "{name}: expected emitted functions or classes"
             );
         }

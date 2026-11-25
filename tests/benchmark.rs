@@ -614,7 +614,7 @@ fn raw_module(workload: String, source: &str) -> Result<(Vec<u8>, Row)> {
     let wasm = compile_core(source, "bench.ts")?;
     // Inspect the same raw pipeline separately.
     let ctx = &mut Context::new();
-    let mir = perry_lower::lower_sources(
+    let mir = perry_frontend::lower_sources(
         ctx,
         source,
         "bench.ts",

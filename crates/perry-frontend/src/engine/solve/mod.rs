@@ -10,7 +10,7 @@ mod members;
 mod methods;
 mod promises;
 use super::bitset::BitSet;
-use super::boundary::{ClassInfo, LocalFlags, ModuleIndex, SourceFacts, TemplateKind};
+use super::boundary::{ClassInfo, LocalFlags, ModuleIndex, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
     CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity,
@@ -19,10 +19,10 @@ use super::types::{
 };
 use crate::{
     Absence,
-    hir::Foreign,
     hir_compat::{self, Metadata},
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
+    wit::Foreign,
 };
 use eval::first_type_var_name;
 pub(crate) use ir::*;
@@ -53,7 +53,7 @@ struct ResultContract {
 }
 
 struct InstanceReq<'a> {
-    witness: Option<&'a hir_compat::Witness<perry_hir::types::FuncId>>,
+    witness: Option<&'a hir_compat::Witness<'a, perry_hir::types::FuncId>>,
     template: TemplateId,
     receiver: Option<Receiver>,
     capture_owner: CaptureOwner,
@@ -136,7 +136,6 @@ pub(crate) fn solve<'h>(
     hir: &'h HirModule,
     index: &ModuleIndex<'h>,
     metadata: &Metadata<'_>,
-    facts: &SourceFacts,
     foreign: &HashMap<String, Foreign>,
     types: &mut TypeTable,
 ) -> Result<Solved> {
@@ -147,7 +146,7 @@ pub(crate) fn solve<'h>(
         &hir.classes,
         foreign,
     );
-    let mut solver = Solver::new(ctx, hir, index, metadata, facts, &decls, types);
+    let mut solver = Solver::new(ctx, hir, index, metadata, &decls, types);
     let init_inst = solver.seed_roots()?;
     solver.run_worklist(init_inst)?;
     solver.verify_fixed_point()?;
@@ -156,11 +155,11 @@ pub(crate) fn solve<'h>(
 }
 
 struct Solver<'h, 'a> {
+    resource_registries: HashMap<LocalId, Ty>,
     ctx: &'a Context,
     hir: &'h HirModule,
     index: &'a ModuleIndex<'h>,
     metadata: &'a Metadata<'a>,
-    facts: &'a SourceFacts,
     decls: &'a Declarations<'a>,
     types: &'a mut TypeTable,
     locations: IdxVec<LocId, Ty>,
@@ -204,7 +203,7 @@ struct Solver<'h, 'a> {
     static_field_locs: Vec<(ClassId, usize, LocId)>,
     class_insts: IdxVec<ClassInstId, ClassInst>,
     class_index: HashMap<(ClassId, Ty), ClassInstId>,
-    type_param_pool: Pool<TypeParamSpan, shapes::TypeId>,
+    type_param_pool: Pool<TypeParamSpan, shapes::TypeName>,
     template_type_params: IdxVec<TemplateId, TypeParamSpan>,
     class_type_params: IdxVec<ClassId, TypeParamSpan>,
     result_contracts: Vec<ResultContract>,
@@ -254,7 +253,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         hir: &'h HirModule,
         index: &'a ModuleIndex<'h>,
         metadata: &'a Metadata<'a>,
-        facts: &'a SourceFacts,
         decls: &'a Declarations<'a>,
         types: &'a mut TypeTable,
     ) -> Self {
@@ -282,7 +280,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             tp_buf.clear();
             tp_buf.extend(
                 tps.iter()
-                    .map(|tp| shapes::TypeId::from_owned(ctx, HirType::Named(tp.name.clone()))),
+                    .map(|tp| shapes::TypeName::new(ctx, tp.name.clone())),
             );
             type_param_pool.extend_from_slice(&tp_buf)
         };
@@ -292,12 +290,27 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .get(c.hir_idx)
                 .map_or_else(TypeParamSpan::default, |hc| intern_tps(&hc.type_params))
         });
+        let resource_registries = metadata
+            .witnesses
+            .iter()
+            .filter_map(|w| {
+                let signature = w.signature.as_ref()?;
+                let (local, class) = signature.registry.as_ref()?;
+                let params = signature
+                    .params
+                    .iter()
+                    .map(|&p| types.export_type(ctx, p))
+                    .collect::<Vec<_>>();
+                let class = types.generic(shapes::TypeName::new(ctx, class.clone()), &params);
+                Some((*local, class))
+            })
+            .collect();
         Self {
+            resource_registries,
             ctx,
             hir,
             index,
             metadata,
-            facts,
             decls,
             types,
             reader_ends: locations.filled(0),
@@ -743,7 +756,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 _ => raw_actual,
             };
-            if !self.types.accepts(self.ctx, contract.expected, actual) {
+            if !self.types.accepts(contract.expected, actual) {
                 return Err(self.metadata.locations.annotate_call(
                     diag!(
                         codes::TYPE_MISMATCH,

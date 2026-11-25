@@ -37,7 +37,7 @@ pub(crate) fn function_label(name: &str) -> &str {
 /// wrappers (`__obj_method_<name>_<N>`) for user-facing diagnostic names.
 pub(crate) fn display_name(name: &str) -> &str {
     let name = name
-        .strip_prefix(super::names::MODULE_PREFIX)
+        .strip_prefix(crate::source::MODULE_PREFIX)
         .and_then(|rest| {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             (digits > 0)
@@ -67,7 +67,7 @@ enum CallSite {
     Import(Note),
 }
 
-pub fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
+pub(crate) fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
     let Expr::Sequence(parts) = expr else {
         return None;
     };
@@ -90,7 +90,7 @@ struct SourceFile<'s> {
 }
 
 #[derive(Default)]
-pub struct Locations<'s> {
+pub(crate) struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
     calls: HashMap<u32, (Span, Option<Span>)>,
@@ -151,7 +151,7 @@ impl<'s> Locations<'s> {
         self.operators.get(index).copied()
     }
 
-    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
+    pub(crate) fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
         self.operator_raw_span(parts)
             .and_then(|span| self.span(span))
     }
@@ -192,7 +192,7 @@ impl<'s> Locations<'s> {
         name
     }
 
-    pub fn display_function_name<'a>(&'a self, name: &'a str) -> &'a str {
+    pub(crate) fn display_function_name<'a>(&'a self, name: &'a str) -> &'a str {
         display_name(self.template_name(name))
     }
 
@@ -280,7 +280,7 @@ impl<'s> Locations<'s> {
         }
     }
 
-    pub fn caller_notes(&self, function_name: &str) -> Vec<Note> {
+    pub(crate) fn caller_notes(&self, function_name: &str) -> Vec<Note> {
         let mut notes = Vec::new();
         let mut seen = HashSet::new();
         let mut current = function_name;
@@ -300,7 +300,7 @@ impl<'s> Locations<'s> {
         notes
     }
 
-    pub fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
+    pub(crate) fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
         error.with_notes(self.caller_notes(function_name))
     }
 
@@ -310,7 +310,7 @@ impl<'s> Locations<'s> {
             .is_some_and(|info| info.explicit_return)
     }
 
-    pub fn function_span(&self, name: &str) -> Option<SourceSpan> {
+    pub(crate) fn function_span(&self, name: &str) -> Option<SourceSpan> {
         self.functions
             .get(self.template_name(name))
             .and_then(|info| self.span(info.span))
@@ -322,7 +322,7 @@ impl<'s> Locations<'s> {
             })
     }
 
-    pub fn source_at(&self, position: u32) -> Option<&'s str> {
+    pub(crate) fn source_at(&self, position: u32) -> Option<&'s str> {
         let file = self.file_at(position)?;
         file.source
             .get((position - file.positions.start()) as usize..)
@@ -337,7 +337,7 @@ impl<'s> Locations<'s> {
         self.source_text(*self.members.get(&offset)?)
     }
 
-    pub fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
+    pub(crate) fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
         self.span(Span::new(
             swc_common::BytePos(start),
             swc_common::BytePos(start.saturating_add(len)),
@@ -351,21 +351,21 @@ impl<'s> Locations<'s> {
             .is_some_and(|span| span.hi.0 == end)
     }
 
-    pub fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+    pub(crate) fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.calls
             .get(&byte_offset)
             .and_then(|(span, _)| self.span(*span))
             .or_else(|| self.offset_span(byte_offset, 1))
     }
 
-    pub fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+    pub(crate) fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.members
             .get(&byte_offset)
             .and_then(|span| self.span(*span))
             .or_else(|| self.call_span(byte_offset))
     }
 
-    pub fn missing_function(&self, id: FuncId) -> Diagnostic {
+    pub(crate) fn missing_function(&self, id: FuncId) -> Diagnostic {
         if let Some((_, name)) = self
             .generic_templates
             .iter()
@@ -380,11 +380,11 @@ impl<'s> Locations<'s> {
         }
     }
 
-    pub fn type_span(&self, name: &str) -> Option<SourceSpan> {
+    pub(crate) fn type_span(&self, name: &str) -> Option<SourceSpan> {
         self.types.get(name).and_then(|span| self.span(*span))
     }
 
-    pub fn import_span(&self, source: &str) -> Option<SourceSpan> {
+    pub(crate) fn import_span(&self, source: &str) -> Option<SourceSpan> {
         self.imports
             .get(source.strip_prefix("node:").unwrap_or(source))
             .and_then(|span| self.span(*span))
@@ -394,7 +394,7 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.call_span(byte_offset))
     }
 
-    pub(super) fn span(&self, span: Span) -> Option<SourceSpan> {
+    pub(crate) fn span(&self, span: Span) -> Option<SourceSpan> {
         let file = self.file_at(span.lo.0)?;
         let start = (span.lo.0 - file.positions.start()) as usize;
         let end = span.hi.0.checked_sub(*file.positions.start())? as usize;

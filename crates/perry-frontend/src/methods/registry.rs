@@ -1,6 +1,6 @@
 /// Built-in methods, one row each: variant, source names, inferred result, HIR name preservation,
 /// member form, arguments, lowering recipe and arity requirement. `perry-frontend` derives `Method`
-/// and `Call` from the signature columns; `perry-lower` derives `Call::lower` from the recipes,
+/// and `Call` from the signature columns; the MIR builder derives `Call::lower` from the recipes,
 /// which name its `FunctionBuilder` operations.
 #[macro_export]
 macro_rules! method_catalog {

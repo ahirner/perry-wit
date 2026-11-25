@@ -16,7 +16,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .iter()
             .map(|ta| {
                 let t = self.types.intern_hir(self.ctx, ta, true);
-                self.types.substitute(self.ctx, t, &bindings)
+                self.types.substitute(t, &bindings)
             })
             .collect()
     }
@@ -75,7 +75,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                     && m.kind == kind
                     && (kind == MemberKind::Constructor || m.name == name)
             })?;
-        let ty = self.types.intern_hir(self.ctx, &member.result, true);
+        let ty = member.result.map_or(Ty::VOID, |value| {
+            self.types.wit_type(self.ctx, value, false)
+        });
         self.record_site(inst, expr, SiteResolution::ResourceCall(id));
         Some(ty)
     }
@@ -158,9 +160,9 @@ impl<'h, 'a> Solver<'h, 'a> {
     ) -> Result<Option<ClassInstId>> {
         match self.types.kind(stripped) {
             TyKind::ClassInst(id) => Ok(Some(id)),
-            TyKind::Leaf(id) => {
-                if let HirType::Named(name) = id.hir(self.ctx) {
-                    let nid = self.types.intern_name(name);
+            TyKind::Named(id) => {
+                {
+                    let nid = self.types.intern_name(id.get(self.ctx));
                     if let Some(cid) = self.index.class_by_name_id(nid) {
                         return Ok(Some(self.request_class_inst(
                             cid,
@@ -278,9 +280,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             if ty == Ty::BOTTOM {
                 return Ok(Ty::BOTTOM);
             }
-            if let TyKind::Leaf(id) = self.types.kind(ty)
-                && let HirType::Named(base) = id.hir(self.ctx)
-                && let Some(owner) = self.decls.resource(base)
+            if let TyKind::Named(id) = self.types.kind(ty)
+                && let Some(owner) = self.decls.resource(id.get(self.ctx))
                 && let Some(result) =
                     self.resource_operation(s.inst, expr, owner, MemberKind::Dispose, "")
             {
@@ -356,7 +357,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ));
             }
             if let Some((_, sig)) = self.decls.foreign_functions.get(name.as_str()) {
-                let ret = self.types.intern_hir(self.ctx, &sig.return_type, true);
+                let ret = sig
+                    .result
+                    .map_or(Ty::VOID, |ty| self.types.wit_type(self.ctx, ty, false));
                 return Ok(
                     if sig.is_async && !matches!(self.types.kind(ret), TyKind::Promise(_)) {
                         self.types.promise(ret)
@@ -380,7 +383,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
+            let helper = self.intern_helper(
+                HelperSpec::Callable(CallableOp::ThrowTypeError),
+                byte_offset,
+            );
             self.record_site(s.inst, expr, SiteResolution::ThrowTypeError(helper));
             return Ok(Ty::NEVER);
         }
@@ -615,7 +621,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.types.intern_hir(self.ctx, exp_p, true),
                     self.types.intern_hir(self.ctx, &cb_p.ty, true),
                 );
-                if !self.types.is_open(cb_ty) && !self.types.accepts(self.ctx, cb_ty, exp_ty) {
+                if !self.types.is_open(cb_ty) && !self.types.accepts(cb_ty, exp_ty) {
                     return Err(mismatch());
                 }
                 expected_param_tys.push(exp_ty);

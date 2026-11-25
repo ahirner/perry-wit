@@ -305,15 +305,31 @@ pub(crate) enum TyKind {
     BigInt,
     String,
     Symbol,
-    Leaf(shapes::TypeId),
-    TypeVar(shapes::TypeId),
+    Named(shapes::TypeName),
+    Literal(shapes::TypeName),
+    Signature {
+        params: PropSpan,
+        result: Ty,
+        is_async: bool,
+        is_generator: bool,
+    },
+    TypeVar(shapes::TypeName),
     Array(Ty),
-    Cell { loc: LocId, kind: CellKind },
+    Cell {
+        loc: LocId,
+        kind: CellKind,
+    },
     Promise(Ty),
     Tuple(TySpan),
     Union(TySpan),
-    Generic { base: shapes::TypeId, args: TySpan },
-    Object { props: PropSpan, index: Option<Ty> },
+    Generic {
+        base: shapes::TypeName,
+        args: TySpan,
+    },
+    Object {
+        props: PropSpan,
+        index: Option<Ty>,
+    },
     Func(FuncIdentity),
     ClassInst(ClassInstId),
 }
@@ -356,7 +372,6 @@ impl LocalFlags {
             | Self::FOR_HEAD.0
             | Self::FORWARD_CAPTURED.0,
     );
-    pub(crate) const UNDEF_BOXED: Self = Self(Self::FORWARD_CAPTURED.0 | Self::DEFERRED.0);
     pub(crate) const DEFERRED_OR_NULLISH: Self = Self(Self::DEFERRED.0 | Self::NULLISH_INIT.0);
 
     pub(crate) fn insert(&mut self, other: Self) {

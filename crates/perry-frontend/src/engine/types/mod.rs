@@ -1,12 +1,10 @@
-//! Dense interned types over `shapes::TypeId`, canonical sorted unions, and monotone joins.
+//! Interned solver types, canonical unions, and monotone joins.
 mod idx;
-mod materialize;
+mod wit;
 use super::bitset::BitSet;
 use crate::{Absence, shapes};
 pub(crate) use idx::*;
-use materialize::Materializer;
-pub(crate) use materialize::{box_hir, env_class_name, func_tag};
-use perry_hir::types::{ObjectType, PropertyInfo, Type as HirType};
+use perry_hir::types::Type as HirType;
 use pliron::context::Context;
 use std::collections::HashMap;
 
@@ -141,17 +139,11 @@ impl TypeTable {
         self.kind_index.insert(kind, ty);
         ty
     }
-    pub(crate) fn leaf(&mut self, id: shapes::TypeId) -> Ty {
-        self.intern_kind(TyKind::Leaf(id))
-    }
     pub(crate) fn named(&mut self, ctx: &Context, name: &str) -> Ty {
-        self.leaf(shapes::TypeId::from_owned(
-            ctx,
-            HirType::Named(name.to_owned()),
-        ))
+        self.intern_kind(TyKind::Named(shapes::TypeName::new(ctx, name.into())))
     }
-    pub(crate) fn type_var(&mut self, id: shapes::TypeId) -> Ty {
-        self.intern_kind(TyKind::TypeVar(id))
+    pub(crate) fn literal(&mut self, ctx: &Context, value: &str) -> Ty {
+        self.intern_kind(TyKind::Literal(shapes::TypeName::new(ctx, value.into())))
     }
     pub(crate) fn array(&mut self, element: Ty) -> Ty {
         self.intern_kind(TyKind::Array(element))
@@ -173,7 +165,7 @@ impl TypeTable {
         let span = self.ty_pool.intern(&mut self.members_index, items);
         self.intern_kind(TyKind::Tuple(span))
     }
-    pub(crate) fn generic(&mut self, base: shapes::TypeId, args: &[Ty]) -> Ty {
+    pub(crate) fn generic(&mut self, base: shapes::TypeName, args: &[Ty]) -> Ty {
         let args = self.ty_pool.intern(&mut self.members_index, args);
         self.intern_kind(TyKind::Generic { base, args })
     }
@@ -293,13 +285,14 @@ impl TypeTable {
     fn normalize_atom(&self, ctx: &Context, decls: &shapes::Declarations<'_>, ty: Ty) -> Ty {
         match self.kind(ty) {
             TyKind::Int32 => Ty::NUMBER,
-            TyKind::Leaf(id) => match id.hir(ctx) {
-                HirType::StringLiteral(_) => Ty::STRING,
-                HirType::Named(n) if matches!(decls.integer_carrier(n), Some(HirType::Number)) => {
-                    Ty::NUMBER
-                }
-                _ => ty,
-            },
+            TyKind::Literal(_) => Ty::STRING,
+            TyKind::Named(name)
+                if decls
+                    .integer_spec(name.get(ctx))
+                    .is_some_and(|(width, _)| width < 64) =>
+            {
+                Ty::NUMBER
+            }
             _ => ty,
         }
     }
@@ -511,9 +504,30 @@ impl TypeTable {
             HirType::BigInt => Ty::BIGINT,
             HirType::String => Ty::STRING,
             HirType::Symbol => Ty::SYMBOL,
-            HirType::TypeVar(_) => self.type_var(shapes::TypeId::intern(ctx, ty)),
-            HirType::StringLiteral(_) | HirType::Named(_) | HirType::Function(_) => {
-                self.leaf(shapes::TypeId::intern(ctx, ty))
+            HirType::TypeVar(name) => {
+                self.intern_kind(TyKind::TypeVar(shapes::TypeName::new(ctx, name.clone())))
+            }
+            HirType::StringLiteral(value) => self.literal(ctx, value),
+            HirType::Named(name) => self.named(ctx, name),
+            HirType::Function(signature) => {
+                let params: Vec<_> = signature
+                    .params
+                    .iter()
+                    .map(|(name, ty, optional)| ObjectProp {
+                        name: self.intern_name(name),
+                        ty: self.intern_hir(ctx, ty, explicit),
+                        optional: *optional,
+                        readonly: false,
+                    })
+                    .collect();
+                let params = self.object_props.intern(&mut self.props_index, &params);
+                let result = self.intern_hir(ctx, &signature.return_type, explicit);
+                self.intern_kind(TyKind::Signature {
+                    params,
+                    result,
+                    is_async: signature.is_async,
+                    is_generator: signature.is_generator,
+                })
             }
             HirType::Array(i) => {
                 let t = self.intern_hir(ctx, i, explicit);
@@ -538,7 +552,7 @@ impl TypeTable {
                 self.union(&items)
             }
             HirType::Generic { base, type_args } => {
-                let base_id = shapes::TypeId::from_owned(ctx, HirType::Named(base.clone()));
+                let base_id = shapes::TypeName::new(ctx, base.clone());
                 let args: Vec<Ty> = type_args
                     .iter()
                     .map(|a| self.intern_hir(ctx, a, explicit))
@@ -681,35 +695,6 @@ impl TypeTable {
         walk(self, ty, target, exclude_owner, &mut BitSet::default())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn materialize_hir_with<'a>(
-        &self,
-        ctx: &Context,
-        ty: Ty,
-        locations: &[Ty],
-        dict_reads: &BitSet,
-        capture_free: &BitSet,
-        escaping_env: &BitSet,
-        class_name: &impl Fn(ClassInstId) -> &'a str,
-    ) -> HirType {
-        Materializer {
-            table: self,
-            ctx,
-            locations,
-            dict_reads,
-            capture_free,
-            escaping_env,
-            class_name,
-            visiting: Vec::new(),
-        }
-        .run(ty)
-    }
-
-    pub(crate) fn materialize_hir(&self, ctx: &Context, ty: Ty) -> HirType {
-        let empty = BitSet::default();
-        self.materialize_hir_with(ctx, ty, &[], &empty, &empty, &empty, &|_| "")
-    }
-
     pub(crate) fn is_valid_dict_value(&self, elem: Ty, dict_read: bool) -> bool {
         let primitive = matches!(
             elem,
@@ -722,30 +707,40 @@ impl TypeTable {
             && (!dict_read || primitive)
     }
 
-    pub(crate) fn substitute(
-        &mut self,
-        ctx: &Context,
-        ty: Ty,
-        bindings: &[(shapes::TypeId, Ty)],
-    ) -> Ty {
+    pub(crate) fn substitute(&mut self, ty: Ty, bindings: &[(shapes::TypeName, Ty)]) -> Ty {
         if bindings.is_empty() {
             return ty;
         }
         match self.kind(ty) {
-            TyKind::TypeVar(id) | TyKind::Leaf(id) => {
-                if let HirType::TypeVar(name) | HirType::Named(name) = id.hir(ctx)
-                    && let Some(&(_, bound)) = bindings.iter().find(|(p, _)| matches!(p.hir(ctx), HirType::Named(n) | HirType::TypeVar(n) if n == name))
-                {
-                    return bound;
+            TyKind::TypeVar(name) | TyKind::Named(name) => bindings
+                .iter()
+                .find(|(p, _)| *p == name)
+                .map_or(ty, |&(_, bound)| bound),
+            TyKind::Signature {
+                params,
+                result,
+                is_async,
+                is_generator,
+            } => {
+                let mut params = self.object_slice(params).to_vec();
+                for p in &mut params {
+                    p.ty = self.substitute(p.ty, bindings);
                 }
-                ty
+                let params = self.object_props.intern(&mut self.props_index, &params);
+                let result = self.substitute(result, bindings);
+                self.intern_kind(TyKind::Signature {
+                    params,
+                    result,
+                    is_async,
+                    is_generator,
+                })
             }
             TyKind::Array(i) => {
-                let n = self.substitute(ctx, i, bindings);
+                let n = self.substitute(i, bindings);
                 if n == i { ty } else { self.array(n) }
             }
             TyKind::Promise(i) => {
-                let n = self.substitute(ctx, i, bindings);
+                let n = self.substitute(i, bindings);
                 if n == i { ty } else { self.promise(n) }
             }
             kind @ (TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. }) => {
@@ -755,7 +750,7 @@ impl TypeTable {
                     .to_vec()
                     .into_iter()
                     .map(|i| {
-                        let n = self.substitute(ctx, i, bindings);
+                        let n = self.substitute(i, bindings);
                         changed |= n != i;
                         n
                     })
@@ -774,12 +769,12 @@ impl TypeTable {
                 let mut items = self.object_slice(props).to_vec();
                 let mut changed = false;
                 for p in &mut items {
-                    let n = self.substitute(ctx, p.ty, bindings);
+                    let n = self.substitute(p.ty, bindings);
                     changed |= n != p.ty;
                     p.ty = n;
                 }
                 let next_idx = index.map(|i| {
-                    let n = self.substitute(ctx, i, bindings);
+                    let n = self.substitute(i, bindings);
                     changed |= n != i;
                     n
                 });
@@ -795,61 +790,73 @@ impl TypeTable {
 
     pub(crate) fn unify(
         &self,
-        ctx: &Context,
         pattern: Ty,
         actual: Ty,
-        type_params: &[shapes::TypeId],
-        bindings: &mut Vec<(shapes::TypeId, Ty)>,
+        type_params: &[shapes::TypeName],
+        bindings: &mut Vec<(shapes::TypeName, Ty)>,
     ) {
         if matches!(actual, Ty::BOTTOM | Ty::OPEN | Ty::NEVER) {
             return;
         }
         match (self.kind(pattern), self.kind(actual)) {
-            (TyKind::TypeVar(id) | TyKind::Leaf(id), _) => {
-                if let HirType::TypeVar(name) | HirType::Named(name) = id.hir(ctx)
-                    && let Some(&tp) = type_params.iter().find(|tp| matches!(tp.hir(ctx), HirType::Named(p) | HirType::TypeVar(p) if p == name))
-                    && !bindings.iter().any(|(k, _)| *k == tp)
-                {
-                    bindings.push((tp, actual));
+            (TyKind::TypeVar(name) | TyKind::Named(name), _)
+                if type_params.contains(&name) && !bindings.iter().any(|(k, _)| *k == name) =>
+            {
+                bindings.push((name, actual));
+            }
+            (TyKind::Array(p), TyKind::Array(a)) | (TyKind::Promise(p), TyKind::Promise(a)) => {
+                self.unify(p, a, type_params, bindings)
+            }
+            (TyKind::Tuple(p), TyKind::Tuple(a)) => {
+                for (&pt, &at) in self.ty_slice(p).iter().zip(self.ty_slice(a)) {
+                    self.unify(pt, at, type_params, bindings);
                 }
             }
-            (TyKind::Array(p), TyKind::Array(a)) | (TyKind::Promise(p), TyKind::Promise(a)) => self.unify(ctx, p, a, type_params, bindings),
-            (TyKind::Tuple(p), TyKind::Tuple(a)) => for (&pt, &at) in self.ty_slice(p).iter().zip(self.ty_slice(a)) { self.unify(ctx, pt, at, type_params, bindings); },
-            (TyKind::Generic { base: pb, args: pa }, TyKind::Generic { base: ab, args: aa }) if pb == ab => {
-                for (&pt, &at) in self.ty_slice(pa).iter().zip(self.ty_slice(aa)) { self.unify(ctx, pt, at, type_params, bindings); }
+            (TyKind::Generic { base: pb, args: pa }, TyKind::Generic { base: ab, args: aa })
+                if pb == ab =>
+            {
+                for (&pt, &at) in self.ty_slice(pa).iter().zip(self.ty_slice(aa)) {
+                    self.unify(pt, at, type_params, bindings);
+                }
             }
-            (TyKind::Object { props: pp, index: pi }, TyKind::Object { props: ap, index: ai }) => {
+            (
+                TyKind::Object {
+                    props: pp,
+                    index: pi,
+                },
+                TyKind::Object {
+                    props: ap,
+                    index: ai,
+                },
+            ) => {
                 let a_slice = self.object_slice(ap);
                 for prop in self.object_slice(pp) {
-                    if let Some(ap) = a_slice.iter().find(|p| p.name == prop.name) { self.unify(ctx, prop.ty, ap.ty, type_params, bindings); }
+                    if let Some(ap) = a_slice.iter().find(|p| p.name == prop.name) {
+                        self.unify(prop.ty, ap.ty, type_params, bindings);
+                    }
                 }
-                if let (Some(pt), Some(at)) = (pi, ai) { self.unify(ctx, pt, at, type_params, bindings); }
+                if let (Some(pt), Some(at)) = (pi, ai) {
+                    self.unify(pt, at, type_params, bindings);
+                }
             }
             _ => {}
         }
     }
 
-    pub(crate) fn accepts(&self, ctx: &Context, expected: Ty, actual: Ty) -> bool {
+    pub(crate) fn accepts(&self, expected: Ty, actual: Ty) -> bool {
         if expected == actual || actual == Ty::NEVER || expected == Ty::DYNAMIC {
             return true;
         }
         if let TyKind::Union(s) = self.kind(actual) {
-            return self
-                .ty_slice(s)
-                .iter()
-                .all(|&m| self.accepts(ctx, expected, m));
+            return self.ty_slice(s).iter().all(|&m| self.accepts(expected, m));
         }
         if let TyKind::Union(s) = self.kind(expected) {
-            return self
-                .ty_slice(s)
-                .iter()
-                .any(|&m| self.accepts(ctx, m, actual));
+            return self.ty_slice(s).iter().any(|&m| self.accepts(m, actual));
         }
-        match (self.kind(expected), self.kind(actual)) {
-            (TyKind::Number, TyKind::Int32) => true,
-            (TyKind::String, TyKind::Leaf(id)) => matches!(id.hir(ctx), HirType::StringLiteral(_)),
-            _ => false,
-        }
+        matches!(
+            (self.kind(expected), self.kind(actual)),
+            (TyKind::Number, TyKind::Int32) | (TyKind::String, TyKind::Literal(_))
+        )
     }
 
     fn has_nested_unresolved_walk(&self, ty: Ty, nested: bool, seen: &mut [BitSet; 2]) -> bool {
@@ -917,4 +924,18 @@ impl TypeTable {
             _ => false,
         }
     }
+}
+
+pub(crate) fn func_tag(ident: FuncIdentity) -> String {
+    match ident.capture_owner {
+        CaptureOwner::None => format!("fn_{}", ident.template.index()),
+        CaptureOwner::Instance(owner) => format!("fn_{}_{}", ident.template.index(), owner.index()),
+        CaptureOwner::Template(owner) => {
+            format!("fn_{}_t{}", ident.template.index(), owner.index())
+        }
+    }
+}
+
+pub(crate) fn env_class_name(ident: FuncIdentity) -> String {
+    format!("__Env_{}", func_tag(ident))
 }

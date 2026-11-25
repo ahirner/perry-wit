@@ -1,6 +1,5 @@
 //! Emit expressions from solved call sites and function-value coercions.
 use super::*;
-use crate::hir_compat::{self, GuestCall};
 
 pub(super) enum CalleeValue {
     Static,
@@ -16,8 +15,14 @@ impl<'h> Emitter<'h, '_> {
         if let Some(c) = coercion {
             match c {
                 FuncCoercion::Zero if is_pure_func_expr(expr) => return Ok(Expr::Number(0.0)),
-                FuncCoercion::Tag(ident) if is_pure_func_expr(expr) => {
-                    return Ok(Self::emit_tag_record(ident));
+                FuncCoercion::Tag(ident, target) if is_pure_func_expr(expr) => {
+                    return self.expression_op(
+                        crate::engine::ExpressionOp::Function {
+                            identity: ident,
+                            target,
+                        },
+                        vec![],
+                    );
                 }
                 _ => {}
             }
@@ -25,14 +30,23 @@ impl<'h> Emitter<'h, '_> {
         let rewritten = self.rewrite_expr_inner(rctx, expr, resolution)?;
         match coercion {
             Some(FuncCoercion::Zero) => Ok(Expr::Sequence(vec![rewritten, Expr::Number(0.0)])),
-            Some(FuncCoercion::Tag(ident)) => {
-                let tag = Self::emit_tag_record(ident);
+            Some(FuncCoercion::Tag(ident, target)) => {
+                let tag = self.expression_op(
+                    crate::engine::ExpressionOp::Function {
+                        identity: ident,
+                        target,
+                    },
+                    vec![],
+                )?;
                 Ok(Expr::Sequence(vec![rewritten, tag]))
             }
-            Some(FuncCoercion::BoxEnv(ident)) => {
-                let val_expr = Self::prop_get(rewritten, "val");
-                Ok(Self::emit_env_wrapper(ident, val_expr))
-            }
+            Some(FuncCoercion::BoxEnv(ident, target)) => self.expression_op(
+                crate::engine::ExpressionOp::Function {
+                    identity: ident,
+                    target,
+                },
+                vec![rewritten],
+            ),
             Some(FuncCoercion::Widen(helper)) => {
                 let fid = self.emit_helper(helper)?;
                 Ok(synth_call(fid, vec![rewritten], 0, 0))
@@ -40,12 +54,11 @@ impl<'h> Emitter<'h, '_> {
             Some(FuncCoercion::EnvCallback { target, input_tys }) => {
                 let target_fid = self.solved.instances[target].emitted_func_id;
                 let inputs = self.types.tuple_slice(input_tys);
-                let arm_ret = self.arm_return_hir(target)?;
-                self.emit_callback_wrapper(
+                self.bind_callback(
                     target_fid,
-                    Self::prop_get(rewritten, "val"),
+                    crate::engine::CallbackOperand::Environment,
+                    rewritten,
                     inputs,
-                    arm_ret,
                 )
             }
             Some(FuncCoercion::DispatchCallback {
@@ -68,9 +81,13 @@ impl<'h> Emitter<'h, '_> {
                     .max()
                     .unwrap_or(0)
                     .min(inputs.len());
-                let disp = self.emit_helper_fn(helper)?;
-                let (disp_fid, disp_ret) = (disp.id, disp.return_type.clone());
-                self.emit_callback_wrapper(disp_fid, rewritten, &inputs[..max_params], disp_ret)
+                let fid = self.emit_helper(helper)?;
+                self.bind_callback(
+                    fid,
+                    crate::engine::CallbackOperand::Callee,
+                    rewritten,
+                    &inputs[..max_params],
+                )
             }
             None => Ok(rewritten),
         }
@@ -87,8 +104,9 @@ impl<'h> Emitter<'h, '_> {
                 SiteResolution::ResourceCall(id) => return self.resource_call(rctx, expr, id),
                 SiteResolution::BranchResult(ty) => {
                     let value = self.rewrite_expr_inner(&rctx.with_expected(true), expr, None)?;
-                    let ty = self.materialize(ty)?;
-                    return Ok(GuestCall::Typed { value, ty }.into_hir());
+                    self.prepare_layouts(ty)?;
+                    return self
+                        .expression_op(crate::engine::ExpressionOp::Expected(ty), vec![value]);
                 }
                 SiteResolution::Cell(_) => {}
                 SiteResolution::FoldBool(b) => {
@@ -96,19 +114,14 @@ impl<'h> Emitter<'h, '_> {
                         return self.fold_comparison(rctx, left, right, b);
                     }
                 }
-                SiteResolution::CollectionNew { is_map, type_args } => {
-                    let mat_args = type_args
-                        .into_iter()
-                        .map(|t| self.materialize(t))
-                        .collect::<Result<Vec<_>>>()?;
-                    let init_args = if let Expr::New { args, .. } = expr {
-                        args.iter()
+                SiteResolution::CollectionNew(op) => {
+                    if let Expr::New { args, .. } = expr {
+                        let init = args
+                            .iter()
                             .map(|a| self.rewrite_expr(rctx, a))
-                            .collect::<Result<Vec<_>>>()?
-                    } else {
-                        Vec::new()
-                    };
-                    return Ok(hir_compat::typed_collection(is_map, mat_args, init_args));
+                            .collect::<Result<_>>()?;
+                        return self.expression_op(op, init);
+                    }
                 }
                 SiteResolution::ThrowTypeError(helper) => {
                     let fid = self.emit_helper(helper)?;
@@ -155,57 +168,46 @@ impl<'h> Emitter<'h, '_> {
                     if let Expr::Closure { body, .. } = expr {
                         let mut out = expr.clone();
                         if let Expr::Closure {
+                            func_id,
                             params,
-                            return_type,
                             body: out_body,
-                            captures,
                             mutable_captures,
                             ..
                         } = &mut out
                         {
-                            *return_type = self.materialize(self.solved.locations[return_loc])?;
-                            let param_tys: Vec<Ty> = self.solved.param_locs[param_locs_span]
+                            *func_id = emitted_func_id;
+                            let result = self.solved.locations[return_loc];
+                            self.prepare_layouts(result)?;
+                            let mut param_types = Vec::with_capacity(params.len());
+                            for &loc in self.solved.param_locs[param_locs_span]
                                 .iter()
-                                .map(|&loc| self.solved.locations[loc])
-                                .collect();
-                            for (p, ty) in params.iter_mut().zip(param_tys) {
-                                if self.is_resolved(ty) {
-                                    p.ty = self.materialize(ty)?;
+                                .take(params.len())
+                            {
+                                let ty = self.solved.locations[loc];
+                                let ty = self.is_resolved(ty).then_some(ty);
+                                if let Some(ty) = ty {
+                                    self.prepare_layouts(ty)?;
                                 }
+                                param_types.push(ty);
                             }
+                            self.plans.closures.insert(
+                                emitted_func_id,
+                                crate::engine::InstanceSignature {
+                                    params: param_types,
+                                    result: Some(result),
+                                },
+                            );
                             let mut cb_ctx = RewriteCtx {
                                 inst_id: target,
                                 func_params: &[],
                                 self_local: None,
-                                env_local: rctx.env_local,
-                                env_captures: rctx.env_captures,
-                                boxed_param_map: rctx.boxed_param_map,
+
                                 void_return: false,
                                 has_expected: false,
                                 remap: None,
                             };
                             *out_body = self.rewrite_stmts(&mut cb_ctx, body)?;
-                            if rctx.env_local.is_some()
-                                || !rctx.boxed_param_map.is_empty()
-                                || captures.iter().any(|c| self.is_boxed_local(*c))
-                            {
-                                let mut new_caps = Vec::new();
-                                let mut defined: std::collections::HashSet<usize> =
-                                    params.iter().map(|p| p.id as usize).collect();
-                                for s in out_body.iter() {
-                                    perry_hir::analysis::collect_local_refs_stmt(
-                                        s,
-                                        &mut new_caps,
-                                        &mut defined,
-                                    );
-                                }
-                                *captures = new_caps;
-                                mutable_captures.retain(|c| {
-                                    !self.is_boxed_local(*c)
-                                        && !rctx.env_captures.iter().any(|(lid, _, _)| lid == c)
-                                        && !rctx.boxed_param_map.iter().any(|(lid, _)| lid == c)
-                                });
-                            }
+                            mutable_captures.retain(|id| !self.is_boxed_local(*id));
                         }
                         return Ok(out);
                     }
@@ -280,11 +282,14 @@ impl<'h> Emitter<'h, '_> {
                                     return self.fold_comparison(rctx, left, right, !is_eq);
                                 }
                                 let u_rewritten = self.rewrite_expr(rctx, union_expr)?;
-                                let comparison = Expr::Compare {
-                                    op: if is_eq { CompareOp::Eq } else { CompareOp::Ne },
-                                    left: Box::new(Self::prop_get(u_rewritten, "tag")),
-                                    right: Box::new(Expr::String(func_tag(ident))),
-                                };
+                                let comparison = self.expression_op(
+                                    crate::engine::ExpressionOp::Matches {
+                                        identity: ident,
+                                        source: union_ty,
+                                        equal: is_eq,
+                                    },
+                                    vec![u_rewritten],
+                                )?;
                                 let erased = if l_zero { left } else { right };
                                 if is_pure_func_expr(erased) {
                                     return Ok(comparison);
@@ -438,8 +443,9 @@ impl<'h> Emitter<'h, '_> {
                     if rctx.has_expected {
                         return Ok(array);
                     }
-                    let ty = self.materialize(ty)?;
-                    return self.inline_iife(ty, vec![Stmt::Return(Some(array))]);
+                    self.prepare_layouts(ty)?;
+                    return self
+                        .expression_op(crate::engine::ExpressionOp::Expected(ty), vec![array]);
                 }
                 SiteResolution::ZeroSizedArray => {
                     if let Expr::Array(elems, _) = expr {

@@ -4,7 +4,11 @@ use perry_codegen::boundary::Import;
 use perry_frontend::wit::WorldTypes;
 use wit_parser::{Resolve, WorldId};
 
-pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes) -> Vec<Import> {
+pub(super) fn bindings<'r>(
+    resolve: &'r Resolve,
+    world: WorldId,
+    types: &mut WorldTypes<'r>,
+) -> Vec<Import> {
     let mut imports = Vec::new();
     for entry in perry_contract::world_functions(resolve, resolve.worlds[world].imports.iter()) {
         let module = if entry.interface.is_some() {
@@ -29,9 +33,14 @@ pub(super) fn bindings(resolve: &Resolve, world: WorldId, types: &mut WorldTypes
         else {
             continue;
         };
-        let Some(binding) = types.import_function(resolve, &module, function) else {
-            continue;
-        };
+        let binding = types.import_function(
+            resolve,
+            &module,
+            &perry_contract::names::to_camel_case(&function.name),
+            function.params.iter().map(|p| p.ty),
+            function.result,
+            function.kind.is_async(),
+        );
         imports.push(Import {
             binding,
             module,

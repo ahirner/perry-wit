@@ -198,25 +198,23 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
-            self.record_site_coercion(inst_id, expr, FuncCoercion::Tag(ident));
+            self.record_site_coercion(inst_id, expr, FuncCoercion::Tag(ident, dst_ty));
             return;
         }
         if let TyKind::Func(ident) = self.types.kind(src_ty)
             && self.is_escaping_env(ident.template, inst_id)
         {
-            if !matches!(expr, Expr::Closure { .. }) {
-                self.record_site_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident));
-            }
+            self.record_site_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident, dst_ty));
             return;
         }
         if self.is_tagged_func_union_in(src_ty, inst_id)
             && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
         {
             let helper = self.intern_helper(
-                HelperSpec::Widener {
+                HelperSpec::Callable(CallableOp::Widener {
                     from: src_ty,
                     to: dst_ty,
-                },
+                }),
                 0,
             );
             self.record_site_coercion(inst_id, expr, FuncCoercion::Widen(helper));

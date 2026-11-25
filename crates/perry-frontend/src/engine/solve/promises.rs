@@ -97,6 +97,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let arg_tuple = self.types.tuple(arg_tys);
         let helper = self.intern_helper(
             HelperSpec::Dispatcher {
+                result: ret,
                 callee_ty,
                 arms: arms_span,
                 arg_tys: arg_tuple,
@@ -119,7 +120,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(None);
         }
         if matches!(cb_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
+            let helper = self.intern_helper(
+                HelperSpec::Callable(CallableOp::ThrowTypeError),
+                byte_offset,
+            );
             return Ok(Some((CallbackCall::ThrowTypeError(helper), Ty::NEVER)));
         }
         if let Some(idents) = self.types.func_dispatch_members(cb_ty, true) {
@@ -419,7 +423,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         byte_offset: u32,
     ) -> Result<Ty> {
         let is_immediate = name == "setImmediate";
-        let repeating = name == "setInterval";
+        let kind = match name {
+            "setImmediate" => crate::engine::TimerKind::Immediate,
+            "setInterval" => crate::engine::TimerKind::Interval,
+            _ => crate::engine::TimerKind::Timeout,
+        };
         let Some(cb_expr) = args.first() else {
             return Err(self.annotate_expr_error(
                 s,
@@ -447,8 +455,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             let pass_cb = cb_call.needs_value();
             let helper = self.intern_helper(
                 HelperSpec::TimerRunner {
-                    repeating,
-                    is_immediate,
+                    kind,
+                    timer_ty,
                     cb_call,
                     cb_ty,
                     extra_arg_tys: extra_tuple,

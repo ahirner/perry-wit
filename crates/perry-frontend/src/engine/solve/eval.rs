@@ -576,8 +576,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.write_local_value(s, lidx, declared);
                 }
                 let is_i64_cast = is_inferred
-                    && matches!(self.types.kind(declared), TyKind::Leaf(id)
-                    if matches!(id.hir(self.ctx), HirType::Named(n) if matches!(self.decls.integer_carrier(n), Some(HirType::BigInt))));
+                    && matches!(self.types.kind(declared), TyKind::Named(id) if matches!(self.decls.integer_spec(id.get(self.ctx)),Some((64,_))));
                 if is_i64_cast {
                     self.write_local_value(s, lidx, declared);
                 }
@@ -607,7 +606,21 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.mark_written(s.inst, lidx);
                         return Ok(());
                     }
-                    let init_ty = self.eval_expr(s, init_expr)?;
+                    let init_ty = if let Some(&class) = self.resource_registries.get(id) {
+                        let value = self.instantiate_annotated_class(class, 0, Some(s.inst))?;
+                        let map = self.types.generic(
+                            shapes::TypeName::new(self.ctx, "Map".into()),
+                            &[Ty::NUMBER, value],
+                        );
+                        self.record_site(
+                            s.inst,
+                            init_expr,
+                            SiteResolution::CollectionNew(crate::engine::ExpressionOp::Map(map)),
+                        );
+                        map
+                    } else {
+                        self.eval_expr(s, init_expr)?
+                    };
                     if !is_inferred
                         && let TyKind::Promise(expected_inner) = self.types.kind(declared)
                         && let TyKind::Cell {
@@ -625,10 +638,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     {
                         self.write_local_value(s, lidx, init_ty);
                     } else if !is_i64_cast && needs_context {
-                        let is_kind = |t, k| {
-                            matches!(self.types.kind(t), TyKind::Leaf(id)
-                            if matches!(id.hir(self.ctx), HirType::Named(n) if crate::methods::Kind::builtin(n) == Some(k)))
-                        };
+                        let is_kind = |t, k| matches!(self.types.kind(t), TyKind::Named(id) if crate::methods::Kind::builtin(id.get(self.ctx)) == Some(k));
                         let keep_declared = (init_ty == Ty::DYNAMIC
                             || (is_kind(declared, crate::methods::Kind::Reader)
                                 && !is_kind(init_ty, crate::methods::Kind::ByobReader)))

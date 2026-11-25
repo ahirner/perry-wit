@@ -60,13 +60,13 @@ macro_rules! define_kinds {
     ) => {
         /// Source-level families used by built-in method signatures.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub enum Kind {
+        pub(crate) enum Kind {
             $($prim,)*
             $($refk,)*
         }
 
         impl Kind {
-            pub const fn label(self) -> &'static str {
+            pub(crate) const fn label(self) -> &'static str {
                 match self {
                     $(Self::$prim => $plabel,)*
                     $(Self::$refk => $rlabel,)*
@@ -89,13 +89,13 @@ macro_rules! define_kinds {
 }
 
 crate::kind_catalog!(define_kinds);
-pub enum CallReceiver<'s> {
+pub(crate) enum CallReceiver<'s> {
     Expression(&'s Expr),
     Local(LocalId),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Receiver {
+pub(crate) enum Receiver {
     Value(Kind),
     Map,
     Set,
@@ -246,7 +246,7 @@ macro_rules! registry {
             }
         }
 
-        pub enum Call<'s> {
+        pub(crate) enum Call<'s> {
             $($($variant($(argument_type!($argument $(:$mode)?)),*),)*)*
         }
 
@@ -255,11 +255,11 @@ macro_rules! registry {
                 match self { $($(Self::$variant(..) => Method::$variant.result_rule(),)*)* }
             }
 
-            pub fn parse(receiver: Receiver, name: &str, args: &'s [Expr]) -> Result<Option<Self>> {
+            pub(crate) fn parse(receiver: Receiver, name: &str, args: &'s [Expr]) -> Result<Option<Self>> {
                 Self::member(receiver, name, Some(args))
             }
 
-            pub fn member(receiver: Receiver, name: &str, args: Option<&'s [Expr]>) -> Result<Option<Self>> {
+            pub(crate) fn member(receiver: Receiver, name: &str, args: Option<&'s [Expr]>) -> Result<Option<Self>> {
                 let Some(method) = Method::lookup(receiver, name).filter(|m| m.is_property() == args.is_none()) else { return Ok(None) };
                 let args = args.unwrap_or(&[]);
                 Ok(Some(match method {
@@ -280,7 +280,7 @@ macro_rules! registry {
 mod registry;
 crate::method_catalog!(registry);
 impl<'s> Call<'s> {
-    pub fn expression(expr: &'s Expr) -> Option<(CallReceiver<'s>, Self)> {
+    pub(crate) fn expression(expr: &'s Expr) -> Option<(CallReceiver<'s>, Self)> {
         match expr {
             Expr::SetAdd { set_id, value } => {
                 return Some((CallReceiver::Local(*set_id), Self::SetAdd(value)));
@@ -402,7 +402,7 @@ impl<'s> Call<'s> {
 }
 
 /// Positional captures and the optional groups argument in a replacement callback.
-pub fn regex_captures(pattern: &str) -> (usize, bool) {
+pub(crate) fn regex_captures(pattern: &str) -> (usize, bool) {
     let mut chars = pattern.chars().peekable();
     let mut in_class = false;
     let mut count = 0;

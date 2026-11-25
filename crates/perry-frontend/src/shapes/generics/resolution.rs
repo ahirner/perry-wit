@@ -1,9 +1,21 @@
 use super::*;
 
-type Properties = Vec<(String, TypeId, bool)>;
+pub(crate) type Properties = Vec<(String, Ty, bool)>;
 
+pub(crate) fn object_properties(
+    types: &TypeTable,
+    props: crate::engine::types::PropSpan,
+) -> Properties {
+    let mut fields: Properties = types
+        .object_slice(props)
+        .iter()
+        .map(|p| (types.name_str(p.name).to_owned(), p.ty, p.optional))
+        .collect();
+    fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    fields
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Query {
+pub(crate) enum Query {
     Union,
     Keys,
     Record,
@@ -17,47 +29,43 @@ impl Query {
     }
 }
 
-pub enum View {
-    Type(TypeId),
+pub(crate) enum View {
+    Type(Ty),
     Fields(Properties),
-    Index(TypeId),
+    Index(Ty),
 }
 
 impl View {
-    pub fn properties(self, ctx: &Context) -> Option<Properties> {
+    pub(crate) fn properties(self, types: &TypeTable) -> Option<Properties> {
         match self {
             Self::Fields(properties) => Some(properties),
-            Self::Type(ty) => match ty.hir(ctx) {
-                HirType::Object(obj) if obj.index_signature.is_none() => {
-                    let mut props: Properties = obj
-                        .properties
-                        .iter()
-                        .map(|(name, p)| (name.clone(), TypeId::intern(ctx, &p.ty), p.optional))
-                        .collect();
-                    props.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                    Some(props)
-                }
-                _ => None,
-            },
-            Self::Index(_) => None,
+            Self::Type(ty) if let TyKind::Object { props, index: None } = types.kind(ty) => {
+                Some(object_properties(types, props))
+            }
+            _ => None,
         }
     }
 }
 
-pub struct Resolver<'a, 'h> {
+pub(crate) struct Resolver<'a, 'h> {
     ctx: &'a Context,
     decls: &'a Declarations<'h>,
+    pub(crate) types: &'a mut TypeTable,
 }
 
 impl<'a, 'h> Resolver<'a, 'h> {
-    pub fn new(ctx: &'a Context, decls: &'a Declarations<'h>) -> Self {
-        Self { ctx, decls }
+    pub(crate) fn new(
+        ctx: &'a Context,
+        decls: &'a Declarations<'h>,
+        types: &'a mut TypeTable,
+    ) -> Self {
+        Self { ctx, decls, types }
     }
 
-    pub fn fields(
-        &self,
+    pub(crate) fn fields(
+        &mut self,
         declaration: Declaration<'_>,
-        bindings: &HashMap<&str, TypeId>,
+        bindings: &[(TypeName, Ty)],
         depth: usize,
     ) -> Option<Properties> {
         let (interface, class) = match declaration {
@@ -66,7 +74,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
             _ => return None,
         };
         let mut properties: Properties = Vec::new();
-        let mut merge = |field: (String, TypeId, bool)| {
+        let mut merge = |field: (String, Ty, bool)| {
             if let Some(existing) = properties.iter_mut().find(|p| p.0 == field.0) {
                 *existing = field;
             } else {
@@ -75,7 +83,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         };
         let mut remaining = ARGUMENT_LIMIT;
         for parent in interface.into_iter().flat_map(|i| &i.extends) {
-            let parent = substitute_id(self.ctx, parent, bindings, &mut remaining).ok()?;
+            let parent = substitute(self.ctx, self.types, parent, bindings, &mut remaining).ok()?;
             for field in self.record(parent, depth)? {
                 merge(field);
             }
@@ -89,16 +97,16 @@ impl<'a, 'h> Resolver<'a, 'h> {
                     .flat_map(|c| c.fields.iter().map(|f| (&f.name, &f.ty, false))),
             );
         for (name, ty, optional) in fields {
-            let ty = substitute_id(self.ctx, ty, bindings, &mut remaining).ok()?;
+            let ty = substitute(self.ctx, self.types, ty, bindings, &mut remaining).ok()?;
             merge((name.clone(), ty, optional));
         }
         Some(properties)
     }
 
-    pub fn named(
-        &self,
+    pub(crate) fn named(
+        &mut self,
         base: &str,
-        arguments: &[TypeId],
+        arguments: &[Ty],
         plain: bool,
         query: Query,
         depth: usize,
@@ -121,11 +129,14 @@ impl<'a, 'h> Resolver<'a, 'h> {
         if matches!(declaration, Declaration::Class(_)) && query == Query::Dictionary {
             return None;
         }
-        let bindings = declaration.bind(self.ctx, base, arguments).ok()?;
+        let bindings = declaration
+            .bind(self.ctx, base, self.types, arguments)
+            .ok()?;
         if let Declaration::Alias(alias) = declaration {
             let mut remaining = ARGUMENT_LIMIT;
-            let target = substitute_id(self.ctx, &alias.ty, &bindings, &mut remaining).ok()?;
-            let union = matches!(target.hir(self.ctx), HirType::Union(_));
+            let target =
+                substitute(self.ctx, self.types, &alias.ty, &bindings, &mut remaining).ok()?;
+            let union = matches!(self.types.kind(target), TyKind::Union(_));
             let resolved = self.resolve(target, query, depth + 1)?;
             // Flatten aliases only when they expose a union or a utility expansion.
             if query == Query::Union
@@ -145,44 +156,44 @@ impl<'a, 'h> Resolver<'a, 'h> {
         }
     }
 
-    fn resolve(&self, ty: TypeId, query: Query, depth: usize) -> Option<(View, usize)> {
-        let hir = ty.hir(self.ctx);
-        if let Some((base, arguments)) = generic_parts(hir) {
-            let arg_ids = TypeId::intern_slice(self.ctx, arguments);
+    fn resolve(&mut self, ty: Ty, query: Query, depth: usize) -> Option<(View, usize)> {
+        let kind = self.types.kind(ty);
+        let named = match kind {
+            TyKind::Generic { base, args } => {
+                Some((base, self.types.ty_slice(args).to_vec(), false))
+            }
+            TyKind::Named(id) => Some((id, Vec::new(), true)),
+            _ => None,
+        };
+        if let Some((id, args, plain)) = named {
             return self
-                .named(
-                    base,
-                    &arg_ids,
-                    matches!(hir, HirType::Named(_)),
-                    query,
-                    depth,
-                )
+                .named(id.get(self.ctx), &args, plain, query, depth)
                 .or_else(|| (query == Query::Union).then_some((View::Type(ty), depth)));
         }
         if query == Query::Property
-            && let HirType::Union(members) = hir
+            && let TyKind::Union(span) = kind
         {
-            let member_ids = TypeId::intern_slice(self.ctx, members);
-            let flattened = self.flatten(&member_ids, depth);
+            let members = self.types.ty_slice(span).to_vec();
+            let flattened = self.flatten(&members, depth);
             let mut defined = flattened
                 .into_iter()
-                .filter(|m| !matches!(m.hir(self.ctx), HirType::Null | HirType::Void));
-            let single = defined.next()?;
-            if defined.next().is_some() || matches!(single.hir(self.ctx), HirType::Union(_)) {
+                .filter(|ty| !matches!(*ty, Ty::NULL | Ty::VOID));
+            let one = defined.next()?;
+            if defined.next().is_some() || matches!(self.types.kind(one), TyKind::Union(_)) {
                 return None;
             }
-            return self.resolve(single, query, depth);
+            return self.resolve(one, query, depth);
         }
         Some((View::Type(ty), depth))
     }
 
-    pub fn record(&self, ty: TypeId, depth: usize) -> Option<Properties> {
+    pub(crate) fn record(&mut self, ty: Ty, depth: usize) -> Option<Properties> {
         self.resolve(ty, Query::Record, depth)?
             .0
-            .properties(self.ctx)
+            .properties(self.types)
     }
 
-    pub fn flatten(&self, members: &[TypeId], depth: usize) -> Vec<TypeId> {
+    pub(crate) fn flatten(&mut self, members: &[Ty], depth: usize) -> Vec<Ty> {
         if depth >= RESOLUTION_DEPTH {
             return members.to_vec();
         }
@@ -192,25 +203,23 @@ impl<'a, 'h> Resolver<'a, 'h> {
     }
 
     fn members(
-        &self,
-        members: &[TypeId],
+        &mut self,
+        members: &[Ty],
         query: Query,
         depth: usize,
-        out: &mut Vec<TypeId>,
+        out: &mut Vec<Ty>,
     ) -> Option<()> {
         for &member in members {
             let (View::Type(target), resolved_depth) = self.resolve(member, query, depth)? else {
                 return None;
             };
             if resolved_depth < RESOLUTION_DEPTH
-                && let HirType::Union(nested) = target.hir(self.ctx)
+                && let TyKind::Union(nested) = self.types.kind(target)
             {
-                let nested_ids = TypeId::intern_slice(self.ctx, nested);
+                let nested_ids = self.types.ty_slice(nested).to_vec();
                 self.members(&nested_ids, query, resolved_depth + 1, out)?;
             } else if query == Query::Keys {
-                if !matches!(target.hir(self.ctx), HirType::StringLiteral(_)) {
-                    return None;
-                }
+                self.literal(target)?;
                 out.push(target);
             } else {
                 out.push_unique(target);
@@ -219,16 +228,19 @@ impl<'a, 'h> Resolver<'a, 'h> {
         Some(())
     }
 
-    fn matches(&self, member: TypeId, pattern: TypeId, depth: usize) -> bool {
+    fn literal(&self, ty: Ty) -> Option<&str> {
+        if let TyKind::Literal(id) = self.types.kind(ty) {
+            Some(id.get(self.ctx))
+        } else {
+            None
+        }
+    }
+
+    fn matches(&mut self, member: Ty, pattern: Ty, depth: usize) -> bool {
         if depth >= RESOLUTION_DEPTH {
             return false;
         }
-        if member == pattern
-            || matches!(
-                (member.hir(self.ctx), pattern.hir(self.ctx)),
-                (HirType::StringLiteral(_), HirType::String)
-            )
-        {
+        if member == pattern || (self.literal(member).is_some() && pattern == Ty::STRING) {
             return true;
         }
         let (Some(member), Some(pattern)) = (
@@ -247,18 +259,23 @@ impl<'a, 'h> Resolver<'a, 'h> {
             })
     }
 
-    pub fn utility_type(&self, base: &str, arguments: &[TypeId], depth: usize) -> Option<TypeId> {
+    pub(crate) fn utility_type(
+        &mut self,
+        base: &str,
+        arguments: &[Ty],
+        depth: usize,
+    ) -> Option<Ty> {
         if depth >= RESOLUTION_DEPTH
             || self.decls.interfaces.contains_key(base)
             || self.decls.type_aliases.contains_key(base)
         {
             return None;
         }
-        let members = match (base, arguments) {
+        let members: Vec<Ty> = match (base, arguments) {
             ("NonNullable", [target]) => self
                 .flatten(std::slice::from_ref(target), depth + 1)
                 .into_iter()
-                .filter(|m| !matches!(m.hir(self.ctx), HirType::Null | HirType::Void))
+                .filter(|m| !matches!(*m, Ty::NULL | Ty::VOID))
                 .collect(),
             ("Exclude" | "Extract", [target, selected]) => {
                 let selected = self.flatten(std::slice::from_ref(selected), depth + 1);
@@ -274,13 +291,17 @@ impl<'a, 'h> Resolver<'a, 'h> {
             }
             _ => return None,
         };
-        Some(union_of(self.ctx, members))
+        Some(if members.is_empty() {
+            Ty::NEVER
+        } else {
+            self.types.union(&members)
+        })
     }
 
     fn utility(
-        &self,
+        &mut self,
         base: &str,
-        arguments: &[TypeId],
+        arguments: &[Ty],
         query: Query,
         depth: usize,
     ) -> Option<(View, usize)> {
@@ -331,13 +352,15 @@ impl<'a, 'h> Resolver<'a, 'h> {
             "Required" => {
                 for (_, ty, optional) in &mut properties {
                     *optional = false;
-                    *ty = strip_void(self.ctx, *ty);
+                    if *ty != Ty::VOID {
+                        *ty = self.types.exclude_absences(*ty, crate::Absence::Undefined);
+                    }
                 }
             }
             "Pick" | "Omit" => properties.retain(|(name, _, _)| {
                 selected
                     .iter()
-                    .any(|key| matches!(key.hir(self.ctx), HirType::StringLiteral(k) if k == name))
+                    .any(|key| self.literal(*key) == Some(name.as_str()))
                     == (base == "Pick")
             }),
             _ => {}
@@ -346,76 +369,68 @@ impl<'a, 'h> Resolver<'a, 'h> {
     }
 
     pub(crate) fn property(
-        &self,
+        &mut self,
         base: &str,
-        arguments: &[TypeId],
+        arguments: &[Ty],
         property: &str,
-    ) -> Option<(TypeId, bool)> {
+    ) -> Option<(Ty, bool)> {
         match self.named(base, arguments, false, Query::Property, 0)?.0 {
             View::Fields(fields) => fields
                 .into_iter()
                 .find(|(name, _, _)| name == property)
                 .map(|(_, ty, optional)| (ty, optional)),
             View::Index(value) => Some((value, true)),
-            View::Type(ty) => match ty.hir(self.ctx) {
-                HirType::Object(obj) => obj
-                    .properties
-                    .get(property)
-                    .map(|p| (TypeId::intern(self.ctx, &p.ty), p.optional))
-                    .or_else(|| {
-                        obj.index_signature
-                            .as_deref()
-                            .map(|idx| (TypeId::intern(self.ctx, idx), true))
-                    }),
+            View::Type(ty) => match self.types.kind(ty) {
+                TyKind::Object { props, index } => self
+                    .types
+                    .object_slice(props)
+                    .iter()
+                    .find(|p| self.types.name_str(p.name) == property)
+                    .map(|p| (p.ty, p.optional))
+                    .or_else(|| index.map(|ty| (ty, true))),
                 _ => None,
             },
         }
     }
 
-    pub(crate) fn dictionary(&self, ty: TypeId) -> Option<(HirType, HirType)> {
-        let value = match self.resolve(ty, Query::Dictionary, 0)?.0 {
-            View::Index(value) => value.hir(self.ctx).clone(),
-            View::Fields(fields) => self.uniform(
-                fields
-                    .iter()
-                    .map(|(_, ty, optional)| (ty.hir(self.ctx), *optional)),
-            )?,
-            View::Type(ty) => match ty.hir(self.ctx) {
-                HirType::Object(obj) => match &obj.index_signature {
-                    Some(value) => (**value).clone(),
-                    None => self.uniform(obj.properties.values().map(|p| (&p.ty, p.optional)))?,
-                },
-                _ => return None,
-            },
+    pub(crate) fn dictionary(&mut self, ty: Ty) -> Option<(Ty, Ty)> {
+        let view = self.resolve(ty, Query::Dictionary, 0)?.0;
+        let fields = match view {
+            View::Index(value) => return Some((Ty::STRING, value)),
+            View::Type(ty)
+                if let TyKind::Object {
+                    index: Some(value), ..
+                } = self.types.kind(ty) =>
+            {
+                return Some((Ty::STRING, value));
+            }
+            other => other.properties(self.types)?,
         };
-        Some((HirType::String, value))
-    }
-
-    fn uniform<'b>(
-        &self,
-        mut properties: impl Iterator<Item = (&'b HirType, bool)>,
-    ) -> Option<HirType> {
-        let (first, mut optional) = properties.next()?;
+        let (_, first, mut optional) = *fields.first()?;
+        let defined = self
+            .types
+            .exclude_absences(first, crate::Absence::Undefined);
         let mut exact = true;
-        for (ty, opt) in properties {
+        for (_, ty, opt) in fields.into_iter().skip(1) {
             optional |= opt;
-            if ty != first {
-                if !optional_union_members(ty).eq(optional_union_members(first)) {
+            if first != ty {
+                if self.types.exclude_absences(ty, crate::Absence::Undefined) != defined {
                     return None;
                 }
                 exact = false;
             }
         }
-        (exact || optional).then(|| optional_property(first.clone(), optional))
+        (exact || optional).then(|| {
+            (
+                Ty::STRING,
+                if optional {
+                    self.types.with_absences(first, crate::Absence::Undefined)
+                } else {
+                    first
+                },
+            )
+        })
     }
-}
-
-fn optional_union_members(ty: &HirType) -> impl Iterator<Item = &HirType> {
-    let (items, add_void) = match ty {
-        HirType::Union(items) => (items.as_slice(), !items.contains(&HirType::Void)),
-        other => (std::slice::from_ref(other), true),
-    };
-    items.iter().chain(add_void.then_some(&HirType::Void))
 }
 
 #[cfg(test)]

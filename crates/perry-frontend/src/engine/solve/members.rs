@@ -34,7 +34,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.types.has_func(val_ty) || prop_ty.is_some_and(|p| self.types.has_func(p));
         if touches_func
             && val_ty != Ty::BOTTOM
-            && !prop_ty.is_some_and(|p| self.types.accepts(self.ctx, p, val_ty))
+            && !prop_ty.is_some_and(|p| self.types.accepts(p, val_ty))
         {
             let mut err = Diagnostic::unsupported(format!(
                 "reassigning function property '{property}' on an object literal is not supported yet"
@@ -143,10 +143,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         let r_env = self.types.is_env_func(r, &self.escaping_env_templates);
         let helper = (!(l_zero || r_zero || (l_env && r_env && l == r))).then(|| {
             self.intern_helper(
-                HelperSpec::Comparer {
+                HelperSpec::Callable(CallableOp::Comparer {
                     left_ty: l,
                     right_ty: r,
-                },
+                }),
                 0,
             )
         });
@@ -258,30 +258,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(init) = init {
             self.eval_expr(s, init)?;
         }
-        let base = shapes::TypeId::from_owned(
-            self.ctx,
-            HirType::Named(if is_map { "Map" } else { "Set" }.into()),
-        );
+        let base = shapes::TypeName::new(self.ctx, if is_map { "Map" } else { "Set" }.into());
         if let Some(mut arg_tys) = explicit_tys {
             let bindings = self.active_instance_type_bindings(s.inst);
             let mut specialized = false;
             for ty in &mut arg_tys {
-                let bound = self.types.substitute(self.ctx, *ty, &bindings);
+                let bound = self.types.substitute(*ty, &bindings);
                 let concrete = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
                 specialized |= concrete != *ty;
                 *ty = concrete;
             }
+            let ty = self.types.generic(base, &arg_tys);
             if specialized {
-                self.record_site(
-                    s.inst,
-                    expr,
-                    SiteResolution::CollectionNew {
-                        is_map,
-                        type_args: arg_tys.clone(),
-                    },
-                );
+                let op = if is_map {
+                    crate::engine::ExpressionOp::Map(ty)
+                } else {
+                    crate::engine::ExpressionOp::Set(ty)
+                };
+                self.record_site(s.inst, expr, SiteResolution::CollectionNew(op));
             }
-            return Ok(self.types.generic(base, &arg_tys));
+            return Ok(ty);
         }
         if let Some(init) = init {
             if is_map {
@@ -331,7 +327,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn active_instance_type_bindings(
         &mut self,
         inst_id: InstanceId,
-    ) -> Vec<(shapes::TypeId, Ty)> {
+    ) -> Vec<(shapes::TypeName, Ty)> {
         let Some(inst) = self.instances.get(inst_id) else {
             return Vec::new();
         };
@@ -348,7 +344,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn check_timer_member(&self, receiver: Ty, offset: u32) -> Result<()> {
-        if matches!(self.types.kind(receiver), TyKind::Leaf(id) if crate::hir_compat::is_timer_handle(id.hir(self.ctx)))
+        if matches!(self.types.kind(receiver), TyKind::Named(id) if id.get(self.ctx) == crate::hir_compat::TIMER_CLASS)
         {
             let locations = &self.metadata.locations;
             let member = locations
@@ -445,16 +441,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if matches!(
             self.types.kind(stripped),
-            TyKind::Leaf(_) | TyKind::Generic { .. }
+            TyKind::Named(_) | TyKind::Generic { .. }
         ) {
-            let hir = self.types.materialize_hir(self.ctx, stripped);
             return Some(
-                self.decls
-                    .object_properties(self.ctx, &hir)?
+                crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+                    .record(stripped, 0)?
                     .into_iter()
-                    .map(|(n, fh, optional)| {
+                    .map(|(n, mut ty, optional)| {
                         let name = self.types.intern_name(&n);
-                        let mut ty = self.types.intern_hir(self.ctx, &fh, true);
                         if optional {
                             ty = self.types.with_absences(ty, Absence::Undefined);
                         }

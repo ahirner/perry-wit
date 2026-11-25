@@ -94,35 +94,35 @@ fn constrain_numbers(
 
 pub(super) fn exports(
     ctx: &mut Context,
-    targets: &[perry_lower::ExportTarget],
+    targets: Vec<perry_frontend::ExportTarget>,
     resolve: &Resolve,
     world_id: WorldId,
-    metadata: &perry_frontend::hir_compat::Metadata,
 ) -> Result<Vec<Export>> {
     let world = &resolve.worlds[world_id];
+    let mut targets = targets.into_iter();
     let mut bound = Vec::new();
-    for (i, entry) in perry_contract::world_functions(resolve, world.exports.iter()).enumerate() {
+    for entry in perry_contract::world_functions(resolve, world.exports.iter()) {
         let function = entry.function;
         let target = targets
-            .get(i)
+            .next()
             .ok_or_else(|| Diagnostic::internal("world export has no witness"))?;
         let core_name = if entry.interface.is_some() {
             core_export_name(resolve, entry.key, function)
         } else {
             function.name.clone()
         };
-        let mir_function = match target {
-            perry_lower::ExportTarget::Function(func) => func,
-            perry_lower::ExportTarget::Destructor(..) => {
+        let (mir_function, annotations) = match target {
+            perry_frontend::ExportTarget::Function(func, annotations) => (func, annotations),
+            perry_frontend::ExportTarget::Destructor(..) => {
                 return Err(Diagnostic::internal("expected function witness"));
             }
-            perry_lower::ExportTarget::Command(main) => {
+            perry_frontend::ExportTarget::Command(main) => {
                 bound.push((
                     main,
                     Export {
                         annotations: Vec::new(),
                         core_name,
-                        function: perry_lower::MAIN.to_string(),
+                        function: perry_frontend::MAIN.to_string(),
                         params: vec![],
                         result: None,
                         kind: ExportKind::Async {
@@ -139,7 +139,7 @@ pub(super) fn exports(
         };
         let implementation = mir_function.get_symbol_name(ctx).to_string();
         let expected_async = function.kind.is_async();
-        if perry_mir::is_async(ctx, mir_function) != expected_async {
+        if perry_mir::is_async(ctx, &mir_function) != expected_async {
             let help = if expected_async {
                 format!(
                     "Add 'async' to 'export async function {implementation}(...)' so it matches the WIT export."
@@ -155,7 +155,7 @@ pub(super) fn exports(
                 if expected_async { "not " } else { "" },
                 if expected_async { "" } else { "not " },
             )
-            .with_optional_span(perry_mir::source_span(ctx, mir_function))
+            .with_optional_span(perry_mir::source_span(ctx, &mir_function))
             .with_help(help));
         }
         let params = function
@@ -184,7 +184,7 @@ pub(super) fn exports(
         bound.push((
             mir_function,
             Export {
-                annotations: metadata.witness_annotations(i),
+                annotations,
                 core_name,
                 function: implementation,
                 params,
@@ -193,8 +193,8 @@ pub(super) fn exports(
             },
         ));
     }
-    for target in targets.iter().skip(bound.len()) {
-        let perry_lower::ExportTarget::Destructor(function, core_name) = target else {
+    for target in targets {
+        let perry_frontend::ExportTarget::Destructor(function, core_name) = target else {
             return Err(Diagnostic::internal(
                 "unexpected witness after world functions",
             ));
@@ -203,7 +203,7 @@ pub(super) fn exports(
             function,
             Export {
                 annotations: Vec::new(),
-                core_name: core_name.clone(),
+                core_name,
                 function: function.get_symbol_name(ctx).into(),
                 params: vec![AbiType::U32],
                 result: None,
@@ -235,7 +235,7 @@ pub(super) fn finalize_exports(
     exports: &mut [Export],
 ) -> Result<()> {
     let functions = module_functions(ctx, mir);
-    if functions.contains_key(perry_lower::MAIN)
+    if functions.contains_key(perry_frontend::MAIN)
         && !functions.contains_key(perry_mir::INITIALIZER)
         && !exports.iter().any(Export::is_command)
     {

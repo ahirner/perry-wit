@@ -48,98 +48,30 @@ impl<'h> Emitter<'h, '_> {
         rctx: &mut RewriteCtx<'_>,
         stmts: &'h [Stmt],
     ) -> Result<Vec<Stmt>> {
-        let mut out = Vec::with_capacity(stmts.len());
-        for stmt in stmts {
-            if let Stmt::Let { id, name, ty, .. } = stmt
-                && self.is_forward_boxed(*id)
-            {
-                let out_id = match &mut rctx.remap {
-                    Some(r) => self.fresh_local(*id, r)?,
-                    None => *id,
-                };
-                let inner_ty = self.resolve_let_ty(rctx.inst_id, *id, name, ty)?;
-                let box_ty = box_hir(Self::admitting_undefined_hir(inner_ty));
-                self.boxed_locals.push(out_id);
-                out.push(Stmt::Let {
-                    id: out_id,
-                    name: name.clone(),
-                    ty: box_ty,
-                    mutable: false,
-                    init: Some(Self::emit_box_record(Expr::Undefined)),
-                });
-            }
-        }
-        let mut pending_for_boxes: Vec<LocalId> = Vec::new();
-        for stmt in stmts {
-            match stmt {
-                Stmt::Let { id, .. }
-                    if self.index.is_for_head_local(*id) && self.is_boxed_local(*id) =>
-                {
-                    let rewritten = self.rewrite_stmt(rctx, stmt)?;
-                    if let Stmt::Let { id: out_id, .. } = &rewritten {
-                        pending_for_boxes.push(*out_id);
-                    }
-                    out.push(rewritten);
-                }
-                Stmt::For {
-                    init,
-                    condition,
-                    update,
-                    body,
-                } => {
-                    let mut box_ids = std::mem::take(&mut pending_for_boxes);
-                    let rewritten_init = init
-                        .as_deref()
-                        .map(|s| {
-                            let r = self.rewrite_stmt(rctx, s)?;
-                            if let (Stmt::Let { id: orig_id, .. }, Stmt::Let { id: out_id, .. }) =
-                                (s, &r)
-                                && self.index.is_for_head_local(*orig_id)
-                                && self.is_boxed_local(*orig_id)
-                            {
-                                box_ids.push(*out_id);
-                            }
-                            Ok::<_, Diagnostic>(Box::new(r))
-                        })
-                        .transpose()?;
-                    let rewritten_cond = self.rewrite_opt_expr(rctx, condition.as_ref())?;
-                    let mut rewritten_update = self.rewrite_opt_expr(rctx, update.as_ref())?;
-                    let rewritten_body = self.rewrite_stmts(rctx, body)?;
-                    if !box_ids.is_empty() {
-                        let mut seq = Vec::with_capacity(box_ids.len() + 1);
-                        for box_id in box_ids {
-                            let fresh =
-                                Self::emit_box_record(Self::prop_get(Expr::LocalGet(box_id), "v"));
-                            seq.push(Expr::LocalSet(box_id, Box::new(fresh)));
-                        }
-                        if let Some(u) = rewritten_update {
-                            seq.push(u);
-                        }
-                        rewritten_update = Some(Expr::Sequence(seq));
-                    }
-                    out.push(Stmt::For {
-                        init: rewritten_init,
-                        condition: rewritten_cond,
-                        update: rewritten_update,
-                        body: rewritten_body,
-                    });
-                }
-                _ => {
-                    pending_for_boxes.clear();
-                    out.push(self.rewrite_stmt(rctx, stmt)?);
-                }
-            }
-        }
-        Ok(out)
+        stmts
+            .iter()
+            .map(|stmt| self.rewrite_stmt(rctx, stmt))
+            .collect()
     }
 
-    pub(super) fn resolve_let_ty(
+    pub(super) fn local_storage(
+        &mut self,
+        instance: InstanceId,
+        id: LocalId,
+        storage: crate::engine::Storage,
+    ) {
+        let owner = (instance != self.solved.init_inst)
+            .then(|| self.solved.instances[instance].emitted_func_id);
+        self.plans.locals.insert((owner, id), storage);
+    }
+
+    fn resolve_let_ty(
         &mut self,
         inst_id: InstanceId,
         id: LocalId,
         name: &str,
         ty: &HirType,
-    ) -> Result<HirType> {
+    ) -> Result<Option<Ty>> {
         let resolved = self.local_ty(inst_id, id);
         let local_flags = self
             .index
@@ -155,7 +87,8 @@ impl<'h> Emitter<'h, '_> {
                         || matches!(ty, HirType::Array(e) if matches!(**e, HirType::Any | HirType::Unknown))
                         || matches!(self.types.kind(t), TyKind::ClassInst(_))) =>
             {
-                self.materialize(t)
+                self.prepare_layouts(t)?;
+                Ok(Some(t))
             }
             Some(t)
                 if matches!(
@@ -166,7 +99,8 @@ impl<'h> Emitter<'h, '_> {
                     }
                 ) =>
             {
-                self.materialize(t)
+                self.prepare_layouts(t)?;
+                Ok(Some(t))
             }
             Some(t)
                 if let TyKind::Cell { loc, kind } = self.types.kind(t)
@@ -200,7 +134,7 @@ impl<'h> Emitter<'h, '_> {
                 let err = self.annotate_local(err, id);
                 Err(self.attach_inst_chain(err, inst_id))
             }
-            _ => Ok(ty.clone()),
+            _ => Ok(None),
         }
     }
 
@@ -240,51 +174,43 @@ impl<'h> Emitter<'h, '_> {
                         init: Some(Expr::FuncRef(fid)),
                     });
                 }
-                if self.is_forward_boxed(*id) {
-                    let init_ctx = rctx.with_expected(true);
-                    return match self.rewrite_opt_expr(&init_ctx, init.as_ref())? {
-                        Some(val) => {
-                            Ok(Stmt::Expr(Self::prop_set(Expr::LocalGet(out_id), "v", val)))
-                        }
-                        None => Ok(Stmt::Expr(Expr::Undefined)),
-                    };
-                }
-                let new_ty = self.resolve_let_ty(rctx.inst_id, *id, name, ty)?;
-                let init_has_expected = !matches!(new_ty, HirType::Any | HirType::Unknown);
+                let solved = self.resolve_let_ty(rctx.inst_id, *id, name, ty)?;
+                let init_has_expected = solved.map_or_else(
+                    || !matches!(ty, HirType::Any | HirType::Unknown),
+                    |t| !matches!(t, Ty::DYNAMIC | Ty::OPEN | Ty::BOTTOM),
+                );
                 let init_ctx = rctx.with_expected(init_has_expected);
-                let rewritten_init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
+                let init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
                 if self.is_boxed_local(*id) {
-                    self.boxed_locals.push(out_id);
-                    let undef_box = self.is_undef_boxed(*id);
-                    let (box_inner_ty, init_val) =
-                        if undef_box && matches!(init, None | Some(Expr::Undefined)) {
-                            (Self::admitting_undefined_hir(new_ty), Expr::Undefined)
-                        } else {
-                            let v = match rewritten_init {
-                                Some(v) => v,
-                                None => self.default_box_init(&new_ty, *id, rctx.inst_id)?,
-                            };
-                            let t = if undef_box {
-                                Self::admitting_undefined_hir(new_ty)
-                            } else {
-                                new_ty
-                            };
-                            (t, v)
-                        };
+                    if self.index.is_for_head_local(*id) {
+                        self.plans.per_iteration.insert(out_id);
+                    }
+                    let inner = self.boxed_type(*id, solved)?;
+                    self.local_storage(
+                        rctx.inst_id,
+                        out_id,
+                        crate::engine::Storage::Boxed {
+                            ty: inner,
+                            init: self.cell_init(*id),
+                        },
+                    );
                     return Ok(Stmt::Let {
                         id: out_id,
                         name: name.clone(),
-                        ty: box_hir(box_inner_ty),
+                        ty: ty.clone(),
                         mutable: self.index.is_for_head_local(*id),
-                        init: Some(Self::emit_box_record(init_val)),
+                        init,
                     });
+                }
+                if let Some(solved) = solved {
+                    self.local_storage(rctx.inst_id, out_id, crate::engine::Storage::Value(solved));
                 }
                 Ok(Stmt::Let {
                     id: out_id,
                     name: name.clone(),
-                    ty: new_ty,
+                    ty: ty.clone(),
                     mutable: *mutable,
-                    init: rewritten_init,
+                    init,
                 })
             }
             Stmt::Expr(e) => Ok(Stmt::Expr(self.rewrite_expr(rctx, e)?)),
@@ -390,29 +316,13 @@ impl<'h> Emitter<'h, '_> {
         }
     }
 
-    pub(super) fn default_box_init(
-        &self,
-        ty: &HirType,
-        id: LocalId,
-        inst_id: InstanceId,
-    ) -> Result<Expr> {
-        match ty {
-            HirType::Void => Ok(Expr::Undefined),
-            HirType::Null => Ok(Expr::Null),
-            HirType::Union(members) if members.contains(&HirType::Void) => Ok(Expr::Undefined),
-            HirType::Union(members) if members.contains(&HirType::Null) => Ok(Expr::Null),
-            HirType::Number | HirType::Int32 => Ok(Expr::Number(0.0)),
-            HirType::Boolean => Ok(Expr::Bool(false)),
-            HirType::String => Ok(Expr::String(String::new())),
-            _ => {
-                let err = self.annotate_local(
-                    Diagnostic::unsupported(
-                        "captured local declared without an initializer has no placeholder value",
-                    ),
-                    id,
-                );
-                Err(self.attach_inst_chain(err, inst_id))
-            }
-        }
+    pub(super) fn boxed_type(&self, id: LocalId, solved: Option<Ty>) -> Result<Ty> {
+        solved
+            .or_else(|| {
+                self.index
+                    .local_idx(id)
+                    .map(|local| self.index.locals[local].declared)
+            })
+            .ok_or_else(|| Diagnostic::internal("boxed local has no declaration"))
     }
 }

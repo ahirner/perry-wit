@@ -1,59 +1,8 @@
 //! Plain expression rewriting, boxed capture access, and call operand projection.
 use super::expressions::CalleeValue;
 use super::*;
-use crate::hir_compat;
 
 impl<'h> Emitter<'h, '_> {
-    pub(super) fn local_read_override(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
-        let undef_box = self.is_undef_boxed(id);
-        let unwrap_box = |base: Expr| {
-            let val = Self::prop_get(base, "v");
-            if undef_box {
-                hir_compat::mark_non_null(val)
-            } else {
-                val
-            }
-        };
-        if let Some(env_pid) = rctx.env_local
-            && let Some((_, field, boxed)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == id)
-        {
-            let base = Self::prop_get(Expr::LocalGet(env_pid), field);
-            return Some(if *boxed { unwrap_box(base) } else { base });
-        }
-        if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| *lid == id) {
-            return Some(unwrap_box(Expr::LocalGet(box_id)));
-        }
-        if self.is_boxed_local(id) {
-            return Some(unwrap_box(Expr::LocalGet(id)));
-        }
-        None
-    }
-
-    pub(super) fn method_call_expr(recv: Expr, property: &str, args: Vec<Expr>) -> Expr {
-        Expr::Call {
-            callee: Box::new(Self::prop_get(recv, property)),
-            args,
-            type_args: Vec::new(),
-            byte_offset: 0,
-            byte_end: 0,
-        }
-    }
-
-    pub(super) fn boxed_target(&self, rctx: &RewriteCtx<'_>, id: LocalId) -> Option<Expr> {
-        if let Some(env_pid) = rctx.env_local
-            && let Some((_, field, boxed)) = rctx.env_captures.iter().find(|(lid, _, _)| *lid == id)
-        {
-            return boxed.then(|| Self::prop_get(Expr::LocalGet(env_pid), field));
-        }
-        if let Some(&(_, box_id)) = rctx.boxed_param_map.iter().find(|(lid, _)| *lid == id) {
-            return Some(Expr::LocalGet(box_id));
-        }
-        if self.is_boxed_local(id) {
-            return Some(Expr::LocalGet(id));
-        }
-        None
-    }
-
     pub(super) fn rewrite_expr_plain(
         &mut self,
         rctx: &RewriteCtx<'_>,
@@ -85,14 +34,14 @@ impl<'h> Emitter<'h, '_> {
                 template: tid,
                 capture_owner,
             };
-            let class_name = self.ensure_env_class(ident)?;
+            let constructor = self.environment(ident)?;
             let fields = self.env_layout(ident)?;
             let args = if fields.is_empty() {
                 vec![Expr::Number(0.0)]
             } else {
                 let mut out_args = Vec::with_capacity(fields.len());
                 for (cap_id, _, dst_ty, boxed) in fields {
-                    let mut arg = self.emit_capture_ref(rctx, cap_id);
+                    let mut arg = Expr::LocalGet(cap_id);
                     if !boxed
                         && matches!(capture_owner, CaptureOwner::Template(_))
                         && let Some(src_ty) =
@@ -105,95 +54,12 @@ impl<'h> Emitter<'h, '_> {
                 }
                 out_args
             };
-            let env_expr = Self::synth_new(class_name, args);
-            return Ok(Self::emit_env_wrapper(ident, env_expr));
+            return Ok(synth_call(constructor, args, 0, 0));
         }
-        if let Expr::LocalGet(id) = expr {
-            if let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id) {
-                return Ok(Expr::FuncRef(*fid));
-            }
-            if let Some(override_expr) = self.local_read_override(rctx, *id) {
-                return Ok(override_expr);
-            }
-        }
-        match expr {
-            Expr::ArrayPush {
-                array_id, value, ..
-            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
-                let arg_ctx = rctx.with_expected(true);
-                let val = self.rewrite_expr(&arg_ctx, value)?;
-                return Ok(Self::method_call_expr(recv, "push", vec![val]));
-            }
-            Expr::ArrayPushSpread { array_id, source }
-                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
-            {
-                let src = self.rewrite_expr(rctx, source)?;
-                return Ok(Expr::CallSpread {
-                    callee: Box::new(Self::prop_get(recv, "push")),
-                    args: vec![CallArg::Spread(src)],
-                    type_args: Vec::new(),
-                    byte_offset: 0,
-                    byte_end: 0,
-                });
-            }
-            Expr::ArrayPop(array_id)
-                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
-            {
-                return Ok(Self::method_call_expr(recv, "pop", Vec::new()));
-            }
-            Expr::ArrayShift(array_id)
-                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
-            {
-                return Ok(Self::method_call_expr(recv, "shift", Vec::new()));
-            }
-            Expr::ArrayUnshift { array_id, value }
-                if let Some(recv) = self.local_read_override(rctx, *array_id) =>
-            {
-                let arg_ctx = rctx.with_expected(true);
-                let val = self.rewrite_expr(&arg_ctx, value)?;
-                return Ok(Self::method_call_expr(recv, "unshift", vec![val]));
-            }
-            Expr::ArraySplice {
-                array_id,
-                start,
-                delete_count,
-                items,
-            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
-                let mut args = vec![self.rewrite_expr(rctx, start)?];
-                if let Some(dc) = delete_count {
-                    args.push(self.rewrite_expr(rctx, dc)?);
-                }
-                for item in items {
-                    args.push(self.rewrite_expr(rctx, item)?);
-                }
-                return Ok(Self::method_call_expr(recv, "splice", args));
-            }
-            Expr::ArrayCopyWithin {
-                array_id,
-                target,
-                start,
-                end,
-            } if let Some(recv) = self.local_read_override(rctx, *array_id) => {
-                return Ok(Expr::ArrayCopyWithinValue {
-                    receiver: Box::new(recv),
-                    target: Box::new(self.rewrite_expr(rctx, target)?),
-                    start: Box::new(self.rewrite_expr(rctx, start)?),
-                    end: self.rewrite_opt_expr(rctx, end.as_deref())?.map(Box::new),
-                });
-            }
-            Expr::SetAdd { set_id, value }
-                if let Some(recv) = self.local_read_override(rctx, *set_id) =>
-            {
-                let val = self.rewrite_expr(rctx, value)?;
-                return Ok(Self::method_call_expr(recv, "add", vec![val]));
-            }
-            _ => {}
-        }
-        if let Expr::LocalSet(id, value) = expr
-            && let Some(box_obj) = self.boxed_target(rctx, *id)
+        if let Expr::LocalGet(id) = expr
+            && let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id)
         {
-            let val = self.rewrite_expr(rctx, value)?;
-            return Ok(Self::prop_set(box_obj, "v", val));
+            return Ok(Expr::FuncRef(*fid));
         }
         if let Expr::Conditional {
             condition,
@@ -218,23 +84,6 @@ impl<'h> Emitter<'h, '_> {
                 operand: Box::new(self.rewrite_condition(rctx, operand)?),
             });
         }
-        if let Expr::Update { id, op, prefix } = expr
-            && let Some(box_obj) = self.boxed_target(rctx, *id)
-        {
-            let bin_op = match op {
-                UpdateOp::Increment => BinaryOp::Add,
-                UpdateOp::Decrement => BinaryOp::Sub,
-            };
-            return Ok(Expr::PropertyUpdate {
-                object: Box::new(box_obj),
-                property: "v".into(),
-                op: bin_op,
-                prefix: *prefix,
-                strict: true,
-                byte_offset: 0,
-                byte_end: 0,
-            });
-        }
         let nested;
         let rctx = if rctx.self_local.is_some()
             && matches!(
@@ -249,9 +98,7 @@ impl<'h> Emitter<'h, '_> {
                 remap: None,
                 func_params: rctx.func_params,
                 self_local: None,
-                env_local: rctx.env_local,
-                env_captures: rctx.env_captures,
-                boxed_param_map: rctx.boxed_param_map,
+
                 void_return: false,
                 has_expected: false,
             };

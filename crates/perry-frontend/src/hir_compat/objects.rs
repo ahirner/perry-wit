@@ -2,7 +2,7 @@ use perry_hir::ir::Expr;
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{bail_unsupported, ensure_internal, unsupported};
 
-pub fn init_fields<'h, 'e>(
+pub(crate) fn init_fields<'h, 'e>(
     init: Option<&'e Expr>,
     literal_fields: impl FnOnce(&str) -> Option<&'h [&'h str]>,
 ) -> Result<Vec<(&'h str, &'e Expr)>> {

@@ -12,16 +12,14 @@ use super::solve::{
 };
 use super::types::{
     CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, Idx, IdxVec, InstanceId,
-    TemplateId, Ty, TyKind, TypeTable, box_hir, func_tag,
+    TemplateId, Ty, TyKind, TypeTable,
 };
-use crate::hir_compat::resource_classes::{
-    external, local, synth_call, synth_function, synth_param,
-};
+use crate::hir_compat::resource_classes::{synth_call, synth_param};
 use crate::hir_compat::{Locations, Metadata};
 use perry_hir::{
     ir::{
-        BinaryOp, CallArg, CatchClause, Class, CompareOp, Expr, Function, Module as HirModule,
-        Stmt, SwitchCase, UnaryOp, UpdateOp,
+        CallArg, CatchClause, Class, CompareOp, Expr, Function, Module as HirModule, Stmt,
+        SwitchCase, UnaryOp,
     },
     types::{FuncId, LocalId, Type as HirType},
 };
@@ -30,6 +28,7 @@ use pliron::context::Context;
 use std::collections::HashMap;
 
 pub(crate) struct Emitted {
+    plans: super::InstancePlans,
     pub(crate) init: Vec<Stmt>,
     pub(crate) functions: Vec<Function>,
     pub(crate) classes: Vec<Class>,
@@ -37,12 +36,14 @@ pub(crate) struct Emitted {
     pub(crate) instantiations: Vec<(String, String, u32, Option<String>)>,
     pub(crate) inline_callbacks: Vec<FuncId>,
     pub(crate) class_origins: Vec<(String, String)>,
-    pub(crate) boxed_locals: Vec<LocalId>,
-    pub(crate) deletes_array_elements: bool,
 }
 
 impl Emitted {
-    pub(crate) fn apply(self, hir: &mut HirModule, metadata: &mut Metadata<'_>) {
+    pub(crate) fn apply(
+        self,
+        hir: &mut HirModule,
+        metadata: &mut Metadata<'_>,
+    ) -> super::InstancePlans {
         hir.init = self.init;
         hir.functions = self.functions;
         hir.classes = self.classes;
@@ -50,15 +51,6 @@ impl Emitted {
             if let Some(&span) = hir.local_source_spans.get(&old_id) {
                 hir.local_source_spans.insert(new_id, span);
             }
-            if metadata.deferred_bindings.contains(&old_id) {
-                metadata.deferred_bindings.insert(new_id);
-            }
-            if metadata.inferred_bindings.contains(&old_id) {
-                metadata.inferred_bindings.insert(new_id);
-            }
-        }
-        for id in self.boxed_locals {
-            metadata.deferred_bindings.remove(&id);
         }
         for (inst_name, template_name, offset, caller) in self.instantiations {
             metadata
@@ -67,7 +59,7 @@ impl Emitted {
         }
         metadata.inline_callbacks.extend(self.inline_callbacks);
         metadata.class_origins.extend(self.class_origins);
-        metadata.sparse_arrays |= self.deletes_array_elements;
+        self.plans
     }
 }
 
@@ -96,28 +88,19 @@ pub(crate) fn build(
         solved,
         next_local: index.max_local_id.saturating_add(1),
         next_func_id: index.max_func_id.max(max_inst_fid).saturating_add(1),
-        next_class_id: hir
-            .classes
-            .iter()
-            .map(|c| c.id)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1),
         remapped_locals: Vec::new(),
         instantiations: Vec::new(),
         inline_callbacks: Vec::new(),
         class_origins: Vec::new(),
-        boxed_locals: Vec::new(),
-        emitted_env_classes: std::collections::HashSet::new(),
-        emitted_timer_class: false,
-        synth_classes: Vec::new(),
-        synth_functions: Vec::new(),
+        environments: HashMap::new(),
+        timer_record: None,
         helper_slots: solved.helpers.filled(None),
+        expression_ids: HashMap::new(),
+        plans: Default::default(),
     };
-    let (init, mut functions, mut classes) = e.build_all()?;
-    functions.extend(e.synth_functions);
-    classes.extend(e.synth_classes);
+    let (init, functions, classes) = e.build_all()?;
     Ok(Emitted {
+        plans: e.plans,
         init,
         functions,
         classes,
@@ -125,8 +108,6 @@ pub(crate) fn build(
         instantiations: e.instantiations,
         inline_callbacks: e.inline_callbacks,
         class_origins: e.class_origins,
-        boxed_locals: e.boxed_locals,
-        deletes_array_elements: solved.deletes_array_elements,
     })
 }
 
@@ -137,32 +118,28 @@ struct Emitter<'h, 'a> {
     hir: &'h HirModule,
     index: &'a ModuleIndex<'h>,
     locations: &'a Locations<'a>,
-    resource_members: &'a [crate::wit::ResourceMember],
+    resource_members: &'a [crate::wit::ResourceMember<'a>],
     resource_functions: Vec<Option<FuncId>>,
     types: &'a TypeTable,
     solved: &'a Solved,
     next_local: LocalId,
     next_func_id: FuncId,
-    next_class_id: u32,
     remapped_locals: Vec<(LocalId, LocalId)>,
     instantiations: Vec<(String, String, u32, Option<String>)>,
     inline_callbacks: Vec<FuncId>,
     class_origins: Vec<(String, String)>,
-    boxed_locals: Vec<LocalId>,
-    emitted_env_classes: std::collections::HashSet<FuncIdentity>,
-    emitted_timer_class: bool,
-    synth_classes: Vec<Class>,
-    synth_functions: Vec<Function>,
-    helper_slots: IdxVec<HelperId, Option<usize>>,
+    environments: HashMap<FuncIdentity, FuncId>,
+    timer_record: Option<FuncId>,
+    helper_slots: IdxVec<HelperId, Option<FuncId>>,
+    expression_ids: HashMap<super::ExpressionOp, FuncId>,
+    plans: super::InstancePlans,
 }
 
 struct RewriteCtx<'a> {
     inst_id: InstanceId,
     func_params: &'a [(LocalId, FuncId)],
     self_local: Option<LocalId>,
-    env_local: Option<LocalId>,
-    env_captures: &'a [(LocalId, String, bool)],
-    boxed_param_map: &'a [(LocalId, LocalId)],
+
     void_return: bool,
     has_expected: bool,
     remap: Option<&'a mut HashMap<LocalId, LocalId>>,
@@ -173,9 +150,7 @@ impl RewriteCtx<'_> {
             inst_id,
             func_params: &[],
             self_local: None,
-            env_local: None,
-            env_captures: &[],
-            boxed_param_map: &[],
+
             void_return: false,
             has_expected: false,
             remap: None,
@@ -186,9 +161,7 @@ impl RewriteCtx<'_> {
             inst_id: self.inst_id,
             func_params: self.func_params,
             self_local: self.self_local,
-            env_local: self.env_local,
-            env_captures: self.env_captures,
-            boxed_param_map: self.boxed_param_map,
+
             void_return: self.void_return,
             has_expected,
             remap: None,
@@ -197,6 +170,24 @@ impl RewriteCtx<'_> {
 }
 
 impl<'h> Emitter<'h, '_> {
+    fn expression_op(&mut self, op: super::ExpressionOp, args: Vec<Expr>) -> Result<Expr> {
+        let id = self.expression_id(op)?;
+        Ok(synth_call(id, args, 0, 0))
+    }
+
+    fn expression_id(&mut self, op: super::ExpressionOp) -> Result<FuncId> {
+        Ok(if let Some(&id) = self.expression_ids.get(&op) {
+            id
+        } else {
+            let id = self.fresh_func_id()?;
+            self.expression_ids.insert(op, id);
+            self.plans
+                .operations
+                .insert(id, super::NativeOperation::Expression(op));
+            id
+        })
+    }
+
     fn is_resolved(&self, ty: Ty) -> bool {
         !self.types.is_open_with(
             ty,
@@ -279,13 +270,11 @@ impl<'h> Emitter<'h, '_> {
                 continue;
             }
             let view = self.index.view(inst.template);
-            if !matches!(
-                view.kind,
-                TemplateKind::Function
-                    | TemplateKind::Closure
-                    | TemplateKind::PromiseResolve(_)
-                    | TemplateKind::PromiseReject(_)
-            ) {
+            if let TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_) = view.kind {
+                self.promise_handle_function(inst, view.kind)?;
+                continue;
+            }
+            if !matches!(view.kind, TemplateKind::Function | TemplateKind::Closure) {
                 continue;
             }
             let remap_locals = !seen_templates.insert(inst.template.index());
@@ -370,6 +359,12 @@ impl<'h> Emitter<'h, '_> {
         let mut cls = orig.clone();
         cls.type_params.clear();
         let init_ctx = RewriteCtx::plain(init_inst);
+        let name = instantiated
+            .as_ref()
+            .map_or(orig.name.as_str(), |(_, instance)| {
+                instance.emitted_name.as_str()
+            });
+        let mut layout = super::ClassFields::default();
         let static_tys = &self.solved.class_static_field_tys[cid];
         cls.static_fields = orig
             .static_fields
@@ -380,7 +375,8 @@ impl<'h> Emitter<'h, '_> {
                 if let Some(&ty) = static_tys.get(f_idx)
                     && self.is_resolved(ty)
                 {
-                    f.ty = self.materialize(ty)?;
+                    self.prepare_layouts(ty)?;
+                    layout.statics.insert(field.name.clone(), ty);
                 }
                 f.init = self.rewrite_opt_expr(&init_ctx, field.init.as_ref())?;
                 Ok(f)
@@ -392,6 +388,7 @@ impl<'h> Emitter<'h, '_> {
             cls.methods.clear();
             cls.getters.clear();
             cls.setters.clear();
+            self.plans.class_fields.insert(name.to_owned(), layout);
             return Ok(cls);
         };
         cls.name = cinst.emitted_name.clone();
@@ -406,7 +403,8 @@ impl<'h> Emitter<'h, '_> {
             }
             let mut f = field.clone();
             if self.is_resolved(resolved) {
-                f.ty = self.materialize(resolved)?;
+                self.prepare_layouts(resolved)?;
+                layout.instance.insert(field.name.clone(), resolved);
             } else if matches!(
                 self.types.kind(resolved),
                 TyKind::Cell {
@@ -454,6 +452,7 @@ impl<'h> Emitter<'h, '_> {
         cls.methods = self.emit_named_methods(&members.methods)?;
         cls.getters = self.emit_accessors(&members.getters, &orig.getters)?;
         cls.setters = self.emit_accessors(&members.setters, &orig.setters)?;
+        self.plans.class_fields.insert(name.to_owned(), layout);
         Ok(cls)
     }
 
@@ -497,56 +496,41 @@ impl<'h> Emitter<'h, '_> {
         remap_locals: bool,
         inherited: Option<HashMap<LocalId, LocalId>>,
     ) -> Result<(Function, HashMap<LocalId, LocalId>)> {
-        if matches!(
-            view.kind,
-            TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-        ) {
-            return Ok((
-                self.emit_promise_handle_function(inst, view)?,
-                HashMap::new(),
-            ));
-        }
         let mut remap = inherited.unwrap_or_default();
         let has_inherited = !remap.is_empty();
         let mut params = Vec::with_capacity(view.params.len() + 2);
+        let mut param_types = Vec::with_capacity(view.params.len() + 2);
         let mut static_func_params: Vec<(LocalId, FuncId)> = Vec::new();
         let is_env_fn = self.is_env_template(inst.template);
         let self_ident = FuncIdentity {
             template: inst.template,
             capture_owner: inst.capture_owner,
         };
-        let (env_local, env_captures) = if is_env_fn {
-            let env_class = self.ensure_env_class(self_ident)?;
+        let environment = if is_env_fn {
+            self.environment(self_ident)?;
             let fields = self.env_layout(self_ident)?;
             let env_pid = self.fresh_synthetic_local()?;
-            let cap_entries: Vec<(LocalId, String, bool)> = fields
-                .into_iter()
-                .map(|(cap_id, fname, _, boxed)| (cap_id, fname, boxed))
-                .collect();
             params.push(synth_param(
                 env_pid,
                 "__env".to_owned(),
-                HirType::Named(env_class),
+                HirType::Named(super::types::env_class_name(self_ident)),
             ));
-            (Some(env_pid), cap_entries)
+            param_types.push(None);
+            Some((env_pid, fields))
         } else {
-            (None, Vec::new())
+            None
         };
         let self_local = match inst.receiver {
             Some(Receiver::Object(obj_ty)) => {
                 let sid = self.fresh_synthetic_local()?;
-                params.push(synth_param(
-                    sid,
-                    "__self".to_owned(),
-                    self.materialize(obj_ty)?,
-                ));
+                self.prepare_layouts(obj_ty)?;
+                params.push(synth_param(sid, "__self".to_owned(), HirType::Any));
+                param_types.push(Some(obj_ty));
                 Some(sid)
             }
             _ => None,
         };
 
-        let mut boxed_param_map: Vec<(LocalId, LocalId)> = Vec::new();
-        let mut boxed_param_inits: Vec<Stmt> = Vec::new();
         for (p_idx, param) in view.params.iter().enumerate() {
             let param_loc = *self.solved.param_locs[inst.param_locs]
                 .get(p_idx)
@@ -561,8 +545,10 @@ impl<'h> Emitter<'h, '_> {
                 continue;
             }
             let mut new_param = param.clone();
-            if self.is_resolved(param_ty) {
-                new_param.ty = self.materialize(param_ty)?;
+            let resolved = self.is_resolved(param_ty).then_some(param_ty);
+            param_types.push(resolved);
+            if resolved.is_some() {
+                self.prepare_layouts(param_ty)?;
             } else if !self.index.is_param_annotated(param.id)
                 && !inst.is_witness
                 && matches!(param.ty, HirType::Any | HirType::Unknown)
@@ -579,35 +565,28 @@ impl<'h> Emitter<'h, '_> {
                 inst_id,
                 func_params: &static_func_params,
                 self_local,
-                env_local,
-                env_captures: &env_captures,
-                boxed_param_map: &boxed_param_map,
+
                 void_return: false,
                 has_expected: false,
                 remap: None,
             };
             new_param.default = self.rewrite_opt_expr(&param_ctx, param.default.as_ref())?;
             if self.is_boxed_local(param.id) {
-                let box_id = self.fresh_synthetic_local()?;
-                boxed_param_map.push((param.id, box_id));
-                let init_expr = Self::emit_box_record(Expr::LocalGet(new_param.id));
-                boxed_param_inits.push(Stmt::Let {
-                    id: box_id,
-                    name: format!("__box_{}", param.name),
-                    ty: box_hir(new_param.ty.clone()),
-                    mutable: false,
-                    init: Some(init_expr),
-                });
+                let ty = self.boxed_type(param.id, resolved)?;
+                self.plans
+                    .boxed_parameters
+                    .insert((inst.emitted_func_id, new_param.id), ty);
             }
             params.push(new_param);
         }
 
         let ret_ty = self.solved.locations[inst.return_loc];
         let void_return = self.is_zero_sized_func(ret_ty);
-        let return_type = if void_return {
-            HirType::Void
+        let result = if void_return {
+            Some(Ty::VOID)
         } else if self.is_resolved(ret_ty) {
-            self.materialize(ret_ty)?
+            self.prepare_layouts(ret_ty)?;
+            Some(ret_ty)
         } else if self
             .solved
             .self_nested_locs
@@ -625,15 +604,20 @@ impl<'h> Emitter<'h, '_> {
             };
             return Err(self.attach_inst_chain(err, inst_id));
         } else {
-            view.return_type.clone()
+            None
         };
+        self.plans.signatures.insert(
+            inst.emitted_func_id,
+            super::InstanceSignature {
+                params: param_types,
+                result,
+            },
+        );
         let mut rctx = RewriteCtx {
             inst_id,
             func_params: &static_func_params,
             self_local,
-            env_local,
-            env_captures: &env_captures,
-            boxed_param_map: &boxed_param_map,
+
             void_return,
             has_expected: false,
             remap: remap_locals.then_some(&mut remap),
@@ -647,9 +631,24 @@ impl<'h> Emitter<'h, '_> {
             }
             perry_hir::analysis::remap_local_ids_in_stmts(&mut body, &remap);
         }
-        if !boxed_param_inits.is_empty() {
-            boxed_param_inits.extend(body);
-            body = boxed_param_inits;
+
+        if let Some((parameter, fields)) = environment {
+            let captures = fields
+                .into_iter()
+                .map(|(id, field, ty, boxed)| super::Capture {
+                    local: remap.get(&id).copied().unwrap_or(id),
+                    field,
+                    storage: if boxed {
+                        super::Storage::Boxed {
+                            ty,
+                            init: self.cell_init(id),
+                        }
+                    } else {
+                        super::Storage::Value(ty)
+                    },
+                })
+                .collect();
+            self.plans.captures.insert(parameter, captures);
         }
 
         let captures = if is_env_fn {
@@ -689,7 +688,7 @@ impl<'h> Emitter<'h, '_> {
                 name: inst.emitted_name.clone(),
                 type_params: Vec::new(),
                 params,
-                return_type,
+                return_type: view.return_type.clone(),
                 body,
                 captures,
                 is_async: view.is_async,

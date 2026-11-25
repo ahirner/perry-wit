@@ -1,0 +1,751 @@
+//! Expressions: the dispatch over HIR expressions, and locals, literals and member reads.
+use super::*;
+use crate::lower::methods::Call;
+use crate::lower::{builtins::BytesCreation, json::JSON_CALLBACKS};
+
+mod members;
+
+impl<'s> FunctionBuilder<'s> {
+    pub(super) fn expression(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        self.expression_with(ctx, expr, None)
+    }
+
+    /// Lower `expr`, using `expected` to type literals whose own type is not determined by their
+    /// operands (such as empty arrays or object literals widened to a declared shape).
+    pub(super) fn expression_with(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        if let Some(value) = hir_compat::non_null_assertion(expr) {
+            let value = self.expression_with(ctx, value, expected)?;
+            return Ok(if self.is_optional(ctx, value) {
+                self.emit_value(ctx, |ctx| OptionalCastOp::assert_present(ctx, value))
+            } else {
+                value
+            });
+        }
+        if let Some(record) = self.iteration.expression(expr) {
+            return match record {
+                hir_compat::RecordExpr::Value(value) => self.expression_with(ctx, value, expected),
+                hir_compat::RecordExpr::RequireObject(value) => {
+                    let v = self.expression_with(ctx, value, expected)?;
+                    self.defined(ctx, v)
+                }
+                hir_compat::RecordExpr::Length(source) => {
+                    let source = self.expression(ctx, source)?;
+                    let source = self.defined(ctx, source)?;
+                    if let Some(record) = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
+                        && record.deref(ctx).kind() == RecordKind::Tuple
+                    {
+                        let length = record.deref(ctx).fields().to_diag(ctx)?.len();
+                        Ok(self.number(ctx, length as f64))
+                    } else {
+                        Ok(self.array_length(ctx, source))
+                    }
+                }
+                hir_compat::RecordExpr::Close => self.absent_literal(ctx, false, expected),
+            };
+        }
+        if let Expr::Sequence(parts) = expr {
+            let (last, effects) = parts
+                .split_last()
+                .ok_or_else(|| Diagnostic::internal("empty sequence expression"))?;
+            if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+                return self
+                    .expression_with(ctx, last, expected)
+                    .map_err(|error| error.with_fallback_span(Some(span)));
+            }
+            for effect in effects {
+                self.effect(ctx, effect)?;
+            }
+            return self.expression_with(ctx, last, expected);
+        }
+        if let Some(value) = self.date_expression(ctx, expr)? {
+            return Ok(value);
+        }
+        if let Some(value) = self.url_expression(ctx, expr)? {
+            return Ok(value);
+        }
+        if let Some(value) = self.collection_expression(ctx, expr, expected)? {
+            return self.narrow_value(ctx, expr, value);
+        }
+        if let Some((receiver, call)) = Call::expression(expr) {
+            let receiver = match receiver {
+                crate::lower::methods::CallReceiver::Expression(expr) => {
+                    self.expression(ctx, expr)?
+                }
+                crate::lower::methods::CallReceiver::Local(id) => self
+                    .load_local(ctx, id)
+                    .map_err(|error| self.shapes.annotate_local(error, id))?,
+            };
+            let receiver = self.defined(ctx, receiver)?;
+            let value = call.lower(self, ctx, receiver)?.ok_or_else(|| {
+                Diagnostic::new(codes::TYPE_MISMATCH, "method expression produces no value")
+            })?;
+            return self.narrow_value(ctx, expr, value);
+        }
+        let value = match expr {
+            Expr::RegExp { pattern, flags } => {
+                self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
+            }
+            Expr::RegExpDynamic { .. } => {
+                bail_unsupported!("RegExp construction is unsupported; use a bounded regex literal")
+            }
+            Expr::ObjectSpread { parts } => self.object_spread(ctx, parts, expected)?,
+            Expr::ObjectRest {
+                object,
+                exclude_keys,
+            } => self.object_rest(ctx, object, exclude_keys, expected)?,
+            Expr::BigInt(text) => self.bigint_literal(ctx, text)?,
+            Expr::BigIntCoerce(expr) => self.bigint_coerce(ctx, expr)?,
+            Expr::NumberCoerce(expr) => self.number_coerce(ctx, expr)?,
+            Expr::StringCoerce(expr) | Expr::TemplateStringCoerce(expr) => {
+                let value = self.expression(ctx, expr)?;
+                if let Some(class_name) = self.shapes.class_of_type(ctx, value.get_type(ctx))
+                    && let Some((owner_class, func)) =
+                        self.shapes.class_method(class_name, "toString")
+                {
+                    let recv = self.defined(ctx, value)?;
+                    self.class_method_call(ctx, recv, owner_class, func, &[])?
+                        .ok_or_else(|| {
+                            Diagnostic::new(codes::TYPE_MISMATCH, "toString() produced no value")
+                        })?
+                } else {
+                    self.display(ctx, value)?
+                }
+            }
+            Expr::Number(value) => self.number(ctx, *value),
+            Expr::Integer(value) => self.number(ctx, *value as f64),
+            Expr::Bool(value) => self.boolean(ctx, *value),
+            Expr::String(text) => self.string(ctx, text),
+            Expr::LocalGet(id) => self
+                .load_local(ctx, *id)
+                .map_err(|error| self.shapes.annotate_local(error, *id))?,
+            Expr::Null | Expr::Undefined => {
+                self.absent_literal(ctx, matches!(expr, Expr::Null), expected)?
+            }
+            Expr::LocalSet(id, value) => self
+                .local_set(ctx, *id, value)
+                .map_err(|error| self.shapes.annotate_local(error, *id))?,
+            Expr::Update { id, op, prefix } => {
+                self.iteration.advance(*id);
+                self.update(ctx, *id, op, *prefix)
+                    .map_err(|error| self.shapes.annotate_local(error, *id))?
+            }
+            Expr::PropertyUpdate {
+                object,
+                property,
+                op,
+                prefix,
+                ..
+            } => self.property_update(ctx, object, property, op, *prefix)?,
+            Expr::Binary { op, left, right } => self.binary_expression(ctx, op, left, right)?,
+            Expr::Compare { op, left, right } => self.comparison(ctx, op, left, right)?,
+            Expr::Logical { op, left, right } => self.logical(ctx, op, left, right, expected)?,
+            Expr::ScopedTemp { id, value, body } => {
+                self.with_temp(ctx, *id, value, |this, ctx| {
+                    this.expression_with(ctx, body, expected)
+                })?
+            }
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => self.conditional(ctx, condition, then_expr, else_expr, expected)?,
+            Expr::Unary { op, operand } => self.unary(ctx, op, operand)?,
+
+            Expr::ArrayPushSpread { array_id, source } => {
+                let array = self.load_local(ctx, *array_id)?;
+                let array = self.defined(ctx, array)?;
+                let elem = self.array_element(ctx, array)?;
+                let values = self.spread_value(ctx, source, Some(elem))?;
+                let values = self.defined(ctx, values)?;
+                let values = self.fit(ctx, values, ArrayType::get(ctx, elem).into())?;
+                self.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, values));
+                self.array_length(ctx, array)
+            }
+            Expr::CallSpread { callee, args, .. } => self.array_push_spread(ctx, callee, args)?,
+            Expr::Call {
+                callee,
+                args,
+
+                byte_offset,
+                ..
+            } => self
+                .call(ctx, callee, args, *byte_offset, expected)
+                .and_then(|value| {
+                    value.ok_or_else(|| {
+                        Diagnostic::new(codes::TYPE_MISMATCH, "a void call has no value")
+                    })
+                })
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+            Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
+            Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
+            Expr::MathTrunc(value) => self.math_unary(ctx, Intrinsic::MathTrunc, value)?,
+            Expr::MathAbs(value) => self.math_unary(ctx, Intrinsic::MathAbs, value)?,
+            Expr::MathRound(value) => self.math_unary(ctx, Intrinsic::MathRound, value)?,
+            Expr::MathSqrt(value) => self.math_unary(ctx, Intrinsic::MathSqrt, value)?,
+            Expr::MathImul(left, right) => {
+                let left = self.number_operand(ctx, left)?;
+                let right = self.number_operand(ctx, right)?;
+                self.intrinsic(ctx, Intrinsic::MathImul, vec![left, right])
+            }
+            Expr::MathMin(values) => {
+                self.math_extremum(ctx, Intrinsic::MathMin, f64::INFINITY, values)?
+            }
+            Expr::MathMax(values) => {
+                self.math_extremum(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, values)?
+            }
+            Expr::MathMinSpread(array) => {
+                self.math_extremum_spread(ctx, Intrinsic::MathMin, f64::INFINITY, array)?
+            }
+            Expr::MathMaxSpread(array) => {
+                self.math_extremum_spread(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, array)?
+            }
+            Expr::StructuredClone { value, .. } => {
+                let val = self.expression_with(ctx, value, expected)?;
+                self.clone_structured_value(ctx, val)?
+            }
+            Expr::ParseInt { string, radix } => {
+                let value = self.expression(ctx, string)?;
+                let text = self.display(ctx, value)?;
+                let radix = self.number_or(ctx, radix.as_deref(), 0.0)?;
+                self.intrinsic(ctx, Intrinsic::ParseInt, vec![text, radix])
+            }
+            Expr::ParseFloat(string) => {
+                let value = self.expression(ctx, string)?;
+                let text = self.display(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::ParseFloat, vec![text])
+            }
+            Expr::IsNaN(value) => {
+                let value = self.number_coerce(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsNaN, vec![value])
+            }
+            Expr::IsFinite(value) => {
+                let value = self.number_coerce(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsFinite, vec![value])
+            }
+            Expr::NumberIsNaN(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsNaN, vec![value])
+            }
+            Expr::NumberIsFinite(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsFinite, vec![value])
+            }
+            Expr::NumberIsInteger(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsInteger, vec![value])
+            }
+            Expr::NumberIsSafeInteger(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::NumberIsSafeInteger, vec![value])
+            }
+            Expr::Uint8ArrayNew(None) => {
+                let zero = self.number(ctx, 0.0);
+                self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
+            }
+            Expr::Uint8ArrayNew(Some(source)) => {
+                self.bytes_from(ctx, BytesCreation::Construct, source)?
+            }
+            Expr::Uint8ArrayFrom(source) => self.bytes_from(ctx, BytesCreation::From, source)?,
+            Expr::Uint8ArrayGet { array, index } => {
+                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
+                let index = self.number_operand(ctx, index)?;
+                self.intrinsic(ctx, Intrinsic::BytesGet, vec![bytes, index])
+            }
+            Expr::Uint8ArraySet {
+                array,
+                index,
+                value,
+            } => {
+                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
+                self.set_byte_index(ctx, bytes, index, value)?
+            }
+            Expr::TextEncoderNew => self.intrinsic(ctx, Intrinsic::EncoderNew, vec![]),
+            Expr::TextDecoderNew {
+                label,
+                fatal,
+                ignore_bom,
+            } => self.text_decoder(ctx, label, fatal, ignore_bom)?,
+            Expr::TextDecoderDecode { decoder, input } => {
+                let decoder = self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
+                self.decode(ctx, decoder, Some(input), None)?
+            }
+            Expr::TextDecoderEncoding(decoder) => {
+                self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
+                self.string(ctx, "utf-8")
+            }
+            Expr::TextDecoderFatal(decoder) | Expr::TextDecoderIgnoreBom(decoder) => {
+                let decoder = self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
+                let intrinsic = if matches!(expr, Expr::TextDecoderFatal(_)) {
+                    Intrinsic::DecoderFatal
+                } else {
+                    Intrinsic::DecoderIgnoreBom
+                };
+                self.intrinsic(ctx, intrinsic, vec![decoder])
+            }
+            Expr::StringFromCharCode(_) | Expr::StringFromCharCodeSpread(_) => {
+                bail_unsupported!("fromCharCode uses UTF-16 code units; use fromCodePoint")
+            }
+            Expr::StringFromCodePoint(value) => {
+                let value = self.number_operand(ctx, value)?;
+                self.intrinsic(ctx, Intrinsic::StringFromCodePoint, vec![value])
+            }
+
+            Expr::JsonParse(text) => {
+                let text = self.string_operand(ctx, text)?;
+                self.parse_json_text(ctx, text, expected)?
+            }
+            Expr::JsonParseTyped { text, ty, .. } => {
+                let text = self.string_operand(ctx, text)?;
+                let target = if let Some(int_ty) = self.shapes.integer_type(ctx, ty)
+                    && int_ty.deref(ctx).width() == 64
+                {
+                    int_ty.into()
+                } else if matches!(ty, HirType::Any | HirType::Unknown) {
+                    expected.unwrap_or_else(|| JsonType::get(ctx).into())
+                } else {
+                    self.shapes.value_type(ctx, ty)?
+                };
+                let parsed = self.parse_json_text(ctx, text, Some(target))?;
+                let decoded = self.fit(ctx, parsed, target)?;
+                if expected != Some(target) {
+                    self.bigint_view(ctx, decoded)
+                } else {
+                    decoded
+                }
+            }
+            Expr::JsonStringify(value) => self.stringify(ctx, value)?,
+            Expr::JsonStringifyFull(value, replacer, space) => {
+                ensure_unsupported!(
+                    matches!(&**space, Expr::Null | Expr::Undefined),
+                    "{JSON_CALLBACKS}"
+                );
+                self.stringify_replaced(ctx, value, replacer)?
+            }
+            Expr::JsonParseWithReviver(text, reviver) => {
+                ensure_unsupported!(
+                    matches!(&**reviver, Expr::Null | Expr::Undefined),
+                    "{JSON_CALLBACKS}"
+                );
+                let text = self.string_operand(ctx, text)?;
+                self.parse_json_text(ctx, text, expected)?
+            }
+            Expr::MathRandom => self.intrinsic(ctx, Intrinsic::MathRandom, vec![]),
+            Expr::CryptoRandomUUID => self.intrinsic(ctx, Intrinsic::RandomUuid, vec![]),
+            Expr::TypeOf(value) => {
+                let value = self.expression(ctx, value)?;
+                self.type_of(ctx, value)?
+            }
+            Expr::EnvGet(name) => {
+                let name = self.string(ctx, name);
+                self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
+            }
+            Expr::DateNow => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
+            Expr::ErrorNew(message) => {
+                let message = match message {
+                    Some(message) => self.string_operand(ctx, message)?,
+                    None => self.string(ctx, ""),
+                };
+                self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::Any, message))
+            }
+            Expr::TypeErrorNew(message)
+            | Expr::RangeErrorNew(message)
+            | Expr::ReferenceErrorNew(message)
+            | Expr::SyntaxErrorNew(message) => {
+                let kind = match expr {
+                    Expr::TypeErrorNew(_) => ErrorKind::TypeError,
+                    Expr::RangeErrorNew(_) => ErrorKind::RangeError,
+                    Expr::ReferenceErrorNew(_) => ErrorKind::ReferenceError,
+                    _ => ErrorKind::SyntaxError,
+                };
+                let message = self.string_operand(ctx, message)?;
+                self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message))
+            }
+            // Literal causes keep their authored value through the shared cause conversion.
+            Expr::ErrorNewWithCause { message, cause } => {
+                self.error_with_cause(ctx, ErrorKind::Any, message, cause)?
+            }
+            Expr::ErrorNewWithOptions {
+                kind: error_kind,
+                message,
+                options,
+            } => self.error_with_options(ctx, *error_kind, message, options)?,
+            Expr::InstanceOf {
+                expr: value, ty, ..
+            } => self.instance_of(ctx, value, ty)?,
+            Expr::Await(promise) => self.await_(ctx, promise)?,
+            Expr::PropertyGet {
+                object,
+                property,
+                byte_offset,
+                ..
+            } => self
+                .property_get(ctx, object, property, *byte_offset)
+                .map_err(|error| self.shapes.annotate_member(error, *byte_offset))?,
+            Expr::PropertySet {
+                object,
+                property,
+                value,
+                ..
+            } => self.set_field(ctx, object, property, value)?,
+            Expr::PutValueSet {
+                target,
+                key,
+                value,
+                element_offset,
+                ..
+            } => match key.as_ref() {
+                Expr::String(field) => self.set_field(ctx, target, field, value),
+                index => self.set_index(ctx, target, index, value),
+            }
+            .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
+            Expr::New {
+                class_name,
+                args,
+                byte_offset,
+                ..
+            } if class_name == "DataView" && !self.shapes.is_user_type(class_name) => self
+                .data_view(ctx, args)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+            Expr::New {
+                class_name, args, ..
+            } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
+                ensure_diag!(
+                    args.is_empty(),
+                    codes::TYPE_MISMATCH,
+                    "new AbortController takes no arguments"
+                );
+                self.intrinsic(ctx, Intrinsic::AbortNew, vec![])
+            }
+            Expr::New {
+                class_name, args, ..
+            } if matches!(class_name.as_str(), "Headers" | "Response" | "Request")
+                && !self.shapes.is_user_type(class_name) =>
+            {
+                self.web_new(ctx, class_name, args)?
+            }
+            Expr::NativeMethodCall { args, .. } if hir_compat::is_writable_to_web(expr) => {
+                self.writable_to_web(ctx, args)?
+            }
+            Expr::NativeMethodCall {
+                object: Some(object),
+                method,
+                args,
+                ..
+            } => self.web_method(ctx, object, method, args)?,
+            Expr::This => self.class_this(ctx)?,
+            Expr::ThisProvenClass(class_name) => {
+                self.boolean(ctx, self.is_proven_this_class(ctx, class_name))
+            }
+            Expr::StaticFieldGet {
+                class_name,
+                field_name,
+            } => self.class_static_field_get(ctx, class_name, field_name)?,
+            Expr::StaticFieldSet {
+                class_name,
+                field_name,
+                value,
+            } => self.class_static_field_set(ctx, class_name, field_name, value)?,
+            Expr::StaticMethodCall {
+                class_name,
+                method_name,
+                args,
+            } => self
+                .class_static_method_call(ctx, class_name, method_name, args)?
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        codes::TYPE_MISMATCH,
+                        "a void static method call has no value",
+                    )
+                })?,
+            Expr::New {
+                class_name,
+                args,
+                byte_offset,
+                ..
+            } if self
+                .shapes
+                .decls
+                .classes
+                .named
+                .contains_key(class_name.as_str()) =>
+            {
+                self.class_new(ctx, class_name, args)
+                    .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?
+            }
+            Expr::New {
+                class_name, args, ..
+            } => self.object_literal(ctx, class_name, args, expected)?,
+            // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
+            Expr::Array(items, _)
+                if expected.is_some_and(|ty| {
+                    perry_mir::typed::<RecordType>(ctx, present_type(ctx, ty))
+                        .is_some_and(|record| record.deref(ctx).kind() == RecordKind::Tuple)
+                }) =>
+            {
+                let names: Vec<String> = (0..items.len()).map(|i| format!("_{i}")).collect();
+                let fields: Vec<(&str, &'s Expr)> =
+                    names.iter().map(String::as_str).zip(items).collect();
+                self.record_literal(ctx, &fields, expected, RecordKind::Tuple)?
+            }
+            Expr::Array(items, _) => self.array_literal(ctx, items, expected)?,
+            Expr::ArraySpread(items) => self.array_spread(ctx, items, expected)?,
+            Expr::ArrayFrom(iterable, _) => self.array_from(ctx, iterable, None, expected)?,
+            Expr::ArrayFromMapped {
+                iterable, map_fn, ..
+            } => self.array_from(ctx, iterable, Some(map_fn), expected)?,
+            Expr::IndexGet {
+                object,
+                index,
+                element_offset,
+                byte_offset: _,
+                byte_end: _,
+            } => self
+                .index_get(ctx, object, index)
+                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
+            Expr::IndexSet {
+                object,
+                index,
+                value,
+                element_offset,
+                byte_offset: _,
+                byte_end: _,
+            } => self
+                .set_index(ctx, object, index, value)
+                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
+            Expr::Object(fields) => {
+                let pairs: Vec<(&str, &'s Expr)> =
+                    fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                self.record_literal(ctx, &pairs, expected, RecordKind::Object)?
+            }
+            _ => bail_unsupported!("this expression form is not supported yet"),
+        };
+        self.narrow_value(ctx, expr, value)
+    }
+
+    /// A bigint literal (`0x…n`, `1_000n`), independent of WIT transport widths.
+    pub(super) fn with_temp<T>(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        expr: &'s Expr,
+        body: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
+    ) -> Result<T> {
+        let value = self.expression(ctx, expr)?;
+        let binding = self.initialized_local(ctx, value);
+        let previous = self.locals.insert(id, binding);
+        let result = body(self, ctx);
+        if let Some(previous) = previous {
+            self.locals.insert(id, previous);
+        } else {
+            self.locals.remove(&id);
+        }
+        result
+    }
+
+    fn bigint_literal(&mut self, ctx: &mut Context, text: &str) -> Result<Value> {
+        use pliron::utils::apint::{APInt, bw};
+        let text = text.trim_end_matches('n').replace('_', "");
+        let (radix, digits) =
+            if let Some(n) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                (16, n)
+            } else if let Some(n) = text.strip_prefix("0o").or_else(|| text.strip_prefix("0O")) {
+                (8, n)
+            } else if let Some(n) = text.strip_prefix("0b").or_else(|| text.strip_prefix("0B")) {
+                (2, n)
+            } else {
+                (10, text.as_str())
+            };
+        let value = match u64::from_str_radix(digits, radix) {
+            Ok(value) => APInt::from_u64(value, bw(64)),
+            Err(_) => {
+                let width = digits
+                    .len()
+                    .checked_mul(4)
+                    .ok_or_else(|| Diagnostic::unsupported("bigint literal too large"))?;
+                APInt::from_str(digits, width, radix as u8)
+                    .map_err(|_| Diagnostic::new(codes::PARSE_ERROR, "invalid bigint literal"))?
+            }
+        };
+        let width = u32::try_from(value.bw())
+            .map_err(|_| Diagnostic::unsupported("bigint literal too large"))?;
+        let ty = IntegerType::get(ctx, width, Signedness::Unsigned);
+        let magnitude = IntegerAttr::new(ty, value);
+        Ok(self.emit_value(ctx, |ctx| perry_mir::BigIntConstOp::new(ctx, magnitude)))
+    }
+
+    /// Emit an absent literal in an optional or unknown type, defaulting to an optional number when unconstrained.
+    pub(super) fn absent_literal(
+        &mut self,
+        ctx: &mut Context,
+        null: bool,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        if expected.is_some_and(|ty| ty.deref(ctx).is::<JsonType>()) {
+            let intrinsic = if null {
+                Intrinsic::JsonNull
+            } else {
+                Intrinsic::JsonUndefined
+            };
+            return Ok(self.intrinsic(ctx, intrinsic, vec![]));
+        }
+        let ty = match expected {
+            Some(ty) => ty,
+            None => {
+                let number = FP64Type::get(ctx).into();
+                let kind = if null {
+                    perry_mir::Absence::Null
+                } else {
+                    perry_mir::Absence::Undefined
+                };
+                perry_mir::OptionalType::get_with(ctx, number, kind).into()
+            }
+        };
+        let allowed = absence(ctx, ty).is_some_and(|a| {
+            if null {
+                a.admits_null()
+            } else {
+                a.admits_undefined()
+            }
+        });
+        ensure_diag!(
+            allowed,
+            codes::TYPE_MISMATCH,
+            "{} is not admitted by the declared type",
+            if null { "null" } else { "undefined" }
+        );
+        Ok(if null {
+            self.emit_value(ctx, |ctx| NullOp::new(ctx, ty))
+        } else {
+            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+        })
+    }
+
+    /// `local = value`, fitted to the local's type.
+    pub(super) fn local_set(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        value: &'s Expr,
+    ) -> Result<Value> {
+        let local = self.local_binding(id)?;
+        let writes = local.writes;
+        let assigned = self.expression_with(ctx, value, Some(writes.expected_type(ctx)))?;
+        if writes.carrier.deref(ctx).is::<JsonType>()
+            && local.cell.is_none()
+            && self.shapes.deferred_binding(id)
+            && self.shapes.binding_annotation(id)
+                != Some(crate::lower::shapes::BindingAnnotation::Explicit)
+            && !perry_mir::JsonSchema::supports_boxing(ctx, assigned.get_type(ctx))
+        {
+            let name = self.shapes.local_name(id).unwrap_or("<unknown>");
+            let kind = kind(ctx, assigned)?.label();
+            bail_diag!(
+                codes::UNSUPPORTED_TYPE,
+                "local '{name}' cannot store {kind} together with its other assigned types"
+            );
+        }
+        let result = self.assign_local(ctx, local, assigned)?;
+        self.assignment_narrowing(ctx, id, (value, assigned), writes.carrier);
+        Ok(result)
+    }
+
+    /// `++local`, `local--` and their relatives.
+    pub(super) fn update(
+        &mut self,
+        ctx: &mut Context,
+        id: LocalId,
+        op: &UpdateOp,
+        prefix: bool,
+    ) -> Result<Value> {
+        let local = self.local_binding(id)?;
+        let old = self.load_local(ctx, id)?;
+        let old = self.arithmetic(ctx, old);
+        ensure_diag!(
+            kind(ctx, old)? == Kind::Number,
+            codes::TYPE_MISMATCH,
+            "++/-- needs a number"
+        );
+        let one = self.number(ctx, 1.0);
+        let kind = match op {
+            UpdateOp::Increment => BinaryKind::Add,
+            UpdateOp::Decrement => BinaryKind::Sub,
+        };
+        let new = self.binary(ctx, kind, old, one);
+        let stored = self.assign_local(ctx, local, new)?;
+        self.variant_guards.assign(id);
+        Ok(if prefix { stored } else { old })
+    }
+
+    pub(super) fn branch_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        solved: TypeHandle,
+    ) -> Result<Value> {
+        let context = matches!(
+            expr,
+            Expr::Null
+                | Expr::Undefined
+                | Expr::Array(..)
+                | Expr::ArraySpread(_)
+                | Expr::Object(_)
+                | Expr::ObjectSpread { .. }
+                | Expr::Sequence(_)
+        );
+        self.expression_with(ctx, expr, context.then_some(solved))
+    }
+
+    pub(super) fn conditional(
+        &mut self,
+        ctx: &mut Context,
+        condition: &'s Expr,
+        then_expr: &'s Expr,
+        else_expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let solved = expected
+            .ok_or_else(|| Diagnostic::internal("emitter omitted the conditional result type"))?;
+        let test = self.condition(ctx, condition)?;
+        let then = self.new_block(ctx, "then");
+        let otherwise = self.new_block(ctx, "else");
+        self.branch(ctx, test, then, otherwise);
+        let guard = crate::narrowing::DefinedGuard::of(condition);
+        let mut arm = |ctx: &mut Context, block, truth, expr, opposite: &Expr| -> Result<_> {
+            self.switch_to(block);
+            let depth = self.variant_guards.depth();
+            self.variant_guards.condition(condition, truth);
+            let value = self.branch_operand(ctx, expr, solved);
+            self.variant_guards.truncate(depth);
+            let mut value = value?;
+            if guard.as_ref().is_some_and(|g| g.proves(truth, expr))
+                && !matches!(opposite, Expr::Undefined)
+            {
+                value = self.strip_undefined(ctx, value)?;
+            }
+            Ok((self.block, [value]))
+        };
+        let (left_end, [left]) = arm(ctx, then, true, then_expr, else_expr)?;
+        let (right_end, [right]) = arm(ctx, otherwise, false, else_expr, then_expr)?;
+        let carrier = crate::lower::coerce::result_carrier(ctx, solved, &[left, right]);
+        let [value] =
+            self.merge_branches(ctx, [carrier], [(left_end, [left]), (right_end, [right])])?;
+        Ok(value)
+    }
+
+    /// `await promise` in an async function.
+    fn await_(&mut self, ctx: &mut Context, promise: &'s Expr) -> Result<Value> {
+        ensure_unsupported!(self.is_async, "await is only valid in async functions");
+        let promise = self.expression(ctx, promise)?;
+        ensure_unsupported!(
+            perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx)).is_some(),
+            "await of a non-promise value is not supported yet"
+        );
+        let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
+        Ok(self.append_value(ctx, &op))
+    }
+}

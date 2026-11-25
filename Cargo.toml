@@ -17,7 +17,6 @@ exclude = ["runtime"]
 members = [
   "crates/conformance",
   "crates/perry-mir",
-  "crates/perry-lower",
   "crates/perry-frontend",
   "crates/perry-contract",
   "crates/pliron-wasm",
@@ -80,7 +79,6 @@ strip = true
 perry-contract.workspace = true
 perry-frontend.workspace = true
 perry-codegen = { path = "crates/perry-codegen" }
-perry-lower = { path = "crates/perry-lower" }
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true
 pliron.workspace = true

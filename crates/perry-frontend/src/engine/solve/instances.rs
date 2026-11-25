@@ -18,12 +18,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             let mut args = Vec::with_capacity(view.params.len());
             if let Some(signature) = &witness.signature {
                 for (i, ty) in signature.params.iter().enumerate() {
-                    let ty = view
+                    let ty = match view
                         .params
                         .get(i)
                         .filter(|p| self.index.is_param_annotated(p.id))
-                        .map_or(ty, |p| &p.ty);
-                    let ty = self.types.intern_hir(self.ctx, ty, true);
+                    {
+                        Some(p) => self.types.intern_hir(self.ctx, &p.ty, true),
+                        None => self.types.export_type(self.ctx, *ty),
+                    };
                     args.push(self.instantiate_annotated_class(ty, 0, None)?);
                 }
             } else {
@@ -32,7 +34,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     let ty =
                         self.types
                             .intern_hir(self.ctx, &p.ty, self.index.is_param_annotated(p.id));
-                    let ty = self.types.substitute(self.ctx, ty, &bindings);
+                    let ty = self.types.substitute(ty, &bindings);
                     args.push(self.instantiate_annotated_class(ty, 0, None)?);
                 }
             }
@@ -45,7 +47,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(init_inst)
     }
 
-    fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeId, Ty)> {
+    fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeName, Ty)> {
         let view = self.index.view(tid);
         let tps = &self.type_param_pool[self.template_type_params[tid]];
         view.type_params
@@ -71,13 +73,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         caller: Option<InstanceId>,
     ) -> Result<Ty> {
         match self.types.kind(ty) {
-            TyKind::Leaf(base) | TyKind::Generic { base, .. } => {
+            TyKind::Named(base) | TyKind::Generic { base, .. } => {
                 let args = match self.types.kind(ty) {
                     TyKind::Generic { args, .. } => self.types.ty_slice(args).to_vec(),
                     _ => Vec::new(),
                 };
-                if let HirType::Named(name) = base.hir(self.ctx) {
-                    let nid = self.types.intern_name(name);
+                {
+                    let nid = self.types.intern_name(base.get(self.ctx));
                     if let Some(cid) = self.index.class_by_name_id(nid) {
                         let resolved: Vec<Ty> = args
                             .iter()
@@ -197,18 +199,17 @@ impl<'h, 'a> Solver<'h, 'a> {
                         .iter()
                         .filter(|w| w.target == Some(view.func_id))
                         .filter_map(|w| w.signature.as_ref());
-                    candidates
-                        .next()
-                        .filter(|first| candidates.all(|s| s.result == first.result))
+                    candidates.next().filter(|first| {
+                        candidates.all(|s| s.result.map(|v| v.ty) == first.result.map(|v| v.ty))
+                    })
                 };
                 caller
                     .and_then(|id| self.instances.get(id))
                     .filter(|i| i.template == template)
                     .and_then(|i| i.list_result)
                     .or_else(|| {
-                        signature
-                            .filter(|s| matches!(s.result, HirType::Array(_)))
-                            .map(|s| self.types.intern_hir(self.ctx, &s.result, true))
+                        let ty = self.types.export_type(self.ctx, signature?.result?);
+                        matches!(self.types.kind(ty), TyKind::Array(_)).then_some(ty)
                     })
             } else {
                 None
@@ -301,7 +302,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let declared =
                 self.types
                     .intern_hir(self.ctx, &param.ty, self.index.is_param_annotated(param.id));
-            let declared = self.types.substitute(self.ctx, declared, &type_bindings);
+            let declared = self.types.substitute(declared, &type_bindings);
             let bound_ty = if param.is_rest {
                 let extra_args = args.get(fixed_count..).unwrap_or(&[]);
                 if !extra_args.is_empty() {
@@ -329,7 +330,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         if s == Ty::NEVER { Ty::BOTTOM } else { s }
                     }
                 } else if !self.types.is_open(declared)
-                    && !matches!(self.types.kind(declared), TyKind::Leaf(id) if matches!(id.hir(self.ctx), HirType::Function(_)))
+                    && !matches!(self.types.kind(declared), TyKind::Signature { .. })
                 {
                     declared
                 } else {
@@ -360,7 +361,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .explicit_return
             .then(|| {
                 let ret = self.types.intern_hir(self.ctx, view.return_type, true);
-                let ret = self.types.substitute(self.ctx, ret, &type_bindings);
+                let ret = self.types.substitute(ret, &type_bindings);
                 (!self.types.is_open(ret)).then_some(ret)
             })
             .flatten();
@@ -459,7 +460,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         capture_owner: CaptureOwner,
         args: &[Ty],
         explicit_type_args: &[Ty],
-    ) -> Vec<(shapes::TypeId, Ty)> {
+    ) -> Vec<(shapes::TypeName, Ty)> {
         let mut bindings = capture_owner
             .instance()
             .map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
@@ -491,7 +492,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         params: &[perry_hir::ir::Param],
         args: &[Ty],
         tps: TypeParamSpan,
-        bindings: &mut Vec<(shapes::TypeId, Ty)>,
+        bindings: &mut Vec<(shapes::TypeName, Ty)>,
     ) {
         for skip_open in [true, false] {
             for (param, &arg_ty) in params.iter().zip(args) {
@@ -517,13 +518,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     _ => arg_ty,
                 };
                 let pat = self.types.intern_hir(self.ctx, &param.ty, true);
-                self.types.unify(
-                    self.ctx,
-                    pat,
-                    resolved_arg,
-                    &self.type_param_pool[tps],
-                    bindings,
-                );
+                self.types
+                    .unify(pat, resolved_arg, &self.type_param_pool[tps], bindings);
             }
         }
     }
@@ -597,7 +593,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     HirType::Any | HirType::Unknown | HirType::Function(_)
                 ),
             );
-            let ty = self.types.substitute(self.ctx, ty, &bindings);
+            let ty = self.types.substitute(ty, &bindings);
             let declared = !is_func_ty && !self.types.is_open(ty);
             let loc = self.alloc_loc(if declared { ty } else { Ty::BOTTOM });
             if declared {

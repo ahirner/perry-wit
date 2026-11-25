@@ -12,7 +12,7 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
         };
         source.push_str(&format!("type Chain{index} = {next};"));
     }
-    let ast = crate::hir_compat::parse(&source, "resolution.ts")?;
+    let ast = crate::source::parse(&source, "resolution.ts")?;
     let module = perry_hir::lower_module(&ast, "main", "resolution.ts")?;
     let ctx = Context::new();
     let foreign = HashMap::new();
@@ -23,8 +23,10 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
         &module.classes,
         &foreign,
     );
+    let mut types = TypeTable::new();
+    let mut resolver = Resolver::new(&ctx, &decls, &mut types);
     for name in ["Cycle", "Chain0"] {
-        assert_eq!(decls.property_type(&ctx, name, &[], "a"), None, "{name}");
+        assert_eq!(resolver.property(name, &[], "a"), None, "{name}");
     }
     Ok(())
 }

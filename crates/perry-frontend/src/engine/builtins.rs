@@ -6,10 +6,7 @@ use crate::{
     methods::{Kind, Method, MethodResult, Receiver},
     shapes::{self, Declarations},
 };
-use perry_hir::{
-    ir::{BinaryOp, Expr, LogicalOp, UnaryOp},
-    types::Type as HirType,
-};
+use perry_hir::ir::{BinaryOp, Expr, LogicalOp, UnaryOp};
 use pliron::context::Context;
 
 pub(crate) const SETTLED: &str = "PromiseSettledResult";
@@ -41,15 +38,8 @@ pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Re
         TyKind::Number | TyKind::Int32 => Some(Receiver::Value(Kind::Number)),
         TyKind::Boolean => Some(Receiver::Value(Kind::Boolean)),
         TyKind::BigInt => Some(Receiver::Value(Kind::BigInt)),
-        TyKind::Leaf(id) => match id.hir(ctx) {
-            HirType::StringLiteral(_) => Some(Receiver::Value(Kind::String)),
-            HirType::Named(name) => for_name(name),
-            _ => None,
-        },
-        TyKind::Generic { base, .. } => match base.hir(ctx) {
-            HirType::Named(name) => for_name(name),
-            _ => None,
-        },
+        TyKind::Literal(_) => Some(Receiver::Value(Kind::String)),
+        TyKind::Named(id) | TyKind::Generic { base: id, .. } => for_name(id.get(ctx)),
         _ => None,
     }
 }
@@ -85,15 +75,10 @@ pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> 
             }
             (!elems.is_empty()).then(|| types.union(&elems))
         }
-        TyKind::Leaf(id) => match id.hir(ctx) {
-            HirType::StringLiteral(_) => Some(Ty::STRING),
-            HirType::Named(n) if n == "Uint8Array" => Some(Ty::NUMBER),
-            _ => None,
-        },
+        TyKind::Literal(_) => Some(Ty::STRING),
+        TyKind::Named(id) if id.get(ctx) == "Uint8Array" => Some(Ty::NUMBER),
         TyKind::Generic { base, args } => {
-            let HirType::Named(name) = base.hir(ctx) else {
-                return None;
-            };
+            let name = base.get(ctx);
             match (name.as_str(), types.ty_slice(args)) {
                 ("Set" | "ReadonlySet" | "SetValues" | "Array" | "ReadonlyArray", &[e]) => Some(e),
                 ("MapKeys", &[k, _]) => Some(k),
@@ -124,16 +109,14 @@ pub(crate) fn iterator_view(
             Some(types.array(out))
         }
         TyKind::Generic { base, args } => {
-            let HirType::Named(name) = base.hir(ctx) else {
-                return None;
-            };
+            let name = base.get(ctx);
             let (view_name, kept_buf, kept_len) = match (name.as_str(), types.ty_slice(args)) {
                 ("Map" | "ReadonlyMap", &[k, v]) => (method.map_view().type_name(), [k, v], 2),
                 ("Set" | "ReadonlySet", &[e, ..]) => (method.set_view().type_name(), [e, e], 1),
                 _ => return None,
             };
             Some(types.generic(
-                shapes::TypeId::from_owned(ctx, HirType::Named(view_name.to_owned())),
+                shapes::TypeName::new(ctx, view_name.to_owned()),
                 &kept_buf[..kept_len],
             ))
         }
@@ -301,8 +284,7 @@ pub(crate) fn apply_method_result(
         MethodResult::Lookup => {
             let (stripped, _) = types.strip_nullish(receiver);
             if let TyKind::Generic { base, args } = types.kind(stripped)
-                && let HirType::Named(name) = base.hir(ctx)
-                && matches!(name.as_str(), "Map" | "ReadonlyMap")
+                && matches!(base.get(ctx).as_str(), "Map" | "ReadonlyMap")
                 && let [_, val] = types.ty_slice(args)
             {
                 let v = *val;
@@ -341,16 +323,9 @@ pub(crate) fn native_ty(ctx: &Context, types: &mut TypeTable, kind: Kind) -> Ty 
     }
 }
 
-pub(crate) fn binary_result(
-    ctx: &Context,
-    types: &mut TypeTable,
-    op: BinaryOp,
-    left: Ty,
-    right: Ty,
-) -> Ty {
+pub(crate) fn binary_result(types: &mut TypeTable, op: BinaryOp, left: Ty, right: Ty) -> Ty {
     let is_str = |t: Ty| {
-        matches!(types.kind(t), TyKind::String)
-            || matches!(types.kind(t), TyKind::Leaf(id) if matches!(id.hir(ctx), HirType::StringLiteral(_)))
+        matches!(types.kind(t), TyKind::String) || matches!(types.kind(t), TyKind::Literal(_))
     };
     let is_mixed_str = |t: Ty| {
         matches!(types.kind(t), TyKind::Union(span) if types.ty_slice(span).iter().any(|&m| {
@@ -483,10 +458,9 @@ fn dict_value_ty(
     ctx: &Context,
     decls: &Declarations<'_>,
     types: &mut TypeTable,
-    hir: &HirType,
+    ty: Ty,
 ) -> Option<Ty> {
-    let (_, val_hir) = decls.dict_entry_types(ctx, hir)?;
-    let val_ty = types.intern_hir(ctx, &val_hir, true);
+    let (_, val_ty) = crate::shapes::generics::Resolver::new(ctx, decls, types).dictionary(ty)?;
     Some(types.with_absences(val_ty, Absence::Undefined))
 }
 
@@ -530,11 +504,9 @@ pub(crate) fn property_type(
             }
             index.map(|idx| types.with_absences(idx, Absence::Undefined))
         }
-        TyKind::Leaf(id) | TyKind::Generic { base: id, .. } => {
-            let HirType::Named(base_name) = id.hir(ctx) else {
-                return (matches!(id.hir(ctx), HirType::StringLiteral(_)) && property == "length")
-                    .then_some(Ty::NUMBER);
-            };
+        TyKind::Literal(_) => (property == "length").then_some(Ty::NUMBER),
+        TyKind::Named(id) | TyKind::Generic { base: id, .. } => {
+            let base_name = id.get(ctx);
             let gargs = match types.kind(stripped) {
                 TyKind::Generic { args, .. } => Some(args),
                 _ => None,
@@ -563,48 +535,35 @@ pub(crate) fn property_type(
                     };
                 }
             }
-            let arg_hirs: Vec<HirType> = gargs
-                .map(|a| {
-                    types
-                        .ty_slice(a)
-                        .iter()
-                        .map(|&t| types.materialize_hir(ctx, t))
-                        .collect()
-                })
+            let arguments = gargs
+                .map(|a| types.ty_slice(a).to_vec())
                 .unwrap_or_default();
-            if let Some(prop_hir) = decls.property_type(ctx, base_name, &arg_hirs, property) {
-                let ty = types.intern_hir(ctx, &prop_hir, true);
-                if let TyKind::Leaf(lid) = types.kind(ty)
-                    && let HirType::Named(n) = lid.hir(ctx)
-                    && let Some(carrier) = decls.integer_carrier(n)
+            if let Some((ty, optional)) = crate::shapes::generics::Resolver::new(ctx, decls, types)
+                .property(base_name, &arguments, property)
+            {
+                let ty = if optional {
+                    types.with_absences(ty, Absence::Undefined)
+                } else {
+                    ty
+                };
+                if let TyKind::Named(lid) = types.kind(ty)
+                    && let Some((width, _)) = decls.integer_spec(lid.get(ctx))
                 {
-                    return Some(if matches!(carrier, HirType::BigInt) {
-                        Ty::BIGINT
-                    } else {
-                        Ty::NUMBER
-                    });
+                    return Some(if width == 64 { Ty::BIGINT } else { Ty::NUMBER });
                 }
                 return Some(ty);
             }
             if gargs.is_none()
-                && let Some(resolved) = decls.resolve_foreign_type(base_name)
+                && let Some(resolved) = decls.foreign_type(base_name)
             {
-                let rty = types.intern_hir(ctx, resolved, true);
+                let rty = types.wit_type(ctx, resolved, true);
                 if rty != stripped
                     && let Some(found) = property_type(ctx, decls, types, rty, property)
                 {
                     return Some(found);
                 }
             }
-            let full_hir = if gargs.is_some() {
-                HirType::Generic {
-                    base: base_name.clone(),
-                    type_args: arg_hirs,
-                }
-            } else {
-                HirType::Named(base_name.clone())
-            };
-            dict_value_ty(ctx, decls, types, &full_hir).or_else(|| {
+            dict_value_ty(ctx, decls, types, stripped).or_else(|| {
                 lookup_method_result(ctx, types, stripped, property, true).map(|rule| {
                     apply_method_result(ctx, types, rule, MethodResultArgs::receiver_only(stripped))
                 })
@@ -651,17 +610,16 @@ pub(crate) fn index_type(
                 None => Some(types.union_span(span)),
             }
         }
-        TyKind::Leaf(id) => match id.hir(ctx) {
-            HirType::Named(n) if n == "Uint8Array" => {
-                Some(types.with_absences(Ty::NUMBER, Absence::Undefined))
+        TyKind::Named(id) if id.get(ctx) == "Uint8Array" => {
+            Some(types.with_absences(Ty::NUMBER, Absence::Undefined))
+        }
+        TyKind::Named(id) => dict_value_ty(ctx, decls, types, stripped).or_else(|| {
+            let ty = types.wit_type(ctx, decls.foreign_type(id.get(ctx))?, true);
+            match types.kind(ty) {
+                TyKind::Array(elem) => Some(elem),
+                _ => None,
             }
-            HirType::Named(base) => dict_value_ty(ctx, decls, types, &HirType::Named(base.clone()))
-                .or_else(|| match decls.resolve_foreign_type(base) {
-                    Some(HirType::Array(elem)) => Some(types.intern_hir(ctx, elem, true)),
-                    _ => None,
-                }),
-            _ => None,
-        },
+        }),
         TyKind::Object { props, index: idx } => {
             if let Some(idx_ty) = idx {
                 return Some(types.with_absences(idx_ty, Absence::Undefined));
@@ -669,10 +627,8 @@ pub(crate) fn index_type(
             let items: Vec<Ty> = types.object_slice(props).iter().map(|p| p.ty).collect();
             (!items.is_empty()).then(|| types.union(&items))
         }
-        TyKind::Generic { .. } => iterated_element(ctx, types, stripped).or_else(|| {
-            let hir = types.materialize_hir(ctx, stripped);
-            dict_value_ty(ctx, decls, types, &hir)
-        }),
+        TyKind::Generic { .. } => iterated_element(ctx, types, stripped)
+            .or_else(|| dict_value_ty(ctx, decls, types, stripped)),
         _ => None,
     }
 }
@@ -720,10 +676,8 @@ pub(crate) fn static_global_method(
             };
             let inner = match method {
                 "allSettled" => {
-                    let settled = types.generic(
-                        shapes::TypeId::from_owned(ctx, HirType::Named(SETTLED.to_owned())),
-                        &[val],
-                    );
+                    let settled =
+                        types.generic(shapes::TypeName::new(ctx, SETTLED.to_owned()), &[val]);
                     types.array(settled)
                 }
                 "all" => types.array(val),

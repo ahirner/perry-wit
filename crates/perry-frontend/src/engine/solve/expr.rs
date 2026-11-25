@@ -288,10 +288,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                                     && self.is_tagged_func_union_in(dst_ty, s.inst)
                                 {
                                     self.intern_helper(
-                                        HelperSpec::Widener {
+                                        HelperSpec::Callable(CallableOp::Widener {
                                             from: cap_ty,
                                             to: dst_ty,
-                                        },
+                                        }),
                                         0,
                                     );
                                 }
@@ -306,7 +306,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             Expr::Binary { op, left, right } => {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
-                Ok(builtins::binary_result(self.ctx, self.types, *op, l, r))
+                Ok(builtins::binary_result(self.types, *op, l, r))
             }
             Expr::Unary { op, operand } => {
                 Ok(builtins::unary_result(*op, self.eval_expr(s, operand)?))
@@ -744,7 +744,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 arg0: arg_tys.first().copied(),
                                 arg0_expr: args.first(),
                                 callback_result: None,
-                                sparse_arrays: self.facts.sparse_arrays,
+                                sparse_arrays: self.metadata.source.sparse_arrays,
                             },
                         ));
                     }
@@ -767,20 +767,18 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 let obj_ty = self.resolve_cell_read(s.inst, obj_ty);
                 let stripped = self.types.strip_nullish(obj_ty).0;
-                let hir = self.types.materialize_hir(self.ctx, stripped);
-                Ok(self
-                    .decls
-                    .dict_entry_types(self.ctx, &hir)
-                    .map_or(Ty::OPEN, |(k, v)| {
-                        let v = self.types.intern_hir(self.ctx, &v, true);
-                        let elem = if matches!(expr, Expr::ObjectEntries(_)) {
-                            let k = self.types.intern_hir(self.ctx, &k, true);
-                            self.types.tuple(&[k, v])
-                        } else {
-                            v
-                        };
-                        self.types.array(elem)
-                    }))
+                Ok(
+                    crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+                        .dictionary(stripped)
+                        .map_or(Ty::OPEN, |(k, v)| {
+                            let elem = if matches!(expr, Expr::ObjectEntries(_)) {
+                                self.types.tuple(&[k, v])
+                            } else {
+                                v
+                            };
+                            self.types.array(elem)
+                        }),
+                )
             }
             Expr::ObjectFromEntries(entries) => {
                 let ent_ty = self.eval_expr(s, entries)?;
@@ -794,7 +792,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     let val = *val;
                     return Ok(self.types.generic(
-                        shapes::TypeId::from_owned(self.ctx, HirType::Named("Record".into())),
+                        shapes::TypeName::new(self.ctx, "Record".into()),
                         &[Ty::STRING, val],
                     ));
                 }
@@ -818,8 +816,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let op_ty = self.eval_expr(s, operand)?;
                 if op_ty != Ty::BOTTOM && self.types.has_func(op_ty) {
                     let has_nullish = self.types.strip_nullish(op_ty).1.is_some();
-                    let helper =
-                        has_nullish.then(|| self.intern_helper(HelperSpec::TypeOfFn(op_ty), 0));
+                    let helper = has_nullish.then(|| {
+                        self.intern_helper(HelperSpec::Callable(CallableOp::TypeOfFn(op_ty)), 0)
+                    });
                     self.record_site(s.inst, expr, SiteResolution::FuncTypeOf(helper));
                 }
                 Ok(Ty::STRING)

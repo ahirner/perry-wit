@@ -82,23 +82,23 @@ impl CallbackCall {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum CallableOp {
+    Widener { from: Ty, to: Ty },
+    Comparer { left_ty: Ty, right_ty: Ty },
+    TypeOfFn(Ty),
+    ThrowTypeError,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum HelperSpec {
     Dispatcher {
+        result: Ty,
         callee_ty: Ty,
         arms: DispatchArmSpan,
         arg_tys: Ty,
         recv_ty: Option<Ty>,
     },
-    Widener {
-        from: Ty,
-        to: Ty,
-    },
-    Comparer {
-        left_ty: Ty,
-        right_ty: Ty,
-    },
-    TypeOfFn(Ty),
-    ThrowTypeError,
+    Callable(CallableOp),
     PromiseReaction {
         kind: ReactionKind,
         promise_ty: Ty,
@@ -108,8 +108,8 @@ pub(crate) enum HelperSpec {
         ret_ty: Ty,
     },
     TimerRunner {
-        repeating: bool,
-        is_immediate: bool,
+        kind: crate::engine::TimerKind,
+        timer_ty: Ty,
         cb_call: CallbackCall,
         cb_ty: Ty,
         extra_arg_tys: Ty,
@@ -119,8 +119,8 @@ pub(crate) enum HelperSpec {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FuncCoercion {
     Zero,
-    Tag(FuncIdentity),
-    BoxEnv(FuncIdentity),
+    Tag(FuncIdentity, Ty),
+    BoxEnv(FuncIdentity, Ty),
     Widen(HelperId),
     DispatchCallback {
         helper: HelperId,
@@ -172,10 +172,7 @@ pub(crate) enum SiteResolution {
     ZeroSizedArray,
     TypedArray(Ty),
     ZeroSizedFieldSet,
-    CollectionNew {
-        is_map: bool,
-        type_args: Vec<Ty>,
-    },
+    CollectionNew(crate::engine::ExpressionOp),
     Cell(LocId),
     FoldBool(bool),
     PromiseNew {

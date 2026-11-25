@@ -1,5 +1,4 @@
 //! Single-pass boundary indexing over Perry HIR.
-pub(crate) use super::ast_scan::{SourceFacts, scan_ast, validate_ast};
 use super::bitset::BitSet;
 pub(crate) use super::types::LocalFlags;
 use super::types::{
@@ -7,6 +6,7 @@ use super::types::{
     NameId, Pool, SiteSpan, TemplateId, Ty, TypeTable,
 };
 use crate::hir_compat::{self, Locations};
+use crate::source::SourceFacts;
 use perry_hir::{
     ir::{Expr, Function, Module as HirModule, Param, Stmt},
     types::{FuncId, LocalId},
@@ -584,16 +584,17 @@ impl<'h> ModuleIndex<'h> {
         }
         let mut flags = LocalFlags::default();
         if let Some(span) = hir.local_source_spans.get(&id) {
-            if facts.is_inferred(span.start, span.end) {
+            let binding = facts.binding(span.start);
+            if binding.inferred(span.end) {
                 flags.insert(LocalFlags::INFERRED);
             }
-            if facts.is_deferred(span.start) {
+            if binding.deferred {
                 flags.insert(LocalFlags::DEFERRED);
             }
-            if facts.is_for_head_let(span.start) {
+            if binding.loop_let {
                 flags.insert(LocalFlags::FOR_HEAD);
             }
-            if facts.is_param_annotated(span.start) {
+            if binding.annotated_parameter {
                 flags.insert(LocalFlags::PARAM_ANNOTATED);
             }
         }
@@ -616,7 +617,7 @@ impl<'h> ModuleIndex<'h> {
     fn param_is_unannotated(&self, hir: &HirModule, facts: &SourceFacts, param: &Param) -> bool {
         !hir.local_source_spans
             .get(&param.id)
-            .is_some_and(|s| facts.is_param_annotated(s.start))
+            .is_some_and(|s| facts.binding(s.start).annotated_parameter)
             && matches!(
                 param.ty,
                 perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
@@ -629,7 +630,7 @@ impl<'h> ModuleIndex<'h> {
                 .hir
                 .local_source_spans
                 .get(&param.id)
-                .is_some_and(|s| scan.facts.is_param_annotated(s.start));
+                .is_some_and(|s| scan.facts.binding(s.start).annotated_parameter);
             let ty = scan.types.intern_hir(scan.ctx, &param.ty, explicit);
             let local = self.ensure_local(param.id, owner, ty, scan.hir, scan.facts);
             self.locals[local].flags.insert(LocalFlags::PARAM);
@@ -655,7 +656,7 @@ impl<'h> ModuleIndex<'h> {
                         .hir
                         .local_source_spans
                         .get(id)
-                        .is_some_and(|s| !scan.facts.is_inferred(s.start, s.end));
+                        .is_some_and(|s| !scan.facts.binding(s.start).inferred(s.end));
                     let declared = scan.types.intern_hir(scan.ctx, ty, explicit);
                     let local = self.ensure_local(*id, owner, declared, scan.hir, scan.facts);
                     if is_module_top && !self.locals[local].flags.contains(LocalFlags::FOR_HEAD) {

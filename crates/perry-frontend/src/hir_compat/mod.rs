@@ -14,80 +14,49 @@ use swc_ecma_visit::VisitMutWith;
 mod calls;
 mod classes;
 mod constructors;
-pub use calls::{GuestCall, RuntimeCall, runtime_call};
+pub(crate) use calls::{RuntimeCall, runtime_call};
 mod defaults;
 mod locations;
 pub(crate) use calls::{is_array_insertion, is_source_extern};
 pub(crate) use constructors::typed_collection;
 pub(crate) use iteration::is_object_coercibility_check;
-pub use locations::{Locations, non_null_assertion};
+pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset, mark_non_null};
-pub(crate) use names::{is_reserved_binding, module_binding_name};
-mod methods;
-mod names;
-mod parser;
-pub(crate) use parser::parse;
 mod iteration;
+mod methods;
 mod regex;
-pub use iteration::{Availability, Iteration, RecordExpr};
+pub(crate) use iteration::{Availability, Iteration, RecordExpr};
 pub(crate) mod resource_classes;
 mod streams;
 mod timers;
 mod witnesses;
-pub use constructors::{Constructor, constructor};
+pub(crate) use constructors::{Constructor, constructor};
 pub(crate) use methods::Preservation;
-pub use methods::{Method, method};
-pub use streams::is_writable_to_web;
-pub use timers::is_timer_module;
-pub(crate) use timers::{TIMER_CLASS, is_timer_handle};
+pub(crate) use methods::{Method, method};
+pub(crate) use streams::is_writable_to_web;
+pub(crate) use timers::TIMER_CLASS;
+pub(crate) use timers::is_timer_module;
 pub(crate) use witnesses::Witness;
 
-pub struct Metadata<'s> {
-    pub(crate) witnesses: Vec<Witness<perry_hir::types::FuncId>>,
-    pub(crate) resource_members: Vec<crate::wit::ResourceMember>,
-    pub inline_callbacks: HashSet<perry_hir::types::FuncId>,
-    pub locations: Locations<'s>,
-    pub inferred_bindings: HashSet<LocalId>,
-    /// Bindings declared without an initializer.
-    pub deferred_bindings: HashSet<LocalId>,
-    pub sparse_arrays: bool,
+pub(crate) struct Metadata<'s> {
+    pub(crate) witnesses: Vec<Witness<'s, perry_hir::types::FuncId>>,
+    pub(crate) resource_members: Vec<crate::wit::ResourceMember<'s>>,
+    pub(crate) inline_callbacks: HashSet<perry_hir::types::FuncId>,
+    pub(crate) locations: Locations<'s>,
+    pub(crate) source: crate::source::SourceFacts,
     /// Monomorphized class name -> original source class name (for `instanceof`).
-    pub class_origins: HashMap<String, String>,
-}
-
-impl Metadata<'_> {
-    pub fn witness_annotations(
-        &self,
-        ordinal: usize,
-    ) -> Vec<Option<perry_wit_diagnostics::SourceSpan>> {
-        self.witnesses
-            .get(ordinal)
-            .and_then(|w| w.signature.as_ref())
-            .into_iter()
-            .flat_map(|s| &s.annotations)
-            .map(|s| s.and_then(|s| self.locations.span(s)))
-            .collect()
-    }
-
-    pub fn witness_functions(
-        &self,
-    ) -> impl Iterator<Item = (Option<perry_hir::types::FuncId>, Option<&str>)> + '_ {
-        self.witnesses
-            .iter()
-            .map(|w| (w.target, w.is_destructor.then_some(w.name.as_str())))
-    }
+    pub(crate) class_origins: HashMap<String, String>,
 }
 
 pub(crate) struct LoweredHir<'s> {
-    pub facts: crate::engine::boundary::SourceFacts,
-    pub module: HirModule,
-    pub metadata: Metadata<'s>,
+    pub(crate) module: HirModule,
+    pub(crate) metadata: Metadata<'s>,
 }
 
 pub(crate) fn lower<'s>(
     loaded: modules::Loaded<'s>,
     identity: &str,
-    world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
+    world: Option<(&'s wit_parser::Resolve, wit_parser::WorldId)>,
 ) -> Result<LoweredHir<'s>> {
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
@@ -105,12 +74,15 @@ pub(crate) fn lower<'s>(
             witnesses::resolve(&ast, &loaded.exports, world, &locations, unresolved)?,
         ))
     })?;
-    let facts = crate::engine::boundary::scan_ast(&ast);
-    let mut names = names::FreshNames::new(&ast);
+    let crate::source::Analysis {
+        facts,
+        expression_spans,
+        mut names,
+    } = crate::source::analyze(&ast);
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
     classes::preserve_field_types(&mut ast);
-    locations.preserve_expressions(&mut ast, &facts.expression_spans);
+    locations.preserve_expressions(&mut ast, &expression_spans);
     if !witnesses.witnesses.is_empty() {
         perry_hir::ir::set_current_module_source(locations.module_text());
     }
@@ -143,19 +115,7 @@ pub(crate) fn lower<'s>(
     let witnesses = witnesses.in_hir(&mut module)?;
     constructors.collect_types(&mut module)?;
     normalize_hir(&mut module, &constructors);
-    let inferred_bindings = module
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| facts.is_inferred(span.start, span.end).then_some(*id))
-        .collect();
-    let deferred_bindings = module
-        .local_source_spans
-        .iter()
-        .filter_map(|(id, span)| facts.is_deferred(span.start).then_some(*id))
-        .collect();
-    let sparse_arrays = facts.sparse_arrays;
     Ok(LoweredHir {
-        facts,
         module,
         metadata: Metadata {
             witnesses,
@@ -164,9 +124,7 @@ pub(crate) fn lower<'s>(
                 .unwrap_or_default(),
             inline_callbacks: HashSet::new(),
             locations,
-            inferred_bindings,
-            deferred_bindings,
-            sparse_arrays,
+            source: facts,
             class_origins: HashMap::new(),
         },
     })
@@ -317,40 +275,6 @@ fn normalize_expr(expr: &mut Expr, constructors: &constructors::Constructors) {
     constructors.rewrite_expr(expr);
 }
 
-/// Visit the declared names and whether a type annotation covers each binding.
-pub(crate) fn pattern_bindings<'a>(
-    pat: &'a perry_parser::swc_ecma_ast::Pat,
-    annotated: bool,
-    visit: &mut impl FnMut(&'a perry_parser::swc_ecma_ast::Ident, bool),
-) {
-    use perry_parser::swc_ecma_ast as ast;
-    match pat {
-        ast::Pat::Ident(binding) => visit(&binding.id, annotated || binding.type_ann.is_some()),
-        ast::Pat::Array(array) => {
-            for element in array.elems.iter().flatten() {
-                pattern_bindings(element, annotated || array.type_ann.is_some(), visit);
-            }
-        }
-        ast::Pat::Object(object) => {
-            let annotated = annotated || object.type_ann.is_some();
-            for prop in &object.props {
-                match prop {
-                    ast::ObjectPatProp::KeyValue(kv) => {
-                        pattern_bindings(&kv.value, annotated, visit)
-                    }
-                    ast::ObjectPatProp::Assign(assign) => visit(&assign.key.id, annotated),
-                    ast::ObjectPatProp::Rest(rest) => pattern_bindings(&rest.arg, annotated, visit),
-                }
-            }
-        }
-        ast::Pat::Rest(rest) => {
-            pattern_bindings(&rest.arg, annotated || rest.type_ann.is_some(), visit)
-        }
-        ast::Pat::Assign(assign) => pattern_bindings(&assign.left, annotated, visit),
-        ast::Pat::Invalid(_) | ast::Pat::Expr(_) => {}
-    }
-}
-
 fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
     if message.starts_with("SyntaxError:") {
         codes::PARSE_ERROR
@@ -378,7 +302,7 @@ pub(crate) fn is_object_literal(name: &str) -> bool {
     name.starts_with("__AnonShape_")
 }
 
-pub fn is_import_initializer(callee: &Expr) -> bool {
+pub(crate) fn is_import_initializer(callee: &Expr) -> bool {
     matches!(callee, Expr::ExternFuncRef { name, .. } if name == "js_native_module_named_esm_export_value")
 }
 
@@ -461,7 +385,7 @@ function builtin() { return new Set<string>(); }
 }
 
 /// A key known without executing a computed property expression.
-pub fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
+pub(crate) fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
     use perry_hir::ir::ObjectPart;
     match part {
         ObjectPart::Define(name, _) => Some(name),
@@ -474,7 +398,7 @@ pub fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> {
 }
 
 /// Object fields retained across Perry's duplicate-key and literal-class desugarings.
-pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
+pub(crate) fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
     expr: &'s Expr,
     literal_fields: F,
 ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s, F>> {
@@ -504,14 +428,14 @@ pub fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
 }
 
 #[derive(Clone, Copy)]
-pub enum ErrorClass {
+pub(crate) enum ErrorClass {
     Any,
     Type,
     Range,
     Reference,
     Syntax,
 }
-pub fn error_class(code: u32) -> Result<ErrorClass> {
+pub(crate) fn error_class(code: u32) -> Result<ErrorClass> {
     Ok(match code {
         0 => ErrorClass::Any,
         1 => ErrorClass::Type,
@@ -522,7 +446,7 @@ pub fn error_class(code: u32) -> Result<ErrorClass> {
     })
 }
 
-pub fn native_member_is_property(
+pub(crate) fn native_member_is_property(
     receiver: crate::methods::Receiver,
     name: &str,
     arguments: &[Expr],
@@ -533,4 +457,4 @@ pub fn native_member_is_property(
 }
 
 mod objects;
-pub use objects::init_fields;
+pub(crate) use objects::init_fields;

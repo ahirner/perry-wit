@@ -1395,6 +1395,7 @@ version = "0.1.0"
 dependencies = [
  "perry-contract",
  "perry-hir",
+ "perry-mir",
  "perry-parser",
  "perry-wit-diagnostics",
  "pliron",
@@ -1403,6 +1404,7 @@ dependencies = [
  "swc_common",
  "swc_ecma_parser",
  "swc_ecma_transforms_base",
+ "swc_ecma_utils",
  "swc_ecma_visit",
  "wit-parser 0.261.0",
 ]
@@ -1436,16 +1438,6 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "perry-rt-sys",
-]
-
-[[package]]
-name = "perry-lower"
-version = "0.1.0"
-dependencies = [
- "perry-frontend",
- "perry-mir",
- "perry-wit-diagnostics",
- "pliron",
 ]
 
 [[package]]
@@ -1528,7 +1520,6 @@ dependencies = [
  "perry-contract",
  "perry-frontend",
  "perry-json",
- "perry-lower",
  "perry-mir",
  "perry-rt-build",
  "perry-wit-diagnostics",
