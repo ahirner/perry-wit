@@ -401,10 +401,7 @@ fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> 
         .saturating_add(rem_bytes as u64);
     let total = pad_bytes.saturating_add(view.text.len() as u64);
     if total > u64::from(u32::MAX >> 2) {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid string length"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid string length");
         return from_static(perry_rt_sys::static_text!(""));
     }
     let data = crate::runtime::alloc(total as u32);
@@ -537,10 +534,7 @@ pub(crate) extern "C" fn std_string_repeat(string: *mut u8, count: f64) -> *mut 
     let count = integer(count);
     let total = (view.text.len() as u64).saturating_mul(count.max(0) as u64);
     if count < 0 || count == i64::MAX || total > u64::from(u32::MAX >> 2) {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid count value"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid count value");
         return from_static(perry_rt_sys::static_text!(""));
     }
     let data = crate::runtime::alloc(total as u32);
@@ -609,16 +603,13 @@ fn ascii_character(byte: u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_string_from_code_point(value: f64) -> *mut u8 {
     if value < 0.0 || value > 0x10ffff as f64 || value != value as u32 as f64 {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid Unicode scalar value"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid Unicode scalar value");
         return from_static(perry_rt_sys::static_text!(""));
     }
     let Some(scalar) = char::from_u32(value as u32) else {
-        crate::runtime::raise(
+        perry_rt_sys::raise_static!(
             crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Surrogate code points are outside UTF-8 strings"),
+            "Surrogate code points are outside UTF-8 strings"
         );
         return from_static(perry_rt_sys::static_text!(""));
     };

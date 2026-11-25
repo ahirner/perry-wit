@@ -18,7 +18,7 @@ extern crate std;
 mod canonical;
 mod wasi;
 
-use core::{cell::UnsafeCell, ptr};
+use core::ptr;
 use perry_rt_sys::{
     BLOCKED, Buffer, DROPPED, EVENT_FUTURE_READ, EVENT_STREAM_READ, EVENT_STREAM_WRITE,
     EVENT_SUBTASK, SUBTASK_RETURNED, UNDEFINED_BITS, adopt, alloc, bytes, bytes_view, from_bytes,
@@ -108,15 +108,7 @@ struct Op {
     next: *mut Op,
 }
 
-struct Ops(UnsafeCell<*mut Op>);
-// SAFETY: one instance runs one thread.
-unsafe impl Sync for Ops {}
-static OPS: Ops = Ops(UnsafeCell::new(ptr::null_mut()));
-
-fn ops() -> &'static mut *mut Op {
-    // SAFETY: single-threaded; no reference outlives one entry point.
-    unsafe { &mut *OPS.0.get() }
-}
+perry_rt_sys::single_thread_global!(ops: *mut Op = ptr::null_mut());
 
 const AREA: u32 = 112;
 const CHUNK: usize = 16 * 1024;
@@ -769,18 +761,8 @@ fn finish(op: &mut Op) {
     }
     perry_rt_sys::unpin(core::mem::take(&mut op.pin));
     op.stage = Stage::Done;
-    let this = op as *mut Op;
-    let mut link: *mut *mut Op = ops();
     // SAFETY: the list holds live operations.
-    unsafe {
-        while !(*link).is_null() {
-            if *link == this {
-                *link = (*this).next;
-                break;
-            }
-            link = &mut (**link).next;
-        }
-    }
+    unsafe { perry_rt_sys::unlink_node!(ops(), op as *mut Op) };
 }
 
 fn succeed(op: &mut Op, value: u64) {

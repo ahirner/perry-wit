@@ -150,10 +150,7 @@ fn format_float_radix(abs: f64, neg: bool, radix: u32) -> *mut u8 {
 pub(crate) extern "C" fn std_number_to_string_radix(tag: i32, bits: u64, radix: f64) -> *mut u8 {
     let r = crate::text::integer(radix);
     if !(2..=36).contains(&r) {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid radix"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid radix");
         return crate::runtime::from_static(perry_rt_sys::static_text!(""));
     }
     let radix_u32 = r as u32;

@@ -87,15 +87,7 @@ struct Serve {
     next: *mut Serve,
 }
 
-struct Ops(core::cell::UnsafeCell<*mut Serve>);
-// SAFETY: one instance runs one thread.
-unsafe impl Sync for Ops {}
-static OPS: Ops = Ops(core::cell::UnsafeCell::new(core::ptr::null_mut()));
-
-fn ops() -> &'static mut *mut Serve {
-    // SAFETY: single-threaded; no reference outlives one entry point.
-    unsafe { &mut *OPS.0.get() }
-}
+perry_rt_sys::single_thread_global!(ops: *mut Serve = core::ptr::null_mut());
 
 fn serve<'a>(s: *mut u8) -> &'a mut Serve {
     // SAFETY: compiled code passes exchanges from [web_serve_request].
@@ -312,10 +304,7 @@ pub(crate) unsafe extern "C" fn web_serve_respond(s: *mut u8, status: f64, body:
     // SAFETY: guaranteed by the caller; the bytes live in the task region until written.
     let body = unsafe { view_bytes(body) };
     if !(100.0..=999.0).contains(&status) || status != f64::from(status as u32) {
-        perry_rt_sys::raise(
-            RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid status code"),
-        );
+        perry_rt_sys::raise_static!(RANGE_ERROR, "Invalid status code");
         return 0.0;
     }
     // SAFETY: canonical calls on handles this exchange owns.
@@ -340,10 +329,7 @@ pub(crate) unsafe extern "C" fn web_serve_respond(s: *mut u8, status: f64, body:
         s.fields = 0;
         let (response, transmit) = (ends[0], ends[1]);
         if http::set_status(response, status as u32) != 0 {
-            perry_rt_sys::raise(
-                RANGE_ERROR,
-                perry_rt_sys::static_text!("Invalid status code"),
-            );
+            perry_rt_sys::raise_static!(RANGE_ERROR, "Invalid status code");
         }
         s.exchange.write(
             (contents >> 32) as u32,

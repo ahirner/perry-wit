@@ -1,6 +1,6 @@
 //! Streaming `JSON.stringify` writer for typed values and retained JSON graphs.
 use super::{canonical, json_number, key_bytes, node, string_bytes, word};
-use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static, raise};
+use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static};
 use perry_rt_sys::json::{MAX_DEPTH, kind::*};
 use perry_rt_sys::{
     layout::numeric::Tag,
@@ -179,10 +179,7 @@ pub(super) fn quote(text: &mut Buffer, bytes: &[u8]) {
 pub(crate) extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
     let w = writer(w);
     if w.failed {
-        raise(
-            TYPE_ERROR,
-            perry_rt_sys::static_text!("Converting circular structure to JSON"),
-        );
+        perry_rt_sys::raise_static!(TYPE_ERROR, "Converting circular structure to JSON");
         return from_static(perry_rt_sys::static_text!(""));
     }
     let text = core::mem::take(&mut w.text);
@@ -219,9 +216,9 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
                         continue;
                     }
                     BIGINT => {
-                        raise(
+                        perry_rt_sys::raise_static!(
                             TYPE_ERROR,
-                            perry_rt_sys::static_text!("Do not know how to serialize a BigInt"),
+                            "Do not know how to serialize a BigInt"
                         );
                         return true;
                     }

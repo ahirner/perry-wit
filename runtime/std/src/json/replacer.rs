@@ -1,6 +1,6 @@
 //! A suspended depth-first writer. Callback calls occur only in generated code.
 use super::*;
-use crate::runtime::{Buffer, TYPE_ERROR, raise};
+use crate::runtime::{Buffer, TYPE_ERROR};
 use perry_rt_sys::{json::MAX_DEPTH, layout::array};
 
 #[repr(C)]
@@ -161,9 +161,9 @@ pub(crate) extern "C" fn std_json_replacer_next(state: *mut u8, value: *mut u8) 
                     }),
                     STRING => writer::quote(&mut state.text, string_bytes(value)),
                     BIGINT => {
-                        raise(
+                        perry_rt_sys::raise_static!(
                             TYPE_ERROR,
-                            perry_rt_sys::static_text!("Do not know how to serialize a BigInt"),
+                            "Do not know how to serialize a BigInt"
                         );
                         return 0;
                     }
@@ -172,22 +172,18 @@ pub(crate) extern "C" fn std_json_replacer_next(state: *mut u8, value: *mut u8) 
                         while !ancestor.is_null() {
                             let frame = &*ancestor;
                             if identity(frame.value) == identity(value) {
-                                raise(
+                                perry_rt_sys::raise_static!(
                                     TYPE_ERROR,
-                                    perry_rt_sys::static_text!(
-                                        "Converting circular structure to JSON"
-                                    ),
+                                    "Converting circular structure to JSON"
                                 );
                                 return 0;
                             }
                             ancestor = frame.parent;
                         }
                         if state.depth >= MAX_DEPTH {
-                            raise(
+                            perry_rt_sys::raise_static!(
                                 TYPE_ERROR,
-                                perry_rt_sys::static_text!(
-                                    "JSON nesting exceeds the supported depth"
-                                ),
+                                "JSON nesting exceeds the supported depth"
                             );
                             return 0;
                         }

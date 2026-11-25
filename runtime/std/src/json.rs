@@ -96,10 +96,7 @@ fn string_bytes(node: *mut u8) -> &'static [u8] {
 /// Reading a property of `undefined` or `null` throws, as in ECMAScript.
 fn checked(value: *mut u8) -> bool {
     if value.is_null() || unsafe { word(value, 0) } == NULL {
-        raise(
-            TYPE_ERROR,
-            perry_rt_sys::static_text!("Cannot read properties of undefined or null"),
-        );
+        perry_rt_sys::raise_static!(TYPE_ERROR, "Cannot read properties of undefined or null");
         return false;
     }
     true
@@ -344,10 +341,7 @@ pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
         NULL => 0.0,
         BOOLEAN => f64::from(unsafe { word(value, 8) }),
         _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("JSON value is not a number"),
-            );
+            perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value is not a number");
             0.0
         }
     }
@@ -362,10 +356,7 @@ pub(crate) unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
     if let Some(number) = json_number(value) {
         return number.as_f64();
     }
-    raise(
-        TYPE_ERROR,
-        perry_rt_sys::static_text!("JSON value is not a number"),
-    );
+    perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value is not a number");
     0.0
 }
 
@@ -378,10 +369,7 @@ pub(crate) unsafe extern "C" fn std_json_to_i64(value: *mut u8) -> i64 {
     if let Some(integer) = json_integer(value) {
         return integer;
     }
-    raise(
-        TYPE_ERROR,
-        perry_rt_sys::static_text!("JSON value does not match the declared schema"),
-    );
+    perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value does not match the declared schema");
     0
 }
 
@@ -394,10 +382,7 @@ pub(crate) unsafe extern "C" fn std_json_to_u64(value: *mut u8) -> u64 {
     if let Some(integer) = json_integer(value) {
         return integer;
     }
-    raise(
-        TYPE_ERROR,
-        perry_rt_sys::static_text!("JSON value does not match the declared schema"),
-    );
+    perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value does not match the declared schema");
     0
 }
 

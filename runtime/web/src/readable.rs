@@ -103,19 +103,11 @@ struct Lists {
     /// `json()` drains that read their whole body, for [take_parsed].
     parsing: *mut Drain,
 }
-struct Global(core::cell::UnsafeCell<Lists>);
-// SAFETY: one instance runs one thread.
-unsafe impl Sync for Global {}
-static LISTS: Global = Global(core::cell::UnsafeCell::new(Lists {
+perry_rt_sys::single_thread_global!(lists: Lists = Lists {
     readables: core::ptr::null_mut(),
     waiting: core::ptr::null_mut(),
     parsing: core::ptr::null_mut(),
-}));
-
-fn lists() -> &'static mut Lists {
-    // SAFETY: single-threaded; no reference outlives one entry point.
-    unsafe { &mut *LISTS.0.get() }
-}
+});
 
 fn new_readable(handle: u32, memory: *mut u8, memory_len: u32, completion: u32) -> *mut Readable {
     let stream = perry_rt_sys::object!(Readable; memory, parked);
@@ -227,10 +219,7 @@ fn new_reader(stream: *mut Readable) -> *mut Reader {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn web_readable_get_reader(stream: *mut u8) -> *mut u8 {
     if readable(stream).locked != 0 {
-        perry_rt_sys::raise(
-            TYPE_ERROR,
-            perry_rt_sys::static_text!("Invalid state: ReadableStream is locked"),
-        );
+        perry_rt_sys::raise_static!(TYPE_ERROR, "Invalid state: ReadableStream is locked");
         return core::ptr::null_mut();
     }
     new_reader(stream as *mut Readable) as *mut u8
@@ -242,12 +231,10 @@ pub(crate) extern "C" fn web_readable_cancel(stream: *mut u8) -> *mut u8 {
     let promise = promise_new();
     let source = readable(stream);
     if source.locked != 0 {
-        reject_with(
+        perry_rt_sys::reject_static!(
             promise,
             TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Invalid state: ReadableStream is locked"
-            )),
+            "Invalid state: ReadableStream is locked"
         );
     } else {
         source.disturbed = 1;
@@ -351,11 +338,7 @@ fn fail(r: &mut Reader) {
         // SAFETY: drains live as long as their reader.
         unsafe { (*r.drain).promise }
     };
-    reject_with(
-        promise,
-        TYPE_ERROR,
-        from_static(perry_rt_sys::static_text!("terminated")),
-    );
+    perry_rt_sys::reject_static!(promise, TYPE_ERROR, "terminated");
 }
 
 /// Report whether a stream with a pending completion ended intact and settle any waiting final read.
@@ -493,22 +476,18 @@ pub(crate) extern "C" fn web_reader_read(r: *mut u8, leased: u32) -> *mut u8 {
         r.promise = promise;
     }
     if r.released != 0 {
-        reject_with(
+        perry_rt_sys::reject_static!(
             promise,
             TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Invalid state: The reader is not attached to a stream"
-            )),
+            "Invalid state: The reader is not attached to a stream"
         );
         return promise;
     }
     if !r.pending.is_null() {
-        reject_with(
+        perry_rt_sys::reject_static!(
             promise,
             TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Concurrent reads of one reader are not supported"
-            )),
+            "Concurrent reads of one reader are not supported"
         );
         return promise;
     }
@@ -578,12 +557,10 @@ pub(crate) extern "C" fn web_reader_cancel(r: *mut u8) -> *mut u8 {
     let r = reader(r);
     let promise = promise_new();
     if r.released != 0 {
-        reject_with(
+        perry_rt_sys::reject_static!(
             promise,
             TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Invalid state: The reader is not attached to a stream"
-            )),
+            "Invalid state: The reader is not attached to a stream"
         );
         return promise;
     }
@@ -631,13 +608,7 @@ pub(crate) extern "C" fn web_reader_release_lock(r: *mut u8) {
     }
     if !r.pending.is_null() {
         let promise = core::mem::replace(&mut r.pending, core::ptr::null_mut());
-        reject_with(
-            promise,
-            TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Invalid state: Releasing reader"
-            )),
-        );
+        perry_rt_sys::reject_static!(promise, TYPE_ERROR, "Invalid state: Releasing reader");
     }
     r.released = 1;
     stream.locked = 0;
@@ -662,12 +633,10 @@ pub(crate) extern "C" fn web_read_value(result: *mut u8) -> *mut u8 {
 pub(crate) fn drain(stream: *mut Readable, form: Form, promise: *mut u8) {
     // SAFETY: bodies keep their streams.
     if unsafe { (*stream).locked } != 0 {
-        reject_with(
+        perry_rt_sys::reject_static!(
             promise,
             TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Body is unusable: Body has already been read"
-            )),
+            "Body is unusable: Body has already been read"
         );
         return;
     }

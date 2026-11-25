@@ -3,8 +3,6 @@
 use crate::collectible::Collector;
 use crate::instance::instance_state;
 use alloc::{boxed::Box, vec::Vec};
-#[cfg(target_arch = "wasm32")]
-use core::cell::UnsafeCell;
 use core::ptr;
 
 struct Pin {
@@ -229,11 +227,6 @@ impl Roots {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-struct Global(UnsafeCell<Option<Box<Roots>>>);
-// SAFETY: component instances are single-threaded; no borrow crosses a runtime entry point.
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for Global {}
 instance_state!(ROOTS, roots_state, roots, Option<Box<Roots>>, None);
 
 #[allow(clippy::mut_from_ref)]

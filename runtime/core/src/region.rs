@@ -18,8 +18,6 @@ use alloc::alloc::{alloc, dealloc};
 use alloc::{boxed::Box, vec::Vec};
 #[cfg(target_arch = "wasm32")]
 use core::alloc::Layout;
-#[cfg(target_arch = "wasm32")]
-use core::cell::UnsafeCell;
 use core::ptr;
 
 /// Size of the largest standard chunk, including its header. A task's chunks start at
@@ -145,12 +143,6 @@ pub(crate) struct NativeStorage {
     tasks: Vec<Box<Task>>,
     chunks: Vec<Box<[u64]>>,
 }
-
-#[cfg(target_arch = "wasm32")]
-struct Global(UnsafeCell<Runtime>);
-// SAFETY: one instance runs one thread (the callback ABI has no shared-memory threads).
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for Global {}
 
 instance_state!(RUNTIME, runtime_state, runtime, Runtime, Runtime::new());
 

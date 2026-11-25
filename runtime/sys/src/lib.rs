@@ -154,6 +154,56 @@ macro_rules! object {
     }};
 }
 
+/// Raise a runtime exception of `kind` with a static UTF-8 message literal.
+#[macro_export]
+macro_rules! raise_static {
+    ($kind:expr, $message:literal) => {
+        $crate::raise($kind, $crate::static_text!($message))
+    };
+}
+
+/// Reject `promise` with an exception of `kind` and a static UTF-8 message literal.
+#[macro_export]
+macro_rules! reject_static {
+    ($promise:expr, $kind:expr, $message:literal) => {
+        $crate::reject_with(
+            $promise,
+            $kind,
+            $crate::from_static($crate::static_text!($message)),
+        )
+    };
+}
+
+/// Define a single-threaded guest static and its `&'static mut` accessor.
+#[macro_export]
+macro_rules! single_thread_global {
+    ($access:ident: $ty:ty = $init:expr) => {
+        fn $access() -> &'static mut $ty {
+            struct Global(core::cell::UnsafeCell<$ty>);
+            // SAFETY: one component instance runs on a single thread.
+            unsafe impl Sync for Global {}
+            static STATE: Global = Global(core::cell::UnsafeCell::new($init));
+            // SAFETY: single-threaded; no reference outlives one entry point.
+            unsafe { &mut *STATE.0.get() }
+        }
+    };
+}
+
+/// Unlink `$target` from an intrusive singly-linked list rooted at `$head` via `.next`.
+#[macro_export]
+macro_rules! unlink_node {
+    ($head:expr, $target:expr) => {{
+        let mut link: *mut _ = $head;
+        while !(*link).is_null() {
+            if *link == $target {
+                *link = (**link).next;
+                break;
+            }
+            link = &mut (**link).next;
+        }
+    }};
+}
+
 #[allow(unused_unsafe, clippy::not_unsafe_ptr_arg_deref)]
 pub fn pin(owner: *mut u8) -> u32 {
     unsafe { imports::perry_operation_pin(owner) }

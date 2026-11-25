@@ -81,12 +81,10 @@ pub(crate) extern "C" fn web_body_stream(object: *mut u8) -> *mut u8 {
 fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
     let body = body(object);
     if body.used != 0 {
-        reject_with(
+        perry_rt_sys::reject_static!(
             promise,
             TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Body is unusable: Body has already been read"
-            )),
+            "Body is unusable: Body has already been read"
         );
         return None;
     }
@@ -201,11 +199,9 @@ pub(crate) unsafe extern "C" fn web_response_new(
     h: *mut u8,
 ) -> *mut u8 {
     if !(200.0..=599.0).contains(&status) || status != (status as u32) as f64 {
-        perry_rt_sys::raise(
+        perry_rt_sys::raise_static!(
             RANGE_ERROR,
-            perry_rt_sys::static_text!(
-                "init[\"status\"] must be in the range of 200 to 599, inclusive."
-            ),
+            "init[\"status\"] must be in the range of 200 to 599, inclusive."
         );
         return core::ptr::null_mut();
     }
@@ -213,13 +209,13 @@ pub(crate) unsafe extern "C" fn web_response_new(
     let reason = unsafe { bytes(status_text) };
     // SAFETY: helper call on an input string.
     if unsafe { helper::fetch_status_text(reason.as_ptr(), reason.len() as u32) } == INVALID {
-        perry_rt_sys::raise(TYPE_ERROR, perry_rt_sys::static_text!("Invalid statusText"));
+        perry_rt_sys::raise_static!(TYPE_ERROR, "Invalid statusText");
         return core::ptr::null_mut();
     }
     if !view.is_null() && matches!(status as u32, 204 | 205 | 304) {
-        perry_rt_sys::raise(
+        perry_rt_sys::raise_static!(
             TYPE_ERROR,
-            perry_rt_sys::static_text!("Response constructor: Invalid response status code"),
+            "Response constructor: Invalid response status code"
         );
         return core::ptr::null_mut();
     }

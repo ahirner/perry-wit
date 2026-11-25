@@ -1,7 +1,7 @@
 //! Thrown values used as typed values: `trace.push(outcome.reason)` after a numeric `throw`.
 use crate::runtime::{
     EXCEPTION_KIND, EXCEPTION_TAG, EXCEPTION_VALUE, TAG_NUMBER, TAG_STRING, THROWN_VALUE,
-    TYPE_ERROR, from_static, raise,
+    TYPE_ERROR, from_static,
 };
 
 /// The kind, tag and value slot of an exception object.
@@ -120,10 +120,7 @@ pub(crate) extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
     match parts(exception) {
         (THROWN_VALUE, TAG_NUMBER, bits) => f64::from_bits(bits),
         _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("Thrown value is not a number"),
-            );
+            perry_rt_sys::raise_static!(TYPE_ERROR, "Thrown value is not a number");
             0.0
         }
     }
@@ -135,10 +132,7 @@ pub(crate) extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 
     match parts(exception) {
         (THROWN_VALUE, TAG_STRING, value) => value as usize as *mut u8,
         _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("Thrown value is not a string"),
-            );
+            perry_rt_sys::raise_static!(TYPE_ERROR, "Thrown value is not a string");
             from_static(perry_rt_sys::static_text!(""))
         }
     }
@@ -165,10 +159,7 @@ pub(crate) extern "C" fn std_exception_to_bool(exception: *mut u8) -> u32 {
     match parts(exception) {
         (THROWN_VALUE, TAG_BOOLEAN, value) => u32::from(value != 0),
         _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("Thrown value is not a boolean"),
-            );
+            perry_rt_sys::raise_static!(TYPE_ERROR, "Thrown value is not a boolean");
             0
         }
     }
