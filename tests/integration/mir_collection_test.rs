@@ -831,6 +831,68 @@ export function run(n: number): number {
     assert!(warmed <= 65536, "expected one 64 KiB page, got {warmed}");
 }
 
+#[test]
+fn count_only_iteration_uses_constant_fuel() {
+    let mut program = Program::new(
+        r#"
+let text = "";
+let values: number[] = [];
+export function prepare(n: number) {
+  text = "🌱a".repeat(n);
+  values = [];
+  for (let i=0; i<n; i++) values.push(i);
+}
+export function count_text() {
+  let count = 0;
+  for (const _ of text) count++;
+  return count;
+}
+export function count_items() {
+  let count = 0;
+  for (const _ of values) count++;
+  return count;
+}
+export function text_length() { return text.length; }
+export function item_length() { return values.length; }
+let visits = 0;
+export function observed() {
+  visits = 0;
+  for (const _ of values) visits++;
+  return visits;
+}
+export function until_three() {
+  let count = 0;
+  for (const n of values) { if (n === 3) break; count++; }
+  return count;
+}
+"#,
+    );
+    let mut fuel = Vec::new();
+    for n in [0_u32, 1, 4096] {
+        program.call("prepare", &[wasmtime::Val::F64(f64::from(n).to_bits())]);
+        let costs = [
+            ("count_text", "text_length", 2 * n),
+            ("count_items", "item_length", n),
+        ]
+        .map(|(name, length, expected)| {
+            let (result, cost) = program.call(name, &[]);
+            assert_eq!(result[0].unwrap_f64(), f64::from(expected));
+            let (_, baseline) = program.call(length, &[]);
+            cost as i64 - baseline as i64
+        });
+        assert_eq!(
+            program.call("until_three", &[]).0[0].unwrap_f64(),
+            f64::from(n.min(3))
+        );
+        assert_eq!(
+            program.call("observed", &[]).0[0].unwrap_f64(),
+            f64::from(n)
+        );
+        fuel.push(costs);
+    }
+    assert!(fuel.windows(2).all(|pair| pair[0] == pair[1]), "{fuel:?}");
+}
+
 /// Inline and named callbacks see `(item, index, array)` over the original length, propagate
 /// exceptions, run `finally`, return through `switch` and endless loops (an empty return is
 /// `undefined`), and `for...of` visits elements pushed during iteration and string scalars;

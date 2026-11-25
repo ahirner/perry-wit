@@ -271,6 +271,13 @@ fn nullable_property_access_requires_narrowing() {
 
 #[test]
 fn type_errors_preserve_source_spans_and_field_names() {
+    let source = "export function run() { const cause = new TypeError('cause'); const aggregate = new AggregateError([cause], 'aggregate'); return { message: cause.message, aggregateCount: aggregate.errors.length }; }";
+    let error = perry_wit::compile_core(source, "fields.ts").unwrap_err();
+    assert!(
+        error.to_string().contains("in field 'aggregateCount'"),
+        "{error}"
+    );
+
     for (source, code) in [
         (
             "interface Item { value:number|null } export function run():number { const item:Item={};return 0; }",

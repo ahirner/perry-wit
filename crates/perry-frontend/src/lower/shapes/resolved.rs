@@ -275,7 +275,7 @@ impl Shapes<'_> {
                 self.mir_tuple(ctx, fields)?.into()
             }
             TyKind::Object { props, index } => {
-                let fields: Vec<_> = {
+                let mut fields: Vec<_> = {
                     let types = types.borrow();
                     types
                         .object_slice(props)
@@ -284,6 +284,9 @@ impl Shapes<'_> {
                         .map(|p| (types.name_str(p.name).to_owned(), p.ty, p.optional))
                         .collect()
                 };
+                if types.borrow().is_open(ty) {
+                    fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                }
                 if let Some(index) = index {
                     ensure_diag!(
                         fields.is_empty(),

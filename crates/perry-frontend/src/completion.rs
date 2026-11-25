@@ -1,4 +1,5 @@
 //! Return completion facts shared by inference and elaboration.
+use crate::source::ModuleDeclarations;
 use perry_hir::ir::{Expr, Stmt};
 const FALLTHROUGH: u8 = 1;
 const RETURN: u8 = 2;
@@ -10,7 +11,7 @@ const EMPTY_RETURN: u8 = 32;
 
 /// Compute the completion mask of `statements` so a callback that can fall through yields
 /// `undefined` on that path.
-fn completions(statements: &[Stmt]) -> u8 {
+fn completions(declarations: &ModuleDeclarations, statements: &[Stmt]) -> u8 {
     let mut result = FALLTHROUGH;
     for statement in statements {
         let next = match statement {
@@ -24,10 +25,10 @@ fn completions(statements: &[Stmt]) -> u8 {
                 else_branch,
                 ..
             } => {
-                completions(then_branch)
+                completions(declarations, then_branch)
                     | else_branch
                         .as_ref()
-                        .map_or(FALLTHROUGH, |body| completions(body))
+                        .map_or(FALLTHROUGH, |body| completions(declarations, body))
             }
             Stmt::Switch { cases, .. } => {
                 let mut tail = FALLTHROUGH;
@@ -37,7 +38,7 @@ fn completions(statements: &[Stmt]) -> u8 {
                     FALLTHROUGH
                 };
                 for case in cases.iter().rev() {
-                    let body = completions(&case.body);
+                    let body = completions(declarations, &case.body);
                     tail = (body & !FALLTHROUGH) | if body & FALLTHROUGH != 0 { tail } else { 0 };
                     branches |= tail;
                 }
@@ -49,7 +50,7 @@ fn completions(statements: &[Stmt]) -> u8 {
                     }
             }
             Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-                let body = completions(body);
+                let body = completions(declarations, body);
                 (body & (RETURN | EMPTY_RETURN | LABELLED))
                     | if matches!(condition, Expr::Bool(true)) && body & BREAK == 0 {
                         0
@@ -58,12 +59,16 @@ fn completions(statements: &[Stmt]) -> u8 {
                     }
             }
             Stmt::For {
-                condition, body, ..
+                init,
+                condition,
+                body,
+                ..
             } => {
-                let body = completions(body);
-                let inf = condition
-                    .as_ref()
-                    .is_none_or(|c| matches!(c, Expr::Bool(true)));
+                let body = completions(declarations, body);
+                let inf = declarations.for_of(init.as_deref()).is_none()
+                    && condition
+                        .as_ref()
+                        .is_none_or(|c| matches!(c, Expr::Bool(true)));
                 (body & (RETURN | EMPTY_RETURN | LABELLED))
                     | if inf && body & BREAK == 0 {
                         0
@@ -77,11 +82,13 @@ fn completions(statements: &[Stmt]) -> u8 {
                 finally,
                 ..
             } => {
-                let body =
-                    completions(body) | catch.as_ref().map_or(0, |catch| completions(&catch.body));
+                let body = completions(declarations, body)
+                    | catch
+                        .as_ref()
+                        .map_or(0, |catch| completions(declarations, &catch.body));
                 let final_state = finally
                     .as_ref()
-                    .map_or(FALLTHROUGH, |body| completions(body));
+                    .map_or(FALLTHROUGH, |body| completions(declarations, body));
                 (body & EMPTY_RETURN)
                     | (final_state & !FALLTHROUGH)
                     | if final_state & FALLTHROUGH != 0 {
@@ -91,7 +98,7 @@ fn completions(statements: &[Stmt]) -> u8 {
                     }
             }
             Stmt::Labeled { body, .. } => {
-                FALLTHROUGH | (completions(std::slice::from_ref(body)) & EMPTY_RETURN)
+                FALLTHROUGH | (completions(declarations, std::slice::from_ref(body)) & EMPTY_RETURN)
             }
             _ => FALLTHROUGH,
         };
@@ -105,10 +112,10 @@ fn completions(statements: &[Stmt]) -> u8 {
     result
 }
 
-pub(crate) fn falls_through(statements: &[Stmt]) -> bool {
-    completions(statements) & FALLTHROUGH != 0
+pub(crate) fn falls_through(declarations: &ModuleDeclarations, statements: &[Stmt]) -> bool {
+    completions(declarations, statements) & FALLTHROUGH != 0
 }
 
-pub(crate) fn returns_optional(statements: &[Stmt]) -> bool {
-    completions(statements) & (FALLTHROUGH | EMPTY_RETURN) != 0
+pub(crate) fn returns_optional(declarations: &ModuleDeclarations, statements: &[Stmt]) -> bool {
+    completions(declarations, statements) & (FALLTHROUGH | EMPTY_RETURN) != 0
 }

@@ -145,16 +145,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if !has_explicit_return {
             let mut result_ty = if s.has_return_value {
-                if crate::completion::returns_optional(view.body) {
+                if crate::completion::returns_optional(&self.hir.declarations, view.body) {
                     self.types.with_absences(s.returned, Absence::Undefined)
                 } else {
                     s.returned
                 }
-            } else if !crate::completion::falls_through(view.body) {
+            } else if !crate::completion::falls_through(&self.hir.declarations, view.body) {
                 Ty::NEVER
             } else {
                 Ty::VOID
             };
+            self.instances[inst_id].partial_record_result = (self.types.is_open(result_ty)
+                && matches!(self.types.kind(result_ty), TyKind::Object { .. }))
+            .then_some(result_ty);
             if view.is_async {
                 while let Some(inner) = self.unwrap_promise_once(inst_id, result_ty) {
                     result_ty = inner;
@@ -617,6 +620,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                             shapes::TypeName::new(self.ctx, "Map".into()),
                             &[Ty::NUMBER, value],
                         )
+                    } else if matches!(init_expr, Expr::MapNew)
+                        && matches!(self.types.kind(declared), TyKind::Generic { .. })
+                        && !self.types.is_open(declared)
+                    {
+                        self.instantiate_annotated_class(declared, 0, Some(s.inst))?
                     } else {
                         self.eval_expr(s, init_expr)?
                     };
@@ -716,8 +724,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(s, condition)?;
                 let otherwise = else_branch.as_deref().unwrap_or(&[]);
                 let (then_reaches, else_reaches) = (
-                    crate::completion::falls_through(then_branch),
-                    crate::completion::falls_through(otherwise),
+                    crate::completion::falls_through(&self.hir.declarations, then_branch),
+                    crate::completion::falls_through(&self.hir.declarations, otherwise),
                 );
                 let branch = s.guards.branch();
                 s.guards.exclude_absences(condition, true);

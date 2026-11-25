@@ -29,6 +29,8 @@ struct Counts {
 fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()> {
     let wit = "package test:counter; interface counters {
         resource counter {constructor(value:u32); get:func()->u32;}
+        resource label {constructor(); text:func()->string;}
+        visit:func(values:list<u32>);
         drops:func()->u32;
     } world api {export counters;}";
     let directory = tempfile::tempdir()?;
@@ -39,8 +41,7 @@ fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()>
         export class Local { constructor(value) {this.value=value;} get() {return read(this);}
         [Symbol.dispose]() {disposed++;} }",
     )?;
-    let source =
-        "import { Local, drops } from './counter'; export const counters={Counter:Local,drops};";
+    let source = "import { Local, drops } from './counter'; class Label { text(){return 'label';} } export const counters={Counter:Local,Label,drops,visit(values){for (const n of values) { if(n) continue; }}};";
     let entry = directory.path().join("entry.ts");
     let engine = Engine::default();
     let bytes = MemoryChecked.component(wit, "api", &entry.to_string_lossy(), source)?;

@@ -38,6 +38,7 @@ pub(crate) struct Instance {
     pub(crate) args: Ty,
     pub(crate) explicit_type_args: Ty,
     pub(crate) return_loc: LocId,
+    pub(crate) partial_record_result: Option<Ty>,
     pub(crate) has_explicit_return: bool,
     pub(crate) param_locs: ParamLocSpan,
     pub(crate) caller: Option<InstanceId>,

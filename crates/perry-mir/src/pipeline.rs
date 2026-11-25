@@ -163,6 +163,10 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     ));
     cleanup.add_pass(Mem2RegPass);
     cleanup.add_pass(DCEPass);
+    cleanup.add_pass(PassWrapper::new(
+        "fold-counted-loops",
+        crate::counted_loops::Fold,
+    ));
     cleanup.add_pass(SimplifyCFGPass);
     let mut rounds = run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 

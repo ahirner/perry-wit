@@ -416,6 +416,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             args: args_key,
             explicit_type_args: targs_key,
             return_loc,
+            partial_record_result: None,
             has_explicit_return: explicit_return.is_some(),
             param_locs,
             caller,

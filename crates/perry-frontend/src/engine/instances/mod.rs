@@ -488,6 +488,8 @@ impl<'h> InstancePlanner<'h, '_> {
                 None => err,
             };
             return Err(self.attach_inst_chain(err, inst_id));
+        } else if let Some(partial) = inst.partial_record_result {
+            super::InstanceResult::Value(partial)
         } else {
             super::InstanceResult::Source
         };

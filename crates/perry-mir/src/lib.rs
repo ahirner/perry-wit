@@ -11,6 +11,7 @@ mod characters;
 mod collections;
 mod constants;
 mod control;
+mod counted_loops;
 mod diagnostics;
 mod effects;
 mod exceptions;
