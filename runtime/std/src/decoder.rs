@@ -115,10 +115,7 @@ pub(crate) unsafe extern "C" fn std_decoder_validate_label(label: *mut u8) {
         .iter()
         .any(|name| label.eq_ignore_ascii_case(name))
     {
-        runtime::raise(
-            runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Unsupported text encoding"),
-        );
+        perry_rt_sys::raise_static!(runtime::RANGE_ERROR, "Unsupported text encoding");
     }
 }
 
@@ -163,17 +160,14 @@ pub(crate) unsafe extern "C" fn std_decoder_decode(
         *decoder = measured;
     }
     if result.is_err() {
-        runtime::raise(
+        perry_rt_sys::raise_static!(
             runtime::TYPE_ERROR,
-            perry_rt_sys::static_text!("The encoded data was not valid for encoding utf-8"),
+            "The encoded data was not valid for encoding utf-8"
         );
         return runtime::from_static(perry_rt_sys::static_text!(""));
     }
     let Ok(length) = u32::try_from(length) else {
-        runtime::raise(
-            runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Decoded string is too large"),
-        );
+        perry_rt_sys::raise_static!(runtime::RANGE_ERROR, "Decoded string is too large");
         return runtime::from_static(perry_rt_sys::static_text!(""));
     };
     let data = runtime::alloc(length);

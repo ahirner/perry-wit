@@ -623,32 +623,22 @@ pub(crate) unsafe extern "C" fn std_regex_exec_from(
     result
 }
 
-/// # Safety
-/// `result` is an array returned by `std_regex_exec_from`, not an ordinary array.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_regex_groups(result: *mut u8) -> *mut u8 {
-    unsafe { result.add(RESULT_GROUPS).cast::<*mut u8>().read() }
+macro_rules! regex_result_fields {
+    ($($name:ident => $offset:ident: $ty:ty;)*) => {$(
+        /// # Safety
+        /// `result` is an array returned by `std_regex_exec_from`.
+        #[unsafe(no_mangle)]
+        pub(crate) unsafe extern "C" fn $name(result: *mut u8) -> $ty {
+            unsafe { result.add($offset).cast::<$ty>().read() }
+        }
+    )*};
 }
 
-/// # Safety
-/// `result` is an array returned by `std_regex_exec_from`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_regex_index(result: *mut u8) -> f64 {
-    unsafe { result.add(RESULT_INDEX).cast::<f64>().read() }
-}
-
-/// # Safety
-/// `result` is an array returned by `std_regex_exec_from`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_regex_next(result: *mut u8) -> f64 {
-    unsafe { result.add(RESULT_NEXT).cast::<f64>().read() }
-}
-
-/// # Safety
-/// `result` is an array returned by `std_regex_exec_from`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_regex_input(result: *mut u8) -> *mut u8 {
-    unsafe { result.add(RESULT_INPUT).cast::<*mut u8>().read() }
+regex_result_fields! {
+    std_regex_groups => RESULT_GROUPS: *mut u8;
+    std_regex_index => RESULT_INDEX: f64;
+    std_regex_next => RESULT_NEXT: f64;
+    std_regex_input => RESULT_INPUT: *mut u8;
 }
 
 /// `s.match(regex)`.

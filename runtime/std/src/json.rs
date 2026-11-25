@@ -96,10 +96,7 @@ fn string_bytes(node: *mut u8) -> &'static [u8] {
 /// Reading a property of `undefined` or `null` throws, as in ECMAScript.
 fn checked(value: *mut u8) -> bool {
     if value.is_null() || unsafe { word(value, 0) } == NULL {
-        raise(
-            TYPE_ERROR,
-            perry_rt_sys::static_text!("Cannot read properties of undefined or null"),
-        );
+        perry_rt_sys::raise_static!(TYPE_ERROR, "Cannot read properties of undefined or null");
         return false;
     }
     true
@@ -162,19 +159,30 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     object_member(value, name)
 }
 
+/// Iterate child node handles of a JSON array or object container.
+fn children(container: *mut u8) -> impl Iterator<Item = u32> {
+    let mut next = if container.is_null() {
+        0
+    } else {
+        unsafe { word(container, 16) }
+    };
+    core::iter::from_fn(move || {
+        let current = next;
+        if current == 0 {
+            return None;
+        }
+        next = unsafe { word(node(current), 4) };
+        Some(current)
+    })
+}
+
 /// The last member node named `name`, including absent and `undefined` placeholders.
 fn member_node(value: *mut u8, name: &[u8]) -> *mut u8 {
     unsafe {
-        let mut found = core::ptr::null_mut();
-        let mut child = word(value, 16);
-        while child != 0 {
-            let key = node(word(node(child), 24));
-            if string_bytes(key) == name {
-                found = node(child);
-            }
-            child = word(node(child), 4);
-        }
-        found
+        children(value)
+            .filter(|&child| string_bytes(node(word(node(child), 24))) == name)
+            .last()
+            .map_or(core::ptr::null_mut(), node)
     }
 }
 
@@ -258,21 +266,15 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         let value = view::std_json_snapshot(value);
         if word(value, 0) == OBJECT {
             let value = canonical(value);
-            let mut child = word(value, 16);
-            let mut count = 0;
-            while child != 0 {
-                count += usize::from(word(node(child), 0) != ABSENT);
-                child = word(node(child), 4);
-            }
+            let count = children(value)
+                .filter(|&child| word(node(child), 0) != ABSENT)
+                .count();
             let (array, slots) = crate::runtime::array_storage(count);
-            child = word(value, 16);
-            let mut at = 0;
-            while child != 0 {
-                if word(node(child), 0) != ABSENT {
-                    slots[at] = std_json_to_string(node(word(node(child), 24))) as u64;
-                    at += 1;
-                }
-                child = word(node(child), 4);
+            for (slot, child) in slots
+                .iter_mut()
+                .zip(children(value).filter(|&child| word(node(child), 0) != ABSENT))
+            {
+                *slot = std_json_to_string(node(word(node(child), 24))) as u64;
             }
             return array;
         }
@@ -344,10 +346,7 @@ pub(crate) unsafe extern "C" fn std_json_to_number(value: *mut u8) -> f64 {
         NULL => 0.0,
         BOOLEAN => f64::from(unsafe { word(value, 8) }),
         _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("JSON value is not a number"),
-            );
+            perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value is not a number");
             0.0
         }
     }
@@ -362,10 +361,7 @@ pub(crate) unsafe extern "C" fn std_json_require_number(value: *mut u8) -> f64 {
     if let Some(number) = json_number(value) {
         return number.as_f64();
     }
-    raise(
-        TYPE_ERROR,
-        perry_rt_sys::static_text!("JSON value is not a number"),
-    );
+    perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value is not a number");
     0.0
 }
 
@@ -378,10 +374,7 @@ pub(crate) unsafe extern "C" fn std_json_to_i64(value: *mut u8) -> i64 {
     if let Some(integer) = json_integer(value) {
         return integer;
     }
-    raise(
-        TYPE_ERROR,
-        perry_rt_sys::static_text!("JSON value does not match the declared schema"),
-    );
+    perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value does not match the declared schema");
     0
 }
 
@@ -394,10 +387,7 @@ pub(crate) unsafe extern "C" fn std_json_to_u64(value: *mut u8) -> u64 {
     if let Some(integer) = json_integer(value) {
         return integer;
     }
-    raise(
-        TYPE_ERROR,
-        perry_rt_sys::static_text!("JSON value does not match the declared schema"),
-    );
+    perry_rt_sys::raise_static!(TYPE_ERROR, "JSON value does not match the declared schema");
     0
 }
 
@@ -513,9 +503,8 @@ fn canonical(object: *mut u8) -> *mut u8 {
         let (entries, table) = scratch.split_at_mut(count * 2);
         let entries = entries.as_chunks_mut::<2>().0;
         let mut unique = 0;
-        let mut child = word(object, 16);
         let mut changed = false;
-        while child != 0 {
+        for child in children(object) {
             let key = key_bytes(child);
             let mut hash = 0x811c_9dc5u32;
             for &byte in key {
@@ -538,7 +527,6 @@ fn canonical(object: *mut u8) -> *mut u8 {
                     _ => at = (at + 1) & (size - 1),
                 }
             }
-            child = word(node(child), 4);
         }
         let entries = &mut entries[..unique];
         let order = |entry: [u32; 2]| match array_index(key_bytes(entry[1])) {
@@ -639,23 +627,17 @@ pub(crate) extern "C" fn std_json_assign(object: *mut u8, source: *mut u8) {
         let source = view::std_json_snapshot(source);
         match word(source, 0) {
             OBJECT => {
-                let mut child = word(source, 16);
-                while child != 0 {
+                for child in children(source) {
                     if word(node(child), 0) != ABSENT {
                         append(object, node(child), node(word(node(child), 24)));
                     }
-                    child = word(node(child), 4);
                 }
             }
             ARRAY => {
-                let mut child = word(source, 16);
-                let mut index = 0;
-                while child != 0 {
+                for (index, child) in children(source).enumerate() {
                     if word(node(child), 0) != ABSENT {
-                        append(object, node(child), index_key(index));
+                        append(object, node(child), index_key(index as u32));
                     }
-                    index += 1;
-                    child = word(node(child), 4);
                 }
             }
             STRING => {
@@ -696,14 +678,12 @@ unsafe fn exclude_key(graph: *mut u8, key: *mut u8) -> *mut u8 {
         }
         let target = crate::runtime::bytes(key);
         let out = new_node(OBJECT);
-        let mut child = word(graph, 16);
-        while child != 0 {
+        for child in children(graph) {
             let member = node(child);
             let k = node(word(member, 24));
             if string_bytes(k) != target {
                 append(out, member, k);
             }
-            child = word(member, 4);
         }
         if word(out, 16) == 0 {
             core::ptr::null_mut()

@@ -12,24 +12,15 @@ use perry_rt_sys as _;
 pub(crate) unsafe extern "C" fn number_format(value: f64, output: *mut u8) -> u32 {
     // Every i32 has an exact, non-exponential ECMAScript decimal representation.
     let integer = value as i32;
-    let mut digits = [0u8; 11];
+    let mut digits = [0u8; 66];
     let mut buffer = ryu_js::Buffer::new();
     let text = if f64::from(integer) == value {
-        let mut at = digits.len();
-        let mut rest = integer.unsigned_abs();
-        loop {
-            at -= 1;
-            digits[at] = b'0' + (rest % 10) as u8;
-            rest /= 10;
-            if rest == 0 {
-                break;
-            }
-        }
-        if integer < 0 {
-            at -= 1;
-            digits[at] = b'-';
-        }
-        &digits[at..]
+        perry_rt_sys::number::format_integer(
+            u64::from(integer.unsigned_abs()),
+            integer < 0,
+            10,
+            &mut digits,
+        )
     } else {
         buffer.format(value).as_bytes()
     };

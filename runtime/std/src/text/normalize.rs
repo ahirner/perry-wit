@@ -23,7 +23,7 @@ pub(crate) extern "C" fn std_string_normalize(string: *mut u8, form: *mut u8) ->
             [b'N', b'F', b'K', b'C'] => 3,
             [b'N', b'F', b'K', b'D'] => 2,
             _ => {
-                crate::runtime::raise(crate::runtime::RANGE_ERROR, perry_rt_sys::static_text!(""));
+                perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "");
                 return from_static(perry_rt_sys::static_text!(""));
             }
         }

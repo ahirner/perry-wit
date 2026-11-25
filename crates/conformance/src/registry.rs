@@ -68,6 +68,20 @@ pub enum Case {
     },
 }
 impl Case {
+    pub(crate) fn command(source: impl Into<String>) -> Self {
+        Self::Command {
+            source: source.into(),
+            exit: ExitStatus::Success,
+        }
+    }
+    pub(crate) fn reject(source: impl Into<String>, diagnostic: impl Into<String>) -> Self {
+        Self::Reject {
+            wit: None,
+            source: source.into(),
+            diagnostic: diagnostic.into(),
+            form_sources: vec![],
+        }
+    }
     pub(crate) fn expected_outcome(&self) -> ExpectedOutcome {
         match self {
             Self::Reject { .. } => ExpectedOutcome::CompilerRejection,
@@ -100,32 +114,26 @@ impl Case {
                     })
                 }))
                 .collect(),
-            Self::Program(program) if program.form == Form::Direct => Form::ALL
-                .into_iter()
-                .map(|form| {
-                    if form == Form::Direct {
-                        Cow::Borrowed(self)
-                    } else {
-                        Cow::Owned(Self::Program(Program {
-                            expression: program.expression.clone(),
-                            form,
-                        }))
-                    }
-                })
-                .collect(),
-            Self::Program(program) if program.form == Form::StoredTimer => Form::TIMER_OBSERVERS
-                .into_iter()
-                .map(|form| {
-                    if form == Form::StoredTimer {
-                        Cow::Borrowed(self)
-                    } else {
-                        Cow::Owned(Self::Program(Program {
-                            expression: program.expression.clone(),
-                            form,
-                        }))
-                    }
-                })
-                .collect(),
+            Self::Program(program) if matches!(program.form, Form::Direct | Form::StoredTimer) => {
+                let forms: &[Form] = if program.form == Form::Direct {
+                    &Form::ALL
+                } else {
+                    &Form::TIMER_OBSERVERS
+                };
+                forms
+                    .iter()
+                    .map(|&form| {
+                        if form == program.form {
+                            Cow::Borrowed(self)
+                        } else {
+                            Cow::Owned(Self::Program(Program {
+                                expression: program.expression.clone(),
+                                form,
+                            }))
+                        }
+                    })
+                    .collect()
+            }
             Self::Aggregate(case) if !case.permuted => vec![
                 Cow::Borrowed(self),
                 Cow::Owned(Self::Aggregate(crate::aggregates::AggregateCase {
@@ -195,18 +203,29 @@ pub struct Contract {
     pub(crate) check: fn(&Case, &Evidence) -> Result<()>,
 }
 impl Contract {
-    pub(crate) fn new(
+    pub(crate) fn checked(
         id: &'static str,
-        witnesses: Vec<Witness>,
+        witnesses: impl IntoIterator<Item = (&'static str, Case)>,
         strategy: BoxedStrategy<Case>,
         check: fn(&Case, &Evidence) -> Result<()>,
     ) -> Self {
         Self {
             id,
-            witnesses,
+            witnesses: witnesses
+                .into_iter()
+                .map(|(partition, case)| Witness { partition, case })
+                .collect(),
             strategy,
             check,
         }
+    }
+
+    pub(crate) fn equivalence(
+        id: &'static str,
+        witnesses: impl IntoIterator<Item = (&'static str, Case)>,
+        strategy: BoxedStrategy<Case>,
+    ) -> Self {
+        Self::checked(id, witnesses, strategy, check_equivalence)
     }
 
     /// The contract's documented metadata from the static catalog.
@@ -252,27 +271,18 @@ fn expression_contract(
     strategy: BoxedStrategy<Number>,
     examples: Vec<(&'static str, Number)>,
 ) -> Contract {
-    Contract::new(
+    let direct = |expression| {
+        Case::Program(Program {
+            expression,
+            form: Form::Direct,
+        })
+    };
+    Contract::equivalence(
         id,
         examples
             .into_iter()
-            .map(|(partition, expression)| Witness {
-                partition,
-                case: Case::Program(Program {
-                    expression,
-                    form: Form::Direct,
-                }),
-            })
-            .collect(),
-        strategy
-            .prop_map(|expression| {
-                Case::Program(Program {
-                    expression,
-                    form: Form::Direct,
-                })
-            })
-            .boxed(),
-        check_equivalence,
+            .map(|(partition, expression)| (partition, direct(expression))),
+        strategy.prop_map(direct).boxed(),
     )
 }
 
@@ -515,19 +525,18 @@ export function run(x: number): {value: number, trace: number[]} {
         ("node.timers.promises.value", Form::Timer),
         ("node.timers.promises.observers", Form::StoredTimer),
     ] {
-        contracts.push(Contract::new(
+        contracts.push(Contract::equivalence(
             id,
-            vec![Witness {
-                partition: "retained-operation",
-                case: Case::Program(Program {
+            [(
+                "retained-operation",
+                Case::Program(Program {
                     expression: Number::Mark(input()),
                     form,
                 }),
-            }],
+            )],
             n.clone()
                 .prop_map(move |expression| Case::Program(Program { expression, form }))
                 .boxed(),
-            check_equivalence,
         ));
     }
     contracts.extend(crate::capabilities::fs_contracts());
@@ -621,36 +630,29 @@ export function run(x: number): {value: number, trace: number[]} {
         ("web.crypto.random", include_str!("../cases/random.ts")),
         ("node.process.environment", include_str!("../cases/env.ts")),
     ] {
-        let case = Case::Command {
-            source: source.into(),
-            exit: ExitStatus::Success,
-        };
-        contracts.push(Contract::new(
+        let case = Case::command(source);
+        contracts.push(Contract::equivalence(
             id,
-            vec![Witness {
-                partition: "standard-source",
-                case: case.clone(),
-            }],
+            [("standard-source", case.clone())],
             Just(case).boxed(),
-            check_equivalence,
         ));
     }
-    contracts.push(Contract::new(
+    contracts.push(Contract::checked(
         "node.timers.promises.lifecycle",
-        vec![
-            Witness {
-                partition: "settlement-and-reobserve",
-                case: Case::Lifecycle(crate::transitions::complete_trace(vec![
+        [
+            (
+                "settlement-and-reobserve",
+                Case::Lifecycle(crate::transitions::complete_trace(vec![
                     Action::Start,
                     Action::HostRelease,
                     Action::Complete,
                     Action::Observe,
                     Action::Observe,
                 ])),
-            },
-            Witness {
-                partition: "cancel-and-reuse",
-                case: Case::Lifecycle(crate::transitions::complete_trace(vec![
+            ),
+            (
+                "cancel-and-reuse",
+                Case::Lifecycle(crate::transitions::complete_trace(vec![
                     Action::Start,
                     Action::Cancel,
                     Action::Complete,
@@ -661,7 +663,7 @@ export function run(x: number): {value: number, trace: number[]} {
                     Action::Complete,
                     Action::Observe,
                 ])),
-            },
+            ),
         ],
         TimerModel::sequential_strategy(1..=12)
             .prop_map(|(_, actions, _)| {
@@ -691,12 +693,9 @@ export function run(x: number): {value: number, trace: number[]} {
             },
             fault,
         };
-        contracts.push(Contract::new(
+        contracts.push(Contract::checked(
             id,
-            vec![Witness {
-                partition: "injected-fault",
-                case: case(Number::Input),
-            }],
+            [("injected-fault", case(Number::Input))],
             n.clone().prop_map(case).boxed(),
             crate::execution::check_fault,
         ));

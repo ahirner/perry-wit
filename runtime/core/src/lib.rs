@@ -41,6 +41,37 @@ static ALLOCATOR: heap::Allocator = heap::Allocator::new();
 /// value of `Promise<void>`.
 pub(crate) const UNDEFINED_BITS: u64 = 0x7FF0_0000_0000_0001;
 
+macro_rules! dlist_push_front {
+    ($head:expr, $node:expr, $prev:ident, $next:ident) => {{
+        (*$node).$next = $head;
+        if !$head.is_null() {
+            (*$head).$prev = $node;
+        }
+        $head = $node;
+    }};
+}
+pub(crate) use dlist_push_front;
+
+macro_rules! dlist_unlink {
+    ($head:expr, $node:expr, $prev:ident, $next:ident $(, tail = $tail:expr)?) => {{
+        let previous = (*$node).$prev;
+        let next = (*$node).$next;
+        if previous.is_null() {
+            $head = next;
+        } else {
+            (*previous).$next = next;
+        }
+        if next.is_null() {
+            $($tail = previous;)?
+        } else {
+            (*next).$prev = previous;
+        }
+        (*$node).$prev = core::ptr::null_mut();
+        (*$node).$next = core::ptr::null_mut();
+    }};
+}
+pub(crate) use dlist_unlink;
+
 #[inline(always)]
 pub(crate) fn byte_size(elements: u32, stride: u32, overhead: u32) -> u32 {
     elements

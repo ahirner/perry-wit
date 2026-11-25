@@ -187,7 +187,7 @@ pub(crate) unsafe extern "C" fn perry_array_hole(array: *mut u8, index: u32, ref
 /// A new array with room for at least `capacity` elements and length 0.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
-    allocate(capacity, Elements::Scalar)
+    allocate::<false>(capacity, Elements::Scalar)
 }
 
 /// Double the capacity of `array` when a compiled push finds it full.
@@ -197,56 +197,70 @@ pub(crate) extern "C" fn perry_array_new(capacity: u32) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_array_grow(array: *mut u8) {
     // SAFETY: forwarded from the caller; scalar arrays use scalar slots.
-    unsafe { grow(array, Elements::Scalar) }
+    unsafe { grow::<false>(array, Elements::Scalar) }
 }
 
-/// A non-collectible array of `elements` with room for at least `capacity` of them.
-fn allocate(capacity: u32, elements: Elements) -> *mut u8 {
+/// Allocate an array of `elements` with room for at least `capacity` of them.
+fn allocate<const COLLECTIBLE: bool>(capacity: u32, elements: Elements) -> *mut u8 {
     let cap = capacity.max(MIN_CAPACITY);
-    let array = perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array;
-    let data = perry_alloc(elements.bytes(cap)) as *mut u64;
-    // SAFETY: both blocks were just allocated with sufficient size and alignment.
-    unsafe { array.write(Array::empty(cap, data)) };
-    array as *mut u8
+    // SAFETY: both blocks are fresh with sufficient size, alignment, and matching shapes.
+    unsafe {
+        let (array, data) = if COLLECTIBLE {
+            (
+                crate::roots::perry_gc_alloc(
+                    core::mem::size_of::<Array>() as u32,
+                    ARRAY_SHAPE.as_ptr(),
+                ) as *mut Array,
+                crate::roots::perry_gc_alloc(elements.bytes(cap), elements.shape()) as *mut u64,
+            )
+        } else {
+            (
+                perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array,
+                perry_alloc(elements.bytes(cap)) as *mut u64,
+            )
+        };
+        array.write(Array::empty(cap, data));
+        array as *mut u8
+    }
 }
 
-/// Double the capacity of a non-collectible array, copying its live elements.
+/// Double the capacity of an array, copying its live elements.
 ///
 /// # Safety
-/// `array` is live and was allocated with `elements` slots.
-unsafe fn grow(array: *mut u8, elements: Elements) {
+/// `array` is live and was allocated with `elements` slots and matching collectibility.
+unsafe fn grow<const COLLECTIBLE: bool>(array: *mut u8, elements: Elements) {
     let array = array as *mut Array;
     // SAFETY: the caller passes a live array; the new block holds every old element.
     unsafe {
         let (cap, bytes) = elements.doubled((*array).cap);
-        let data = perry_alloc(bytes) as *mut u64;
-        core::ptr::copy_nonoverlapping(
-            (*array).data,
-            data,
-            (*array).len as usize * elements.words(),
-        );
+        let data = if COLLECTIBLE {
+            let stride = elements.stride();
+            crate::roots::resize_buffer(
+                (*array).data.cast(),
+                (*array).cap * stride,
+                bytes,
+                (*array).len * stride,
+                elements.shape(),
+            ) as *mut u64
+        } else {
+            let data = perry_alloc(bytes) as *mut u64;
+            core::ptr::copy_nonoverlapping(
+                (*array).data,
+                data,
+                (*array).len as usize * elements.words(),
+            );
+            data
+        };
         (*array).data = data;
         resize_holes(array, cap);
         (*array).cap = cap;
     }
 }
 
-/// Allocate an array whose header and element storage are collectible. Reference slots are
-/// traced precisely, and numeric slots are treated as opaque values.
+/// Allocate an array whose header and element storage are collectible.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: u32) -> *mut u8 {
-    let elements = Elements::decode(references);
-    let cap = capacity.max(MIN_CAPACITY);
-    // SAFETY: both static shapes describe these zeroed allocations exactly.
-    unsafe {
-        let array = crate::roots::perry_gc_alloc(
-            core::mem::size_of::<Array>() as u32,
-            ARRAY_SHAPE.as_ptr(),
-        ) as *mut Array;
-        let data = crate::roots::perry_gc_alloc(elements.bytes(cap), elements.shape()) as *mut u64;
-        array.write(Array::empty(cap, data));
-        array as *mut u8
-    }
+    allocate::<true>(capacity, Elements::decode(references))
 }
 
 /// Grow collectible element storage.
@@ -255,37 +269,14 @@ pub(crate) extern "C" fn perry_array_new_collectible(capacity: u32, references: 
 /// `array` was created by [perry_array_new_collectible], with the same reference flag.
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn perry_array_grow_collectible(array: *mut u8, references: u32) {
-    let elements = Elements::decode(references);
-    let array = array as *mut Array;
-    // SAFETY: the caller owns a live array, and the copied slots retain their original shape.
-    unsafe {
-        let stride = elements.stride();
-        let (cap, bytes) = elements.doubled((*array).cap);
-        // The old capacity and length are at most half the new one, so their sizes fit.
-        let data = crate::roots::resize_buffer(
-            (*array).data.cast(),
-            (*array).cap * stride,
-            bytes,
-            (*array).len * stride,
-            elements.shape(),
-        ) as *mut u64;
-        (*array).data = data;
-        resize_holes(array, cap);
-        (*array).cap = cap;
-    }
+    // SAFETY: forwarded from the caller.
+    unsafe { grow::<true>(array, Elements::decode(references)) }
 }
 
 /// Create an array with a statically known element representation.
 #[unsafe(no_mangle)]
 pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8 {
-    #[cfg(feature = "collectible")]
-    {
-        perry_array_new_collectible(capacity, references)
-    }
-    #[cfg(not(feature = "collectible"))]
-    {
-        allocate(capacity, Elements::decode(references))
-    }
+    allocate::<{ cfg!(feature = "collectible") }>(capacity, Elements::decode(references))
 }
 
 /// Grow an array whose reference flag matches its construction.
@@ -294,16 +285,8 @@ pub extern "C" fn perry_array_new_typed(capacity: u32, references: u32) -> *mut 
 /// `array` is a live exclusively owned array created with the same `references` flag.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn perry_array_grow_typed(array: *mut u8, references: u32) {
-    #[cfg(feature = "collectible")]
     // SAFETY: forwarded from the caller.
-    unsafe {
-        perry_array_grow_collectible(array, references);
-    }
-    #[cfg(not(feature = "collectible"))]
-    // SAFETY: forwarded from the caller.
-    unsafe {
-        grow(array, Elements::decode(references));
-    }
+    unsafe { grow::<{ cfg!(feature = "collectible") }>(array, Elements::decode(references)) }
 }
 
 /// Concatenate arrays, consuming only headers and buffers proved exclusive by MIR.

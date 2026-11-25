@@ -3,8 +3,8 @@
 
 use crate::{
     emit::{CHECKSUM_TS, Emitter},
-    execution::{FactLimits, check_equivalence},
-    registry::{Case, Contract, Witness},
+    execution::FactLimits,
+    registry::{Case, Contract},
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -347,10 +347,10 @@ pub(crate) fn contract() -> Contract {
         steps,
         in_body,
     };
-    let witnesses = vec![
-        Witness {
-            partition: "set-paused-clear-foreach-and-reinsert",
-            case: Case::Collection(CollectionCase {
+    let witnesses = [
+        (
+            "set-paused-clear-foreach-and-reinsert",
+            Case::Collection(CollectionCase {
                 kind: CollectionKind::SetValues,
                 initial_count: 8,
                 actions: vec![
@@ -373,10 +373,10 @@ pub(crate) fn contract() -> Contract {
                 permuted: false,
                 fact_limits: FactLimits::Summarized,
             }),
-        },
-        Witness {
-            partition: "map-entries-compaction-and-abandoned-cursor-churn",
-            case: Case::Collection(CollectionCase {
+        ),
+        (
+            "map-entries-compaction-and-abandoned-cursor-churn",
+            Case::Collection(CollectionCase {
                 kind: CollectionKind::MapEntries,
                 initial_count: 36,
                 actions: vec![
@@ -401,14 +401,13 @@ pub(crate) fn contract() -> Contract {
                 permuted: false,
                 fact_limits: FactLimits::Narrow,
             }),
-        },
+        ),
     ];
-    Contract::new(
+    Contract::equivalence(
         "ecma.collection.iterators",
         witnesses,
         collection_case_strategy()
             .prop_map(Case::Collection)
             .boxed(),
-        check_equivalence,
     )
 }

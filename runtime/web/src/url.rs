@@ -1,6 +1,6 @@
 //! The declared HTTP(S) URL subset. A linked search-params value retains its URL owner.
 use crate::{Buffer, TYPE_ERROR, alloc, bytes, from_static, helper};
-use perry_rt_sys::{adopt, raise};
+use perry_rt_sys::adopt;
 
 #[repr(C)]
 struct Url {
@@ -101,10 +101,7 @@ pub(crate) extern "C" fn web_url_new(input: *mut u8, base: *mut u8) -> *mut u8 {
         resolve(text(input), text(base))
     };
     let Some(href) = href else {
-        raise(
-            TYPE_ERROR,
-            perry_rt_sys::static_text!("Invalid HTTP(S) URL"),
-        );
+        perry_rt_sys::raise_static!(TYPE_ERROR, "Invalid HTTP(S) URL");
         return core::ptr::null_mut();
     };
     let object = perry_rt_sys::object!(Url; href);

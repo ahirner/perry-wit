@@ -1,7 +1,7 @@
 //! Thrown values used as typed values: `trace.push(outcome.reason)` after a numeric `throw`.
 use crate::runtime::{
     EXCEPTION_KIND, EXCEPTION_TAG, EXCEPTION_VALUE, TAG_NUMBER, TAG_STRING, THROWN_VALUE,
-    TYPE_ERROR, from_static, raise,
+    TYPE_ERROR, from_static,
 };
 
 /// The kind, tag and value slot of an exception object.
@@ -114,34 +114,25 @@ pub(crate) extern "C" fn std_exception_display(exception: *mut u8) -> *mut u8 {
     }
 }
 
-/// Extract a thrown number or raise `TypeError` for any other thrown value.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_exception_to_number(exception: *mut u8) -> f64 {
-    match parts(exception) {
-        (THROWN_VALUE, TAG_NUMBER, bits) => f64::from_bits(bits),
-        _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("Thrown value is not a number"),
-            );
-            0.0
+macro_rules! exception_extract {
+    ($($name:ident -> $ret:ty: $tag:path => |$val:ident| $ok:expr, else $msg:literal => $fallback:expr;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) extern "C" fn $name(exception: *mut u8) -> $ret {
+            match parts(exception) {
+                (THROWN_VALUE, $tag, $val) => $ok,
+                _ => {
+                    perry_rt_sys::raise_static!(TYPE_ERROR, $msg);
+                    $fallback
+                }
+            }
         }
-    }
+    )*};
 }
 
-/// Extract a thrown string or raise `TypeError` for any other thrown value.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_exception_to_string(exception: *mut u8) -> *mut u8 {
-    match parts(exception) {
-        (THROWN_VALUE, TAG_STRING, value) => value as usize as *mut u8,
-        _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("Thrown value is not a string"),
-            );
-            from_static(perry_rt_sys::static_text!(""))
-        }
-    }
+exception_extract! {
+    std_exception_to_number -> f64: TAG_NUMBER => |bits| f64::from_bits(bits), else "Thrown value is not a number" => 0.0;
+    std_exception_to_string -> *mut u8: TAG_STRING => |value| value as usize as *mut u8, else "Thrown value is not a string" => from_static(perry_rt_sys::static_text!(""));
+    std_exception_to_bool -> u32: perry_rt_sys::layout::exception::TAG_BOOLEAN => |value| u32::from(value != 0), else "Thrown value is not a boolean" => 0;
 }
 
 /// `error.name`: the constructor's name of an `Error` object (thrown values have none).
@@ -156,20 +147,4 @@ pub(crate) extern "C" fn std_exception_name(exception: *mut u8) -> *mut u8 {
         SYNTAX_ERROR => perry_rt_sys::static_text!("SyntaxError"),
         _ => perry_rt_sys::static_text!(""),
     })
-}
-
-/// Extract a thrown boolean or raise a checked `TypeError` for any other thrown value.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_exception_to_bool(exception: *mut u8) -> u32 {
-    use perry_rt_sys::layout::exception::TAG_BOOLEAN;
-    match parts(exception) {
-        (THROWN_VALUE, TAG_BOOLEAN, value) => u32::from(value != 0),
-        _ => {
-            raise(
-                TYPE_ERROR,
-                perry_rt_sys::static_text!("Thrown value is not a boolean"),
-            );
-            0
-        }
-    }
 }

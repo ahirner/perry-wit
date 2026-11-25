@@ -48,52 +48,6 @@ mod imports {
         pub(crate) fn reaction_cancel_read(readable: u32) -> u32;
     }
 
-    macro_rules! output {
-        ($module:literal, $new:ident, $start:ident, $write:ident, $drop_writer:ident, $read:ident, $drop_future:ident, $cancel_write:ident, $cancel_read:ident) => {
-            #[link(wasm_import_module = $module)]
-            unsafe extern "C" {
-                #[link_name = "[stream-new-0]write-via-stream"]
-                pub(crate) fn $new() -> u64;
-                #[link_name = "write-via-stream"]
-                pub(crate) fn $start(readable: u32) -> u32;
-                #[link_name = "[async-lower][stream-write-0]write-via-stream"]
-                pub(crate) fn $write(writable: u32, data: *const u8, len: u32) -> u32;
-                #[link_name = "[stream-drop-writable-0]write-via-stream"]
-                pub(crate) fn $drop_writer(writable: u32);
-                #[link_name = "[async-lower][future-read-1]write-via-stream"]
-                pub(crate) fn $read(future: u32, result: *mut u8) -> u32;
-                #[link_name = "[future-drop-readable-1]write-via-stream"]
-                pub(crate) fn $drop_future(future: u32);
-                #[link_name = "[stream-cancel-write-0]write-via-stream"]
-                pub(crate) fn $cancel_write(writable: u32) -> u32;
-                #[link_name = "[future-cancel-read-1]write-via-stream"]
-                pub(crate) fn $cancel_read(future: u32) -> u32;
-            }
-        };
-    }
-    output!(
-        "wasi:cli/stdout@0.3.0",
-        stdout_new,
-        stdout_start,
-        stdout_write,
-        stdout_drop_writer,
-        stdout_read,
-        stdout_drop_future,
-        stdout_cancel_write,
-        stdout_cancel_read
-    );
-    output!(
-        "wasi:cli/stderr@0.3.0",
-        stderr_new,
-        stderr_start,
-        stderr_write,
-        stderr_drop_writer,
-        stderr_read,
-        stderr_drop_future,
-        stderr_cancel_write,
-        stderr_cancel_read
-    );
-
     #[link(wasm_import_module = "wasi:cli/environment@0.3.0")]
     unsafe extern "C" {
         #[link_name = "get-environment"]
@@ -121,14 +75,22 @@ pub(crate) use imports::*;
 #[cfg(target_arch = "wasm32")]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub(crate) mod output {
-    use super::imports::*;
-
-    macro_rules! dispatch {
-        ($($name:ident($($arg:ident: $ty:ty),*) $(-> $result:ty)? => $stdout:ident, $stderr:ident;)*) => {$(
+    macro_rules! output_ops {
+        ($($name:ident($($arg:ident: $ty:ty),*) $(-> $result:ty)? $([$ext_ret:ty])? => $link:literal;)*) => {$(
             pub(crate) fn $name(fd: usize, $($arg: $ty),*) $(-> $result)? {
+                #[link(wasm_import_module = "wasi:cli/stdout@0.3.0")]
+                unsafe extern "C" {
+                    #[link_name = $link]
+                    fn stdout($($arg: $ty),*) $(-> $result)? $(-> $ext_ret)?;
+                }
+                #[link(wasm_import_module = "wasi:cli/stderr@0.3.0")]
+                unsafe extern "C" {
+                    #[link_name = $link]
+                    fn stderr($($arg: $ty),*) $(-> $result)? $(-> $ext_ret)?;
+                }
                 // SAFETY: the caller retains buffers until the canonical operation completes.
-                dispatch!(@result unsafe {
-                    if fd == 0 { $stdout($($arg),*) } else { $stderr($($arg),*) }
+                output_ops!(@result unsafe {
+                    if fd == 0 { stdout($($arg),*) } else { stderr($($arg),*) }
                 } $(, $result)?)
             }
         )*};
@@ -136,15 +98,15 @@ pub(crate) mod output {
         (@result $value:expr, $result:ty) => { $value };
     }
 
-    dispatch! {
-        new() -> u64 => stdout_new, stderr_new;
-        start(readable: u32) -> u32 => stdout_start, stderr_start;
-        write(writable: u32, data: *const u8, len: u32) -> u32 => stdout_write, stderr_write;
-        drop_writer(writable: u32) => stdout_drop_writer, stderr_drop_writer;
-        read(future: u32, result: *mut u8) -> u32 => stdout_read, stderr_read;
-        drop_future(future: u32) => stdout_drop_future, stderr_drop_future;
-        cancel_write(writable: u32) => stdout_cancel_write, stderr_cancel_write;
-        cancel_read(future: u32) => stdout_cancel_read, stderr_cancel_read;
+    output_ops! {
+        new() -> u64 => "[stream-new-0]write-via-stream";
+        start(readable: u32) -> u32 => "write-via-stream";
+        write(writable: u32, data: *const u8, len: u32) -> u32 => "[async-lower][stream-write-0]write-via-stream";
+        drop_writer(writable: u32) => "[stream-drop-writable-0]write-via-stream";
+        read(future: u32, result: *mut u8) -> u32 => "[async-lower][future-read-1]write-via-stream";
+        drop_future(future: u32) => "[future-drop-readable-1]write-via-stream";
+        cancel_write(writable: u32) [u32] => "[stream-cancel-write-0]write-via-stream";
+        cancel_read(future: u32) [u32] => "[future-cancel-read-1]write-via-stream";
     }
 }
 

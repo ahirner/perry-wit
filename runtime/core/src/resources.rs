@@ -2,8 +2,6 @@
 //! descriptors, while the weak registry queues host destruction after marking finishes.
 use crate::{collectible::Collector, instance::instance_state, region::Task};
 use alloc::{boxed::Box, vec::Vec};
-#[cfg(target_arch = "wasm32")]
-use core::cell::UnsafeCell;
 use core::ptr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,11 +167,6 @@ impl Registry {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-struct Global(UnsafeCell<Registry>);
-// SAFETY: one guest thread; no borrow crosses a host call or allocation safe point.
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for Global {}
 instance_state!(
     REGISTRY,
     registry_state,

@@ -175,6 +175,24 @@ pub enum Flat {
 }
 
 impl AbiType {
+    /// Whether this type is one of the 11 Canonical ABI scalars.
+    pub(super) fn is_scalar(&self) -> bool {
+        matches!(
+            self,
+            Self::Bool
+                | Self::S8
+                | Self::U8
+                | Self::S16
+                | Self::U16
+                | Self::S32
+                | Self::U32
+                | Self::S64
+                | Self::U64
+                | Self::F32
+                | Self::F64
+        )
+    }
+
     /// The WIT spelling of this type's outermost constructor, for diagnostics.
     pub(crate) fn wit_name(&self) -> &'static str {
         match self {
@@ -197,10 +215,9 @@ impl AbiType {
             Self::Enum(_) => "enum",
             Self::Variant(_) => "variant",
             Self::ByteStream => "stream<u8>",
-            Self::Resource { owned: true, .. } => "own",
             Self::Resource { owned: false, .. } => "borrow",
-            // The ok case is a resource handle, a number in TypeScript.
-            Self::OkHandle { .. } => "own",
+            // The ok case of `OkHandle` is a resource handle, a number in TypeScript.
+            Self::Resource { owned: true, .. } | Self::OkHandle { .. } => "own",
         }
     }
 
@@ -223,25 +240,24 @@ impl AbiType {
 
     fn flatten(&self, out: &mut Vec<Flat>) {
         match self {
-            AbiType::Bool
-            | AbiType::S8
-            | AbiType::U8
-            | AbiType::S16
-            | AbiType::U16
-            | AbiType::S32
-            | AbiType::U32
-            | AbiType::ByteStream
-            | AbiType::Resource { .. } => out.push(Flat::I32),
-            AbiType::S64 | AbiType::U64 => out.push(Flat::I64),
-            AbiType::F32 => out.push(Flat::F32),
-            AbiType::F64 => out.push(Flat::F64),
-            AbiType::String | AbiType::List(_) => out.extend([Flat::I32, Flat::I32]),
-            AbiType::Record(fields) => fields.iter().for_each(|(_, ty)| ty.flatten(out)),
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => out.extend(self.sum_flat()),
-            AbiType::OkHandle { flat, .. } => out.extend(flat.iter().copied()),
+            Self::Bool
+            | Self::S8
+            | Self::U8
+            | Self::S16
+            | Self::U16
+            | Self::S32
+            | Self::U32
+            | Self::ByteStream
+            | Self::Resource { .. } => out.push(Flat::I32),
+            Self::S64 | Self::U64 => out.push(Flat::I64),
+            Self::F32 => out.push(Flat::F32),
+            Self::F64 => out.push(Flat::F64),
+            Self::String | Self::List(_) => out.extend([Flat::I32, Flat::I32]),
+            Self::Record(fields) => fields.iter().for_each(|(_, ty)| ty.flatten(out)),
+            Self::Option(_) | Self::Result { .. } | Self::Enum(_) | Self::Variant(_) => {
+                out.extend(self.sum_flat())
+            }
+            Self::OkHandle { flat, .. } => out.extend(flat.iter().copied()),
         }
     }
 
@@ -251,44 +267,31 @@ impl AbiType {
         out
     }
 
-    fn alignment(&self) -> u32 {
+    /// Canonical ABI `(alignment, size)` in bytes.
+    fn layout(&self) -> (u32, u32) {
         match self {
-            AbiType::Bool | AbiType::S8 | AbiType::U8 => 1,
-            AbiType::S16 | AbiType::U16 => 2,
-            AbiType::S32
-            | AbiType::U32
-            | AbiType::F32
-            | AbiType::ByteStream
-            | AbiType::Resource { .. } => 4,
-            AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
-            AbiType::String | AbiType::List(_) => 4,
-            AbiType::Record(fields) => fields.iter().map(|(_, t)| t.alignment()).max().unwrap_or(1),
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => self.sum_alignment(),
-            AbiType::OkHandle { .. } => 8,
+            Self::Bool | Self::S8 | Self::U8 => (1, 1),
+            Self::S16 | Self::U16 => (2, 2),
+            Self::S32 | Self::U32 | Self::F32 | Self::ByteStream | Self::Resource { .. } => (4, 4),
+            Self::S64 | Self::U64 | Self::F64 => (8, 8),
+            Self::String | Self::List(_) => (4, 8),
+            Self::Record(fields) => (
+                fields.iter().map(|(_, t)| t.alignment()).max().unwrap_or(1),
+                record_size(fields.iter().map(|(_, ty)| ty)),
+            ),
+            Self::Option(_) | Self::Result { .. } | Self::Enum(_) | Self::Variant(_) => {
+                (self.sum_alignment(), self.sum_size())
+            }
+            Self::OkHandle { flat, .. } => (8, 8 * flat.len() as u32),
         }
     }
 
+    fn alignment(&self) -> u32 {
+        self.layout().0
+    }
+
     fn size(&self) -> u32 {
-        match self {
-            AbiType::Bool | AbiType::S8 | AbiType::U8 => 1,
-            AbiType::S16 | AbiType::U16 => 2,
-            AbiType::S32
-            | AbiType::U32
-            | AbiType::F32
-            | AbiType::ByteStream
-            | AbiType::Resource { .. } => 4,
-            AbiType::S64 | AbiType::U64 | AbiType::F64 => 8,
-            AbiType::String | AbiType::List(_) => 8,
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => self.sum_size(),
-            AbiType::OkHandle { flat, .. } => 8 * flat.len() as u32,
-            AbiType::Record(fields) => record_size(fields.iter().map(|(_, ty)| ty)),
-        }
+        self.layout().1
     }
 
     fn field_offsets(&self) -> impl Iterator<Item = u32> + '_ {
@@ -302,14 +305,14 @@ impl AbiType {
     /// The memory access for a scalar, or `None` for compound types.
     fn mem_kind(&self) -> Option<MemKind> {
         Some(match self {
-            AbiType::Bool | AbiType::U8 => MemKind::I32U8,
-            AbiType::S8 => MemKind::I32S8,
-            AbiType::U16 => MemKind::I32U16,
-            AbiType::S16 => MemKind::I32S16,
-            AbiType::S32 | AbiType::U32 | AbiType::Resource { .. } => MemKind::I32,
-            AbiType::S64 | AbiType::U64 => MemKind::I64,
-            AbiType::F32 => MemKind::F32,
-            AbiType::F64 => MemKind::F64,
+            Self::Bool | Self::U8 => MemKind::I32U8,
+            Self::S8 => MemKind::I32S8,
+            Self::U16 => MemKind::I32U16,
+            Self::S16 => MemKind::I32S16,
+            Self::S32 | Self::U32 | Self::Resource { .. } => MemKind::I32,
+            Self::S64 | Self::U64 => MemKind::I64,
+            Self::F32 => MemKind::F32,
+            Self::F64 => MemKind::F64,
             _ => return None,
         })
     }
