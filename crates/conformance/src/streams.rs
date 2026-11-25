@@ -1,7 +1,7 @@
 //! Pure stream inputs and observation assertions. Transports own the host effects.
 use crate::{
     execution::{Evidence, Outcome, check_equivalence, number},
-    registry::{Case, Contract, Witness},
+    registry::{Case, Contract},
 };
 use anyhow::{Result, ensure};
 use proptest::prelude::*;
@@ -16,56 +16,13 @@ pub struct StreamCase {
 }
 impl StreamCase {
     pub(crate) fn source(&self) -> String {
-        if self.byob {
-            return self.byob_source();
-        }
-        format!(
-            r#"
-import {{Writable}} from 'node:stream';
-export async function run(input:ReadableStream<Uint8Array>):Promise<{{value:number,trace:number[]}}> {{
-  const trace:number[]=[];
-  const reader=input.getReader();
-  if(!input.locked)throw 1;
-  let locked=false;try{{input.getReader();}}catch{{locked=true;}}
-  if(!locked)throw 2;trace.push(1);
-  const writer=Writable.toWeb(process.stdout).getWriter();
-  let count=0;
-  try {{
-    let result=await reader.read();
-    while(!result.done){{
-      const bytes=result.value;if(bytes===undefined)throw 3;
-      const pending=writer.write(bytes);
-      await pending;await pending;
-      count+=bytes.length;
-      if({cancel}){{await reader.cancel();trace.push(2);break;}}
-      result=await reader.read();
-    }}
-    writer.releaseLock();
-    reader.releaseLock();
-    if(input.locked)throw 4;
-    const finished=input.getReader();
-    if(!(await finished.read()).done)throw 5;
-    finished.releaseLock();trace.push(3);
-    return {{value:count,trace}};
-  }} finally {{if(input.locked){{await reader.cancel();reader.releaseLock();}}}}
-}}
-"#,
-            cancel = self.cancel
-        )
-    }
-    fn byob_source(&self) -> String {
-        format!(
-            r#"
-import {{Writable}} from 'node:stream';
-export async function run(input:ReadableStream<Uint8Array>):Promise<{{value:number,trace:number[]}}> {{
-  const trace:number[]=[];const reader=input.getReader({{mode:"byob"}});
-  if(!input.locked)throw 1;
-  let locked=false;try{{input.getReader();}}catch{{locked=true;}}
-  if(!locked)throw 2;trace.push(1);
-  const writer=Writable.toWeb(process.stdout).getWriter();
-  let buffer=new Uint8Array(8196);buffer[0]=19;buffer[8195]=23;let count=0;
-  try {{
-    while(true){{
+        let cancel = self.cancel;
+        let (mode, setup, read_loop, unlock_err, eof_err) = if self.byob {
+            (
+                r#"{mode:"byob"}"#,
+                "let buffer=new Uint8Array(8196);buffer[0]=19;buffer[8195]=23;",
+                format!(
+                    r#"while(true){{
       const original=buffer.buffer;const alias=buffer.subarray(1,2);
       const pending=reader.read(buffer.subarray(2,8194),{{min:8192}});
       if(buffer.length!==0 || alias.length!==0 || original.byteLength!==0)throw 3;
@@ -78,14 +35,53 @@ export async function run(input:ReadableStream<Uint8Array>):Promise<{{value:numb
         if({cancel}){{await reader.cancel();trace.push(2);break;}}
       }}
       if(result.done)break;
-    }}
-    writer.releaseLock();reader.releaseLock();if(input.locked)throw 7;
-    const finished=input.getReader();if(!(await finished.read()).done)throw 8;
-    finished.releaseLock();trace.push(3);return {{value:count,trace}};
-  }}finally{{if(input.locked){{await reader.cancel();reader.releaseLock();}}}}
+    }}"#
+                ),
+                7,
+                8,
+            )
+        } else {
+            (
+                "",
+                "",
+                format!(
+                    r#"let result=await reader.read();
+    while(!result.done){{
+      const bytes=result.value;if(bytes===undefined)throw 3;
+      const pending=writer.write(bytes);
+      await pending;await pending;
+      count+=bytes.length;
+      if({cancel}){{await reader.cancel();trace.push(2);break;}}
+      result=await reader.read();
+    }}"#
+                ),
+                4,
+                5,
+            )
+        };
+        format!(
+            r#"
+import {{Writable}} from 'node:stream';
+export async function run(input:ReadableStream<Uint8Array>):Promise<{{value:number,trace:number[]}}> {{
+  const trace:number[]=[];
+  const reader=input.getReader({mode});
+  if(!input.locked)throw 1;
+  let locked=false;try{{input.getReader();}}catch{{locked=true;}}
+  if(!locked)throw 2;trace.push(1);
+  const writer=Writable.toWeb(process.stdout).getWriter();
+  {setup}let count=0;
+  try {{
+    {read_loop}
+    writer.releaseLock();
+    reader.releaseLock();
+    if(input.locked)throw {unlock_err};
+    const finished=input.getReader();
+    if(!(await finished.read()).done)throw {eof_err};
+    finished.releaseLock();trace.push(3);
+    return {{value:count,trace}};
+  }} finally {{if(input.locked){{await reader.cancel();reader.releaseLock();}}}}
 }}
-"#,
-            cancel = self.cancel
+"#
         )
     }
     pub(crate) fn expected_bytes(&self) -> &[u8] {
@@ -136,29 +132,14 @@ fn stream_contract(id: &'static str, byob: bool) -> Contract {
             byob,
         })
     };
-    Contract::new(
+    Contract::checked(
         id,
-        vec![
-            Witness {
-                partition: "empty",
-                case: case(0, false),
-            },
-            Witness {
-                partition: "byte-boundary",
-                case: case(257, false),
-            },
-            Witness {
-                partition: "transfer-boundary",
-                case: case(8193, false),
-            },
-            Witness {
-                partition: "beyond-guest-memory",
-                case: case(4 * 1024 * 1024, false),
-            },
-            Witness {
-                partition: "cancel-and-reuse",
-                case: case(16385, true),
-            },
+        [
+            ("empty", case(0, false)),
+            ("byte-boundary", case(257, false)),
+            ("transfer-boundary", case(8193, false)),
+            ("beyond-guest-memory", case(4 * 1024 * 1024, false)),
+            ("cancel-and-reuse", case(16385, true)),
         ],
         (prop::collection::vec(any::<u8>(), 0..=16385), any::<bool>())
             .prop_map(move |(bytes, cancel)| {

@@ -1,8 +1,7 @@
 //! Concrete standard API domains. Source generation is pure, and adapters own all host effects.
 use crate::{
-    execution::check_equivalence,
     program::{FIXTURE, Form, Number, Program, literal},
-    registry::{Case, Contract, ExitStatus, Witness},
+    registry::{Case, Contract, ExitStatus},
 };
 use proptest::prelude::*;
 
@@ -74,10 +73,8 @@ let rejected=false;try{await request.bytes();}catch{rejected=true;}if(!rejected)
 for(let i=0;i<body.length;i++){const byte=body[i];if(byte===undefined)throw 93;trace.push(byte);}
 "#;
 fn writer(bytes: Vec<u8>) -> Case {
-    Case::Command {
-        exit: ExitStatus::Success,
-        source: format!(
-            r#"
+    Case::command(format!(
+        r#"
 import {{Writable}} from 'node:stream';
 const input=new Uint8Array({bytes});
 const stream=Writable.toWeb(process.stdout);
@@ -94,9 +91,8 @@ if(!closed)throw 91;
 const errors=Writable.toWeb(process.stderr).getWriter();
 await errors.write(input);await errors.close();errors.releaseLock();
 "#,
-            bytes = literal(&bytes)
-        ),
-    }
+        bytes = literal(&bytes)
+    ))
 }
 pub(crate) fn contracts() -> Vec<Contract> {
     let mut contracts = Vec::new();
@@ -107,74 +103,47 @@ pub(crate) fn contracts() -> Vec<Contract> {
         ("web.request.bytes", REQUEST, true),
     ] {
         let build = move |bytes| bytes_function(bytes, operation, asynchronous);
-        contracts.push(Contract::new(
+        contracts.push(Contract::equivalence(
             id,
-            vec![
-                Witness {
-                    partition: "empty",
-                    case: build(vec![]),
-                },
-                Witness {
-                    partition: "binary-subview",
-                    case: build(vec![0, 255, 128, 1, 17]),
-                },
+            [
+                ("empty", build(vec![])),
+                ("binary-subview", build(vec![0, 255, 128, 1, 17])),
             ],
             prop::collection::vec(any::<u8>(), 0..=256)
                 .prop_map(build)
                 .boxed(),
-            check_equivalence,
         ));
     }
-    contracts.push(Contract::new(
+    contracts.push(Contract::equivalence(
         "node.stream.writable_to_web",
-        vec![
-            Witness {
-                partition: "empty",
-                case: writer(vec![]),
-            },
-            Witness {
-                partition: "binary-and-close",
-                case: writer(vec![0, 255, 128, 10, 13]),
-            },
+        [
+            ("empty", writer(vec![])),
+            ("binary-and-close", writer(vec![0, 255, 128, 10, 13])),
         ],
         prop::collection::vec(any::<u8>(), 1..=256)
             .prop_map(writer)
             .boxed(),
-        check_equivalence,
     ));
-    let callback_timer = |module: &str, value: u8| Case::Command {
-        source: format!(
+    let callback_timer = |module: &str, value: u8| {
+        Case::command(format!(
             "import {{setTimeout as later, clearTimeout, setInterval, clearInterval, setImmediate}} from '{module}'; clearTimeout(later(()=>console.log('cancelled'),1000)); clearInterval(setInterval(()=>console.log('cancelled'),1000)); setImmediate(()=>later(x=>console.log(x),1,{value}));"
-        ),
-        exit: ExitStatus::Success,
+        ))
     };
-    contracts.push(Contract::new(
+    contracts.push(Contract::equivalence(
         "node.timers.callbacks.named",
-        ["timers", "node:timers"]
-            .map(|module| Witness {
-                partition: module,
-                case: callback_timer(module, 42),
-            })
-            .into(),
+        ["timers", "node:timers"].map(|module| (module, callback_timer(module, 42))),
         any::<u8>()
             .prop_map(move |value| callback_timer("node:timers", value))
             .boxed(),
-        check_equivalence,
     ));
-    let namespace = Case::Reject {
-        wit: None,
-        source: "import * as timers from 'node:timers';timers.setTimeout(()=>{},1);".into(),
-        diagnostic: "timer import 'timers.setTimeout' is not supported".into(),
-        form_sources: vec![],
-    };
-    contracts.push(Contract::new(
+    let namespace = Case::reject(
+        "import * as timers from 'node:timers';timers.setTimeout(()=>{},1);",
+        "timer import 'timers.setTimeout' is not supported",
+    );
+    contracts.push(Contract::equivalence(
         "node.timers.callbacks.namespace",
-        vec![Witness {
-            partition: "namespace",
-            case: namespace.clone(),
-        }],
+        [("namespace", namespace.clone())],
         Just(namespace).boxed(),
-        check_equivalence,
     ));
     let unawaited_initialization = Case::Reject {
         wit: Some("package test:initialization; world generated { include wasi:cli/imports@0.3.0; export size: func() -> f64; }".into()),
@@ -182,33 +151,22 @@ pub(crate) fn contracts() -> Vec<Contract> {
         diagnostic: "top-level statements leave asynchronous work pending".into(),
         form_sources: vec![],
     };
-    contracts.push(Contract::new(
+    contracts.push(Contract::equivalence(
         "ecma.module.unawaited_initialization",
-        vec![Witness {
-            partition: "unawaited-async-call",
-            case: unawaited_initialization.clone(),
-        }],
+        [("unawaited-async-call", unawaited_initialization.clone())],
         Just(unawaited_initialization).boxed(),
-        check_equivalence,
     ));
     contracts.extend(additional_contracts());
     contracts.extend(combinator_contracts());
-    contracts.push(Contract::new(
+    contracts.push(Contract::equivalence(
         "ecma.error.values",
-        vec![
-            Witness {
-                partition: "empty-message",
-                case: error_case(String::new()),
-            },
-            Witness {
-                partition: "nul-and-unicode",
-                case: error_case("failed\0é雪😀".into()),
-            },
+        [
+            ("empty-message", error_case(String::new())),
+            ("nul-and-unicode", error_case("failed\0é雪😀".into())),
         ],
         prop::collection::vec(any::<char>(), 0..=32)
             .prop_map(|chars| error_case(chars.into_iter().collect()))
             .boxed(),
-        check_equivalence,
     ));
     contracts.push(crate::inferred_aggregates::contract());
     contracts.push(crate::inferred_aggregates::dictionary_contract());
@@ -307,13 +265,23 @@ for(let i=0;i<encoded.length;i++){{const byte=encoded[i];if(byte===undefined)thr
         false,
     )
 }
-fn additional_contracts() -> Vec<Contract> {
-    let directory = |bytes: Vec<u8>| Case::Function {
-        source: format!(
-            "import {{mkdir,writeFile,stat,readdir,unlink,rmdir}} from 'node:fs/promises';\n{}",
-            bytes_source(&bytes, DIRECTORY, true)
-        ),
+fn fs_bytes_case(imports: &str, bytes: &[u8], operation: &str) -> Case {
+    Case::Function {
         asynchronous: true,
+        source: format!(
+            "import {{{imports}}} from 'node:fs/promises';\n{}",
+            bytes_source(bytes, operation, true)
+        ),
+    }
+}
+
+fn additional_contracts() -> Vec<Contract> {
+    let directory = |bytes: Vec<u8>| {
+        fs_bytes_case(
+            "mkdir,writeFile,stat,readdir,unlink,rmdir",
+            &bytes,
+            DIRECTORY,
+        )
     };
     let decoder = |bytes| bytes_function(bytes, DECODE, false);
     let exit = |direct| Case::Command {
@@ -326,102 +294,58 @@ fn additional_contracts() -> Vec<Contract> {
         exit: ExitStatus::Failure,
     };
     vec![
-        Contract::new(
+        Contract::equivalence(
             "node.fs.directories",
-            vec![
-                Witness {
-                    partition: "empty-file",
-                    case: directory(vec![]),
-                },
-                Witness {
-                    partition: "binary-file",
-                    case: directory(vec![0, 255, 128]),
-                },
+            [
+                ("empty-file", directory(vec![])),
+                ("binary-file", directory(vec![0, 255, 128])),
             ],
             prop::collection::vec(any::<u8>(), 0..=256)
                 .prop_map(directory)
                 .boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        Contract::equivalence(
             "web.textdecoder.streaming",
-            vec![
-                Witness {
-                    partition: "empty",
-                    case: decoder(vec![]),
-                },
-                Witness {
-                    partition: "bom-and-split-scalar",
-                    case: decoder("\u{feff}é𝄞\0".as_bytes().to_vec()),
-                },
-                Witness {
-                    partition: "invalid-sequence",
-                    case: decoder(vec![65, 0xf0, 0x28, 0x8c, 0x28]),
-                },
-                Witness {
-                    partition: "incomplete-sequence",
-                    case: decoder(vec![65, 0xf0, 0x9f]),
-                },
+            [
+                ("empty", decoder(vec![])),
+                (
+                    "bom-and-split-scalar",
+                    decoder("\u{feff}é𝄞\0".as_bytes().to_vec()),
+                ),
+                (
+                    "invalid-sequence",
+                    decoder(vec![65, 0xf0, 0x28, 0x8c, 0x28]),
+                ),
+                ("incomplete-sequence", decoder(vec![65, 0xf0, 0x9f])),
             ],
             prop::collection::vec(any::<u8>(), 0..=32)
                 .prop_map(decoder)
                 .boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        Contract::equivalence(
             "web.headers.multimap",
-            vec![
-                Witness {
-                    partition: "empty-value",
-                    case: headers(String::new()),
-                },
-                Witness {
-                    partition: "trim-and-duplicates",
-                    case: headers("  first  ".into()),
-                },
+            [
+                ("empty-value", headers(String::new())),
+                ("trim-and-duplicates", headers("  first  ".into())),
             ],
             "[a-zA-Z0-9 ]{0,32}".prop_map(headers).boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        Contract::equivalence(
             "ecma.temporal.iso",
-            vec![
-                Witness {
-                    partition: "negative-millisecond",
-                    case: temporal(-1),
-                },
-                Witness {
-                    partition: "epoch",
-                    case: temporal(0),
-                },
-                Witness {
-                    partition: "lower-limit",
-                    case: temporal(-8640000000000000),
-                },
-                Witness {
-                    partition: "upper-limit",
-                    case: temporal(8640000000000000),
-                },
+            [
+                ("negative-millisecond", temporal(-1)),
+                ("epoch", temporal(0)),
+                ("lower-limit", temporal(-8640000000000000)),
+                ("upper-limit", temporal(8640000000000000)),
             ],
             (-8640000000000000i64..=8640000000000000)
                 .prop_map(temporal)
                 .boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        Contract::equivalence(
             "node.process.exit_status",
-            vec![
-                Witness {
-                    partition: "exit-code",
-                    case: exit(false),
-                },
-                Witness {
-                    partition: "immediate-exit",
-                    case: exit(true),
-                },
-            ],
+            [("exit-code", exit(false)), ("immediate-exit", exit(true))],
             any::<bool>().prop_map(exit).boxed(),
-            check_equivalence,
         ),
     ]
 }
@@ -466,35 +390,41 @@ fn combinator_contracts() -> Vec<Contract> {
     ]
     .into_iter()
     .map(|(id, settled)| {
-        Contract::new(
+        Contract::equivalence(
             id,
-            vec![
-                Witness {
-                    partition: "zero",
-                    case: combinator(0, settled),
-                },
-                Witness {
-                    partition: "negative",
-                    case: combinator(-7, settled),
-                },
+            [
+                ("zero", combinator(0, settled)),
+                ("negative", combinator(-7, settled)),
             ],
             (-32i16..=32)
                 .prop_map(move |value| combinator(value, settled))
                 .boxed(),
-            check_equivalence,
         )
     })
     .collect()
 }
 
-fn retained_fs_witness(form: Form) -> Witness {
-    Witness {
-        partition: "retained-operation",
-        case: Case::Program(Program {
-            expression: Number::Mark(Box::new(Number::Input)),
-            form,
-        }),
-    }
+fn fs_contract(
+    id: &'static str,
+    form: Form,
+    partition: &'static str,
+    case: Case,
+    strategy: BoxedStrategy<Case>,
+) -> Contract {
+    Contract::equivalence(
+        id,
+        [
+            (
+                "retained-operation",
+                Case::Program(Program {
+                    expression: Number::Mark(Box::new(Number::Input)),
+                    form,
+                }),
+            ),
+            (partition, case),
+        ],
+        strategy,
+    )
 }
 
 fn fs_read_utf8_case(payload: String) -> Case {
@@ -598,14 +528,11 @@ export async function run(x:number):Promise<{{value:number,trace:number[]}}> {{
 
 fn fs_read_bytes_case(bytes: Vec<u8>) -> Case {
     let fixture = literal(FIXTURE);
-    Case::Function {
-        asynchronous: true,
-        source: format!(
-            "import {{readFile,writeFile}} from 'node:fs/promises';\n{}",
-            bytes_source(
-                &bytes,
-                &format!(
-                    r#"
+    fs_bytes_case(
+        "readFile,writeFile",
+        &bytes,
+        &format!(
+            r#"
 await writeFile('binary.bin',input);
 const first:Uint8Array=await readFile('binary.bin');
 const b0=first[0];
@@ -615,11 +542,8 @@ const fixtureBytes=await readFile('fixture.txt');
 if(second.byteLength!==input.length||fixtureBytes.byteLength!==6||new TextDecoder().decode(fixtureBytes)!=={fixture})throw 94;
 for(let i=0;i<second.byteLength;i++){{const byte=second[i];if(byte===undefined||byte!==input[i])throw 95;trace.push(byte);}}
 "#
-                ),
-                true,
-            )
         ),
-    }
+    )
 }
 
 fn fs_write_subview_case(bytes: Vec<u8>, raw_start: usize, raw_end: usize) -> Case {
@@ -628,14 +552,11 @@ fn fs_write_subview_case(bytes: Vec<u8>, raw_start: usize, raw_end: usize) -> Ca
     let b = if len == 0 { 0 } else { raw_end % (len + 1) };
     let (start, end) = if a <= b { (a, b) } else { (b, a) };
     let expected_len = end - start;
-    Case::Function {
-        asynchronous: true,
-        source: format!(
-            "import {{readFile,writeFile}} from 'node:fs/promises';\n{}",
-            bytes_source(
-                &bytes,
-                &format!(
-                    r#"
+    fs_bytes_case(
+        "readFile,writeFile",
+        &bytes,
+        &format!(
+            r#"
 const view=input.subarray({start},{end});
 const snapshot=new Uint8Array(view);
 const pending=writeFile('view.bin',view);
@@ -649,23 +570,17 @@ const empty=await readFile('view.bin');
 if(empty.byteLength!==0)throw 97;
 trace.push(empty.byteLength);
 "#
-                ),
-                true,
-            )
         ),
-    }
+    )
 }
 
 fn fs_recovery_case(bytes: Vec<u8>) -> Case {
     let fixture = literal(FIXTURE);
-    Case::Function {
-        asynchronous: true,
-        source: format!(
-            "import {{readFile,writeFile,stat}} from 'node:fs/promises';\n{}",
-            bytes_source(
-                &bytes,
-                &format!(
-                    r#"
+    fs_bytes_case(
+        "readFile,writeFile,stat",
+        &bytes,
+        &format!(
+            r#"
 const pendingUtf8=readFile('missing-utf8.txt','utf8');
 let failures=0;
 try{{await pendingUtf8;}}catch{{failures++;}}
@@ -680,11 +595,8 @@ const fixtureText=await readFile('fixture.txt','utf8');
 if(restored.byteLength!==input.length||fixtureText!=={fixture})throw 98;
 for(let i=0;i<restored.byteLength;i++){{const byte=restored[i];if(byte===undefined||byte!==input[i])throw 99;trace.push(byte);}}
 "#
-                ),
-                true,
-            )
         ),
-    }
+    )
 }
 
 pub(crate) fn fs_contracts() -> Vec<Contract> {
@@ -693,69 +605,45 @@ pub(crate) fn fs_contracts() -> Vec<Contract> {
             .prop_map(|chars| chars.into_iter().collect::<String>())
     };
     vec![
-        Contract::new(
+        fs_contract(
             "node.fs.readFile.utf8",
-            vec![
-                retained_fs_witness(Form::FileRead),
-                Witness {
-                    partition: "unicode-and-concurrent-read",
-                    case: fs_read_utf8_case("é\0漢𝄞😀\nline2".into()),
-                },
-            ],
+            Form::FileRead,
+            "unicode-and-concurrent-read",
+            fs_read_utf8_case("é\0漢𝄞😀\nline2".into()),
             unicode_text().prop_map(fs_read_utf8_case).boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        fs_contract(
             "node.fs.writeFile.text",
-            vec![
-                retained_fs_witness(Form::FileRoundTrip),
-                Witness {
-                    partition: "overwrite-and-truncate",
-                    case: fs_write_text_case("initial-long-payload-é\0漢".into(), "short".into()),
-                },
-            ],
+            Form::FileRoundTrip,
+            "overwrite-and-truncate",
+            fs_write_text_case("initial-long-payload-é\0漢".into(), "short".into()),
             (unicode_text(), unicode_text())
                 .prop_map(|(a, b)| fs_write_text_case(a, b))
                 .boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        fs_contract(
             "node.fs.metadata",
-            vec![
-                retained_fs_witness(Form::FileMetadata),
-                Witness {
-                    partition: "multi-file-stat-and-unlink",
-                    case: fs_metadata_case(vec![0, 1, 255, 128, 42], "extra\0é".into()),
-                },
-            ],
+            Form::FileMetadata,
+            "multi-file-stat-and-unlink",
+            fs_metadata_case(vec![0, 1, 255, 128, 42], "extra\0é".into()),
             (prop::collection::vec(any::<u8>(), 0..=256), unicode_text())
                 .prop_map(|(bytes, text)| fs_metadata_case(bytes, text))
                 .boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        fs_contract(
             "node.fs.readFile.bytes",
-            vec![
-                retained_fs_witness(Form::FileBytes),
-                Witness {
-                    partition: "binary-buffer-isolation",
-                    case: fs_read_bytes_case(vec![0, 255, 128, 1, 0, 42, 199]),
-                },
-            ],
+            Form::FileBytes,
+            "binary-buffer-isolation",
+            fs_read_bytes_case(vec![0, 255, 128, 1, 0, 42, 199]),
             prop::collection::vec(any::<u8>(), 0..=256)
                 .prop_map(fs_read_bytes_case)
                 .boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        fs_contract(
             "node.fs.writeFile.subviews",
-            vec![
-                retained_fs_witness(Form::FileByteRoundTrip),
-                Witness {
-                    partition: "arbitrary-subview-slice",
-                    case: fs_write_subview_case(vec![19, 0, 255, 128, 42, 20, 77], 1, 5),
-                },
-            ],
+            Form::FileByteRoundTrip,
+            "arbitrary-subview-slice",
+            fs_write_subview_case(vec![19, 0, 255, 128, 42, 20, 77], 1, 5),
             (
                 prop::collection::vec(any::<u8>(), 0..=128),
                 0usize..=128,
@@ -763,21 +651,15 @@ pub(crate) fn fs_contracts() -> Vec<Contract> {
             )
                 .prop_map(|(bytes, start, end)| fs_write_subview_case(bytes, start, end))
                 .boxed(),
-            check_equivalence,
         ),
-        Contract::new(
+        fs_contract(
             "node.fs.readFile.recovery",
-            vec![
-                retained_fs_witness(Form::FileRejectedRead),
-                Witness {
-                    partition: "multi-op-rejection-recovery",
-                    case: fs_recovery_case(vec![7, 0, 254, 128]),
-                },
-            ],
+            Form::FileRejectedRead,
+            "multi-op-rejection-recovery",
+            fs_recovery_case(vec![7, 0, 254, 128]),
             prop::collection::vec(any::<u8>(), 0..=128)
                 .prop_map(fs_recovery_case)
                 .boxed(),
-            check_equivalence,
         ),
     ]
 }

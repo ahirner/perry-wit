@@ -3,9 +3,9 @@
 
 use crate::{
     emit::checksum,
-    execution::{FactLimits, Observation, Outcome, check_equivalence, number},
+    execution::{FactLimits, Observation, Outcome, number},
     program::INPUTS,
-    registry::{Case, Contract, Witness},
+    registry::{Case, Contract},
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -713,17 +713,17 @@ pub(crate) fn aggregate_case_strategy() -> impl Strategy<Value = AggregateCase> 
 }
 
 pub(crate) fn contract() -> Contract {
-    let witnesses = vec![
-        Witness {
-            partition: "persistent-record-map-aliases",
-            case: Case::Function {
+    let witnesses = [
+        (
+            "persistent-record-map-aliases",
+            Case::Function {
                 source: include_str!("../cases/persistent_aggregates.ts").to_owned(),
                 asynchronous: false,
             },
-        },
-        Witness {
-            partition: "self-recursive-wide-parseint-and-float",
-            case: Case::Aggregate(AggregateCase {
+        ),
+        (
+            "self-recursive-wide-parseint-and-float",
+            Case::Aggregate(AggregateCase {
                 shape: AggregateShape::SelfRecursive,
                 wit_signature: WitSignature::ObservationRecord,
                 instances: vec![
@@ -784,10 +784,10 @@ pub(crate) fn contract() -> Contract {
                 permuted: false,
                 fact_limits: FactLimits::Summarized,
             }),
-        },
-        Witness {
-            partition: "nested-record-option-boundary-special-values-and-overflow",
-            case: Case::Aggregate(AggregateCase {
+        ),
+        (
+            "nested-record-option-boundary-special-values-and-overflow",
+            Case::Aggregate(AggregateCase {
                 shape: AggregateShape::NestedRecord,
                 wit_signature: WitSignature::OptionRecord,
                 instances: vec![
@@ -839,12 +839,11 @@ pub(crate) fn contract() -> Contract {
                 permuted: false,
                 fact_limits: FactLimits::Narrow,
             }),
-        },
+        ),
     ];
-    Contract::new(
+    Contract::equivalence(
         "ecma.aggregate.specialization",
         witnesses,
         aggregate_case_strategy().prop_map(Case::Aggregate).boxed(),
-        check_equivalence,
     )
 }

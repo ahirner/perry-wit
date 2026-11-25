@@ -260,86 +260,32 @@ impl Program {
             "{value:number,trace:number[]}"
         };
         if self.form == Form::Permuted {
+            let helpers = TYPED_HELPER_ITEMS
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>()
+                .join("\n");
             format!(
-                "{import}export {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\nfunction identity(value:number):number {{ return value; }}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\n{TYPED_HELPERS_PERMUTED}\n"
+                "{import}export {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\nfunction identity(value:number):number {{ return value; }}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\n\n{helpers}\n\n"
             )
         } else {
+            let helpers = TYPED_HELPER_ITEMS.join("\n");
             format!(
-                "{import}{TYPED_HELPERS}\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
+                "{import}\n{helpers}\n\nfunction mark(trace:number[], value:number):number {{ trace.push(value); return value; }}\nfunction identity(value:number):number {{ return value; }}\nexport {asynchronous}function run(x:number):{result} {{\n  const trace:number[] = [];\n  {body}\n  return {{value:value, trace:trace}};\n}}\n"
             )
         }
     }
 }
 
-const TYPED_HELPERS: &str = r#"
-const sharedJsonCell: { value: number } = { value: 0 };
-function clobberSharedJsonCell(): void {
-    sharedJsonCell.value = -999;
-}
-function typedJson(value: number): number {
-    sharedJsonCell.value = value;
-    const snapshot = JSON.stringify(sharedJsonCell);
-    clobberSharedJsonCell();
-    const preserved: { value: number | null } = JSON.parse(snapshot);
-    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));
-    parsed.rows[0] = 4;
-    return parsed.value === null ? 0 : parsed.value;
-}
-function byteAlias(first: number, second: number): number {
-    const bytes = new Uint8Array([first, second]);
-    const alias = bytes.subarray(1);
-    alias[0] = first;
-    return bytes[1] as number;
-}
-function closedLoop(value: number, count: number): number {
-    const state = { value: value, step: 0 };
-    for (let i = 0; i < count; i++) {
-        if (i % 2 === 0) state.value += i;
-        else state.value -= i;
-        state.step++;
-    }
-    return state.value;
-}
-function handled(value: number): number {
-    try { if (value < 0) throw value; return value; }
-    catch (error) { return error as number; }
-}
-"#;
-
-const TYPED_HELPERS_PERMUTED: &str = r#"
-function handled(value: number): number {
-    try { if (value < 0) throw value; return value; }
-    catch (error) { return error as number; }
-}
-function closedLoop(value: number, count: number): number {
-    const state = { value: value, step: 0 };
-    for (let i = 0; i < count; i++) {
-        if (i % 2 === 0) state.value += i;
-        else state.value -= i;
-        state.step++;
-    }
-    return state.value;
-}
-function byteAlias(first: number, second: number): number {
-    const bytes = new Uint8Array([first, second]);
-    const alias = bytes.subarray(1);
-    alias[0] = first;
-    return bytes[1] as number;
-}
-function typedJson(value: number): number {
-    sharedJsonCell.value = value;
-    const snapshot = JSON.stringify(sharedJsonCell);
-    clobberSharedJsonCell();
-    const preserved: { value: number | null } = JSON.parse(snapshot);
-    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));
-    parsed.rows[0] = 4;
-    return parsed.value === null ? 0 : parsed.value;
-}
-function clobberSharedJsonCell(): void {
-    sharedJsonCell.value = -999;
-}
-const sharedJsonCell: { value: number } = { value: 0 };
-"#;
+const TYPED_HELPER_ITEMS: [&str; 6] = [
+    "const sharedJsonCell: { value: number } = { value: 0 };",
+    "function clobberSharedJsonCell(): void {\n    sharedJsonCell.value = -999;\n}",
+    "function typedJson(value: number): number {\n    sharedJsonCell.value = value;\n    const snapshot = JSON.stringify(sharedJsonCell);\n    clobberSharedJsonCell();\n    const preserved: { value: number | null } = JSON.parse(snapshot);\n    const parsed: { value: number | null; rows: number[] } = JSON.parse(JSON.stringify({ value: preserved.value, rows: [1, 2, 3] }));\n    parsed.rows[0] = 4;\n    return parsed.value === null ? 0 : parsed.value;\n}",
+    "function byteAlias(first: number, second: number): number {\n    const bytes = new Uint8Array([first, second]);\n    const alias = bytes.subarray(1);\n    alias[0] = first;\n    return bytes[1] as number;\n}",
+    "function closedLoop(value: number, count: number): number {\n    const state = { value: value, step: 0 };\n    for (let i = 0; i < count; i++) {\n        if (i % 2 === 0) state.value += i;\n        else state.value -= i;\n        state.step++;\n    }\n    return state.value;\n}",
+    "function handled(value: number): number {\n    try { if (value < 0) throw value; return value; }\n    catch (error) { return error as number; }\n}",
+];
 
 impl Display for Number {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

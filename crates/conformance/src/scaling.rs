@@ -5,7 +5,7 @@
 //! must stay within `max_growth`.
 use crate::{
     execution::{Evidence, Outcome, number},
-    registry::{Case, Contract, Witness},
+    registry::{Case, Contract},
 };
 use anyhow::{Context, Result, bail, ensure};
 use proptest::prelude::*;
@@ -115,12 +115,9 @@ pub(crate) fn contracts() -> Vec<Contract> {
     ]
     .into_iter()
     .map(|(id, workload)| {
-        Contract::new(
+        Contract::checked(
             id,
-            vec![Witness {
-                partition: "n-128",
-                case: case(workload, 128),
-            }],
+            [("n-128", case(workload, 128))],
             (32u32..=128)
                 .prop_map(move |base| case(workload, base))
                 .boxed(),
