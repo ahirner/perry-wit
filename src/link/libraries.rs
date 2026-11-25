@@ -10,42 +10,43 @@ use wasm_encoder::Instruction;
 use wasm_encoder::reencode::{self, Reencode};
 use wasmparser::{Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Operator, TypeRef};
 
-pub(crate) const FETCH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/fetch.wasm"));
-pub(crate) const TEXT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/text.wasm"));
-pub(crate) const TIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/time.wasm"));
-const JSON_GRAPH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-graph.wasm"));
-const JSON_CURSOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-cursor.wasm"));
-const JSON_COPY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json-copy.wasm"));
-pub(crate) const JSON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json.wasm"));
-const NORMALIZATION: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/runtime/normalization.wasm"));
-const DECIMAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/decimal.wasm"));
-pub(crate) const NUMBER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/number.wasm"));
-pub(crate) const COLLECTIBLE_RUNTIME: &[u8] = include_bytes!(concat!(
+const COLLECTIBLE_RUNTIME: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/runtime/runtime-collectible.wasm"
 ));
-pub(crate) const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/runtime.wasm"));
-pub(crate) const STD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/std.wasm"));
-pub(crate) const FS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/fs.wasm"));
-pub(crate) const WEB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/web.wasm"));
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum LibraryId {
-    Runtime,
-    Std,
-    Fs,
-    Web,
-    Fetch,
-    Text,
-    Normalization,
-    Json,
-    JsonGraph,
-    JsonCursor,
-    JsonCopy,
-    Time,
-    Number,
-    Decimal,
+macro_rules! libraries {
+    ($($variant:ident => $file:literal,)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub(crate) enum LibraryId {
+            $($variant,)*
+        }
+
+        impl LibraryId {
+            pub(crate) fn bytes(self) -> &'static [u8] {
+                match self {
+                    $(Self::$variant => include_bytes!(concat!(env!("OUT_DIR"), "/runtime/", $file)),)*
+                }
+            }
+        }
+    };
+}
+
+libraries! {
+    Runtime => "runtime.wasm",
+    Std => "std.wasm",
+    Fs => "fs.wasm",
+    Web => "web.wasm",
+    Fetch => "fetch.wasm",
+    Text => "text.wasm",
+    Normalization => "normalization.wasm",
+    Json => "json.wasm",
+    JsonGraph => "json-graph.wasm",
+    JsonCursor => "json-cursor.wasm",
+    JsonCopy => "json-copy.wasm",
+    Time => "time.wasm",
+    Number => "number.wasm",
+    Decimal => "decimal.wasm",
 }
 
 impl LibraryId {
@@ -76,25 +77,6 @@ impl LibraryId {
             COLLECTIBLE_RUNTIME
         } else {
             self.bytes()
-        }
-    }
-
-    pub(crate) fn bytes(self) -> &'static [u8] {
-        match self {
-            Self::Runtime => RUNTIME,
-            Self::Std => STD,
-            Self::Fs => FS,
-            Self::Web => WEB,
-            Self::Fetch => FETCH,
-            Self::Text => TEXT,
-            Self::Normalization => NORMALIZATION,
-            Self::Json => JSON,
-            Self::JsonGraph => JSON_GRAPH,
-            Self::JsonCursor => JSON_CURSOR,
-            Self::JsonCopy => JSON_COPY,
-            Self::Time => TIME,
-            Self::Number => NUMBER,
-            Self::Decimal => DECIMAL,
         }
     }
 }
@@ -868,15 +850,15 @@ mod tests {
     #[test]
     fn helper_libraries_have_checked_small_stacks() {
         for (name, bytes) in [
-            ("time", TIME),
-            ("number", NUMBER),
-            ("runtime", RUNTIME),
+            ("time", LibraryId::Time.bytes()),
+            ("number", LibraryId::Number.bytes()),
+            ("runtime", LibraryId::Runtime.bytes()),
             ("runtime_collectible", COLLECTIBLE_RUNTIME),
-            ("fs", FS),
-            ("web", WEB),
-            ("json", JSON),
-            ("std", STD),
-            ("text", TEXT),
+            ("fs", LibraryId::Fs.bytes()),
+            ("web", LibraryId::Web.bytes()),
+            ("json", LibraryId::Json.bytes()),
+            ("std", LibraryId::Std.bytes()),
+            ("text", LibraryId::Text.bytes()),
         ] {
             let library = Library::parse(bytes).unwrap();
             assert!(

@@ -146,16 +146,23 @@ fn start(kind: Kind, path: *mut u8, data: &[u8]) -> *mut u8 {
     promise
 }
 
-/// `readFile(path, 'utf8')`: the contents as a string (invalid UTF-8 replaced).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_read_text(path: *mut u8) -> *mut u8 {
-    start(Kind::ReadText, path, &[])
+macro_rules! fs_entries {
+    ($($name:ident => $kind:ident;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) extern "C" fn $name(path: *mut u8) -> *mut u8 {
+            start(Kind::$kind, path, &[])
+        }
+    )*};
 }
 
-/// `readFile(path)`: the contents as a `Uint8Array`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_read_bytes(path: *mut u8) -> *mut u8 {
-    start(Kind::ReadBytes, path, &[])
+fs_entries! {
+    fs_read_text => ReadText;
+    fs_read_bytes => ReadBytes;
+    fs_stat => Stat;
+    fs_readdir => Readdir;
+    fs_mkdir => Mkdir;
+    fs_unlink => Unlink;
+    fs_rmdir => Rmdir;
 }
 
 /// `writeFile(path, text)`: create or truncate, then write the UTF-8 bytes.
@@ -176,36 +183,6 @@ pub(crate) unsafe extern "C" fn fs_write_text(path: *mut u8, text: *mut u8) -> *
 pub(crate) unsafe extern "C" fn fs_write_bytes(path: *mut u8, view: *mut u8) -> *mut u8 {
     // SAFETY: guaranteed by the caller.
     start(Kind::Write, path, unsafe { view_bytes(view) })
-}
-
-/// `stat(path)`: a stats object ([fs_stats_is_file], [fs_stats_size]).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_stat(path: *mut u8) -> *mut u8 {
-    start(Kind::Stat, path, &[])
-}
-
-/// `readdir(path)`: entry names in host order.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_readdir(path: *mut u8) -> *mut u8 {
-    start(Kind::Readdir, path, &[])
-}
-
-/// `mkdir(path)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_mkdir(path: *mut u8) -> *mut u8 {
-    start(Kind::Mkdir, path, &[])
-}
-
-/// `unlink(path)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_unlink(path: *mut u8) -> *mut u8 {
-    start(Kind::Unlink, path, &[])
-}
-
-/// `rmdir(path)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn fs_rmdir(path: *mut u8) -> *mut u8 {
-    start(Kind::Rmdir, path, &[])
 }
 
 /// Stats: `type: u32` at 0 (a `descriptor-type` case), `size: f64` at 8.

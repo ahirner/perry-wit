@@ -364,22 +364,25 @@ unsafe fn trim_with(string: *mut u8, f: fn(&[u8]) -> &[u8]) -> *mut u8 {
     unsafe { crate::runtime::string_view(string, from as u32, (from + trimmed.len()) as u32) }
 }
 
-/// `s.trim()`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_trim(string: *mut u8) -> *mut u8 {
-    unsafe { trim_with(string, trim_bytes) }
+macro_rules! string_wrappers {
+    ($(unsafe $name:ident($($arg:ident: $ty:ty),*) => $body:expr;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) unsafe extern "C" fn $name($($arg: $ty),*) -> *mut u8 {
+            unsafe { $body }
+        }
+    )*};
+    ($($name:ident($($arg:ident: $ty:ty),*) => $body:expr;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) extern "C" fn $name($($arg: $ty),*) -> *mut u8 {
+            $body
+        }
+    )*};
 }
 
-/// `s.trimStart()`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_trim_start(string: *mut u8) -> *mut u8 {
-    unsafe { trim_with(string, trim_start_bytes) }
-}
-
-/// `s.trimEnd()`.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn std_string_trim_end(string: *mut u8) -> *mut u8 {
-    unsafe { trim_with(string, trim_end_bytes) }
+string_wrappers! {
+    unsafe std_string_trim(string: *mut u8) => trim_with(string, trim_bytes);
+    unsafe std_string_trim_start(string: *mut u8) => trim_with(string, trim_start_bytes);
+    unsafe std_string_trim_end(string: *mut u8) => trim_with(string, trim_end_bytes);
 }
 
 fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> *mut u8 {
@@ -427,24 +430,9 @@ fn pad_string(string: *mut u8, max_length: f64, fill: *mut u8, is_end: bool) -> 
     }
 }
 
-/// `s.padStart(maxLength, fillString)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_pad_start(
-    string: *mut u8,
-    max_length: f64,
-    fill: *mut u8,
-) -> *mut u8 {
-    pad_string(string, max_length, fill, false)
-}
-
-/// `s.padEnd(maxLength, fillString)`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_pad_end(
-    string: *mut u8,
-    max_length: f64,
-    fill: *mut u8,
-) -> *mut u8 {
-    pad_string(string, max_length, fill, true)
+string_wrappers! {
+    std_string_pad_start(string: *mut u8, max_length: f64, fill: *mut u8) => pad_string(string, max_length, fill, false);
+    std_string_pad_end(string: *mut u8, max_length: f64, fill: *mut u8) => pad_string(string, max_length, fill, true);
 }
 
 fn replace_string(
@@ -493,24 +481,9 @@ fn replace_string(
     unsafe { out.into_string() }
 }
 
-/// `s.replace(needle, replacement)` for string search.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_replace(
-    string: *mut u8,
-    needle: *mut u8,
-    replacement: *mut u8,
-) -> *mut u8 {
-    replace_string(string, needle, replacement, false)
-}
-
-/// `s.replaceAll(needle, replacement)` for string search.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_string_replace_all(
-    string: *mut u8,
-    needle: *mut u8,
-    replacement: *mut u8,
-) -> *mut u8 {
-    replace_string(string, needle, replacement, true)
+string_wrappers! {
+    std_string_replace(string: *mut u8, needle: *mut u8, replacement: *mut u8) => replace_string(string, needle, replacement, false);
+    std_string_replace_all(string: *mut u8, needle: *mut u8, replacement: *mut u8) => replace_string(string, needle, replacement, true);
 }
 
 /// `s.at(index)`: returns null pointer (`undefined`) when out of bounds.

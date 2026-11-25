@@ -5,9 +5,11 @@ use wasmtime::{
     Val, ValType,
 };
 
-use crate::link::{self, libraries};
+use crate::link::{
+    self,
+    libraries::{self, LibraryId},
+};
 
-const JSON_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/runtime/json.wasm"));
 const INPUT: u32 = 262_144;
 const GRAPH: u32 = 327_680;
 
@@ -79,7 +81,7 @@ fn descriptor_readers_link_only_their_input_mechanism() -> Result<()> {
 #[test]
 fn linked_json_helpers_share_a_measured_layout_with_the_guest_heap() -> Result<()> {
     let mut placement = libraries::HelperMemory::new(59_004);
-    placement.place(&libraries::Library::parse(libraries::JSON)?, None)?;
+    placement.place(&libraries::Library::parse(LibraryId::Json.bytes())?, None)?;
     let heap = libraries::align_to(placement.stack_top()?, 65_536)?;
     let core = wat::parse_str(
         r#"(module
@@ -239,7 +241,7 @@ struct GuestJson {
 impl GuestJson {
     fn new() -> Result<Self> {
         let engine = Engine::default();
-        let module = Module::new(&engine, JSON_WASM)?;
+        let module = Module::new(&engine, LibraryId::Json.bytes())?;
         let mut store = Store::new(&engine, ());
         let memory = Memory::new(&mut store, MemoryType::new(8, Some(8)))?;
         let mut linker = Linker::new(&engine);

@@ -1,6 +1,6 @@
 //! Streaming `JSON.stringify` writer for typed values and retained JSON graphs.
 use super::{canonical, json_number, key_bytes, node, string_bytes, word};
-use crate::runtime::{Buffer, TYPE_ERROR, adopt, from_static};
+use crate::runtime::{Buffer, TYPE_ERROR, from_static};
 use perry_rt_sys::json::{MAX_DEPTH, kind::*};
 use perry_rt_sys::{
     layout::numeric::Tag,
@@ -182,10 +182,32 @@ pub(crate) extern "C" fn std_json_finish(w: *mut u8) -> *mut u8 {
         perry_rt_sys::raise_static!(TYPE_ERROR, "Converting circular structure to JSON");
         return from_static(perry_rt_sys::static_text!(""));
     }
-    let text = core::mem::take(&mut w.text);
-    let bytes = text.as_slice();
     // SAFETY: finished UTF-8 output is immutable; the string traces this owned allocation.
-    unsafe { adopt(bytes.as_ptr().cast_mut(), bytes.len() as u32) }
+    unsafe { core::mem::take(&mut w.text).into_string() }
+}
+
+/// Write a scalar JSON node (`Number`, `null`, `boolean`, `string`, or `BigInt` error).
+/// Returns `Some(ok)` if `value` was a scalar (`ok = false` on `BigInt`), or `None` for containers.
+pub(super) unsafe fn write_scalar(text: &mut Buffer, value: *mut u8) -> Option<bool> {
+    if let Some(number) = json_number(value) {
+        append_number(text, number);
+        return Some(true);
+    }
+    match unsafe { word(value, 0) } {
+        NULL | ABSENT | UNDEFINED => text.extend_from_slice(b"null"),
+        BOOLEAN => text.extend_from_slice(if unsafe { word(value, 8) } != 0 {
+            b"true"
+        } else {
+            b"false"
+        }),
+        STRING => quote(text, string_bytes(value)),
+        BIGINT => {
+            perry_rt_sys::raise_static!(TYPE_ERROR, "Do not know how to serialize a BigInt");
+            return Some(false);
+        }
+        _ => return None,
+    }
+    Some(true)
 }
 
 /// Write a parsed JSON value starting `depth` levels deep, returning `false` when nesting
@@ -207,29 +229,17 @@ fn value_text(text: &mut Buffer, value: *mut u8, depth: u32) -> bool {
             if depth + stack.len() as u32 > MAX_DEPTH {
                 return false;
             }
-            if let Some(number) = json_number(current) {
-                append_number(text, number);
+            if let Some(ok) = write_scalar(text, current) {
+                if !ok {
+                    return true;
+                }
             } else {
                 match word(current, 0) {
                     NATIVE | VIEW => {
                         current = super::view::std_json_snapshot(super::view::to_json(current));
                         continue;
                     }
-                    BIGINT => {
-                        perry_rt_sys::raise_static!(
-                            TYPE_ERROR,
-                            "Do not know how to serialize a BigInt"
-                        );
-                        return true;
-                    }
                     EXCEPTION => text.extend_from_slice(b"{}"),
-                    NULL | ABSENT | UNDEFINED => text.extend_from_slice(b"null"),
-                    BOOLEAN => text.extend_from_slice(if word(current, 8) != 0 {
-                        b"true"
-                    } else {
-                        b"false"
-                    }),
-                    STRING => quote(text, string_bytes(current)),
                     kind @ (ARRAY | OBJECT) => {
                         if kind == OBJECT {
                             current = canonical(current);

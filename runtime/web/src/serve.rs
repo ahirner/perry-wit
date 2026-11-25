@@ -197,49 +197,22 @@ pub(crate) extern "C" fn web_serve_body(s: *mut u8) -> *mut u8 {
     promise
 }
 
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_method(s: *mut u8) -> *mut u8 {
-    serve(s).method
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_method_other(s: *mut u8) -> *mut u8 {
-    serve(s).method_other
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_has_scheme(s: *mut u8) -> u32 {
-    u32::from(!serve(s).scheme.is_null())
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_scheme(s: *mut u8) -> *mut u8 {
-    let scheme = serve(s).scheme;
-    if scheme.is_null() {
-        from_static(perry_rt_sys::static_text!(""))
-    } else {
-        scheme
-    }
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_scheme_other(s: *mut u8) -> *mut u8 {
-    serve(s).scheme_other
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_authority(s: *mut u8) -> *mut u8 {
-    serve(s).authority
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_path(s: *mut u8) -> *mut u8 {
-    serve(s).path
-}
-
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_serve_header_count(s: *mut u8) -> f64 {
-    f64::from(serve(s).header_count)
+crate::web_getters! {
+    web_serve_method(s: *mut u8) -> *mut u8 => serve(s).method;
+    web_serve_method_other(s: *mut u8) -> *mut u8 => serve(s).method_other;
+    web_serve_has_scheme(s: *mut u8) -> u32 => u32::from(!serve(s).scheme.is_null());
+    web_serve_scheme(s: *mut u8) -> *mut u8 => {
+        let scheme = serve(s).scheme;
+        if scheme.is_null() {
+            from_static(perry_rt_sys::static_text!(""))
+        } else {
+            scheme
+        }
+    };
+    web_serve_scheme_other(s: *mut u8) -> *mut u8 => serve(s).scheme_other;
+    web_serve_authority(s: *mut u8) -> *mut u8 => serve(s).authority;
+    web_serve_path(s: *mut u8) -> *mut u8 => serve(s).path;
+    web_serve_header_count(s: *mut u8) -> f64 => f64::from(serve(s).header_count);
 }
 
 /// Entry `index` of the request headers: (name data, name length, value data, value

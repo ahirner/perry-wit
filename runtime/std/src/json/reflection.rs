@@ -64,7 +64,6 @@ pub(crate) extern "C" fn std_json_strict_equal(left: *mut u8, right: *mut u8) ->
                     node(word(right, 8)).cast(),
                 ) == 0
             }
-            EXCEPTION | NATIVE | VIEW => word(left, 8) == word(right, 8),
             _ => left == right,
         })
     }
@@ -272,49 +271,14 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
     }
 }
 
-fn native_key(desc: *mut u8, index: u32) -> *mut u8 {
-    unsafe { node(word(field_descriptor(desc, index), 0)) }
-}
-
-fn field_descriptor(desc: *mut u8, index: u32) -> *mut u8 {
-    unsafe { desc.add((descriptor::FIELDS + index * descriptor::FIELD_SIZE) as usize) }
-}
-
-fn native_field(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
-    let field = field_descriptor(desc, index);
-    unsafe {
-        super::view::read_slot(
-            origin,
-            word(field, descriptor::FIELD_OFFSET as usize),
-            node(word(field, descriptor::FIELD_SCHEMA as usize)),
-            false,
-        )
-    }
-}
-
-fn native_element(origin: *mut u8, desc: *mut u8, index: u32) -> *mut u8 {
-    if !super::view::array_present(origin, index) {
-        return core::ptr::null_mut();
-    }
-    unsafe {
-        let stride = crate::runtime::layout::array::Elements::decode(word(desc, 8)).stride();
-        super::view::read_slot(
-            node(word(origin, crate::runtime::layout::array::DATA as usize)),
-            index * stride,
-            node(word(desc, 4)),
-            false,
-        )
-    }
-}
-
 pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
     unsafe {
         let (origin, desc) = (node(word(value, 8)), node(word(value, 12)));
         match word(desc, 0) {
             descriptor::RECORD | descriptor::JSON_TUPLE => (0..word(desc, 4))
-                .find(|&index| crate::runtime::bytes(native_key(desc, index)) == name)
+                .find(|&index| crate::runtime::bytes(super::view::field_key(desc, index)) == name)
                 .map_or(core::ptr::null_mut(), |index| {
-                    native_field(origin, desc, index)
+                    super::view::field(origin, desc, index, false)
                 }),
             descriptor::ARRAY | descriptor::JSON_DICTIONARY => {
                 let length = word(origin, 0);
@@ -324,7 +288,7 @@ pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
                 array_index(name)
                     .filter(|&index| index < length)
                     .map_or(core::ptr::null_mut(), |index| {
-                        native_element(origin, desc, index)
+                        super::view::array_slot(origin, desc, index, false)
                     })
             }
             _ => core::ptr::null_mut(),
@@ -349,14 +313,14 @@ pub(super) fn native_snapshot(value: *mut u8) -> *mut u8 {
         for index in 0..count {
             if is_array {
                 let item = if super::view::array_present(origin, index) {
-                    native_element(origin, desc, index)
+                    super::view::array_slot(origin, desc, index, false)
                 } else {
                     new_node(ABSENT)
                 };
                 append(result, item, core::ptr::null_mut());
             } else {
-                let key = native_key(desc, index);
-                let mut item = native_field(origin, desc, index);
+                let key = super::view::field_key(desc, index);
+                let mut item = super::view::field(origin, desc, index, false);
                 if item.is_null()
                     && word(desc, 0) == descriptor::RECORD
                     && !super::order::field_present(

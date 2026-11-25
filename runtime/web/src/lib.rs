@@ -70,6 +70,16 @@ pub(crate) unsafe fn word(area: *const u8, offset: usize) -> u32 {
 
 pub(crate) use perry_rt_sys::unlink_node;
 
+macro_rules! web_getters {
+    ($($name:ident($arg:ident: *mut u8) -> $ret:ty => $body:expr;)*) => {$(
+        #[unsafe(no_mangle)]
+        pub(crate) extern "C" fn $name($arg: *mut u8) -> $ret {
+            $body
+        }
+    )*};
+}
+pub(crate) use web_getters;
+
 pub(crate) unsafe fn validate_request_init(
     url: *mut u8,
     method: *mut u8,

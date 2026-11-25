@@ -183,10 +183,8 @@ fn end(stream: &mut Readable) {
     unsafe { crate::unlink_node!(&mut lists().readables, stream as *mut Readable) };
 }
 
-/// `stream.locked`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_readable_locked(stream: *mut u8) -> u32 {
-    readable(stream).locked
+crate::web_getters! {
+    web_readable_locked(stream: *mut u8) -> u32 => readable(stream).locked;
 }
 
 fn new_reader(stream: *mut Readable) -> *mut Reader {
@@ -614,18 +612,9 @@ pub(crate) extern "C" fn web_reader_release_lock(r: *mut u8) {
     stream.locked = 0;
 }
 
-/// `result.done`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_read_done(result: *mut u8) -> u32 {
-    // SAFETY: compiled code passes read results.
-    unsafe { (*(result as *const ReadResult)).done }
-}
-
-/// `result.value`: bytes, or null (`undefined`) after default-reader EOF or BYOB cancellation.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_read_value(result: *mut u8) -> *mut u8 {
-    // SAFETY: compiled code passes read results.
-    unsafe { (*(result as *const ReadResult)).value }
+crate::web_getters! {
+    web_read_done(result: *mut u8) -> u32 => unsafe { (*(result as *const ReadResult)).done };
+    web_read_value(result: *mut u8) -> *mut u8 => unsafe { (*(result as *const ReadResult)).value };
 }
 
 /// `bytes()`/`text()`/`json()` of a body stream: read it to the end through an internal

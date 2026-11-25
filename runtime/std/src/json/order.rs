@@ -1,10 +1,10 @@
 //! Record headers carry compact field order or a graph retaining interleaved extra keys.
 use super::{
-    address, append, canonical, exclude_key, key_bytes, new_node, node, set_word, std_json_assign,
-    string_node, word,
+    address, append, canonical, children, exclude_key, key_bytes, new_node, node, set_word,
+    std_json_assign, string_node, word,
 };
 use perry_rt_sys::json::{
-    FIRST, NEXT, PACKED_FIELDS, append_field, array_index, field_index, field_name, key_cmp,
+    FIRST, PACKED_FIELDS, append_field, array_index, field_index, field_name, key_cmp,
     kind::OBJECT, remove_field,
 };
 use perry_rt_sys::layout::{array, record};
@@ -34,14 +34,7 @@ pub(super) unsafe fn field_present(native: *mut u8, count: u32, index: u32, key:
         if graph.is_null() {
             return native_fields(native, count).any(|field| field == index);
         }
-        let mut member = word(graph, FIRST);
-        while member != 0 {
-            if key_bytes(member) == key {
-                return true;
-            }
-            member = word(node(member), NEXT);
-        }
-        false
+        children(graph).any(|member| key_bytes(member) == key)
     }
 }
 
@@ -85,15 +78,13 @@ pub(crate) unsafe extern "C" fn std_json_record_retain(
         }
         let mut order = 0;
         if count as usize <= PACKED_FIELDS {
-            let mut member = word(graph, FIRST);
-            while member != 0 {
+            for member in children(graph) {
                 let index = std_json_record_index(member, table, count);
                 if index == count {
                     set_word(native, record::JSON as usize, address(graph));
                     return;
                 }
                 order = append_field(order, index);
-                member = word(node(member), NEXT);
             }
             set_word(native, record::ORDER as usize, order);
             set_word(native, record::JSON as usize, 0);
@@ -184,12 +175,8 @@ pub(crate) unsafe extern "C" fn std_json_record_field(
         let graph = if present == 0 {
             exclude_key(graph, key)
         } else {
-            let mut member = word(graph, FIRST);
-            while member != 0 {
-                if index < count && key_bytes(member) == name {
-                    return;
-                }
-                member = word(node(member), NEXT);
+            if index < count && children(graph).any(|member| key_bytes(member) == name) {
+                return;
             }
             let out = new_node(OBJECT);
             std_json_assign(out, graph);
@@ -214,13 +201,11 @@ unsafe fn visit_fields(
             0
         };
         if graph != 0 {
-            let mut member = word(node(graph), FIRST);
-            while member != 0 {
+            for member in children(node(graph)) {
                 let index = std_json_record_index(member, table, count);
                 if index < count {
                     visit(index as usize);
                 }
-                member = word(node(member), NEXT);
             }
         } else {
             for index in native_fields(native, count) {

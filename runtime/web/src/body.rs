@@ -235,28 +235,11 @@ pub(crate) unsafe extern "C" fn web_response_new(
     r as *mut u8
 }
 
-/// `response.status`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_status(r: *mut u8) -> f64 {
-    response(r).status
-}
-
-/// `response.statusText`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_status_text(r: *mut u8) -> *mut u8 {
-    response(r).status_text
-}
-
-/// `response.ok`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_ok(r: *mut u8) -> u32 {
-    u32::from((200.0..300.0).contains(&response(r).status))
-}
-
-/// `response.headers`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_headers(r: *mut u8) -> *mut u8 {
-    response(r).headers
+crate::web_getters! {
+    web_response_status(r: *mut u8) -> f64 => response(r).status;
+    web_response_status_text(r: *mut u8) -> *mut u8 => response(r).status_text;
+    web_response_ok(r: *mut u8) -> u32 => u32::from((200.0..300.0).contains(&response(r).status));
+    web_response_headers(r: *mut u8) -> *mut u8 => response(r).headers;
 }
 
 // --- Request ------------------------------------------------------------------------------
@@ -324,20 +307,8 @@ pub(crate) unsafe extern "C" fn web_request_new(
     r as *mut u8
 }
 
-/// `request.method`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_request_method(r: *mut u8) -> *mut u8 {
-    request(r).method
-}
-
-/// `request.url`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_request_url(r: *mut u8) -> *mut u8 {
-    request(r).url
-}
-
-/// `request.headers`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_request_headers(r: *mut u8) -> *mut u8 {
-    request(r).headers
+crate::web_getters! {
+    web_request_method(r: *mut u8) -> *mut u8 => request(r).method;
+    web_request_url(r: *mut u8) -> *mut u8 => request(r).url;
+    web_request_headers(r: *mut u8) -> *mut u8 => request(r).headers;
 }
