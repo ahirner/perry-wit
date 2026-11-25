@@ -4,7 +4,7 @@ use crate::lower::collections::{
     dict_entry_types, is_collection_or_view_record, map_box_record, set_box_record,
 };
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// `++object.field` and its relatives, on a numeric record field.
     pub(super) fn property_update(
         &mut self,
@@ -241,7 +241,7 @@ impl<'s> FunctionBuilder<'s> {
                 self.collection_view_element_at(ctx, array, idx)
             }
             Kind::Record => {
-                let field = match (index, self.iteration.index(index)) {
+                let field = match (index, self.cursors.index(index)) {
                     (Expr::String(name), _) => name.clone(),
                     (Expr::Number(n), _) if n.fract() == 0.0 && *n >= 0.0 => {
                         format!("_{}", *n as u64)

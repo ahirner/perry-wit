@@ -24,21 +24,17 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_object_fields<'b>(
         &mut self,
         s: &mut EvalState<'h>,
-        site_expr: &'h Expr,
         pairs: impl Iterator<Item = (&'b str, &'h Expr)>,
     ) -> Result<Ty> {
         let mut props = Vec::new();
-        let mut has_zero_sized_func = false;
         for (name, expr) in pairs {
             let ty = self.eval_expr(s, expr)?;
             self.invalidate_conservative_cell(ty);
             self.check_escaping_func(s.inst, ty, 0, s.current_span)?;
-            if self
+            let erased = self
                 .types
-                .is_zero_sized_func(ty, &self.index.capture_free_templates)
-            {
-                has_zero_sized_func = true;
-            }
+                .is_zero_sized_func(ty, &self.index.capture_free_templates);
+            self.site_mut(s.inst, expr)?.erased = erased;
             let ty = self.types.normalize_for_storage(self.ctx, self.decls, ty);
             props.push(ObjectProp {
                 name: self.types.intern_name(name),
@@ -50,11 +46,20 @@ impl<'h, 'a> Solver<'h, 'a> {
         if props.iter().any(|p| p.ty == Ty::BOTTOM) {
             return Ok(Ty::BOTTOM);
         }
-        let obj_ty = self.types.object(&props, None);
-        if has_zero_sized_func {
-            self.record_site(s.inst, site_expr, SiteResolution::ObjectLiteral(obj_ty));
+        Ok(self.types.object(&props, None))
+    }
+
+    fn record_class_arguments(
+        &mut self,
+        inst: InstanceId,
+        args: &[Expr],
+        types: &[Ty],
+    ) -> Result<()> {
+        for (arg, &ty) in args.iter().zip(types) {
+            let erased = matches!(self.types.kind(ty), TyKind::Func(id) if !self.is_escaping_env(id.template, inst));
+            self.site_mut(inst, arg)?.erased = erased;
         }
-        Ok(obj_ty)
+        Ok(())
     }
 
     pub(super) fn resource_operation(
@@ -96,7 +101,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 s.inst,
                 expr,
                 InstanceReq::new(tid, &arg_tys, Some(s.inst)).at(byte_offset),
-                true,
+                Some(args),
                 false,
             )?;
             return Ok(ret);
@@ -114,23 +119,23 @@ impl<'h, 'a> Solver<'h, 'a> {
         inst_id: InstanceId,
         expr: &'h Expr,
         req: InstanceReq<'_>,
-        is_method: bool,
+        method_arguments: Option<&[Expr]>,
         pass_env: bool,
     ) -> Result<(InstanceId, Ty)> {
-        let argument_types = self.types.tuple(req.args);
+        let arg_types = req.args;
         let pass_receiver = matches!(req.receiver, Some(Receiver::Object(_)));
         let target = self.request_instance(req)?;
-        let res = if is_method {
-            SiteResolution::MethodCall {
-                target,
-                argument_types,
-            }
+        let res = if let Some(args) = method_arguments {
+            self.record_class_arguments(inst_id, args, arg_types)?;
+            SiteResolution::MethodCall(target)
         } else {
-            SiteResolution::DirectCall {
-                target,
-                argument_types,
-                pass_receiver,
-                pass_env,
+            SiteResolution::Call {
+                target: CallTarget::Direct {
+                    target,
+                    pass_receiver,
+                    pass_env,
+                },
+                argument_types: self.types.tuple(arg_types),
             }
         };
         self.record_site(inst_id, expr, res);
@@ -173,14 +178,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         type_args: &'h [HirType],
         byte_offset: u32,
     ) -> Result<Ty> {
-        let cname_id = self.types.intern_name(class_name);
-        if let Some(fields) = self.index.literal_fields_by_id(cname_id) {
+        if let Some(&fields) = self.index.literal_classes.get(class_name) {
             return self.eval_object_fields(
                 s,
-                expr,
                 fields.iter().zip(args).map(|(f, a)| (f.name.as_str(), a)),
             );
         }
+        let cname_id = self.types.intern_name(class_name);
         if class_name == "Promise" && self.index.class_by_name_id(cname_id).is_none() {
             return self.eval_new_promise(s, expr, args, type_args, byte_offset);
         }
@@ -214,15 +218,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let class_inst =
                 self.request_class_inst(cid, &class_args, byte_offset, Some(s.inst))?;
-            let argument_types = self.types.tuple(&arg_tys);
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::ClassNew {
-                    class_inst,
-                    argument_types,
-                },
-            );
+            self.record_class_arguments(s.inst, args, &arg_tys)?;
+            self.record_site(s.inst, expr, SiteResolution::ClassNew(class_inst));
             return Ok(self.types.class_inst(class_inst));
         }
         if let Some(owner) = self.decls.resource(class_name)
@@ -364,7 +361,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError);
+            let argument_types = self.types.tuple(&arg_tys);
+            self.record_site(
+                s.inst,
+                expr,
+                SiteResolution::Call {
+                    target: CallTarget::ThrowTypeError,
+                    argument_types,
+                },
+            );
             return Ok(Ty::NEVER);
         }
         if let Some(idents) = self.types.func_dispatch_members(callee_ty, true) {
@@ -441,7 +446,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .owner(ident.capture_owner)
                 .type_args(&explicit_targs)
                 .at(byte_offset),
-            false,
+            None,
             pass_env,
         )?;
         self.propagate_writes(s.inst, target_inst);
@@ -510,7 +515,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             s.inst,
             expr,
             InstanceReq::new(ident.template, &expanded, Some(s.inst)).owner(ident.capture_owner),
-            false,
+            None,
             pass_env,
         )?;
         Ok(ret)
@@ -532,10 +537,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.record_site(
             s.inst,
             expr,
-            SiteResolution::DispatchCall {
-                helper,
+            SiteResolution::Call {
+                target: CallTarget::Dispatch { helper, needs_recv },
                 argument_types,
-                needs_recv,
             },
         );
         Ok(ret)
@@ -684,7 +688,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let view = self.index.view(template);
         let owner_name = match context_name {
             Some(name) if view.name.is_empty() => hir_compat::display_name(name).to_owned(),
-            _ => view.display_name(),
+            _ => view.display_name(&self.hir.locations),
         };
         for param in view.params {
             if !self.index.is_param_annotated(param.id)

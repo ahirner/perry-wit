@@ -5,13 +5,13 @@ use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub(crate) mod generics;
 mod records;
-pub(crate) use records::{ClassShape, Classes};
+pub(crate) use records::ClassShape;
 pub(crate) type TypeName = pliron::uniqued_any::Uniqued<String>;
 
 pub(crate) struct Declarations<'h> {
     pub(crate) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
     pub(crate) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
-    pub(crate) classes: Classes<'h>,
+    pub(crate) classes: HashMap<&'h str, (usize, ClassShape<'h>)>,
     pub(crate) world: &'h crate::wit::WorldTypes<'h>,
     pub(crate) integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub(crate) imported_types: HashMap<&'h str, &'h crate::wit::Foreign<'h>>,
@@ -37,7 +37,11 @@ impl<'h> Declarations<'h> {
             .enumerate()
             .map(|(idx, alias)| (alias.name.as_str(), (idx, alias)))
             .collect();
-        let classes = Classes::new(classes);
+        let classes = classes
+            .enumerate()
+            .filter(|(_, c)| !crate::hir_compat::is_object_literal(c.name()))
+            .map(|(index, c)| (c.name(), (index, c)))
+            .collect();
         let mut integer_imports = HashMap::new();
         let mut imported_types = HashMap::new();
         let mut foreign_functions = HashMap::new();
@@ -85,7 +89,7 @@ impl<'h> Declarations<'h> {
     pub(crate) fn is_user_type(&self, name: &str) -> bool {
         self.interfaces.contains_key(name)
             || self.type_aliases.contains_key(name)
-            || self.classes.named.contains_key(name)
+            || self.classes.contains_key(name)
     }
 
     pub(crate) fn integer_spec(&self, name: &str) -> Option<(u32, Signedness)> {

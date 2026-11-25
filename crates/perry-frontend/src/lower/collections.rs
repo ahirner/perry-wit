@@ -7,6 +7,7 @@
 use super::*;
 use crate::lower::control_flow::{ArrayOutput, Holes, Input, Projection};
 use crate::source::CollectionKind;
+use crate::source::ConstructorSites;
 use perry_mir::{OptionalType, RecordKind};
 
 mod keyed;
@@ -242,7 +243,7 @@ fn record_uniform_field_type(ctx: &Context, rec: TypedHandle<RecordType>) -> Opt
     )
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn new_collection(
         &mut self,
         ctx: &mut Context,
@@ -264,7 +265,7 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
-        if let Some(constructor) = self.shapes.source.constructors.collection(expr) {
+        if let Some(constructor) = self.shapes.specialization.instances.collection(expr) {
             let expected = match (constructor.kind, constructor.types) {
                 (CollectionKind::Map, [key, value]) => Some(self.shapes.map_type(ctx, key, value)?),
                 (CollectionKind::Set, [item]) => Some(self.shapes.set_type(ctx, item)?),

@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(crate) fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
         static_regex(ctx, regex, |op| op.flags(ctx).contains('g')).ok_or_else(|| {
             unsupported!(

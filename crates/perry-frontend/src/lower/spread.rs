@@ -3,7 +3,7 @@ use super::*;
 use crate::lower::control_flow::{ArrayOutput, Holes, Input};
 use perry_mir::{ArrayExtendOp, ConcatSegmentsOp, StringType};
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// `[...text]` and `Array.from(text)`: one string per Unicode scalar value.
     pub(crate) fn string_characters(&mut self, ctx: &mut Context, text: Value) -> Value {
         let empty = self.string(ctx, "");

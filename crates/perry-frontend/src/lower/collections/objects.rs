@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// A read of an optional that admits `undefined`, normalized to the type's `undefined`.
     pub(crate) fn normalize_optional_read(
         &mut self,

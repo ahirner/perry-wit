@@ -26,9 +26,9 @@ pub(super) struct TypeIndices<'a> {
     pub(super) output: &'a mut Signatures,
 }
 
-fn referenced(ty: ValType) -> Option<u32> {
+fn referenced(ty: &mut ValType) -> Option<&mut u32> {
     match ty {
-        ValType::Ref(reference) => match reference.heap_type {
+        ValType::Ref(reference) => match &mut reference.heap_type {
             HeapType::Concrete(id) | HeapType::Exact(id) => Some(id),
             HeapType::Abstract { .. } => None,
         },
@@ -46,61 +46,51 @@ impl TypeIndices<'_> {
         if let Some(mapped) = self.mapped[slot] {
             return Ok(mapped);
         }
-        let mut references = ty
-            .params()
-            .iter()
-            .chain(ty.results())
-            .copied()
-            .filter_map(referenced)
-            .peekable();
-        let mapped = if references.peek().is_none() {
-            self.output.intern(ty)
-        } else {
+        let values = ty.params().iter().chain(ty.results()).copied();
+        let mapped = if values
+            .clone()
+            .any(|mut value| referenced(&mut value).is_some())
+        {
+            let mut values: Vec<_> = values.collect();
             let mut recursive = false;
-            for dependency in references {
-                if dependency < index {
-                    self.resolve(dependency)?;
-                } else if dependency == index {
-                    recursive = true;
-                } else {
-                    return Err(Error::UserError(format!(
-                        "forward type reference {dependency} in single-type recursion group {index}"
-                    )));
-                }
-            }
-            let relocated = |self_index| {
-                let relocate = |mut value: ValType| {
-                    if let ValType::Ref(reference) = &mut value {
-                        let source = match &mut reference.heap_type {
-                            HeapType::Concrete(id) | HeapType::Exact(id) => id,
-                            HeapType::Abstract { .. } => return value,
-                        };
-                        *source = if *source == index {
-                            self_index
-                        } else {
-                            self.mapped[*source as usize].expect("dependency was interned")
-                        };
+            // A Wasm module cannot contain u32::MAX types. In the interner key
+            // this index denotes the current single-type recursion group.
+            for dependency in values.iter_mut().filter_map(referenced) {
+                *dependency = match (*dependency).cmp(&index) {
+                    std::cmp::Ordering::Less => self.resolve(*dependency)?,
+                    std::cmp::Ordering::Equal => {
+                        recursive = true;
+                        u32::MAX
                     }
-                    value
+                    std::cmp::Ordering::Greater => {
+                        return Err(Error::UserError(format!(
+                            "forward type reference {dependency} in single-type recursion group {index}"
+                        )));
+                    }
                 };
-                FuncType::new(
-                    ty.params().iter().copied().map(relocate),
-                    ty.results().iter().copied().map(relocate),
-                )
+            }
+            let signature = |values: &[ValType]| {
+                let (params, results) = values.split_at(ty.params().len());
+                FuncType::new(params.iter().copied(), results.iter().copied())
             };
-            // Wasm bounds module type counts below u32::MAX. Reserve that index in the
-            // interner key for a reference local to the current recursion group.
-            let key = relocated(u32::MAX);
+            let key = signature(&values);
             if !recursive {
                 self.output.intern(&key)
             } else if let Some(&mapped) = self.output.indices.get(&key) {
                 mapped
             } else {
                 let mapped = self.output.section.len();
-                self.output.section.ty().func_type(&relocated(mapped));
+                for dependency in values.iter_mut().filter_map(referenced) {
+                    if *dependency == u32::MAX {
+                        *dependency = mapped;
+                    }
+                }
+                self.output.section.ty().func_type(&signature(&values));
                 self.output.indices.insert(key, mapped);
                 mapped
             }
+        } else {
+            self.output.intern(ty)
         };
         self.mapped[slot] = Some(mapped);
         Ok(mapped)

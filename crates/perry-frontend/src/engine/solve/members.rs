@@ -133,15 +133,44 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(());
             }
         }
-        self.record_site(
-            inst_id,
-            expr,
+        let erased = |ty| match self.types.kind(ty) {
+            TyKind::Func(id)
+                if self
+                    .types
+                    .is_zero_sized_func(ty, &self.index.capture_free_templates) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        };
+        let comparison = if let Some((identity, source, left_erased)) = erased(l)
+            .map(|id| (id, r, true))
+            .or_else(|| erased(r).map(|id| (id, l, false)))
+        {
+            if self
+                .types
+                .func_members(&source)
+                .any(|member| member == identity)
+            {
+                SiteResolution::Matches {
+                    identity,
+                    source,
+                    left_erased,
+                    equal: is_eq,
+                }
+            } else {
+                SiteResolution::FoldBool(!is_eq)
+            }
+        } else {
             SiteResolution::FuncCompare {
                 left_ty: l,
                 right_ty: r,
-                op,
-            },
-        );
+                equal: is_eq,
+                environments: l == r
+                    && matches!(self.types.kind(l), TyKind::Func(id) if self.is_escaping_env(id.template, inst_id)),
+            }
+        };
+        self.record_site(inst_id, expr, comparison);
         Ok(())
     }
 
@@ -344,7 +373,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .with_fallback_span(self.hir.locations.member_span(byte_offset).or_else(|| {
                 self.hir
                     .locations
-                    .offset_span(s.iteration.object_pattern_offset(object)?, 1)
+                    .offset_span(self.index.iteration.object_pattern_offset(object)?, 1)
             })));
         }
         if let TyKind::Cell {
@@ -383,10 +412,9 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
         let cinst = &self.class_insts[cinst_id];
         let f_idx = self
-            .hir
-            .bodies
-            .classes
-            .get(self.index.class(cinst.class).hir_idx)?
+            .index
+            .class(cinst.class)
+            .declaration
             .fields
             .iter()
             .position(|f| f.name == property)?;

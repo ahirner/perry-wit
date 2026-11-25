@@ -17,7 +17,7 @@ pub(crate) fn export(
         is_async == export.is_async(),
         codes::ASYNC_MISMATCH,
         "{} is {}async but the WIT export is {}async",
-        export.function,
+        export.declaration(),
         if is_async { "" } else { "not " },
         if export.is_async() { "" } else { "not " },
     );
@@ -33,7 +33,7 @@ pub(crate) fn export(
         mir_params.len() == export.params.len(),
         codes::CONTRACT_MISMATCH,
         "{} takes {} parameters but the WIT export has {}",
-        export.function,
+        export.declaration(),
         mir_params.len(),
         export.params.len()
     );
@@ -45,11 +45,15 @@ pub(crate) fn export(
         return Err(diag!(
             codes::CONTRACT_MISMATCH,
             "{} returns {} values but the WIT export returns {}",
-            export.function,
+            export.declaration(),
             mir_results.len(),
             usize::from(export.result.is_some())
         )
-        .with_fallback_span(export.annotation(export.params.len())));
+        .with_fallback_span(
+            export
+                .annotation(export.params.len())
+                .or_else(|| perry_mir::source_span(ctx, function)),
+        ));
     }
     let flat_params = parameters::export_signature(&export.params);
     let flat_result = export
@@ -167,7 +171,13 @@ pub(crate) fn export(
     let returned = match (&export.result, source) {
         (Some(ty), Some(source)) => b
             .lower_return(ctx, ty, source, flat_result_len != 1)
-            .map_err(|e| e.with_fallback_span(export.annotation(export.params.len())))?,
+            .map_err(|e| {
+                e.with_fallback_span(
+                    export
+                        .annotation(export.params.len())
+                        .or_else(|| perry_mir::source_span(ctx, function)),
+                )
+            })?,
         _ => vec![],
     };
     b.commit_resources(ctx);
@@ -214,7 +224,7 @@ fn async_export(
         mir_params.len() == export.params.len(),
         codes::CONTRACT_MISMATCH,
         "{} takes {} parameters but the WIT export has {}",
-        export.function,
+        export.declaration(),
         mir_params.len(),
         export.params.len()
     );
@@ -442,7 +452,11 @@ fn async_export(
                 BoundaryValue::Native(*mir_ty, value)
             };
             flat = b.lower_return(ctx, ty, source, indirect).map_err(|error| {
-                error.with_fallback_span(export.annotation(export.params.len()))
+                error.with_fallback_span(
+                    export
+                        .annotation(export.params.len())
+                        .or_else(|| perry_mir::source_span(ctx, function)),
+                )
             })?;
         }
         if b.state.uses_http_server {

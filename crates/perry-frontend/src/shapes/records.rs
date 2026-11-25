@@ -20,43 +20,16 @@ impl<'s> ClassShape<'s> {
             Self::Instance(_) => &[],
         }
     }
-    pub(crate) fn fields(self) -> impl Iterator<Item = &'s ClassField> {
-        let (source, selected): (&[ClassField], &[&ClassField]) = match self {
-            Self::Source(c) => (&c.fields, &[]),
-            Self::Instance(c) => (&[], &c.fields),
+    pub(crate) fn fields(
+        self,
+    ) -> impl Iterator<Item = (&'s ClassField, Option<crate::engine::types::Ty>)> {
+        let (source, selected) = match self {
+            Self::Source(c) => (c.fields.as_slice(), &[][..]),
+            Self::Instance(c) => (&[][..], c.fields.as_slice()),
         };
-        source.iter().chain(selected.iter().copied())
-    }
-}
-
-use std::collections::HashMap;
-
-pub(crate) struct Classes<'h> {
-    pub(crate) named: HashMap<&'h str, (usize, ClassShape<'h>)>,
-    literal_fields: HashMap<&'h str, Vec<&'h str>>,
-}
-
-impl<'h> Classes<'h> {
-    pub(crate) fn new(classes: impl Iterator<Item = ClassShape<'h>>) -> Self {
-        let mut named = HashMap::new();
-        let mut literal_fields = HashMap::new();
-        for (index, class) in classes.enumerate() {
-            if crate::hir_compat::is_object_literal(class.name()) {
-                literal_fields.insert(
-                    class.name(),
-                    class.fields().map(|field| field.name.as_str()).collect(),
-                );
-            } else {
-                named.insert(class.name(), (index, class));
-            }
-        }
-        Self {
-            named,
-            literal_fields,
-        }
-    }
-
-    pub(crate) fn literal_fields(&self, name: &str) -> Option<&[&'h str]> {
-        self.literal_fields.get(name).map(Vec::as_slice)
+        source
+            .iter()
+            .map(|field| (field, None))
+            .chain(selected.iter().copied())
     }
 }

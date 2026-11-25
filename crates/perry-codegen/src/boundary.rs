@@ -140,6 +140,7 @@ pub enum ExportKind {
 /// One component export bound to a TypeScript function.
 #[derive(Clone, Debug)]
 pub struct Export {
+    pub source_name: Option<String>,
     /// Parameter annotation spans followed by the return annotation.
     pub annotations: Vec<Option<perry_wit_diagnostics::SourceSpan>>,
     /// Core export name: the WIT function name, or `interface#function`.
@@ -152,6 +153,9 @@ pub struct Export {
 }
 
 impl Export {
+    pub fn declaration(&self) -> &str {
+        self.source_name.as_deref().unwrap_or(&self.function)
+    }
     pub fn annotation(&self, i: usize) -> Option<perry_wit_diagnostics::SourceSpan> {
         self.annotations.get(i).cloned().flatten()
     }

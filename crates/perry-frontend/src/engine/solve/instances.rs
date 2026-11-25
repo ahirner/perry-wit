@@ -446,7 +446,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         executor: None,
                     }
                 }),
-                coercion: None,
+                ..SiteEntry::default()
             })
             .collect();
         self.inst_sites.push(sites);
@@ -573,12 +573,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(id);
         }
         let cinfo = self.index.class(class);
-        let hir_class = self
-            .hir
-            .bodies
-            .classes
-            .get(cinfo.hir_idx)
-            .ok_or_else(|| Diagnostic::internal("unknown class in HIR"))?;
+        let hir_class = cinfo.declaration;
 
         let bindings: Vec<_> = self.type_param_pool[self.class_type_params[class]]
             .iter()
@@ -613,6 +608,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
 
         let cinst_id = self.class_insts.push(ClassInst {
+            ty: self.types.named(self.ctx, &emitted_name),
             class,
             args: args_key,
             field_locs,

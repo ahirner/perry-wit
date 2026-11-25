@@ -25,7 +25,7 @@ pub(super) enum LoopBound {
     Collection(Value),
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
         let entry = self.entry_block();
         let mut seen = HashSet::new();
@@ -111,7 +111,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// Leave with exception `status`: to the innermost handler, or out of the function. Ends
     /// the current block.
     pub(super) fn propagate(&mut self, ctx: &mut Context, status: Value) {
@@ -373,7 +373,7 @@ struct CollectionTraversal {
     cursor: Option<LiveCursor>,
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     fn repeat<T>(
         &mut self,
         ctx: &mut Context,

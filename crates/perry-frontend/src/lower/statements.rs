@@ -1,13 +1,14 @@
 //! Statements: bindings, `return`, `throw`, jumps and expression statements.
 use super::*;
+use crate::engine::types::LocalFlags;
 use crate::engine::{CellInit, Storage};
 use crate::lower::{
     builder::Jump,
     control_flow::{LoopCondition, LoopUpdate},
 };
-use crate::source::BindingAnnotation;
+use crate::source::ConstructorSites;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
         for statement in statements {
             if let Stmt::Let { id, ty, .. } = statement
@@ -25,7 +26,7 @@ impl<'s> FunctionBuilder<'s> {
         let mut rest = statements;
         let mut loop_cells = Vec::new();
         while let Some((first, tail)) = rest.split_first() {
-            rest = match self.iteration.element(rest) {
+            rest = match self.shapes.specialization.iteration.element(rest) {
                 Some(element) => {
                     let element_ty = self
                         .declared_local(ctx, self.local_storage(element.id), element.ty)?
@@ -94,16 +95,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
             };
             match first {
-                Stmt::Let { id, .. }
-                    if self
-                        .shapes
-                        .specialization
-                        .instances
-                        .per_iteration
-                        .contains(id) =>
-                {
-                    loop_cells.push(*id)
-                }
+                Stmt::Let { id, .. } if self.per_iteration(*id) => loop_cells.push(*id),
                 _ => loop_cells.clear(),
             }
         }
@@ -133,15 +125,13 @@ impl<'s> FunctionBuilder<'s> {
                 condition,
                 else_branch,
                 ..
-            } if self.iteration.is_guard(condition) => {
+            } if self.shapes.specialization.iteration.is_guard(condition) => {
                 if let Some(else_branch) = else_branch {
                     self.statements(ctx, else_branch)?;
                 }
             }
-            Stmt::Let {
-                id, name, ty, init, ..
-            } => {
-                if matches!(self.local_storage(*id), Some(Storage::ErasedFunction)) {
+            Stmt::Let { id, ty, init, .. } => {
+                if matches!(self.local_storage(*id), Some(Storage::ErasedFunction(_))) {
                     if let Some(expr) = init
                         && !crate::source::is_pure_func_expr(expr)
                     {
@@ -150,7 +140,9 @@ impl<'s> FunctionBuilder<'s> {
                     return Ok(());
                 }
                 let init = init.as_ref();
-                self.iteration.register_binding(*id, name, init);
+                if self.shapes.specialization.iteration.is_cursor(*id) {
+                    self.cursors.reset(*id);
+                }
                 let storage = self.local_storage(*id);
                 if matches!(
                     storage,
@@ -171,15 +163,8 @@ impl<'s> FunctionBuilder<'s> {
                 self.effect(ctx, expr)?;
             }
             Stmt::Return(value) => {
-                let erased = self
-                    .local_owner
-                    .and_then(|owner| self.shapes.specialization.instances.signatures.get(&owner))
-                    .is_some_and(|signature| {
-                        matches!(
-                            signature.result,
-                            crate::engine::InstanceResult::ErasedFunction
-                        )
-                    });
+                let erased = matches!(self.local_owner, BodyOwner::Function(id) if self.signatures.source(id)
+                    .and_then(|f| f.signature.as_ref()).is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
                     if let Some(expr) = value
                         && !crate::source::is_pure_func_expr(expr)
@@ -308,12 +293,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
                 let mut cells = loop_cells.to_vec();
                 if let Some(Stmt::Let { id, .. }) = init.as_deref()
-                    && self
-                        .shapes
-                        .specialization
-                        .instances
-                        .per_iteration
-                        .contains(id)
+                    && self.per_iteration(*id)
                 {
                     cells.push(*id);
                 }
@@ -425,17 +405,27 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    fn local_storage(&self, id: LocalId) -> Option<crate::engine::Storage> {
+    fn per_iteration(&self, id: LocalId) -> bool {
+        matches!(
+            self.local_storage(id),
+            Some(crate::engine::Storage::Boxed { .. })
+        ) && self
+            .shapes
+            .source
+            .locals
+            .get(&id)
+            .is_some_and(|binding| binding.flags.contains(LocalFlags::FOR_HEAD))
+    }
+
+    pub(super) fn local_storage(&self, id: LocalId) -> Option<crate::engine::Storage> {
         self.shapes
             .specialization
             .instances
-            .locals
-            .get(&(self.local_owner, id))
-            .copied()
+            .storage(self.local_owner, id)
     }
 
     fn declared_local(
-        &self,
+        &mut self,
         ctx: &Context,
         storage: Option<crate::engine::Storage>,
         ty: &HirType,
@@ -448,7 +438,7 @@ impl<'s> FunctionBuilder<'s> {
             ));
         }
         Ok((
-            self.shapes.source_binding(ctx, ty)?,
+            self.shapes.source_binding(ty)?,
             matches!(ty, HirType::Never),
         ))
     }
@@ -491,9 +481,9 @@ impl<'s> FunctionBuilder<'s> {
             };
             let value = self.fit(ctx, value, payload)?;
             let value = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![value]));
-            let binding = if self.shapes.global_ids.contains(&id) {
+            let binding = if let Some(global) = self.shapes.globals.get_mut(&id) {
                 let writes = BindingType::plain(record.into());
-                self.shapes.globals.borrow_mut().insert(id, writes);
+                *global = Some(writes);
                 let slot = self.global_slot(ctx, id, writes.carrier)?;
                 self.store(ctx, slot, value);
                 LocalBinding::slot(slot, writes, false)
@@ -512,16 +502,12 @@ impl<'s> FunctionBuilder<'s> {
             };
             if function
                 .is_some_and(|id| !plans.closure_values.contains_key(&(self.local_owner, id)))
-                && plans
-                    .site(self.local_owner, expr)
-                    .is_none_or(|site| site.conversion.is_none())
+                && plans.site(self.local_owner, expr).conversion().is_none()
             {
                 return Ok(());
             }
         }
-        if let Some(init) = init
-            && let Some(source) = self.iteration.guard(id, init)
-        {
+        if let Some(source) = self.shapes.specialization.iteration.guard(id) {
             if let Some(source) = source {
                 let source = self.expression(ctx, source)?;
                 let source = self.defined(ctx, source)?;
@@ -534,13 +520,13 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(());
         }
-        let annotation = self
+        let inferred = self
             .shapes
             .source
             .locals
             .get(&id)
-            .map(|local| local.annotation);
-        let explicit = annotation == Some(BindingAnnotation::Explicit);
+            .map(|local| local.flags.contains(LocalFlags::INFERRED));
+        let explicit = inferred == Some(false);
         let (mut binding, is_never) = match self.declared_local(ctx, storage, ty) {
             Err(error)
                 if error.code() == codes::MISSING_TYPE_ANNOTATION
@@ -559,12 +545,7 @@ impl<'s> FunctionBuilder<'s> {
             {
                 let ty = match storage {
                     Some(crate::engine::Storage::Value(ty)) => ty,
-                    _ => self
-                        .shapes
-                        .specialization
-                        .types
-                        .borrow_mut()
-                        .intern_hir(ctx, ty, true),
+                    _ => self.shapes.specialization.annotations.get(ty)?,
                 };
                 if self.shapes.is_json_encodable_union(ty) {
                     (
@@ -604,13 +585,13 @@ impl<'s> FunctionBuilder<'s> {
             binding.integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
         }
         if let Some(value) = init
-            && annotation == Some(BindingAnnotation::Inferred)
+            && inferred == Some(true)
         {
             binding.carrier = crate::lower::coerce::result_carrier(ctx, declared, &[value]);
         }
         let storage = deferred.unwrap_or(binding.carrier);
-        let slot = if self.shapes.global_ids.contains(&id) {
-            self.shapes.globals.borrow_mut().insert(id, binding);
+        let slot = if let Some(global) = self.shapes.globals.get_mut(&id) {
+            *global = Some(binding);
             self.global_slot(ctx, id, storage)?
         } else {
             self.entry_slot(ctx, storage)
@@ -635,16 +616,7 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
-        let result = if let Some(site) = self
-            .shapes
-            .specialization
-            .instances
-            .site(self.local_owner, expr)
-        {
-            self.instance_operand(ctx, expr, expected, site, false)?
-        } else {
-            self.source_operand(ctx, expr, expected)?
-        };
+        let result = self.instance_operand(ctx, expr, expected, false)?;
         Ok(result.filter(|value| !self.never_values.contains(value)))
     }
 
@@ -654,7 +626,7 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
-        if self.iteration.is_release(expr) {
+        if self.shapes.specialization.iteration.is_release(expr) {
             return Ok(None);
         }
         let value = match expr {
@@ -679,8 +651,13 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::Undefined => None,
             Expr::Call { .. }
-                if self.shapes.source.constructors.collection(expr).is_some()
-                    || self.shapes.source.constructors.regexp(expr).is_some() =>
+                if self
+                    .shapes
+                    .specialization
+                    .instances
+                    .collection(expr)
+                    .is_some()
+                    || self.shapes.specialization.instances.regexp(expr).is_some() =>
             {
                 Some(self.source_expression(ctx, expr, expected)?)
             }

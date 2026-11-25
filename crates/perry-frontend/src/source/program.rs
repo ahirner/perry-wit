@@ -1,4 +1,5 @@
 //! Source declarations and executable bodies have separate lifetimes during specialization.
+use crate::engine::{BodyOwner, types::LocalFlags};
 use perry_hir::{
     ir::{Class, Expr, Function, Import, Interface, Module, Param, Stmt, TypeAlias},
     types::{FuncId, LocalId},
@@ -12,7 +13,6 @@ pub(crate) struct ModuleDeclarations {
     pub(crate) interfaces: Vec<Interface>,
     pub(crate) type_aliases: Vec<TypeAlias>,
     pub(crate) locals: HashMap<LocalId, LocalDeclaration>,
-    pub(crate) constructors: super::Constructors,
     pub(crate) has_top_level_await: bool,
 }
 
@@ -26,26 +26,21 @@ impl ModuleDeclarations {
         else {
             return None;
         };
-        self.locals.get(id)?.for_of.then_some((*id, source))
+        self.locals
+            .get(id)?
+            .flags
+            .contains(LocalFlags::FOR_OF)
+            .then_some((*id, source))
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BindingAnnotation {
-    Inferred,
-    Explicit,
 }
 
 pub(crate) struct LocalDeclaration {
     pub(crate) span: swc_common::Span,
-    pub(crate) annotation: BindingAnnotation,
-    pub(crate) deferred: bool,
-    pub(crate) loop_let: bool,
-    pub(crate) annotated_parameter: bool,
-    for_of: bool,
+    pub(crate) flags: LocalFlags,
 }
 
 pub(crate) struct SourceModule<'s> {
+    pub(crate) constructors: super::Constructors,
     pub(crate) locations: crate::hir_compat::Locations<'s>,
     pub(crate) witnesses: Vec<crate::hir_compat::Witness<'s, FuncId>>,
     pub(crate) sparse_arrays: bool,
@@ -75,24 +70,19 @@ impl<'s> SourceModule<'s> {
                     swc_common::BytePos(span.start),
                     swc_common::BytePos(span.end),
                 );
-                let for_of = analysis.for_of.contains(&span);
-                let decl = LocalDeclaration {
-                    span,
-                    for_of,
-                    annotation: if for_of || syntax.inferred_end == Some(span.hi.0) {
-                        BindingAnnotation::Inferred
-                    } else {
-                        BindingAnnotation::Explicit
-                    },
-                    deferred: syntax.deferred,
-                    loop_let: syntax.loop_let,
-                    annotated_parameter: syntax.annotated_parameter,
-                };
-                (id, decl)
+                let mut flags = syntax.flags;
+                if syntax.iteration_end == Some(span.hi.0) {
+                    flags.insert(LocalFlags::FOR_OF);
+                    flags.insert(LocalFlags::INFERRED);
+                } else if syntax.inferred_end == Some(span.hi.0) {
+                    flags.insert(LocalFlags::INFERRED);
+                }
+                (id, LocalDeclaration { span, flags })
             })
             .collect();
         Self {
             locations,
+            constructors,
             witnesses,
             sparse_arrays: analysis.sparse_arrays,
             declarations: ModuleDeclarations {
@@ -101,7 +91,6 @@ impl<'s> SourceModule<'s> {
                 interfaces: module.interfaces,
                 type_aliases: module.type_aliases,
                 locals,
-                constructors,
                 has_top_level_await: module.has_top_level_await,
             },
             bodies: Bodies {
@@ -151,11 +140,6 @@ pub(crate) fn authored_body<'a>(params: &[Param], mut body: &'a [Stmt]) -> &'a [
     body
 }
 
-pub(crate) struct BodyIndex<'a> {
-    pub(crate) closures: HashMap<FuncId, &'a Expr>,
-    pub(crate) globals: HashSet<LocalId>,
-}
-
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum CallerKind {
     Initializer,
@@ -165,12 +149,13 @@ pub(crate) enum CallerKind {
 }
 
 pub(crate) struct InstanceFunction<'s> {
+    pub(crate) signature: Option<crate::engine::InstanceSignature>,
     pub(crate) id: FuncId,
-    pub(crate) name: String,
-    pub(crate) params: Vec<&'s Param>,
+    pub(crate) name: std::borrow::Cow<'s, str>,
+    pub(crate) params: Vec<(&'s Param, Option<crate::engine::types::Ty>)>,
     pub(crate) return_type: &'s perry_hir::types::Type,
     pub(crate) body: &'s [Stmt],
-    pub(crate) captures: Vec<LocalId>,
+    pub(crate) captures: std::borrow::Cow<'s, [LocalId]>,
     pub(crate) is_async: bool,
     pub(crate) is_exported: bool,
     pub(crate) is_generator: bool,
@@ -179,12 +164,13 @@ pub(crate) struct InstanceFunction<'s> {
 impl<'s> From<&'s Function> for InstanceFunction<'s> {
     fn from(function: &'s Function) -> Self {
         Self {
+            signature: None,
             id: function.id,
-            name: function.name.clone(),
-            params: function.params.iter().collect(),
+            name: function.name.as_str().into(),
+            params: function.params.iter().map(|param| (param, None)).collect(),
             return_type: &function.return_type,
             body: authored_body(&function.params, &function.body),
-            captures: function.captures.clone(),
+            captures: function.captures.as_slice().into(),
             is_async: function.is_async,
             is_exported: function.is_exported,
             is_generator: function.is_generator,
@@ -192,10 +178,22 @@ impl<'s> From<&'s Function> for InstanceFunction<'s> {
     }
 }
 
+pub(crate) struct StaticField<'s> {
+    pub(crate) id: LocalId,
+    pub(crate) field: &'s perry_hir::ir::ClassField,
+    pub(crate) ty: Option<crate::engine::types::Ty>,
+}
+
 pub(crate) struct InstanceClass<'s> {
+    pub(crate) ty: crate::engine::types::Ty,
     pub(crate) declaration: &'s Class,
     pub(crate) name: String,
-    pub(crate) fields: Vec<&'s perry_hir::ir::ClassField>,
+    pub(crate) fields: Vec<(
+        &'s perry_hir::ir::ClassField,
+        Option<crate::engine::types::Ty>,
+    )>,
+    pub(crate) static_fields: Vec<StaticField<'s>>,
+    pub(crate) initializer: Option<FuncId>,
     pub(crate) constructor: Option<InstanceFunction<'s>>,
     pub(crate) methods: Vec<InstanceFunction<'s>>,
     pub(crate) static_methods: Vec<InstanceFunction<'s>>,
@@ -204,9 +202,11 @@ pub(crate) struct InstanceClass<'s> {
 }
 
 pub(crate) struct InstanceBodies<'s> {
+    pub(crate) native: Vec<(FuncId, crate::engine::NativeFunction)>,
     pub(crate) init: &'s [Stmt],
     pub(crate) functions: Vec<InstanceFunction<'s>>,
-    pub(crate) classes: Vec<InstanceClass<'s>>,
+    pub(crate) classes:
+        crate::engine::types::IdxVec<crate::engine::types::ClassInstId, InstanceClass<'s>>,
 }
 
 impl InstanceBodies<'_> {
@@ -214,29 +214,15 @@ impl InstanceBodies<'_> {
         &'a self,
         locations: &mut crate::hir_compat::Locations<'_>,
         plans: &'a crate::engine::InstancePlans,
-    ) -> BodyIndex<'a> {
-        let module_locals: HashSet<_> = self
-            .init
-            .iter()
-            .filter_map(|stmt| match stmt {
-                Stmt::Let { id, .. } => Some(*id),
-                _ => None,
-            })
-            .collect();
+    ) -> HashSet<LocalId> {
         let names: HashMap<_, _> = self
             .functions
             .iter()
             .filter(|_| locations.has_imports())
-            .map(|f| (f.id, f.name.as_str()))
+            .map(|f| (f.id, f.name.as_ref()))
             .collect();
-        let mut index = BodyIndex {
-            closures: HashMap::new(),
-            globals: HashSet::new(),
-        };
+        let mut globals = HashSet::new();
         let mut scan = |owner, expr: &'a Expr, kind, caller: Option<&str>| match expr {
-            Expr::Closure { func_id, .. } => {
-                index.closures.entry(*func_id).or_insert(expr);
-            }
             Expr::Call { byte_offset, .. }
                 if let Some(id) = plans.call_target(owner, expr)
                     && let Some(&callee) = names.get(&id) =>
@@ -254,9 +240,9 @@ impl InstanceBodies<'_> {
             | Expr::ArrayPop(id)
             | Expr::ArrayShift(id)
             | Expr::SetAdd { set_id: id, .. }
-                if kind != CallerKind::Initializer && module_locals.contains(id) =>
+                if kind != CallerKind::Initializer && plans.module_binding(*id) =>
             {
-                index.globals.insert(*id);
+                globals.insert(*id);
             }
             _ => {}
         };
@@ -270,20 +256,22 @@ impl InstanceBodies<'_> {
                 scan(owner, expr, kind, Some(&function.name))
             });
         }
-        for class in &self.classes {
+        for class in self.classes.iter() {
             let mut scan_class = |owner, expr| scan(owner, expr, CallerKind::Class, None);
-            for field in &class.fields {
+            for &(field, _) in &class.fields {
                 if let Some(init) = &field.init {
-                    let owner = plans
-                        .class_fields
-                        .get(&class.name)
-                        .and_then(|layout| layout.initializer);
-                    self.walk_expr(owner, init, &mut scan_class);
+                    self.walk_expr(
+                        class
+                            .initializer
+                            .map_or(BodyOwner::Initializer, BodyOwner::Function),
+                        init,
+                        &mut scan_class,
+                    );
                 }
             }
             for field in &class.declaration.static_fields {
                 if let Some(init) = &field.init {
-                    self.walk_expr(None, init, &mut scan_class);
+                    self.walk_expr(BodyOwner::Initializer, init, &mut scan_class);
                 }
             }
             for function in class
@@ -298,46 +286,40 @@ impl InstanceBodies<'_> {
             for member in &class.declaration.computed_members {
                 let f = &member.function;
                 self.walk_body(
-                    Some(f.id),
+                    BodyOwner::Function(f.id),
                     authored_body(&f.params, &f.body),
                     &mut scan_class,
                 );
                 for default in f.params.iter().filter_map(|p| p.default.as_ref()) {
-                    self.walk_expr(Some(f.id), default, &mut scan_class);
+                    self.walk_expr(BodyOwner::Function(f.id), default, &mut scan_class);
                 }
             }
         }
-        self.walk_body(None, self.init, &mut |owner, expr| {
+        self.walk_body(BodyOwner::Initializer, self.init, &mut |owner, expr| {
             scan(owner, expr, CallerKind::Initializer, None)
         });
-        index
+        globals
     }
 }
 
 impl crate::engine::InstancePlans {
-    pub(crate) fn site(
-        &self,
-        owner: Option<FuncId>,
-        expr: &Expr,
-    ) -> Option<crate::engine::ExpressionSite> {
-        self.expressions
-            .get(&(owner, std::ptr::from_ref(expr).addr()))
-            .copied()
-    }
-    pub(crate) fn reference(&self, owner: Option<FuncId>, expr: &Expr) -> Option<FuncId> {
-        match self.site(owner, expr).map(|s| s.value) {
-            Some(crate::engine::InstanceValue::Reference(id)) => Some(id),
-            _ => match *expr {
-                Expr::FuncRef(id) => Some(id),
-                _ => None,
-            },
+    pub(crate) fn reference(&self, owner: BodyOwner, expr: &Expr) -> Option<FuncId> {
+        if let Some(crate::engine::solve::SiteResolution::Callback { target }) =
+            self.site(owner, expr).resolution
+        {
+            return Some(self.function(target));
+        }
+        match *expr {
+            Expr::LocalGet(id) => self.parameter_function(owner, id),
+            Expr::FuncRef(id) => Some(id),
+            _ => None,
         }
     }
-    pub(crate) fn call_target(&self, owner: Option<FuncId>, expr: &Expr) -> Option<FuncId> {
-        if let Some(crate::engine::InstanceValue::Invoke(site)) =
-            self.site(owner, expr).map(|s| s.value)
+    pub(crate) fn call_target(&self, owner: BodyOwner, expr: &Expr) -> Option<FuncId> {
+        if let Some(crate::engine::solve::SiteResolution::Call { target, .. }) =
+            self.site(owner, expr).resolution
         {
-            return Some(site.target);
+            return self.emitted_callee(target)?.ok();
         }
         match expr {
             Expr::Call { callee, .. } | Expr::CallSpread { callee, .. } => {
@@ -351,10 +333,10 @@ impl InstanceBodies<'_> {
     fn walk_function<'a>(
         &'a self,
         function: &'a InstanceFunction<'a>,
-        visit: &mut impl FnMut(Option<FuncId>, &'a Expr),
+        visit: &mut impl FnMut(BodyOwner, &'a Expr),
     ) {
-        let owner = Some(function.id);
-        for param in &function.params {
+        let owner = BodyOwner::Function(function.id);
+        for &(param, _) in &function.params {
             if let Some(default) = &param.default {
                 self.walk_expr(owner, default, visit);
             }
@@ -363,9 +345,9 @@ impl InstanceBodies<'_> {
     }
     fn walk_body<'a>(
         &'a self,
-        owner: Option<FuncId>,
+        owner: BodyOwner,
         body: &'a [Stmt],
-        visit: &mut impl FnMut(Option<FuncId>, &'a Expr),
+        visit: &mut impl FnMut(BodyOwner, &'a Expr),
     ) {
         for stmt in body {
             stmt_any_expr(stmt, &mut |expr| {
@@ -376,9 +358,9 @@ impl InstanceBodies<'_> {
     }
     fn walk_expr<'a>(
         &'a self,
-        owner: Option<FuncId>,
+        owner: BodyOwner,
         expr: &'a Expr,
-        visit: &mut impl FnMut(Option<FuncId>, &'a Expr),
+        visit: &mut impl FnMut(BodyOwner, &'a Expr),
     ) {
         if let Expr::Closure {
             func_id,
@@ -387,7 +369,11 @@ impl InstanceBodies<'_> {
             ..
         } = expr
         {
-            self.walk_body(Some(*func_id), authored_body(params, body), visit);
+            self.walk_body(
+                BodyOwner::Function(*func_id),
+                authored_body(params, body),
+                visit,
+            );
         }
         walk_expr_children(expr, &mut |child| self.walk_expr(owner, child, visit));
         visit(owner, expr);

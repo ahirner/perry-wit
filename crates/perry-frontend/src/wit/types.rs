@@ -88,14 +88,15 @@ pub(crate) fn supported(resolve: &Resolve, input: Input) -> bool {
     convert(
         resolve,
         input,
-        &|id| NamedType::get(resolve, id).map(|_| true),
-        &|contract| match contract {
+        &mut (),
+        &|(), id| NamedType::get(resolve, id).map(|_| true),
+        &|(), contract| match contract {
             Contract::Unsupported(_) | Contract::Scalar(Type::ErrorContext) => false,
             Contract::List(ok) | Contract::Option(ok) => ok,
             Contract::Result { ok, err } => ok.unwrap_or(true) && err.unwrap_or(true),
-            Contract::Record(mut fields) => Iterator::all(&mut fields, |(_, ok)| ok),
-            Contract::Tuple(mut items) => Iterator::all(&mut items, |ok| ok),
-            Contract::Variant(mut cases) => Iterator::all(&mut cases, |(_, ok)| ok.unwrap_or(true)),
+            Contract::Record(fields) => fields.into_iter().all(|(_, ok)| ok),
+            Contract::Tuple(items) => items.into_iter().all(|ok| ok),
+            Contract::Variant(cases) => cases.into_iter().all(|(_, ok)| ok.unwrap_or(true)),
             _ => true,
         },
     )

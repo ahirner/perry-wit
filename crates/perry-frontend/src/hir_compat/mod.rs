@@ -22,7 +22,7 @@ pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset, mark_non_null};
 mod iteration;
 mod methods;
-pub(crate) use iteration::{Availability, Iteration, RecordExpr};
+pub(crate) use iteration::{Availability, CursorPositions, Iteration, RecordExpr};
 mod resource_classes;
 mod streams;
 mod timers;
@@ -53,11 +53,10 @@ pub(crate) fn lower<'s>(
             witnesses::resolve(&ast, &loaded.exports, world, &locations, unresolved)?,
         ))
     })?;
-    let mut analysis = crate::source::analyze(&ast);
-    analysis.for_of = streams::lower(&mut ast, &mut analysis.names)?;
+    let mut analysis = crate::source::analyze(&mut ast, &mut locations);
+    streams::lower(&mut ast, &mut analysis)?;
     methods::preserve_arguments(&mut ast, &mut analysis.names);
     classes::preserve_field_types(&mut ast);
-    locations.preserve_expressions(&mut ast, &analysis.expression_spans);
     if !witnesses.witnesses.is_empty() {
         perry_hir::ir::set_current_module_source(locations.module_text());
     }
@@ -87,7 +86,21 @@ pub(crate) fn lower<'s>(
             }
         }
     }
-    let witnesses = witnesses.in_hir(&mut module)?;
+    let witnesses = witnesses.in_hir(&mut module, &mut locations)?;
+    for (&id, text) in &module.closure_source_text {
+        if let Some((lo, hi)) = text.source_span {
+            let symbol = format!("callback_{id}");
+            let label = module
+                .closure_display_names
+                .get(&id)
+                .map_or("anonymous function", String::as_str);
+            locations.register_generated(
+                symbol,
+                swc_common::Span::new(swc_common::BytePos(lo), swc_common::BytePos(hi)),
+                label.to_owned(),
+            );
+        }
+    }
     Ok(crate::source::SourceModule::bind(
         module,
         analysis,
@@ -131,6 +144,7 @@ pub(crate) fn is_import_initializer(callee: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::ConstructorSites;
     use perry_hir::types::Type as HirType;
 
     #[test]
@@ -150,7 +164,7 @@ function builtin() { return new Set<string>(); }
             };
             if function.name == "builtin" {
                 assert!(matches!(
-                    lowered.declarations.constructors.collection(expr),
+                    lowered.constructors.collection(expr),
                     Some(crate::source::Constructor {
                         kind: crate::source::CollectionKind::Set,
                         types: [HirType::String],
@@ -159,7 +173,7 @@ function builtin() { return new Set<string>(); }
                     })
                 ));
             } else {
-                assert!(lowered.declarations.constructors.collection(expr).is_none());
+                assert!(lowered.constructors.collection(expr).is_none());
                 let args = match expr {
                     Expr::New { args, .. } | Expr::NewDynamic { args, .. } => args,
                     other => panic!("unexpected shadowed constructor: {other:?}"),
@@ -223,10 +237,10 @@ pub(crate) fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> 
 }
 
 /// Object fields retained across Perry's duplicate-key and literal-class desugarings.
-pub(crate) fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>(
+pub(crate) fn object_literal_pairs<'s>(
     expr: &'s Expr,
-    literal_fields: F,
-) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s, F>> {
+    literals: &crate::source::LiteralClasses<'s>,
+) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
     let (fields, defined, names, args) = match expr {
         Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
         Expr::ObjectSpread { parts }
@@ -236,7 +250,12 @@ pub(crate) fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>
         }
         Expr::New {
             class_name, args, ..
-        } => (&[][..], &[][..], literal_fields(class_name)?, &args[..]),
+        } => (
+            &[][..],
+            &[][..],
+            *literals.get(class_name.as_str())?,
+            &args[..],
+        ),
         _ => return None,
     };
     Some(
@@ -248,7 +267,7 @@ pub(crate) fn object_literal_pairs<'s, F: FnOnce(&str) -> Option<&'s [&'s str]>>
                     .iter()
                     .filter_map(|part| Some((static_property(part)?, part.value()))),
             )
-            .chain(names.iter().copied().zip(args)),
+            .chain(names.iter().map(|field| field.name.as_str()).zip(args)),
     )
 }
 

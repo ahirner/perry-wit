@@ -16,8 +16,9 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
     convert(
         names.resolve,
         input,
-        &|id| names.name(id),
-        &|contract| match contract {
+        &mut (),
+        &|(), id| names.name(id),
+        &|(), contract| match contract {
             Contract::Scalar(ty) => scalar_type(ty).into(),
             Contract::Resource { id, .. } => names.name(id).unwrap_or_else(|| "unknown".into()),
             Contract::Bytes => "Uint8Array".into(),
@@ -30,7 +31,7 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
                 format!("{{ ok: true{ok} }} | {{ ok: false{err} }}")
             }
             Contract::Tuple(items) => {
-                format!("[{}]", items.collect::<Vec<_>>().join(", "))
+                format!("[{}]", items.join(", "))
             }
             Contract::Record(fields) => {
                 let mut out = String::from("{\n");

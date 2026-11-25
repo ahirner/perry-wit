@@ -1,7 +1,7 @@
 //! MIR representations and operations for finite sets of function identities.
 use super::*;
-use crate::engine::types::{FuncIdentity, Idx, Ty, TyKind, func_tag};
-use crate::engine::{CallbackOperand, NativeCallback};
+use crate::engine::solve::CallTarget;
+use crate::engine::types::{FuncIdentity, Ty, func_tag};
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 #[derive(Clone, Copy)]
@@ -9,72 +9,16 @@ pub(in crate::lower) enum Callback<'s> {
     Source(&'s Expr),
     Function(FuncId),
     Lexical(&'s Function<'s>, &'s Signature<'s>),
-    Bound(&'s crate::engine::CallbackBinding, Value),
+    Bound {
+        call: CallTarget,
+        params: &'s [Ty],
+        callee: Value,
+    },
 }
 
-impl<'s> Shapes<'s> {
-    fn callable_environment(
-        &self,
-        ctx: &Context,
-        function: FuncIdentity,
-    ) -> Result<Option<TypeHandle>> {
-        self.specialization
-            .escaping_envs
-            .contains(function.template.index())
-            .then(|| self.environment_type(ctx, function))
-            .transpose()
-    }
-
-    pub(super) fn callable_type(&self, ctx: &Context, ty: Ty) -> Result<Option<TypeHandle>> {
-        let types = self.specialization.types.borrow();
-        let mut identities = Vec::new();
-        let mut absent = None;
-        let members = match types.kind(ty) {
-            TyKind::Union(span) => types.ty_slice(span),
-            _ => std::slice::from_ref(&ty),
-        };
-        for &member in members {
-            let state = match types.kind(member) {
-                TyKind::Func(identity) => {
-                    identities.push(identity);
-                    continue;
-                }
-                TyKind::Void => perry_mir::Absence::Undefined,
-                TyKind::Null => perry_mir::Absence::Null,
-                _ => return Ok(None),
-            };
-            absent = perry_mir::Absence::join_optional(absent, Some(state));
-        }
-        drop(types);
-        let cases = identities
-            .into_iter()
-            .map(|identity| {
-                Ok((
-                    func_tag(identity),
-                    self.callable_environment(ctx, identity)?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let present = match cases.as_slice() {
-            [] => return Ok(None),
-            [(_, payload)] => {
-                let mut fields = vec![("tag".into(), StringType::get(ctx).into())];
-                if let Some(payload) = payload {
-                    fields.push(("val".into(), *payload));
-                }
-                self.mir_record(ctx, fields)?.into()
-            }
-            _ => VariantType::get(ctx, cases).into(),
-        };
-        Ok(Some(absent.map_or(present, |state| {
-            perry_mir::OptionalType::get_with(ctx, present, state).into()
-        })))
-    }
-}
-
-impl crate::engine::NativeCallback {
+impl CallTarget {
     pub(super) fn take_operand(self, args: &mut &[Value]) -> Result<Option<Value>> {
-        if !self.takes_value() {
+        if !self.needs_value() {
             return Ok(None);
         }
         let (&value, rest) = args
@@ -85,28 +29,36 @@ impl crate::engine::NativeCallback {
     }
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(in crate::lower) fn prepare_callback(
         &mut self,
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Callback<'s>> {
         let plans = &self.shapes.specialization.instances;
-        if let Some(binding) = plans
-            .callbacks
-            .get(&(self.local_owner, std::ptr::from_ref(expr).addr()))
+        if let Some(crate::engine::solve::FuncCoercion::Callback { target, inputs }) =
+            plans.site(self.local_owner, expr).coercion
         {
-            return Ok(Callback::Bound(binding, self.expression(ctx, expr)?));
+            return Ok(Callback::Bound {
+                call: target,
+                params: self.shapes.types.source.tuple_slice(inputs),
+                callee: self.expression(ctx, expr)?,
+            });
         }
         if let Some(id) = plans.reference(self.local_owner, expr) {
-            if plans.inline_callbacks.get(&id) == Some(&crate::engine::solve::Invocation::Lexical) {
+            if self
+                .signatures
+                .source(id)
+                .and_then(|f| f.signature.as_ref()?.inline)
+                == Some(crate::engine::solve::Invocation::Lexical)
+            {
                 let signature = self.signature(id)?;
                 let function = signature
                     .inline
                     .ok_or_else(|| internal!("missing lexical callback body"))?;
                 return Ok(Callback::Lexical(function, signature));
             }
-            if let Some(expr) = self.shapes.lexical_functions.get(&id) {
+            if let Some(expr) = self.shapes.specialization.lexical.closure(id) {
                 return Ok(Callback::Source(expr));
             }
             return Ok(Callback::Function(id));
@@ -117,32 +69,23 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn invoke_callback(
         &mut self,
         ctx: &mut Context,
-        call: NativeCallback,
+        call: CallTarget,
         value: Option<Value>,
         receiver: Option<Value>,
         args: &[Value],
     ) -> Result<Option<Value>> {
-        let NativeCallback::Call {
-            target,
-            operand,
-            receiver: needs_receiver,
-        } = call
+        let Some(target) = self
+            .shapes
+            .specialization
+            .instances
+            .emitted_callee(call)
+            .transpose()?
         else {
             self.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
             return Ok(None);
         };
-        let bound = match operand {
-            CallbackOperand::None => None,
-            CallbackOperand::Callee => {
-                Some(value.ok_or_else(|| internal!("missing callback value"))?)
-            }
-            CallbackOperand::Environment => {
-                let wrapper = value.ok_or_else(|| internal!("missing callback environment"))?;
-                let wrapper = self.defined(ctx, wrapper)?;
-                Some(self.record_field(ctx, wrapper, "val")?)
-            }
-        };
-        let receiver = if needs_receiver {
+        let bound = self.bound_callee(ctx, call, value)?;
+        let receiver = if call.needs_receiver() {
             Some(receiver.ok_or_else(|| internal!("missing callback receiver"))?)
         } else {
             None
@@ -155,6 +98,23 @@ impl<'s> FunctionBuilder<'s> {
                 .chain(receiver)
                 .chain(args.iter().copied()),
         )
+    }
+
+    pub(super) fn bound_callee(
+        &mut self,
+        ctx: &mut Context,
+        call: CallTarget,
+        value: Option<Value>,
+    ) -> Result<Option<Value>> {
+        if !call.needs_value() {
+            return Ok(None);
+        }
+        let value = value.ok_or_else(|| internal!("missing callable operand"))?;
+        if matches!(call, CallTarget::Direct { pass_env: true, .. }) {
+            let wrapper = self.defined(ctx, value)?;
+            return self.record_field(ctx, wrapper, "val").map(Some);
+        }
+        Ok(Some(value))
     }
 
     pub(super) fn call_values(
@@ -224,7 +184,7 @@ impl<'s> FunctionBuilder<'s> {
             };
             let env = self
                 .shapes
-                .callable_environment(ctx, arm.identity)?
+                .callable_environment(arm.identity)
                 .map(|ty| self.callable_field(ctx, callee, "val", ty))
                 .transpose()?;
             let inputs = env
@@ -247,6 +207,7 @@ impl<'s> FunctionBuilder<'s> {
         self.never_values.insert(never);
         never
     }
+
     pub(super) fn callable_typeof(
         &mut self,
         ctx: &mut Context,
@@ -287,12 +248,11 @@ impl<'s> FunctionBuilder<'s> {
                 self.yield_if(ctx, done, test, no);
             }
         }
-        let types = self.shapes.specialization.types.borrow();
+        let types = self.shapes.types.source;
         let shared = types
             .func_members(&left_ty)
             .filter(|id| types.func_members(&right_ty).any(|other| other == *id))
             .collect::<Vec<_>>();
-        drop(types);
         if !shared.is_empty() {
             let left = self.defined(ctx, left)?;
             let right = self.defined(ctx, right)?;
@@ -305,7 +265,7 @@ impl<'s> FunctionBuilder<'s> {
                 let wanted = self.string(ctx, &func_tag(identity));
                 let test = self.compare(ctx, CompareKind::Eq, left_tag, wanted);
                 let next = self.enter_case(ctx, test);
-                let equal = if let Some(env) = self.shapes.callable_environment(ctx, identity)? {
+                let equal = if let Some(env) = self.shapes.callable_environment(identity) {
                     let l = self.callable_field(ctx, left, "val", env)?;
                     let r = self.callable_field(ctx, right, "val", env)?;
                     self.compare(ctx, CompareKind::Eq, l, r)
@@ -328,7 +288,7 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let result = self
             .shapes
-            .callable_type(ctx, to)?
+            .callable_type(to)?
             .ok_or_else(|| internal!("missing destination type for function union"))?;
         let done = self.result_block(ctx, result);
         for null in [true, false] {
@@ -341,9 +301,8 @@ impl<'s> FunctionBuilder<'s> {
         let tag = self.callable_field(ctx, value, "tag", StringType::get(ctx).into())?;
         let mut members = self
             .shapes
-            .specialization
             .types
-            .borrow()
+            .source
             .func_members(&from)
             .collect::<Vec<_>>()
             .into_iter()
@@ -359,7 +318,7 @@ impl<'s> FunctionBuilder<'s> {
             };
             let payload = self
                 .shapes
-                .callable_environment(ctx, identity)?
+                .callable_environment(identity)
                 .map(|ty| self.callable_field(ctx, value, "val", ty))
                 .transpose()?;
             let target = present_type(ctx, result);
@@ -380,7 +339,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     fn callable_operand(&mut self, ctx: &mut Context, operand: &'s Expr, ty: Ty) -> Result<Value> {
-        let expected = self.shapes.callable_type(ctx, ty)?;
+        let expected = self.shapes.callable_type(ty)?;
         let value = self.expression_with(ctx, operand, expected)?;
         match expected {
             Some(ty) => self.fit(ctx, value, ty),

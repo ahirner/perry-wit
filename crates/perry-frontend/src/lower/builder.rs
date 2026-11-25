@@ -107,23 +107,21 @@ impl LocalBinding {
 }
 
 pub(super) enum Body<'s> {
-    Statements(Option<FuncId>, &'s [Stmt]),
+    Statements(BodyOwner, &'s [Stmt]),
     Native(&'s crate::engine::NativeBody),
 }
 
-pub(super) struct FunctionBuilder<'s> {
+pub(super) struct FunctionBuilder<'s, 'm> {
     pub(super) region: Ptr<pliron::region::Region>,
     /// The region's entry block, where slots are allocated so they dominate every use.
     entry: Ptr<BasicBlock>,
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
-    pub(super) local_owner: Option<FuncId>,
+    pub(super) local_owner: BodyOwner,
     pub(super) locals: bindings::Bindings<LocalBinding>,
     pub(super) never_values: HashSet<Value>,
     pub(super) global_slots: HashSet<Value>,
-    /// Iterator-protocol guards of array destructuring that are statically false: the
-    /// branches they select are not lowered.
-    pub(super) iteration: hir_compat::Iteration,
+    pub(super) cursors: hir_compat::CursorPositions,
     pub(super) variant_guards: crate::narrowing::Guards<'s>,
     pub(super) controls: Vec<Control<'s>>,
     pub(super) inline_functions: Vec<FuncId>,
@@ -131,8 +129,8 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) class_expansions: Vec<crate::lower::classes::ClassExpansion<'s>>,
     pub(super) handlers: Vec<Handler>,
     pub(super) finallies: Vec<Finally<'s>>,
-    pub(super) signatures: &'s HashMap<FuncId, Signature<'s>>,
-    pub(super) shapes: &'s Shapes<'s>,
+    pub(super) signatures: &'s Functions<'s>,
+    pub(super) shapes: &'m mut Shapes<'s>,
     /// Imported built-ins by local name.
     pub(super) builtins: &'s HashMap<&'s str, Builtin>,
     pub(super) result: Option<BindingType>,
@@ -142,19 +140,19 @@ pub(super) struct FunctionBuilder<'s> {
     pub(super) this_slot: Option<Value>,
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s, 'm> FunctionBuilder<'s, 'm> {
     pub(super) fn lower(
         ctx: &mut Context,
         function: &'s Function<'s>,
-        signatures: &'s HashMap<FuncId, Signature<'s>>,
-        shapes: &'s Shapes<'s>,
+        signatures: &'s Functions<'s>,
+        shapes: &'m mut Shapes<'s>,
         builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
         ensure_unsupported!(
             function
                 .captures
                 .iter()
-                .all(|id| shapes.globals.borrow().contains_key(id)),
+                .all(|id| shapes.globals.get(id).is_some_and(Option::is_some)),
             "closures capturing activation-local values are unsupported: {}",
             function.name
         );
@@ -164,7 +162,7 @@ impl<'s> FunctionBuilder<'s> {
         Self::lower_body(
             ctx,
             signature,
-            Body::Statements(Some(function.id), function.body),
+            Body::Statements(BodyOwner::Function(function.id), function.body),
             signatures,
             shapes,
             builtins,
@@ -175,8 +173,8 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         signature: &Signature<'s>,
         body: Body<'s>,
-        signatures: &'s HashMap<FuncId, Signature<'s>>,
-        shapes: &'s Shapes<'s>,
+        signatures: &'s Functions<'s>,
+        shapes: &'m mut Shapes<'s>,
         builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
         let ty = FunctionType::get(
@@ -194,25 +192,30 @@ impl<'s> FunctionBuilder<'s> {
             shapes,
             builtins,
         );
-        let mut globals: Vec<_> = shapes
+        let globals: Vec<_> = builder
+            .shapes
             .globals
-            .borrow()
             .iter()
-            .map(|(&id, &binding)| (id, binding))
+            .filter_map(|(&id, &binding)| Some((id, binding?)))
             .collect();
-        globals.sort_by_key(|(id, _)| *id);
         for (id, binding) in globals {
-            let cell = match shapes.specialization.instances.locals.get(&(None, id)) {
-                Some(&crate::engine::Storage::Boxed { ty, init }) => {
+            let cell = match builder
+                .shapes
+                .specialization
+                .instances
+                .storage(BodyOwner::Initializer, id)
+            {
+                Some(crate::engine::Storage::Boxed { ty, init }) => {
                     let deferred = init.admits_undefined();
-                    Some((shapes.box_layout(ctx, ty, deferred)?.1, deferred))
+                    Some((builder.shapes.box_layout(ctx, ty, deferred)?.1, deferred))
                 }
                 _ => None,
             };
             let storage = if cell.is_some() {
                 binding.carrier
             } else {
-                shapes
+                builder
+                    .shapes
                     .deferred_storage(ctx, id, binding.carrier)
                     .unwrap_or(binding.carrier)
             };
@@ -258,10 +261,15 @@ impl<'s> FunctionBuilder<'s> {
             let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
             builder.append_value(ctx, &await_);
         }
-        if signature.top_level && !shapes.static_fields.is_empty() {
-            let mut static_inits: Vec<_> = shapes.static_fields.values().copied().collect();
-            static_inits.sort_by_key(|field| field.id);
-            for entry in static_inits {
+        if signature.top_level {
+            for entry in builder
+                .shapes
+                .specialization
+                .bodies
+                .classes
+                .iter()
+                .flat_map(|class| &class.static_fields)
+            {
                 builder.binding(
                     ctx,
                     entry.id,
@@ -285,8 +293,8 @@ impl<'s> FunctionBuilder<'s> {
         func: &FuncOp,
         result: Option<BindingType>,
         is_async: bool,
-        signatures: &'s HashMap<FuncId, Signature<'s>>,
-        shapes: &'s Shapes<'s>,
+        signatures: &'s Functions<'s>,
+        shapes: &'m mut Shapes<'s>,
         builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Self {
         let entry = func.get_entry_block(ctx);
@@ -296,11 +304,11 @@ impl<'s> FunctionBuilder<'s> {
             entry,
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
-            local_owner: None,
+            local_owner: BodyOwner::Initializer,
             locals: bindings::Bindings::default(),
             never_values: HashSet::new(),
             global_slots: HashSet::new(),
-            iteration: hir_compat::Iteration::default(),
+            cursors: Default::default(),
             variant_guards: crate::narrowing::Guards::default(),
             controls: Vec::new(),
             inline_functions: Vec::new(),
@@ -320,7 +328,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn wrap_integer(
         &mut self,
         ctx: &mut Context,
@@ -631,7 +639,7 @@ pub(super) fn insert_before_terminator(
     Ok(())
 }
 
-impl FunctionBuilder<'_> {
+impl FunctionBuilder<'_, '_> {
     pub(super) fn emit<T: Op>(
         &mut self,
         ctx: &mut Context,

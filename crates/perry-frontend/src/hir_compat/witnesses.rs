@@ -467,6 +467,7 @@ impl<'r> Roots<'r> {
     pub(super) fn in_hir(
         self,
         module: &mut perry_hir::ir::Module,
+        locations: &mut Locations,
     ) -> Result<Vec<Witness<'r, FuncId>>> {
         use perry_hir::ir::{Expr, Stmt};
         module.init.retain(|stmt| {
@@ -496,6 +497,30 @@ impl<'r> Roots<'r> {
                     .get(id)
                     .is_some_and(|s| self.namespaces.iter().any(|span| span.lo.0 == s.start)))
         });
+        let origins = self
+            .witnesses
+            .iter()
+            .map(|witness| match witness.target? {
+                SourceTarget::Function(span) => Some((span, None)),
+                SourceTarget::Resource { owner, action } => {
+                    let class = self.classes.get(owner)?;
+                    let span = match action {
+                        ResourceAction::Call(span)
+                        | ResourceAction::Static(span)
+                        | ResourceAction::Drop(Some(span)) => span,
+                        ResourceAction::New | ResourceAction::Drop(None) => class.class,
+                    };
+                    let member = match action {
+                        ResourceAction::New => "constructor".to_owned(),
+                        ResourceAction::Drop(_) => "[Symbol.dispose]".to_owned(),
+                        _ => perry_contract::names::to_camel_case(
+                            witness.name.rsplit('.').next().unwrap_or(&witness.name),
+                        ),
+                    };
+                    Some((span, Some(format!("{}::{member}", class.source_name))))
+                }
+            })
+            .collect::<Vec<_>>();
         let classes = self
             .classes
             .into_iter()
@@ -568,6 +593,27 @@ impl<'r> Roots<'r> {
                 local,
                 function,
             )?;
+        }
+        for (witness, origin) in witnesses.iter().zip(origins) {
+            if let Some((span, label)) = origin
+                && let Some(function) = witness
+                    .target
+                    .and_then(|id| module.functions.iter().find(|f| f.id == id))
+            {
+                let label = label.unwrap_or_else(|| {
+                    if function.name.starts_with("resource_adapter_") {
+                        witness
+                            .name
+                            .rsplit('#')
+                            .next()
+                            .unwrap_or(&witness.name)
+                            .to_owned()
+                    } else {
+                        super::display_name(&function.name).to_owned()
+                    }
+                });
+                locations.register_generated(function.name.clone(), span, label);
+            }
         }
         Ok(witnesses)
     }

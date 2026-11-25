@@ -9,8 +9,8 @@ use crate::{
     control::ReturnOp,
     effects::Failure,
     facts::{
-        ProgramFacts, constrain_signature, specialize, specialized_implementation,
-        verify_lossless_module, with_fact_limits,
+        FactLimits, ProgramFacts, constrain_signature, specialize, specialized_implementation,
+        verify_lossless_module,
     },
     heap::FieldGetOp,
     intrinsics::{Combinator, IntrinsicOp, PromiseCombinatorOp},
@@ -172,6 +172,47 @@ fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
             ),
             perry_wit_diagnostics::Note::new("while compiling"),
         ],
+    );
+    let span = crate::SourceSpan::new("lib.ts", "call()", 0, 6);
+    crate::set_caller_frames(
+        ctx,
+        &Operation::get_op::<pliron::builtin::ops::ModuleOp>(module, ctx).unwrap(),
+        vec![
+            crate::CallerFrame::new(
+                "run",
+                Some("entry"),
+                crate::CallerRelation::Instantiation,
+                "run",
+                Some(span.clone()),
+            ),
+            crate::CallerFrame::new(
+                "entry",
+                None,
+                crate::CallerRelation::Import,
+                "entry",
+                Some(span),
+            ),
+        ],
+    );
+    crate::set_caller_origin(ctx, &run, "run");
+    let diagnostic = crate::attach_caller_notes(
+        ctx,
+        &run,
+        perry_wit_diagnostics::Diagnostic::internal("test"),
+    );
+    let messages: Vec<_> = diagnostic
+        .notes()
+        .iter()
+        .map(|note| note.message())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "called from here",
+            "while compiling",
+            "while instantiating 'run'",
+            "called from here ('entry')"
+        ]
     );
     alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(vec![1, 0]));
     let printed = round_trip(ctx, module)?;

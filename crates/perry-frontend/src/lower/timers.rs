@@ -1,8 +1,8 @@
 //! Timer allocation, cancellation, and asynchronous callback execution.
 use super::*;
-use crate::engine::{NativeCallback, TimerKind};
+use crate::engine::{TimerKind, solve::CallTarget};
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn start_timer(
         &mut self,
         ctx: &mut Context,
@@ -14,26 +14,22 @@ impl<'s> FunctionBuilder<'s> {
             .params
             .split_first()
             .ok_or_else(|| internal!("missing timer handle parameter"))?;
-        let Some(crate::engine::NativeBody::Timer { kind, callback }) = self
-            .shapes
-            .specialization
-            .instances
-            .functions
-            .get(&id)
-            .map(|runner| &runner.body)
-        else {
+        let Some(Callee::Native(runner, _)) = self.signatures.callee(id) else {
+            bail_internal!("expected a timer runner")
+        };
+        let crate::engine::NativeBody::Timer { kind, callback } = runner.body else {
             bail_internal!("expected a timer runner")
         };
         let (callback_arg, remaining) = args
             .split_first()
             .ok_or_else(|| internal!("missing timer callback"))?;
-        let retained = if callback.takes_value() {
+        let retained = if callback.needs_value() {
             args
         } else {
             self.discard_function_operand(ctx, callback_arg)?;
             remaining
         };
-        let default_delay = *kind != TimerKind::Immediate && remaining.is_empty();
+        let default_delay = kind != TimerKind::Immediate && remaining.is_empty();
         ensure_internal!(
             retained.len() + usize::from(default_delay) == params.len(),
             "timer runner argument count mismatch"
@@ -60,7 +56,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn clear_timer(&mut self, ctx: &mut Context, operand: Value) -> Result<()> {
         let ty = self
             .shapes
-            .resolved_binding(ctx, crate::engine::types::Ty::TIMER)?
+            .resolved_binding(crate::engine::types::Ty::TIMER)?
             .carrier;
         let done = self.new_block(ctx, "timer_cleared");
         if absence(ctx, operand.get_type(ctx)).is_some() {
@@ -87,7 +83,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         kind: TimerKind,
-        callback: NativeCallback,
+        callback: CallTarget,
         args: &[Value],
     ) -> Result<()> {
         let (&timer, args) = args

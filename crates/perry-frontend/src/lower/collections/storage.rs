@@ -30,7 +30,7 @@ impl LiveCursor {
     /// Start iterating `coll` at the index stored in `index`, or at a view's own position,
     /// which is stored into `index`. `None` when `coll` is not a collection box or view.
     pub(crate) fn open(
-        b: &mut FunctionBuilder<'_>,
+        b: &mut FunctionBuilder<'_, '_>,
         ctx: &mut Context,
         coll: Value,
         index: Value,
@@ -72,7 +72,7 @@ impl LiveCursor {
     /// body can delete entries.
     pub(crate) fn advance(
         self,
-        b: &mut FunctionBuilder<'_>,
+        b: &mut FunctionBuilder<'_, '_>,
         ctx: &mut Context,
         next: Value,
         entry: Value,
@@ -95,12 +95,20 @@ impl LiveCursor {
     }
 
     /// The index the next visit starts at, synchronized with clears and compactions.
-    pub(crate) fn position(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<Value> {
+    pub(crate) fn position(
+        self,
+        b: &mut FunctionBuilder<'_, '_>,
+        ctx: &mut Context,
+    ) -> Result<Value> {
         b.sync_collection_cursor(ctx, self.box_val, self.cursor, self.kind)
     }
 
     /// The loop ran out of entries: a view stays exhausted at infinity.
-    pub(crate) fn exhausted(self, b: &mut FunctionBuilder<'_>, ctx: &mut Context) -> Result<()> {
+    pub(crate) fn exhausted(
+        self,
+        b: &mut FunctionBuilder<'_, '_>,
+        ctx: &mut Context,
+    ) -> Result<()> {
         if matches!(self.owner, CursorOwner::View) {
             let inf = b.number(ctx, f64::INFINITY);
             b.set_storage_field(ctx, self.cursor, Field::CursorIndex, inf);
@@ -110,7 +118,7 @@ impl LiveCursor {
     }
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     fn storage_field(&mut self, ctx: &mut Context, record: Value, field: Field) -> Result<Value> {
         let op = FieldGetOp::new(ctx, record, field.name().to_owned()).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))

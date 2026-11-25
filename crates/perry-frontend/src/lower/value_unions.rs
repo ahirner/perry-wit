@@ -7,7 +7,7 @@ pub(super) fn is_value_union(ctx: &Context, ty: TypeHandle) -> bool {
         .is::<perry_mir::ValueUnionType>()
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn dispatch_value(
         &mut self,
         ctx: &mut Context,

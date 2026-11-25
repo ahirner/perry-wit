@@ -1,37 +1,41 @@
 //! Lower a solved operation at its lexical expression.
 use super::*;
-use crate::engine::{Conversion, ExpressionSite, InstanceValue};
+use crate::engine::solve::{FuncCoercion, SiteResolution, ValueCoercion};
+use crate::engine::types::Ty;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(in crate::lower) fn erased_operand(&self, expr: &Expr) -> bool {
         self.shapes
             .specialization
             .instances
+            .site(self.local_owner, expr)
             .erased
-            .contains(&(self.local_owner, std::ptr::from_ref(expr).addr()))
     }
     pub(in crate::lower) fn is_callback(&self, expr: &Expr) -> bool {
         let plans = &self.shapes.specialization.instances;
         matches!(expr, Expr::Closure { .. })
             || plans.reference(self.local_owner, expr).is_some()
-            || plans
-                .callbacks
-                .contains_key(&(self.local_owner, std::ptr::from_ref(expr).addr()))
+            || matches!(
+                plans.site(self.local_owner, expr).coercion,
+                Some(FuncCoercion::Callback { .. })
+            )
     }
     pub(in crate::lower) fn instance_operand(
         &mut self,
         ctx: &mut Context,
         expr: &'s Expr,
         expected: Option<TypeHandle>,
-        site: ExpressionSite,
         required: bool,
     ) -> Result<Option<Value>> {
+        let plans = &self.shapes.specialization.instances;
+        let site = plans.site(self.local_owner, expr);
+        let conversion = site.conversion();
         let discard = matches!(
-            site.conversion,
-            Some(Conversion::Zero | Conversion::Tag(..))
+            conversion,
+            Some(ValueCoercion::Zero | ValueCoercion::Tag(..))
         );
-        let input = match site.conversion {
-            Some(Conversion::Widen(from, _)) => self.shapes.callable_type(ctx, from)?,
+        let input = match conversion {
+            Some(ValueCoercion::Widen { from, .. }) => self.shapes.callable_type(from)?,
             Some(_) => None,
             None => expected,
         };
@@ -42,29 +46,29 @@ impl<'s> FunctionBuilder<'s> {
                 ctx,
                 expr,
                 input,
-                site.value,
-                !discard && (required || site.conversion.is_some()),
+                site.resolution,
+                !discard && (required || conversion.is_some()),
             )?
         };
-        let value = match site.conversion {
+        let value = match conversion {
             None => return Ok(raw),
-            Some(Conversion::Zero) => self.number(ctx, 0.0),
-            Some(Conversion::Tag(id, target)) => {
-                let target = expected.map(Ok).unwrap_or_else(|| {
-                    self.shapes.resolved_binding(ctx, target).map(|b| b.carrier)
-                })?;
+            Some(ValueCoercion::Zero) => self.number(ctx, 0.0),
+            Some(ValueCoercion::Tag(id, target)) => {
+                let target = expected
+                    .map(Ok)
+                    .unwrap_or_else(|| self.shapes.resolved_binding(target).map(|b| b.carrier))?;
                 self.function_value(ctx, id, None, Some(target))?
             }
-            Some(Conversion::BoxEnvironment(id, target)) => {
-                let target = expected.map(Ok).unwrap_or_else(|| {
-                    self.shapes.resolved_binding(ctx, target).map(|b| b.carrier)
-                })?;
+            Some(ValueCoercion::BoxEnv(id, target)) => {
+                let target = expected
+                    .map(Ok)
+                    .unwrap_or_else(|| self.shapes.resolved_binding(target).map(|b| b.carrier))?;
                 let wrapper = raw.ok_or_else(|| internal!("missing closure environment"))?;
-                let env = self.shapes.environment_type(ctx, id)?;
+                let env = self.shapes.environment_record(id)?.into();
                 let payload = self.callable_field(ctx, wrapper, "val", env)?;
                 self.function_value(ctx, id, Some(payload), Some(target))?
             }
-            Some(Conversion::Widen(from, to)) => {
+            Some(ValueCoercion::Widen { from, to }) => {
                 let value = raw.ok_or_else(|| internal!("missing function to widen"))?;
                 let value = match input {
                     Some(ty) => self.fit(ctx, value, ty)?,
@@ -80,42 +84,50 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         expr: &'s Expr,
         expected: Option<TypeHandle>,
-        site: InstanceValue,
+        site: Option<SiteResolution>,
         required: bool,
     ) -> Result<Option<Value>> {
+        let plans = &self.shapes.specialization.instances;
+        let reference = match site {
+            Some(SiteResolution::Callback { target }) => Some(plans.function(target)),
+            _ => match expr {
+                Expr::LocalGet(id) => plans.parameter_function(self.local_owner, *id),
+                _ => None,
+            },
+        };
+        if let Some(id) = reference {
+            let plan = plans
+                .closure_values
+                .get(&(self.local_owner, id))
+                .ok_or_else(|| unsupported!("this expression form is not supported yet"))?;
+            return self.closure_value(ctx, plan, expected).map(Some);
+        }
+        use SiteResolution::*;
+        let value = match site {
+            None | Some(Cell(_)) => None,
+            Some(TypedArray(_)) if expected.is_some() => None,
+            other => other,
+        };
+        let Some(site) = value else {
+            return if required {
+                self.source_expression(ctx, expr, expected).map(Some)
+            } else {
+                self.source_operand(ctx, expr, expected)
+            };
+        };
         let result = match (site, expr) {
-            (InstanceValue::Source, _) => {
-                return if required {
-                    self.source_expression(ctx, expr, expected).map(Some)
-                } else {
-                    self.source_operand(ctx, expr, expected)
-                };
-            }
-            (InstanceValue::Expected(ty), _) => {
+            (BranchResult(ty) | TypedArray(ty), _) => {
                 let ty = match expected {
                     Some(ty) if crate::lower::value_unions::is_value_union(ctx, ty) => ty,
-                    _ => self.shapes.resolved_binding(ctx, ty)?.carrier,
+                    _ => self.shapes.resolved_binding(ty)?.carrier,
                 };
                 self.source_expression(ctx, expr, Some(ty))?
             }
-            (InstanceValue::Reference(id), _) => {
-                if let Some(plan) = self
-                    .shapes
-                    .specialization
-                    .instances
-                    .closure_values
-                    .get(&(self.local_owner, id))
-                {
-                    self.closure_value(ctx, plan, expected)?
-                } else {
-                    bail_unsupported!("this expression form is not supported yet")
-                }
-            }
-            (InstanceValue::Receiver, Expr::PrivateGuard { object, .. }) => {
-                self.expression_with(ctx, object, expected)?
-            }
             (
-                InstanceValue::Invoke(site),
+                Call {
+                    target,
+                    argument_types,
+                },
                 Expr::Call {
                     callee,
                     args,
@@ -124,20 +136,25 @@ impl<'s> FunctionBuilder<'s> {
                 },
             ) => {
                 return self
-                    .invoke_site(ctx, site, callee, args)
+                    .invoke_site(ctx, target, argument_types, callee, args)
                     .map_err(|e| self.shapes.annotate_call(e, *byte_offset));
             }
-            (InstanceValue::Promise(plan), Expr::New { args, .. }) => {
-                self.new_promise(ctx, plan, args)?
-            }
-            (InstanceValue::Collection(ty), _) => {
+            (
+                PromiseNew {
+                    value_loc,
+                    executor: Some(executor),
+                    ..
+                },
+                Expr::New { args, .. },
+            ) => self.new_promise(ctx, value_loc, executor, args)?,
+            (CollectionNew(ty), _) => {
                 let c = self
                     .shapes
-                    .source
-                    .constructors
+                    .specialization
+                    .instances
                     .collection(expr)
                     .ok_or_else(|| internal!("missing collection constructor"))?;
-                let ty = self.shapes.resolved_binding(ctx, ty)?.carrier;
+                let ty = self.shapes.resolved_binding(ty)?.carrier;
                 self.new_collection(
                     ctx,
                     c.kind == crate::source::CollectionKind::Map,
@@ -146,7 +163,12 @@ impl<'s> FunctionBuilder<'s> {
                 )?
             }
             (
-                InstanceValue::Async(plan),
+                PromiseReaction {
+                    helper,
+                    pass_first,
+                    pass_second,
+                    ..
+                },
                 Expr::Call {
                     callee,
                     args,
@@ -154,22 +176,50 @@ impl<'s> FunctionBuilder<'s> {
                     ..
                 },
             ) => {
-                let value = self
-                    .async_call(ctx, plan, callee, args)
-                    .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?;
-                if required
-                    && value.is_none()
-                    && matches!(plan, crate::engine::AsyncCall::ClearTimer { .. })
-                {
-                    self.absent_literal(ctx, false, expected)?
-                } else {
-                    return Ok(value);
+                return self
+                    .promise_reaction(
+                        ctx,
+                        plans.helper(helper)?,
+                        [pass_first, pass_second],
+                        callee,
+                        args,
+                    )
+                    .map_err(|e| self.shapes.annotate_call(e, *byte_offset));
+            }
+            (
+                TimerStart { helper },
+                Expr::Call {
+                    args, byte_offset, ..
+                },
+            ) => self
+                .start_timer(ctx, plans.helper(helper)?, args)
+                .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?,
+            (
+                TimerClear { arg_ty },
+                Expr::Call {
+                    args, byte_offset, ..
+                },
+            ) => {
+                self.clear_timer_args(
+                    ctx,
+                    arg_ty.is_some_and(|t| !matches!(t, Ty::VOID | Ty::NULL)),
+                    args,
+                )
+                .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?;
+                if !required {
+                    return Ok(None);
                 }
+                self.absent_literal(ctx, false, expected)?
             }
-            (InstanceValue::Invoke(site), Expr::CallSpread { args, .. }) => {
-                self.func_call_spread(ctx, site.target, args)?
-            }
-            (InstanceValue::Method(id), _) => {
+            (
+                Call {
+                    target: crate::engine::solve::CallTarget::Direct { target, .. },
+                    ..
+                },
+                Expr::CallSpread { args, .. },
+            ) => self.func_call_spread(ctx, plans.function(target), args)?,
+            (MethodCall(target), _) => {
+                let id = plans.function(target);
                 return self
                     .instance_method_call(ctx, expr, id)
                     .map_err(|error| match expr {
@@ -180,26 +230,17 @@ impl<'s> FunctionBuilder<'s> {
                     });
             }
             (
-                InstanceValue::Construct(id),
+                ClassNew(id),
                 Expr::New {
                     args, byte_offset, ..
                 },
             ) => {
-                let name = &self.shapes.specialization.class_names[id];
-                self.class_new(ctx, name, args)
+                let class = &self.shapes.specialization.bodies.classes[id];
+                self.class_new(ctx, class, args)
                     .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?
             }
-            (InstanceValue::ThrowTypeError, _) => {
-                if let Expr::Call { callee, args, .. } = expr {
-                    self.discard_function_operand(ctx, callee)?;
-                    for arg in args {
-                        self.discard_function_operand(ctx, arg)?;
-                    }
-                }
-                self.raise_non_callable(ctx)
-            }
             (
-                InstanceValue::ErasedFieldSet,
+                ZeroSizedFieldSet,
                 Expr::PropertySet { object, value, .. }
                 | Expr::PutValueSet {
                     target: object,
@@ -215,7 +256,7 @@ impl<'s> FunctionBuilder<'s> {
                     Ok(None)
                 };
             }
-            (InstanceValue::ZeroArray, Expr::Array(items, _)) => {
+            (ZeroSizedArray, Expr::Array(items, _)) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     self.discard_function_operand(ctx, item)?;
@@ -224,12 +265,12 @@ impl<'s> FunctionBuilder<'s> {
                 let ty = FP64Type::get(ctx).into();
                 self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, ty, values))
             }
-            (InstanceValue::Fold(value), Expr::Compare { left, right, .. }) => {
+            (FoldBool(value), Expr::Compare { left, right, .. }) => {
                 self.discard_function_operand(ctx, left)?;
                 self.discard_function_operand(ctx, right)?;
                 self.boolean(ctx, value)
             }
-            (InstanceValue::TypeOf(ty), Expr::TypeOf(operand)) => match ty {
+            (FuncTypeOf(ty), Expr::TypeOf(operand)) => match ty {
                 Some(ty) => self.callable_typeof(ctx, operand, ty)?,
                 None => {
                     self.discard_function_operand(ctx, operand)?;
@@ -237,7 +278,7 @@ impl<'s> FunctionBuilder<'s> {
                 }
             },
             (
-                InstanceValue::Matches {
+                Matches {
                     identity,
                     source,
                     left_erased,
@@ -255,9 +296,9 @@ impl<'s> FunctionBuilder<'s> {
                 }
             }
             (
-                InstanceValue::Compare {
-                    left: left_ty,
-                    right: right_ty,
+                FuncCompare {
+                    left_ty,
+                    right_ty,
                     equal,
                     environments,
                 },

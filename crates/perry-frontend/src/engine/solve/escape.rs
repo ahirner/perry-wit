@@ -162,7 +162,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(elem_ty, &self.index.capture_free_templates)
         {
             for a in args {
-                self.record_site_coercion(inst_id, a, FuncCoercion::Zero);
+                self.record_site_coercion(inst_id, a, FuncCoercion::Value(ValueCoercion::Zero));
             }
         } else if self.is_tagged_func_union_in(elem_ty, inst_id) {
             for (a, &at) in args.iter().zip(arg_tys) {
@@ -198,13 +198,21 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
             && let TyKind::Func(ident) = self.types.kind(src_ty)
         {
-            self.record_site_coercion(inst_id, expr, FuncCoercion::Tag(ident, dst_ty));
+            self.record_site_coercion(
+                inst_id,
+                expr,
+                FuncCoercion::Value(ValueCoercion::Tag(ident, dst_ty)),
+            );
             return;
         }
         if let TyKind::Func(ident) = self.types.kind(src_ty)
             && self.is_escaping_env(ident.template, inst_id)
         {
-            self.record_site_coercion(inst_id, expr, FuncCoercion::BoxEnv(ident, dst_ty));
+            self.record_site_coercion(
+                inst_id,
+                expr,
+                FuncCoercion::Value(ValueCoercion::BoxEnv(ident, dst_ty)),
+            );
             return;
         }
         if self.is_tagged_func_union_in(src_ty, inst_id)
@@ -213,10 +221,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.record_site_coercion(
                 inst_id,
                 expr,
-                FuncCoercion::Widen {
+                FuncCoercion::Value(ValueCoercion::Widen {
                     from: src_ty,
                     to: dst_ty,
-                },
+                }),
             );
         }
     }

@@ -1,9 +1,8 @@
 //! Emission of guest-settled promises (`new Promise`, `then`/`catch`/`finally`) and global timers.
 use super::InstancePlanner;
-use crate::engine::PromiseConstructor;
 use crate::engine::boundary::TemplateKind;
-use crate::engine::solve::{CallbackCall, Instance, ReactionKind};
-use crate::engine::types::{CaptureOwner, FuncIdentity, LocId, TemplateId, Ty};
+use crate::engine::solve::{CallTarget, Instance, ReactionKind};
+use crate::engine::types::{FuncIdentity, Ty};
 use perry_hir::types::FuncId;
 use perry_wit_diagnostics::Result;
 
@@ -29,7 +28,7 @@ impl<'h> InstancePlanner<'h, '_> {
         } else {
             perry_mir::SettleKind::Reject
         };
-        self.plans.functions.insert(
+        self.native.push((
             inst.emitted_func_id,
             NativeFunction {
                 name: inst.emitted_name.clone(),
@@ -38,43 +37,8 @@ impl<'h> InstancePlanner<'h, '_> {
                 is_async: false,
                 body: NativeBody::Settle(settle),
             },
-        );
+        ));
         Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn promise_constructor(
-        &mut self,
-        instance: crate::engine::types::InstanceId,
-        value_loc: LocId,
-        resolve: TemplateId,
-        reject: TemplateId,
-        executor: CallbackCall,
-        pass_resolve: bool,
-        pass_reject: bool,
-    ) -> Result<PromiseConstructor> {
-        let settled = self.solved.locations[value_loc];
-        self.prepare_layouts(settled)?;
-        let owner = CaptureOwner::Instance(instance);
-        let handles = [
-            pass_resolve.then_some(resolve),
-            pass_reject.then_some(reject),
-        ]
-        .map(|template| {
-            template.map(|template| FuncIdentity {
-                template,
-                capture_owner: owner,
-            })
-        });
-        for &handle in handles.iter().flatten() {
-            self.environment(handle)?;
-        }
-        let executor = self.native_callback(executor)?;
-        Ok(PromiseConstructor {
-            settled,
-            executor,
-            handles,
-        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -84,19 +48,20 @@ impl<'h> InstancePlanner<'h, '_> {
         kind: ReactionKind,
         promise: Ty,
         inner: Ty,
-        fulfilled: Option<(CallbackCall, Ty)>,
-        rejected: Option<(CallbackCall, Ty)>,
+        fulfilled: Option<(CallTarget, Ty)>,
+        rejected: Option<(CallTarget, Ty)>,
         result: Ty,
     ) -> Result<crate::engine::NativeFunction> {
         use crate::engine::{NativeBody, NativeFunction, NativeParam, Reaction};
         self.prepare_layouts(promise)?;
         let mut params = vec![NativeParam::Value(promise)];
-        let mut bind = |(call, ty): (CallbackCall, Ty)| {
+        let mut bind = |(call, ty): (CallTarget, Ty)| {
             if call.needs_value() {
                 self.prepare_layouts(ty)?;
                 params.push(NativeParam::Value(ty));
             }
-            self.native_callback(call)
+            self.prepare_call(call)?;
+            Result::Ok(call)
         };
         let fulfilled = fulfilled.map(&mut bind).transpose()?;
         let rejected = rejected.map(bind).transpose()?;
@@ -131,32 +96,11 @@ impl<'h> InstancePlanner<'h, '_> {
         })
     }
 
-    pub(super) fn native_callback(
-        &mut self,
-        call: CallbackCall,
-    ) -> Result<crate::engine::NativeCallback> {
-        use crate::engine::{CallbackOperand, NativeCallback};
-        Ok(match call {
-            CallbackCall::ThrowTypeError => NativeCallback::ThrowTypeError,
-            CallbackCall::Direct {
-                target,
-                pass_env,
-                pass_receiver,
-            } => NativeCallback::Call {
-                target: self.solved.instances[target].emitted_func_id,
-                operand: if pass_env {
-                    CallbackOperand::Environment
-                } else {
-                    CallbackOperand::None
-                },
-                receiver: pass_receiver,
-            },
-            CallbackCall::Dispatch { helper, needs_recv } => NativeCallback::Call {
-                target: self.helper_function(helper)?,
-                operand: CallbackOperand::Callee,
-                receiver: needs_recv,
-            },
-        })
+    pub(super) fn prepare_call(&mut self, call: CallTarget) -> Result<()> {
+        if let CallTarget::Dispatch { helper, .. } = call {
+            self.helper_function(helper)?;
+        }
+        Ok(())
     }
 
     pub(super) fn timer_runner(
@@ -164,7 +108,7 @@ impl<'h> InstancePlanner<'h, '_> {
         id: FuncId,
         kind: crate::engine::TimerKind,
         timer: Ty,
-        cb_call: CallbackCall,
+        cb_call: CallTarget,
         callback_type: Ty,
         extra: Ty,
     ) -> Result<crate::engine::NativeFunction> {
@@ -181,6 +125,7 @@ impl<'h> InstancePlanner<'h, '_> {
             self.prepare_layouts(ty)?;
             params.push(NativeParam::Value(ty));
         }
+        self.prepare_call(cb_call)?;
         Ok(NativeFunction {
             name: format!("__timer_{id}"),
             params,
@@ -188,7 +133,7 @@ impl<'h> InstancePlanner<'h, '_> {
             is_async: true,
             body: NativeBody::Timer {
                 kind,
-                callback: self.native_callback(cb_call)?,
+                callback: cb_call,
             },
         })
     }

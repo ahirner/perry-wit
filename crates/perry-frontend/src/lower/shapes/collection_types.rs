@@ -2,10 +2,10 @@
 use super::*;
 use crate::lower::collections::{CollectionViewKind, EntryKind, StorageField as Field};
 
-impl Shapes<'_> {
+impl<T> Shapes<'_, T> {
     /// The `tuple` record `[first, second]`: iterated entries and `[key, value]` pairs.
     pub(crate) fn pair_type(
-        &self,
+        &mut self,
         ctx: &Context,
         first: TypeHandle,
         second: TypeHandle,
@@ -18,7 +18,7 @@ impl Shapes<'_> {
 
     /// A `Map` entry `{ _0: key, _1: value, _2: live, _3: seq }`.
     pub(crate) fn map_tuple_type(
-        &self,
+        &mut self,
         ctx: &Context,
         k_ty: TypeHandle,
         v_ty: TypeHandle,
@@ -39,7 +39,7 @@ impl Shapes<'_> {
 
     /// A `Set` entry `{ _0: value, _1: live, _2: seq }`.
     pub(crate) fn set_tuple_type(
-        &self,
+        &mut self,
         ctx: &Context,
         elem_ty: TypeHandle,
     ) -> Result<TypedHandle<RecordType>> {
@@ -57,7 +57,7 @@ impl Shapes<'_> {
     }
 
     /// The `{ _0: index, _1: min_seq, _2: epoch }` cursor of a live iterator.
-    pub(crate) fn cursor_tuple_type(&self, ctx: &Context) -> Result<TypedHandle<RecordType>> {
+    pub(crate) fn cursor_tuple_type(&mut self, ctx: &Context) -> Result<TypedHandle<RecordType>> {
         let f64_ty: TypeHandle = FP64Type::get(ctx).into();
         self.mir_tuple(
             ctx,
@@ -71,7 +71,7 @@ impl Shapes<'_> {
 
     /// A `kind` box over `entry` records: `{ _0: entries, _1: live count, _2: next_seq, _3: epoch }`.
     pub(crate) fn collection_box_type(
-        &self,
+        &mut self,
         ctx: &Context,
         entry: TypedHandle<RecordType>,
         kind: EntryKind,
@@ -92,7 +92,7 @@ impl Shapes<'_> {
 
     /// A live `view` `{ _0: box, _1: cursor }` over a box of type `box_ty`.
     pub(crate) fn collection_view_type(
-        &self,
+        &mut self,
         ctx: &Context,
         box_ty: TypeHandle,
         view: CollectionViewKind,
@@ -107,22 +107,35 @@ impl Shapes<'_> {
             ],
         )
     }
+}
 
+impl Shapes<'_> {
     /// `Map<K, V>` from source types.
-    pub(crate) fn map_type(&self, ctx: &Context, k: &HirType, v: &HirType) -> Result<TypeHandle> {
-        let k_ty = self.source_binding(ctx, k)?.carrier;
-        let v_ty = self.source_binding(ctx, v)?.carrier;
+    pub(in crate::lower) fn map_type(
+        &mut self,
+        ctx: &Context,
+        k: &HirType,
+        v: &HirType,
+    ) -> Result<TypeHandle> {
+        let k_ty = self.source_binding(k)?.carrier;
+        let v_ty = self.source_binding(v)?.carrier;
         Ok(self.map_box_type(ctx, k_ty, v_ty)?.into())
     }
 
     /// `Set<T>` from a source type.
-    pub(crate) fn set_type(&self, ctx: &Context, elem: &HirType) -> Result<TypeHandle> {
-        let elem_ty = self.source_binding(ctx, elem)?.carrier;
+    pub(in crate::lower) fn set_type(
+        &mut self,
+        ctx: &Context,
+        elem: &HirType,
+    ) -> Result<TypeHandle> {
+        let elem_ty = self.source_binding(elem)?.carrier;
         Ok(self.set_box_type(ctx, elem_ty)?.into())
     }
+}
 
+impl<T> Shapes<'_, T> {
     pub(super) fn map_box_type(
-        &self,
+        &mut self,
         ctx: &Context,
         k_ty: TypeHandle,
         v_ty: TypeHandle,
@@ -132,7 +145,7 @@ impl Shapes<'_> {
     }
 
     pub(super) fn set_box_type(
-        &self,
+        &mut self,
         ctx: &Context,
         elem_ty: TypeHandle,
     ) -> Result<TypedHandle<RecordType>> {
@@ -142,7 +155,7 @@ impl Shapes<'_> {
 
     /// A `Record<K, V>` dictionary entry `{ _0: K, _1: V }`.
     pub(crate) fn dict_tuple_type(
-        &self,
+        &mut self,
         ctx: &Context,
         k_ty: TypeHandle,
         v_ty: TypeHandle,
@@ -153,14 +166,18 @@ impl Shapes<'_> {
             vec![("_0".to_string(), k_ty), ("_1".to_string(), v_ty)],
         )
     }
+}
 
-    pub(super) fn builtin_generic<T>(
-        &self,
+impl Shapes<'_, Preparing<'_>> {
+    pub(super) fn builtin_generic(
+        &mut self,
         ctx: &Context,
         name: &str,
-        arguments: &[T],
-        mut carrier: impl FnMut(&T) -> Result<TypeHandle>,
+        arguments: &[Ty],
+        visiting: &mut Vec<crate::engine::types::LocId>,
     ) -> Result<Option<TypeHandle>> {
+        let mut carrier =
+            |this: &mut Self, ty: &Ty| this.project_type(ctx, *ty, visiting).map(|b| b.carrier);
         if name != "WitInput" && self.is_user_type(name) {
             return Ok(None);
         }
@@ -173,9 +190,14 @@ impl Shapes<'_> {
         if let Some(collection) = collection {
             let storage = match (collection, arguments) {
                 (EntryKind::Map, [key, value]) => {
-                    self.map_box_type(ctx, carrier(key)?, carrier(value)?)?
+                    let key = carrier(self, key)?;
+                    let value = carrier(self, value)?;
+                    self.map_box_type(ctx, key, value)?
                 }
-                (EntryKind::Set, [element]) => self.set_box_type(ctx, carrier(element)?)?,
+                (EntryKind::Set, [element]) => {
+                    let element = carrier(self, element)?;
+                    self.set_box_type(ctx, element)?
+                }
                 (EntryKind::Map, _) => bail_diag!(
                     codes::TYPE_MISMATCH,
                     "{name} needs key and value type arguments"
@@ -191,14 +213,19 @@ impl Shapes<'_> {
             }));
         }
         Ok(Some(match (name, arguments) {
-            ("WitInput", [arg]) => self.input_type(ctx, carrier(arg)?)?,
-            ("PromiseSettledResult", [arg]) => {
-                perry_mir::SettledType::get(ctx, carrier(arg)?).into()
+            ("WitInput", [arg]) => {
+                let arg = carrier(self, arg)?;
+                self.input_type(ctx, arg)?
             }
-            ("ReadonlyArray" | "Array", [arg]) => ArrayType::get(ctx, carrier(arg)?).into(),
-            ("Readonly", [arg]) => carrier(arg)?,
+            ("PromiseSettledResult", [arg]) => {
+                perry_mir::SettledType::get(ctx, carrier(self, arg)?).into()
+            }
+            ("ReadonlyArray" | "Array", [arg]) => ArrayType::get(ctx, carrier(self, arg)?).into(),
+            ("Readonly", [arg]) => carrier(self, arg)?,
             ("Record", [key, value]) => {
-                let entry = self.dict_tuple_type(ctx, carrier(key)?, carrier(value)?)?;
+                let key = carrier(self, key)?;
+                let value = carrier(self, value)?;
+                let entry = self.dict_tuple_type(ctx, key, value)?;
                 ArrayType::get(ctx, entry.into()).into()
             }
             ("Record", _) => bail_diag!(

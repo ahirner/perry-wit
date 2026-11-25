@@ -1,11 +1,12 @@
 //! Guest promise creation, settlement, and reaction handlers.
 use super::*;
 use crate::engine::{
-    NativeCallback, Reaction,
+    Reaction,
+    solve::CallTarget,
     types::{Ty, func_tag},
 };
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn settle_body(
         &mut self,
         ctx: &mut Context,
@@ -15,8 +16,7 @@ impl<'s> FunctionBuilder<'s> {
         let (&env, values) = args
             .split_first()
             .ok_or_else(|| internal!("missing promise environment"))?;
-        let field = FieldGetOp::new(ctx, env, "c0".into()).to_diag(ctx)?;
-        let promise = self.append_value(ctx, &field);
+        let promise = self.capture_field(ctx, env, 0)?;
         let settled = perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx))
             .ok_or_else(|| internal!("expected a captured promise"))?
             .deref(ctx)
@@ -39,23 +39,22 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn new_promise(
         &mut self,
         ctx: &mut Context,
-        constructor: crate::engine::PromiseConstructor,
+        value_loc: crate::engine::types::LocId,
+        executor: crate::engine::solve::PromiseExecutor,
         args: &'s [Expr],
     ) -> Result<Value> {
-        let crate::engine::PromiseConstructor {
-            settled,
-            executor,
-            handles,
-        } = constructor;
+        let settled = self.shapes.specialization.locations[value_loc];
+        let handles = executor.handles;
+        let executor = executor.call;
         let mut value = None;
         for (i, arg) in args.iter().enumerate() {
-            if i == 0 && executor.takes_value() {
+            if i == 0 && executor.needs_value() {
                 value = Some(self.expression(ctx, arg)?);
             } else {
                 self.discard_function_operand(ctx, arg)?;
             }
         }
-        if matches!(executor, NativeCallback::ThrowTypeError) {
+        if matches!(executor, CallTarget::ThrowTypeError) {
             return Ok(self.raise_non_callable(ctx));
         }
         if let Some(value) = value
@@ -75,26 +74,24 @@ impl<'s> FunctionBuilder<'s> {
         }
         let settled = self
             .shapes
-            .resolved_binding(
-                ctx,
-                if settled == Ty::BOTTOM {
-                    Ty::VOID
-                } else {
-                    settled
-                },
-            )?
+            .resolved_binding(if settled == Ty::BOTTOM {
+                Ty::VOID
+            } else {
+                settled
+            })?
             .carrier;
         let promise = self.emit_value(ctx, |ctx| PromisePendingOp::new(ctx, settled));
         let mut inputs = Vec::new();
         for handle in handles.into_iter().flatten() {
-            let env = self.shapes.environment_type(ctx, handle)?;
-            let record = perry_mir::typed::<RecordType>(ctx, env)
-                .ok_or_else(|| internal!("expected promise environment"))?;
+            let record = self.shapes.environment_record(handle)?;
             let capture = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![promise]));
             let tag = self.string(ctx, &func_tag(handle));
             let wrapper = self.shapes.mir_record(
                 ctx,
-                vec![("tag".into(), tag.get_type(ctx)), ("val".into(), env)],
+                vec![
+                    ("tag".into(), tag.get_type(ctx)),
+                    ("val".into(), record.into()),
+                ],
             )?;
             inputs.push(self.emit_value(ctx, |ctx| AllocOp::new(ctx, wrapper, vec![tag, capture])));
         }
@@ -159,7 +156,7 @@ impl<'s> FunctionBuilder<'s> {
     fn finalizer(
         &mut self,
         ctx: &mut Context,
-        call: NativeCallback,
+        call: CallTarget,
         value: Option<Value>,
     ) -> Result<()> {
         let skip = self.if_callable(ctx, value)?;

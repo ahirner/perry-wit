@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(crate) fn integer_or_infinity(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         let number = FP64Type::get(ctx).into();
         let zero = self.number(ctx, 0.0);

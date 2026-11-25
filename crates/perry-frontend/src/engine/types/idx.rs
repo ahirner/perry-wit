@@ -57,6 +57,11 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
         self.data.push(value);
         id
     }
+    pub(crate) fn fill_through(&mut self, id: I, value: impl FnMut() -> T) {
+        if self.len() <= id.index() {
+            self.data.resize_with(id.index() + 1, value);
+        }
+    }
     pub(crate) fn get(&self, id: I) -> Option<&T> {
         self.data.get(id.index())
     }
@@ -138,6 +143,8 @@ id_type!(
     InstanceId,
     ClassId,
     ClassInstId,
+    EnvId,
+    EmittedId,
     LocId,
     LocalIdx,
     NameId,
@@ -176,6 +183,12 @@ impl<S: sealed::MintSpan, T> Pool<S, T> {
         let start = self.data.len();
         self.data.extend_from_slice(items);
         S::from_range(start, items.len())
+    }
+
+    pub(crate) fn extend(&mut self, items: impl IntoIterator<Item = T>) -> S {
+        let start = self.data.len();
+        self.data.extend(items);
+        S::from_range(start, self.data.len() - start)
     }
 
     pub(crate) fn intern(&mut self, index: &mut HashMap<Box<[T]>, S>, items: &[T]) -> S
@@ -231,6 +244,10 @@ span_type!(
     FieldLocSpan,
     DispatchArmSpan,
     SiteSpan,
+    BindingSpan,
+    PlanSpan,
+    LocalPlanSpan,
+    EnvFieldSpan,
     CaptureSpan,
     CapturedLocalSpan,
     TypeParamSpan,
@@ -367,6 +384,7 @@ impl LocalFlags {
     pub(crate) const CAPTURED: Self = Self(1 << 8);
     pub(crate) const WRITTEN_FROM_CLOSURE: Self = Self(1 << 9);
     pub(crate) const FORWARD_CAPTURED: Self = Self(1 << 10);
+    pub(crate) const FOR_OF: Self = Self(1 << 11);
     pub(crate) const MODULE_OR_PARAM: Self = Self(Self::MODULE.0 | Self::PARAM.0);
     pub(crate) const BOXED_TRIGGER: Self = Self(
         Self::REASSIGNED.0

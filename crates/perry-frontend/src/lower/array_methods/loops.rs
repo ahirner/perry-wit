@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// `array` without holes, of the same type: [Holes::Skip] drops them and [Holes::Dense]
     /// reads them through [Self::hole_as_element]. A dense `array` is returned itself unless
     /// `copy` is set.

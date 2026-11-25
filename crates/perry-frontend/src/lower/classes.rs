@@ -24,7 +24,7 @@ pub(super) enum ClassExpansion<'s> {
     Fields(&'s crate::source::InstanceClass<'s>),
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     fn with_class_expansion<T>(
         &mut self,
         ctx: &mut Context,
@@ -78,15 +78,11 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn class_new(
         &mut self,
         ctx: &mut Context,
-        class_name: &'s str,
+        class: &'s crate::source::InstanceClass<'s>,
         args: &'s [Expr],
     ) -> Result<Value> {
-        let class = self
-            .shapes
-            .instance_class(class_name)
-            .ok_or_else(|| unsupported!("unknown class {class_name}"))?;
         let class_name = class.name.as_str();
-        let rec_ty = self.shapes.named(ctx, class_name)?;
+        let rec_ty = self.shapes.resolved_binding(class.ty)?.carrier;
         let rec = TypedHandle::<RecordType>::from_handle(rec_ty, ctx)
             .map_err(|_| internal!("expected class record for {class_name}"))?;
         let field_defs: Vec<(String, TypeHandle)> = rec
@@ -96,7 +92,7 @@ impl<'s> FunctionBuilder<'s> {
             .to_vec();
         let mut order = Vec::with_capacity(field_defs.len());
         let mut field_slots = Vec::with_capacity(class.fields.len());
-        for field in &class.fields {
+        for &(field, _) in &class.fields {
             let (index, field_ty) = rec
                 .deref(ctx)
                 .field(&field.name)
@@ -107,13 +103,13 @@ impl<'s> FunctionBuilder<'s> {
             }
         }
         if class.fields.len() == field_defs.len()
-            && class.fields.iter().all(|f| f.init.is_none())
+            && class.fields.iter().all(|(f, _)| f.init.is_none())
             && let Some(ctor) = &class.constructor
             && ctor.params.len() == class.fields.len()
             && ctor
                 .params
                 .iter()
-                .all(|p| !p.is_rest && p.default.is_none())
+                .all(|(p, _)| !p.is_rest && p.default.is_none())
             && ctor.body.len() == class.fields.len()
             && args.len() == class.fields.len()
             && args.iter().all(|e| !self.erased_operand(e))
@@ -121,7 +117,7 @@ impl<'s> FunctionBuilder<'s> {
                 .body
                 .iter()
                 .zip(class.fields.iter().zip(&ctor.params))
-                .all(|(stmt, (field, param))| {
+                .all(|(stmt, ((field, _), (param, _)))| {
                     let Stmt::Expr(expr) = stmt else { return false };
                     matches!(expr,
                         Expr::PropertySet { object, property, value, .. }
@@ -153,7 +149,9 @@ impl<'s> FunctionBuilder<'s> {
             .fields
             .iter()
             .zip(&field_slots)
-            .map(|(field, &(_, field_ty))| (field.name.as_str(), field_ty, field.init.as_ref()))
+            .map(|((field, _), &(_, field_ty))| {
+                (field.name.as_str(), field_ty, field.init.as_ref())
+            })
             .collect();
         for (field, field_ty) in &field_defs {
             let initializer = initializers.iter_mut().find(|(name, _, _)| *name == field);
@@ -254,11 +252,9 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let owner = self
             .shapes
-            .specialization
-            .instances
-            .class_fields
-            .get(class)
-            .and_then(|fields| fields.initializer);
+            .instance_class(class)
+            .and_then(|c| c.initializer)
+            .map_or(BodyOwner::Initializer, BodyOwner::Function);
         let saved = std::mem::replace(&mut self.local_owner, owner);
         let result = self.expression_with(ctx, expr, Some(ty));
         self.local_owner = saved;
@@ -319,11 +315,9 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         id: FuncId,
     ) -> Result<Option<Value>> {
-        let &(class, function) = self
-            .shapes
-            .methods_by_id
-            .get(&id)
-            .ok_or_else(|| internal!("missing specialized class method {id}"))?;
+        let Some(&Callee::Member(class, function)) = self.signatures.callee(id) else {
+            bail_internal!("missing specialized class method {id}");
+        };
         let (args, receiver) = match expr {
             Expr::StaticMethodCall { args, .. } => (args, ClassReceiver::Static),
             Expr::Call { callee, args, .. } if let Expr::PropertyGet { object, .. } = &**callee => {
@@ -448,10 +442,10 @@ impl<'s> FunctionBuilder<'s> {
         setter: &'s Function<'s>,
         value: &'s Expr,
     ) -> Result<Value> {
-        let [_] = setter.params.as_slice() else {
+        let &[(param, solved)] = setter.params.as_slice() else {
             bail_internal!("emitted setter requires one parameter");
         };
-        let param_ty = self.shapes.parameter_binding(ctx, setter, 0)?.0.carrier;
+        let param_ty = self.shapes.param_type(solved, &param.ty)?.0.carrier;
         let val = self.expression_with(ctx, value, Some(param_ty))?;
         let val = self.fit(ctx, val, param_ty)?;
         self.class_setter_call_value(ctx, receiver, owner_class, setter, val)
@@ -518,8 +512,8 @@ impl<'s> FunctionBuilder<'s> {
             }
         };
         let mut evaluated_args = Vec::with_capacity(func.params.len());
-        for (index, param) in func.params.iter().enumerate() {
-            let (binding, is_never) = self.shapes.parameter_binding(ctx, func, index)?;
+        for &(param, solved) in &func.params {
+            let (binding, is_never) = self.shapes.param_type(solved, &param.ty)?;
             let param_ty = binding.carrier;
             let value = if param.is_rest {
                 let element = Self::rest_element_type(ctx, param_ty)?;
@@ -557,7 +551,7 @@ impl<'s> FunctionBuilder<'s> {
                 };
 
                 let slot = this.with_inline_scope(ctx, func.id, this_slot, |this, ctx| {
-                    for (param, (param_ty, eval_arg, is_never)) in
+                    for (&(param, _), (param_ty, eval_arg, is_never)) in
                         func.params.iter().zip(evaluated_args)
                     {
                         this.bind_parameter(
@@ -573,7 +567,7 @@ impl<'s> FunctionBuilder<'s> {
                         InlineResult::Void
                     } else {
                         this.shapes
-                            .function_result(ctx, func)?
+                            .function_result(func)?
                             .0
                             .map_or(InlineResult::Void, |binding| {
                                 InlineResult::Declared(binding.carrier)

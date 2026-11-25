@@ -68,11 +68,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         if template == TemplateId::INIT {
             for (cid, f_idx, loc) in self.static_field_locs.clone() {
                 if let Some(init) = self
-                    .hir
-                    .bodies
-                    .classes
-                    .get(self.index.class(cid).hir_idx)
-                    .and_then(|c| c.static_fields.get(f_idx))
+                    .index
+                    .class(cid)
+                    .declaration
+                    .static_fields
+                    .get(f_idx)
                     .and_then(|f| f.init.as_ref())
                 {
                     let ty = self.eval_expr(&mut s, init)?;
@@ -89,13 +89,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let instance = &self.class_insts[id];
             let info = &self.index.classes[instance.class];
-            let fields = &self
-                .hir
-                .bodies
-                .classes
-                .get(info.hir_idx)
-                .ok_or_else(|| Diagnostic::internal("missing class fields"))?
-                .fields;
+            let fields = &info.declaration.fields;
             let field_locs = instance.field_locs;
             for (f_idx, field) in fields.iter().enumerate() {
                 let Some(init) = &field.init else { continue };
@@ -492,6 +486,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
+    pub(super) fn site_mut(&mut self, inst: InstanceId, expr: &Expr) -> Result<&mut SiteEntry> {
+        let template = self.instances[inst].template;
+        self.index
+            .site_of(template, expr)
+            .and_then(|site| self.inst_sites[inst].get_mut(site))
+            .ok_or_else(|| Diagnostic::internal("operand missing from lexical site index"))
+    }
+
     pub(super) fn record_site(&mut self, inst_id: InstanceId, expr: &Expr, res: SiteResolution) {
         let template = self.instances[inst_id].template;
         let Some(local_site) = self.index.site_of(template, expr) else {
@@ -508,41 +510,42 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut remaining = stmts;
         while let Some((stmt, rest)) = remaining.split_first() {
             let mut handled = false;
-            if let Stmt::Let { id, name, init, .. } = stmt {
-                s.iteration.register_binding(*id, name, init.as_ref());
-                if let Some(init) = init {
-                    s.iteration.guard(*id, init);
-                    if let Some(hir_compat::RecordExpr::Value(mut value)) =
-                        s.iteration.expression(init)
+            if let Stmt::Let {
+                id,
+                init: Some(init),
+                ..
+            } = stmt
+            {
+                if let Some(hir_compat::RecordExpr::Value(mut value)) =
+                    self.index.iteration.expression(init)
+                {
+                    while let Some(hir_compat::RecordExpr::Value(inner)) =
+                        self.index.iteration.expression(value)
                     {
-                        while let Some(hir_compat::RecordExpr::Value(inner)) =
-                            s.iteration.expression(value)
-                        {
-                            value = inner;
-                        }
-                        let ty = self.eval_expr(s, value)?;
-                        if let Some(lidx) = self.index.local_idx(*id) {
-                            self.write_local_value(s, lidx, ty);
-                            self.mark_written(s.inst, lidx);
-                        }
-                        handled = true;
-                    } else if matches!(init, Expr::Undefined)
-                        && let Some(el) = s.iteration.element(remaining)
-                    {
-                        let ty = self.eval_expr(s, el.value)?;
-                        let ty = match el.available {
-                            hir_compat::Availability::Known(true) => ty,
-                            hir_compat::Availability::Known(false) => Ty::VOID,
-                            hir_compat::Availability::Test(_) => {
-                                self.types.with_absences(ty, Absence::Undefined)
-                            }
-                        };
-                        if let Some(lidx) = self.index.local_idx(el.id) {
-                            self.write_local_value(s, lidx, ty);
-                            self.mark_written(s.inst, lidx);
-                        }
-                        handled = true;
+                        value = inner;
                     }
+                    let ty = self.eval_expr(s, value)?;
+                    if let Some(lidx) = self.index.local_idx(*id) {
+                        self.write_local_value(s, lidx, ty);
+                        self.mark_written(s.inst, lidx);
+                    }
+                    handled = true;
+                } else if matches!(init, Expr::Undefined)
+                    && let Some(el) = self.index.iteration.element(remaining)
+                {
+                    let ty = self.eval_expr(s, el.value)?;
+                    let ty = match el.available {
+                        hir_compat::Availability::Known(true) => ty,
+                        hir_compat::Availability::Known(false) => Ty::VOID,
+                        hir_compat::Availability::Test(_) => {
+                            self.types.with_absences(ty, Absence::Undefined)
+                        }
+                    };
+                    if let Some(lidx) = self.index.local_idx(el.id) {
+                        self.write_local_value(s, lidx, ty);
+                        self.mark_written(s.inst, lidx);
+                    }
+                    handled = true;
                 }
             }
             if !handled {
@@ -602,7 +605,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     } else if needs_context
                         && !local_flags.contains(LocalFlags::REASSIGNED)
-                        && self.index.is_empty_object_expr(self.types, init_expr)
+                        && self.index.is_empty_object_expr(init_expr)
                     {
                         Some(CellKind::Dict)
                     } else {
@@ -846,16 +849,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .collect()
         });
 
-        let mut class_static_field_tys = self.index.classes.map(|c| {
-            vec![
-                Ty::OPEN;
-                self.hir
-                    .bodies
-                    .classes
-                    .get(c.hir_idx)
-                    .map_or(0, |hc| hc.static_fields.len())
-            ]
-        });
+        let mut class_static_field_tys = self
+            .index
+            .classes
+            .map(|c| vec![Ty::OPEN; c.declaration.static_fields.len()]);
         for &(cid, f_idx, loc) in &self.static_field_locs {
             if let Some(slot) = class_static_field_tys[cid].get_mut(f_idx) {
                 *slot = self.locations[loc];

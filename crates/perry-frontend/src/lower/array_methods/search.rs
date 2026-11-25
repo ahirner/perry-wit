@@ -18,7 +18,7 @@ enum Outcome {
     Boolean(bool),
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(crate) fn array_search(
         &mut self,
         ctx: &mut Context,

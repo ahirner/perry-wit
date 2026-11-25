@@ -83,7 +83,7 @@ fn merged_field_type(ctx: &Context, previous: TypeHandle, incoming: TypeHandle) 
 impl<'a> RecordAssembly<'a> {
     fn write<'s>(
         &mut self,
-        b: &mut FunctionBuilder<'s>,
+        b: &mut FunctionBuilder<'s, '_>,
         ctx: &mut Context,
         name: Cow<'a, str>,
         input: RecordInput<'s>,
@@ -182,7 +182,7 @@ impl<'a> RecordAssembly<'a> {
 
     fn copy(
         &mut self,
-        b: &mut FunctionBuilder<'_>,
+        b: &mut FunctionBuilder<'_, '_>,
         ctx: &mut Context,
         source: Value,
         record: TypedHandle<RecordType>,
@@ -206,7 +206,7 @@ impl<'a> RecordAssembly<'a> {
 
     fn finish(
         self,
-        b: &mut FunctionBuilder<'_>,
+        b: &mut FunctionBuilder<'_, '_>,
         ctx: &mut Context,
         record: Option<TypedHandle<RecordType>>,
         sources: impl Iterator<Item = RecordSource<'a>>,
@@ -276,7 +276,7 @@ impl<'a> RecordAssembly<'a> {
     }
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(in crate::lower) fn closure_value(
         &mut self,
         ctx: &mut Context,
@@ -284,25 +284,23 @@ impl<'s> FunctionBuilder<'s> {
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
         use crate::engine::CaptureOperand;
-        let record = self.shapes.environment_type(ctx, closure.identity)?;
-        let record = perry_mir::typed::<RecordType>(ctx, record)
-            .ok_or_else(|| internal!("capture environment has no record layout"))?;
-        let layout = &self.shapes.specialization.instances.environments[&closure.identity];
-        let mut assembly = RecordAssembly {
-            expected: Some(record),
-            fields: Vec::with_capacity(layout.len()),
-        };
+        let record = self.shapes.environment_record(closure.identity)?;
+        let field_types = record
+            .deref(ctx)
+            .fields()
+            .to_diag(ctx)?
+            .iter()
+            .map(|field| field.1)
+            .collect::<Vec<_>>();
+        let mut values = Vec::with_capacity(field_types.len());
         if closure.operands.is_empty() {
-            assembly
-                .fields
-                .push((Cow::Borrowed("_u"), self.number(ctx, 0.0)));
+            values.push(self.number(ctx, 0.0));
         } else {
             ensure_internal!(
-                layout.len() == closure.operands.len(),
+                field_types.len() == closure.operands.len(),
                 "wrong number of closure captures"
             );
-            for (field, &operand) in layout.iter().zip(&closure.operands) {
-                let name = field.name();
+            for (ty, &operand) in field_types.into_iter().zip(&closure.operands) {
                 let value = match operand {
                     CaptureOperand::Local(id) => {
                         let value = self.load_local(ctx, id)?;
@@ -316,14 +314,10 @@ impl<'s> FunctionBuilder<'s> {
                         let payload = environment
                             .map(|id| {
                                 let value = self.load_local(ctx, id)?;
-                                let env = self.shapes.environment_type(ctx, identity)?;
+                                let env = self.shapes.environment_record(identity)?.into();
                                 self.callable_field(ctx, value, "val", env)
                             })
                             .transpose()?;
-                        let (_, ty) = record
-                            .deref(ctx)
-                            .field(name)
-                            .ok_or_else(|| internal!("unknown capture field {name}"))?;
                         self.function_value(ctx, identity, payload, Some(ty))?
                     }
                     CaptureOperand::Widen { local, from, to } => {
@@ -331,10 +325,15 @@ impl<'s> FunctionBuilder<'s> {
                         self.widen_function(ctx, value, from, to)?
                     }
                 };
-                assembly.fields.push((Cow::Borrowed(name), value));
+                values.push(self.fit(ctx, value, ty)?);
             }
         }
-        let env = assembly.finish(self, ctx, Some(record), empty())?;
+        let env = self.emit_value(ctx, |ctx| {
+            let order = perry_mir::FieldOrder((0..values.len() as u32).collect());
+            let alloc = AllocOp::new(ctx, record, values);
+            alloc.set_attr_perry_field_order(ctx, order);
+            alloc
+        });
         self.function_value(ctx, closure.identity, Some(env), expected)
     }
 

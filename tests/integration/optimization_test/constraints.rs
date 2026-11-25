@@ -171,7 +171,7 @@ fn range_queries_follow_actual_wrap_points() -> Result<()> {
 }
 
 /// Context-count bounds per arity are asserted precisely in perry-mir's facts tests;
-/// this checks that forced context summarization via `with_fact_limits(1, 1, ...)`
+/// this checks that forcing a single precise context per function
 /// records `summarized_contexts` and `range_widenings` and preserves helper semantics
 /// regardless of function declaration order.
 #[test]
@@ -213,7 +213,7 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
         ] {
             for summarize in [false, true] {
                 let compiled = if summarize {
-                    perry_mir::with_fact_limits(1, 1, || compile(&source, &signature))?
+                    compile_summarized(&source, &signature)?
                 } else {
                     compile(&source, &signature)?
                 };
@@ -257,6 +257,17 @@ fn bounded_context_specialization_is_sound_and_order_invariant() -> Result<()> {
     );
     let sig = "func(x:f64)->string; export r2:func(x:f64)->string; export r3:func(x:f64)->string; export r4:func(x:f64)->string; export n1:func(x:f64)->string; export n2:func(x:f64)->string";
     compile(&source, sig)?;
-    perry_mir::with_fact_limits(1, 1, || compile(&source, sig))?;
+    compile_summarized(&source, sig)?;
     Ok(())
+}
+
+fn compile_summarized(source: &str, signature: &str) -> Result<perry_wit::Compiled> {
+    crate::world::compile_signature_with(
+        crate::world::Compiler::Limited(perry_mir::FactLimits {
+            max_origins: 1,
+            max_precise_contexts: 1,
+        }),
+        source,
+        signature,
+    )
 }

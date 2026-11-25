@@ -13,6 +13,8 @@ mod control_flow;
 mod dates;
 mod expressions;
 mod foreign;
+mod functions;
+use functions::{Callee, Functions};
 mod host;
 mod inline;
 mod json;
@@ -93,7 +95,11 @@ fn missing_type_annotation() -> Diagnostic {
 
 pub enum ExportTarget {
     Destructor(FuncOp, String),
-    Function(FuncOp, Vec<Option<perry_wit_diagnostics::SourceSpan>>),
+    Function(
+        FuncOp,
+        Vec<Option<perry_wit_diagnostics::SourceSpan>>,
+        Option<String>,
+    ),
     Command(FuncOp),
 }
 
@@ -105,4 +111,5 @@ pub struct LoweredProgram {
 #[cfg(test)]
 mod tests;
 
+use crate::engine::BodyOwner;
 use crate::source::InstanceFunction as Function;

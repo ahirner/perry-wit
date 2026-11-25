@@ -38,7 +38,7 @@ macro_rules! lower_calls {
     } )*) => {
         impl<'s> Call<'s> {
             pub(super) fn lower(
-                self, b: &mut FunctionBuilder<'s>, ctx: &mut Context, receiver: Value,
+                self, b: &mut FunctionBuilder<'s, '_>, ctx: &mut Context, receiver: Value,
             ) -> Result<Option<Value>> {
                 match self { $($(
                     Call::$variant($($argument),*) => lower_calls!(@invoke (b, ctx, receiver) $action $recipe),
@@ -83,7 +83,7 @@ fn set_element(ctx: &Context, set: Value) -> Result<TypeHandle> {
 }
 
 /// Catalog recipes that combine several builder operations.
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     fn iterator_method(
         &mut self,
         ctx: &mut Context,

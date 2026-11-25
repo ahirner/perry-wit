@@ -6,7 +6,7 @@ use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported};
 use pliron::utils::vec_exns::VecExtns;
 
 mod resolution;
-pub(crate) use resolution::{Properties, Query, Resolver, object_properties};
+pub(crate) use resolution::{Expansion, Properties, Query, Resolver, object_properties};
 
 const RESOLUTION_DEPTH: usize = 32;
 pub(crate) const ARGUMENT_LIMIT: usize = 4096;
@@ -104,7 +104,7 @@ impl<'a> Declaration<'a> {
         if let Some(&(index, interface)) = decls.interfaces.get(base) {
             return Some((DeclarationId::Interface(index), Self::Interface(interface)));
         }
-        if let Some(&(index, class)) = decls.classes.named.get(base) {
+        if let Some(&(index, class)) = decls.classes.get(base) {
             return Some((DeclarationId::Class(index), Self::Class(class)));
         }
         let &(index, alias) = decls.type_aliases.get(base)?;

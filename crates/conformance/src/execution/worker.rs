@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use http_body_util::{BodyExt, Full};
-use perry_wit::{CompileOptions, compile_for_world, compile_typescript};
+use perry_wit::{CompileOptions, compile_typescript};
 use std::{
     collections::HashMap,
     env, fs,
@@ -273,29 +273,26 @@ fn compile_component_cached(
         return cached.clone();
     }
     let built = (|| -> ComponentCacheValue {
-        let compiled = if matches!(case, Case::Handler(_)) {
-            let (resolve, world) =
-                resolve_handler_world().map_err(|e| Outcome::Compile(format!("{e:#}")))?;
-            fact_limits
-                .apply(|| {
-                    compile_for_world(source, &path.to_string_lossy(), resolve, *world, true)
-                        .map_err(anyhow::Error::from)
-                })
-                .map_err(|e| Outcome::Compile(format!("{e:#}")))?
+        let cached;
+        let (resolve, world) = if matches!(case, Case::Handler(_)) {
+            resolve_handler_world().map_err(|e| Outcome::Compile(format!("{e:#}")))?
         } else {
-            let resolved = resolve_world_cached(
+            cached = resolve_world_cached(
                 case.asynchronous() || matches!(case, Case::Reject { wit: Some(_), .. }),
                 &wit_source,
             )
             .map_err(|e| Outcome::Compile(format!("{e:#}")))?;
-            let (resolve, world) = &*resolved;
-            fact_limits
-                .apply(|| {
-                    compile_for_world(source, &path.to_string_lossy(), resolve, *world, true)
-                        .map_err(anyhow::Error::from)
-                })
-                .map_err(|e| Outcome::Compile(format!("{e:#}")))?
+            &*cached
         };
+        let compiled = perry_wit::compiler::compile_for_world_with_limits(
+            source,
+            &path.to_string_lossy(),
+            resolve,
+            *world,
+            true,
+            fact_limits.into(),
+        )
+        .map_err(|e| Outcome::Compile(format!("{e:#}")))?;
         let bytes = compiled
             .component
             .ok_or_else(|| Outcome::Compile("component compilation produced no component".into()))?

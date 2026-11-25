@@ -27,7 +27,7 @@ pub(super) struct IntrinsicCall {
 impl IntrinsicCall {
     pub(super) fn lower<'s>(
         self,
-        builder: &mut FunctionBuilder<'s>,
+        builder: &mut FunctionBuilder<'s, '_>,
         ctx: &mut Context,
         receiver: Value,
         args: impl IntoIterator<Item = &'s Expr>,

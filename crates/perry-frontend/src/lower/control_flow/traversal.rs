@@ -29,7 +29,7 @@ pub(crate) enum ArrayOutput {
     Items(Value),
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(crate) fn iterate<T>(
         &mut self,
         ctx: &mut Context,
@@ -241,7 +241,11 @@ impl Projection {
             .then_some((record.field("_0")?.1, record.field("_1")?.1))
     }
 
-    pub(crate) fn output_type(&self, ctx: &mut Context, shapes: &Shapes<'_>) -> Result<TypeHandle> {
+    pub(crate) fn output_type(
+        &self,
+        ctx: &mut Context,
+        shapes: &mut Shapes<'_>,
+    ) -> Result<TypeHandle> {
         Ok(match *self {
             Self::Item(ty) | Self::Field((_, ty)) => ty,
             Self::Pair((_, first), (_, second)) => shapes.pair_type(ctx, first, second)?.into(),
@@ -250,11 +254,11 @@ impl Projection {
 
     pub(crate) fn read(
         self,
-        b: &mut FunctionBuilder<'_>,
+        b: &mut FunctionBuilder<'_, '_>,
         ctx: &mut Context,
         entry: Value,
     ) -> Result<Value> {
-        let field = |b: &mut FunctionBuilder<'_>, ctx: &mut Context, name: &str| {
+        let field = |b: &mut FunctionBuilder<'_, '_>, ctx: &mut Context, name: &str| {
             let op = FieldGetOp::new(ctx, entry, name.to_owned()).to_diag(ctx)?;
             Ok::<_, crate::lower::Diagnostic>(b.append_value(ctx, &op))
         };

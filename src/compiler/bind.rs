@@ -37,7 +37,7 @@ fn constrain_numbers(
         return Err(diag!(
             crate::codes::CONTRACT_MISMATCH,
             "{} takes {} parameters but the WIT export {} has {}",
-            export.function,
+            export.declaration(),
             args.len(),
             export.core_name,
             export.params.len()
@@ -45,7 +45,7 @@ fn constrain_numbers(
         .with_optional_span(perry_mir::source_span(ctx, function))
         .with_help(format!(
             "Update 'export function {}(...)' to accept {} parameter(s) matching WIT export '{}'.",
-            export.function,
+            export.declaration(),
             export.params.len(),
             export.core_name
         )));
@@ -76,7 +76,7 @@ fn constrain_numbers(
             .with_optional_span(export.annotation(index).or_else(|| perry_mir::source_span(ctx,function)))
             .with_help(format!(
                 "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
-                export.function, export.core_name
+                export.declaration(), export.core_name
             )));
         }
         if common_domain
@@ -111,8 +111,10 @@ pub(super) fn exports(
         } else {
             function.name.clone()
         };
-        let (mir_function, annotations) = match target {
-            perry_frontend::ExportTarget::Function(func, annotations) => (func, annotations),
+        let (mir_function, annotations, source_name) = match target {
+            perry_frontend::ExportTarget::Function(func, annotations, name) => {
+                (func, annotations, name)
+            }
             perry_frontend::ExportTarget::Destructor(..) => {
                 return Err(Diagnostic::internal("expected function witness"));
             }
@@ -120,6 +122,7 @@ pub(super) fn exports(
                 bound.push((
                     main,
                     Export {
+                        source_name: None,
                         annotations: Vec::new(),
                         core_name,
                         function: perry_frontend::MAIN.to_string(),
@@ -140,6 +143,7 @@ pub(super) fn exports(
         let implementation = mir_function.get_symbol_name(ctx).to_string();
         let expected_async = function.kind.is_async();
         if perry_mir::is_async(ctx, &mir_function) != expected_async {
+            let implementation = source_name.as_deref().unwrap_or(&implementation);
             let help = if expected_async {
                 format!(
                     "Add 'async' to 'export async function {implementation}(...)' so it matches the WIT export."
@@ -184,6 +188,7 @@ pub(super) fn exports(
         bound.push((
             mir_function,
             Export {
+                source_name,
                 annotations,
                 core_name,
                 function: implementation,
@@ -202,6 +207,7 @@ pub(super) fn exports(
         bound.push((
             function,
             Export {
+                source_name: None,
                 annotations: Vec::new(),
                 core_name,
                 function: function.get_symbol_name(ctx).into(),
@@ -305,46 +311,55 @@ fn stream_functions<'a>(
 }
 
 pub(super) fn abi_type(resolve: &Resolve, ty: &Type) -> Result<AbiType> {
-    convert(resolve, Input::Reference(*ty), &|_| None, &|contract| {
-        Ok(match contract {
-            Contract::Scalar(ty) => scalar_type(ty)?,
-            Contract::Resource { id, owned } => AbiType::Resource {
-                key: perry_contract::names::canonical_type(resolve, id).index() as u32,
-                owned,
-            },
-            Contract::Bytes => AbiType::List(Box::new(AbiType::U8)),
-            Contract::ByteStream => AbiType::ByteStream,
-            Contract::List(ty) => AbiType::List(Box::new(ty?)),
-            Contract::Option(ty) => AbiType::Option(Box::new(ty?)),
-            Contract::Result { ok, err } => AbiType::Result {
-                ok: ok.transpose()?.map(Box::new),
-                err: err.transpose()?.map(Box::new),
-            },
-            Contract::Tuple(items) => AbiType::Record(
-                items
-                    .enumerate()
-                    .map(|(i, ty)| ty.map(|ty| (format!("_{i}"), ty)))
-                    .collect::<Result<_>>()?,
-            ),
-            Contract::Record(fields) => AbiType::Record(
-                fields
-                    .map(|(name, ty)| Ok((name, ty?)))
-                    .collect::<Result<_>>()?,
-            ),
-            Contract::Enum(cases) => AbiType::Enum(cases.map(str::to_owned).collect()),
-            Contract::Variant(cases) => AbiType::Variant(
-                cases
-                    .map(|(name, ty)| Ok((name.to_owned(), ty.transpose()?)))
-                    .collect::<Result<_>>()?,
-            ),
-            Contract::Unsupported(kind) => {
-                return Err(diag!(
-                    crate::codes::UNSUPPORTED_TYPE,
-                    "WIT {kind} values are not supported by the compiler yet"
-                ));
-            }
-        })
-    })
+    convert(
+        resolve,
+        Input::Reference(*ty),
+        &mut (),
+        &|(), _| None,
+        &|(), contract| {
+            Ok(match contract {
+                Contract::Scalar(ty) => scalar_type(ty)?,
+                Contract::Resource { id, owned } => AbiType::Resource {
+                    key: perry_contract::names::canonical_type(resolve, id).index() as u32,
+                    owned,
+                },
+                Contract::Bytes => AbiType::List(Box::new(AbiType::U8)),
+                Contract::ByteStream => AbiType::ByteStream,
+                Contract::List(ty) => AbiType::List(Box::new(ty?)),
+                Contract::Option(ty) => AbiType::Option(Box::new(ty?)),
+                Contract::Result { ok, err } => AbiType::Result {
+                    ok: ok.transpose()?.map(Box::new),
+                    err: err.transpose()?.map(Box::new),
+                },
+                Contract::Tuple(items) => AbiType::Record(
+                    items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, ty)| ty.map(|ty| (format!("_{i}"), ty)))
+                        .collect::<Result<_>>()?,
+                ),
+                Contract::Record(fields) => AbiType::Record(
+                    fields
+                        .into_iter()
+                        .map(|(name, ty)| Ok((name, ty?)))
+                        .collect::<Result<_>>()?,
+                ),
+                Contract::Enum(cases) => AbiType::Enum(cases.map(str::to_owned).collect()),
+                Contract::Variant(cases) => AbiType::Variant(
+                    cases
+                        .into_iter()
+                        .map(|(name, ty)| Ok((name.to_owned(), ty.transpose()?)))
+                        .collect::<Result<_>>()?,
+                ),
+                Contract::Unsupported(kind) => {
+                    return Err(diag!(
+                        crate::codes::UNSUPPORTED_TYPE,
+                        "WIT {kind} values are not supported by the compiler yet"
+                    ));
+                }
+            })
+        },
+    )
 }
 
 fn scalar_type(ty: Type) -> Result<AbiType> {

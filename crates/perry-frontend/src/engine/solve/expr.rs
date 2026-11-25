@@ -1,5 +1,6 @@
 //! Expression, property, collection-constructor, and object-spread evaluation.
 use super::*;
+use crate::source::ConstructorSites;
 
 impl<'h, 'a> Solver<'h, 'a> {
     #[allow(clippy::too_many_arguments)]
@@ -78,7 +79,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn eval_expr(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<Ty> {
-        if let Some(record) = s.iteration.expression(expr) {
+        if let Some(record) = self.index.iteration.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(inner) => self.eval_expr(s, inner),
                 hir_compat::RecordExpr::RequireObject(inner) => {
@@ -92,13 +93,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 hir_compat::RecordExpr::Close => Ok(Ty::VOID),
             };
         }
-        if let Some(args) = self.hir.declarations.constructors.regexp(expr) {
+        if let Some(args) = self.index.expressions.regexp(expr) {
             for arg in args.operands() {
                 self.eval_expr(s, arg)?;
             }
             return Ok(self.types.named(self.ctx, "RegExp"));
         }
-        if let Some(constructor) = self.hir.declarations.constructors.collection(expr) {
+        if let Some(constructor) = self.index.expressions.collection(expr) {
             return self.eval_collection_constructor(s, expr, constructor);
         }
         if let Some(cb_ty) = self.try_eval_builtin_callback(s, expr)? {
@@ -108,7 +109,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         match expr {
             Expr::LocalGet(id) => self.eval_local_get(s, *id),
             Expr::LocalSet(id, value) => {
-                if s.iteration.is_release(expr) {
+                if self.index.iteration.is_release(expr) {
                     return Ok(Ty::VOID);
                 }
                 s.guards.assign(*id);
@@ -186,8 +187,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let ty = self.eval_expr(s, object)?;
                 if ty == Ty::BOTTOM
                     || matches!(self.types.kind(ty), TyKind::ClassInst(id)
-                    if self.hir.bodies.classes.get(self.index.classes[self.class_insts[id].class].hir_idx)
-                        .is_some_and(|class| class.id == *class_id))
+                    if self.index.class(self.class_insts[id].class).declaration.id == *class_id)
                 {
                     return Ok(ty);
                 }
@@ -475,7 +475,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .map_or(Ty::OPEN, |e| self.types.array(e)))
             }
             Expr::Object(fields) => {
-                self.eval_object_fields(s, expr, fields.iter().map(|(n, v)| (n.as_str(), v)))
+                self.eval_object_fields(s, fields.iter().map(|(n, v)| (n.as_str(), v)))
             }
             Expr::ObjectSpread { parts } => self.eval_object_spread(s, parts),
             Expr::ObjectRest {

@@ -1,7 +1,7 @@
 //! Statically typed Date construction and UTC mutation.
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn date_expression(
         &mut self,
         ctx: &mut Context,

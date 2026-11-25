@@ -1,5 +1,6 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
+use pliron::builtin::op_interfaces::SymbolOpInterface;
 
 #[derive(Clone, Copy)]
 pub(super) enum Parameter<'s> {
@@ -27,11 +28,10 @@ impl<'s> ParamSig<'s> {
 
     fn native(
         shapes: &Shapes<'_>,
-        ctx: &Context,
         ty: crate::engine::NativeParam,
         origin: Parameter<'s>,
     ) -> Result<Self> {
-        let (binding, is_never) = shapes.native_param(ctx, ty)?;
+        let (binding, is_never) = shapes.native_param(ty)?;
         Ok(Self {
             origin,
             binding,
@@ -86,6 +86,7 @@ pub(crate) fn build_module(
     locations: &mut hir_compat::Locations<'_>,
     witnesses: &[hir_compat::Witness<'_, FuncId>],
     specialization: &crate::engine::Specialization,
+    layouts: (crate::engine::types::TypeTable, perry_mir::RecordLayouts),
 ) -> Result<LoweredProgram> {
     let bodies = &specialization.bodies;
     let mut functions = Vec::new();
@@ -101,12 +102,24 @@ pub(crate) fn build_module(
     {
         bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
+    let decls = crate::shapes::Declarations::new(
+        &declarations.interfaces,
+        &declarations.type_aliases,
+        &declarations.imports,
+        bodies
+            .classes
+            .iter()
+            .map(crate::shapes::ClassShape::Instance),
+        world,
+    );
+    let (mut types, records) = layouts;
     let shapes = Shapes::new(
         module,
         declarations,
-        world,
+        &decls,
         locations,
         specialization,
+        (&mut types, records),
         index,
     );
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
@@ -156,7 +169,10 @@ pub(crate) fn build_module(
             builtins.insert(local.as_str(), builtin);
         }
     }
-    let mut signatures = HashMap::new();
+    locations.set_mir_frames(ctx, &module);
+    let mut shapes = shapes.prepare(ctx);
+    shapes.define_environments(ctx)?;
+    let mut signatures = Functions::default();
     for function in &bodies.functions {
         let display_name = locations.display_function_name(&function.name);
         if function.is_generator {
@@ -168,11 +184,10 @@ pub(crate) fn build_module(
         }
 
         let mut params = Vec::with_capacity(function.params.len());
-        if let Some(instance) = specialization.instances.signatures.get(&function.id) {
+        if let Some(instance) = &function.signature {
             if let Some(env) = instance.environment {
                 params.push(ParamSig::native(
                     &shapes,
-                    ctx,
                     crate::engine::NativeParam::Environment(env),
                     Parameter::Environment(env),
                 )?);
@@ -180,13 +195,12 @@ pub(crate) fn build_module(
             if let Some(receiver) = instance.receiver {
                 params.push(ParamSig::native(
                     &shapes,
-                    ctx,
                     crate::engine::NativeParam::Value(receiver),
                     Parameter::Receiver,
                 )?);
             }
         }
-        for (idx, param) in function.params.iter().enumerate() {
+        for (idx, &(param, solved)) in function.params.iter().enumerate() {
             if param.is_rest && idx + 1 != function.params.len() {
                 return Err(locations.annotate_caller(
                     shapes.annotate_local(
@@ -199,24 +213,21 @@ pub(crate) fn build_module(
                     &function.name,
                 ));
             }
-            let (base, is_never) =
-                shapes
-                    .parameter_binding(ctx, function, idx)
-                    .map_err(|error| {
-                        let source = declarations
-                            .locals
-                            .get(&param.id)
-                            .and_then(|span| locations.source_at(span.span.lo.0));
-                        let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
-                            format!("{}", idx + 1)
-                        } else {
-                            format!("'{}'", param.name)
-                        };
-                        let error = shapes
-                            .annotate_local(error, param.id)
-                            .with_note(format!("in parameter {label} of '{display_name}'"));
-                        locations.annotate_caller(error, &function.name)
-                    })?;
+            let (base, is_never) = shapes.param_type(solved, &param.ty).map_err(|error| {
+                let source = declarations
+                    .locals
+                    .get(&param.id)
+                    .and_then(|span| locations.source_at(span.span.lo.0));
+                let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
+                    format!("{}", idx + 1)
+                } else {
+                    format!("'{}'", param.name)
+                };
+                let error = shapes
+                    .annotate_local(error, param.id)
+                    .with_note(format!("in parameter {label} of '{display_name}'"));
+                locations.annotate_caller(error, &function.name)
+            })?;
 
             let carrier = if param.default.is_some() && !function.is_exported {
                 crate::lower::coerce::admitting(ctx, base.carrier, perry_mir::Absence::Undefined)
@@ -231,37 +242,48 @@ pub(crate) fn build_module(
                 base,
             });
         }
-        let (result, returns_never) = shapes.function_result(ctx, function).map_err(|error| {
-            let error = error
-                .with_fallback_span(locations.function_span(&function.name))
-                .with_note(format!("in return type of '{display_name}'"));
+        let (result, returns_never) = shapes.function_result(function).map_err(|error| {
+            let origin = locations.function_span(&function.name);
+            let declaration = locations.declaration_span(&function.name);
+            let note = format!("in return type of '{display_name}'");
+            let error = if let Some(span) = declaration.filter(|span| Some(span) != origin.as_ref())
+            {
+                error
+                    .with_fallback_span(origin.or_else(|| Some(span.clone())))
+                    .with_spanned_note(span, note)
+            } else {
+                error.with_fallback_span(origin).with_note(note)
+            };
             locations.annotate_caller(error, &function.name)
         })?;
         signatures.insert(
             function.id,
-            Signature {
-                inline: (specialization
-                    .instances
-                    .inline_callbacks
-                    .contains_key(&function.id)
-                    || function
-                        .captures
-                        .iter()
-                        .any(|id| !shapes.global_ids.contains(id)))
-                .then_some(function),
-                is_async: function.is_async,
-                await_initialization: function.is_exported
-                    && function.is_async
-                    && declarations.has_top_level_await,
-                top_level: false,
-                name: identifier(&function.name)?,
-                params,
-                returns_never,
-                result,
-            },
+            Callee::Source(
+                function,
+                Signature {
+                    inline: (function
+                        .signature
+                        .as_ref()
+                        .is_some_and(|s| s.inline.is_some())
+                        || function
+                            .captures
+                            .iter()
+                            .any(|id| !shapes.globals.contains_key(id)))
+                    .then_some(function),
+                    is_async: function.is_async,
+                    await_initialization: function.is_exported
+                        && function.is_async
+                        && declarations.has_top_level_await,
+                    top_level: false,
+                    name: identifier(&function.name)?,
+                    params,
+                    returns_never,
+                    result,
+                },
+            ),
         );
     }
-    for (&id, function) in &specialization.instances.functions {
+    for &(id, ref function) in &bodies.native {
         let annotate = |err: Diagnostic| {
             locations.annotate_caller(
                 err.with_fallback_span(locations.function_span(&function.name)),
@@ -271,30 +293,47 @@ pub(crate) fn build_module(
         let params = function
             .params
             .iter()
-            .map(|param| ParamSig::native(&shapes, ctx, *param, Parameter::Native))
+            .map(|param| ParamSig::native(&shapes, *param, Parameter::Native))
             .collect::<Result<_>>()
             .map_err(&annotate)?;
         let result = shapes
-            .solved_result(ctx, function.result, function.is_async)
+            .solved_result(function.result, function.is_async)
             .map_err(annotate)?;
         signatures.insert(
             id,
-            Signature {
-                inline: None,
-                name: identifier(&function.name)?,
-                is_async: function.is_async,
-                await_initialization: false,
-                top_level: false,
-                params,
-                returns_never: false,
-                result,
-            },
+            Callee::Native(
+                function,
+                Signature {
+                    inline: None,
+                    name: identifier(&function.name)?,
+                    is_async: function.is_async,
+                    await_initialization: false,
+                    top_level: false,
+                    params,
+                    returns_never: false,
+                    result,
+                },
+            ),
         );
+    }
+    for class in bodies.classes.iter() {
+        for function in class
+            .methods
+            .iter()
+            .chain(&class.static_methods)
+            .chain(&class.constructor)
+            .chain(class.getters.iter().chain(&class.setters).map(|(_, f)| f))
+        {
+            signatures.insert(function.id, Callee::Member(&class.name, function));
+        }
     }
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run (calls lower it to nothing); without other statements there is no main
     // function.
-    let has_init = !shapes.static_fields.is_empty()
+    let has_init = bodies
+        .classes
+        .iter()
+        .any(|class| !class.static_fields.is_empty())
         || bodies.init.iter().any(|statement| {
             !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
                 if hir_compat::is_import_initializer(callee))
@@ -342,9 +381,9 @@ pub(crate) fn build_module(
             let func = FunctionBuilder::lower_body(
                 ctx,
                 signature,
-                builder::Body::Statements(None, body),
+                builder::Body::Statements(BodyOwner::Initializer, body),
                 &signatures,
-                &shapes,
+                &mut shapes,
                 &builtins,
             )
             .map_err(|err| err.with_internal_context("lowering top-level statements"))?;
@@ -360,22 +399,18 @@ pub(crate) fn build_module(
     for function in &bodies.functions {
         let signature = signatures
             .get(&function.id)
-            .ok_or_else(|| locations.missing_function(function.id))?;
+            .ok_or_else(|| internal!("unknown function {}", function.id))?;
         if signature.inline.is_some() {
             continue;
         }
-        let func = FunctionBuilder::lower(ctx, function, &signatures, &shapes, &builtins).map_err(
-            |error| {
+        let func = FunctionBuilder::lower(ctx, function, &signatures, &mut shapes, &builtins)
+            .map_err(|error| {
                 let error = error
                     .with_fallback_span(locations.function_span(&function.name))
                     .with_internal_context(format!("lowering function {}", function.name));
                 locations.annotate_caller(error, &function.name)
-            },
-        )?;
-        if let Some(span) = locations.function_span(&function.name) {
-            perry_mir::set_source_span(ctx, &func, &span);
-        }
-        perry_mir::set_caller_notes(ctx, &func, &locations.caller_notes(&function.name));
+            })?;
+        locations.set_mir_location(ctx, &func, &function.name);
         if let Some((wit_params, wit_results)) = signature.wit_constraints() {
             perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);
         }
@@ -394,15 +429,17 @@ pub(crate) fn build_module(
         }
         module.append_operation(ctx, func.get_operation(), 0);
     }
-    for (id, function) in &specialization.instances.functions {
-        let signature = &signatures[id];
+    for (id, function) in &bodies.native {
+        let signature = signatures
+            .get(id)
+            .ok_or_else(|| internal!("unknown function {}", *id))?;
         let name = signature.name.as_ref();
         let func = FunctionBuilder::lower_body(
             ctx,
             signature,
             builder::Body::Native(&function.body),
             &signatures,
-            &shapes,
+            &mut shapes,
             &builtins,
         )
         .map_err(|error| {
@@ -411,13 +448,10 @@ pub(crate) fn build_module(
                 name,
             )
         })?;
-        if let Some(span) = locations.function_span(name) {
-            perry_mir::set_source_span(ctx, &func, &span);
-        }
         if function.is_async {
             set_async(ctx, &func);
         }
-        perry_mir::set_caller_notes(ctx, &func, &locations.caller_notes(name));
+        locations.set_mir_location(ctx, &func, name);
         module.append_operation(ctx, func.get_operation(), 0);
     }
     let exports = witnesses
@@ -431,14 +465,20 @@ pub(crate) fn build_module(
                     if witness.is_destructor {
                         ExportTarget::Destructor(f, witness.name.clone())
                     } else {
+                        let symbol = f.get_symbol_name(ctx);
+                        let name = locations.display_function_name(symbol.as_ref());
                         ExportTarget::Function(
                             f,
                             witness
                                 .signature
                                 .iter()
                                 .flat_map(|s| &s.annotations)
-                                .map(|span| span.and_then(|s| locations.span(s)))
+                                .map(|span| {
+                                    span.and_then(|s| locations.span(s))
+                                        .or_else(|| locations.declaration_span(symbol.as_ref()))
+                                })
                                 .collect(),
+                            (name != symbol.as_ref()).then(|| name.to_owned()),
                         )
                     }
                 })

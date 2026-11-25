@@ -3,7 +3,7 @@ mod records;
 
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn set_byte_index(
         &mut self,
         ctx: &mut Context,
@@ -75,6 +75,26 @@ impl<'s> FunctionBuilder<'s> {
         let value = self.fit(ctx, value, element)?;
         self.emit(ctx, |ctx| ArraySetOp::new(ctx, array, index, value));
         Ok(value)
+    }
+
+    pub(super) fn capture_field(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        slot: usize,
+    ) -> Result<Value> {
+        let record = perry_mir::typed::<RecordType>(ctx, value.get_type(ctx))
+            .ok_or_else(|| internal!("expected a capture record"))?;
+        let name = record
+            .deref(ctx)
+            .fields()
+            .to_diag(ctx)?
+            .get(slot)
+            .ok_or_else(|| internal!("missing capture slot {slot}"))?
+            .0
+            .clone();
+        let op = FieldGetOp::new(ctx, value, name).to_diag(ctx)?;
+        self.field_read(ctx, &op)
     }
 
     pub(super) fn record_field(
@@ -170,7 +190,11 @@ impl<'s> FunctionBuilder<'s> {
             names.len() == args.len(),
             "object literal arity differs from its shape"
         );
-        let fields: Vec<(&str, &'s Expr)> = names.iter().copied().zip(args).collect();
+        let fields: Vec<(&str, &'s Expr)> = names
+            .iter()
+            .map(|field| field.name.as_str())
+            .zip(args)
+            .collect();
         self.record_literal(ctx, &fields, expected, RecordKind::Object)
     }
 

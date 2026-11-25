@@ -15,7 +15,7 @@ pub(super) enum Equality {
     SameValueZero,
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn same_value(
         &mut self,
         ctx: &mut Context,

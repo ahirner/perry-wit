@@ -96,7 +96,6 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
             self.prepare_layouts(cap_ty)?;
             fields.push(EnvironmentField::Capture {
                 local: cap_id,
-                name: format!("c{}", fields.len()),
                 ty: cap_ty,
                 cell: self.is_boxed_local(cap_id).then(|| self.cell_init(cap_id)),
             });
@@ -107,10 +106,19 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
         Ok(fields)
     }
 
-    pub(super) fn environment(&mut self, ident: FuncIdentity) -> Result<()> {
-        if !self.environments.insert(ident) {
-            return Ok(());
+    pub(super) fn environment(
+        &mut self,
+        ident: FuncIdentity,
+    ) -> Result<crate::engine::types::EnvId> {
+        use perry_mir::PlironResultExt;
+        if let Some(id) = self.plans.environments.id(ident) {
+            return Ok(id);
         }
+        let (ctx, records) = &mut self.layouts;
+        let record = records
+            .fresh(ctx, perry_mir::RecordKind::Object, None)
+            .to_diag(ctx)?;
+        let id = self.plans.environments.reserve(ident, record);
         let fields = match self.index.view(ident.template).kind {
             TemplateKind::PromiseResolve(site) | TemplateKind::PromiseReject(site) => {
                 let loc =
@@ -121,8 +129,8 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
             }
             _ => self.capture_fields(ident)?,
         };
-        self.plans.environments.insert(ident, fields);
-        Ok(())
+        self.plans.environments.define(id, fields);
+        Ok(id)
     }
 
     fn collect_env_idents_in(&self, ty: Ty, seen: &mut BitSet, out: &mut Vec<FuncIdentity>) {
@@ -131,7 +139,9 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
         }
         match self.types.kind(ty) {
             TyKind::Func(ident) => {
-                if self.is_env_template(ident.template) && !self.environments.contains(&ident) {
+                if self.is_env_template(ident.template)
+                    && self.plans.environments.id(ident).is_none()
+                {
                     out.push(ident);
                 }
             }
@@ -224,38 +234,14 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
         Ok(next)
     }
 
-    pub(super) fn callback_binding(
-        &mut self,
-        target: FuncId,
-        operand: crate::engine::CallbackOperand,
-        inputs: &[Ty],
-    ) -> Result<crate::engine::CallbackBinding> {
-        let mut params = Vec::with_capacity(inputs.len());
-        for &ty in inputs {
-            self.prepare_layouts(ty)?;
-            params.push((!self.erases_argument(ty)).then_some(ty));
-        }
-        Ok(crate::engine::CallbackBinding {
-            call: crate::engine::NativeCallback::Call {
-                target,
-                operand,
-                receiver: false,
-            },
-            params,
-        })
-    }
-    pub(super) fn erases_argument(&self, ty: Ty) -> bool {
-        matches!(self.types.kind(ty), TyKind::Func(id) if !self.is_env_template(id.template))
-    }
-
     pub(super) fn helper_function(&mut self, id: HelperId) -> Result<FuncId> {
-        if let Some(fid) = self.helper_slots[id] {
+        if let Some(fid) = self.plans.helpers[id] {
             return Ok(fid);
         }
         let entry = self.solved.helpers[id];
         let (spec, byte_offset) = (entry.spec, entry.byte_offset);
         let fid = self.fresh_func_id()?;
-        self.helper_slots[id] = Some(fid);
+        self.plans.helpers[id] = Some(fid);
         match spec {
             HelperSpec::Dispatcher {
                 result,
@@ -266,14 +252,13 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
             } => {
                 let dispatcher =
                     self.build_dispatcher(fid, callee_ty, arms, arg_tys, recv_ty, result)?;
-                self.plans.functions.insert(fid, dispatcher);
+                self.native.push((fid, dispatcher));
                 if hir_compat::has_source_offset(byte_offset) {
-                    self.instantiations.push((
-                        format!("__dispatch_{fid}"),
-                        "dispatch".to_owned(),
-                        byte_offset,
-                        None,
-                    ));
+                    self.instantiations
+                        .push(crate::engine::InstantiationOrigin::Dispatch {
+                            function: fid,
+                            offset: byte_offset,
+                        });
                 }
             }
             HelperSpec::PromiseReaction {
@@ -293,7 +278,7 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
                     on_rejected,
                     ret_ty,
                 )?;
-                self.plans.functions.insert(fid, function);
+                self.native.push((fid, function));
             }
             HelperSpec::TimerRunner {
                 kind,
@@ -304,7 +289,7 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
             } => {
                 let runner =
                     self.timer_runner(fid, kind, timer_ty, cb_call, cb_ty, extra_arg_tys)?;
-                self.plans.functions.insert(fid, runner);
+                self.native.push((fid, runner));
             }
         }
         Ok(fid)
@@ -322,7 +307,11 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
         let args = self.types.tuple_slice(args);
         let mut params = vec![callee];
         params.extend(receiver);
-        params.extend(args.iter().copied().filter(|&ty| !self.erases_argument(ty)));
+        params.extend(args.iter().copied().filter(|&ty| {
+            !self
+                .types
+                .erases_argument(ty, &self.solved.escaping_env_templates)
+        }));
         for &ty in &params {
             self.prepare_layouts(ty)?;
         }
@@ -356,7 +345,11 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
                 arguments: args
                     .iter()
                     .take(count)
-                    .filter(|&&ty| !self.erases_argument(ty))
+                    .filter(|&&ty| {
+                        !self
+                            .types
+                            .erases_argument(ty, &self.solved.escaping_env_templates)
+                    })
                     .count(),
             });
         }

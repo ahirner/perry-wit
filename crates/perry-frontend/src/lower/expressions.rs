@@ -2,11 +2,12 @@
 use super::*;
 use crate::lower::methods::Call;
 use crate::lower::{builtins::BytesCreation, json::JSON_CALLBACKS};
+use crate::source::ConstructorSites;
 
 mod instances;
 mod members;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn expression(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         self.expression_with(ctx, expr, None)
     }
@@ -19,17 +20,8 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        if let Some(site) = self
-            .shapes
-            .specialization
-            .instances
-            .site(self.local_owner, expr)
-        {
-            return self
-                .instance_operand(ctx, expr, expected, site, true)?
-                .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"));
-        }
-        self.source_expression(ctx, expr, expected)
+        self.instance_operand(ctx, expr, expected, true)?
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))
     }
 
     pub(super) fn source_expression(
@@ -46,7 +38,7 @@ impl<'s> FunctionBuilder<'s> {
                 value
             });
         }
-        if let Some(record) = self.iteration.expression(expr) {
+        if let Some(record) = self.shapes.specialization.iteration.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(value) => self.expression_with(ctx, value, expected),
                 hir_compat::RecordExpr::RequireObject(value) => {
@@ -82,10 +74,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             return self.expression_with(ctx, last, expected);
         }
-        if let Some(args) = self.shapes.source.constructors.regexp(expr) {
-            let strings = &self.shapes.specialization.strings;
+        if let Some(args) = self.shapes.specialization.instances.regexp(expr) {
+            let facts = self.shapes.specialization;
             let text = |arg: Option<&Expr>| match arg {
-                Some(arg) => strings.regexp_operand(arg).ok_or_else(|| {
+                Some(arg) => facts.regexp_operand(arg).ok_or_else(|| {
                     unsupported!("RegExp construction is unsupported; use a bounded regex literal")
                 }),
                 None => Ok(String::new()),
@@ -124,6 +116,9 @@ impl<'s> FunctionBuilder<'s> {
             return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
         }
         let value = match expr {
+            Expr::PrivateGuard {
+                kind: 0, object, ..
+            } => self.expression_with(ctx, object, expected)?,
             Expr::Closure { func_id: id, .. } | Expr::FuncRef(id)
                 if let Some(closure) = self
                     .shapes
@@ -174,7 +169,7 @@ impl<'s> FunctionBuilder<'s> {
                 .local_set(ctx, *id, value)
                 .map_err(|error| self.shapes.annotate_local(error, *id))?,
             Expr::Update { id, op, prefix } => {
-                self.iteration.advance(*id);
+                self.cursors.advance(*id);
                 self.update(ctx, *id, op, *prefix)
                     .map_err(|error| self.shapes.annotate_local(error, *id))?
             }
@@ -351,7 +346,7 @@ impl<'s> FunctionBuilder<'s> {
                 let target = if matches!(ty, HirType::Any | HirType::Unknown) {
                     expected.unwrap_or_else(|| JsonType::get(ctx).into())
                 } else {
-                    self.shapes.source_binding(ctx, ty)?.expected_type(ctx)
+                    self.shapes.source_binding(ty)?.expected_type(ctx)
                 };
                 let parsed = self.parse_json_text(ctx, text, Some(target))?;
                 let decoded = self.fit(ctx, parsed, target)?;
@@ -510,16 +505,9 @@ impl<'s> FunctionBuilder<'s> {
                 args,
                 byte_offset,
                 ..
-            } if self
-                .shapes
-                .decls
-                .classes
-                .named
-                .contains_key(class_name.as_str()) =>
-            {
-                self.class_new(ctx, class_name, args)
-                    .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?
-            }
+            } if let Some(class) = self.shapes.instance_class(class_name) => self
+                .class_new(ctx, class, args)
+                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
                 class_name,
                 args,
@@ -698,13 +686,11 @@ impl<'s> FunctionBuilder<'s> {
         if writes.carrier.deref(ctx).is::<JsonType>()
             && local.cell.is_none()
             && self.shapes.deferred_binding(id)
-            && self
-                .shapes
-                .source
-                .locals
-                .get(&id)
-                .map(|local| local.annotation)
-                != Some(crate::source::BindingAnnotation::Explicit)
+            && self.shapes.source.locals.get(&id).is_none_or(|local| {
+                local
+                    .flags
+                    .contains(crate::engine::types::LocalFlags::INFERRED)
+            })
             && !perry_mir::JsonSchema::supports_boxing(ctx, assigned.get_type(ctx))
         {
             let name = self.shapes.local_name(id).unwrap_or("<unknown>");

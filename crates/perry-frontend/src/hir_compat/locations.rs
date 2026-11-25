@@ -1,13 +1,13 @@
 //! Original source coordinates for merged AST and HIR declarations.
-use perry_hir::{ir::Expr, types::FuncId};
+use perry_hir::ir::Expr;
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{Diagnostic, Note, Result, SourceSpan, codes};
+use perry_wit_diagnostics::{Diagnostic, Result, SourceSpan, codes};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
 use swc_common::{Span, Spanned};
-use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+use swc_ecma_visit::{Visit, VisitWith};
 
 const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
@@ -58,10 +58,10 @@ struct CallerOrigin {
 enum CallSite {
     Instantiation {
         template: String,
-        note: Option<Note>,
+        offset: u32,
     },
     Import {
-        note: Note,
+        offset: u32,
         priority: crate::source::CallerKind,
     },
 }
@@ -76,8 +76,8 @@ pub(crate) fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-#[derive(Clone, Copy)]
 struct FunctionInfo {
+    label: Option<String>,
     span: Span,
     explicit_return: bool,
 }
@@ -97,51 +97,37 @@ pub(crate) struct Locations<'s> {
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
-    pub(crate) generic_templates: Vec<(FuncId, String)>,
     origins: HashMap<String, CallerOrigin>,
 }
 
 impl<'s> Locations<'s> {
-    /// Preserve operator spans and non-null assertions as inert sequences before HIR erases them.
-    pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module, spans: &HashSet<Span>) {
-        struct Preserver<'a>(&'a mut Vec<Span>, &'a HashSet<Span>);
-        impl VisitMut for Preserver<'_> {
-            // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
-            fn visit_mut_ts_enum_decl(&mut self, _: &mut ast::TsEnumDecl) {}
-
-            fn visit_mut_expr(&mut self, expr: &mut ast::Expr) {
-                expr.visit_mut_children_with(self);
-                let span = expr.span();
-                let token = if matches!(expr, ast::Expr::TsNonNull(_)) {
-                    NON_NULL.to_owned()
-                } else if self.1.contains(&span)
-                    || matches!(expr, ast::Expr::Bin(binary) if matches!(
-                        binary.op,
-                        ast::BinaryOp::Exp | ast::BinaryOp::BitAnd | ast::BinaryOp::BitOr | ast::BinaryOp::BitXor
-                        | ast::BinaryOp::LShift | ast::BinaryOp::RShift | ast::BinaryOp::ZeroFillRShift
-                    ))
-                {
-                    let token = format!("{OPERATOR}{}", self.0.len());
-                    self.0.push(span);
-                    token
-                } else {
-                    return;
-                };
-                let token = ast::Expr::Lit(ast::Lit::Str(ast::Str {
-                    span,
-                    value: token.into(),
-                    raw: None,
-                }));
-                let original = std::mem::replace(expr, ast::Expr::Invalid(ast::Invalid { span }));
-                *expr = ast::Expr::Seq(ast::SeqExpr {
-                    span,
-                    exprs: vec![Box::new(token), Box::new(original)],
-                });
-            }
+    pub(crate) fn preserve_expression(&mut self, expr: &mut ast::Expr) {
+        use swc_common::util::take::Take;
+        let span = expr.span();
+        let token = if matches!(expr, ast::Expr::TsNonNull(_)) {
+            NON_NULL.to_owned()
+        } else {
+            let token = format!("{OPERATOR}{}", self.operators.len());
+            self.operators.push(span);
+            token
+        };
+        let original = expr.take();
+        *expr = ast::SeqExpr {
+            span,
+            exprs: vec![
+                Box::new(
+                    ast::Lit::Str(ast::Str {
+                        span,
+                        value: token.into(),
+                        raw: None,
+                    })
+                    .into(),
+                ),
+                Box::new(original),
+            ],
         }
-        module.visit_mut_with(&mut Preserver(&mut self.operators, spans));
+        .into();
     }
-
     pub(crate) fn operator_raw_span(&self, parts: &[Expr]) -> Option<Span> {
         let [Expr::String(token), _] = parts else {
             return None;
@@ -192,7 +178,19 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn display_function_name<'a>(&'a self, name: &'a str) -> &'a str {
-        display_name(self.template_name(name))
+        let name = self.template_name(name);
+        self.functions
+            .get(name)
+            .and_then(|info| info.label.as_deref())
+            .unwrap_or_else(|| display_name(name))
+    }
+
+    pub(super) fn register_generated(&mut self, symbol: String, span: Span, label: String) {
+        self.functions.entry(symbol).or_insert(FunctionInfo {
+            span,
+            label: Some(label),
+            explicit_return: false,
+        });
     }
 
     pub(crate) fn record_instantiation(
@@ -202,16 +200,13 @@ impl<'s> Locations<'s> {
         call_byte_offset: u32,
         caller: Option<String>,
     ) {
-        let note = self.call_span(call_byte_offset).map(|span| {
-            Note::spanned(
-                span,
-                format!("while instantiating '{}'", display_name(&template)),
-            )
-        });
         self.origins.insert(
             instance,
             CallerOrigin {
-                site: CallSite::Instantiation { template, note },
+                site: CallSite::Instantiation {
+                    template,
+                    offset: call_byte_offset,
+                },
                 caller,
             },
         );
@@ -240,50 +235,94 @@ impl<'s> Locations<'s> {
         {
             return;
         }
-        let Some(declaration) = self.functions.get(callee) else {
+        let Some(declaration) = self
+            .functions
+            .get(callee)
+            .filter(|info| info.label.is_none())
+        else {
             return;
         };
         if let (Some(call), Some(target)) =
             (self.file_at(offset), self.file_at(declaration.span.lo.0))
             && call.path != target.path
-            && let Some(span) = self.call_span(offset)
         {
-            let note = Note::spanned(
-                span,
-                format!("called from here ('{}')", display_name(callee)),
-            );
             self.origins.insert(
                 callee.to_owned(),
                 CallerOrigin {
-                    site: CallSite::Import { priority, note },
+                    site: CallSite::Import { priority, offset },
                     caller: caller.map(str::to_owned),
                 },
             );
         }
     }
 
-    pub(crate) fn caller_notes(&self, function_name: &str) -> Vec<Note> {
+    fn caller_site<'a>(
+        &'a self,
+        name: &'a str,
+        site: &'a CallSite,
+    ) -> (perry_mir::CallerRelation, &'a str, Option<SourceSpan>) {
+        let (kind, label, offset) = match site {
+            CallSite::Instantiation { template, offset } => (
+                perry_mir::CallerRelation::Instantiation,
+                template.as_str(),
+                *offset,
+            ),
+            CallSite::Import { offset, .. } => (perry_mir::CallerRelation::Import, name, *offset),
+        };
+        (
+            kind,
+            self.display_function_name(label),
+            self.call_span(offset),
+        )
+    }
+
+    pub(crate) fn set_mir_frames(
+        &self,
+        ctx: &mut pliron::context::Context,
+        module: &pliron::builtin::ops::ModuleOp,
+    ) {
+        perry_mir::set_caller_frames(
+            ctx,
+            module,
+            self.origins
+                .iter()
+                .map(|(name, origin)| {
+                    let (kind, label, span) = self.caller_site(name, &origin.site);
+                    perry_mir::CallerFrame::new(name, origin.caller.as_deref(), kind, label, span)
+                })
+                .collect(),
+        );
+    }
+
+    pub(crate) fn set_mir_location(
+        &self,
+        ctx: &mut pliron::context::Context,
+        function: &pliron::builtin::ops::FuncOp,
+        name: &str,
+    ) {
+        if let Some(span) = self.function_span(name) {
+            perry_mir::set_source_span(ctx, function, &span);
+        }
+        if self.origins.contains_key(name) {
+            perry_mir::set_caller_origin(ctx, function, name);
+        }
+    }
+
+    pub(crate) fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
         let mut notes = Vec::new();
         let mut seen = HashSet::new();
         let mut current = function_name;
         while let Some(origin) = self.origins.get(current)
             && seen.insert(current)
         {
-            let note = match &origin.site {
-                CallSite::Instantiation { note, .. } => note.as_ref(),
-                CallSite::Import { note, .. } => Some(note),
-            };
-            notes.extend(note.cloned());
+            let (kind, label, span) = self.caller_site(current, &origin.site);
+            notes.extend(span.map(|span| kind.note(label, span)));
             let Some(caller) = origin.caller.as_deref() else {
                 break;
             };
             current = caller;
         }
-        notes
-    }
-
-    pub(crate) fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
-        error.with_notes(self.caller_notes(function_name))
+        error.with_notes(notes)
     }
 
     pub(crate) fn has_explicit_return(&self, name: &str) -> bool {
@@ -292,15 +331,22 @@ impl<'s> Locations<'s> {
             .is_some_and(|info| info.explicit_return)
     }
 
-    pub(crate) fn function_span(&self, name: &str) -> Option<SourceSpan> {
+    pub(crate) fn declaration_span(&self, name: &str) -> Option<SourceSpan> {
         self.functions
             .get(self.template_name(name))
             .and_then(|info| self.span(info.span))
+            .or_else(|| self.function_span(name))
+    }
+
+    pub(crate) fn function_span(&self, name: &str) -> Option<SourceSpan> {
+        self.functions
+            .get(self.template_name(name))
+            .filter(|info| info.label.is_none())
+            .and_then(|info| self.span(info.span))
             .or_else(|| match self.origins.get(name)?.site {
-                CallSite::Instantiation { ref note, .. } => {
-                    note.as_ref().and_then(Note::span).cloned()
+                CallSite::Instantiation { offset, .. } | CallSite::Import { offset, .. } => {
+                    self.call_span(offset)
                 }
-                CallSite::Import { ref note, .. } => note.span().cloned(),
             })
     }
 
@@ -345,21 +391,6 @@ impl<'s> Locations<'s> {
             .get(&byte_offset)
             .and_then(|span| self.span(*span))
             .or_else(|| self.call_span(byte_offset))
-    }
-
-    pub(crate) fn missing_function(&self, id: FuncId) -> Diagnostic {
-        if let Some((_, name)) = self
-            .generic_templates
-            .iter()
-            .find(|(template, _)| *template == id)
-        {
-            Diagnostic::unsupported(format!(
-                "generic function '{}' requires a direct call for specialization",
-                display_name(name)
-            ))
-        } else {
-            Diagnostic::internal("call to an unknown function")
-        }
     }
 
     pub(crate) fn type_span(&self, name: &str) -> Option<SourceSpan> {
@@ -412,6 +443,7 @@ impl<'s> Locations<'s> {
                 self.locations.functions.insert(
                     name,
                     FunctionInfo {
+                        label: None,
                         span: function.function.span,
                         explicit_return: function.function.return_type.is_some(),
                     },
@@ -422,10 +454,12 @@ impl<'s> Locations<'s> {
                 if let (ast::Pat::Ident(ident), Some(init)) = (&decl.name, &decl.init) {
                     let info = match &**init {
                         ast::Expr::Arrow(arrow) => Some(FunctionInfo {
+                            label: None,
                             span: arrow.span,
                             explicit_return: arrow.return_type.is_some(),
                         }),
                         ast::Expr::Fn(fn_expr) => Some(FunctionInfo {
+                            label: None,
                             span: fn_expr.function.span,
                             explicit_return: fn_expr.function.return_type.is_some(),
                         }),
@@ -497,6 +531,7 @@ impl<'s> Locations<'s> {
                     self.locations.functions.insert(
                         format!("{class_name}::constructor"),
                         FunctionInfo {
+                            label: None,
                             span: ctor.span,
                             explicit_return: false,
                         },
@@ -520,6 +555,7 @@ impl<'s> Locations<'s> {
                         self.locations.functions.insert(
                             format!("{class_name}::{prefix}{name}"),
                             FunctionInfo {
+                                label: None,
                                 span: method.function.span,
                                 explicit_return: method.function.return_type.is_some(),
                             },

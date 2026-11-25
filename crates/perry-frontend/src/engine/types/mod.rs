@@ -103,6 +103,10 @@ impl TypeTable {
         ty
     }
 
+    pub(crate) fn ids(&self) -> impl Iterator<Item = Ty> + use<> {
+        self.kinds.ids()
+    }
+
     pub(crate) fn kind(&self, ty: Ty) -> TyKind {
         self.kinds[ty]
     }
@@ -611,6 +615,10 @@ impl TypeTable {
             self.kind(ty),
             TyKind::Func(id) if id.capture_owner.is_none() && capture_free.contains(id.template.index())
         )
+    }
+
+    pub(crate) fn erases_argument(&self, ty: Ty, escaping_env: &BitSet) -> bool {
+        matches!(self.kind(ty), TyKind::Func(id) if !escaping_env.contains(id.template.index()))
     }
 
     pub(crate) fn is_env_func(&self, ty: Ty, escaping_env: &BitSet) -> bool {

@@ -15,7 +15,7 @@ pub(super) struct ReturnFrame {
     slot: Option<Value>,
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn with_inline_scope<T>(
         &mut self,
         ctx: &mut Context,
@@ -24,7 +24,7 @@ impl<'s> FunctionBuilder<'s> {
         lower: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
     ) -> Result<T> {
         let locals = self.locals.scope();
-        let saved_owner = self.local_owner.replace(owner);
+        let saved_owner = std::mem::replace(&mut self.local_owner, BodyOwner::Function(owner));
         let saved_this = std::mem::replace(&mut self.this_slot, this_slot);
         let guards = self.variant_guards.depth();
         let finallies = std::mem::take(&mut self.finallies);
@@ -50,7 +50,7 @@ impl<'s> FunctionBuilder<'s> {
             exprs,
             |id| {
                 if let Some(Expr::Closure { params, body, .. }) =
-                    self.shapes.lexical_functions.get(&id)
+                    self.shapes.specialization.lexical.closure(id)
                 {
                     return Some(crate::source::authored_body(params, body));
                 }

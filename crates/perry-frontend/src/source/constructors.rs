@@ -3,7 +3,7 @@ use crate::hir_compat::Locations;
 use perry_hir::{ir::Expr, types::Type};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag, unsupported};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use swc_common::{BytePos, Span, SyntaxContext, util::take::Take};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
@@ -19,11 +19,14 @@ pub(crate) struct Constructor<'a> {
     pub(crate) init: Option<&'a Expr>,
 }
 
-#[derive(Default)]
-pub(crate) struct Constructors {
-    collections: HashMap<Span, CollectionKind>,
-    regexp_calls: HashSet<Span>,
+#[derive(Clone, Copy)]
+pub(crate) enum BuiltinConstructor {
+    Collection(CollectionKind),
+    RegExp,
 }
+
+#[derive(Default)]
+pub(crate) struct Constructors(HashMap<Span, BuiltinConstructor>);
 
 #[derive(Clone, Copy)]
 pub(crate) struct RegExpArguments<'a> {
@@ -38,22 +41,18 @@ impl<'a> RegExpArguments<'a> {
     }
 }
 
-impl Constructors {
-    pub(crate) fn regexp<'e>(&self, expr: &'e Expr) -> Option<RegExpArguments<'e>> {
+pub(crate) trait ConstructorSites {
+    fn constructor(&self, expr: &Expr) -> Option<BuiltinConstructor>;
+
+    fn regexp<'e>(&self, expr: &'e Expr) -> Option<RegExpArguments<'e>> {
         match expr {
             Expr::RegExpDynamic { pattern, flags, .. } => Some(RegExpArguments {
                 pattern: Some(pattern),
                 flags: flags.as_deref(),
                 extra: &[],
             }),
-            Expr::Call {
-                args,
-                byte_offset,
-                byte_end,
-                ..
-            } if self
-                .regexp_calls
-                .contains(&Span::new(BytePos(*byte_offset), BytePos(*byte_end))) =>
+            Expr::Call { args, .. }
+                if matches!(self.constructor(expr), Some(BuiltinConstructor::RegExp)) =>
             {
                 Some(RegExpArguments {
                     pattern: args.first(),
@@ -65,10 +64,29 @@ impl Constructors {
         }
     }
 
-    pub(crate) fn collection<'e>(&self, expr: &'e Expr) -> Option<Constructor<'e>> {
+    fn collection<'e>(&self, expr: &'e Expr) -> Option<Constructor<'e>> {
         let Expr::Call {
-            args,
-            type_args,
+            args, type_args, ..
+        } = expr
+        else {
+            return None;
+        };
+        let BuiltinConstructor::Collection(kind) = self.constructor(expr)? else {
+            return None;
+        };
+        Some(Constructor {
+            kind,
+            types: type_args,
+            init: args
+                .first()
+                .filter(|arg| !matches!(arg, Expr::Null | Expr::Undefined)),
+        })
+    }
+}
+
+impl ConstructorSites for Constructors {
+    fn constructor(&self, expr: &Expr) -> Option<BuiltinConstructor> {
+        let Expr::Call {
             byte_offset,
             byte_end,
             ..
@@ -76,16 +94,13 @@ impl Constructors {
         else {
             return None;
         };
-        let span = Span::new(BytePos(*byte_offset), BytePos(*byte_end));
-        Some(Constructor {
-            kind: *self.collections.get(&span)?,
-            types: type_args,
-            init: args
-                .first()
-                .filter(|arg| !matches!(arg, Expr::Null | Expr::Undefined)),
-        })
+        self.0
+            .get(&Span::new(BytePos(*byte_offset), BytePos(*byte_end)))
+            .copied()
     }
+}
 
+impl Constructors {
     pub(crate) fn bind(
         module: &mut ast::Module,
         unresolved: SyntaxContext,
@@ -105,7 +120,7 @@ impl Constructors {
                     && let ast::Callee::Expr(callee) = &call.callee
                     && matches!(callee.unwrap_parens(), ast::Expr::Ident(name) if name.ctxt == self.unresolved && name.sym == "RegExp")
                 {
-                    self.sites.regexp_calls.insert(call.span);
+                    self.sites.0.insert(call.span, BuiltinConstructor::RegExp);
                 }
                 let ast::Expr::New(new) = expr else { return };
                 let ast::Expr::Ident(name) = new.callee.unwrap_parens() else {
@@ -121,7 +136,7 @@ impl Constructors {
                 {
                     // Perry keeps all arguments on ordinary calls. Its new-RegExp form
                     // drops operands after the flags and loses the zero-argument builtin.
-                    self.sites.regexp_calls.insert(new.span);
+                    self.sites.0.insert(new.span, BuiltinConstructor::RegExp);
                     *expr = constructor_call(new);
                     return;
                 }
@@ -152,7 +167,9 @@ impl Constructors {
                     self.diagnostic.get_or_insert((new.span, problem));
                     return;
                 }
-                self.sites.collections.insert(new.span, kind);
+                self.sites
+                    .0
+                    .insert(new.span, BuiltinConstructor::Collection(kind));
                 // Perry retains generic arguments and both endpoints on calls. The source
                 // site supplies constructor identity even when a lexical class shadows a global.
                 *expr = constructor_call(new);

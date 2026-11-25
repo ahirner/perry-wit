@@ -100,8 +100,7 @@ pub(crate) fn compile(
     modules: &std::collections::BTreeMap<String, String>,
     types: &Resolve,
     types_world: WorldId,
-    componentize: bool,
-    memory_checks: bool,
+    options: super::WorldOptions,
 ) -> Result<Compiled> {
     let asynchronous = source.contains("async function handle");
     let adapter = ADAPTER.replace("AWAIT ", if asynchronous { "await " } else { "" });
@@ -113,6 +112,7 @@ pub(crate) fn compile(
         file_name,
         modules,
         &perry_frontend::wit::WorldTypes::new(types, Some(types_world)),
+        options.limits,
     )?;
     let (resolve, package) =
         component::wit::resolve_embedded_source("perry-http-handler.wit", NATIVE)?;
@@ -135,6 +135,7 @@ pub(crate) fn compile(
         .result
         .ok_or_else(|| Diagnostic::internal("handle returns a result"))?;
     let exports = vec![Export {
+        source_name: None,
         annotations: Vec::new(),
         core_name: format!("{name}#handle"),
         function: "__perryHttpHandle".into(),
@@ -154,8 +155,8 @@ pub(crate) fn compile(
         &mut analyses,
         &resolve,
         world,
-        memory_checks,
-        componentize,
+        options.memory_checks,
+        options.componentize,
         exports,
         vec![],
         vec![],

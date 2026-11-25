@@ -110,7 +110,6 @@ struct EvalState<'h> {
     returned: Ty,
     has_return_value: bool,
     guards: Guards<'h>,
-    iteration: hir_compat::Iteration,
     local_changed: bool,
     current_span: Option<swc_common::Span>,
 }
@@ -123,7 +122,6 @@ impl EvalState<'_> {
             returned: Ty::BOTTOM,
             has_return_value: false,
             guards: Guards::default(),
-            iteration: hir_compat::Iteration::default(),
             local_changed: false,
             current_span: None,
         }
@@ -236,7 +234,7 @@ pub(crate) fn attach_inst_chain(
         if hir_compat::has_source_offset(inst.call_byte_offset) {
             let msg = format!(
                 "while instantiating '{}'",
-                index.view(inst.template).display_name()
+                index.view(inst.template).display_name(locations)
             );
             err = match locations.call_span(inst.call_byte_offset) {
                 Some(span) => err.with_spanned_note(span, msg),
@@ -292,12 +290,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             type_param_pool.extend_from_slice(&tp_buf)
         };
         let template_type_params = index.views.map(|v| intern_tps(v.type_params));
-        let class_type_params = index.classes.map(|c| {
-            hir.bodies
-                .classes
-                .get(c.hir_idx)
-                .map_or_else(TypeParamSpan::default, |hc| intern_tps(&hc.type_params))
-        });
+        let class_type_params = index
+            .classes
+            .map(|class| intern_tps(&class.declaration.type_params));
         let resource_registries = hir
             .witnesses
             .iter()
@@ -454,43 +449,35 @@ impl<'h, 'a> Solver<'h, 'a> {
             || self.contract_insts.contains(inst_id.index())
     }
 
-    fn for_each_callback_target(&self, cb: CallbackCall, mut f: impl FnMut(InstanceId)) {
+    fn for_each_callback_target(&self, cb: CallTarget, mut f: impl FnMut(InstanceId)) {
         match cb {
-            CallbackCall::Direct { target, .. } => f(target),
-            CallbackCall::Dispatch { helper, .. } => {
+            CallTarget::Direct { target, .. } => f(target),
+            CallTarget::Dispatch { helper, .. } => {
                 if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper].spec {
                     for &(_, target) in &self.dispatch_arms[arms] {
                         f(target);
                     }
                 }
             }
-            CallbackCall::ThrowTypeError => {}
+            CallTarget::ThrowTypeError => {}
         }
     }
 
     fn for_each_site_target(&self, res: &SiteResolution, mut f: impl FnMut(InstanceId)) {
         match *res {
-            SiteResolution::DirectCall { target, .. }
-            | SiteResolution::MethodCall { target, .. }
-            | SiteResolution::Callback { target, .. } => f(target),
-            SiteResolution::DispatchCall { helper, .. } => {
-                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper].spec {
-                    for &(_, target) in &self.dispatch_arms[arms] {
-                        f(target);
-                    }
-                }
-            }
-            SiteResolution::ClassNew { class_inst, .. } => {
+            SiteResolution::Call { target, .. } => self.for_each_callback_target(target, f),
+            SiteResolution::MethodCall(target) | SiteResolution::Callback { target } => f(target),
+            SiteResolution::ClassNew(class_inst) => {
                 let instance = &self.class_insts[class_inst];
                 for target in instance.field_init.into_iter().chain(instance.ctor_inst) {
                     f(target);
                 }
             }
             SiteResolution::PromiseNew {
-                executor: Some((executor, _, _)),
+                executor: Some(executor),
                 ..
             } => {
-                self.for_each_callback_target(executor, f);
+                self.for_each_callback_target(executor.call, f);
             }
             SiteResolution::PromiseReaction { helper, .. } => {
                 if let HelperSpec::PromiseReaction {
@@ -537,20 +524,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     });
                 }
-                match entry.coercion {
-                    Some(FuncCoercion::EnvCallback { target, .. }) => {
-                        if live.insert(target.index()) {
-                            queue.push(target);
+                if let Some(FuncCoercion::Callback { target, .. }) = entry.coercion {
+                    self.for_each_callback_target(target, |t| {
+                        if live.insert(t.index()) {
+                            queue.push(t);
                         }
-                    }
-                    Some(FuncCoercion::DispatchCallback { arms, .. }) => {
-                        for &(_, target) in &self.dispatch_arms[arms] {
-                            if live.insert(target.index()) {
-                                queue.push(target);
-                            }
-                        }
-                    }
-                    _ => {}
+                    });
                 }
             }
         }

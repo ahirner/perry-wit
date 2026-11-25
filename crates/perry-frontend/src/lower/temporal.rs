@@ -82,7 +82,7 @@ enum FieldValue<'s> {
     Loaded(Value),
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn raise_error(&mut self, ctx: &mut Context, kind: ErrorKind, msg: &str) {
         let message = self.string(ctx, msg);
         let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message));
@@ -95,9 +95,7 @@ impl<'s> FunctionBuilder<'s> {
         &self,
         expr: &'s Expr,
     ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
-        crate::hir_compat::object_literal_pairs(expr, |class_name| {
-            self.shapes.literal_fields(class_name)
-        })
+        crate::hir_compat::object_literal_pairs(expr, &self.shapes.specialization.literal_classes)
     }
 
     fn temporal_fields(

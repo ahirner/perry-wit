@@ -65,22 +65,21 @@ pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHan
 
 pub(super) fn wrapper<'h>(
     ctx: &mut Context,
-    shapes: &Shapes<'h>,
+    shapes: &mut Shapes<'h>,
     binding: &'h str,
     params: Vec<TypeHandle>,
     result: TypeHandle,
 ) -> Result<Identifier> {
     let key = (binding, params.clone());
-    if let Some(name) = shapes.foreign_wrappers.borrow().get(&key) {
+    if let Some(name) = shapes.foreign_wrappers.get(&key) {
         return Ok(name.clone());
     }
-    let mut index = shapes.foreign_wrappers.borrow().len();
+    let mut index = shapes.foreign_wrappers.len();
     let name = loop {
         let name = format!("perry_host_wrapper_{index}");
         if !shapes.has_function(&name)
             && shapes
                 .foreign_wrappers
-                .borrow()
                 .values()
                 .all(|other| other.as_ref() != name)
         {
@@ -115,15 +114,17 @@ pub(super) fn wrapper<'h>(
     shapes
         .module
         .append_operation(ctx, function.get_operation(), 0);
-    shapes
-        .foreign_wrappers
-        .borrow_mut()
-        .insert(key, name.clone());
+    shapes.foreign_wrappers.insert(key, name.clone());
     Ok(name)
 }
 
 impl crate::wit::WitValue<'_> {
-    pub(super) fn mir_type(self, ctx: &Context, input: bool) -> Result<TypeHandle> {
+    pub(super) fn mir_type(
+        self,
+        ctx: &Context,
+        records: &mut perry_mir::RecordLayouts,
+        input: bool,
+    ) -> Result<TypeHandle> {
         use perry_contract::types::{Contract, Input, convert};
         use perry_mir::{OptionalType, ResourceType, VariantType};
         use wit_parser::Type;
@@ -138,8 +139,9 @@ impl crate::wit::WitValue<'_> {
         let binding = convert(
             self.resolve,
             Input::Reference(self.ty),
-            &|_| None,
-            &|contract: Contract<'_, Result<BindingType>>| {
+            records,
+            &|_, _| None,
+            &|records, contract: Contract<'_, Result<BindingType>>| {
                 Ok(BindingType::plain(match contract {
                     Contract::Scalar(ty) => {
                         if let Some((width, sign)) = (Self { ty, ..self }).integer() {
@@ -176,23 +178,28 @@ impl crate::wit::WitValue<'_> {
                     Contract::Enum(_) => StringType::get(ctx).into(),
                     Contract::Record(fields) => {
                         let fields = fields
+                            .into_iter()
                             .map(|(name, b)| Ok((name, field(b?))))
                             .collect::<Result<_>>()?;
-                        RecordType::structural(ctx, RecordKind::Object, fields)
+                        records
+                            .structural(ctx, RecordKind::Object, fields)
                             .to_diag(ctx)?
                             .into()
                     }
                     Contract::Tuple(elements) => {
                         let fields = elements
+                            .into_iter()
                             .enumerate()
                             .map(|(i, b)| Ok((format!("_{i}"), field(b?))))
                             .collect::<Result<_>>()?;
-                        RecordType::structural(ctx, RecordKind::Tuple, fields)
+                        records
+                            .structural(ctx, RecordKind::Tuple, fields)
                             .to_diag(ctx)?
                             .into()
                     }
                     Contract::Variant(cases) => {
                         let cases = cases
+                            .into_iter()
                             .map(|(tag, value)| {
                                 Ok((tag.into(), value.transpose()?.map(|b| b.carrier)))
                             })
@@ -212,7 +219,8 @@ impl crate::wit::WitValue<'_> {
                                 ));
                             }
                         }
-                        RecordType::structural(ctx, RecordKind::Object, fields)
+                        records
+                            .structural(ctx, RecordKind::Object, fields)
                             .to_diag(ctx)?
                             .into()
                     }
@@ -229,7 +237,7 @@ pub(super) enum CallKind {
     Resource(Option<Value>),
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn resource_call(
         &mut self,
         ctx: &mut Context,
@@ -258,7 +266,7 @@ impl<'s> FunctionBuilder<'s> {
             let (this, rest) = params
                 .split_first()
                 .ok_or_else(|| internal!("WIT resource method has no receiver"))?;
-            let ty = this.mir_type(ctx, true)?;
+            let ty = this.mir_type(ctx, &mut self.shapes.records, true)?;
             values.push(self.fit(ctx, receiver, ty)?);
             params = rest;
         }
@@ -272,7 +280,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let resource_method = matches!(kind, CallKind::Resource(_));
         for (arg, &wit) in args.iter().zip(params) {
-            let ty = wit.mir_type(ctx, true)?;
+            let ty = wit.mir_type(ctx, &mut self.shapes.records, true)?;
             let value = if resource_method && let Some(result) = wit.result() {
                 self.resource_input(ctx, arg, wit, result, ty)?
             } else if resource_method
@@ -304,7 +312,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         let result = signature
             .result
-            .map(|ty| ty.mir_type(ctx, false))
+            .map(|ty| ty.mir_type(ctx, &mut self.shapes.records, false))
             .transpose()?;
         if signature.is_async {
             let payload = result.unwrap_or_else(|| void_type(ctx));
@@ -332,7 +340,7 @@ impl<'s> FunctionBuilder<'s> {
     }
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     fn resource_input(
         &mut self,
         ctx: &mut Context,
@@ -341,8 +349,10 @@ impl<'s> FunctionBuilder<'s> {
         result: &wit_parser::Result_,
         raw: TypeHandle,
     ) -> Result<Value> {
-        let payload = |ty| (crate::wit::WitValue { ty, ..wit }).mir_type(ctx, false);
-        let ok = result.ok.map(payload).transpose()?;
+        let mut payload = |ty| {
+            (crate::wit::WitValue { ty, ..wit }).mir_type(ctx, &mut self.shapes.records, false)
+        };
+        let ok = result.ok.map(&mut payload).transpose()?;
         let err = result.err.map(payload).transpose()?;
         let variant =
             perry_mir::VariantType::get(ctx, vec![("ok".into(), ok), ("err".into(), err)]).into();
@@ -454,7 +464,11 @@ impl<'s> FunctionBuilder<'s> {
         result
             .ok
             .map(|ty| {
-                let expected = (crate::wit::WitValue { ty, ..wit }).mir_type(ctx, false)?;
+                let expected = (crate::wit::WitValue { ty, ..wit }).mir_type(
+                    ctx,
+                    &mut self.shapes.records,
+                    false,
+                )?;
                 let value = self.record_field(ctx, raw, "value")?;
                 self.fit(ctx, value, expected)
             })

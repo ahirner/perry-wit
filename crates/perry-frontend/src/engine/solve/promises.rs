@@ -115,17 +115,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         recv_ty: Option<Ty>,
         arg_tys: &[Ty],
         byte_offset: u32,
-    ) -> Result<Option<(CallbackCall, Ty)>> {
+    ) -> Result<Option<(CallTarget, Ty)>> {
         if cb_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
             return Ok(None);
         }
         if matches!(cb_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            return Ok(Some((CallbackCall::ThrowTypeError, Ty::NEVER)));
+            return Ok(Some((CallTarget::ThrowTypeError, Ty::NEVER)));
         }
         if let Some(idents) = self.types.func_dispatch_members(cb_ty, true) {
             let (helper, _, needs_recv, ret) =
                 self.build_callback_dispatcher(s, cb_ty, &idents, recv_ty, arg_tys, byte_offset)?;
-            return Ok(Some((CallbackCall::Dispatch { helper, needs_recv }, ret)));
+            return Ok(Some((CallTarget::Dispatch { helper, needs_recv }, ret)));
         }
         let TyKind::Func(ident) = self.types.kind(cb_ty) else {
             if !self.types.is_open(cb_ty) && cb_ty != Ty::DYNAMIC {
@@ -144,7 +144,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
         let pass_env = self.is_escaping_env(ident.template, s.inst);
         Ok(Some((
-            CallbackCall::Direct {
+            CallTarget::Direct {
                 target,
                 pass_env,
                 pass_receiver,
@@ -219,7 +219,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.resolve_callback_call(s, exec_ty, None, &[resolve_ty, reject_ty], byte_offset)?
         {
             let (pass_resolve, pass_reject) = match executor {
-                CallbackCall::Direct { target, .. } => {
+                CallTarget::Direct { target, .. } => {
                     let view = self.index.view(self.instances[target].template);
                     let arity = if view.params.iter().any(|p| p.is_rest) {
                         2
@@ -228,8 +228,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     };
                     (arity >= 1, arity >= 2)
                 }
-                CallbackCall::Dispatch { .. } => (true, true),
-                CallbackCall::ThrowTypeError => (false, false),
+                CallTarget::Dispatch { .. } => (true, true),
+                CallTarget::ThrowTypeError => (false, false),
             };
             self.record_site(
                 s.inst,
@@ -238,7 +238,19 @@ impl<'h, 'a> Solver<'h, 'a> {
                     value_loc,
                     resolve_tid,
                     reject_tid,
-                    executor: Some((executor, pass_resolve, pass_reject)),
+                    executor: Some(PromiseExecutor {
+                        call: executor,
+                        handles: [
+                            pass_resolve.then_some(resolve_tid),
+                            pass_reject.then_some(reject_tid),
+                        ]
+                        .map(|tid| {
+                            tid.map(|template| FuncIdentity {
+                                template,
+                                capture_owner: owner,
+                            })
+                        }),
+                    }),
                 },
             );
         }
@@ -294,7 +306,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let f_present = f_ty.filter(|&t| is_handler(t));
         let g_present = g_ty.filter(|&t| is_handler(t));
 
-        let mut on_fulfilled: Option<(CallbackCall, Ty)> = None;
+        let mut on_fulfilled: Option<(CallTarget, Ty)> = None;
         let mut f_ret = Ty::BOTTOM;
         if let Some(ft) = f_present {
             self.check_escaping_func(s.inst, ft, byte_offset, s.current_span)?;
@@ -336,7 +348,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        let mut on_rejected: Option<(CallbackCall, Ty)> = None;
+        let mut on_rejected: Option<(CallTarget, Ty)> = None;
         let mut g_ret = Ty::BOTTOM;
         if let Some(gt) = g_present {
             self.check_escaping_func(s.inst, gt, byte_offset, s.current_span)?;

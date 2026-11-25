@@ -1,5 +1,5 @@
 //! Lower array/string iteration and byte-stream async iteration before HIR erases types.
-use crate::source::FreshNames;
+use crate::source::Analysis;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Result};
 use perry_wit_diagnostics::{bail_unsupported, ensure_unsupported};
@@ -15,22 +15,17 @@ pub(crate) fn is_writable_to_web(expr: &perry_hir::ir::Expr) -> bool {
 }
 
 /// Keep the iteration source, binding pattern, and body together through lexical name resolution.
-pub(super) fn lower(
-    module: &mut ast::Module,
-    names: &mut FreshNames,
-) -> Result<HashSet<swc_common::Span>> {
+pub(super) fn lower(module: &mut ast::Module, analysis: &mut Analysis) -> Result<()> {
     let mut lower = Loops {
-        names,
-        bindings: HashSet::new(),
+        analysis,
         error: None,
     };
     module.visit_mut_with(&mut lower);
-    lower.error.map_or(Ok(lower.bindings), Err)
+    lower.error.map_or(Ok(()), Err)
 }
 
 struct Loops<'n> {
-    names: &'n mut FreshNames,
-    bindings: HashSet<swc_common::Span>,
+    analysis: &'n mut Analysis,
     error: Option<Diagnostic>,
 }
 
@@ -47,7 +42,7 @@ impl Loops<'_> {
             bail_unsupported!("{ONE_BINDING}");
         };
         let binding = declarator.name;
-        let prefix = self.names.prefix("loop");
+        let prefix = self.analysis.names.prefix("loop");
         let ident = |suffix| ast::Ident::new_no_ctxt(format!("{prefix}{suffix}").into(), DUMMY_SP);
         let source = iteration.right;
         let body = *iteration.body;
@@ -103,7 +98,7 @@ impl Loops<'_> {
             // the current element and owns the loop bounds, cursor, and control flow.
             let element =
                 ast::Ident::new_no_ctxt(format!("{prefix}element").into(), iteration.span);
-            self.bindings.insert(iteration.span);
+            self.analysis.record_iteration(iteration.span);
             let init = source.into_var_decl(ast::VarDeclKind::Const, element.clone().into());
             let item = element.into_var_decl(kind, binding);
             return Ok(ast::ForStmt {

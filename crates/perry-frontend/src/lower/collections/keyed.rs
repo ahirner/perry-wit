@@ -23,7 +23,7 @@ enum SetSelection {
     AbsentFrom(Value),
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     fn canonicalize_collection_key(&mut self, ctx: &mut Context, key: Value) -> Result<Value> {
         let ty = key.get_type(ctx);
         let numeric = match Kind::of(ctx, present_type(ctx, ty)) {

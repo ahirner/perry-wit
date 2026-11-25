@@ -1,7 +1,7 @@
 //! Lowering for `URL` and `URLSearchParams` constructors, properties, and methods.
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn url_field(
         &mut self,
         ctx: &mut Context,

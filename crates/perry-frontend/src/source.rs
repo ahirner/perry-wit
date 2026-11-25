@@ -1,7 +1,10 @@
 //! Source validation, lexical binding facts and expression locations from SWC.
+use crate::engine::types::LocalFlags;
 use crate::hir_compat::Locations;
 mod constructors;
-pub(crate) use constructors::{CollectionKind, Constructor, Constructors};
+pub(crate) use constructors::{
+    BuiltinConstructor, CollectionKind, Constructor, ConstructorSites, Constructors,
+};
 mod names;
 mod parser;
 mod program;
@@ -11,20 +14,21 @@ pub(crate) use parser::parse;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 pub(crate) use program::{
-    BindingAnnotation, Bodies, BodyIndex, CallerKind, InstanceBodies, InstanceClass,
-    InstanceFunction, ModuleDeclarations, SourceModule, authored_body, is_pure_func_expr,
+    Bodies, CallerKind, InstanceBodies, InstanceClass, InstanceFunction, ModuleDeclarations,
+    SourceModule, StaticField, authored_body, is_pure_func_expr,
 };
 use std::collections::{HashMap, HashSet};
 pub(crate) use strings::StringConstants;
 use swc_common::Span;
-use swc_ecma_visit::{Visit, VisitWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+
+pub(crate) type LiteralClasses<'s> = HashMap<&'s str, &'s [perry_hir::ir::ClassField]>;
 
 #[derive(Clone, Copy, Default)]
 struct SourceBinding {
     inferred_end: Option<u32>,
-    pub(crate) deferred: bool,
-    pub(crate) loop_let: bool,
-    pub(crate) annotated_parameter: bool,
+    iteration_end: Option<u32>,
+    flags: LocalFlags,
 }
 
 pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<()> {
@@ -91,20 +95,26 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
 pub(crate) struct Analysis {
     bindings: HashMap<u32, SourceBinding>,
     pub(crate) sparse_arrays: bool,
-    pub(crate) expression_spans: HashSet<Span>,
-    pub(crate) for_of: HashSet<Span>,
+
     pub(crate) names: FreshNames,
 }
 
-pub(crate) fn analyze(module: &ast::Module) -> Analysis {
-    #[derive(Default)]
-    struct AstScanner {
+impl Analysis {
+    pub(crate) fn record_iteration(&mut self, span: Span) {
+        self.bindings.entry(span.lo.0).or_default().iteration_end = Some(span.hi.0);
+    }
+}
+
+pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -> Analysis {
+    struct AstScanner<'a, 's> {
+        locations: &'a mut Locations<'s>,
+        mark_spans: bool,
         analysis: Analysis,
         closures: HashSet<ast::Id>,
         enclosing_depth: u32,
     }
 
-    impl AstScanner {
+    impl AstScanner<'_, '_> {
         fn infer_pattern(&mut self, pattern: &ast::Pat) {
             pattern_bindings(pattern, &mut |id, annotated| {
                 if !annotated {
@@ -128,7 +138,8 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
                         .bindings
                         .entry(span.lo.0)
                         .or_default()
-                        .annotated_parameter = true;
+                        .flags
+                        .insert(LocalFlags::PARAM_ANNOTATED);
                 }
             });
         }
@@ -139,38 +150,70 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
                 other => matches!(other, ast::Expr::Arrow(_) | ast::Expr::Fn(_)),
             }
         }
+        fn needs_location(&self, expr: &ast::Expr) -> bool {
+            use ast::{BinaryOp::*, Expr::*};
+            let dynamic = |e: &ast::Expr| matches!(e, Ident(_) | Call(_) | Member(_));
+            let undefined = |e: &ast::Expr| matches!(e, Ident(id) if id.sym == "undefined");
+            match expr {
+                TsNonNull(_) | Cond(_) => true,
+                Assign(a) => {
+                    matches!(
+                        &a.left,
+                        ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(_))
+                    ) && (dynamic(&a.right) || self.is_closure_expr(&a.right))
+                }
+                Bin(b) => match b.op {
+                    Exp | BitAnd | BitOr | BitXor | LShift | RShift | ZeroFillRShift => true,
+                    EqEqEq | NotEqEq | EqEq | NotEq => {
+                        !undefined(&b.left)
+                            && !undefined(&b.right)
+                            && (self.is_closure_expr(&b.left)
+                                || self.is_closure_expr(&b.right)
+                                || dynamic(&b.left) && dynamic(&b.right))
+                    }
+                    _ => false,
+                },
+                Call(call) if let ast::Callee::Expr(callee) = &call.callee => {
+                    matches!(&**callee, Ident(id) if id.sym == "queueMicrotask")
+                        || matches!(&**callee, Member(m) if matches!(&*m.obj, Ident(id) if id.sym == "process") &&
+                            matches!(&m.prop, ast::MemberProp::Ident(id) if matches!(id.sym.as_ref(), "nextTick" | "on" | "once")))
+                        || call.args.iter().any(|arg| self.is_closure_expr(&arg.expr))
+                }
+                _ => false,
+            }
+        }
     }
 
-    impl Visit for AstScanner {
-        fn visit_ident(&mut self, ident: &ast::Ident) {
+    impl VisitMut for AstScanner<'_, '_> {
+        fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
             self.analysis.names.reserve(&ident.sym);
         }
 
-        fn visit_array_lit(&mut self, array: &ast::ArrayLit) {
+        fn visit_mut_array_lit(&mut self, array: &mut ast::ArrayLit) {
             self.analysis.sparse_arrays |= array.elems.iter().any(Option::is_none);
-            array.visit_children_with(self);
+            array.visit_mut_children_with(self);
         }
-        fn visit_param(&mut self, param: &ast::Param) {
+        fn visit_mut_param(&mut self, param: &mut ast::Param) {
             self.record_param(&param.pat);
-            param.visit_children_with(self);
+            param.visit_mut_children_with(self);
         }
-        fn visit_arrow_expr(&mut self, arrow: &ast::ArrowExpr) {
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut ast::ArrowExpr) {
             for pat in &arrow.params {
                 self.record_param(pat);
             }
             self.enclosing_depth += 1;
-            arrow.visit_children_with(self);
+            arrow.visit_mut_children_with(self);
             self.enclosing_depth -= 1;
         }
-        fn visit_fn_decl(&mut self, decl: &ast::FnDecl) {
+        fn visit_mut_fn_decl(&mut self, decl: &mut ast::FnDecl) {
             if self.enclosing_depth > 0 {
                 self.closures.insert(decl.ident.to_id());
             }
             self.enclosing_depth += 1;
-            decl.visit_children_with(self);
+            decl.visit_mut_children_with(self);
             self.enclosing_depth -= 1;
         }
-        fn visit_for_stmt(&mut self, stmt: &ast::ForStmt) {
+        fn visit_mut_for_stmt(&mut self, stmt: &mut ast::ForStmt) {
             if let Some(ast::VarDeclOrExpr::VarDecl(var)) = &stmt.init
                 && var.kind == ast::VarDeclKind::Let
             {
@@ -180,25 +223,26 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
                             .bindings
                             .entry(id.span.lo.0)
                             .or_default()
-                            .loop_let = true;
+                            .flags
+                            .insert(LocalFlags::FOR_HEAD);
                     });
                 }
             }
-            stmt.visit_children_with(self);
+            stmt.visit_mut_children_with(self);
         }
-        fn visit_for_head(&mut self, head: &ast::ForHead) {
+        fn visit_mut_for_head(&mut self, head: &mut ast::ForHead) {
             if let ast::ForHead::VarDecl(var) = head {
-                for decl in &var.decls {
+                for decl in &mut var.decls {
                     self.infer_pattern(&decl.name);
-                    decl.visit_children_with(self);
+                    decl.visit_mut_children_with(self);
                 }
             } else {
-                head.visit_children_with(self);
+                head.visit_mut_children_with(self);
             }
         }
-        fn visit_var_decl(&mut self, declaration: &ast::VarDecl) {
+        fn visit_mut_var_decl(&mut self, declaration: &mut ast::VarDecl) {
             let is_const = declaration.kind == ast::VarDeclKind::Const;
-            for decl in &declaration.decls {
+            for decl in &mut declaration.decls {
                 if decl.init.is_none()
                     && let ast::Pat::Ident(b) = &decl.name
                 {
@@ -206,88 +250,45 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
                         .bindings
                         .entry(b.id.span.lo.0)
                         .or_default()
-                        .deferred = true;
+                        .flags
+                        .insert(LocalFlags::DEFERRED);
                 }
                 self.infer_pattern(&decl.name);
-                decl.name.visit_with(self);
-                if let Some(init) = &decl.init {
+                decl.name.visit_mut_with(self);
+                if let Some(init) = &mut decl.init {
                     if is_const
                         && let ast::Pat::Ident(b) = &decl.name
                         && self.is_closure_expr(init)
                     {
                         self.closures.insert(b.id.to_id());
                     }
-                    init.visit_with(self);
+                    init.visit_mut_with(self);
                 }
             }
         }
-        fn visit_cond_expr(&mut self, cond: &ast::CondExpr) {
-            self.analysis.expression_spans.insert(cond.span);
-            cond.visit_children_with(self);
+        fn visit_mut_ts_enum_decl(&mut self, decl: &mut ast::TsEnumDecl) {
+            let previous = std::mem::replace(&mut self.mark_spans, false);
+            decl.visit_mut_children_with(self);
+            self.mark_spans = previous;
         }
-        fn visit_assign_expr(&mut self, assign: &ast::AssignExpr) {
-            if matches!(
-                &assign.left,
-                ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(_))
-            ) && (self.is_closure_expr(&assign.right)
-                || matches!(
-                    &*assign.right,
-                    ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
-                ))
-            {
-                self.analysis.expression_spans.insert(assign.span);
+
+        fn visit_mut_expr(&mut self, expr: &mut ast::Expr) {
+            let preserve = self.mark_spans && self.needs_location(expr);
+            expr.visit_mut_children_with(self);
+            if preserve {
+                self.locations.preserve_expression(expr);
             }
-            assign.visit_children_with(self);
-        }
-        fn visit_bin_expr(&mut self, expr: &ast::BinExpr) {
-            if matches!(
-                expr.op,
-                ast::BinaryOp::EqEqEq
-                    | ast::BinaryOp::NotEqEq
-                    | ast::BinaryOp::EqEq
-                    | ast::BinaryOp::NotEq
-            ) {
-                let is_undef =
-                    |e: &ast::Expr| matches!(e, ast::Expr::Ident(id) if id.sym == "undefined");
-                if !is_undef(&expr.left)
-                    && !is_undef(&expr.right)
-                    && (self.is_closure_expr(&expr.left)
-                        || self.is_closure_expr(&expr.right)
-                        || matches!(
-                            (&*expr.left, &*expr.right),
-                            (
-                                ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_),
-                                ast::Expr::Ident(_) | ast::Expr::Call(_) | ast::Expr::Member(_)
-                            )
-                        ))
-                {
-                    self.analysis.expression_spans.insert(expr.span);
-                }
-            }
-            expr.visit_children_with(self);
-        }
-        fn visit_call_expr(&mut self, call: &ast::CallExpr) {
-            if let ast::Callee::Expr(callee) = &call.callee {
-                let is_special_host_call = match callee.as_ref() {
-                    ast::Expr::Ident(id) => id.sym == "queueMicrotask",
-                    ast::Expr::Member(member) => {
-                        matches!(member.obj.as_ref(), ast::Expr::Ident(id) if id.sym == "process")
-                            && matches!(&member.prop, ast::MemberProp::Ident(id) if matches!(id.sym.as_ref(), "nextTick" | "on" | "once"))
-                    }
-                    _ => false,
-                };
-                if is_special_host_call
-                    || call.args.iter().any(|arg| self.is_closure_expr(&arg.expr))
-                {
-                    self.analysis.expression_spans.insert(call.span);
-                }
-            }
-            call.visit_children_with(self);
         }
     }
 
-    let mut scanner = AstScanner::default();
-    module.visit_with(&mut scanner);
+    let mut scanner = AstScanner {
+        locations,
+        mark_spans: true,
+        analysis: Analysis::default(),
+        closures: HashSet::new(),
+        enclosing_depth: 0,
+    };
+    module.visit_mut_with(&mut scanner);
     scanner.analysis
 }
 

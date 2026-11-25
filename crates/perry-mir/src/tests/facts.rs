@@ -682,7 +682,12 @@ fn context_summarization_bounds_mixed_integer_and_float_arguments() -> Result<()
         let results = vec![FP64Type::get(ctx).into()];
         constrain_signature(ctx, &entry, args, results);
     }
-    let facts = with_fact_limits(2, 2, || facts(ctx, module))?;
+    FactLimits {
+        max_origins: 2,
+        max_precise_contexts: 2,
+    }
+    .set(ctx, module);
+    let facts = facts(ctx, module)?;
     // One generic context, 2 precise ones and one shared summary.
     assert_eq!(facts.context_counts(&pliron::ident!("helper")), (1, 3));
     assert_eq!(facts.summarized_contexts, combos - 2);

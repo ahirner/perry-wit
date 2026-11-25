@@ -7,7 +7,7 @@ use super::*;
 use crate::narrowing::{Discriminant, path};
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// After `local = expr`, lowered to `assigned`, the local holds the alternative of the
     /// assigned value's own type or the case of a variant literal, as TypeScript narrows on
     /// assignment.
@@ -39,7 +39,7 @@ impl<'s> FunctionBuilder<'s> {
                 class_name, args, ..
             } => {
                 let fields = self.shapes.literal_fields(class_name)?;
-                args.get(fields.iter().position(|&name| name == "tag")?)?
+                args.get(fields.iter().position(|field| field.name == "tag")?)?
             }
             Expr::Object(fields) => &fields.iter().find(|(name, _)| name == "tag")?.1,
             _ => return None,

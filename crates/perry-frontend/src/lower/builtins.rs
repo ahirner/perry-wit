@@ -4,7 +4,7 @@ use super::*;
 use crate::lower::methods::{Call, Receiver};
 mod regex;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// `object.method(args)` on built-in values.
     pub(super) fn method(
         &mut self,
@@ -180,28 +180,16 @@ impl<'s> FunctionBuilder<'s> {
         ty: &str,
     ) -> Result<Value> {
         let value = self.expression(ctx, value)?;
-        let is_known_class = self.shapes.decls.classes.named.contains_key(ty)
-            || self
-                .shapes
-                .specialization
-                .instances
-                .class_origins
-                .values()
-                .any(|origin| origin == ty);
-        if is_known_class {
+        let classes = &self.shapes.specialization.bodies.classes;
+        if classes
+            .iter()
+            .any(|class| class.name == ty || class.declaration.name == ty)
+        {
             let is_inst = self
                 .shapes
                 .class_of_type(ctx, value.get_type(ctx))
-                .is_some_and(|c| {
-                    c == ty
-                        || self
-                            .shapes
-                            .specialization
-                            .instances
-                            .class_origins
-                            .get(c)
-                            .is_some_and(|origin| origin == ty)
-                });
+                .and_then(|name| self.shapes.instance_class(name))
+                .is_some_and(|class| class.name == ty || class.declaration.name == ty);
             return Ok(self.boolean(ctx, is_inst));
         }
         let (error, code) = match ty {

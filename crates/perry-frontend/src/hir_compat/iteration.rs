@@ -1,13 +1,15 @@
 //! Recognize Perry's compiler-owned dense-array iterator records.
 use super::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Default)]
-pub(crate) struct Iteration {
-    guards: HashSet<LocalId>,
-    object_patterns: Vec<(LocalId, u32)>,
-    released: HashSet<LocalId>,
-    positions: HashMap<LocalId, usize>,
+pub(crate) struct Iteration<'h>(HashMap<LocalId, (Binding<'h>, bool)>);
+
+enum Binding<'h> {
+    Guard(Option<&'h Expr>),
+    ObjectPattern(u32),
+    Cursor,
+    Temporary,
 }
 
 pub(crate) enum RecordExpr<'a> {
@@ -54,53 +56,52 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
     }
 }
 
-impl Iteration {
-    pub(crate) fn register_binding(&mut self, id: LocalId, name: &str, init: Option<&Expr>) {
-        if let Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) = init.and_then(runtime) {
-            self.object_patterns.push((id, *offset as u32));
-        }
-        if matches!(
-            init.and_then(runtime),
-            Some(("arrayRecordIndex", [Expr::Integer(0)]))
-        ) {
-            self.positions.insert(id, 0);
-        }
-        if name.starts_with("__iterator_record_")
+impl<'h> Iteration<'h> {
+    pub(crate) fn bind(&mut self, id: LocalId, name: &str, init: Option<&'h Expr>) {
+        let call = init.and_then(runtime);
+        let released = name.starts_with("__iterator_record_")
             || name.starts_with("__iterator_literal_")
-            || init.is_some_and(|expr| matches!(runtime(expr), Some(("arrayRecordPayload", _))))
-            || matches!(init, Some(Expr::Conditional { condition, .. }) if self.is_guard(condition))
-        {
-            self.released.insert(id);
-        }
+            || matches!(call, Some(("arrayRecordPayload", _)))
+            || matches!(init, Some(Expr::Conditional { condition, .. }) if self.is_guard(condition));
+        let role = match call {
+            Some(("arrayRecordNeedsIterator", [])) => Binding::Guard(None),
+            Some(("arrayRecordNeedsIterator", [Expr::LocalSet(local, source), ..])) if matches!(&**source, Expr::LocalGet(other) if other == local) => {
+                Binding::Guard(Some(source))
+            }
+            Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) => {
+                Binding::ObjectPattern(*offset as u32)
+            }
+            Some(("arrayRecordIndex", [Expr::Integer(0)])) => Binding::Cursor,
+            _ if released => Binding::Temporary,
+            _ => return,
+        };
+        self.0.insert(id, (role, released));
     }
 
     pub(crate) fn object_pattern_offset(&self, receiver: &Expr) -> Option<u32> {
         let Expr::LocalGet(id) = receiver else {
             return None;
         };
-        self.object_patterns
-            .iter()
-            .find_map(|(local, offset)| (id == local).then_some(*offset))
+        match self.0.get(id)? {
+            (Binding::ObjectPattern(offset), _) => Some(*offset),
+            _ => None,
+        }
     }
 
-    pub(crate) fn guard<'a>(&mut self, id: LocalId, expr: &'a Expr) -> Option<Option<&'a Expr>> {
-        let ("arrayRecordNeedsIterator", args) = runtime(expr)? else {
-            return None;
-        };
-        let source = match args {
-            [] => None,
-            [Expr::LocalSet(id, source), ..] if matches!(&**source, Expr::LocalGet(other) if other == id) => {
-                Some(&**source)
-            }
-            _ => return None,
-        };
-        self.guards.insert(id);
-        Some(source)
+    pub(crate) fn guard(&self, id: LocalId) -> Option<Option<&'h Expr>> {
+        match self.0.get(&id)? {
+            (Binding::Guard(source), _) => Some(*source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_cursor(&self, id: LocalId) -> bool {
+        matches!(self.0.get(&id), Some((Binding::Cursor, _)))
     }
 
     pub(crate) fn is_guard(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::LocalGet(id) => self.guards.contains(id),
+            Expr::LocalGet(id) => self.guard(*id).is_some(),
             Expr::Compare {
                 op: CompareOp::Eq,
                 left,
@@ -130,21 +131,8 @@ impl Iteration {
         })
     }
 
-    pub(crate) fn index(&self, expr: &Expr) -> Option<usize> {
-        let ("arrayRecordIndex", [Expr::LocalGet(id)]) = runtime(expr)? else {
-            return None;
-        };
-        self.positions.get(id).copied()
-    }
-
-    pub(crate) fn advance(&mut self, id: LocalId) {
-        if let Some(position) = self.positions.get_mut(&id) {
-            *position += 1;
-        }
-    }
-
     pub(crate) fn is_release(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::LocalSet(id, value) if self.released.contains(id) && matches!(&**value, Expr::Undefined))
+        matches!(expr, Expr::LocalSet(id, value) if self.0.get(id).is_some_and(|(_, released)| *released) && matches!(&**value, Expr::Undefined))
     }
 
     pub(crate) fn element<'a>(&self, statements: &'a [Stmt]) -> Option<Element<'a>> {
@@ -234,5 +222,25 @@ impl Iteration {
             missing,
             available,
         })
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CursorPositions(HashMap<LocalId, usize>);
+
+impl CursorPositions {
+    pub(crate) fn reset(&mut self, id: LocalId) {
+        self.0.insert(id, 0);
+    }
+    pub(crate) fn index(&self, expr: &Expr) -> Option<usize> {
+        let ("arrayRecordIndex", [Expr::LocalGet(id)]) = runtime(expr)? else {
+            return None;
+        };
+        self.0.get(id).copied()
+    }
+    pub(crate) fn advance(&mut self, id: LocalId) {
+        if let Some(position) = self.0.get_mut(&id) {
+            *position += 1;
+        }
     }
 }

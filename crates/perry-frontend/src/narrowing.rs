@@ -1,6 +1,7 @@
 //! Facts a branch condition proves about the values read in each arm, recovered from source
 //! guards because Perry HIR carries no flow-sensitive types.
 use crate::Absence;
+use crate::engine::BodyOwner;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Stmt, UnaryOp},
     types::{FuncId, LocalId},
@@ -292,16 +293,22 @@ impl<'s> Guards<'s> {
         expressions: impl IntoIterator<Item = &'e Expr>,
         closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
     ) {
-        self.assign_projected(None, statements, expressions, closure, |_, _| None);
+        self.assign_projected(
+            BodyOwner::Initializer,
+            statements,
+            expressions,
+            closure,
+            |_, _| None,
+        );
     }
 
     pub(crate) fn assign_projected<'e>(
         &mut self,
-        owner: Option<FuncId>,
+        owner: BodyOwner,
         statements: &'e [Stmt],
         expressions: impl IntoIterator<Item = &'e Expr>,
         closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
-        project: impl Fn(Option<FuncId>, &'e Expr) -> Option<FuncId>,
+        project: impl Fn(BodyOwner, &'e Expr) -> Option<FuncId>,
     ) {
         if self.stack.is_empty() {
             return;
@@ -381,9 +388,9 @@ struct Assignments<F, P> {
 impl<'e, F, P> Assignments<F, P>
 where
     F: Fn(FuncId) -> Option<&'e [Stmt]>,
-    P: Fn(Option<FuncId>, &'e Expr) -> Option<FuncId>,
+    P: Fn(BodyOwner, &'e Expr) -> Option<FuncId>,
 {
-    fn statements(&mut self, owner: Option<FuncId>, statements: &'e [Stmt]) {
+    fn statements(&mut self, owner: BodyOwner, statements: &'e [Stmt]) {
         for statement in statements {
             stmt_any_expr(statement, &mut |expr| {
                 self.expression(owner, expr);
@@ -392,7 +399,7 @@ where
         }
     }
 
-    fn expression(&mut self, owner: Option<FuncId>, expr: &'e Expr) {
+    fn expression(&mut self, owner: BodyOwner, expr: &'e Expr) {
         let target = (self.project)(owner, expr);
         let target = target.or(match *expr {
             Expr::FuncRef(id) => Some(id),
@@ -403,11 +410,13 @@ where
             && let Some(body) = (self.closure)(id)
         {
             self.entered.push(id);
-            self.statements(Some(id), body);
+            self.statements(BodyOwner::Function(id), body);
         }
         match expr {
             Expr::LocalSet(id, _) | Expr::Update { id, .. } => self.assigned.push(*id),
-            Expr::Closure { func_id, body, .. } => self.statements(Some(*func_id), body),
+            Expr::Closure { func_id, body, .. } => {
+                self.statements(BodyOwner::Function(*func_id), body)
+            }
             _ => {}
         }
         walk_expr_children(expr, &mut |child| self.expression(owner, child));

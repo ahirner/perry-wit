@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// Lower `array.map(callback)` or `array.filter(callback)` (when `filter` is true),
     /// expanding the callback inline once with `(item, index, array)`.
     pub(crate) fn array_transform(
@@ -163,12 +163,11 @@ impl<'s> FunctionBuilder<'s> {
         let callback = self.prepare_callback(ctx, callback)?;
         let initial = if let Some(init_expr) = initial {
             let expected_acc = match callback {
-                crate::lower::callable::Callback::Bound(binding, _) => binding
-                    .params
+                crate::lower::callable::Callback::Bound { params, .. } => params
                     .first()
                     .copied()
-                    .flatten()
-                    .map(|ty| self.shapes.resolved_binding(ctx, ty).map(|b| b.carrier))
+                    .filter(|&ty| self.shapes.passes_argument(ty))
+                    .map(|ty| self.shapes.resolved_binding(ty).map(|b| b.carrier))
                     .transpose()?,
                 crate::lower::callable::Callback::Lexical(_, signature) => {
                     signature.params.first().map(|p| p.base.carrier)
@@ -176,7 +175,7 @@ impl<'s> FunctionBuilder<'s> {
                 crate::lower::callable::Callback::Source(Expr::Closure { params, .. }) => {
                     params.first().and_then(|param| {
                         self.shapes
-                            .source_parameter(ctx, param)
+                            .param_type(None, &param.ty)
                             .ok()
                             .map(|(ty, _)| ty.carrier)
                     })

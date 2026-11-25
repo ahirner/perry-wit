@@ -219,9 +219,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(None);
             }
             let mut inputs = vec![Ty::STRING];
-            let captures = self
-                .index
-                .replacement_captures(&self.hir.declarations.constructors, first_arg);
+            let captures = self.index.replacement_captures(first_arg);
             if let Some((count, named)) = captures {
                 let opt = self.types.with_absences(Ty::STRING, Absence::Undefined);
                 inputs.extend(std::iter::repeat_n(opt, count));
@@ -371,10 +369,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.record_site_coercion(
                     s.inst,
                     callback,
-                    FuncCoercion::DispatchCallback {
-                        helper,
-                        arms: arms_span,
-                        input_tys,
+                    FuncCoercion::Callback {
+                        target: CallTarget::Dispatch {
+                            helper,
+                            needs_recv: false,
+                        },
+                        inputs: input_tys,
                     },
                 );
                 return Ok(Some(cb_ret));
@@ -393,9 +393,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.record_site_coercion(
                     s.inst,
                     callback,
-                    FuncCoercion::EnvCallback {
-                        target: cb_inst,
-                        input_tys,
+                    FuncCoercion::Callback {
+                        target: CallTarget::Direct {
+                            target: cb_inst,
+                            pass_env: true,
+                            pass_receiver: false,
+                        },
+                        inputs: input_tys,
                     },
                 );
                 return Ok(Some(

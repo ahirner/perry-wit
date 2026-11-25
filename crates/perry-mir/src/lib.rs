@@ -108,8 +108,8 @@ pub use collections::{
 };
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{
-    PlironResultExt, SourceSpan, attach_caller_notes, set_caller_notes, set_source_span,
-    source_span,
+    CallerFrame, CallerRelation, PlironResultExt, SourceSpan, attach_caller_notes,
+    set_caller_frames, set_caller_notes, set_caller_origin, set_source_span, source_span,
 };
 pub use effects::{Allocation, Effects, Failure, Summary, allocates, allocation};
 pub use exceptions::{
@@ -117,7 +117,7 @@ pub use exceptions::{
     set_exit_only,
 };
 pub use facts::{
-    ProgramFacts, constrain_signature, specialized_implementation, wit_signature, with_fact_limits,
+    FactLimits, ProgramFacts, constrain_signature, specialized_implementation, wit_signature,
 };
 pub use foreign::{ForeignOp, Phase};
 pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};

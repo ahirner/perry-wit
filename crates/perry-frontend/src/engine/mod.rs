@@ -3,12 +3,14 @@ pub(crate) mod bitset;
 pub(crate) mod boundary;
 pub(crate) mod builtins;
 mod instances;
+mod plans;
 pub(crate) mod solve;
 pub(crate) mod types;
 
 use crate::source::SourceModule;
 use boundary::ModuleIndex;
 use perry_wit_diagnostics::Result;
+pub(crate) use plans::BodyOwner;
 use pliron::context::Context;
 use std::collections::HashMap;
 use types::TypeTable;
@@ -28,88 +30,10 @@ impl CellInit {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Storage {
-    ErasedFunction,
+    ErasedFunction(Option<perry_hir::types::FuncId>),
     Value(types::Ty),
     Boxed { ty: types::Ty, init: CellInit },
     Promise(types::Ty),
-}
-
-#[derive(Clone, Copy, Default)]
-pub(crate) enum InstanceValue {
-    #[default]
-    Source,
-    Reference(perry_hir::types::FuncId),
-    Receiver,
-    Expected(types::Ty),
-    Fold(bool),
-    TypeOf(Option<types::Ty>),
-    ThrowTypeError,
-    Matches {
-        identity: types::FuncIdentity,
-        source: types::Ty,
-        left_erased: bool,
-        equal: bool,
-    },
-    Compare {
-        left: types::Ty,
-        right: types::Ty,
-        equal: bool,
-        environments: bool,
-    },
-    Invoke(InvocationSite),
-    Async(AsyncCall),
-    Promise(PromiseConstructor),
-    Collection(types::Ty),
-    Method(perry_hir::types::FuncId),
-    Construct(types::ClassInstId),
-    ZeroArray,
-    ErasedFieldSet,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum Conversion {
-    Zero,
-    Tag(types::FuncIdentity, types::Ty),
-    BoxEnvironment(types::FuncIdentity, types::Ty),
-    Widen(types::Ty, types::Ty),
-}
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct ExpressionSite {
-    pub(crate) value: InstanceValue,
-    pub(crate) conversion: Option<Conversion>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct PromiseConstructor {
-    pub(crate) settled: types::Ty,
-    pub(crate) executor: NativeCallback,
-    pub(crate) handles: [Option<types::FuncIdentity>; 2],
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum AsyncCall {
-    Reaction {
-        target: perry_hir::types::FuncId,
-        passed: [bool; 2],
-    },
-    StartTimer(perry_hir::types::FuncId),
-    ClearTimer {
-        has_handle: bool,
-    },
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct InvocationSite {
-    pub(crate) target: perry_hir::types::FuncId,
-    pub(crate) operand: CallbackOperand,
-    pub(crate) receiver: bool,
-    pub(crate) argument_types: types::Ty,
-}
-
-pub(crate) struct CallbackBinding {
-    pub(crate) call: NativeCallback,
-    pub(crate) params: Vec<Option<types::Ty>>,
 }
 
 #[derive(Clone, Copy)]
@@ -120,14 +44,11 @@ pub(crate) enum InstanceResult {
 }
 
 pub(crate) struct InstanceSignature {
+    pub(crate) inline: Option<solve::Invocation>,
     pub(crate) environment: Option<types::FuncIdentity>,
     pub(crate) receiver: Option<types::Ty>,
-    pub(crate) params: Vec<Option<types::Ty>>,
     pub(crate) result: InstanceResult,
 }
-
-type InstanceSignatures = HashMap<perry_hir::types::FuncId, InstanceSignature>;
-type SiteKey = (Option<perry_hir::types::FuncId>, usize);
 
 pub(crate) struct DispatchArm {
     pub(crate) identity: types::FuncIdentity,
@@ -149,42 +70,13 @@ pub(crate) enum TimerKind {
     Interval,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum CallbackOperand {
-    None,
-    Environment,
-    Callee,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum NativeCallback {
-    ThrowTypeError,
-    Call {
-        target: perry_hir::types::FuncId,
-        operand: CallbackOperand,
-        receiver: bool,
-    },
-}
-
-impl NativeCallback {
-    pub(crate) fn takes_value(self) -> bool {
-        matches!(
-            self,
-            Self::Call {
-                operand: CallbackOperand::Callee | CallbackOperand::Environment,
-                ..
-            }
-        )
-    }
-}
-
 pub(crate) enum Reaction {
     Chain {
-        fulfilled: Option<NativeCallback>,
-        rejected: Option<NativeCallback>,
+        fulfilled: Option<solve::CallTarget>,
+        rejected: Option<solve::CallTarget>,
         rejects_only: bool,
     },
-    Finally(NativeCallback),
+    Finally(solve::CallTarget),
 }
 
 pub(crate) enum NativeBody {
@@ -199,7 +91,7 @@ pub(crate) enum NativeBody {
     },
     Timer {
         kind: TimerKind,
-        callback: NativeCallback,
+        callback: solve::CallTarget,
     },
 }
 
@@ -211,17 +103,10 @@ pub(crate) struct NativeFunction {
     pub(crate) body: NativeBody,
 }
 
-#[derive(Default)]
-pub(crate) struct ClassFields {
-    pub(crate) initializer: Option<perry_hir::types::FuncId>,
-    pub(crate) instance: HashMap<String, types::Ty>,
-    pub(crate) statics: HashMap<String, types::Ty>,
-}
-
+#[derive(Clone, Copy)]
 pub(crate) enum EnvironmentField {
     Capture {
         local: perry_hir::types::LocalId,
-        name: String,
         ty: types::Ty,
         cell: Option<CellInit>,
     },
@@ -230,14 +115,6 @@ pub(crate) enum EnvironmentField {
 }
 
 impl EnvironmentField {
-    pub(crate) fn name(&self) -> &str {
-        match self {
-            Self::Capture { name, .. } => name,
-            Self::Settler(_) => "c0",
-            Self::Unit => "_u",
-        }
-    }
-
     pub(crate) fn storage(&self) -> Storage {
         match *self {
             Self::Capture { ty, cell, .. } => {
@@ -271,38 +148,37 @@ pub(crate) struct ClosureValue {
 
 #[derive(Default)]
 pub(crate) struct InstancePlans {
-    pub(crate) expressions: HashMap<SiteKey, ExpressionSite>,
-    pub(crate) callbacks: HashMap<SiteKey, CallbackBinding>,
-    pub(crate) erased: std::collections::HashSet<SiteKey>,
-    pub(crate) inline_callbacks: HashMap<perry_hir::types::FuncId, solve::Invocation>,
-    pub(crate) class_origins: HashMap<String, String>,
-    pub(crate) per_iteration: std::collections::HashSet<perry_hir::types::LocalId>,
-    pub(crate) boxed_parameters:
-        HashMap<(perry_hir::types::FuncId, perry_hir::types::LocalId), types::Ty>,
-    pub(crate) closure_values:
-        HashMap<(Option<perry_hir::types::FuncId>, perry_hir::types::FuncId), ClosureValue>,
-    pub(crate) environments: HashMap<types::FuncIdentity, Vec<EnvironmentField>>,
-    pub(crate) class_fields: HashMap<String, ClassFields>,
-    pub(crate) locals:
-        HashMap<(Option<perry_hir::types::FuncId>, perry_hir::types::LocalId), Storage>,
-    pub(crate) signatures: InstanceSignatures,
-    pub(crate) functions: std::collections::BTreeMap<perry_hir::types::FuncId, NativeFunction>,
+    decisions: plans::Decisions,
+    functions: types::IdxVec<types::InstanceId, perry_hir::types::FuncId>,
+    helpers: types::IdxVec<types::HelperId, Option<perry_hir::types::FuncId>>,
+    pub(super) local_ids: Vec<Option<types::LocalIdx>>,
+    local_flags: types::IdxVec<types::LocalIdx, types::LocalFlags>,
+    pub(crate) closure_values: HashMap<(BodyOwner, perry_hir::types::FuncId), ClosureValue>,
+    pub(crate) environments: plans::Environments,
 }
 
 pub(crate) struct Specialization<'s> {
-    pub(crate) strings: crate::source::StringConstants,
+    pub(crate) iteration: crate::hir_compat::Iteration<'s>,
+    pub(crate) literal_classes: crate::source::LiteralClasses<'s>,
+    pub(crate) annotations: boundary::Annotations,
+    pub(crate) lexical: boundary::LexicalFunctions<'s>,
+    pub(crate) strings: crate::source::StringConstants<'s>,
     pub(crate) bodies: crate::source::InstanceBodies<'s>,
     pub(crate) sparse_arrays: bool,
-    pub(crate) types: std::cell::RefCell<TypeTable>,
     pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
     pub(crate) dict_reads: bitset::BitSet,
     pub(crate) capture_free: bitset::BitSet,
-    pub(crate) class_names: types::IdxVec<types::ClassInstId, String>,
-    pub(crate) escaping_envs: bitset::BitSet,
+    pub(crate) escaping_env_templates: bitset::BitSet,
     pub(crate) instances: InstancePlans,
 }
 
-type InstantiationOrigin = (String, String, u32, Option<String>);
+enum InstantiationOrigin {
+    Instance(types::InstanceId),
+    Dispatch {
+        function: perry_hir::types::FuncId,
+        offset: u32,
+    },
+}
 
 pub(crate) fn lower_module(
     ctx: &mut Context,
@@ -310,17 +186,19 @@ pub(crate) fn lower_module(
     world: &crate::wit::WorldTypes<'_>,
 ) -> Result<crate::LoweredProgram> {
     let mut types = TypeTable::new();
-    let index = ModuleIndex::build(
+    let mut index = ModuleIndex::build(
         ctx,
         &source.bodies,
         &source.declarations,
         &source.locations,
         &source.closure_display_names,
+        &source.constructors,
         &mut types,
     );
-    let solved = solve::solve(ctx, &source, &index, world, &mut types)?;
+    let mut solved = solve::solve(ctx, &source, &index, world, &mut types)?;
     let mut origins = Vec::new();
-    let (bodies, instances) = instances::build(
+    let mut records = perry_mir::RecordLayouts::default();
+    let (bodies, mut instances, decisions) = instances::build(
         &source.bodies,
         &source.declarations,
         &source.locations,
@@ -328,29 +206,53 @@ pub(crate) fn lower_module(
         &types,
         &solved,
         &mut origins,
+        (ctx, &mut records),
     )?;
+    instances.decisions = plans::Decisions::from_solver(&mut index, &mut solved, decisions);
+    for origin in origins {
+        match origin {
+            InstantiationOrigin::Instance(id) => {
+                let inst = &solved.instances[id];
+                let caller = inst
+                    .caller
+                    .map(|id| &solved.instances[id])
+                    .filter(|caller| caller.template != types::TemplateId::INIT);
+                source.locations.record_instantiation(
+                    inst.emitted_name.clone(),
+                    index.view(inst.template).raw_name(),
+                    inst.call_byte_offset,
+                    caller.map(|c| c.emitted_name.clone()),
+                );
+            }
+            InstantiationOrigin::Dispatch { function, offset } => {
+                source.locations.record_instantiation(
+                    format!("__dispatch_{function}"),
+                    "dispatch".into(),
+                    offset,
+                    None,
+                );
+            }
+        }
+    }
+    instances.local_ids = index.local_to_idx;
+    instances.local_flags = index.locals.map(|local| local.flags);
     let strings = index.strings;
     let capture_free = index.capture_free_templates;
     for (witness, instance) in source.witnesses.iter_mut().zip(&solved.witness_instances) {
         witness.target = instance.map(|id| solved.instances[id].emitted_func_id);
     }
-    for (name, template, offset, caller) in origins {
-        source
-            .locations
-            .record_instantiation(name, template, offset, caller);
-    }
     let specialization = Specialization {
+        iteration: index.iteration,
+        literal_classes: index.literal_classes,
+        annotations: index.annotations,
+        lexical: index.functions,
         strings,
         bodies,
         sparse_arrays: source.sparse_arrays || solved.deletes_array_elements,
-        types: types.into(),
-        escaping_envs: solved.escaping_env_templates,
         locations: solved.locations,
         dict_reads: solved.dict_reads,
-        class_names: solved
-            .class_insts
-            .map(|instance| instance.emitted_name.clone()),
         capture_free,
+        escaping_env_templates: solved.escaping_env_templates,
         instances,
     };
     crate::lower::program::build_module(
@@ -360,7 +262,68 @@ pub(crate) fn lower_module(
         &mut source.locations,
         &source.witnesses,
         &specialization,
+        (types, records),
     )
+}
+
+impl Specialization<'_> {
+    pub(crate) fn regexp_operand(&self, expr: &perry_hir::ir::Expr) -> Option<String> {
+        self.strings.regexp_operand(expr, &self.instances.local_ids)
+    }
+}
+
+impl InstancePlans {
+    pub(crate) fn function(&self, id: types::InstanceId) -> perry_hir::types::FuncId {
+        self.functions[id]
+    }
+
+    pub(crate) fn helper(&self, id: types::HelperId) -> Result<perry_hir::types::FuncId> {
+        self.helpers[id]
+            .ok_or_else(|| perry_wit_diagnostics::Diagnostic::internal("missing emitted helper"))
+    }
+
+    pub(crate) fn emitted_callee(
+        &self,
+        call: solve::CallTarget,
+    ) -> Option<Result<perry_hir::types::FuncId>> {
+        match call {
+            solve::CallTarget::Direct { target, .. } => Some(Ok(self.function(target))),
+            solve::CallTarget::Dispatch { helper, .. } => Some(self.helper(helper)),
+            solve::CallTarget::ThrowTypeError => None,
+        }
+    }
+
+    pub(crate) fn storage(
+        &self,
+        owner: BodyOwner,
+        id: perry_hir::types::LocalId,
+    ) -> Option<Storage> {
+        self.decisions
+            .storage(owner, self.local_ids.get(id as usize).copied().flatten()?)
+    }
+
+    pub(crate) fn parameter_function(
+        &self,
+        owner: BodyOwner,
+        id: perry_hir::types::LocalId,
+    ) -> Option<perry_hir::types::FuncId> {
+        match self.storage(owner, id)? {
+            Storage::ErasedFunction(target) => target,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn module_binding(&self, id: perry_hir::types::LocalId) -> bool {
+        self.local_ids
+            .get(id as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|idx| self.local_flags[idx].contains(types::LocalFlags::MODULE))
+    }
+
+    pub(crate) fn site(&self, owner: BodyOwner, expr: &perry_hir::ir::Expr) -> solve::SiteEntry {
+        self.decisions.site(owner, expr).unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

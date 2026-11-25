@@ -28,6 +28,85 @@ struct CallerNote {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CallerNotes(Vec<CallerNote>);
 
+#[format]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CallerRelation {
+    Instantiation,
+    Import,
+}
+
+impl CallerRelation {
+    pub fn note(self, label: &str, span: SourceSpan) -> Note {
+        let message = match self {
+            Self::Instantiation => format!("while instantiating '{label}'"),
+            Self::Import => format!("called from here ('{label}')"),
+        };
+        Note::spanned(span, message)
+    }
+}
+
+#[format("`(` $name `,` $relation `,` $label `,` opt($span) `,` opt($parent) `)`")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CallerFrame {
+    name: StringAttr,
+    relation: CallerRelation,
+    label: StringAttr,
+    span: Option<StringAttr>,
+    parent: Option<StringAttr>,
+}
+
+impl CallerFrame {
+    pub fn new(
+        name: &str,
+        parent: Option<&str>,
+        relation: CallerRelation,
+        label: &str,
+        span: Option<SourceSpan>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            parent: parent.map(Into::into),
+            relation,
+            label: label.into(),
+            span: span.map(|span| encode_span(&span).into()),
+        }
+    }
+}
+
+#[pliron_attr(
+    name = "perry.caller_frames",
+    format = "`[` vec($0, CharSpace(`,`)) `]`",
+    verifier = "succ"
+)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CallerFrames(Vec<CallerFrame>);
+
+const FRAMES: Identifier = Identifier::new("perry_caller_frames");
+const ORIGIN: Identifier = Identifier::new("perry_caller_origin");
+
+pub fn set_caller_frames(
+    ctx: &mut Context,
+    module: &pliron::builtin::ops::ModuleOp,
+    mut frames: Vec<CallerFrame>,
+) {
+    if !frames.is_empty() {
+        frames.sort_unstable_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+        module
+            .get_operation()
+            .deref_mut(ctx)
+            .attributes
+            .set(FRAMES, CallerFrames(frames));
+    }
+}
+
+pub fn set_caller_origin(ctx: &mut Context, function: &pliron::builtin::ops::FuncOp, name: &str) {
+    function
+        .get_operation()
+        .deref_mut(ctx)
+        .attributes
+        .set(ORIGIN, StringAttr::from(name));
+}
+
 pub use perry_wit_diagnostics::SourceSpan;
 
 pub trait PlironResultExt<T> {
@@ -110,17 +189,39 @@ pub fn attach_caller_notes(
     diagnostic: Diagnostic,
 ) -> Diagnostic {
     let operation = operation.get_operation().deref(ctx);
-    let Some(notes) = operation.attributes.get::<CallerNotes>(&CALLER_NOTES) else {
-        return diagnostic;
+    let diagnostic = match operation.attributes.get::<CallerNotes>(&CALLER_NOTES) {
+        Some(notes) => diagnostic.with_notes(notes.0.iter().map(|note| {
+            match note
+                .span
+                .as_ref()
+                .and_then(|span| decode_span(span.as_str()))
+            {
+                Some(span) => Note::spanned(span, note.message.as_str()),
+                None => Note::new(note.message.as_str()),
+            }
+        })),
+        None => diagnostic,
     };
-    diagnostic.with_notes(notes.0.iter().map(|note| {
-        match note
-            .span
-            .as_ref()
-            .and_then(|span| decode_span(span.as_str()))
+    if let Some(origin) = operation.attributes.get::<StringAttr>(&ORIGIN)
+        && let Some(module) = operation.get_parent_op(ctx)
+        && let Some(frames) = module.deref(ctx).attributes.get::<CallerFrames>(&FRAMES)
+    {
+        let mut notes = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut name = origin.as_str();
+        while let Ok(index) = frames
+            .0
+            .binary_search_by(|frame| frame.name.as_str().cmp(name))
+            && seen.insert(index)
         {
-            Some(span) => Note::spanned(span, note.message.as_str()),
-            None => Note::new(note.message.as_str()),
+            let frame = &frames.0[index];
+            if let Some(span) = frame.span.as_ref().and_then(|s| decode_span(s.as_str())) {
+                notes.push(frame.relation.note(frame.label.as_str(), span));
+            }
+            let Some(parent) = &frame.parent else { break };
+            name = parent.as_str();
         }
-    }))
+        return diagnostic.with_notes(notes);
+    }
+    diagnostic
 }

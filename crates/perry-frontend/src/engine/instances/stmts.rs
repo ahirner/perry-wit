@@ -2,45 +2,23 @@
 use super::*;
 
 impl<'h> InstancePlanner<'h, '_> {
-    fn plan_condition(&mut self, scope: &InstanceContext<'_>, expr: &'h Expr) -> Result<()> {
-        match expr {
-            Expr::Logical {
-                op: perry_hir::ir::LogicalOp::And | perry_hir::ir::LogicalOp::Or,
-                left,
-                right,
-            } => {
-                self.plan_condition(scope, left)?;
-                self.plan_condition(scope, right)
-            }
-            Expr::Sequence(parts) if let Some((last, prefix)) = parts.split_last() => {
-                for effect in prefix {
-                    self.plan_expr(scope, effect)?;
-                }
-                self.plan_condition(scope, last)
-            }
-            _ => self.plan_expr(scope, expr),
-        }
-    }
-
-    pub(super) fn plan_stmts(
-        &mut self,
-        scope: &InstanceContext<'_>,
-        stmts: &'h [Stmt],
-    ) -> Result<()> {
-        for stmt in stmts {
-            self.plan_stmt(scope, stmt)?;
-        }
-        Ok(())
-    }
-
     pub(super) fn local_storage(
         &mut self,
         instance: InstanceId,
         id: LocalId,
         storage: crate::engine::Storage,
-    ) {
-        let owner = self.owner(instance);
-        self.plans.locals.insert((owner, id), storage);
+    ) -> Result<()> {
+        let owner = self.solved.body_owner(instance);
+        let id = self
+            .index
+            .local_idx(id)
+            .ok_or_else(|| Diagnostic::internal("storage for an unknown lexical binding"))?;
+        self.decisions
+            .entry(owner)
+            .or_default()
+            .locals
+            .insert(id, storage);
+        Ok(())
     }
 
     fn resolve_let_ty(
@@ -116,125 +94,35 @@ impl<'h> InstancePlanner<'h, '_> {
         }
     }
 
-    fn plan_stmt(&mut self, scope: &InstanceContext<'_>, stmt: &'h Stmt) -> Result<()> {
-        match stmt {
-            Stmt::Let {
-                id, name, ty, init, ..
-            } => {
-                if let Some((_, source)) = self.declarations.for_of(Some(stmt)) {
-                    return self.plan_expr(scope, source);
+    pub(super) fn prepare_local(
+        &mut self,
+        instance: InstanceId,
+        binding: &crate::engine::boundary::SourceLocal<'_>,
+    ) -> Result<()> {
+        let id = self.index.locals[binding.local].id;
+        let storage = if let Some(t) = self.local_ty(instance, id)
+            && let TyKind::Func(identity) = self.types.kind(t)
+            && !self.is_env_template(identity.template)
+        {
+            crate::engine::Storage::ErasedFunction(None)
+        } else {
+            let solved = self.resolve_let_ty(instance, id, binding.name, binding.ty)?;
+            if self.is_boxed_local(id) {
+                crate::engine::Storage::Boxed {
+                    ty: self.boxed_type(id, solved)?,
+                    init: self.cell_init(id),
                 }
-                if let Some(t) = self.local_ty(scope.inst_id, *id)
-                    && let TyKind::Func(identity) = self.types.kind(t)
-                    && !self.is_env_template(identity.template)
-                {
-                    self.local_storage(scope.inst_id, *id, crate::engine::Storage::ErasedFunction);
-                    if let Some(init) = init
-                        && !is_pure_func_expr(init)
-                    {
-                        self.plan_expr(scope, init)?;
-                    }
-                    return Ok(());
-                }
-                let solved = self.resolve_let_ty(scope.inst_id, *id, name, ty)?;
-                if self.is_boxed_local(*id) {
-                    if self.index.is_for_head_local(*id) {
-                        self.plans.per_iteration.insert(*id);
-                    }
-                    let ty = self.boxed_type(*id, solved)?;
-                    self.local_storage(
-                        scope.inst_id,
-                        *id,
-                        crate::engine::Storage::Boxed {
-                            ty,
-                            init: self.cell_init(*id),
-                        },
-                    );
-                } else if let Some(ty) = solved {
-                    self.local_storage(scope.inst_id, *id, crate::engine::Storage::Value(ty));
-                }
-                if let Some(init) = init {
-                    let expected = solved.map_or_else(
-                        || !matches!(ty, HirType::Any | HirType::Unknown),
-                        |ty| !matches!(ty, Ty::DYNAMIC | Ty::OPEN | Ty::BOTTOM),
-                    );
-                    self.plan_expr(&scope.with_expected(expected), init)?;
-                }
+            } else if let Some(ty) = solved {
+                crate::engine::Storage::Value(ty)
+            } else {
+                return Ok(());
             }
-            Stmt::Return(Some(expr)) => {
-                if !scope.void_return || !is_pure_func_expr(expr) {
-                    self.plan_expr(&scope.with_expected(!scope.void_return), expr)?;
-                }
-            }
-            Stmt::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.plan_condition(scope, condition)?;
-                self.plan_stmts(scope, then_branch)?;
-                if let Some(body) = else_branch {
-                    self.plan_stmts(scope, body)?;
-                }
-            }
-            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-                self.plan_condition(scope, condition)?;
-                self.plan_stmts(scope, body)?;
-            }
-            Stmt::For {
-                init,
-                condition,
-                update,
-                body,
-            } => {
-                if let Some(init) = init {
-                    self.plan_stmt(scope, init)?;
-                }
-                if let Some(condition) = condition {
-                    self.plan_condition(scope, condition)?;
-                }
-                if let Some(update) = update {
-                    self.plan_expr(scope, update)?;
-                }
-                self.plan_stmts(scope, body)?;
-            }
-            Stmt::Try {
-                body,
-                catch,
-                finally,
-                ..
-            } => {
-                self.plan_stmts(scope, body)?;
-                if let Some(catch) = catch {
-                    self.plan_stmts(scope, &catch.body)?;
-                }
-                if let Some(body) = finally {
-                    self.plan_stmts(scope, body)?;
-                }
-            }
-            Stmt::Switch {
-                discriminant,
-                cases,
-            } => {
-                self.plan_expr(scope, discriminant)?;
-                for case in cases {
-                    if let Some(test) = &case.test {
-                        self.plan_expr(scope, test)?;
-                    }
-                    self.plan_stmts(scope, &case.body)?;
-                }
-            }
-            Stmt::Labeled { body, .. } => self.plan_stmt(scope, body)?,
-            Stmt::Expr(expr) | Stmt::Throw(expr) => self.plan_expr(scope, expr)?,
-            Stmt::Return(None)
-            | Stmt::Break
-            | Stmt::Continue
-            | Stmt::LabeledBreak(_)
-            | Stmt::LabeledContinue(_)
-            | Stmt::PreallocateBoxes(_)
-            | Stmt::PreallocateTdzBoxes(_)
-            | Stmt::ReleaseBoxes(_) => {}
-        }
+        };
+        self.decisions
+            .entry(self.solved.body_owner(instance))
+            .or_default()
+            .locals
+            .insert(binding.local, storage);
         Ok(())
     }
 

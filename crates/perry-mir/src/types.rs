@@ -18,6 +18,7 @@ use pliron::{
 mod kinds;
 pub use kinds::*;
 mod records;
+pub use records::RecordLayouts;
 
 /// `ty` as a `T` when it is one. Unlike [TypedHandle::from_handle], a mismatch does not print
 /// both types into an error, so this is the type test for hot paths.

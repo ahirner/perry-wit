@@ -47,6 +47,12 @@ impl View {
     }
 }
 
+pub(crate) enum Expansion<'h> {
+    Alias(Ty),
+    Interface(Properties),
+    Class(crate::shapes::ClassShape<'h>, Properties),
+}
+
 pub(crate) struct Resolver<'a, 'h> {
     ctx: &'a Context,
     decls: &'a Declarations<'h>,
@@ -62,16 +68,44 @@ impl<'a, 'h> Resolver<'a, 'h> {
         Self { ctx, decls, types }
     }
 
-    pub(crate) fn fields(
+    pub(crate) fn expand(
         &mut self,
-        declaration: Declaration<'_>,
+        declaration: Declaration<'h>,
         bindings: &[(TypeName, Ty)],
         depth: usize,
-    ) -> Option<Properties> {
-        let (interface, class) = match declaration {
-            Declaration::Interface(interface) => (Some(interface), None),
-            Declaration::Class(class) => (None, Some(class)),
-            _ => return None,
+    ) -> Result<Expansion<'h>> {
+        let mut remaining = ARGUMENT_LIMIT;
+        let interface = match declaration {
+            Declaration::Alias(alias) => {
+                return Ok(Expansion::Alias(substitute(
+                    self.ctx,
+                    self.types,
+                    &alias.ty,
+                    bindings,
+                    &mut remaining,
+                )?));
+            }
+            Declaration::Class(class) => {
+                let mut remaining = usize::MAX;
+                let fields = class
+                    .fields()
+                    .map(|(field, solved)| {
+                        let ty = match solved {
+                            Some(ty) => ty,
+                            None => substitute(
+                                self.ctx,
+                                self.types,
+                                &field.ty,
+                                bindings,
+                                &mut remaining,
+                            )?,
+                        };
+                        Ok((field.name.clone(), ty, false))
+                    })
+                    .collect::<Result<_>>()?;
+                return Ok(Expansion::Class(class, fields));
+            }
+            Declaration::Interface(interface) => interface,
         };
         let mut properties: Properties = Vec::new();
         let mut merge = |field: (String, Ty, bool)| {
@@ -81,26 +115,26 @@ impl<'a, 'h> Resolver<'a, 'h> {
                 properties.push(field);
             }
         };
-        let mut remaining = ARGUMENT_LIMIT;
-        for parent in interface.into_iter().flat_map(|i| &i.extends) {
-            let parent = substitute(self.ctx, self.types, parent, bindings, &mut remaining).ok()?;
-            for field in self.record(parent, depth)? {
+        let unresolved = || {
+            diag!(
+                codes::UNSUPPORTED_TYPE,
+                "failed to resolve inherited properties of interface {}",
+                interface.name
+            )
+        };
+        for parent in &interface.extends {
+            let parent = substitute(self.ctx, self.types, parent, bindings, &mut remaining)
+                .map_err(|_| unresolved())?;
+            for field in self.record(parent, depth).ok_or_else(unresolved)? {
                 merge(field);
             }
         }
-        let fields = interface
-            .into_iter()
-            .flat_map(|i| i.properties.iter().map(|p| (&p.name, &p.ty, p.optional)))
-            .chain(
-                class
-                    .into_iter()
-                    .flat_map(|c| c.fields().map(|f| (&f.name, &f.ty, false))),
-            );
-        for (name, ty, optional) in fields {
-            let ty = substitute(self.ctx, self.types, ty, bindings, &mut remaining).ok()?;
-            merge((name.clone(), ty, optional));
+        for field in &interface.properties {
+            let ty = substitute(self.ctx, self.types, &field.ty, bindings, &mut remaining)
+                .map_err(|_| unresolved())?;
+            merge((field.name.clone(), ty, field.optional));
         }
-        Some(properties)
+        Ok(Expansion::Interface(properties))
     }
 
     pub(crate) fn named(
@@ -126,33 +160,30 @@ impl<'a, 'h> Resolver<'a, 'h> {
             }
             Declaration::find(self.decls, base)?.1
         };
-        if matches!(declaration, Declaration::Class(_)) && query == Query::Dictionary {
+        if (query.aliases_only() && !matches!(declaration, Declaration::Alias(_)))
+            || (matches!(declaration, Declaration::Class(_)) && query == Query::Dictionary)
+        {
             return None;
         }
         let bindings = declaration
             .bind(self.ctx, base, self.types, arguments)
             .ok()?;
-        if let Declaration::Alias(alias) = declaration {
-            let mut remaining = ARGUMENT_LIMIT;
-            let target =
-                substitute(self.ctx, self.types, &alias.ty, &bindings, &mut remaining).ok()?;
-            let union = matches!(self.types.kind(target), TyKind::Union(_));
-            let resolved = self.resolve(target, query, depth + 1)?;
-            // Flatten aliases only when they expose a union or a utility expansion.
-            if query == Query::Union
-                && !union
-                && matches!(resolved.0, View::Type(ty) if ty == target)
-            {
-                return None;
+        match self.expand(declaration, &bindings, depth + 1).ok()? {
+            Expansion::Alias(target) => {
+                let union = matches!(self.types.kind(target), TyKind::Union(_));
+                let resolved = self.resolve(target, query, depth + 1)?;
+                // Flatten aliases only when they expose a union or a utility expansion.
+                if query == Query::Union
+                    && !union
+                    && matches!(resolved.0, View::Type(ty) if ty == target)
+                {
+                    return None;
+                }
+                Some(resolved)
             }
-            Some(resolved)
-        } else if !query.aliases_only() {
-            Some((
-                View::Fields(self.fields(declaration, &bindings, depth + 1)?),
-                depth,
-            ))
-        } else {
-            None
+            Expansion::Interface(fields) | Expansion::Class(_, fields) => {
+                Some((View::Fields(fields), depth))
+            }
         }
     }
 

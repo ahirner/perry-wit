@@ -191,7 +191,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 InstanceReq::new(method_tid, &arg_tys, Some(s.inst))
                     .receiver(Some(Receiver::Class(cinst_id)))
                     .at(byte_offset),
-                true,
+                Some(args),
                 false,
             )?;
             return Ok(ret);
@@ -238,7 +238,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .receiver(recv)
                     .owner(ident.capture_owner)
                     .at(byte_offset),
-                false,
+                None,
                 pass_env,
             )?;
             return Ok(ret);

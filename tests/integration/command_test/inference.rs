@@ -354,9 +354,12 @@ const receiver = make(2);
 function getReceiver() { reads++; return receiver; }
 getReceiver().f(0);
 console.log(getReceiver().f(1), reads);
+class Runner { static run(f, n) { return f(n); } }
+function choose(flag) { return flag ? id : other; }
+console.log(Runner.run(get("o"), num("p")), Runner.run(choose(false), num("q")));
 console.log(trace, same, distinct, obj.first, obj.end(1), result, tail);
 "#,
-            "5 2\nabcdefghijklmn true true 2 1 4 2\n",
+            "5 2\n2 -2\nabcdefghijklmnopq true true 2 1 4 2\n",
         ),
         (
             "loop_let_boxes_nullable_functions_typeof_and_wide_objects",

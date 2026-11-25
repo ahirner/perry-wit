@@ -11,16 +11,17 @@ use super::boundary::{LocalFlags, ModuleIndex, TemplateKind, TemplateView};
 use super::solve::Invocation;
 use super::solve::{ClassInst, FuncCoercion, Instance, Receiver, SiteEntry, Solved};
 use super::types::{
-    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, HelperId, Idx, IdxVec, InstanceId,
-    TemplateId, Ty, TyKind, TypeTable,
+    CaptureOwner, CellKind, ClassId, ClassInstId, FuncIdentity, Idx, IdxVec, InstanceId, Ty,
+    TyKind, TypeTable,
 };
 use perry_hir::{
-    ir::{Class, CompareOp, Expr, Function, Stmt},
+    ir::{Class, Expr, Function},
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
-use std::collections::HashSet;
+use pliron::context::Context;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build<'h>(
     bodies: &'h Bodies,
     declarations: &ModuleDeclarations,
@@ -29,7 +30,12 @@ pub(super) fn build<'h>(
     types: &TypeTable,
     solved: &Solved,
     instantiations: &mut Vec<super::InstantiationOrigin>,
-) -> Result<(InstanceBodies<'h>, super::InstancePlans)> {
+    layouts: (&Context, &mut perry_mir::RecordLayouts),
+) -> Result<(
+    InstanceBodies<'h>,
+    super::InstancePlans,
+    super::plans::Pending,
+)> {
     let max_inst_fid = solved
         .instances
         .iter()
@@ -43,14 +49,21 @@ pub(super) fn build<'h>(
         index,
         types,
         solved,
+        next_static_id: 0x8000_0000,
         next_func_id: index.max_func_id.max(max_inst_fid).saturating_add(1),
         instantiations,
-        environments: HashSet::new(),
-        helper_slots: solved.helpers.filled(None),
-        plans: Default::default(),
+        layouts,
+
+        native: Default::default(),
+        plans: super::InstancePlans {
+            functions: solved.instances.map(|inst| inst.emitted_func_id),
+            helpers: solved.helpers.filled(None),
+            ..Default::default()
+        },
+        decisions: Default::default(),
     };
     let bodies = planner.build_all()?;
-    Ok((bodies, planner.plans))
+    Ok((bodies, planner.plans, planner.decisions))
 }
 
 struct InstancePlanner<'h, 'a> {
@@ -61,42 +74,16 @@ struct InstancePlanner<'h, 'a> {
     types: &'a TypeTable,
     solved: &'a Solved,
     next_func_id: FuncId,
+    next_static_id: LocalId,
     instantiations: &'a mut Vec<super::InstantiationOrigin>,
-    environments: HashSet<FuncIdentity>,
-    helper_slots: IdxVec<HelperId, Option<FuncId>>,
-    plans: super::InstancePlans,
-}
+    layouts: (&'a Context, &'a mut perry_mir::RecordLayouts),
 
-struct InstanceContext<'a> {
-    inst_id: InstanceId,
-    func_params: &'a [(LocalId, FuncId)],
-    void_return: bool,
-    has_expected: bool,
-}
-impl InstanceContext<'_> {
-    fn plain(inst_id: InstanceId) -> Self {
-        Self {
-            inst_id,
-            func_params: &[],
-            void_return: false,
-            has_expected: false,
-        }
-    }
-    fn with_expected(&self, has_expected: bool) -> InstanceContext<'_> {
-        InstanceContext {
-            inst_id: self.inst_id,
-            func_params: self.func_params,
-            void_return: self.void_return,
-            has_expected,
-        }
-    }
+    native: Vec<(FuncId, super::NativeFunction)>,
+    plans: super::InstancePlans,
+    decisions: super::plans::Pending,
 }
 
 impl<'h> InstancePlanner<'h, '_> {
-    fn owner(&self, instance: InstanceId) -> Option<FuncId> {
-        (instance != self.solved.init_inst).then(|| self.solved.instances[instance].emitted_func_id)
-    }
-
     fn is_resolved(&self, ty: Ty) -> bool {
         !self.types.is_open_with(
             ty,
@@ -122,12 +109,6 @@ impl<'h> InstancePlanner<'h, '_> {
         )
     }
 
-    fn site_entry(&self, inst_id: InstanceId, expr: &Expr) -> Option<&SiteEntry> {
-        let template = self.solved.instances[inst_id].template;
-        let local_site = self.index.site_of(template, expr)?;
-        self.solved.inst_sites[inst_id].get(local_site)
-    }
-
     fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
         if let Some(lidx) = self.index.local_idx(id) {
             let local = self.index.locals[lidx];
@@ -148,7 +129,7 @@ impl<'h> InstancePlanner<'h, '_> {
 
     fn build_all(&mut self) -> Result<InstanceBodies<'h>> {
         let init_inst = self.solved.init_inst;
-        self.plan_stmts(&InstanceContext::plain(init_inst), &self.bodies.init)?;
+        self.prepare_instance(init_inst)?;
 
         let mut new_functions = Vec::new();
         for (inst_id, inst) in self.solved.instances.iter_enumerated().skip(1) {
@@ -164,12 +145,6 @@ impl<'h> InstancePlanner<'h, '_> {
                 continue;
             }
             let func = self.plan_function(inst_id, inst, view)?;
-            if inst.invocation == Invocation::Lexical
-                || (!self.is_env_template(inst.template)
-                    && (inst.invocation == Invocation::Inline || inst.captures_non_global))
-            {
-                self.plans.inline_callbacks.insert(func.id, inst.invocation);
-            }
             new_functions.push(func);
         }
 
@@ -187,72 +162,26 @@ impl<'h> InstancePlanner<'h, '_> {
             }
         }
 
-        let mut new_classes = Vec::new();
-        for (index, declaration) in self.bodies.classes.iter().enumerate() {
-            if self.index.hir_class_is_literal.contains(index) {
-                new_classes.push(InstanceClass {
-                    declaration,
-                    name: declaration.name.clone(),
-                    fields: declaration.fields.iter().collect(),
-                    constructor: declaration.constructor.as_ref().map(InstanceFunction::from),
-                    methods: declaration
-                        .methods
-                        .iter()
-                        .map(InstanceFunction::from)
-                        .collect(),
-                    static_methods: declaration
-                        .static_methods
-                        .iter()
-                        .map(InstanceFunction::from)
-                        .collect(),
-                    getters: declaration
-                        .getters
-                        .iter()
-                        .map(|(n, f)| (n.as_str(), InstanceFunction::from(f)))
-                        .collect(),
-                    setters: declaration
-                        .setters
-                        .iter()
-                        .map(|(n, f)| (n.as_str(), InstanceFunction::from(f)))
-                        .collect(),
-                });
-            }
-        }
+        let mut new_classes = IdxVec::default();
         let mut emitted_classes = BitSet::default();
         for (cinst_id, cinst) in self.solved.class_insts.iter_enumerated() {
             emitted_classes.insert(cinst.class.index());
-            let Some(orig) = self
-                .bodies
-                .classes
-                .get(self.index.class(cinst.class).hir_idx)
-            else {
-                continue;
-            };
-            if cinst.emitted_name != orig.name {
-                self.plans
-                    .class_origins
-                    .insert(cinst.emitted_name.clone(), orig.name.clone());
-            }
-            new_classes.push(self.plan_class(
-                init_inst,
-                cinst.class,
-                Some((cinst_id, cinst)),
-                orig,
-            )?);
+            let orig = self.index.class(cinst.class).declaration;
+            new_classes.push(self.plan_class(cinst.class, Some((cinst_id, cinst)), orig)?);
         }
         for (cid, cinfo) in self.index.classes.iter_enumerated() {
             if emitted_classes.contains(cid.index()) {
                 continue;
             }
-            let Some(orig) = self.bodies.classes.get(cinfo.hir_idx) else {
-                continue;
-            };
+            let orig = cinfo.declaration;
             let has_statics = !self.solved.class_static_methods[cid].is_empty();
             if has_statics || !orig.static_fields.is_empty() || orig.extends_name.is_some() {
-                new_classes.push(self.plan_class(init_inst, cid, None, orig)?);
+                new_classes.push(self.plan_class(cid, None, orig)?);
             }
         }
+        self.native.sort_unstable_by_key(|&(id, _)| id);
         Ok(InstanceBodies {
+            native: std::mem::take(&mut self.native),
             init: &self.bodies.init,
             functions: new_functions,
             classes: new_classes,
@@ -261,34 +190,39 @@ impl<'h> InstancePlanner<'h, '_> {
 
     fn plan_class(
         &mut self,
-        init_inst: InstanceId,
         cid: ClassId,
         instantiated: Option<(ClassInstId, &ClassInst)>,
         orig: &'h Class,
     ) -> Result<InstanceClass<'h>> {
-        let init_ctx = InstanceContext::plain(init_inst);
         let name = instantiated
             .as_ref()
             .map_or(orig.name.as_str(), |(_, instance)| {
                 instance.emitted_name.as_str()
             });
-        let mut layout = super::ClassFields::default();
+        let mut static_fields = Vec::with_capacity(orig.static_fields.len());
         let static_tys = &self.solved.class_static_field_tys[cid];
         for (index, field) in orig.static_fields.iter().enumerate() {
-            if let Some(&ty) = static_tys.get(index)
-                && self.is_resolved(ty)
-            {
+            let ty = static_tys
+                .get(index)
+                .copied()
+                .filter(|&ty| self.is_resolved(ty));
+            if let Some(ty) = ty {
                 self.prepare_layouts(ty)?;
-                layout.statics.insert(field.name.clone(), ty);
             }
-            if let Some(init) = &field.init {
-                self.plan_expr(&init_ctx, init)?;
-            }
+            static_fields.push(crate::source::StaticField {
+                id: self.next_static_id,
+                field,
+                ty,
+            });
+            self.next_static_id += 1;
         }
         let mut cls = InstanceClass {
+            ty: instantiated.map_or(self.index.class(cid).ty, |(_, instance)| instance.ty),
             declaration: orig,
             name: name.to_owned(),
             fields: Vec::new(),
+            static_fields,
+            initializer: None,
             constructor: None,
             methods: Vec::new(),
             static_methods: self.plan_methods(&self.solved.class_static_methods[cid])?,
@@ -296,15 +230,15 @@ impl<'h> InstancePlanner<'h, '_> {
             setters: Vec::new(),
         };
         let Some((cinst_id, cinst)) = instantiated else {
-            cls.fields.extend(&orig.fields);
-            self.plans.class_fields.insert(name.to_owned(), layout);
+            cls.fields
+                .extend(orig.fields.iter().map(|field| (field, None)));
             return Ok(cls);
         };
-        layout.initializer = cinst
+        cls.initializer = cinst
             .field_init
             .map(|id| self.solved.instances[id].emitted_func_id);
         let field_locs = &self.solved.field_locs[cinst.field_locs];
-        let mut fields = Vec::with_capacity(orig.fields.len());
+        cls.fields.reserve(orig.fields.len());
         for (f_idx, field) in orig.fields.iter().enumerate() {
             let resolved = field_locs
                 .get(f_idx)
@@ -312,9 +246,9 @@ impl<'h> InstancePlanner<'h, '_> {
             if self.is_zero_sized_func(resolved) {
                 continue;
             }
-            if self.is_resolved(resolved) {
+            let ty = self.is_resolved(resolved).then_some(resolved);
+            if let Some(resolved) = ty {
                 self.prepare_layouts(resolved)?;
-                layout.instance.insert(field.name.clone(), resolved);
             } else if matches!(
                 self.types.kind(resolved),
                 TyKind::Cell {
@@ -341,15 +275,11 @@ impl<'h> InstancePlanner<'h, '_> {
                     "Add a concrete type annotation to this binding, parameter, or function return.",
                 ));
             }
-            if let Some(init) = &field.init {
-                let owner = cinst
-                    .field_init
-                    .ok_or_else(|| Diagnostic::internal("missing field initializer instance"))?;
-                self.plan_expr(&InstanceContext::plain(owner), init)?;
-            }
-            fields.push(field);
+            cls.fields.push((field, ty));
         }
-        cls.fields = fields;
+        if let Some(owner) = cinst.field_init {
+            self.prepare_instance(owner)?;
+        }
         cls.constructor = match cinst.ctor_inst {
             Some(ctor_id) => {
                 let inst = &self.solved.instances[ctor_id];
@@ -362,7 +292,6 @@ impl<'h> InstancePlanner<'h, '_> {
         cls.methods = self.plan_methods(&members.methods)?;
         cls.getters = self.plan_accessors(&members.getters, &orig.getters)?;
         cls.setters = self.plan_accessors(&members.setters, &orig.setters)?;
-        self.plans.class_fields.insert(name.to_owned(), layout);
         Ok(cls)
     }
 
@@ -372,7 +301,11 @@ impl<'h> InstancePlanner<'h, '_> {
             let inst = &self.solved.instances[id];
             let view = self.index.view(inst.template);
             let mut m = self.plan_function(id, inst, view)?;
-            m.name = inst.emitted_method_name.clone();
+            m.name = if inst.emitted_method_name == view.name {
+                view.name.into()
+            } else {
+                inst.emitted_method_name.clone().into()
+            };
             out.push(m);
         }
         Ok(out)
@@ -400,8 +333,6 @@ impl<'h> InstancePlanner<'h, '_> {
         view: &TemplateView<'h>,
     ) -> Result<InstanceFunction<'h>> {
         let mut params = Vec::with_capacity(view.params.len());
-        let mut param_types = Vec::with_capacity(view.params.len());
-        let mut static_func_params: Vec<(LocalId, FuncId)> = Vec::new();
         let lexical = inst.invocation == Invocation::Lexical;
         let is_env_fn = !lexical && self.is_env_template(inst.template);
         let self_ident = FuncIdentity {
@@ -431,38 +362,37 @@ impl<'h> InstancePlanner<'h, '_> {
                 && !lexical
                 && !self.is_env_template(ident.template)
             {
-                static_func_params.push((param.id, self.find_func_identity_instance(ident)));
+                self.local_storage(
+                    inst_id,
+                    param.id,
+                    super::Storage::ErasedFunction(Some(self.find_func_identity_instance(ident))),
+                )?;
                 continue;
             }
             let resolved = self.is_resolved(param_ty).then_some(param_ty);
-            param_types.push(resolved);
             if resolved.is_some() {
                 self.prepare_layouts(param_ty)?;
             } else if !self.index.is_param_annotated(param.id)
                 && !inst.is_witness
                 && matches!(param.ty, HirType::Any | HirType::Unknown)
             {
-                let err = diag!(codes::MISSING_TYPE_ANNOTATION, "cannot infer the type of parameter '{}' of '{}'", param.name, view.display_name())
+                let err = diag!(codes::MISSING_TYPE_ANNOTATION, "cannot infer the type of parameter '{}' of '{}'", param.name, view.display_name(self.locations))
                     .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
                 let err = self.annotate_local(err, param.id);
                 return Err(self.attach_inst_chain(err, inst_id));
             }
-            let param_ctx = InstanceContext {
-                inst_id,
-                func_params: &static_func_params,
-                void_return: false,
-                has_expected: false,
-            };
-            if let Some(default) = &param.default {
-                self.plan_expr(&param_ctx, default)?;
-            }
             if self.is_boxed_local(param.id) {
                 let ty = self.boxed_type(param.id, resolved)?;
-                self.plans
-                    .boxed_parameters
-                    .insert((inst.emitted_func_id, param.id), ty);
+                self.local_storage(
+                    inst_id,
+                    param.id,
+                    super::Storage::Boxed {
+                        ty,
+                        init: super::CellInit::AtDeclaration,
+                    },
+                )?;
             }
-            params.push(param);
+            params.push((param, resolved));
         }
 
         let ret_ty = self.solved.locations[inst.return_loc];
@@ -480,10 +410,10 @@ impl<'h> InstancePlanner<'h, '_> {
             let err = diag!(
                 codes::MISSING_TYPE_ANNOTATION,
                 "cannot infer return type of '{}': inferred type nests itself",
-                view.display_name()
+                view.display_name(self.locations)
             )
             .with_help("Add a concrete return type annotation to this function.");
-            let err = match self.locations.function_span(view.name) {
+            let err = match self.locations.declaration_span(&view.raw_name()) {
                 Some(span) => err.with_span(span),
                 None => err,
             };
@@ -493,49 +423,43 @@ impl<'h> InstancePlanner<'h, '_> {
         } else {
             super::InstanceResult::Source
         };
-        self.plans.signatures.insert(
-            inst.emitted_func_id,
-            super::InstanceSignature {
-                environment,
-                receiver,
-                params: param_types,
-                result,
-            },
-        );
-        let scope = InstanceContext {
-            inst_id,
-            func_params: &static_func_params,
-            void_return,
-            has_expected: false,
-        };
-        self.plan_stmts(&scope, view.body)?;
+        self.prepare_instance(inst_id)?;
+        let inherited = &self.solved.inst_captures[inst_id];
         let captures = if is_env_fn {
-            Vec::new()
+            std::borrow::Cow::Borrowed(&[][..])
+        } else if inherited.is_empty() && view.captures.windows(2).all(|pair| pair[0] < pair[1]) {
+            std::borrow::Cow::Borrowed(view.captures)
         } else {
             let mut caps = view.captures.to_vec();
-            caps.extend(self.solved.inst_captures[inst_id].iter().copied());
+            caps.extend_from_slice(inherited);
             caps.sort_unstable();
             caps.dedup();
-            caps
+            caps.into()
         };
 
         if !inst.is_witness && inst.caller.is_some() {
-            let caller_name = inst
-                .caller
-                .map(|c| &self.solved.instances[c])
-                .filter(|c| c.template != TemplateId::INIT)
-                .map(|c| c.emitted_name.clone());
-            self.instantiations.push((
-                inst.emitted_name.clone(),
-                view.raw_name(),
-                inst.call_byte_offset,
-                caller_name,
-            ));
+            self.instantiations
+                .push(super::InstantiationOrigin::Instance(inst_id));
         }
 
+        let inline = (matches!(view.kind, TemplateKind::Function | TemplateKind::Closure)
+            && (inst.invocation == Invocation::Lexical
+                || (!self.is_env_template(inst.template)
+                    && (inst.invocation == Invocation::Inline || inst.captures_non_global))))
+            .then_some(inst.invocation);
         Ok(InstanceFunction {
+            signature: Some(super::InstanceSignature {
+                inline,
+                environment,
+                receiver,
+                result,
+            }),
             id: inst.emitted_func_id,
-            name: inst.emitted_name.clone(),
+            name: if inst.emitted_name == view.name {
+                view.name.into()
+            } else {
+                inst.emitted_name.clone().into()
+            },
             params,
             return_type: view.return_type,
             body: view.body,

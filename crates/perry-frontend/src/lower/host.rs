@@ -1,7 +1,7 @@
 //! Host capabilities: timers, `fetch` and the web stream/HTTP classes, and `node:fs/promises`.
 use super::*;
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// `setTimeout(delay?, value?)` from `node:timers/promises`.
     pub(super) fn timer(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         ensure_diag!(
@@ -39,10 +39,9 @@ impl<'s> FunctionBuilder<'s> {
                 let signal = match options {
                     Expr::New {
                         class_name, args, ..
-                    } if self
-                        .shapes
-                        .literal_fields(class_name)
-                        .is_some_and(|names| names == ["signal"]) =>
+                    } if self.shapes.literal_fields(class_name).is_some_and(
+                        |fields| matches!(fields, [field] if field.name == "signal"),
+                    ) =>
                     {
                         &args[0]
                     }
@@ -124,7 +123,7 @@ impl<'s> FunctionBuilder<'s> {
         &self,
         init: Option<&'e Expr>,
     ) -> Result<Vec<(&'s str, &'e Expr)>> {
-        hir_compat::init_fields(init, |name| self.shapes.literal_fields(name))
+        hir_compat::init_fields(init, &self.shapes.specialization.literal_classes)
     }
 
     pub(super) fn fetch(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
@@ -271,10 +270,9 @@ impl<'s> FunctionBuilder<'s> {
                     Some(Expr::New {
                         class_name, args, ..
                     }) if matches!(args.as_slice(), [Expr::String(encoding)] if is_utf8(encoding))
-                        && self
-                            .shapes
-                            .literal_fields(class_name)
-                            .is_some_and(|names| names == ["encoding"]) =>
+                        && self.shapes.literal_fields(class_name).is_some_and(
+                            |fields| matches!(fields, [field] if field.name == "encoding"),
+                        ) =>
                     {
                         true
                     }

@@ -4,7 +4,7 @@ use super::super::types::{
     CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity, HelperId,
     IdxVec, InstanceId, LocId, LocalIdx, ParamLocSpan, Pool, TemplateId, Ty,
 };
-use perry_hir::{ir::CompareOp, types::LocalId};
+use perry_hir::types::LocalId;
 use perry_wit_diagnostics::{Diagnostic, Result};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -51,6 +51,7 @@ pub(crate) struct Instance {
 }
 
 pub(crate) struct ClassInst {
+    pub(crate) ty: Ty,
     pub(crate) class: ClassId,
     pub(crate) args: Ty,
     pub(crate) field_locs: FieldLocSpan,
@@ -67,7 +68,7 @@ pub(crate) enum ReactionKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum CallbackCall {
+pub(crate) enum CallTarget {
     Direct {
         target: InstanceId,
         pass_env: bool,
@@ -80,7 +81,15 @@ pub(crate) enum CallbackCall {
     ThrowTypeError,
 }
 
-impl CallbackCall {
+impl CallTarget {
+    pub(crate) fn needs_receiver(self) -> bool {
+        match self {
+            Self::Direct { pass_receiver, .. } => pass_receiver,
+            Self::Dispatch { needs_recv, .. } => needs_recv,
+            Self::ThrowTypeError => false,
+        }
+    }
+
     pub(crate) fn needs_value(self) -> bool {
         matches!(
             self,
@@ -102,14 +111,14 @@ pub(crate) enum HelperSpec {
         kind: ReactionKind,
         promise_ty: Ty,
         inner_ty: Ty,
-        on_fulfilled: Option<(CallbackCall, Ty)>,
-        on_rejected: Option<(CallbackCall, Ty)>,
+        on_fulfilled: Option<(CallTarget, Ty)>,
+        on_rejected: Option<(CallTarget, Ty)>,
         ret_ty: Ty,
     },
     TimerRunner {
         kind: crate::engine::TimerKind,
         timer_ty: Ty,
-        cb_call: CallbackCall,
+        cb_call: CallTarget,
         cb_ty: Ty,
         extra_arg_tys: Ty,
     },
@@ -117,57 +126,49 @@ pub(crate) enum HelperSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FuncCoercion {
+    Value(ValueCoercion),
+    Callback { target: CallTarget, inputs: Ty },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValueCoercion {
     Zero,
     Tag(FuncIdentity, Ty),
     BoxEnv(FuncIdentity, Ty),
-    Widen {
-        from: Ty,
-        to: Ty,
-    },
-    DispatchCallback {
-        helper: HelperId,
-        arms: DispatchArmSpan,
-        input_tys: Ty,
-    },
-    EnvCallback {
-        target: InstanceId,
-        input_tys: Ty,
-    },
+    Widen { from: Ty, to: Ty },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PromiseExecutor {
+    pub(crate) call: CallTarget,
+    pub(crate) handles: [Option<FuncIdentity>; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum SiteResolution {
-    DirectCall {
-        target: InstanceId,
+    Call {
+        target: CallTarget,
         argument_types: Ty,
-        pass_receiver: bool,
-        pass_env: bool,
     },
-    DispatchCall {
-        helper: HelperId,
-        argument_types: Ty,
-        needs_recv: bool,
-    },
-    ThrowTypeError,
     FuncTypeOf(Option<Ty>),
     FuncCompare {
         left_ty: Ty,
         right_ty: Ty,
-        op: CompareOp,
+        equal: bool,
+        environments: bool,
     },
-    MethodCall {
-        target: InstanceId,
-        argument_types: Ty,
+    Matches {
+        identity: FuncIdentity,
+        source: Ty,
+        left_erased: bool,
+        equal: bool,
     },
+    MethodCall(InstanceId),
     Callback {
         target: InstanceId,
     },
-    ClassNew {
-        class_inst: ClassInstId,
-        argument_types: Ty,
-    },
+    ClassNew(ClassInstId),
     BranchResult(Ty),
-    ObjectLiteral(Ty),
     ZeroSizedArray,
     TypedArray(Ty),
     ZeroSizedFieldSet,
@@ -178,7 +179,7 @@ pub(crate) enum SiteResolution {
         value_loc: LocId,
         resolve_tid: TemplateId,
         reject_tid: TemplateId,
-        executor: Option<(CallbackCall, bool, bool)>,
+        executor: Option<PromiseExecutor>,
     },
     PromiseReaction {
         result: LocId,
@@ -196,11 +197,19 @@ pub(crate) enum SiteResolution {
 
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct SiteEntry {
+    pub(crate) erased: bool,
     pub(crate) resolution: Option<SiteResolution>,
     pub(crate) coercion: Option<FuncCoercion>,
 }
 
 impl SiteEntry {
+    pub(crate) fn conversion(self) -> Option<ValueCoercion> {
+        match self.coercion {
+            Some(FuncCoercion::Value(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     pub(crate) fn promise(
         sites: &IdxVec<InstanceId, Vec<Self>>,
         owner: CaptureOwner,

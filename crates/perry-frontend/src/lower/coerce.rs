@@ -72,7 +72,7 @@ pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
         .ok_or_else(|| Diagnostic::unsupported("unsupported value type in expression"))
 }
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// Exact integer fields and assignments expose their values as source BigInts.
     pub(super) fn bigint_view(&mut self, ctx: &mut Context, value: Value) -> Value {
         if is_integer64(ctx, value.get_type(ctx)) {

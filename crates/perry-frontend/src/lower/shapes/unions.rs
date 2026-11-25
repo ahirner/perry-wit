@@ -3,21 +3,21 @@ use super::*;
 use crate::engine::types::{LocId, Ty, TyKind};
 use crate::shapes::generics::Resolver;
 
-impl Shapes<'_> {
+impl Shapes<'_, Preparing<'_>> {
     fn literal<'a>(&self, ctx: &'a Context, ty: Ty) -> Option<&'a str> {
-        match self.specialization.types.borrow().kind(ty) {
+        match self.types.source.kind(ty) {
             TyKind::Literal(value) => Some(value.get(ctx).as_str()),
             _ => None,
         }
     }
-    fn variant_properties(&self, ctx: &Context, ty: Ty) -> Option<Vec<(String, Ty)>> {
-        let mut types = self.specialization.types.borrow_mut();
+    fn variant_properties(&mut self, ctx: &Context, ty: Ty) -> Option<Vec<(String, Ty)>> {
+        let types = &mut self.types.source;
         let ty = match types.kind(ty) {
-            TyKind::ClassInst(id) => types.named(ctx, &self.specialization.class_names[id]),
+            TyKind::ClassInst(id) => self.specialization.bodies.classes[id].ty,
             _ => ty,
         };
         Some(
-            Resolver::new(ctx, &self.decls, &mut types)
+            Resolver::new(ctx, self.decls, types)
                 .record(ty, 0)?
                 .into_iter()
                 .filter(|(_, ty, _)| {
@@ -28,17 +28,12 @@ impl Shapes<'_> {
         )
     }
     pub(super) fn solved_union(
-        &self,
+        &mut self,
         ctx: &Context,
         types: &[Ty],
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
-        let mut members = Resolver::new(
-            ctx,
-            &self.decls,
-            &mut self.specialization.types.borrow_mut(),
-        )
-        .flatten(types, 0);
+        let mut members = Resolver::new(ctx, self.decls, self.types.source).flatten(types, 0);
         let mut absence = None;
         members.retain(|ty| {
             let state = match *ty {
@@ -66,21 +61,20 @@ impl Shapes<'_> {
     }
 
     fn union_layout(
-        &self,
+        &mut self,
         ctx: &Context,
         members: &[Ty],
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
-        let types = self.specialization.types.borrow();
+        let types = &self.types.source;
         let scalar = members.iter().any(|&member| {
             matches!(
                 types.kind(member),
                 TyKind::Number | TyKind::String | TyKind::Boolean
             ) || types
-                .integer_domain(ctx, &self.decls, member)
+                .integer_domain(ctx, self.decls, member)
                 .is_some_and(|domain| domain.deref(ctx).width() <= 32)
         });
-        drop(types);
         if scalar {
             let mut cases = Vec::with_capacity(members.len());
             for member in members {
@@ -111,7 +105,7 @@ impl Shapes<'_> {
         if let Some((&first, rest)) = members.split_first()
             && members.iter().all(|&member| {
                 matches!(
-                    self.specialization.types.borrow().kind(member),
+                    self.types.source.kind(member),
                     TyKind::Cell { .. } | TyKind::Array(_) | TyKind::Promise(_)
                 )
             })
@@ -150,7 +144,7 @@ impl Shapes<'_> {
 
     /// Build the record representation for an SDK `Result`, keeping disjoint payload slots that admit `undefined` when inactive.
     fn result(
-        &self,
+        &mut self,
         ctx: &Context,
         alternatives: &[Vec<(String, Ty)>],
         visiting: &mut Vec<LocId>,
@@ -204,7 +198,7 @@ impl Shapes<'_> {
     }
 
     fn variant(
-        &self,
+        &mut self,
         ctx: &Context,
         members: &[Vec<(String, Ty)>],
         visiting: &mut Vec<LocId>,

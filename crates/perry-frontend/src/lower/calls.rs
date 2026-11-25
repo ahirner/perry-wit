@@ -2,11 +2,11 @@
 use super::*;
 use crate::lower::{builder::LocalBinding, hir_compat::RuntimeCall};
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn signature(&self, id: FuncId) -> Result<&'s Signature<'s>> {
         self.signatures
             .get(&id)
-            .ok_or_else(|| self.shapes.locations.missing_function(id))
+            .ok_or_else(|| internal!("unknown function {}", id))
     }
 
     /// Bind an argument, evaluating its default only when omitted or undefined.
@@ -64,14 +64,7 @@ impl<'s> FunctionBuilder<'s> {
         }
         self.locals
             .insert(param.id, LocalBinding::slot(slot, binding, is_never));
-        if let Some(owner) = self.local_owner
-            && let Some(&ty) = self
-                .shapes
-                .specialization
-                .instances
-                .boxed_parameters
-                .get(&(owner, param.id))
-        {
+        if let Some(crate::engine::Storage::Boxed { ty, .. }) = self.local_storage(param.id) {
             let (record, payload) = self.shapes.box_layout(ctx, ty, false)?;
             let value = self.load(ctx, slot)?;
             let value = self.fit(ctx, value, payload)?;
@@ -103,14 +96,18 @@ impl<'s> FunctionBuilder<'s> {
                 self.this_slot = Some(self.initialized_local(ctx, value).slot);
             }
             program::Parameter::Environment(identity) => {
-                for field in &self.shapes.specialization.instances.environments[&identity] {
+                let layouts = &self.shapes.specialization.instances.environments;
+                let id = layouts
+                    .id(identity)
+                    .ok_or_else(|| internal!("missing capture environment"))?;
+                for (slot, field) in layouts.fields(id).iter().enumerate() {
                     let &crate::engine::EnvironmentField::Capture {
                         local, ty, cell, ..
                     } = field
                     else {
                         continue;
                     };
-                    let captured = self.record_field(ctx, value, field.name())?;
+                    let captured = self.capture_field(ctx, value, slot)?;
                     let mut binding = self.initialized_local(ctx, captured);
                     if let Some(init) = cell {
                         let deferred = init.admits_undefined();
@@ -127,28 +124,41 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn invoke_site(
         &mut self,
         ctx: &mut Context,
-        site: crate::engine::InvocationSite,
+        target: crate::engine::solve::CallTarget,
+        argument_types: crate::engine::types::Ty,
         callee: &'s Expr,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        use crate::engine::CallbackOperand;
-        let signature = self.signature(site.target)?;
+        let Some(function) = self
+            .shapes
+            .specialization
+            .instances
+            .emitted_callee(target)
+            .transpose()?
+        else {
+            self.discard_function_operand(ctx, callee)?;
+            for arg in args {
+                self.discard_function_operand(ctx, arg)?;
+            }
+            return Ok(Some(self.raise_non_callable(ctx)));
+        };
+        let signature = self.signature(function)?;
         let (receiver, callable) = match callee {
             Expr::PropertyGet {
                 object,
                 property,
                 byte_offset,
                 ..
-            } if site.receiver => {
+            } if target.needs_receiver() => {
                 let receiver = self.expression(ctx, object)?;
-                let callable = if site.operand == CallbackOperand::None {
+                let callable = if !target.needs_value() {
                     None
                 } else {
                     Some(self.property_of_value(ctx, object, receiver, property, *byte_offset)?)
                 };
                 (Some(receiver), callable)
             }
-            _ if site.operand == CallbackOperand::None => {
+            _ if !target.needs_value() => {
                 if !crate::source::is_pure_func_expr(callee) {
                     let operand = match callee {
                         Expr::PropertyGet { object, .. } => object.as_ref(),
@@ -160,19 +170,13 @@ impl<'s> FunctionBuilder<'s> {
             }
             _ => (None, Some(self.expression(ctx, callee)?)),
         };
-        let callable = match (site.operand, callable) {
-            (CallbackOperand::Environment, Some(wrapper)) => {
-                let wrapper = self.defined(ctx, wrapper)?;
-                Some(self.record_field(ctx, wrapper, "val")?)
-            }
-            (_, value) => value,
-        };
+        let callable = self.bound_callee(ctx, target, callable)?;
         self.invoke_arguments(
             ctx,
             signature,
             callable.into_iter().chain(receiver),
             args,
-            Some(site.argument_types),
+            Some(argument_types),
         )
     }
 
@@ -199,16 +203,14 @@ impl<'s> FunctionBuilder<'s> {
         let rest_element = rest
             .map(|p| Self::rest_element_type(ctx, p.binding.carrier))
             .transpose()?;
+        let arguments = argument_types.map(|ty| self.shapes.types.source.tuple_slice(ty));
         let mut items = Vec::new();
         for (index, arg) in args.iter().enumerate() {
-            let pass = argument_types.is_none_or(|argument_types| {
-                let facts = self.shapes.specialization;
-                let types = facts.types.borrow();
-                types.tuple_slice(argument_types).get(index).is_some_and(|&ty| {
-                    !matches!(types.kind(ty), crate::engine::types::TyKind::Func(identity) if !facts.escaping_envs.contains(crate::engine::types::Idx::index(identity.template)))
-                })
-            });
-            if !pass {
+            if arguments.is_some_and(|args| {
+                !args
+                    .get(index)
+                    .is_some_and(|&ty| self.shapes.passes_argument(ty))
+            }) {
                 self.discard_function_operand(ctx, arg)?;
                 continue;
             }
@@ -243,59 +245,59 @@ impl<'s> FunctionBuilder<'s> {
         self.emit_signature_call(ctx, signature, values)
     }
 
-    pub(super) fn async_call(
+    pub(super) fn clear_timer_args(
         &mut self,
         ctx: &mut Context,
-        plan: crate::engine::AsyncCall,
+        has_handle: bool,
+        args: &'s [Expr],
+    ) -> Result<()> {
+        let mut handle = None;
+        for (i, arg) in args.iter().enumerate() {
+            if i == 0 && has_handle {
+                handle = Some(self.expression(ctx, arg)?);
+            } else {
+                self.discard_function_operand(ctx, arg)?;
+            }
+        }
+        if let Some(handle) = handle {
+            self.clear_timer(ctx, handle)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn promise_reaction(
+        &mut self,
+        ctx: &mut Context,
+        target: FuncId,
+        passed: [bool; 2],
         callee: &'s Expr,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        match plan {
-            crate::engine::AsyncCall::StartTimer(runner) => {
-                self.start_timer(ctx, runner, args).map(Some)
-            }
-            crate::engine::AsyncCall::ClearTimer { has_handle } => {
-                let mut handle = None;
-                for (i, arg) in args.iter().enumerate() {
-                    if i == 0 && has_handle {
-                        handle = Some(self.expression(ctx, arg)?);
-                    } else {
-                        self.discard_function_operand(ctx, arg)?;
-                    }
-                }
-                if let Some(handle) = handle {
-                    self.clear_timer(ctx, handle)?;
-                }
-                Ok(None)
-            }
-            crate::engine::AsyncCall::Reaction { target, passed } => {
-                let Expr::PropertyGet { object, .. } = callee else {
-                    bail_internal!("reaction requires a promise receiver")
-                };
-                let signature = self.signature(target)?;
-                let mut params = signature.params.iter();
-                let mut values = vec![
-                    self.bind_fixed_arg(
-                        ctx,
-                        params
-                            .next()
-                            .ok_or_else(|| internal!("missing promise receiver"))?,
-                        Some(object),
-                    )?,
-                ];
-                for (i, arg) in args.iter().enumerate() {
-                    if passed.get(i) == Some(&true) {
-                        let param = params
-                            .next()
-                            .ok_or_else(|| internal!("missing reaction parameter"))?;
-                        values.push(self.bind_fixed_arg(ctx, param, Some(arg))?);
-                    } else {
-                        self.discard_function_operand(ctx, arg)?;
-                    }
-                }
-                self.emit_signature_call(ctx, signature, values)
+        let Expr::PropertyGet { object, .. } = callee else {
+            bail_internal!("reaction requires a promise receiver")
+        };
+        let signature = self.signature(target)?;
+        let mut params = signature.params.iter();
+        let mut values = vec![
+            self.bind_fixed_arg(
+                ctx,
+                params
+                    .next()
+                    .ok_or_else(|| internal!("missing promise receiver"))?,
+                Some(object),
+            )?,
+        ];
+        for (i, arg) in args.iter().enumerate() {
+            if passed.get(i) == Some(&true) {
+                let param = params
+                    .next()
+                    .ok_or_else(|| internal!("missing reaction parameter"))?;
+                values.push(self.bind_fixed_arg(ctx, param, Some(arg))?);
+            } else {
+                self.discard_function_operand(ctx, arg)?;
             }
         }
+        self.emit_signature_call(ctx, signature, values)
     }
     pub(super) fn call(
         &mut self,
@@ -514,18 +516,21 @@ impl<'s> FunctionBuilder<'s> {
             let val = self.expression(ctx, arg)?;
             return self.clone_structured_value(ctx, val).map(Some);
         }
-        let callee = self.shapes.callable(callee);
+        let callee = match callee {
+            Expr::FuncRef(id) => match self.shapes.specialization.lexical.closure(*id) {
+                Some(closure) => closure,
+                None if self.signatures.get(id).is_some() => callee,
+                None => return Err(internal!("unknown function {}", *id)),
+            },
+            expr => expr,
+        };
         if let Expr::Closure { return_type, .. } = callee {
             let prepared = self.prepare_callback(ctx, callee)?;
             let mut arg_vals = Vec::with_capacity(args.len());
             for arg in args {
                 arg_vals.push(self.expression(ctx, arg)?);
             }
-            if self
-                .shapes
-                .source_closure_result(ctx, return_type)?
-                .is_none()
-            {
+            if self.shapes.source_closure_result(return_type)?.is_none() {
                 self.effect_callback(ctx, prepared, &arg_vals)?;
                 return Ok(None);
             }
@@ -597,7 +602,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier)));
         }
         if let Some((owner, default)) = param.default() {
-            let saved = self.local_owner.replace(owner);
+            let saved = std::mem::replace(&mut self.local_owner, BodyOwner::Function(owner));
             let value = self.expression_with(ctx, default, Some(carrier));
             self.local_owner = saved;
             return self.fit(ctx, value?, carrier);
@@ -680,7 +685,7 @@ impl<'s> FunctionBuilder<'s> {
         if self.variant_guards.depth() == 0 {
             return;
         }
-        for &id in &self.shapes.global_ids {
+        for &id in self.shapes.globals.keys() {
             self.variant_guards.assign(id);
         }
     }

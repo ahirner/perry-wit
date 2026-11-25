@@ -2,16 +2,22 @@
 use super::*;
 use crate::engine::types::{CellKind, Idx, LocId, Ty, TyKind};
 
-impl Shapes<'_> {
-    pub(in crate::lower) fn resolved_binding(&self, ctx: &Context, ty: Ty) -> Result<BindingType> {
-        if let Some(&binding) = self.resolved.borrow().get(&ty) {
+impl Shapes<'_, Preparing<'_>> {
+    pub(in crate::lower) fn resolved_binding(
+        &mut self,
+        ctx: &Context,
+        ty: Ty,
+    ) -> Result<BindingType> {
+        if let Some(&binding) = self.types.resolved.get(&ty) {
             return Ok(binding);
         }
         let binding = self.project_type(ctx, ty, &mut Vec::new())?;
-        self.resolved.borrow_mut().insert(ty, binding);
+        self.types.resolved.insert(ty, binding);
         Ok(binding)
     }
+}
 
+impl Shapes<'_> {
     pub(in crate::lower) fn is_json_encodable_union(&self, ty: Ty) -> bool {
         fn encodable(
             facts: &crate::engine::Specialization,
@@ -55,7 +61,7 @@ impl Shapes<'_> {
                 _ => false,
             }
         }
-        let types = self.specialization.types.borrow();
+        let types = &self.types.source;
         let TyKind::Union(span) = types.kind(ty) else {
             return false;
         };
@@ -65,106 +71,66 @@ impl Shapes<'_> {
             .filter(|&&m| !matches!(m, Ty::NULL | Ty::VOID))
             .count()
             >= 2
-            && encodable(self.specialization, &types, ty, &mut Vec::new())
+            && encodable(self.specialization, types, ty, &mut Vec::new())
     }
 
     pub(in crate::lower) fn source_closure_result(
         &self,
-        ctx: &Context,
         source: &HirType,
     ) -> Result<Option<TypeHandle>> {
         (source != &HirType::Void)
-            .then(|| {
-                self.source_binding(ctx, source)
-                    .map(|binding| binding.carrier)
-            })
+            .then(|| self.source_binding(source).map(|binding| binding.carrier))
             .transpose()
     }
 
-    pub(in crate::lower) fn source_parameter(
+    pub(in crate::lower) fn param_type(
         &self,
-        ctx: &Context,
-        param: &perry_hir::ir::Param,
-    ) -> Result<(BindingType, bool)> {
-        self.param_type(ctx, None, &param.ty)
-    }
-
-    pub(in crate::lower) fn parameter_binding(
-        &self,
-        ctx: &Context,
-        function: &crate::source::InstanceFunction<'_>,
-        index: usize,
-    ) -> Result<(BindingType, bool)> {
-        self.param_type(
-            ctx,
-            self.specialization
-                .instances
-                .signatures
-                .get(&function.id)
-                .and_then(|s| s.params[index]),
-            &function.params[index].ty,
-        )
-    }
-
-    fn param_type(
-        &self,
-        ctx: &Context,
         solved: Option<Ty>,
         ty: &HirType,
     ) -> Result<(BindingType, bool)> {
-        let ty = solved.unwrap_or_else(|| self.annotation(ctx, ty));
-        self.native_param(ctx, crate::engine::NativeParam::Value(ty))
+        let ty = match solved {
+            Some(ty) => ty,
+            None => self.specialization.annotations.get(ty)?,
+        };
+        self.native_param(crate::engine::NativeParam::Value(ty))
     }
 
     pub(in crate::lower) fn native_param(
         &self,
-        ctx: &Context,
         param: crate::engine::NativeParam,
     ) -> Result<(BindingType, bool)> {
         Ok(match param {
-            crate::engine::NativeParam::Value(ty) => {
-                (self.resolved_binding(ctx, ty)?, ty == Ty::NEVER)
-            }
-            crate::engine::NativeParam::Environment(id) => {
-                (BindingType::plain(self.environment_type(ctx, id)?), false)
-            }
+            crate::engine::NativeParam::Value(ty) => (self.resolved_binding(ty)?, ty == Ty::NEVER),
+            crate::engine::NativeParam::Environment(id) => (
+                BindingType::plain(self.environment_record(id)?.into()),
+                false,
+            ),
         })
     }
 
     pub(in crate::lower) fn function_result(
         &self,
-        ctx: &Context,
         function: &crate::source::InstanceFunction<'_>,
     ) -> Result<(Option<BindingType>, bool)> {
-        let ty = match self
-            .specialization
-            .instances
-            .signatures
-            .get(&function.id)
-            .map(|sig| sig.result)
-        {
+        let ty = match function.signature.as_ref().map(|sig| sig.result) {
             Some(crate::engine::InstanceResult::Value(ty)) => ty,
             Some(crate::engine::InstanceResult::ErasedFunction) => Ty::VOID,
-            _ => self.annotation(ctx, function.return_type),
+            _ => self.specialization.annotations.get(function.return_type)?,
         };
-        Ok((
-            self.solved_result(ctx, ty, function.is_async)?,
-            ty == Ty::NEVER,
-        ))
+        Ok((self.solved_result(ty, function.is_async)?, ty == Ty::NEVER))
     }
 
     pub(in crate::lower) fn solved_result(
         &self,
-        ctx: &Context,
         ty: Ty,
         is_async: bool,
     ) -> Result<Option<BindingType>> {
         if !is_async {
             return (ty != Ty::VOID)
-                .then(|| self.resolved_binding(ctx, ty))
+                .then(|| self.resolved_binding(ty))
                 .transpose();
         }
-        let inner = match self.specialization.types.borrow().kind(ty) {
+        let inner = match self.types.source.kind(ty) {
             TyKind::Promise(inner) => inner,
             TyKind::Cell {
                 loc,
@@ -173,36 +139,41 @@ impl Shapes<'_> {
             _ => ty,
         };
         let settled = self
-            .resolved_binding(ctx, if inner == Ty::BOTTOM { Ty::VOID } else { inner })?
+            .resolved_binding(if inner == Ty::BOTTOM { Ty::VOID } else { inner })?
             .carrier;
         Ok(Some(BindingType::plain(settled)))
     }
+}
 
+impl Shapes<'_, Preparing<'_>> {
     pub(super) fn project_type(
-        &self,
+        &mut self,
         ctx: &Context,
         ty: Ty,
         visiting: &mut Vec<LocId>,
     ) -> Result<BindingType> {
         let facts = self.specialization;
-        let types = &facts.types;
-        let slot = |ty, visiting: &mut Vec<LocId>| {
-            if types.borrow().is_zero_sized_func(ty, &facts.capture_free) {
+        let slot = |this: &mut Self, ty, visiting: &mut Vec<LocId>| {
+            if this
+                .types
+                .source
+                .is_zero_sized_func(ty, &facts.capture_free)
+            {
                 Ok(BindingType::plain(FP64Type::get(ctx).into()))
             } else {
-                self.project_type(ctx, ty, visiting)
+                this.project_type(ctx, ty, visiting)
             }
         };
-        let promise = |inner, visiting: &mut Vec<LocId>| -> Result<TypeHandle> {
+        let promise = |this: &mut Self, inner, visiting: &mut Vec<LocId>| -> Result<TypeHandle> {
             let inner = if inner == Ty::BOTTOM { Ty::VOID } else { inner };
-            Ok(PromiseType::get(ctx, self.project_type(ctx, inner, visiting)?.carrier).into())
+            Ok(PromiseType::get(ctx, this.project_type(ctx, inner, visiting)?.carrier).into())
         };
-        let dict = |inner, visiting: &mut Vec<LocId>| -> Result<TypeHandle> {
-            let value = self.project_type(ctx, inner, visiting)?.carrier;
-            let entry = self.dict_tuple_type(ctx, StringType::get(ctx).into(), value)?;
+        let dict = |this: &mut Self, inner, visiting: &mut Vec<LocId>| -> Result<TypeHandle> {
+            let value = this.project_type(ctx, inner, visiting)?.carrier;
+            let entry = this.dict_tuple_type(ctx, StringType::get(ctx).into(), value)?;
             Ok(ArrayType::get(ctx, entry.into()).into())
         };
-        let kind = types.borrow().kind(ty);
+        let kind = self.types.source.kind(ty);
         let carrier = match kind {
             TyKind::Open | TyKind::Bottom => return Err(missing_type_annotation()),
             TyKind::Void | TyKind::Never => crate::lower::coerce::void_type(ctx),
@@ -222,7 +193,7 @@ impl Shapes<'_> {
             TyKind::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             TyKind::Dynamic => perry_mir::JsonType::get(ctx).into(),
             TyKind::Timer => {
-                if let Some(timer) = self.timer.get() {
+                if let Some(timer) = self.types.timer {
                     timer
                 } else {
                     let fields = vec![
@@ -232,8 +203,12 @@ impl Shapes<'_> {
                         ),
                         ("ctrl".into(), perry_mir::AbortType::get(ctx).into()),
                     ];
-                    let timer = fresh_record(ctx, RecordKind::Object, Some(fields))?.into();
-                    self.timer.set(Some(timer));
+                    let timer = self
+                        .records
+                        .fresh(ctx, RecordKind::Object, Some(fields))
+                        .to_diag(ctx)?
+                        .into();
+                    self.types.timer = Some(timer);
                     timer
                 }
             }
@@ -260,23 +235,26 @@ impl Shapes<'_> {
                         .map(|(w, s)| IntegerType::get(ctx, w, s)),
                 });
             }
-            TyKind::ClassInst(id) => self.named(ctx, &facts.class_names[id])?,
-            TyKind::Array(elem) => ArrayType::get(ctx, slot(elem, visiting)?.carrier).into(),
-            TyKind::Promise(inner) => promise(inner, visiting)?,
+            TyKind::ClassInst(id) => self.named(ctx, &facts.bodies.classes[id].name)?,
+            TyKind::Array(elem) => ArrayType::get(ctx, slot(self, elem, visiting)?.carrier).into(),
+            TyKind::Promise(inner) => promise(self, inner, visiting)?,
             TyKind::Tuple(span) => {
-                let elements = types.borrow().ty_slice(span).to_vec();
+                let elements = self.types.source.ty_slice(span).to_vec();
                 let fields = elements
                     .iter()
                     .enumerate()
                     .map(|(i, &elem)| {
-                        Ok((format!("_{i}"), slot(elem, visiting)?.expected_type(ctx)))
+                        Ok((
+                            format!("_{i}"),
+                            slot(self, elem, visiting)?.expected_type(ctx),
+                        ))
                     })
                     .collect::<Result<_>>()?;
                 self.mir_tuple(ctx, fields)?.into()
             }
             TyKind::Object { props, index } => {
                 let mut fields: Vec<_> = {
-                    let types = types.borrow();
+                    let types = &self.types.source;
                     types
                         .object_slice(props)
                         .iter()
@@ -284,7 +262,7 @@ impl Shapes<'_> {
                         .map(|p| (types.name_str(p.name).to_owned(), p.ty, p.optional))
                         .collect()
                 };
-                if types.borrow().is_open(ty) {
+                if self.types.source.is_open(ty) {
                     fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                 }
                 if let Some(index) = index {
@@ -293,7 +271,7 @@ impl Shapes<'_> {
                         codes::UNSUPPORTED_TYPE,
                         "index signatures are outside the closed-record profile when combined with fixed properties"
                     );
-                    dict(index, visiting)?
+                    dict(self, index, visiting)?
                 } else {
                     let fields = fields
                         .into_iter()
@@ -325,15 +303,16 @@ impl Shapes<'_> {
                 let elem = facts.locations[loc];
                 let carrier = match kind {
                     CellKind::Array | CellKind::LocalArray => {
-                        ArrayType::get(ctx, slot(elem, visiting)?.carrier).into()
+                        ArrayType::get(ctx, slot(self, elem, visiting)?.carrier).into()
                     }
-                    CellKind::Promise => promise(elem, visiting)?,
+                    CellKind::Promise => promise(self, elem, visiting)?,
                     CellKind::Dict
-                        if types
-                            .borrow()
+                        if self
+                            .types
+                            .source
                             .is_valid_dict_value(elem, facts.dict_reads.contains(loc.index())) =>
                     {
-                        dict(elem, visiting)?
+                        dict(self, elem, visiting)?
                     }
                     CellKind::Dict => self.mir_record(ctx, Vec::new())?.into(),
                 };
@@ -347,15 +326,13 @@ impl Shapes<'_> {
             }
             TyKind::Generic { base, args } => {
                 let name = base.get(ctx);
-                let args = types.borrow().ty_slice(args).to_vec();
-                if let Some(carrier) = self.builtin_generic(ctx, name, &args, |&arg| {
-                    self.project_type(ctx, arg, visiting).map(|b| b.carrier)
-                })? {
+                let args = self.types.source.ty_slice(args).to_vec();
+                if let Some(carrier) = self.builtin_generic(ctx, name, &args, visiting)? {
                     carrier
                 } else if name == "ReadableStream"
                     && !self.is_user_type(name)
                     && let [arg] = args.as_slice()
-                    && let TyKind::Named(id) = types.borrow().kind(*arg)
+                    && let TyKind::Named(id) = self.types.source.kind(*arg)
                     && id.get(ctx) == "Uint8Array"
                 {
                     perry_mir::ReadableType::get(ctx).into()
@@ -364,7 +341,7 @@ impl Shapes<'_> {
                 }
             }
             TyKind::Union(span) => {
-                let members = types.borrow().ty_slice(span).to_vec();
+                let members = self.types.source.ty_slice(span).to_vec();
                 self.solved_union(ctx, &members, visiting)?
             }
             TyKind::Func(_) => {

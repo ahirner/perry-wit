@@ -23,10 +23,7 @@ use pliron::{
     utils::table::HSet,
     value::Value,
 };
-use std::{
-    cell::Cell,
-    collections::{BTreeSet, HashMap, VecDeque},
-};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 mod domains;
 pub(crate) mod guards;
@@ -284,43 +281,32 @@ impl Body {
     }
 }
 
-/// Specialized contexts per function before further keys share one summary context, so a
-/// function has one generic context and at most `MAX_PRECISE_CONTEXTS + 1` specialized ones.
-const MAX_PRECISE_CONTEXTS: usize = 32;
-/// Allocation sites an alias set holds before it collapses to a typed summary.
-const MAX_ORIGINS: usize = 32;
-
-std::thread_local! {
-    static FACT_LIMITS: Cell<(usize, usize)> = const {
-        Cell::new((MAX_ORIGINS, MAX_PRECISE_CONTEXTS))
-    };
+/// Precision budgets for one compilation's alias and call-context analysis.
+#[pliron::derive::pliron_attr(name = "perry.fact_limits", format, verifier = "succ")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FactLimits {
+    pub max_origins: usize,
+    pub max_precise_contexts: usize,
 }
 
-fn max_origins() -> usize {
-    FACT_LIMITS.get().0
-}
-
-fn max_precise_contexts() -> usize {
-    FACT_LIMITS.get().1
-}
-
-/// Temporarily overrides `(MAX_ORIGINS, MAX_PRECISE_CONTEXTS)` on the current thread
-/// for metamorphic testing of precision summarization vs. exact specialization.
-#[doc(hidden)]
-pub fn with_fact_limits<R>(
-    max_origins: usize,
-    max_precise_contexts: usize,
-    f: impl FnOnce() -> R,
-) -> R {
-    /// Restores the previous limits however `f` exits.
-    struct Restore((usize, usize));
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            FACT_LIMITS.set(self.0);
+impl Default for FactLimits {
+    fn default() -> Self {
+        Self {
+            max_origins: 32,
+            max_precise_contexts: 32,
         }
     }
-    let _restore = Restore(FACT_LIMITS.replace((max_origins, max_precise_contexts)));
-    f()
+}
+
+pliron::dict_key!(FACT_LIMITS, "perry_fact_limits");
+
+impl FactLimits {
+    pub fn set(self, ctx: &mut Context, module: Ptr<Operation>) {
+        module
+            .deref_mut(ctx)
+            .attributes
+            .set(FACT_LIMITS.clone(), self);
+    }
 }
 
 #[derive(Default)]
@@ -538,6 +524,7 @@ impl Worklist {
 }
 
 struct Solver {
+    limits: FactLimits,
     analysis: ProgramFacts,
     contexts: HashMap<Key, usize>,
     precise_counts: HashMap<Identifier, usize>,
@@ -606,7 +593,7 @@ impl Solver {
                 return Ok(id);
             }
             let count = self.precise_counts.entry(key.function.clone()).or_insert(0);
-            if *count >= max_precise_contexts() {
+            if *count >= self.limits.max_precise_contexts {
                 self.analysis.summarized_contexts += 1;
                 let summary = self.summary_key(ctx, &key);
                 let id = match self.contexts.get(&summary).copied() {
@@ -725,9 +712,16 @@ impl Analysis for ProgramFacts {
     }
 
     fn compute(root: Ptr<Operation>, ctx: &Context, _: &mut AnalysisManager) -> Result<Self> {
+        let limits = root
+            .deref(ctx)
+            .attributes
+            .get::<FactLimits>(&FACT_LIMITS)
+            .copied()
+            .unwrap_or_default();
         let functions = crate::aggregates::functions(root, ctx);
         let effects = crate::effects::prepare(ctx, &functions)?;
         let mut solver = Solver {
+            limits,
             analysis: Self {
                 bodies: functions
                     .iter()

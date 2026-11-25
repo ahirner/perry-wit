@@ -38,6 +38,7 @@ fn literal(ctx: &Context, value: Value) -> Option<u64> {
 }
 
 struct CountedLoop {
+    branch: CondBrOp,
     header: Ptr<BasicBlock>,
     comparison: Ptr<Operation>,
     bound: Value,
@@ -45,8 +46,8 @@ struct CountedLoop {
 }
 
 impl CountedLoop {
-    fn recognize(ctx: &Context, branch: &CondBrOp) -> Option<Self> {
-        let op = branch.get_operation();
+    fn recognize(ctx: &Context, op: Ptr<Operation>) -> Option<Self> {
+        let branch = Operation::get_op::<CondBrOp>(op, ctx)?;
         let header = op.deref(ctx).get_parent_block()?;
         let body = op.deref(ctx).get_successor(0);
         let exit = op.deref(ctx).get_successor(1);
@@ -142,6 +143,7 @@ impl CountedLoop {
             return None;
         }
         Some(Self {
+            branch,
             header,
             comparison,
             bound,
@@ -163,8 +165,7 @@ impl MatchRewrite for Fold {
         rewriter: &mut MatchRewriter,
         op: Ptr<Operation>,
     ) -> Result<()> {
-        let branch = Operation::get_op::<CondBrOp>(op, ctx).expect("matched conditional branch");
-        let Some(count) = CountedLoop::recognize(ctx, &branch) else {
+        let Some(count) = CountedLoop::recognize(ctx, op) else {
             return Ok(());
         };
         rewriter.set_insertion_point_before_operation(count.comparison);
@@ -189,7 +190,7 @@ impl MatchRewrite for Fold {
         }
         let body = op.deref(ctx).get_successor(0);
         let exit = op.deref(ctx).get_successor(1);
-        let branch = BrOp::new(ctx, exit, branch.successor_operands(ctx, 1));
+        let branch = BrOp::new(ctx, exit, count.branch.successor_operands(ctx, 1));
         rewriter.set_insertion_point_before_operation(op);
         rewriter.insert_op(ctx, &branch);
         rewriter.replace_operation(ctx, op, branch.get_operation());

@@ -6,7 +6,7 @@ use perry_mir::JsonSchema;
 /// Accepted deviation: JSON revivers and indentation are diagnosed at compile time.
 pub(super) const JSON_CALLBACKS: &str = "JSON revivers and indentation are not supported (accepted profile): parse into a typed shape and transform it in code";
 
-impl<'s> FunctionBuilder<'s> {
+impl<'s> FunctionBuilder<'s, '_> {
     /// `JSON.stringify(value)`.
     pub(super) fn stringify(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let mut value = self.expression(ctx, expr)?;
