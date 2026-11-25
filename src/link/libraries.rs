@@ -711,7 +711,7 @@ impl<'a> Library<'a> {
 pub(crate) struct Relocations<'a> {
     pub(crate) functions: &'a BTreeMap<u32, u32>,
     pub(crate) globals: &'a [Global],
-    pub(crate) type_base: u32,
+    pub(super) types: super::TypeIndices<'a>,
     pub(crate) memory_base: u32,
     pub(crate) stack_global: u32,
     pub(crate) table_base: u32,
@@ -726,7 +726,7 @@ impl Reencode for Relocations<'_> {
         })
     }
     fn type_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
-        Ok(self.type_base + index)
+        self.types.resolve(index)
     }
     fn table_index(&mut self, index: u32) -> Result<u32, reencode::Error<String>> {
         if index == 0 {

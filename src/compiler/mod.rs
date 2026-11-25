@@ -278,8 +278,6 @@ fn finish(
 ) -> Result<(Vec<u8>, u32)> {
     let (core, helpers) = link::link_helpers_with(core, streams, canonical, stub_runtime_import)
         .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
-    let core = link::compact(&core)
-        .map_err(|err| err.with_internal_context("interning core function signatures"))?;
     audit::validate_guest(&core)
         .map_err(|err| err.with_internal_context("validating stackless core Wasm"))?;
     Ok((core, helpers))
