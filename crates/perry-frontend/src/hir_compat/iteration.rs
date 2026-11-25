@@ -1,5 +1,6 @@
 //! Recognize Perry's compiler-owned dense-array iterator records.
 use super::*;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
 pub(crate) struct Iteration {

@@ -1,11 +1,8 @@
 //! Normalize array and string method calls into uniform AST call shapes before HIR lowering.
 use super::*;
 use perry_parser::swc_ecma_ast as ast;
-use swc_common::{DUMMY_SP, SyntaxContext};
+use swc_common::{DUMMY_SP, SyntaxContext, util::take::Take};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
-
-const PUSH: &str = "$$perryArrayPush";
-const METHOD_PREFIX: &str = "$$perryMethod_";
 
 pub(crate) enum Preservation {
     Upstream,
@@ -16,13 +13,13 @@ pub(crate) enum Preservation {
 }
 
 impl Preservation {
-    pub(crate) fn rewrite(&self, name: &str, count: usize, spread: bool) -> Option<String> {
+    pub(crate) fn needed(&self, count: usize, spread: bool) -> bool {
         match self {
-            Self::Push if count != 1 || spread => Some(PUSH.into()),
-            Self::Always => Some(format!("{METHOD_PREFIX}{name}")),
-            Self::Arguments if count > 0 => Some(format!("{METHOD_PREFIX}{name}")),
-            Self::Options if count > 1 => Some(format!("{METHOD_PREFIX}{name}")),
-            _ => None,
+            Self::Upstream => false,
+            Self::Always => true,
+            Self::Push => count != 1 || spread,
+            Self::Arguments => count > 0,
+            Self::Options => count > 1,
         }
     }
 }
@@ -134,13 +131,18 @@ pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut crate::so
             if let ast::Callee::Expr(callee) = &mut call.callee
                 && let ast::Expr::Member(member) = &mut **callee
                 && let ast::MemberProp::Ident(method) = &mut member.prop
-                && let Some(name) = crate::methods::Method::rewrite(
+                && crate::methods::Method::preserve_arguments(
                     method.sym.as_ref(),
                     call.args.len(),
                     call.args.iter().any(|argument| argument.spread.is_some()),
                 )
             {
-                method.sym = name.into();
+                // A parenthesized member retains its receiver and arguments when Perry
+                // would otherwise replace the call with a fixed-arity builtin.
+                **callee = ast::Expr::Paren(ast::ParenExpr {
+                    span: member.span,
+                    expr: callee.take(),
+                });
             }
         }
     }
@@ -156,13 +158,10 @@ pub(crate) enum Method<'a> {
 }
 
 pub(crate) fn method(name: &str) -> Method<'_> {
-    if let Some(rest) = name.strip_prefix(METHOD_PREFIX) {
-        return Method::Ordinary(rest);
-    }
     match name {
         "__perry_using_check__" => Method::UsingCheck,
         streams::ITERATION => Method::Iteration,
-        PUSH => Method::Push,
+        "push" => Method::Push,
         name => Method::Ordinary(name),
     }
 }

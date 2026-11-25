@@ -1,4 +1,5 @@
 //! Worklist monomorphization and storage-join solver over dense indices.
+use crate::source::SourceModule;
 mod callbacks;
 mod calls;
 mod escape;
@@ -22,12 +23,11 @@ use crate::{
     hir_compat::{self, Metadata},
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
-    wit::Foreign,
 };
 use eval::first_type_var_name;
 pub(crate) use ir::*;
 use perry_hir::{
-    ir::{CompareOp, Expr, LogicalOp, Module as HirModule, Stmt},
+    ir::{CompareOp, Expr, LogicalOp, Stmt},
     types::{LocalId, Type as HirType},
 };
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
@@ -43,6 +43,7 @@ type InstanceKey = (
     Ty,
     Ty,
     Option<Ty>,
+    bool,
 );
 
 struct ResultContract {
@@ -61,7 +62,7 @@ struct InstanceReq<'a> {
     explicit_type_args: &'a [Ty],
     call_byte_offset: u32,
     caller: Option<InstanceId>,
-    is_inline_callback: bool,
+    invocation: Invocation,
 }
 
 impl<'a> InstanceReq<'a> {
@@ -75,7 +76,7 @@ impl<'a> InstanceReq<'a> {
             explicit_type_args: &[],
             call_byte_offset: 0,
             caller,
-            is_inline_callback: false,
+            invocation: Invocation::Function,
         }
     }
     fn receiver(mut self, r: Option<Receiver>) -> Self {
@@ -94,8 +95,12 @@ impl<'a> InstanceReq<'a> {
         self.call_byte_offset = offset;
         self
     }
-    fn inline_cb(mut self) -> Self {
-        self.is_inline_callback = true;
+    fn callback(mut self, lexical: bool) -> Self {
+        self.invocation = if lexical {
+            Invocation::Lexical
+        } else {
+            Invocation::Inline
+        };
         self
     }
 }
@@ -133,18 +138,18 @@ struct InstanceLocalSlot {
 
 pub(crate) fn solve<'h>(
     ctx: &Context,
-    hir: &'h HirModule,
+    hir: &'h SourceModule,
     index: &ModuleIndex<'h>,
     metadata: &Metadata<'_>,
-    foreign: &HashMap<String, Foreign>,
+    world: &crate::wit::WorldTypes<'_>,
     types: &mut TypeTable,
 ) -> Result<Solved> {
     let decls = Declarations::new(
-        &hir.interfaces,
-        &hir.type_aliases,
-        &hir.imports,
-        &hir.classes,
-        foreign,
+        &hir.declarations.interfaces,
+        &hir.declarations.type_aliases,
+        &hir.declarations.imports,
+        &hir.bodies.classes,
+        world,
     );
     let mut solver = Solver::new(ctx, hir, index, metadata, &decls, types);
     let init_inst = solver.seed_roots()?;
@@ -157,7 +162,7 @@ pub(crate) fn solve<'h>(
 struct Solver<'h, 'a> {
     resource_registries: HashMap<LocalId, Ty>,
     ctx: &'a Context,
-    hir: &'h HirModule,
+    hir: &'h SourceModule,
     index: &'a ModuleIndex<'h>,
     metadata: &'a Metadata<'a>,
     decls: &'a Declarations<'a>,
@@ -250,7 +255,7 @@ fn bump_count(counts: &mut IdxVec<TemplateId, u16>, template: TemplateId) {
 impl<'h, 'a> Solver<'h, 'a> {
     fn new(
         ctx: &'a Context,
-        hir: &'h HirModule,
+        hir: &'h SourceModule,
         index: &'a ModuleIndex<'h>,
         metadata: &'a Metadata<'a>,
         decls: &'a Declarations<'a>,
@@ -286,7 +291,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         let template_type_params = index.views.map(|v| intern_tps(v.type_params));
         let class_type_params = index.classes.map(|c| {
-            hir.classes
+            hir.bodies
+                .classes
                 .get(c.hir_idx)
                 .map_or_else(TypeParamSpan::default, |hc| intern_tps(&hc.type_params))
         });

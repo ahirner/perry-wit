@@ -48,29 +48,31 @@ impl Signature<'_> {
 
 pub(crate) fn build_module(
     ctx: &mut Context,
-    hir: &HirModule,
-    foreign: &HashMap<String, crate::wit::Foreign>,
-    metadata: &hir_compat::Metadata<'_>,
+    declarations: &crate::source::ModuleDeclarations,
+    world: &crate::wit::WorldTypes<'_>,
+    metadata: &mut hir_compat::Metadata<'_>,
     specialization: &crate::engine::Specialization,
 ) -> Result<LoweredProgram> {
+    let bodies = &specialization.bodies;
     let mut functions = Vec::new();
     let mut command = None;
+    let index = bodies.index(&mut metadata.locations, &specialization.instances);
     let locations = &metadata.locations;
-    let module = ModuleOp::new(ctx, identifier(&hir_module_name(hir))?);
+    let module = ModuleOp::new(ctx, identifier(&module_name(&declarations.name))?);
     // Subclass instances flow into base-typed bindings, where methods would bind statically
     // and `instanceof` would read the declared type: reject inheritance instead of miscompiling.
-    if let Some((class, base)) = hir
+    if let Some((class, base)) = bodies
         .classes
         .iter()
         .find_map(|class| Some((&class.name, class.extends_name.as_deref()?)))
     {
         bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
-    let shapes = Shapes::new(module, hir, foreign, metadata, specialization);
+    let shapes = Shapes::new(module, declarations, world, metadata, specialization, index);
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<&str, Builtin> = HashMap::new();
-    for import in &hir.imports {
+    for import in &declarations.imports {
         let source = import.source.as_str();
         if hir_compat::is_timer_module(source) {
             continue;
@@ -115,7 +117,7 @@ pub(crate) fn build_module(
         }
     }
     let mut signatures = HashMap::new();
-    for function in &hir.functions {
+    for function in &bodies.functions {
         let display_name = locations.display_function_name(&function.name);
         if function.is_generator {
             return Err(locations.annotate_caller(
@@ -143,7 +145,7 @@ pub(crate) fn build_module(
                 shapes
                     .parameter_binding(ctx, function, idx)
                     .map_err(|error| {
-                        let source = hir
+                        let source = declarations
                             .local_source_spans
                             .get(&param.id)
                             .and_then(|span| locations.source_at(span.start));
@@ -180,7 +182,10 @@ pub(crate) fn build_module(
         signatures.insert(
             function.id,
             Signature {
-                inline: (shapes.metadata.inline_callbacks.contains(&function.id)
+                inline: (specialization
+                    .instances
+                    .inline_callbacks
+                    .contains_key(&function.id)
                     || function
                         .captures
                         .iter()
@@ -189,7 +194,7 @@ pub(crate) fn build_module(
                 is_async: function.is_async,
                 await_initialization: function.is_exported
                     && function.is_async
-                    && hir.has_top_level_await,
+                    && declarations.has_top_level_await,
                 top_level: false,
                 name: identifier(&function.name)?,
                 params,
@@ -199,10 +204,6 @@ pub(crate) fn build_module(
         );
     }
     for (&id, function) in &specialization.instances.functions {
-        use crate::engine::{
-            NativeParam,
-            types::{Ty, env_class_name},
-        };
         let annotate = |err: Diagnostic| {
             locations.annotate_caller(
                 err.with_fallback_span(locations.function_span(&function.name)),
@@ -213,13 +214,7 @@ pub(crate) fn build_module(
             .params
             .iter()
             .map(|param| {
-                let (binding, is_never) = match *param {
-                    NativeParam::Value(ty) => (shapes.resolved_binding(ctx, ty)?, ty == Ty::NEVER),
-                    NativeParam::Environment(id) => (
-                        BindingType::plain(shapes.named(ctx, &env_class_name(id))?),
-                        false,
-                    ),
-                };
+                let (binding, is_never) = shapes.native_param(ctx, *param)?;
                 Ok(ParamSig {
                     default: None,
                     is_rest: false,
@@ -251,7 +246,7 @@ pub(crate) fn build_module(
     // nothing to run (calls lower it to nothing); without other statements there is no main
     // function.
     let has_init = !shapes.static_fields.is_empty()
-        || hir.init.iter().any(|statement| {
+        || bodies.init.iter().any(|statement| {
             !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
                 if hir_compat::is_import_initializer(callee))
         });
@@ -259,8 +254,8 @@ pub(crate) fn build_module(
         // Without exported functions, the top-level statements (with top-level `await`) form
         // the body of a command's `wasi:cli/run`. With exported functions they initialize the
         // module once before the first entry point, and `run` only awaits that initialization.
-        let persistent = hir.functions.iter().any(|f| f.is_exported);
-        let async_init = hir.has_top_level_await;
+        let persistent = bodies.functions.iter().any(|f| f.is_exported);
+        let async_init = declarations.has_top_level_await;
         let settled = BindingType::plain(shapes.settled_type(ctx, &HirType::Void)?);
         let mut entries = vec![(
             Signature {
@@ -277,7 +272,7 @@ pub(crate) fn build_module(
                 returns_never: false,
                 result: (!persistent || async_init).then_some(settled),
             },
-            hir.init.as_slice(),
+            bodies.init.as_slice(),
         )];
         if persistent {
             entries.push((
@@ -313,7 +308,7 @@ pub(crate) fn build_module(
             module.append_operation(ctx, func.get_operation(), 0);
         }
     }
-    for function in &hir.functions {
+    for function in &bodies.functions {
         let signature = signatures
             .get(&function.id)
             .ok_or_else(|| locations.missing_function(function.id))?;
@@ -411,9 +406,8 @@ pub(crate) fn build_module(
     Ok(LoweredProgram { module, exports })
 }
 
-fn hir_module_name(hir: &HirModule) -> String {
-    let name: String = hir
-        .name
+fn module_name(name: &str) -> String {
+    let name: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();

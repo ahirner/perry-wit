@@ -22,6 +22,13 @@ impl Receiver {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Invocation {
+    Function,
+    Inline,
+    Lexical,
+}
+
 pub(crate) struct Instance {
     pub(crate) is_witness: bool,
     pub(crate) list_result: Option<Ty>,
@@ -35,7 +42,7 @@ pub(crate) struct Instance {
     pub(crate) param_locs: ParamLocSpan,
     pub(crate) caller: Option<InstanceId>,
     pub(crate) call_byte_offset: u32,
-    pub(crate) is_inline_callback: bool,
+    pub(crate) invocation: Invocation,
     pub(crate) captures_non_global: bool,
     pub(crate) emitted_func_id: u32,
     pub(crate) emitted_name: String,
@@ -160,19 +167,20 @@ pub(crate) enum SiteResolution {
     },
     Callback {
         target: InstanceId,
-        keep_inline_closure: bool,
     },
     ClassNew {
         class_inst: ClassInstId,
         argument_types: Ty,
     },
-    ResourceCall(usize),
     BranchResult(Ty),
     ObjectLiteral(Ty),
     ZeroSizedArray,
     TypedArray(Ty),
     ZeroSizedFieldSet,
-    CollectionNew(crate::engine::ExpressionOp),
+    CollectionNew {
+        span: swc_common::Span,
+        ty: Ty,
+    },
     Cell(LocId),
     FoldBool(bool),
     PromiseNew {

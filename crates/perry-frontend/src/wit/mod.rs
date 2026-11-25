@@ -71,17 +71,34 @@ pub(crate) enum Foreign<'r> {
 #[derive(Default)]
 pub struct WorldTypes<'r> {
     foreign: HashMap<String, Foreign<'r>>,
+    members: Vec<ResourceMember<'r>>,
 }
 
 impl<'r> WorldTypes<'r> {
     pub fn new(resolve: &'r Resolve, world: Option<WorldId>) -> Self {
         Self {
             foreign: types::foreign(resolve, world),
+            members: world
+                .map(|id| resource_members(resolve, id))
+                .unwrap_or_default(),
         }
     }
 
     pub(crate) fn foreign(&self) -> &HashMap<String, Foreign<'r>> {
         &self.foreign
+    }
+
+    pub(crate) fn member(
+        &self,
+        owner: u32,
+        kind: MemberKind,
+        name: &str,
+    ) -> Option<&ResourceMember<'r>> {
+        self.members.iter().find(|member| {
+            member.owner == owner
+                && member.kind == kind
+                && (kind == MemberKind::Constructor || member.name == name)
+        })
     }
 
     pub fn import_function(
@@ -180,7 +197,7 @@ fn imported_resource_member<'r>(
     })
 }
 
-pub(crate) fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<ResourceMember<'_>> {
+fn resource_members(resolve: &Resolve, world: WorldId) -> Vec<ResourceMember<'_>> {
     let mut members: Vec<_> =
         perry_contract::world_functions(resolve, resolve.worlds[world].imports.iter())
             .filter_map(|entry| imported_resource_member(resolve, entry))

@@ -4,9 +4,6 @@ use perry_wit_diagnostics::Result;
 use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub(crate) mod generics;
-mod globals;
-pub(crate) use globals::captured;
-pub(crate) use globals::class_functions;
 mod records;
 pub(crate) use records::Classes;
 pub(crate) type TypeName = pliron::uniqued_any::Uniqued<String>;
@@ -15,7 +12,7 @@ pub(crate) struct Declarations<'h> {
     pub(crate) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
     pub(crate) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
     pub(crate) classes: Classes<'h>,
-    pub(crate) foreign: &'h HashMap<String, crate::wit::Foreign<'h>>,
+    pub(crate) world: &'h crate::wit::WorldTypes<'h>,
     pub(crate) integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub(crate) imported_types: HashMap<&'h str, &'h crate::wit::Foreign<'h>>,
     pub(crate) foreign_functions: HashMap<&'h str, (&'h str, &'h crate::wit::ImportSignature<'h>)>,
@@ -27,8 +24,9 @@ impl<'h> Declarations<'h> {
         type_aliases: &'h [perry_hir::ir::TypeAlias],
         imports: &'h [perry_hir::ir::Import],
         classes: &'h [perry_hir::ir::Class],
-        foreign: &'h HashMap<String, crate::wit::Foreign<'h>>,
+        world: &'h crate::wit::WorldTypes<'h>,
     ) -> Self {
+        let foreign = world.foreign();
         let interfaces = interfaces
             .iter()
             .enumerate()
@@ -77,7 +75,7 @@ impl<'h> Declarations<'h> {
             interfaces,
             type_aliases,
             classes,
-            foreign,
+            world,
             integer_imports,
             imported_types,
             foreign_functions,
@@ -117,7 +115,7 @@ impl<'h> Declarations<'h> {
                 .imported_types
                 .get(name)
                 .copied()
-                .or_else(|| self.foreign.get(name))
+                .or_else(|| self.world.foreign().get(name))
             {
                 return match entry {
                     crate::wit::Foreign::Type(value) | crate::wit::Foreign::Input(value) => {
@@ -147,7 +145,7 @@ impl<'h> Declarations<'h> {
             .imported_types
             .get(name)
             .copied()
-            .or_else(|| self.foreign.get(name))?
+            .or_else(|| self.world.foreign().get(name))?
         {
             crate::wit::Foreign::Type(value) => Some(*value),
             _ => None,

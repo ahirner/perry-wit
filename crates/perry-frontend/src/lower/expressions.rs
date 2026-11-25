@@ -69,7 +69,7 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(value);
         }
         if let Some(value) = self.collection_expression(ctx, expr, expected)? {
-            return self.narrow_value(ctx, expr, value);
+            return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
         }
         if let Some((receiver, call)) = Call::expression(expr) {
             let receiver = match receiver {
@@ -84,9 +84,19 @@ impl<'s> FunctionBuilder<'s> {
             let value = call.lower(self, ctx, receiver)?.ok_or_else(|| {
                 Diagnostic::new(codes::TYPE_MISMATCH, "method expression produces no value")
             })?;
-            return self.narrow_value(ctx, expr, value);
+            return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
         }
         let value = match expr {
+            Expr::FuncRef(id)
+                if let Some(closure) = self
+                    .shapes
+                    .specialization
+                    .instances
+                    .closure_values
+                    .get(&(self.local_owner, *id)) =>
+            {
+                self.closure_value(ctx, closure, expected)?
+            }
             Expr::RegExp { pattern, flags } => {
                 self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
             }
@@ -172,9 +182,10 @@ impl<'s> FunctionBuilder<'s> {
                 args,
 
                 byte_offset,
+                byte_end,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset, expected)
+                .call(ctx, callee, args, *byte_offset..*byte_end, expected)
                 .and_then(|value| {
                     value.ok_or_else(|| {
                         Diagnostic::new(codes::TYPE_MISMATCH, "a void call has no value")
@@ -478,8 +489,25 @@ impl<'s> FunctionBuilder<'s> {
                     .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?
             }
             Expr::New {
-                class_name, args, ..
-            } => self.object_literal(ctx, class_name, args, expected)?,
+                class_name,
+                args,
+                byte_offset,
+                ..
+            } => {
+                if let Some(owner) = self.shapes.decls.resource(class_name)
+                    && let Some(member) = self.shapes.decls.world.member(
+                        owner,
+                        crate::wit::MemberKind::Constructor,
+                        "",
+                    )
+                {
+                    self.resource_call(ctx, member, None, args)
+                        .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?
+                        .ok_or_else(|| internal!("WIT constructor has no result"))?
+                } else {
+                    self.object_literal(ctx, class_name, args, expected)?
+                }
+            }
             // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
             Expr::Array(items, _)
                 if expected.is_some_and(|ty| {
@@ -524,7 +552,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             _ => bail_unsupported!("this expression form is not supported yet"),
         };
-        self.narrow_value(ctx, expr, value)
+        self.narrow_value(ctx, || crate::narrowing::path(expr), value)
     }
 
     /// A bigint literal (`0x…n`, `1_000n`), independent of WIT transport widths.

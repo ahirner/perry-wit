@@ -1,11 +1,17 @@
 //! Source validation, lexical binding facts and expression locations from SWC.
 use crate::hir_compat::Locations;
+mod collections;
+pub(crate) use collections::{CollectionKind, Constructor, Constructors};
 mod names;
 mod parser;
+mod program;
 pub(crate) use names::{FreshNames, MODULE_PREFIX, is_reserved_binding, module_binding_name};
 pub(crate) use parser::parse;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
+pub(crate) use program::{
+    Bodies, BodyIndex, CallerKind, ModuleDeclarations, SourceModule, authored_body,
+};
 use std::collections::{HashMap, HashSet};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
@@ -26,6 +32,7 @@ impl SourceBinding {
 
 #[derive(Default)]
 pub(crate) struct SourceFacts {
+    pub(crate) constructors: Constructors,
     pub(crate) sparse_arrays: bool,
     bindings: HashMap<u32, SourceBinding>,
 }

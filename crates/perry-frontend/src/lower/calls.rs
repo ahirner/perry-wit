@@ -64,6 +64,15 @@ impl<'s> FunctionBuilder<'s> {
         }
         self.locals
             .insert(param.id, LocalBinding::slot(slot, binding, is_never));
+        if self
+            .shapes
+            .specialization
+            .instances
+            .receiver_parameters
+            .contains(&param.id)
+        {
+            self.this_slot = Some(slot);
+        }
         if let Some(owner) = self.local_owner
             && let Some(&ty) = self
                 .shapes
@@ -100,9 +109,34 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         callee: &'s Expr,
         args: &'s [Expr],
-        byte_offset: u32,
+        span: std::ops::Range<u32>,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
+        let byte_offset = span.start;
+        if let Expr::IndexGet { object, .. } = callee
+            && self
+                .shapes
+                .metadata
+                .locations
+                .calls_dispose(span.start, span.end)
+        {
+            let receiver = self.expression(ctx, object)?;
+            let receiver = self.defined(ctx, receiver)?;
+            if let Some(resource) =
+                perry_mir::typed::<perry_mir::ResourceType>(ctx, receiver.get_type(ctx))
+            {
+                let owner = resource.deref(ctx).key();
+                if let Some(member) =
+                    self.shapes
+                        .decls
+                        .world
+                        .member(owner, crate::wit::MemberKind::Dispose, "")
+                {
+                    return self.resource_call(ctx, member, Some(receiver), args);
+                }
+            }
+            bail_unsupported!("computed method or element calls are not supported yet");
+        }
         if let Some(call) = hir_compat::runtime_call(callee, args) {
             return match call {
                 RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
@@ -278,7 +312,7 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::ExternFuncRef { name, .. } = callee
             && let Some((binding, signature)) = self.shapes.foreign_function(name)
         {
-            return self.import_call(ctx, binding, signature, args, byte_offset, false);
+            return self.import_call(ctx, binding, signature, args, foreign::CallKind::Function);
         }
         if let Expr::ExternFuncRef { name, .. } = callee
             && name == "structuredClone"
@@ -293,12 +327,7 @@ impl<'s> FunctionBuilder<'s> {
             return self.clone_structured_value(ctx, val).map(Some);
         }
         let callee = self.shapes.callable(callee);
-        if let Expr::Closure {
-            func_id,
-            return_type,
-            ..
-        } = callee
-        {
+        if let Expr::Closure { return_type, .. } = callee {
             let prepared = self.prepare_callback(ctx, callee)?;
             let mut arg_vals = Vec::with_capacity(args.len());
             for arg in args {
@@ -306,7 +335,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             if self
                 .shapes
-                .closure_result(ctx, *func_id, return_type)?
+                .source_closure_result(ctx, return_type)?
                 .is_none()
             {
                 self.effect_callback(ctx, prepared, &arg_vals)?;
@@ -341,36 +370,11 @@ impl<'s> FunctionBuilder<'s> {
                 crate::engine::NativeOperation::Callback(_) => {
                     bail_internal!("expected a callback invocation")
                 }
-                crate::engine::NativeOperation::Allocate(layout) => {
-                    ensure_internal!(
-                        layout.fields.len() == args.len(),
-                        "wrong number of captures in {}",
-                        layout.name
-                    );
-                    let record = self.shapes.named(ctx, &layout.name)?;
-                    let value = self.capture_record(ctx, layout, args, record)?;
-                    Ok(Some(match layout.function {
-                        Some(identity) => {
-                            self.function_value(ctx, identity, Some(value), expected)?
-                        }
-                        None => value,
-                    }))
-                }
                 crate::engine::NativeOperation::Expression(op) => {
                     self.solved_expression(ctx, *op, args, expected)
                 }
                 crate::engine::NativeOperation::Callable(op) => {
                     self.callable_operation(ctx, *op, args).map(Some)
-                }
-                crate::engine::NativeOperation::Resource(index) => {
-                    let member = &self.shapes.metadata.resource_members[*index];
-                    let (binding, signature) = self
-                        .shapes
-                        .foreign_function(&member.binding)
-                        .ok_or_else(|| {
-                            internal!("missing WIT resource binding {}", member.binding)
-                        })?;
-                    self.import_call(ctx, binding, signature, args, byte_offset, true)
                 }
             };
         }
@@ -429,9 +433,7 @@ impl<'s> FunctionBuilder<'s> {
                     [] => None,
                     [source] => {
                         let value = self.expression(ctx, source)?;
-                        let env = self
-                            .shapes
-                            .named(ctx, &crate::engine::types::env_class_name(identity))?;
+                        let env = self.shapes.environment_type(ctx, identity)?;
                         Some(self.callable_field(ctx, value, "val", env)?)
                     }
                     _ => bail_internal!("invalid function environment"),
@@ -449,16 +451,6 @@ impl<'s> FunctionBuilder<'s> {
             ) => self
                 .matches_function(ctx, arg, source, identity, equal)
                 .map(Some),
-            (ExpressionOp::Map(ty) | ExpressionOp::Set(ty), args) => {
-                let expected = self.shapes.resolved_binding(ctx, ty)?.carrier;
-                self.new_collection(
-                    ctx,
-                    matches!(operation, ExpressionOp::Map(_)),
-                    args.first(),
-                    Some(expected),
-                )
-                .map(Some)
-            }
             (ExpressionOp::Expected(ty), [value]) => {
                 let slot = match expected {
                     Some(slot) if crate::lower::value_unions::is_value_union(ctx, slot) => slot,
@@ -554,7 +546,11 @@ impl<'s> FunctionBuilder<'s> {
                     .map_or(crate::lower::inline::InlineResult::Void, |ty| {
                         crate::lower::inline::InlineResult::Declared(ty.carrier)
                     });
-                let slot = this.inline_body(ctx, &function.body, result)?;
+                let slot = this.inline_body(
+                    ctx,
+                    this.shapes.specialization.instances.function_body(function),
+                    result,
+                )?;
                 slot.map(|slot| this.load(ctx, slot)).transpose()
             });
             self.inline_functions.pop();

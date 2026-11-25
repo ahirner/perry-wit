@@ -45,7 +45,7 @@ impl<'h> Emitter<'h, '_> {
     }
     pub(super) fn rewrite_stmts(
         &mut self,
-        rctx: &mut RewriteCtx<'_>,
+        rctx: &RewriteCtx<'_>,
         stmts: &'h [Stmt],
     ) -> Result<Vec<Stmt>> {
         stmts
@@ -77,7 +77,7 @@ impl<'h> Emitter<'h, '_> {
             .index
             .local_idx(id)
             .map(|li| self.index.locals[li].flags);
-        let is_inferred = !self.hir.local_source_spans.contains_key(&id)
+        let is_inferred = !self.hir.declarations.local_source_spans.contains_key(&id)
             || local_flags.is_none_or(|f| f.contains(LocalFlags::INFERRED));
         match resolved {
             Some(t)
@@ -138,11 +138,7 @@ impl<'h> Emitter<'h, '_> {
         }
     }
 
-    pub(super) fn rewrite_stmt(
-        &mut self,
-        rctx: &mut RewriteCtx<'_>,
-        stmt: &'h Stmt,
-    ) -> Result<Stmt> {
+    pub(super) fn rewrite_stmt(&mut self, rctx: &RewriteCtx<'_>, stmt: &'h Stmt) -> Result<Stmt> {
         match stmt {
             Stmt::Let {
                 id,
@@ -151,10 +147,6 @@ impl<'h> Emitter<'h, '_> {
                 mutable,
                 init,
             } => {
-                let out_id = match &mut rctx.remap {
-                    Some(r) => self.fresh_local(*id, r)?,
-                    None => *id,
-                };
                 let resolved = self.local_ty(rctx.inst_id, *id);
                 if let Some(t) = resolved
                     && let TyKind::Func(ident) = self.types.kind(t)
@@ -167,7 +159,7 @@ impl<'h> Emitter<'h, '_> {
                     }
                     let fid = self.find_func_identity_instance(ident);
                     return Ok(Stmt::Let {
-                        id: out_id,
+                        id: *id,
                         name: name.clone(),
                         ty: ty.clone(),
                         mutable: *mutable,
@@ -183,19 +175,19 @@ impl<'h> Emitter<'h, '_> {
                 let init = self.rewrite_opt_expr(&init_ctx, init.as_ref())?;
                 if self.is_boxed_local(*id) {
                     if self.index.is_for_head_local(*id) {
-                        self.plans.per_iteration.insert(out_id);
+                        self.plans.per_iteration.insert(*id);
                     }
                     let inner = self.boxed_type(*id, solved)?;
                     self.local_storage(
                         rctx.inst_id,
-                        out_id,
+                        *id,
                         crate::engine::Storage::Boxed {
                             ty: inner,
                             init: self.cell_init(*id),
                         },
                     );
                     return Ok(Stmt::Let {
-                        id: out_id,
+                        id: *id,
                         name: name.clone(),
                         ty: ty.clone(),
                         mutable: self.index.is_for_head_local(*id),
@@ -203,10 +195,10 @@ impl<'h> Emitter<'h, '_> {
                     });
                 }
                 if let Some(solved) = solved {
-                    self.local_storage(rctx.inst_id, out_id, crate::engine::Storage::Value(solved));
+                    self.local_storage(rctx.inst_id, *id, crate::engine::Storage::Value(solved));
                 }
                 Ok(Stmt::Let {
-                    id: out_id,
+                    id: *id,
                     name: name.clone(),
                     ty: ty.clone(),
                     mutable: *mutable,
@@ -275,14 +267,8 @@ impl<'h> Emitter<'h, '_> {
                 catch: catch
                     .as_ref()
                     .map(|c| {
-                        let param = match (&c.param, &mut rctx.remap) {
-                            (Some((id, name)), Some(r)) => {
-                                Some((self.fresh_local(*id, r)?, name.clone()))
-                            }
-                            (other, _) => other.clone(),
-                        };
                         Ok::<_, Diagnostic>(CatchClause {
-                            param,
+                            param: c.param.clone(),
                             body: self.rewrite_stmts(rctx, &c.body)?,
                         })
                     })

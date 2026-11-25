@@ -147,7 +147,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             explicit_type_args,
             call_byte_offset,
             caller,
-            is_inline_callback,
+            invocation,
         } = req;
         let view = self.index.view(template);
         let is_monomorphic_plain = matches!(view.kind, TemplateKind::Function)
@@ -221,10 +221,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             args_key,
             targs_key,
             list_result,
+            invocation == Invocation::Lexical,
         );
         if let Some(&id) = self.instance_index.get(&key) {
-            if is_inline_callback && let Some(inst) = self.instances.get_mut(id) {
-                inst.is_inline_callback = true;
+            if invocation == Invocation::Inline {
+                self.instances[id].invocation = invocation;
             }
             if self.inst_superseded.remove(id.index()) {
                 bump_count(&mut self.template_counts, template);
@@ -419,7 +420,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             param_locs,
             caller,
             call_byte_offset,
-            is_inline_callback,
+            invocation,
             captures_non_global,
             emitted_func_id,
             emitted_name,
@@ -573,6 +574,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let cinfo = self.index.class(class);
         let hir_class = self
             .hir
+            .bodies
             .classes
             .get(cinfo.hir_idx)
             .ok_or_else(|| Diagnostic::internal("unknown class in HIR"))?;

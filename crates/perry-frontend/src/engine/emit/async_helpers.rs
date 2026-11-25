@@ -1,13 +1,11 @@
 //! Emission of guest-settled promises (`new Promise`, `then`/`catch`/`finally`) and global timers.
 use super::{Emitter, RewriteCtx, sequence, synth_call};
+use crate::engine::ExpressionOp;
 use crate::engine::boundary::TemplateKind;
 use crate::engine::solve::{CallbackCall, Instance, ReactionKind};
 use crate::engine::types::{CaptureOwner, FuncIdentity, HelperId, LocId, TemplateId, Ty};
-use crate::engine::{ExpressionOp, Storage};
 use perry_hir::{ir::Expr, types::FuncId};
 use perry_wit_diagnostics::Result;
-
-use crate::hir_compat::TIMER_CLASS;
 
 impl<'h> Emitter<'h, '_> {
     pub(super) fn promise_handle_function(
@@ -42,26 +40,6 @@ impl<'h> Emitter<'h, '_> {
             },
         );
         Ok(())
-    }
-
-    pub(super) fn timer_record(&mut self) -> Result<FuncId> {
-        if let Some(id) = self.timer_record {
-            return Ok(id);
-        }
-        let id = self.fresh_func_id()?;
-        self.plans.operations.insert(
-            id,
-            crate::engine::NativeOperation::Allocate(crate::engine::RecordLayout {
-                name: TIMER_CLASS.into(),
-                function: None,
-                fields: vec![
-                    ("ctrl".into(), Storage::AbortController),
-                    ("cancelled".into(), Storage::Value(Ty::BOOLEAN)),
-                ],
-            }),
-        );
-        self.timer_record = Some(id);
-        Ok(id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -207,7 +185,6 @@ impl<'h> Emitter<'h, '_> {
         extra: Ty,
     ) -> Result<crate::engine::NativeFunction> {
         use crate::engine::{NativeBody, NativeFunction, NativeParam, TimerKind};
-        self.timer_record()?;
         let mut params = vec![NativeParam::Value(timer)];
         if cb_call.needs_value() {
             self.prepare_layouts(callback_type)?;
@@ -273,7 +250,6 @@ impl<'h> Emitter<'h, '_> {
         let Some(handle) = values.pop() else {
             return Ok(sequence(effects, Expr::Undefined));
         };
-        self.timer_record()?;
         Ok(sequence(
             effects,
             self.expression_op(ExpressionOp::ClearTimer, vec![handle])?,

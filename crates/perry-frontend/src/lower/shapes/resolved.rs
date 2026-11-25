@@ -68,42 +68,22 @@ impl Shapes<'_> {
             && encodable(self.specialization, &types, ty, &mut Vec::new())
     }
 
-    pub(in crate::lower) fn closure_result(
+    pub(in crate::lower) fn source_closure_result(
         &self,
         ctx: &Context,
-        id: perry_hir::types::FuncId,
         source: &HirType,
     ) -> Result<Option<TypeHandle>> {
-        if let Some(ty) = self
-            .specialization
-            .instances
-            .closures
-            .get(&id)
-            .and_then(|s| s.result)
-        {
-            return Ok(self.solved_result(ctx, ty, false)?.map(|b| b.carrier));
-        }
         (source != &HirType::Void)
             .then(|| self.value_type(ctx, source))
             .transpose()
     }
 
-    pub(in crate::lower) fn closure_param(
+    pub(in crate::lower) fn source_parameter(
         &self,
         ctx: &Context,
-        id: perry_hir::types::FuncId,
-        index: usize,
         param: &perry_hir::ir::Param,
     ) -> Result<(BindingType, bool)> {
-        self.param_type(
-            ctx,
-            self.specialization
-                .instances
-                .closures
-                .get(&id)
-                .and_then(|s| s.params.get(index).copied().flatten()),
-            &param.ty,
-        )
+        self.param_type(ctx, None, &param.ty)
     }
 
     pub(in crate::lower) fn parameter_binding(
@@ -126,11 +106,11 @@ impl Shapes<'_> {
     fn param_type(
         &self,
         ctx: &Context,
-        solved: Option<Ty>,
+        solved: Option<crate::engine::NativeParam>,
         ty: &HirType,
     ) -> Result<(BindingType, bool)> {
-        if let Some(ty) = solved {
-            return Ok((self.resolved_binding(ctx, ty)?, ty == Ty::NEVER));
+        if let Some(param) = solved {
+            return self.native_param(ctx, param);
         }
         Ok((
             BindingType {
@@ -139,6 +119,21 @@ impl Shapes<'_> {
             },
             matches!(ty, HirType::Never),
         ))
+    }
+
+    pub(in crate::lower) fn native_param(
+        &self,
+        ctx: &Context,
+        param: crate::engine::NativeParam,
+    ) -> Result<(BindingType, bool)> {
+        Ok(match param {
+            crate::engine::NativeParam::Value(ty) => {
+                (self.resolved_binding(ctx, ty)?, ty == Ty::NEVER)
+            }
+            crate::engine::NativeParam::Environment(id) => {
+                (BindingType::plain(self.environment_type(ctx, id)?), false)
+            }
+        })
     }
 
     pub(in crate::lower) fn function_result(
@@ -235,6 +230,22 @@ impl Shapes<'_> {
             TyKind::String => StringType::get(ctx).into(),
             TyKind::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
             TyKind::Dynamic => perry_mir::JsonType::get(ctx).into(),
+            TyKind::Timer => {
+                if let Some(timer) = self.timer.get() {
+                    timer
+                } else {
+                    let fields = vec![
+                        (
+                            "cancelled".into(),
+                            IntegerType::get(ctx, 1, Signedness::Signless).into(),
+                        ),
+                        ("ctrl".into(), perry_mir::AbortType::get(ctx).into()),
+                    ];
+                    let timer = fresh_record(ctx, RecordKind::Object, Some(fields))?.into();
+                    self.timer.set(Some(timer));
+                    timer
+                }
+            }
             TyKind::Symbol => {
                 bail_diag!(codes::UNSUPPORTED_TYPE, "type Symbol is not supported yet")
             }

@@ -170,14 +170,17 @@ impl<'s> FunctionBuilder<'s> {
                     .flatten()
                     .map(|ty| self.shapes.resolved_binding(ctx, ty).map(|b| b.carrier))
                     .transpose()?,
-                crate::lower::callable::Callback::Source(Expr::Closure {
-                    func_id, params, ..
-                }) => params.first().and_then(|param| {
-                    self.shapes
-                        .closure_param(ctx, *func_id, 0, param)
-                        .ok()
-                        .map(|(ty, _)| ty.carrier)
-                }),
+                crate::lower::callable::Callback::Lexical(_, signature) => {
+                    signature.params.first().map(|p| p.base.carrier)
+                }
+                crate::lower::callable::Callback::Source(Expr::Closure { params, .. }) => {
+                    params.first().and_then(|param| {
+                        self.shapes
+                            .source_parameter(ctx, param)
+                            .ok()
+                            .map(|(ty, _)| ty.carrier)
+                    })
+                }
                 _ => None,
             };
             Some(self.expression_with(ctx, init_expr, expected_acc)?)

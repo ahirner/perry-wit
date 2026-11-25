@@ -57,6 +57,7 @@ class Box {
   get value() { return this.v; }
   set value(x) { this.v = x; }
   map(f) { return f(this.v); }
+  $$perryMethod_map() { return this.v; }
 }
 class Pair {
   constructor(a, b) { this.a = a; this.b = b; }
@@ -66,9 +67,9 @@ const bn = new Box(1);
 const bs = new Box("a");
 bn.value = 5;
 const swapped = new Pair(1, "x").swap();
-console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b);
+console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b, bs.$$perryMethod_map());
 "#,
-            "2 a! true true 5 a! x 1\n",
+            "2 a! true true 5 a! x 1 a\n",
         ),
         (
             "capture_owners_and_mutual_recursion",
@@ -168,13 +169,18 @@ console.log(new Mode("b").mode, late.n);
 function apply(f, x) { return f(x); }
 const twice = (n) => n * 2;
 const holder = { f: twice };
-const counter = { n: 0, bump(by) { this.n += by; return this.n; } };
+const counter = {
+  n: 0,
+  bump(by) { this.n += by; return this.n; },
+  offsets(xs: number[]) { return xs.map(x => x + this.n).join(","); },
+};
 const greeter = { greet(name) { return "hi " + name; } };
 function getFn() { return twice; }
 function selfRef() { return selfRef; }
 class FnBox { constructor() { this.op = twice; } run(x) { return this.op(x); } }
 const fs = [(x) => x + 1];
 counter.bump(2);
+console.log(counter.offsets([1, 4]));
 console.log(
   apply(twice, 4),
   apply(holder.f, 5),
@@ -187,7 +193,7 @@ console.log(
   fs[0](1),
 );
 "#,
-            "8 10 12 5 hi a 14 true 16 2\n",
+            "3,6\n8 10 12 5 hi a 14 true 16 2\n",
         ),
         (
             "tagged_function_unions_dispatch_and_callbacks",
@@ -497,6 +503,11 @@ await verify();
             r#"
 let calls = 0;
 function hit(value: number): number { calls++; return value; }
+function fallback(value: number | undefined = undefined) {
+  if (value == undefined) value = 19;
+  return value ?? 0;
+}
+console.log(fallback(), fallback(4));
 class Counter {
   seed = hit(5);
   field = 1 + (this.seed === 5 ? hit(this.seed) : hit(100));
@@ -526,7 +537,7 @@ class Bucket<T> {
 }
 console.log(new Bucket<number>(42).selected[0], new Bucket<string>("ok").selected[0]);
 "#,
-            "6 2\n20 2\n7 3\nfalse 3\ntrue 4\nundefined undefined 0 3 undefined 4 undefined missing undefined\n7 0 0 3 1 0 0 0 0\n7 1 6 6 1 6 6 6 ok\n42 ok\n",
+            "19 4\n6 2\n20 2\n7 3\nfalse 3\ntrue 4\nundefined undefined 0 3 undefined 4 undefined missing undefined\n7 0 0 3 1 0 0 0 0\n7 1 6 6 1 6 6 6 ok\n42 ok\n",
         ),
         (
             "promise_handles_keep_their_constructor_instance",
@@ -547,6 +558,8 @@ console.log(await first.promise, await second.promise);
         (
             "guest_settled_promises_and_global_timers",
             r#"
+type __PerryTimer = { label: string };
+function readLabel(value: __PerryTimer) { return value.label; }
 async function main() {
   const immediate = await new Promise((resolve) => resolve(41 + 1));
   const delayed = await new Promise((resolve) => {
@@ -622,11 +635,12 @@ async function main() {
     ticks,
     thisMatches,
     imm,
+    readLabel({label: "user"}),
   );
 }
 await main();
 "#,
-            "42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm\n",
+            "42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm user\n",
         ),
     ];
     for &(name, source, expected) in cases {

@@ -7,8 +7,9 @@ use super::types::{
 };
 use crate::hir_compat::{self, Locations};
 use crate::source::SourceFacts;
+use crate::source::SourceModule;
 use perry_hir::{
-    ir::{Expr, Function, Module as HirModule, Param, Stmt},
+    ir::{Expr, Function, Param, Stmt},
     types::{FuncId, LocalId},
     walker::{stmt_any_expr, walk_expr_children},
 };
@@ -66,13 +67,14 @@ impl<'h> TemplateView<'h> {
     }
 
     fn from_function(kind: TemplateKind, f: &'h Function, explicit_return: bool) -> Self {
+        let body = crate::source::authored_body(&f.params, &f.body);
         Self {
             kind,
             name: f.name.as_str(),
             func_id: f.id,
             params: &f.params,
             return_type: &f.return_type,
-            body: &f.body,
+            body,
             captures: &f.captures,
             type_params: &f.type_params,
             is_async: f.is_async,
@@ -81,7 +83,7 @@ impl<'h> TemplateView<'h> {
             construct_only: f.construct_only,
             captures_this: false,
             captures_new_target: false,
-            uses_this: stmts_use_this(&f.body),
+            uses_this: stmts_use_this(body),
             explicit_return,
         }
     }
@@ -148,19 +150,25 @@ static VOID_HIR: perry_hir::types::Type = perry_hir::types::Type::Void;
 impl<'h> ModuleIndex<'h> {
     pub(crate) fn build(
         ctx: &Context,
-        hir: &'h HirModule,
+        hir: &'h SourceModule,
         facts: &SourceFacts,
         locations: &Locations<'_>,
         types: &mut TypeTable,
     ) -> Self {
-        let max_local_hint = hir.local_source_spans.keys().copied().max().unwrap_or(0);
+        let max_local_hint = hir
+            .declarations
+            .local_source_spans
+            .keys()
+            .copied()
+            .max()
+            .unwrap_or(0);
         let mut idx = Self {
-            func_to_template: Vec::with_capacity(hir.functions.len() + 1),
+            func_to_template: Vec::with_capacity(hir.bodies.functions.len() + 1),
             local_to_idx: vec![None; max_local_hint as usize + 1],
             max_local_id: max_local_hint,
             ..Self::default()
         };
-        for (hir_idx, class) in hir.classes.iter().enumerate() {
+        for (hir_idx, class) in hir.bodies.classes.iter().enumerate() {
             if hir_compat::is_object_literal(&class.name) {
                 idx.hir_class_is_literal.insert(hir_idx);
                 idx.literal_classes
@@ -173,10 +181,10 @@ impl<'h> ModuleIndex<'h> {
             func_id: 0,
             params: &[],
             return_type: &VOID_HIR,
-            body: &hir.init,
+            body: &hir.bodies.init,
             captures: &[],
             type_params: &[],
-            is_async: hir.has_top_level_await,
+            is_async: hir.declarations.has_top_level_await,
             is_generator: false,
             is_strict: true,
             construct_only: false,
@@ -198,9 +206,9 @@ impl<'h> ModuleIndex<'h> {
             defined_locals: &mut defined_locals,
             pending_captures: &mut pending_captures,
         };
-        idx.scan_stmts(&mut scan, &hir.init, init_tid, true, false);
+        idx.scan_stmts(&mut scan, &hir.bodies.init, init_tid, true, false);
 
-        for f in &hir.functions {
+        for f in &hir.bodies.functions {
             idx.register_member(
                 &mut scan,
                 TemplateKind::Function,
@@ -209,7 +217,7 @@ impl<'h> ModuleIndex<'h> {
             );
         }
 
-        for (hir_idx, class) in hir.classes.iter().enumerate() {
+        for (hir_idx, class) in hir.bodies.classes.iter().enumerate() {
             if idx.hir_class_is_literal.contains(hir_idx) {
                 continue;
             }
@@ -488,9 +496,14 @@ impl<'h> ModuleIndex<'h> {
         self.local_idx(id)
             .is_some_and(|li| self.locals[li].flags.contains(LocalFlags::PARAM_ANNOTATED))
     }
-    pub(crate) fn is_inferred_local(&self, hir: &HirModule, id: LocalId, lidx: LocalIdx) -> bool {
+    pub(crate) fn is_inferred_local(
+        &self,
+        hir: &SourceModule,
+        id: LocalId,
+        lidx: LocalIdx,
+    ) -> bool {
         self.locals[lidx].flags.contains(LocalFlags::INFERRED)
-            || !hir.local_source_spans.contains_key(&id)
+            || !hir.declarations.local_source_spans.contains_key(&id)
     }
     pub(crate) fn is_for_head_local(&self, id: LocalId) -> bool {
         self.local_idx(id)
@@ -561,7 +574,7 @@ impl<'h> ModuleIndex<'h> {
         scan.raw_sites.resize_with(self.views.len(), Vec::new);
         self.set_func_template(func.id, tid);
         self.scan_params(scan, &func.params, tid);
-        self.scan_stmts(scan, &func.body, tid, false, false);
+        self.scan_stmts(scan, self.view(tid).body, tid, false, false);
         tid
     }
 
@@ -574,7 +587,7 @@ impl<'h> ModuleIndex<'h> {
         id: LocalId,
         owner: TemplateId,
         declared: Ty,
-        hir: &HirModule,
+        hir: &SourceModule,
         facts: &SourceFacts,
     ) -> LocalIdx {
         self.max_local_id = self.max_local_id.max(id);
@@ -583,7 +596,7 @@ impl<'h> ModuleIndex<'h> {
             return existing;
         }
         let mut flags = LocalFlags::default();
-        if let Some(span) = hir.local_source_spans.get(&id) {
+        if let Some(span) = hir.declarations.local_source_spans.get(&id) {
             let binding = facts.binding(span.start);
             if binding.inferred(span.end) {
                 flags.insert(LocalFlags::INFERRED);
@@ -614,8 +627,9 @@ impl<'h> ModuleIndex<'h> {
         idx
     }
 
-    fn param_is_unannotated(&self, hir: &HirModule, facts: &SourceFacts, param: &Param) -> bool {
-        !hir.local_source_spans
+    fn param_is_unannotated(&self, hir: &SourceModule, facts: &SourceFacts, param: &Param) -> bool {
+        !hir.declarations
+            .local_source_spans
             .get(&param.id)
             .is_some_and(|s| facts.binding(s.start).annotated_parameter)
             && matches!(
@@ -628,6 +642,7 @@ impl<'h> ModuleIndex<'h> {
         for param in params {
             let explicit = scan
                 .hir
+                .declarations
                 .local_source_spans
                 .get(&param.id)
                 .is_some_and(|s| scan.facts.binding(s.start).annotated_parameter);
@@ -654,6 +669,7 @@ impl<'h> ModuleIndex<'h> {
                 Stmt::Let { id, ty, init, .. } => {
                     let explicit = scan
                         .hir
+                        .declarations
                         .local_source_spans
                         .get(id)
                         .is_some_and(|s| !scan.facts.binding(s.start).inferred(s.end));
@@ -879,6 +895,7 @@ impl<'h> ModuleIndex<'h> {
                     return_type,
                     perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
                 );
+                let body = crate::source::authored_body(params, body);
                 let tid = self.add_template(TemplateView {
                     kind: TemplateKind::Closure,
                     name: scan
@@ -889,7 +906,7 @@ impl<'h> ModuleIndex<'h> {
                     func_id: *func_id,
                     params: params.as_slice(),
                     return_type,
-                    body: body.as_slice(),
+                    body,
                     captures: captures.as_slice(),
                     type_params: &[],
                     is_async: *is_async,
@@ -946,7 +963,7 @@ impl<'h> ModuleIndex<'h> {
 
 struct ScanCtx<'h, 'a> {
     ctx: &'a Context,
-    hir: &'h HirModule,
+    hir: &'h SourceModule,
     facts: &'a SourceFacts,
     types: &'a mut TypeTable,
     raw_sites: &'a mut Vec<Vec<&'h Expr>>,

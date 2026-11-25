@@ -236,47 +236,35 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         s: &mut EvalState<'h>,
         expr: &'h Expr,
+        constructor: crate::source::Constructor<'h>,
     ) -> Result<Ty> {
-        let (is_map, explicit_tys, init) = match hir_compat::constructor(expr) {
-            Some(hir_compat::Constructor::Map { types, init }) => (
-                true,
-                types.map(|(k, v)| {
-                    vec![
-                        self.types.intern_hir(self.ctx, k, true),
-                        self.types.intern_hir(self.ctx, v, true),
-                    ]
-                }),
-                init,
-            ),
-            Some(hir_compat::Constructor::Set { element, init }) => (
-                false,
-                element.map(|e| vec![self.types.intern_hir(self.ctx, e, true)]),
-                init,
-            ),
-            None => return Ok(Ty::OPEN),
-        };
+        let is_map = constructor.kind == crate::source::CollectionKind::Map;
+        let init = constructor.init;
         if let Some(init) = init {
             self.eval_expr(s, init)?;
         }
         let base = shapes::TypeName::new(self.ctx, if is_map { "Map" } else { "Set" }.into());
-        if let Some(mut arg_tys) = explicit_tys {
+        if !constructor.types.is_empty() {
+            let mut arg_tys: Vec<_> = constructor
+                .types
+                .iter()
+                .map(|ty| self.types.intern_hir(self.ctx, ty, true))
+                .collect();
             let bindings = self.active_instance_type_bindings(s.inst);
-            let mut specialized = false;
             for ty in &mut arg_tys {
                 let bound = self.types.substitute(*ty, &bindings);
                 let concrete = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
-                specialized |= concrete != *ty;
                 *ty = concrete;
             }
             let ty = self.types.generic(base, &arg_tys);
-            if specialized {
-                let op = if is_map {
-                    crate::engine::ExpressionOp::Map(ty)
-                } else {
-                    crate::engine::ExpressionOp::Set(ty)
-                };
-                self.record_site(s.inst, expr, SiteResolution::CollectionNew(op));
-            }
+            self.record_site(
+                s.inst,
+                expr,
+                SiteResolution::CollectionNew {
+                    span: constructor.span,
+                    ty,
+                },
+            );
             return Ok(ty);
         }
         if let Some(init) = init {
@@ -344,8 +332,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn check_timer_member(&self, receiver: Ty, offset: u32) -> Result<()> {
-        if matches!(self.types.kind(receiver), TyKind::Named(id) if id.get(self.ctx) == crate::hir_compat::TIMER_CLASS)
-        {
+        if receiver == Ty::TIMER {
             let locations = &self.metadata.locations;
             let member = locations
                 .member_text(offset)
@@ -427,6 +414,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let cinst = &self.class_insts[cinst_id];
         let f_idx = self
             .hir
+            .bodies
             .classes
             .get(self.index.class(cinst.class).hir_idx)?
             .fields

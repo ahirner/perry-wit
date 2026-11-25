@@ -236,13 +236,8 @@ macro_rules! registry {
                 result
             }
 
-            pub(crate) fn rewrite(name: &str, count: usize, spread: bool) -> Option<String> {
-                $($(if matches!(name, $($name)|+) {
-                    if let Some(rewritten) = Preservation::$preserve.rewrite(name, count, spread) {
-                        return Some(rewritten);
-                    }
-                })*)*
-                None
+            pub(crate) fn preserve_arguments(name: &str, count: usize, spread: bool) -> bool {
+                false $($(|| (matches!(name, $($name)|+) && Preservation::$preserve.needed(count, spread)))*)*
             }
         }
 

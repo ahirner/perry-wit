@@ -2,7 +2,7 @@
 use super::*;
 use crate::engine::{
     NativeCallback, Reaction,
-    types::{FuncIdentity, Ty, env_class_name, func_tag},
+    types::{FuncIdentity, Ty, func_tag},
 };
 
 impl<'s> FunctionBuilder<'s> {
@@ -77,7 +77,7 @@ impl<'s> FunctionBuilder<'s> {
         let promise = self.emit_value(ctx, |ctx| PromisePendingOp::new(ctx, settled));
         let mut inputs = Vec::new();
         for handle in handles.into_iter().flatten() {
-            let env = self.shapes.named(ctx, &env_class_name(handle))?;
+            let env = self.shapes.environment_type(ctx, handle)?;
             let record = perry_mir::typed::<RecordType>(ctx, env)
                 .ok_or_else(|| internal!("expected promise environment"))?;
             let capture = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![promise]));

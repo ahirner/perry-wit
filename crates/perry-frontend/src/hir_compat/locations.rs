@@ -1,9 +1,5 @@
 //! Original source coordinates for merged AST and HIR declarations.
-use perry_hir::{
-    ir::{Expr, Function, Module, Stmt},
-    types::FuncId,
-    walker::{stmt_any_expr, walk_expr_children},
-};
+use perry_hir::{ir::Expr, types::FuncId};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Note, Result, SourceSpan, codes};
 use std::{
@@ -64,7 +60,10 @@ enum CallSite {
         template: String,
         note: Option<Note>,
     },
-    Import(Note),
+    Import {
+        note: Note,
+        priority: crate::source::CallerKind,
+    },
 }
 
 pub(crate) fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
@@ -218,65 +217,48 @@ impl<'s> Locations<'s> {
         );
     }
 
-    /// Keep the first cross-file caller, giving exported functions priority.
-    pub(crate) fn record_call_origins(&mut self, module: &Module) {
-        if self.files.len() <= 1 {
+    pub(crate) fn has_imports(&self) -> bool {
+        self.files.len() > 1
+    }
+
+    pub(crate) fn record_cross_file_call(
+        &mut self,
+        callee: &str,
+        offset: u32,
+        caller: Option<&str>,
+        priority: crate::source::CallerKind,
+    ) {
+        if self
+            .origins
+            .get(callee)
+            .is_some_and(|origin| match &origin.site {
+                CallSite::Instantiation { .. } => true,
+                CallSite::Import {
+                    priority: previous, ..
+                } => *previous <= priority,
+            })
+        {
             return;
         }
-        let names: HashMap<_, _> = module
-            .functions
-            .iter()
-            .map(|function| (function.id, function.name.as_str()))
-            .collect();
-        let mut record = |id: FuncId, offset: u32, caller: Option<&str>| {
-            let Some(&callee) = names.get(&id) else {
-                return;
-            };
-            if self.origins.contains_key(callee) {
-                return;
-            }
-            let Some(declaration) = self.functions.get(callee) else {
-                return;
-            };
-            if let (Some(call), Some(target)) =
-                (self.file_at(offset), self.file_at(declaration.span.lo.0))
-                && call.path != target.path
-                && let Some(span) = self.call_span(offset)
-            {
-                self.origins.insert(
-                    callee.to_owned(),
-                    CallerOrigin {
-                        site: CallSite::Import(Note::spanned(
-                            span,
-                            format!("called from here ('{}')", display_name(callee)),
-                        )),
-                        caller: caller.map(str::to_owned),
-                    },
-                );
-            }
+        let Some(declaration) = self.functions.get(callee) else {
+            return;
         };
-        body_calls(&module.init, &mut |id, offset| record(id, offset, None));
-        for exported in [true, false] {
-            for function in module
-                .functions
-                .iter()
-                .filter(|f| f.is_exported == exported)
-            {
-                function_calls(function, &mut |id, offset| {
-                    record(id, offset, Some(&function.name))
-                });
-            }
-        }
-        let mut class_call = |id, offset| record(id, offset, None);
-        for class in &module.classes {
-            for field in class.fields.iter().chain(&class.static_fields) {
-                if let Some(init) = &field.init {
-                    expression_calls(init, &mut class_call);
-                }
-            }
-            for function in crate::shapes::class_functions(class) {
-                function_calls(function, &mut class_call);
-            }
+        if let (Some(call), Some(target)) =
+            (self.file_at(offset), self.file_at(declaration.span.lo.0))
+            && call.path != target.path
+            && let Some(span) = self.call_span(offset)
+        {
+            let note = Note::spanned(
+                span,
+                format!("called from here ('{}')", display_name(callee)),
+            );
+            self.origins.insert(
+                callee.to_owned(),
+                CallerOrigin {
+                    site: CallSite::Import { priority, note },
+                    caller: caller.map(str::to_owned),
+                },
+            );
         }
     }
 
@@ -289,7 +271,7 @@ impl<'s> Locations<'s> {
         {
             let note = match &origin.site {
                 CallSite::Instantiation { note, .. } => note.as_ref(),
-                CallSite::Import(note) => Some(note),
+                CallSite::Import { note, .. } => Some(note),
             };
             notes.extend(note.cloned());
             let Some(caller) = origin.caller.as_deref() else {
@@ -318,7 +300,7 @@ impl<'s> Locations<'s> {
                 CallSite::Instantiation { ref note, .. } => {
                     note.as_ref().and_then(Note::span).cloned()
                 }
-                CallSite::Import(ref note) => note.span().cloned(),
+                CallSite::Import { ref note, .. } => note.span().cloned(),
             })
     }
 
@@ -559,37 +541,5 @@ impl<'s> Locations<'s> {
             locations: self,
             class_name: None,
         });
-    }
-}
-
-fn function_calls(function: &Function, visit: &mut impl FnMut(FuncId, u32)) {
-    for default in function.params.iter().filter_map(|p| p.default.as_ref()) {
-        expression_calls(default, visit);
-    }
-    body_calls(&function.body, visit);
-}
-
-fn body_calls(body: &[Stmt], visit: &mut impl FnMut(FuncId, u32)) {
-    for statement in body {
-        stmt_any_expr(statement, &mut |expr| {
-            expression_calls(expr, visit);
-            false
-        });
-    }
-}
-
-fn expression_calls(expr: &Expr, visit: &mut impl FnMut(FuncId, u32)) {
-    if let Expr::Closure { body, .. } = expr {
-        body_calls(body, visit);
-    }
-    walk_expr_children(expr, &mut |child| expression_calls(child, visit));
-    if let Expr::Call {
-        callee,
-        byte_offset,
-        ..
-    } = expr
-        && let Expr::FuncRef(id) = callee.as_ref()
-    {
-        visit(*id, *byte_offset);
     }
 }

@@ -34,27 +34,30 @@ impl<'h> Emitter<'h, '_> {
                 template: tid,
                 capture_owner,
             };
-            let constructor = self.environment(ident)?;
-            let fields = self.env_layout(ident)?;
-            let args = if fields.is_empty() {
-                vec![Expr::Number(0.0)]
-            } else {
-                let mut out_args = Vec::with_capacity(fields.len());
-                for (cap_id, _, dst_ty, boxed) in fields {
-                    let mut arg = Expr::LocalGet(cap_id);
-                    if !boxed
-                        && matches!(capture_owner, CaptureOwner::Template(_))
-                        && let Some(src_ty) =
-                            self.local_ty_in_owner(CaptureOwner::Instance(rctx.inst_id), cap_id)
-                        && src_ty != dst_ty
-                    {
-                        arg = self.coerce_capture_expr(arg, src_ty, dst_ty)?;
-                    }
-                    out_args.push(arg);
-                }
-                out_args
-            };
-            return Ok(synth_call(constructor, args, 0, 0));
+            self.environment(ident)?;
+            let operands = self
+                .env_layout(ident)?
+                .into_iter()
+                .map(|(local, _, ty, boxed)| {
+                    self.capture_operand(
+                        capture_owner,
+                        CaptureOwner::Instance(rctx.inst_id),
+                        local,
+                        ty,
+                        boxed,
+                    )
+                })
+                .collect();
+            let owner = (rctx.inst_id != self.solved.init_inst)
+                .then(|| self.solved.instances[rctx.inst_id].emitted_func_id);
+            self.plans.closure_values.insert(
+                (owner, *func_id),
+                crate::engine::ClosureValue {
+                    identity: ident,
+                    operands,
+                },
+            );
+            return Ok(Expr::FuncRef(*func_id));
         }
         if let Expr::LocalGet(id) = expr
             && let Some((_, fid)) = rctx.func_params.iter().find(|(lid, _)| lid == id)
@@ -95,7 +98,6 @@ impl<'h> Emitter<'h, '_> {
             ) {
             nested = RewriteCtx {
                 inst_id: rctx.inst_id,
-                remap: None,
                 func_params: rctx.func_params,
                 self_local: None,
 

@@ -69,6 +69,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             for (cid, f_idx, loc) in self.static_field_locs.clone() {
                 if let Some(init) = self
                     .hir
+                    .bodies
                     .classes
                     .get(self.index.class(cid).hir_idx)
                     .and_then(|c| c.static_fields.get(f_idx))
@@ -90,6 +91,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let info = &self.index.classes[instance.class];
             let fields = &self
                 .hir
+                .bodies
                 .classes
                 .get(info.hir_idx)
                 .ok_or_else(|| Diagnostic::internal("missing class fields"))?
@@ -608,16 +610,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     let init_ty = if let Some(&class) = self.resource_registries.get(id) {
                         let value = self.instantiate_annotated_class(class, 0, Some(s.inst))?;
-                        let map = self.types.generic(
+                        self.types.generic(
                             shapes::TypeName::new(self.ctx, "Map".into()),
                             &[Ty::NUMBER, value],
-                        );
-                        self.record_site(
-                            s.inst,
-                            init_expr,
-                            SiteResolution::CollectionNew(crate::engine::ExpressionOp::Map(map)),
-                        );
-                        map
+                        )
                     } else {
                         self.eval_expr(s, init_expr)?
                     };
@@ -828,6 +824,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             vec![
                 Ty::OPEN;
                 self.hir
+                    .bodies
                     .classes
                     .get(c.hir_idx)
                     .map_or(0, |hc| hc.static_fields.len())

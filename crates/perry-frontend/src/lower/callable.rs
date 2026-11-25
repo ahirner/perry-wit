@@ -3,13 +3,14 @@ use super::*;
 use crate::engine::{CallbackOperand, NativeCallback};
 use crate::engine::{
     solve::CallableOp,
-    types::{FuncIdentity, Idx, Ty, TyKind, env_class_name, func_tag},
+    types::{FuncIdentity, Idx, Ty, TyKind, func_tag},
 };
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Callback<'s> {
     Source(&'s Expr),
+    Lexical(&'s Function, &'s Signature<'s>),
     Bound(&'s crate::engine::CallbackBinding, Value),
 }
 
@@ -32,7 +33,7 @@ impl<'s> Shapes<'s> {
         Some((plan, value))
     }
 
-    fn environment_type(
+    fn callable_environment(
         &self,
         ctx: &Context,
         function: FuncIdentity,
@@ -40,7 +41,7 @@ impl<'s> Shapes<'s> {
         self.specialization
             .escaping_envs
             .contains(function.template.index())
-            .then(|| self.named(ctx, &env_class_name(function)))
+            .then(|| self.environment_type(ctx, function))
             .transpose()
     }
 
@@ -67,7 +68,12 @@ impl<'s> Shapes<'s> {
         drop(types);
         let cases = identities
             .into_iter()
-            .map(|identity| Ok((func_tag(identity), self.environment_type(ctx, identity)?)))
+            .map(|identity| {
+                Ok((
+                    func_tag(identity),
+                    self.callable_environment(ctx, identity)?,
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
         let present = match cases.as_slice() {
             [] => return Ok(None),
@@ -105,6 +111,21 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Callback<'s>> {
+        if let Expr::FuncRef(id) = expr
+            && self
+                .shapes
+                .specialization
+                .instances
+                .inline_callbacks
+                .get(id)
+                == Some(&crate::engine::solve::Invocation::Lexical)
+        {
+            let signature = self.signature(*id)?;
+            let function = signature
+                .inline
+                .ok_or_else(|| internal!("missing lexical callback body"))?;
+            return Ok(Callback::Lexical(function, signature));
+        }
         let expr = self.shapes.callable(expr);
         Ok(match self.shapes.bound_callback(expr) {
             Some((plan, expr)) => Callback::Bound(plan, self.expression(ctx, expr)?),
@@ -222,7 +243,7 @@ impl<'s> FunctionBuilder<'s> {
             };
             let env = self
                 .shapes
-                .environment_type(ctx, arm.identity)?
+                .callable_environment(ctx, arm.identity)?
                 .map(|ty| self.callable_field(ctx, callee, "val", ty))
                 .transpose()?;
             let inputs = env
@@ -267,58 +288,7 @@ impl<'s> FunctionBuilder<'s> {
             }
             (CallableOp::Widener { from, to }, [operand]) => {
                 let value = self.callable_operand(ctx, operand, from)?;
-                let result = self
-                    .shapes
-                    .callable_type(ctx, to)?
-                    .ok_or_else(|| internal!("missing destination type for function union"))?;
-                let done = self.result_block(ctx, result);
-                for null in [true, false] {
-                    if let Some(test) = self.sentinel_test(ctx, value, null) {
-                        let absent = self.absent_literal(ctx, null, Some(result))?;
-                        self.yield_if(ctx, done, test, absent);
-                    }
-                }
-                let value = self.defined(ctx, value)?;
-                let tag = self.callable_field(ctx, value, "tag", StringType::get(ctx).into())?;
-                let mut members = self
-                    .shapes
-                    .specialization
-                    .types
-                    .borrow()
-                    .func_members(&from)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .peekable();
-                while let Some(identity) = members.next() {
-                    let case = func_tag(identity);
-                    let next = if members.peek().is_some() {
-                        let wanted = self.string(ctx, &case);
-                        let test = self.compare(ctx, CompareKind::Eq, tag, wanted);
-                        Some(self.enter_case(ctx, test))
-                    } else {
-                        None
-                    };
-                    let payload = self
-                        .shapes
-                        .environment_type(ctx, identity)?
-                        .map(|ty| self.callable_field(ctx, value, "val", ty))
-                        .transpose()?;
-                    let target = present_type(ctx, result);
-                    let widened = if let Some(record) = perry_mir::typed::<RecordType>(ctx, target)
-                    {
-                        let fields = std::iter::once(tag).chain(payload).collect();
-                        self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, fields))
-                    } else {
-                        self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, target, &case, payload))
-                    };
-                    let widened = self.fit(ctx, widened, result)?;
-                    self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![widened]));
-                    if let Some(next) = next {
-                        self.switch_to(next);
-                    }
-                }
-                self.switch_to(done);
-                Ok(done.deref(ctx).get_argument(0))
+                self.widen_function(ctx, value, from, to)
             }
             (CallableOp::Comparer { left_ty, right_ty }, [a, b]) => {
                 let left = self.callable_operand(ctx, a, left_ty)?;
@@ -354,7 +324,7 @@ impl<'s> FunctionBuilder<'s> {
                         let test = self.compare(ctx, CompareKind::Eq, left_tag, wanted);
                         let next = self.enter_case(ctx, test);
                         let equal =
-                            if let Some(env) = self.shapes.environment_type(ctx, identity)? {
+                            if let Some(env) = self.shapes.callable_environment(ctx, identity)? {
                                 let l = self.callable_field(ctx, left, "val", env)?;
                                 let r = self.callable_field(ctx, right, "val", env)?;
                                 self.compare(ctx, CompareKind::Eq, l, r)
@@ -369,6 +339,66 @@ impl<'s> FunctionBuilder<'s> {
             }
             _ => bail_internal!("invalid operands for solved function operation"),
         }
+    }
+
+    pub(super) fn widen_function(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        from: Ty,
+        to: Ty,
+    ) -> Result<Value> {
+        let result = self
+            .shapes
+            .callable_type(ctx, to)?
+            .ok_or_else(|| internal!("missing destination type for function union"))?;
+        let done = self.result_block(ctx, result);
+        for null in [true, false] {
+            if let Some(test) = self.sentinel_test(ctx, value, null) {
+                let absent = self.absent_literal(ctx, null, Some(result))?;
+                self.yield_if(ctx, done, test, absent);
+            }
+        }
+        let value = self.defined(ctx, value)?;
+        let tag = self.callable_field(ctx, value, "tag", StringType::get(ctx).into())?;
+        let mut members = self
+            .shapes
+            .specialization
+            .types
+            .borrow()
+            .func_members(&from)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .peekable();
+        while let Some(identity) = members.next() {
+            let case = func_tag(identity);
+            let next = if members.peek().is_some() {
+                let wanted = self.string(ctx, &case);
+                let test = self.compare(ctx, CompareKind::Eq, tag, wanted);
+                Some(self.enter_case(ctx, test))
+            } else {
+                None
+            };
+            let payload = self
+                .shapes
+                .callable_environment(ctx, identity)?
+                .map(|ty| self.callable_field(ctx, value, "val", ty))
+                .transpose()?;
+            let target = present_type(ctx, result);
+            let widened = if let Some(record) = perry_mir::typed::<RecordType>(ctx, target) {
+                let fields = std::iter::once(tag).chain(payload).collect();
+                self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, fields))
+            } else {
+                self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, target, &case, payload))
+            };
+            let widened = self.fit(ctx, widened, result)?;
+            self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![widened]));
+            if let Some(next) = next {
+                self.switch_to(next);
+            }
+        }
+        self.switch_to(done);
+        Ok(done.deref(ctx).get_argument(0))
     }
 
     fn callable_operand(&mut self, ctx: &mut Context, operand: &'s Expr, ty: Ty) -> Result<Value> {

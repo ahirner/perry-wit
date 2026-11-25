@@ -1,24 +1,22 @@
 //! The boundary for source facts and compiler-generated forms that Perry HIR erases.
 use crate::modules;
 use perry_hir::{
-    ir::{CompareOp, Expr, Module as HirModule, Stmt},
-    types::{LocalId, Type as HirType},
+    ir::{CompareOp, Expr, Stmt},
+    types::LocalId,
 };
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, bail_internal, codes};
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashMap;
 use swc_common::{GLOBALS, Globals, Mark, SyntaxContext};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::VisitMutWith;
 
 mod calls;
 mod classes;
-mod constructors;
 pub(crate) use calls::{RuntimeCall, runtime_call};
-mod defaults;
 mod locations;
 pub(crate) use calls::{is_array_insertion, is_source_extern};
-pub(crate) use constructors::typed_collection;
 pub(crate) use iteration::is_object_coercibility_check;
 pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset, mark_non_null};
@@ -30,26 +28,20 @@ pub(crate) mod resource_classes;
 mod streams;
 mod timers;
 mod witnesses;
-pub(crate) use constructors::{Constructor, constructor};
 pub(crate) use methods::Preservation;
 pub(crate) use methods::{Method, method};
 pub(crate) use streams::is_writable_to_web;
-pub(crate) use timers::TIMER_CLASS;
 pub(crate) use timers::is_timer_module;
 pub(crate) use witnesses::Witness;
 
 pub(crate) struct Metadata<'s> {
     pub(crate) witnesses: Vec<Witness<'s, perry_hir::types::FuncId>>,
-    pub(crate) resource_members: Vec<crate::wit::ResourceMember<'s>>,
-    pub(crate) inline_callbacks: HashSet<perry_hir::types::FuncId>,
     pub(crate) locations: Locations<'s>,
     pub(crate) source: crate::source::SourceFacts,
-    /// Monomorphized class name -> original source class name (for `instanceof`).
-    pub(crate) class_origins: HashMap<String, String>,
 }
 
 pub(crate) struct LoweredHir<'s> {
-    pub(crate) module: HirModule,
+    pub(crate) module: crate::source::SourceModule,
     pub(crate) metadata: Metadata<'s>,
 }
 
@@ -60,14 +52,14 @@ pub(crate) fn lower<'s>(
 ) -> Result<LoweredHir<'s>> {
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
-    let (mut constructors, witnesses) = GLOBALS.set(&Globals::new(), || {
+    let (constructors, witnesses) = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
         locations.collect(&ast, unresolved);
         timers::check_imports(&ast, &locations)?;
         regex::fold(&mut ast, unresolved);
-        let constructors = constructors::preserve(&mut ast, unresolved)?;
+        let constructors = crate::source::Constructors::bind(&mut ast, unresolved, &locations)?;
         streams::preserve_options(&mut ast, unresolved, &locations)?;
         Ok::<_, Diagnostic>((
             constructors,
@@ -75,10 +67,11 @@ pub(crate) fn lower<'s>(
         ))
     })?;
     let crate::source::Analysis {
-        facts,
+        mut facts,
         expression_spans,
         mut names,
     } = crate::source::analyze(&ast);
+    facts.constructors = constructors;
     streams::lower(&mut ast, &mut names)?;
     methods::preserve_arguments(&mut ast, &mut names);
     classes::preserve_field_types(&mut ast);
@@ -113,166 +106,14 @@ pub(crate) fn lower<'s>(
         }
     }
     let witnesses = witnesses.in_hir(&mut module)?;
-    constructors.collect_types(&mut module)?;
-    normalize_hir(&mut module, &constructors);
     Ok(LoweredHir {
-        module,
+        module: module.into(),
         metadata: Metadata {
             witnesses,
-            resource_members: world
-                .map(|(r, w)| crate::wit::resource_members(r, w))
-                .unwrap_or_default(),
-            inline_callbacks: HashSet::new(),
             locations,
             source: facts,
-            class_origins: HashMap::new(),
         },
     })
-}
-
-fn normalize_hir(module: &mut HirModule, constructors: &constructors::Constructors) {
-    normalize_stmts(&mut module.init, constructors);
-    for func in &mut module.functions {
-        normalize_function(func, constructors);
-    }
-    for class in &mut module.classes {
-        for field in class.fields.iter_mut().chain(&mut class.static_fields) {
-            if let Some(init) = &mut field.init {
-                normalize_expr(init, constructors);
-            }
-        }
-        if let Some(ctor) = &mut class.constructor {
-            normalize_function(ctor, constructors);
-        }
-        for func in class
-            .methods
-            .iter_mut()
-            .chain(&mut class.static_methods)
-            .chain(class.getters.iter_mut().map(|(_, f)| f))
-            .chain(class.setters.iter_mut().map(|(_, f)| f))
-        {
-            normalize_function(func, constructors);
-        }
-        for member in &mut class.computed_members {
-            normalize_expr(&mut member.key_expr, constructors);
-            normalize_function(&mut member.function, constructors);
-        }
-    }
-}
-
-fn normalize_function(
-    func: &mut perry_hir::ir::Function,
-    constructors: &constructors::Constructors,
-) {
-    defaults::strip_body(&mut func.body, &func.params);
-    for param in &mut func.params {
-        if let Some(default) = &mut param.default {
-            normalize_expr(default, constructors);
-        }
-    }
-    normalize_stmts(&mut func.body, constructors);
-}
-
-fn normalize_stmts(stmts: &mut [Stmt], constructors: &constructors::Constructors) {
-    for stmt in stmts {
-        normalize_stmt(stmt, constructors);
-    }
-}
-
-fn normalize_stmt(stmt: &mut Stmt, constructors: &constructors::Constructors) {
-    match stmt {
-        Stmt::Let {
-            init: Some(expr), ..
-        }
-        | Stmt::Expr(expr)
-        | Stmt::Throw(expr)
-        | Stmt::Return(Some(expr)) => normalize_expr(expr, constructors),
-        Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            normalize_expr(condition, constructors);
-            normalize_stmts(then_branch, constructors);
-            if let Some(branch) = else_branch {
-                normalize_stmts(branch, constructors);
-            }
-        }
-        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-            normalize_expr(condition, constructors);
-            normalize_stmts(body, constructors);
-        }
-        Stmt::For {
-            init,
-            condition,
-            update,
-            body,
-        } => {
-            if let Some(init) = init {
-                normalize_stmt(init, constructors);
-            }
-            if let Some(cond) = condition {
-                normalize_expr(cond, constructors);
-            }
-            if let Some(update) = update {
-                normalize_expr(update, constructors);
-            }
-            normalize_stmts(body, constructors);
-        }
-        Stmt::Try {
-            body,
-            catch,
-            finally,
-            ..
-        } => {
-            normalize_stmts(body, constructors);
-            if let Some(catch) = catch {
-                normalize_stmts(&mut catch.body, constructors);
-            }
-            if let Some(finally) = finally {
-                normalize_stmts(finally, constructors);
-            }
-        }
-        Stmt::Switch {
-            discriminant,
-            cases,
-        } => {
-            normalize_expr(discriminant, constructors);
-            for case in cases {
-                if let Some(test) = &mut case.test {
-                    normalize_expr(test, constructors);
-                }
-                normalize_stmts(&mut case.body, constructors);
-            }
-        }
-        Stmt::Labeled { body, .. } => normalize_stmt(body, constructors),
-        Stmt::Let { init: None, .. }
-        | Stmt::Return(None)
-        | Stmt::Break
-        | Stmt::Continue
-        | Stmt::LabeledBreak(_)
-        | Stmt::LabeledContinue(_)
-        | Stmt::PreallocateBoxes(_)
-        | Stmt::PreallocateTdzBoxes(_)
-        | Stmt::ReleaseBoxes(_) => {}
-    }
-}
-
-fn normalize_expr(expr: &mut Expr, constructors: &constructors::Constructors) {
-    if let Expr::Closure { params, body, .. } = expr {
-        defaults::strip_body(body, params);
-        for param in params {
-            if let Some(default) = &mut param.default {
-                normalize_expr(default, constructors);
-            }
-        }
-        normalize_stmts(body, constructors);
-        return;
-    }
-    perry_hir::walker::walk_expr_children_mut(expr, &mut |child| {
-        normalize_expr(child, constructors);
-    });
-    constructors.rewrite_expr(expr);
 }
 
 fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
@@ -309,6 +150,7 @@ pub(crate) fn is_import_initializer(callee: &Expr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use perry_hir::types::Type as HirType;
 
     #[test]
     fn constructor_preservation_respects_lexical_bindings() {
@@ -321,20 +163,22 @@ function builtin() { return new Set<string>(); }
         let modules = std::collections::BTreeMap::new();
         let loaded = modules::load(source, "shadow.ts", &modules, &HashMap::new()).unwrap();
         let lowered = lower(loaded, "shadow.ts", None).unwrap();
-        for function in &lowered.module.functions {
+        for function in &lowered.module.bodies.functions {
             let Stmt::Return(Some(expr)) = &function.body[0] else {
                 panic!("expected constructor return");
             };
             if function.name == "builtin" {
                 assert!(matches!(
-                    constructor(expr),
-                    Some(Constructor::Set {
-                        element: Some(HirType::String),
-                        init: None
+                    lowered.metadata.source.constructors.get(expr),
+                    Some(crate::source::Constructor {
+                        kind: crate::source::CollectionKind::Set,
+                        types: [HirType::String],
+                        init: None,
+                        ..
                     })
                 ));
             } else {
-                assert!(constructor(expr).is_none());
+                assert!(lowered.metadata.source.constructors.get(expr).is_none());
                 let args = match expr {
                     Expr::New { args, .. } | Expr::NewDynamic { args, .. } => args,
                     other => panic!("unexpected shadowed constructor: {other:?}"),
@@ -365,7 +209,7 @@ function builtin() { return new Set<string>(); }
             let modules = std::collections::BTreeMap::new();
             let loaded = modules::load(source, "names.ts", &modules, &HashMap::new()).unwrap();
             let lowered = lower(loaded, "names.ts", None).unwrap();
-            let function = &lowered.module.functions[0];
+            let function = &lowered.module.bodies.functions[0];
             let user = function.body.iter().find_map(|stmt| match stmt {
                 Stmt::Let {
                     id,

@@ -34,7 +34,10 @@ impl<'s> FunctionBuilder<'s> {
     }
 
     pub(super) fn clear_timer(&mut self, ctx: &mut Context, handle: &'s Expr) -> Result<()> {
-        let ty = self.shapes.named(ctx, hir_compat::TIMER_CLASS)?;
+        let ty = self
+            .shapes
+            .resolved_binding(ctx, crate::engine::types::Ty::TIMER)?
+            .carrier;
         let operand = self.expression(ctx, handle)?;
         let done = self.new_block(ctx, "timer_cleared");
         if absence(ctx, operand.get_type(ctx)).is_some() {

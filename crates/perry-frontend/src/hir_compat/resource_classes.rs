@@ -161,9 +161,11 @@ pub(super) fn bind(
         {
             signature.registry = Some((table, c.name.clone()));
         }
-        let types = vec![HirType::Number, HirType::Named(c.name.clone())];
-        let map = super::typed_collection(true, types, Vec::new());
-        init.push(local(table, "instances", HirType::Any, map, false));
+        let ty = HirType::Generic {
+            base: "Map".into(),
+            type_args: vec![HirType::Number, HirType::Named(c.name.clone())],
+        };
+        init.push(local(table, "instances", ty, Expr::MapNew, false));
         init.push(local(
             next,
             "representation",

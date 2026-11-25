@@ -17,7 +17,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         if let Expr::ExternFuncRef { name: class, .. } = object
             && let Some(owner) = self.decls.resource(class)
-            && let Some(ty) = self.resource_operation(s.inst, expr, owner, MemberKind::Static, name)
+            && let Some(ty) = self.resource_operation(owner, MemberKind::Static, name)
         {
             self.eval_args(s, args)?;
             return Ok(ty);
@@ -54,7 +54,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
         if name == "toWeb" && let Expr::ExternFuncRef { name: local, .. } = object
-            && self.hir.imports.iter().any(|imp| matches!(imp.source.as_str(), "stream" | "node:stream")
+            && self.hir.declarations.imports.iter().any(|imp| matches!(imp.source.as_str(), "stream" | "node:stream")
                 && imp.specifiers.iter().any(|sp| matches!(sp, perry_hir::ir::ImportSpecifier::Named { imported, local: l } if imported == "Writable" && l == local)))
         {
             self.eval_args(s, args)?;
@@ -115,19 +115,22 @@ impl<'h, 'a> Solver<'h, 'a> {
             if matches!(method, hir_compat::Method::UsingCheck)
                 && let Expr::LocalGet(id) = object
             {
-                let span = self.hir.local_source_spans.get(id).and_then(|s| {
-                    self.metadata
-                        .locations
-                        .offset_span(s.start, s.end.saturating_sub(s.start))
-                });
+                let span = self
+                    .hir
+                    .declarations
+                    .local_source_spans
+                    .get(id)
+                    .and_then(|s| {
+                        self.metadata
+                            .locations
+                            .offset_span(s.start, s.end.saturating_sub(s.start))
+                    });
                 return Err(Diagnostic::unsupported(
                     "using declarations for imported resources are unsupported",
                 )
                 .with_fallback_span(span));
             }
-            if let Some(ty) =
-                self.resource_operation(s.inst, expr, owner, MemberKind::Instance, name)
-            {
+            if let Some(ty) = self.resource_operation(owner, MemberKind::Instance, name) {
                 return Ok(ty);
             }
             return Err(self.annotate_expr_error(

@@ -5,8 +5,8 @@
 //! compactions resynchronize cursor positions against monotonic entry sequence numbers.
 
 use super::*;
-use crate::hir_compat::Constructor;
 use crate::lower::control_flow::{ArrayOutput, Holes, Input, Projection};
+use crate::source::CollectionKind;
 use perry_mir::{OptionalType, RecordKind};
 
 mod keyed;
@@ -264,25 +264,35 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
-        if let Some(constructor) = hir_compat::constructor(expr) {
-            return match constructor {
-                Constructor::Map { types, init } => {
-                    let expected = match types {
-                        Some((key, value)) => Some(self.shapes.map_type(ctx, key, value)?),
-                        None => expected,
-                    };
-                    self.new_collection(ctx, true, init, expected).map(Some)
-                }
-                Constructor::Set { element, init } => {
-                    let expected = match element {
-                        Some(element) => Some(self.shapes.set_type(ctx, element)?),
-                        None => expected,
-                    };
-                    self.new_collection(ctx, false, init, expected).map(Some)
+        if let Some(constructor) = self.shapes.metadata.source.constructors.get(expr) {
+            let expected = if let Some(&ty) = self
+                .shapes
+                .specialization
+                .instances
+                .collection_types
+                .get(&(self.local_owner, constructor.span))
+            {
+                Some(self.shapes.resolved_binding(ctx, ty)?.carrier)
+            } else {
+                match (constructor.kind, constructor.types) {
+                    (CollectionKind::Map, [key, value]) => {
+                        Some(self.shapes.map_type(ctx, key, value)?)
+                    }
+                    (CollectionKind::Set, [item]) => Some(self.shapes.set_type(ctx, item)?),
+                    _ => expected,
                 }
             };
+            return self
+                .new_collection(
+                    ctx,
+                    constructor.kind == CollectionKind::Map,
+                    constructor.init,
+                    expected,
+                )
+                .map(Some);
         }
         match expr {
+            Expr::MapNew => self.empty_map(ctx, expected).map(Some),
             Expr::MapSize(map) | Expr::SetSize(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;

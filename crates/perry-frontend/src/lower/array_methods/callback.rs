@@ -34,8 +34,8 @@ impl<'s> FunctionBuilder<'s> {
         arguments: &[Value],
         expected: Option<InlineResult>,
     ) -> Result<Value> {
-        let callback = match callback {
-            Callback::Source(expr) => expr,
+        let (func_id, params, body, return_type, is_async, is_generator, signature) = match callback
+        {
             Callback::Bound(binding, callee) => {
                 let mut inputs = Vec::new();
                 for (index, ty) in binding.params.iter().enumerate() {
@@ -55,41 +55,58 @@ impl<'s> FunctionBuilder<'s> {
                     (None, _) => self.absent_literal(ctx, false, None),
                 };
             }
-        };
-        if let Expr::FuncRef(id) = callback {
-            let signature = self.signature(*id)?;
-            ensure_unsupported!(
-                !signature.is_async && signature.params.iter().all(|p| !p.is_rest),
-                "array callbacks require synchronous functions without rest parameters"
-            );
-            let values = signature
-                .params
-                .iter()
-                .enumerate()
-                .map(|(index, param)| match arguments.get(index) {
-                    Some(&value) => self.fit(ctx, value, param.binding.carrier),
-                    None => self.bind_fixed_arg(ctx, param, None),
-                })
-                .collect::<Result<Vec<_>>>()?;
-            return Ok(match self.emit_signature_call(ctx, signature, values)? {
-                Some(value) => value,
-                None => {
-                    let ty = FP64Type::get(ctx).into();
-                    self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
-                }
-            });
-        }
-        let Expr::Closure {
-            func_id,
-            params,
-            body,
-            is_async,
-            is_generator,
-            return_type,
-            ..
-        } = callback
-        else {
-            bail_unsupported!("array callbacks require an inline closure or named function")
+            Callback::Source(Expr::FuncRef(id)) => {
+                let signature = self.signature(*id)?;
+                ensure_unsupported!(
+                    !signature.is_async && signature.params.iter().all(|p| !p.is_rest),
+                    "array callbacks require synchronous functions without rest parameters"
+                );
+                let values = signature
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, param)| match arguments.get(index) {
+                        Some(&value) => self.fit(ctx, value, param.binding.carrier),
+                        None => self.bind_fixed_arg(ctx, param, None),
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(match self.emit_signature_call(ctx, signature, values)? {
+                    Some(value) => value,
+                    None => {
+                        let ty = FP64Type::get(ctx).into();
+                        self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
+                    }
+                });
+            }
+            Callback::Lexical(function, signature) => (
+                function.id,
+                function.params.as_slice(),
+                function.body.as_slice(),
+                &function.return_type,
+                function.is_async,
+                function.is_generator,
+                Some(signature),
+            ),
+            Callback::Source(Expr::Closure {
+                func_id,
+                params,
+                body,
+                return_type,
+                is_async,
+                is_generator,
+                ..
+            }) => (
+                *func_id,
+                params.as_slice(),
+                crate::source::authored_body(params, body),
+                return_type,
+                *is_async,
+                *is_generator,
+                None,
+            ),
+            Callback::Source(_) => {
+                bail_unsupported!("array callbacks require an inline closure or named function")
+            }
         };
         ensure_unsupported!(
             !is_async && !is_generator && params.iter().all(|p| !p.is_rest),
@@ -97,14 +114,25 @@ impl<'s> FunctionBuilder<'s> {
         );
         let result_type = match expected {
             Some(result) => result,
+            None if let Some(signature) = signature => {
+                signature.result.map_or(InlineResult::Void, |result| {
+                    InlineResult::Declared(result.carrier)
+                })
+            }
             None => self
                 .shapes
-                .closure_result(ctx, *func_id, return_type)?
+                .source_closure_result(ctx, return_type)?
                 .map_or(InlineResult::Void, InlineResult::Declared),
         };
-        let slot = self.with_inline_scope(ctx, *func_id, self.this_slot, |this, ctx| {
+        let slot = self.with_inline_scope(ctx, func_id, self.this_slot, |this, ctx| {
             for (index, param) in params.iter().enumerate() {
-                let (binding, is_never) = this.shapes.closure_param(ctx, *func_id, index, param)?;
+                let (binding, is_never) = match signature {
+                    Some(signature) => (
+                        signature.params[index].base,
+                        signature.params[index].is_never,
+                    ),
+                    None => this.shapes.source_parameter(ctx, param)?,
+                };
                 let ty = binding.carrier;
                 let value = arguments.get(index).copied();
                 ensure_diag!(

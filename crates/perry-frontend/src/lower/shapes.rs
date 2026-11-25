@@ -5,10 +5,7 @@ use crate::lower::{
     Diagnostic, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
     missing_type_annotation, unsupported,
 };
-use perry_hir::{
-    ir::{Expr, Module as HirModule},
-    types::Type as HirType,
-};
+use perry_hir::{ir::Expr, types::Type as HirType};
 use perry_mir::{
     ArrayType, OptionalType, PlironResultExt as _, PromiseType, RecordKind, RecordType, StringType,
 };
@@ -26,7 +23,7 @@ use std::{
 mod collection_types;
 use crate::engine::types::{Ty, TyKind};
 use crate::shapes::{
-    Declarations, captured,
+    Declarations,
     generics::{InstanceKey, Properties, object_properties},
 };
 
@@ -99,9 +96,9 @@ pub(super) struct Shapes<'h> {
     pub(super) global_ids: HashSet<perry_hir::types::LocalId>,
     pub(super) decls: Declarations<'h>,
     pub(super) static_fields: HashMap<(&'h str, &'h str), StaticField<'h>>,
-    runtime_layouts: HashMap<&'h str, &'h crate::engine::RecordLayout>,
     resolved: RefCell<HashMap<crate::engine::types::Ty, BindingType>>,
-    runtime_records: RefCell<HashMap<&'h str, TypedHandle<RecordType>>>,
+    environments: RefCell<HashMap<crate::engine::types::FuncIdentity, TypedHandle<RecordType>>>,
+    timer: std::cell::Cell<Option<TypeHandle>>,
     class_records: RefCell<HashMap<TypeHandle, &'h str>>,
     pub(super) lexical_functions: HashMap<perry_hir::types::FuncId, &'h Expr>,
     function_names: HashSet<&'h str>,
@@ -131,21 +128,23 @@ impl<'h> Shapes<'h> {
 
     pub(super) fn new(
         module: pliron::builtin::ops::ModuleOp,
-        hir: &'h HirModule,
-        foreign: &'h HashMap<String, crate::wit::Foreign<'h>>,
+        declarations: &'h crate::source::ModuleDeclarations,
+        world: &'h crate::wit::WorldTypes<'h>,
         metadata: &'h crate::hir_compat::Metadata<'h>,
         specialization: &'h crate::engine::Specialization,
+        index: crate::source::BodyIndex<'h>,
     ) -> Self {
+        let bodies = &specialization.bodies;
         let decls = Declarations::new(
-            &hir.interfaces,
-            &hir.type_aliases,
-            &hir.imports,
-            &hir.classes,
-            foreign,
+            &declarations.interfaces,
+            &declarations.type_aliases,
+            &declarations.imports,
+            &bodies.classes,
+            world,
         );
         let mut static_fields = HashMap::new();
         let mut next_static_id = 0x8000_0000u32;
-        for class in hir
+        for class in bodies
             .classes
             .iter()
             .filter(|class| decls.classes.named.contains_key(class.name.as_str()))
@@ -167,13 +166,16 @@ impl<'h> Shapes<'h> {
                 next_static_id += 1;
             }
         }
-        let function_names = hir
+        let function_names = bodies
             .functions
             .iter()
             .map(|function| function.name.as_str())
             .collect();
-        let mut global_ids = captured(hir);
-        if !hir.functions.is_empty() || !decls.classes.named.is_empty() {
+        let crate::source::BodyIndex {
+            globals: mut global_ids,
+            closures,
+        } = index;
+        if !bodies.functions.is_empty() || !decls.classes.named.is_empty() {
             global_ids.extend(static_fields.values().map(|field| field.id));
         }
         Shapes {
@@ -186,21 +188,11 @@ impl<'h> Shapes<'h> {
             static_fields,
             class_records: RefCell::default(),
             resolved: RefCell::default(),
-            runtime_records: RefCell::default(),
-            runtime_layouts: specialization
-                .instances
-                .operations
-                .values()
-                .filter_map(|operation| match operation {
-                    crate::engine::NativeOperation::Allocate(layout) => {
-                        Some((layout.name.as_str(), layout))
-                    }
-                    _ => None,
-                })
-                .collect(),
-            lexical_functions: perry_hir::emitted_closures(hir).into_iter().collect(),
+            environments: RefCell::default(),
+            timer: Default::default(),
+            lexical_functions: closures,
             function_names,
-            local_source_spans: &hir.local_source_spans,
+            local_source_spans: &declarations.local_source_spans,
             metadata,
             pending: RefCell::new(HashMap::new()),
             named: RefCell::new(HashMap::new()),
@@ -284,7 +276,7 @@ impl<'h> Shapes<'h> {
             .copied()
             .or_else(|| {
                 let (binding, crate::wit::Foreign::Function(sig)) =
-                    self.decls.foreign.get_key_value(local)?
+                    self.decls.world.foreign().get_key_value(local)?
                 else {
                     return None;
                 };
@@ -470,7 +462,6 @@ impl<'h> Shapes<'h> {
                     .carrier,
             )
             .into(),
-            Storage::AbortController => perry_mir::AbortType::get(ctx).into(),
             Storage::Boxed { ty, init } => {
                 self.box_layout(ctx, ty, init.admits_undefined())?.0.into()
             }
@@ -493,29 +484,39 @@ impl<'h> Shapes<'h> {
         Ok((self.mir_record(ctx, vec![("v".into(), value)])?, value))
     }
 
-    fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        if let Some(layout) = self.runtime_layouts.get(name) {
-            if let Some(record) = self.runtime_records.borrow().get(name) {
-                return Ok((*record).into());
-            }
-            let record = fresh_record(ctx, RecordKind::Object, None)?;
-            self.runtime_records
-                .borrow_mut()
-                .insert(layout.name.as_str(), record);
-            let mut fields = layout
-                .fields
-                .iter()
-                .map(|(field, ty)| {
-                    let ty = self.storage_binding(ctx, *ty)?.expected_type(ctx);
-                    Ok((field.clone(), ty))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-            let name = record.deref(ctx).name().clone();
-            return Ok(RecordType::get(ctx, name, Some(fields))
-                .to_diag(ctx)?
-                .into());
+    pub(super) fn environment_type(
+        &self,
+        ctx: &Context,
+        identity: crate::engine::types::FuncIdentity,
+    ) -> Result<TypeHandle> {
+        if let Some(record) = self.environments.borrow().get(&identity) {
+            return Ok((*record).into());
         }
+        let layout = self
+            .specialization
+            .instances
+            .environments
+            .get(&identity)
+            .ok_or_else(|| Diagnostic::internal("missing closure environment layout"))?;
+        let record = fresh_record(ctx, RecordKind::Object, None)?;
+        self.environments.borrow_mut().insert(identity, record);
+        let mut fields = layout
+            .iter()
+            .map(|(field, storage)| {
+                Ok((
+                    field.clone(),
+                    self.storage_binding(ctx, *storage)?.expected_type(ctx),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let name = record.deref(ctx).name().clone();
+        Ok(RecordType::get(ctx, name, Some(fields))
+            .to_diag(ctx)?
+            .into())
+    }
+
+    fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
         if let Some((width, _)) = name
             .strip_prefix("perry:types/")
             .and_then(perry_integer_spec)
@@ -534,7 +535,7 @@ impl<'h> Shapes<'h> {
             if let Some(ty) = perry_mir::builtin_value_type(ctx, name) {
                 return Ok(ty);
             }
-            if let Some(entry) = self.decls.foreign.get(name) {
+            if let Some(entry) = self.decls.world.foreign().get(name) {
                 return self.foreign_value_type(ctx, entry);
             }
         }

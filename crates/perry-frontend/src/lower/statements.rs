@@ -485,7 +485,9 @@ impl<'s> FunctionBuilder<'s> {
             self.locals.insert(id, binding.captured(payload, deferred));
             return Ok(());
         }
-        if matches!(init, Some(Expr::Closure { .. } | Expr::FuncRef(_))) {
+        if matches!(init, Some(Expr::Closure { .. }))
+            || matches!(init, Some(Expr::FuncRef(id)) if !self.shapes.specialization.instances.closure_values.contains_key(&(self.local_owner, *id)))
+        {
             return Ok(());
         }
         if let Some(init) = init
@@ -623,14 +625,18 @@ impl<'s> FunctionBuilder<'s> {
                 return self.optional_operand(ctx, last, expected);
             }
             Expr::Undefined => None,
+            Expr::Call { .. } if self.shapes.metadata.source.constructors.get(expr).is_some() => {
+                Some(self.expression_with(ctx, expr, expected)?)
+            }
             Expr::Call {
                 callee,
                 args,
 
                 byte_offset,
+                byte_end,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset, expected)
+                .call(ctx, callee, args, *byte_offset..*byte_end, expected)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::StaticMethodCall {
                 class_name,

@@ -277,35 +277,64 @@ impl<'a> RecordAssembly<'a> {
 }
 
 impl<'s> FunctionBuilder<'s> {
-    pub(in crate::lower) fn capture_record(
+    pub(in crate::lower) fn closure_value(
         &mut self,
         ctx: &mut Context,
-        layout: &crate::engine::RecordLayout,
-        args: &'s [Expr],
-        record: TypeHandle,
+        closure: &crate::engine::ClosureValue,
+        expected: Option<TypeHandle>,
     ) -> Result<Value> {
+        use crate::engine::CaptureOperand;
+        let record = self.shapes.environment_type(ctx, closure.identity)?;
         let record = perry_mir::typed::<RecordType>(ctx, record)
             .ok_or_else(|| internal!("capture environment has no record layout"))?;
+        let layout = &self.shapes.specialization.instances.environments[&closure.identity];
         let mut assembly = RecordAssembly {
             expected: Some(record),
-            fields: Vec::with_capacity(args.len()),
+            fields: Vec::with_capacity(layout.len()),
         };
-        for ((name, storage), arg) in layout.fields.iter().zip(args) {
-            let value = if let crate::engine::Storage::Boxed { .. } = storage {
-                let Expr::LocalGet(id) = arg else {
-                    bail_internal!("capture cell is not a lexical binding")
+        if closure.operands.is_empty() {
+            assembly
+                .fields
+                .push((Cow::Borrowed("_u"), self.number(ctx, 0.0)));
+        } else {
+            ensure_internal!(
+                layout.len() == closure.operands.len(),
+                "wrong number of closure captures"
+            );
+            for ((name, _), &operand) in layout.iter().zip(&closure.operands) {
+                let value = match operand {
+                    CaptureOperand::Local(id) => {
+                        let value = self.load_local(ctx, id)?;
+                        self.narrow_value(ctx, || Some(crate::narrowing::Path::local(id)), value)?
+                    }
+                    CaptureOperand::Cell(id) => self.load(ctx, self.local(id)?)?,
+                    CaptureOperand::Function {
+                        identity,
+                        environment,
+                    } => {
+                        let payload = environment
+                            .map(|id| {
+                                let value = self.load_local(ctx, id)?;
+                                let env = self.shapes.environment_type(ctx, identity)?;
+                                self.callable_field(ctx, value, "val", env)
+                            })
+                            .transpose()?;
+                        let (_, ty) = record
+                            .deref(ctx)
+                            .field(name)
+                            .ok_or_else(|| internal!("unknown capture field {name}"))?;
+                        self.function_value(ctx, identity, payload, Some(ty))?
+                    }
+                    CaptureOperand::Widen { local, from, to } => {
+                        let value = self.load_local(ctx, local)?;
+                        self.widen_function(ctx, value, from, to)?
+                    }
                 };
-                self.load(ctx, self.local(*id)?)?
-            } else {
-                let (_, ty) = record
-                    .deref(ctx)
-                    .field(name)
-                    .ok_or_else(|| internal!("unknown capture field {name}"))?;
-                self.expression_with(ctx, arg, Some(ty))?
-            };
-            assembly.fields.push((Cow::Borrowed(name), value));
+                assembly.fields.push((Cow::Borrowed(name), value));
+            }
         }
-        assembly.finish(self, ctx, Some(record), empty())
+        let env = assembly.finish(self, ctx, Some(record), empty())?;
+        self.function_value(ctx, closure.identity, Some(env), expected)
     }
 
     pub(crate) fn record_literal(

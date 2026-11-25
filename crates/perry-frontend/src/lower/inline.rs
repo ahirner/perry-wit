@@ -45,10 +45,14 @@ impl<'s> FunctionBuilder<'s> {
         exprs: impl IntoIterator<Item = &'s Expr>,
     ) {
         self.variant_guards.assign_in(body, exprs, |id| {
-            if let Some(Expr::Closure { body, .. }) = self.shapes.lexical_functions.get(&id) {
-                return Some(body.as_slice());
+            if let Some(Expr::Closure { params, body, .. }) = self.shapes.lexical_functions.get(&id)
+            {
+                return Some(crate::source::authored_body(params, body));
             }
-            self.signatures.get(&id)?.inline.map(|f| f.body.as_slice())
+            self.signatures
+                .get(&id)?
+                .inline
+                .map(|f| self.shapes.specialization.instances.function_body(f))
         });
     }
 

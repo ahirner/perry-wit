@@ -59,27 +59,14 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn resource_operation(
         &mut self,
-        inst: InstanceId,
-        expr: &Expr,
         owner: u32,
         kind: MemberKind,
         name: &str,
     ) -> Option<Ty> {
-        let (id, member) = self
-            .metadata
-            .resource_members
-            .iter()
-            .enumerate()
-            .find(|(_, m)| {
-                m.owner == owner
-                    && m.kind == kind
-                    && (kind == MemberKind::Constructor || m.name == name)
-            })?;
-        let ty = member.result.map_or(Ty::VOID, |value| {
+        let member = self.decls.world.member(owner, kind, name)?;
+        Some(member.result.map_or(Ty::VOID, |value| {
             self.types.wit_type(self.ctx, value, false)
-        });
-        self.record_site(inst, expr, SiteResolution::ResourceCall(id));
-        Some(ty)
+        }))
     }
 
     pub(super) fn eval_static_method_call(
@@ -115,8 +102,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(ret);
         }
         if let Some(owner) = self.decls.resource(class_name)
-            && let Some(ty) =
-                self.resource_operation(s.inst, expr, owner, MemberKind::Static, method_name)
+            && let Some(ty) = self.resource_operation(owner, MemberKind::Static, method_name)
         {
             return Ok(ty);
         }
@@ -240,8 +226,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(self.types.class_inst(class_inst));
         }
         if let Some(owner) = self.decls.resource(class_name)
-            && let Some(ty) =
-                self.resource_operation(s.inst, expr, owner, MemberKind::Constructor, "")
+            && let Some(ty) = self.resource_operation(owner, MemberKind::Constructor, "")
         {
             return Ok(ty);
         }
@@ -282,8 +267,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             if let TyKind::Named(id) = self.types.kind(ty)
                 && let Some(owner) = self.decls.resource(id.get(self.ctx))
-                && let Some(result) =
-                    self.resource_operation(s.inst, expr, owner, MemberKind::Dispose, "")
+                && let Some(result) = self.resource_operation(owner, MemberKind::Dispose, "")
             {
                 self.eval_args(s, args)?;
                 return Ok(result);
@@ -300,7 +284,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         } = callee
         {
             use perry_hir::ir::ImportSpecifier;
-            let binding = self.hir.imports.iter().find_map(|import| {
+            let binding = self.hir.declarations.imports.iter().find_map(|import| {
                 import.specifiers.iter().find_map(|specifier| {
                     let local = match specifier {
                         ImportSpecifier::Named { local, .. }
@@ -720,7 +704,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     owner_name
                 )
                 .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
-                if let Some(span) = self.hir.local_source_spans.get(&param.id) {
+                if let Some(span) = self.hir.declarations.local_source_spans.get(&param.id) {
                     err = self.metadata.locations.annotate(
                         err,
                         swc_common::Span::new(

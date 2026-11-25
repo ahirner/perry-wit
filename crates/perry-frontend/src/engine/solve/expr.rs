@@ -92,8 +92,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 hir_compat::RecordExpr::Close => Ok(Ty::VOID),
             };
         }
-        if hir_compat::constructor(expr).is_some() {
-            return self.eval_collection_constructor(s, expr);
+        if let Some(constructor) = self.metadata.source.constructors.get(expr) {
+            return self.eval_collection_constructor(s, expr, constructor);
         }
         if let Some(cb_ty) = self.try_eval_builtin_callback(s, expr)? {
             return Ok(cb_ty);
@@ -110,12 +110,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
                         let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                        let local_span = self.hir.local_source_spans.get(id).map(|sp| {
-                            swc_common::Span::new(
-                                swc_common::BytePos(sp.start),
-                                swc_common::BytePos(sp.end),
-                            )
-                        });
+                        let local_span =
+                            self.hir.declarations.local_source_spans.get(id).map(|sp| {
+                                swc_common::Span::new(
+                                    swc_common::BytePos(sp.start),
+                                    swc_common::BytePos(sp.end),
+                                )
+                            });
                         if matches!(self.types.kind(existing), TyKind::Func(_))
                             || self.is_tagged_func_union_in(existing, s.inst)
                         {
@@ -185,7 +186,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let ty = self.eval_expr(s, object)?;
                 if ty == Ty::BOTTOM
                     || matches!(self.types.kind(ty), TyKind::ClassInst(id)
-                    if self.hir.classes.get(self.index.classes[self.class_insts[id].class].hir_idx)
+                    if self.hir.bodies.classes.get(self.index.classes[self.class_insts[id].class].hir_idx)
                         .is_some_and(|class| class.id == *class_id))
                 {
                     return Ok(ty);
@@ -213,18 +214,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::Closure {
                 func_id,
                 captures,
+                params,
                 body,
                 ..
             } => {
                 let mut refs = captures.clone();
                 let mut defined = std::collections::HashSet::new();
-                let stmts = if !body.is_empty() {
-                    body.as_slice()
-                } else {
-                    self.index
-                        .template_of_func(*func_id)
-                        .map_or(&[][..], |t| self.index.view(t).body)
-                };
+                let stmts = self.index.template_of_func(*func_id).map_or_else(
+                    || crate::source::authored_body(params, body),
+                    |t| self.index.view(t).body,
+                );
                 for stmt in stmts {
                     perry_hir::analysis::collect_local_refs_stmt(stmt, &mut refs, &mut defined);
                 }
@@ -275,27 +274,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     CaptureOwner::Instance(s.inst)
                 };
                 if self.is_escaping_env(template, s.inst) {
-                    let is_collapsed = matches!(capture_owner, CaptureOwner::Template(_));
                     for &cap_id in self.index.template_captures(template) {
                         if let Some(lidx) = self.index.local_idx(cap_id)
                             && let Some(cap_ty) = self.read_local_value(s.inst, lidx)
                         {
                             self.mark_escaping_env(s.inst, cap_ty);
-                            if is_collapsed && let Some(cloc) = self.collapsed_local_locs[lidx] {
-                                let dst_ty = self.read_loc(cloc, s.inst);
-                                if cap_ty != dst_ty
-                                    && self.is_tagged_func_union_in(cap_ty, s.inst)
-                                    && self.is_tagged_func_union_in(dst_ty, s.inst)
-                                {
-                                    self.intern_helper(
-                                        HelperSpec::Callable(CallableOp::Widener {
-                                            from: cap_ty,
-                                            to: dst_ty,
-                                        }),
-                                        0,
-                                    );
-                                }
-                            }
                         }
                     }
                 }

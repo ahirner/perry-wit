@@ -3,10 +3,9 @@ use super::{Emitter, EnvField, synth_call};
 use crate::engine::Storage;
 use crate::engine::bitset::BitSet;
 use crate::engine::boundary::{LocalFlags, TemplateKind};
-use crate::engine::solve::{CallableOp, HelperSpec};
+use crate::engine::solve::HelperSpec;
 use crate::engine::types::{
     CaptureOwner, DispatchArmSpan, FuncIdentity, HelperId, Idx, TemplateId, Ty, TyKind,
-    env_class_name,
 };
 use crate::hir_compat;
 use perry_hir::{
@@ -104,12 +103,10 @@ impl<'h, 'a> Emitter<'h, 'a> {
         Ok(fields)
     }
 
-    pub(super) fn environment(&mut self, ident: FuncIdentity) -> Result<FuncId> {
-        if let Some(&id) = self.environments.get(&ident) {
-            return Ok(id);
+    pub(super) fn environment(&mut self, ident: FuncIdentity) -> Result<()> {
+        if !self.environments.insert(ident) {
+            return Ok(());
         }
-        let id = self.fresh_func_id()?;
-        self.environments.insert(ident, id);
         let fields = match self.index.view(ident.template).kind {
             TemplateKind::PromiseResolve(site) | TemplateKind::PromiseReject(site) => {
                 let loc =
@@ -120,15 +117,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
             }
             _ => self.capture_fields(ident)?,
         };
-        self.plans.operations.insert(
-            id,
-            crate::engine::NativeOperation::Allocate(crate::engine::RecordLayout {
-                name: env_class_name(ident),
-                function: Some(ident),
-                fields,
-            }),
-        );
-        Ok(id)
+        self.plans.environments.insert(ident, fields);
+        Ok(())
     }
 
     fn capture_fields(&mut self, ident: FuncIdentity) -> Result<Vec<(String, Storage)>> {
@@ -152,42 +142,31 @@ impl<'h, 'a> Emitter<'h, 'a> {
         Ok(fields)
     }
 
-    fn collect_env_idents_in(
-        &self,
-        ty: Ty,
-        seen: &mut BitSet,
-        out: &mut Vec<FuncIdentity>,
-        needs_timer: &mut bool,
-    ) {
+    fn collect_env_idents_in(&self, ty: Ty, seen: &mut BitSet, out: &mut Vec<FuncIdentity>) {
         if !seen.insert(ty.index()) {
             return;
         }
         match self.types.kind(ty) {
-            TyKind::Named(id) => {
-                *needs_timer |= id.get(self.ctx) == crate::hir_compat::TIMER_CLASS;
-            }
             TyKind::Func(ident) => {
-                if self.is_env_template(ident.template) && !self.environments.contains_key(&ident) {
+                if self.is_env_template(ident.template) && !self.environments.contains(&ident) {
                     out.push(ident);
                 }
             }
-            TyKind::Array(i) | TyKind::Promise(i) => {
-                self.collect_env_idents_in(i, seen, out, needs_timer)
-            }
+            TyKind::Array(i) | TyKind::Promise(i) => self.collect_env_idents_in(i, seen, out),
             TyKind::Cell { loc, .. } => {
-                self.collect_env_idents_in(self.solved.locations[loc], seen, out, needs_timer);
+                self.collect_env_idents_in(self.solved.locations[loc], seen, out);
             }
             TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
                 for &m in self.types.ty_slice(s) {
-                    self.collect_env_idents_in(m, seen, out, needs_timer);
+                    self.collect_env_idents_in(m, seen, out);
                 }
             }
             TyKind::Object { props, index } => {
                 if let Some(i) = index {
-                    self.collect_env_idents_in(i, seen, out, needs_timer);
+                    self.collect_env_idents_in(i, seen, out);
                 }
                 for p in self.types.object_slice(props) {
-                    self.collect_env_idents_in(p.ty, seen, out, needs_timer);
+                    self.collect_env_idents_in(p.ty, seen, out);
                 }
             }
             _ => {}
@@ -196,76 +175,57 @@ impl<'h, 'a> Emitter<'h, 'a> {
 
     pub(super) fn prepare_layouts(&mut self, ty: Ty) -> Result<()> {
         let mut idents = Vec::new();
-        let mut needs_timer = false;
-        self.collect_env_idents_in(ty, &mut BitSet::default(), &mut idents, &mut needs_timer);
-        if needs_timer {
-            self.timer_record()?;
-        }
+        self.collect_env_idents_in(ty, &mut BitSet::default(), &mut idents);
         for ident in idents {
             self.environment(ident)?;
         }
         Ok(())
     }
 
-    pub(super) fn coerce_capture_expr(
-        &mut self,
-        arg: Expr,
-        src_ty: Ty,
-        dst_ty: Ty,
-    ) -> Result<Expr> {
-        if !self.types.is_tagged_func_union(
-            dst_ty,
-            &self.index.capture_free_templates,
-            &self.solved.escaping_env_templates,
-        ) {
-            return Ok(arg);
+    pub(super) fn capture_operand(
+        &self,
+        owner: CaptureOwner,
+        source: CaptureOwner,
+        local: LocalId,
+        to: Ty,
+        boxed: bool,
+    ) -> crate::engine::CaptureOperand {
+        use crate::engine::CaptureOperand;
+        if boxed {
+            return CaptureOperand::Cell(local);
         }
-        if self.is_zero_sized_func(src_ty)
-            && let TyKind::Func(ident) = self.types.kind(src_ty)
+        if matches!(owner, CaptureOwner::Template(_))
+            && let Some(from) = self.local_ty_in_owner(source, local)
+            && from != to
+            && self.types.is_tagged_func_union(
+                to,
+                &self.index.capture_free_templates,
+                &self.solved.escaping_env_templates,
+            )
         {
-            return self.expression_op(
-                crate::engine::ExpressionOp::Function {
-                    identity: ident,
-                    target: dst_ty,
-                },
-                vec![],
-            );
+            if let TyKind::Func(identity) = self.types.kind(from) {
+                if self.is_zero_sized_func(from) {
+                    return CaptureOperand::Function {
+                        identity,
+                        environment: None,
+                    };
+                }
+                if self.is_env_template(identity.template) {
+                    return CaptureOperand::Function {
+                        identity,
+                        environment: Some(local),
+                    };
+                }
+            }
+            if self.types.is_tagged_func_union(
+                from,
+                &self.index.capture_free_templates,
+                &self.solved.escaping_env_templates,
+            ) {
+                return CaptureOperand::Widen { local, from, to };
+            }
         }
-        if self
-            .types
-            .is_env_func(src_ty, &self.solved.escaping_env_templates)
-            && let TyKind::Func(ident) = self.types.kind(src_ty)
-        {
-            return self.expression_op(
-                crate::engine::ExpressionOp::Function {
-                    identity: ident,
-                    target: dst_ty,
-                },
-                vec![arg],
-            );
-        }
-        if self.types.is_tagged_func_union(
-            src_ty,
-            &self.index.capture_free_templates,
-            &self.solved.escaping_env_templates,
-        ) && src_ty != dst_ty
-        {
-            let target_spec = HelperSpec::Callable(CallableOp::Widener {
-                from: src_ty,
-                to: dst_ty,
-            });
-            let helper = self
-                .solved
-                .helpers
-                .iter_enumerated()
-                .find_map(|(id, entry)| (entry.spec == target_spec).then_some(id))
-                .ok_or_else(|| {
-                    Diagnostic::internal("missing interned widener for collapsed capture")
-                })?;
-            let fid = self.emit_helper(helper)?;
-            return Ok(synth_call(fid, vec![arg], 0, 0));
-        }
-        Ok(arg)
+        CaptureOperand::Local(local)
     }
 
     pub(super) fn is_zero_sized_func(&self, ty: Ty) -> bool {

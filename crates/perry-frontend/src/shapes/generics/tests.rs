@@ -15,7 +15,7 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
     let ast = crate::source::parse(&source, "resolution.ts")?;
     let module = perry_hir::lower_module(&ast, "main", "resolution.ts")?;
     let ctx = Context::new();
-    let foreign = HashMap::new();
+    let foreign = crate::wit::WorldTypes::default();
     let decls = Declarations::new(
         &module.interfaces,
         &module.type_aliases,

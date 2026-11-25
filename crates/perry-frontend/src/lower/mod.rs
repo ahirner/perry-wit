@@ -30,10 +30,7 @@ mod url;
 mod value_unions;
 mod variants;
 use perry_hir::{
-    ir::{
-        BinaryOp, CompareOp, Expr, Function, LogicalOp, Module as HirModule, Stmt, UnaryOp,
-        UpdateOp,
-    },
+    ir::{BinaryOp, CompareOp, Expr, Function, LogicalOp, Stmt, UnaryOp, UpdateOp},
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_mir::{

@@ -14,6 +14,16 @@ impl<'s> FunctionBuilder<'s> {
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
         let method = hir_compat::method(method);
+        if let Expr::ExternFuncRef { name, .. } = object
+            && let Some(owner) = self.shapes.decls.resource(name)
+            && let Some(member) =
+                self.shapes
+                    .decls
+                    .world
+                    .member(owner, crate::wit::MemberKind::Static, method.name())
+        {
+            return self.resource_call(ctx, member, None, args);
+        }
         if let Expr::ClassRef(class_name) = object {
             return self.class_static_method_call(ctx, class_name, method.name(), args);
         }
@@ -25,6 +35,18 @@ impl<'s> FunctionBuilder<'s> {
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
+        if let Some(resource) =
+            perry_mir::typed::<perry_mir::ResourceType>(ctx, receiver.get_type(ctx))
+        {
+            let owner = resource.deref(ctx).key();
+            if let Some(member) = self.shapes.decls.world.member(
+                owner,
+                crate::wit::MemberKind::Instance,
+                method.name(),
+            ) {
+                return self.resource_call(ctx, member, Some(receiver), args);
+            }
+        }
         if method == hir_compat::Method::Iteration {
             ensure_unsupported!(
                 matches!(kind(ctx, receiver)?, Kind::Array | Kind::String)
@@ -180,7 +202,8 @@ impl<'s> FunctionBuilder<'s> {
         let is_known_class = self.shapes.decls.classes.named.contains_key(ty)
             || self
                 .shapes
-                .metadata
+                .specialization
+                .instances
                 .class_origins
                 .values()
                 .any(|origin| origin == ty);
@@ -192,7 +215,8 @@ impl<'s> FunctionBuilder<'s> {
                     c == ty
                         || self
                             .shapes
-                            .metadata
+                            .specialization
+                            .instances
                             .class_origins
                             .get(c)
                             .is_some_and(|origin| origin == ty)

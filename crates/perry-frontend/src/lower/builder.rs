@@ -164,7 +164,11 @@ impl<'s> FunctionBuilder<'s> {
         Self::lower_body(
             ctx,
             signature,
-            Body::Statements(Some(function.id), &function.params, &function.body),
+            Body::Statements(
+                Some(function.id),
+                &function.params,
+                shapes.specialization.instances.function_body(function),
+            ),
             signatures,
             shapes,
             builtins,

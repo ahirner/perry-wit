@@ -305,6 +305,7 @@ pub(crate) enum TyKind {
     BigInt,
     String,
     Symbol,
+    Timer,
     Named(shapes::TypeName),
     Literal(shapes::TypeName),
     Signature {
@@ -347,6 +348,7 @@ impl Ty {
     pub(crate) const BIGINT: Self = Self(9);
     pub(crate) const STRING: Self = Self(10);
     pub(crate) const SYMBOL: Self = Self(11);
+    pub(crate) const TIMER: Self = Self(12);
 }
 
 #[derive(Clone, Copy, Default, Debug)]

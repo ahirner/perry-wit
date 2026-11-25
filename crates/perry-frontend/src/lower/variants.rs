@@ -53,14 +53,14 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn narrow_value(
         &mut self,
         ctx: &mut Context,
-        expr: &'s Expr,
+        path: impl FnOnce() -> Option<crate::narrowing::Path<'s>>,
         value: Value,
     ) -> Result<Value> {
         let ty = present_type(ctx, value.get_type(ctx));
         if !crate::lower::value_unions::is_value_union(ctx, ty) {
             return Ok(value);
         }
-        let Some(path) = path(expr) else {
+        let Some(path) = path() else {
             return Ok(value);
         };
         let cases = perry_mir::variant_cases(ctx, ty).to_diag(ctx)?;

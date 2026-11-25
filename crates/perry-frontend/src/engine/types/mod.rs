@@ -50,6 +50,7 @@ impl TypeTable {
             TyKind::BigInt,
             TyKind::String,
             TyKind::Symbol,
+            TyKind::Timer,
         ] {
             let id = table.push_kind(kind);
             table.kind_index.insert(kind, id);
@@ -934,8 +935,4 @@ pub(crate) fn func_tag(ident: FuncIdentity) -> String {
             format!("fn_{}_t{}", ident.template.index(), owner.index())
         }
     }
-}
-
-pub(crate) fn env_class_name(ident: FuncIdentity) -> String {
-    format!("__Env_{}", func_tag(ident))
 }

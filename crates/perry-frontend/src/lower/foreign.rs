@@ -224,27 +224,54 @@ impl crate::wit::WitValue<'_> {
     }
 }
 
+pub(super) enum CallKind {
+    Function,
+    Resource(Option<Value>),
+}
+
 impl<'s> FunctionBuilder<'s> {
+    pub(super) fn resource_call(
+        &mut self,
+        ctx: &mut Context,
+        member: &'s crate::wit::ResourceMember<'s>,
+        receiver: Option<Value>,
+        args: &'s [Expr],
+    ) -> Result<Option<Value>> {
+        let (binding, signature) = self
+            .shapes
+            .foreign_function(&member.binding)
+            .ok_or_else(|| internal!("missing WIT resource binding {}", member.binding))?;
+        self.import_call(ctx, binding, signature, args, CallKind::Resource(receiver))
+    }
+
     pub(super) fn import_call(
         &mut self,
         ctx: &mut Context,
         binding: &'s str,
         signature: &'s crate::wit::ImportSignature<'s>,
         args: &'s [Expr],
-        byte_offset: u32,
-        resource_method: bool,
+        kind: CallKind,
     ) -> Result<Option<Value>> {
-        if args.len() != signature.params.len() {
-            let error = diag!(
+        let mut params = signature.params.as_slice();
+        let mut values = Vec::with_capacity(params.len());
+        if let CallKind::Resource(Some(receiver)) = kind {
+            let (this, rest) = params
+                .split_first()
+                .ok_or_else(|| internal!("WIT resource method has no receiver"))?;
+            let ty = this.mir_type(ctx, true)?;
+            values.push(self.fit(ctx, receiver, ty)?);
+            params = rest;
+        }
+        if args.len() != params.len() {
+            bail_diag!(
                 codes::CONTRACT_MISMATCH,
                 "WIT import {binding} expects {} arguments, got {}",
-                signature.params.len(),
+                params.len(),
                 args.len()
             );
-            return Err(self.shapes.annotate_call(error, byte_offset));
         }
-        let mut values = Vec::new();
-        for (arg, &wit) in args.iter().zip(&signature.params) {
+        let resource_method = matches!(kind, CallKind::Resource(_));
+        for (arg, &wit) in args.iter().zip(params) {
             let ty = wit.mir_type(ctx, true)?;
             let value = if resource_method && let Some(result) = wit.result() {
                 self.resource_input(ctx, arg, wit, result, ty)?
@@ -395,13 +422,9 @@ impl<'s> FunctionBuilder<'s> {
                     };
                     let drop = self
                         .shapes
-                        .metadata
-                        .resource_members
-                        .iter()
-                        .find(|member| {
-                            member.owner == owner.index() as u32
-                                && member.kind == crate::wit::MemberKind::Dispose
-                        })
+                        .decls
+                        .world
+                        .member(owner.index() as u32, crate::wit::MemberKind::Dispose, "")
                         .ok_or_else(|| internal!("owned WIT error has no resource destructor"))?;
                     let expected = self.string(ctx, &case.name);
                     let matches = self.compare(ctx, CompareKind::Eq, tag, expected);

@@ -424,15 +424,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             InstanceReq::new(ident.template, inputs, Some(s.inst))
                 .receiver(keep_inline.then_some(s.receiver).flatten())
                 .owner(ident.capture_owner)
-                .inline_cb(),
+                .callback(keep_inline),
         )?;
         self.record_site(
             s.inst,
             callback,
-            SiteResolution::Callback {
-                target: cb_inst,
-                keep_inline_closure: keep_inline,
-            },
+            SiteResolution::Callback { target: cb_inst },
         );
         let Some(cb_ret_loc) = self.instances.get(cb_inst).map(|i| i.return_loc) else {
             return Ok(None);

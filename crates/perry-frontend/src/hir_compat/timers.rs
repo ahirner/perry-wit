@@ -5,8 +5,6 @@ use perry_wit_diagnostics::{Diagnostic, Result};
 use swc_common::{Span, Spanned};
 use swc_ecma_visit::{Visit, VisitWith};
 
-pub(crate) const TIMER_CLASS: &str = "__PerryTimer";
-
 pub(crate) fn is_timer_module(source: &str) -> bool {
     matches!(source, "node:timers" | "timers")
 }

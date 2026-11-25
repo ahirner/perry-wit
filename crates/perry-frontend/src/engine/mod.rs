@@ -6,9 +6,9 @@ pub(crate) mod emit;
 pub(crate) mod solve;
 pub(crate) mod types;
 
-use crate::{hir_compat, wit};
+use crate::hir_compat;
+use crate::source::SourceModule;
 use boundary::ModuleIndex;
-use perry_hir::ir::Module as HirModule;
 use perry_wit_diagnostics::Result;
 use pliron::context::Context;
 use std::collections::HashMap;
@@ -32,7 +32,6 @@ pub(crate) enum Storage {
     Value(types::Ty),
     Boxed { ty: types::Ty, init: CellInit },
     Promise(types::Ty),
-    AbortController,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -47,8 +46,6 @@ pub(crate) enum ExpressionOp {
         equal: bool,
     },
     Expected(types::Ty),
-    Map(types::Ty),
-    Set(types::Ty),
     Promise {
         settled: types::Ty,
         executor: NativeCallback,
@@ -56,12 +53,6 @@ pub(crate) enum ExpressionOp {
     },
     StartTimer(perry_hir::types::FuncId),
     ClearTimer,
-}
-
-pub(crate) struct RecordLayout {
-    pub(crate) function: Option<types::FuncIdentity>,
-    pub(crate) name: String,
-    pub(crate) fields: Vec<(String, Storage)>,
 }
 
 pub(crate) struct CallbackBinding {
@@ -72,13 +63,11 @@ pub(crate) struct CallbackBinding {
 pub(crate) enum NativeOperation {
     Callback(CallbackBinding),
     Callable(solve::CallableOp),
-    Allocate(RecordLayout),
     Expression(ExpressionOp),
-    Resource(usize),
 }
 
 pub(crate) struct InstanceSignature {
-    pub(crate) params: Vec<Option<types::Ty>>,
+    pub(crate) params: Vec<Option<NativeParam>>,
     pub(crate) result: Option<types::Ty>,
 }
 
@@ -92,6 +81,7 @@ pub(crate) struct DispatchArm {
     pub(crate) arguments: usize,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum NativeParam {
     Value(types::Ty),
     Environment(types::FuncIdentity),
@@ -178,22 +168,50 @@ pub(crate) struct Capture {
     pub(crate) storage: Storage,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CaptureOperand {
+    Local(perry_hir::types::LocalId),
+    Cell(perry_hir::types::LocalId),
+    Function {
+        identity: types::FuncIdentity,
+        environment: Option<perry_hir::types::LocalId>,
+    },
+    Widen {
+        local: perry_hir::types::LocalId,
+        from: types::Ty,
+        to: types::Ty,
+    },
+}
+
+pub(crate) struct ClosureValue {
+    pub(crate) identity: types::FuncIdentity,
+    pub(crate) operands: Vec<CaptureOperand>,
+}
+
 #[derive(Default)]
 pub(crate) struct InstancePlans {
+    pub(crate) inline_callbacks: HashMap<perry_hir::types::FuncId, solve::Invocation>,
+    pub(crate) receiver_parameters: std::collections::HashSet<perry_hir::types::LocalId>,
+    pub(crate) class_origins: HashMap<String, String>,
     pub(crate) per_iteration: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) boxed_parameters:
         HashMap<(perry_hir::types::FuncId, perry_hir::types::LocalId), types::Ty>,
     pub(crate) captures: HashMap<perry_hir::types::LocalId, Vec<Capture>>,
     pub(crate) operations: NativeOperations,
+    pub(crate) closure_values:
+        HashMap<(Option<perry_hir::types::FuncId>, perry_hir::types::FuncId), ClosureValue>,
+    pub(crate) environments: HashMap<types::FuncIdentity, Vec<(String, Storage)>>,
     pub(crate) class_fields: HashMap<String, ClassFields>,
+    pub(crate) collection_types:
+        HashMap<(Option<perry_hir::types::FuncId>, swc_common::Span), types::Ty>,
     pub(crate) locals:
         HashMap<(Option<perry_hir::types::FuncId>, perry_hir::types::LocalId), Storage>,
     pub(crate) signatures: InstanceSignatures,
-    pub(crate) closures: InstanceSignatures,
     pub(crate) functions: std::collections::BTreeMap<perry_hir::types::FuncId, NativeFunction>,
 }
 
 pub(crate) struct Specialization {
+    pub(crate) bodies: crate::source::Bodies,
     pub(crate) sparse_arrays: bool,
     pub(crate) types: std::cell::RefCell<TypeTable>,
     pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
@@ -206,31 +224,34 @@ pub(crate) struct Specialization {
 
 pub(crate) fn run_engine(
     ctx: &mut Context,
-    hir: &mut HirModule,
+    hir: SourceModule,
     metadata: &mut hir_compat::Metadata<'_>,
-    foreign: &HashMap<String, wit::Foreign>,
-) -> Result<Specialization> {
+    world: &crate::wit::WorldTypes<'_>,
+) -> Result<(crate::source::ModuleDeclarations, Specialization)> {
     let mut types = TypeTable::new();
-    let index = ModuleIndex::build(ctx, hir, &metadata.source, &metadata.locations, &mut types);
-    let solved = solve::solve(ctx, hir, &index, metadata, foreign, &mut types)?;
+    let index = ModuleIndex::build(ctx, &hir, &metadata.source, &metadata.locations, &mut types);
+    let solved = solve::solve(ctx, &hir, &index, metadata, world, &mut types)?;
     for (witness, instance) in metadata.witnesses.iter_mut().zip(&solved.witness_instances) {
         witness.target = instance.map(|id| solved.instances[id].emitted_func_id);
     }
-    let emitted = emit::build(ctx, hir, &index, metadata, &types, &solved)?;
+    let (bodies, instances) = emit::build(&hir, &index, metadata, &types, &solved)?;
     let capture_free = index.capture_free_templates;
-    let instances = emitted.apply(hir, metadata);
-    Ok(Specialization {
-        sparse_arrays: metadata.source.sparse_arrays || solved.deletes_array_elements,
-        types: types.into(),
-        escaping_envs: solved.escaping_env_templates,
-        locations: solved.locations,
-        dict_reads: solved.dict_reads,
-        class_names: solved
-            .class_insts
-            .map(|instance| instance.emitted_name.clone()),
-        capture_free,
-        instances,
-    })
+    Ok((
+        hir.declarations,
+        Specialization {
+            bodies,
+            sparse_arrays: metadata.source.sparse_arrays || solved.deletes_array_elements,
+            types: types.into(),
+            escaping_envs: solved.escaping_env_templates,
+            locations: solved.locations,
+            dict_reads: solved.dict_reads,
+            class_names: solved
+                .class_insts
+                .map(|instance| instance.emitted_name.clone()),
+            capture_free,
+            instances,
+        },
+    ))
 }
 
 #[cfg(test)]

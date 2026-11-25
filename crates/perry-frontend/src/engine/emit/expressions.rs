@@ -101,7 +101,6 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<Expr> {
         if let Some(site) = resolution {
             match site {
-                SiteResolution::ResourceCall(id) => return self.resource_call(rctx, expr, id),
                 SiteResolution::BranchResult(ty) => {
                     let value = self.rewrite_expr_inner(&rctx.with_expected(true), expr, None)?;
                     self.prepare_layouts(ty)?;
@@ -114,14 +113,11 @@ impl<'h> Emitter<'h, '_> {
                         return self.fold_comparison(rctx, left, right, b);
                     }
                 }
-                SiteResolution::CollectionNew(op) => {
-                    if let Expr::New { args, .. } = expr {
-                        let init = args
-                            .iter()
-                            .map(|a| self.rewrite_expr(rctx, a))
-                            .collect::<Result<_>>()?;
-                        return self.expression_op(op, init);
-                    }
+                SiteResolution::CollectionNew { span, ty } => {
+                    let owner = (rctx.inst_id != self.solved.init_inst)
+                        .then(|| self.solved.instances[rctx.inst_id].emitted_func_id);
+                    self.prepare_layouts(ty)?;
+                    self.plans.collection_types.insert((owner, span), ty);
                 }
                 SiteResolution::ThrowTypeError(helper) => {
                     let fid = self.emit_helper(helper)?;
@@ -155,62 +151,8 @@ impl<'h> Emitter<'h, '_> {
                         return Ok(synth_call(fid, vec![arg], 0, 0));
                     }
                 }
-                SiteResolution::Callback {
-                    target,
-                    keep_inline_closure,
-                } => {
-                    let ti = &self.solved.instances[target];
-                    let (emitted_func_id, return_loc, param_locs_span) =
-                        (ti.emitted_func_id, ti.return_loc, ti.param_locs);
-                    if !keep_inline_closure {
-                        return Ok(Expr::FuncRef(emitted_func_id));
-                    }
-                    if let Expr::Closure { body, .. } = expr {
-                        let mut out = expr.clone();
-                        if let Expr::Closure {
-                            func_id,
-                            params,
-                            body: out_body,
-                            mutable_captures,
-                            ..
-                        } = &mut out
-                        {
-                            *func_id = emitted_func_id;
-                            let result = self.solved.locations[return_loc];
-                            self.prepare_layouts(result)?;
-                            let mut param_types = Vec::with_capacity(params.len());
-                            for &loc in self.solved.param_locs[param_locs_span]
-                                .iter()
-                                .take(params.len())
-                            {
-                                let ty = self.solved.locations[loc];
-                                let ty = self.is_resolved(ty).then_some(ty);
-                                if let Some(ty) = ty {
-                                    self.prepare_layouts(ty)?;
-                                }
-                                param_types.push(ty);
-                            }
-                            self.plans.closures.insert(
-                                emitted_func_id,
-                                crate::engine::InstanceSignature {
-                                    params: param_types,
-                                    result: Some(result),
-                                },
-                            );
-                            let mut cb_ctx = RewriteCtx {
-                                inst_id: target,
-                                func_params: &[],
-                                self_local: None,
-
-                                void_return: false,
-                                has_expected: false,
-                                remap: None,
-                            };
-                            *out_body = self.rewrite_stmts(&mut cb_ctx, body)?;
-                            mutable_captures.retain(|id| !self.is_boxed_local(*id));
-                        }
-                        return Ok(out);
-                    }
+                SiteResolution::Callback { target } => {
+                    return Ok(Expr::FuncRef(self.solved.instances[target].emitted_func_id));
                 }
                 SiteResolution::DirectCall {
                     target,
@@ -341,6 +283,7 @@ impl<'h> Emitter<'h, '_> {
                             class_name, args, ..
                         } => self
                             .hir
+                            .bodies
                             .classes
                             .iter()
                             .find(|c| c.name == *class_name)

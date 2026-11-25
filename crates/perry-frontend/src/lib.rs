@@ -36,20 +36,15 @@ pub fn lower_world(
     types: &wit::WorldTypes,
     world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
 ) -> Result<LoweredProgram> {
-    let foreign = types.foreign();
-    let loaded = modules::load(source, identity, sources, foreign)?;
+    let loaded = modules::load(source, identity, sources, types.foreign())?;
     let mut lowered = hir_compat::lower(loaded, identity, world)?;
-    let specialization =
-        engine::run_engine(ctx, &mut lowered.module, &mut lowered.metadata, foreign)?;
-    lowered
-        .metadata
-        .locations
-        .record_call_origins(&lowered.module);
+    let (declarations, specialization) =
+        engine::run_engine(ctx, lowered.module, &mut lowered.metadata, types)?;
     lower::program::build_module(
         ctx,
-        &lowered.module,
-        foreign,
-        &lowered.metadata,
+        &declarations,
+        types,
+        &mut lowered.metadata,
         &specialization,
     )
 }

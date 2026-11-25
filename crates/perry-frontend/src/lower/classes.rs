@@ -298,6 +298,15 @@ impl<'s> FunctionBuilder<'s> {
         method: &str,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
+        if let Some(owner) = self.shapes.decls.resource(class_name)
+            && let Some(member) =
+                self.shapes
+                    .decls
+                    .world
+                    .member(owner, crate::wit::MemberKind::Static, method)
+        {
+            return self.resource_call(ctx, member, None, args);
+        }
         let (owner_class, func) = self
             .shapes
             .class_static_method(class_name, method)
@@ -514,7 +523,11 @@ impl<'s> FunctionBuilder<'s> {
                                 InlineResult::Declared(binding.carrier)
                             })
                     };
-                    this.inline_body(ctx, &func.body, result_type)
+                    this.inline_body(
+                        ctx,
+                        this.shapes.specialization.instances.function_body(func),
+                        result_type,
+                    )
                 })?;
                 if let ClassReceiver::Constructor(slot, _, _) = receiver {
                     return this.load(ctx, slot).map(Some);
