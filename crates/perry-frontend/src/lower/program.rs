@@ -1,16 +1,49 @@
 //! Module-level lowering: imported built-ins, function signatures and the main function.
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum Parameter<'s> {
+    Source(FuncId, &'s perry_hir::ir::Param),
+    Receiver,
+    Environment(crate::engine::types::FuncIdentity),
+    Native,
+}
+
 pub(super) struct ParamSig<'s> {
-    pub(super) default: Option<&'s Expr>,
+    pub(super) origin: Parameter<'s>,
     pub(super) is_rest: bool,
     pub(super) is_never: bool,
     pub(super) binding: BindingType,
     pub(super) base: BindingType,
 }
 
+impl<'s> ParamSig<'s> {
+    pub(super) fn default(&self) -> Option<(FuncId, &'s Expr)> {
+        match self.origin {
+            Parameter::Source(owner, param) => param.default.as_ref().map(|expr| (owner, expr)),
+            _ => None,
+        }
+    }
+
+    fn native(
+        shapes: &Shapes<'_>,
+        ctx: &Context,
+        ty: crate::engine::NativeParam,
+        origin: Parameter<'s>,
+    ) -> Result<Self> {
+        let (binding, is_never) = shapes.native_param(ctx, ty)?;
+        Ok(Self {
+            origin,
+            binding,
+            base: binding,
+            is_never,
+            is_rest: false,
+        })
+    }
+}
+
 pub(super) struct Signature<'s> {
-    pub(super) inline: Option<&'s Function>,
+    pub(super) inline: Option<&'s Function<'s>>,
     pub(super) name: Identifier,
     /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
     pub(super) is_async: bool,
@@ -50,25 +83,32 @@ pub(crate) fn build_module(
     ctx: &mut Context,
     declarations: &crate::source::ModuleDeclarations,
     world: &crate::wit::WorldTypes<'_>,
-    metadata: &mut hir_compat::Metadata<'_>,
+    locations: &mut hir_compat::Locations<'_>,
+    witnesses: &[hir_compat::Witness<'_, FuncId>],
     specialization: &crate::engine::Specialization,
 ) -> Result<LoweredProgram> {
     let bodies = &specialization.bodies;
     let mut functions = Vec::new();
     let mut command = None;
-    let index = bodies.index(&mut metadata.locations, &specialization.instances);
-    let locations = &metadata.locations;
+    let index = bodies.index(locations, &specialization.instances);
     let module = ModuleOp::new(ctx, identifier(&module_name(&declarations.name))?);
     // Subclass instances flow into base-typed bindings, where methods would bind statically
     // and `instanceof` would read the declared type: reject inheritance instead of miscompiling.
     if let Some((class, base)) = bodies
         .classes
         .iter()
-        .find_map(|class| Some((&class.name, class.extends_name.as_deref()?)))
+        .find_map(|class| Some((&class.name, class.declaration.extends_name.as_deref()?)))
     {
         bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
-    let shapes = Shapes::new(module, declarations, world, metadata, specialization, index);
+    let shapes = Shapes::new(
+        module,
+        declarations,
+        world,
+        locations,
+        specialization,
+        index,
+    );
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
     let mut builtins: HashMap<&str, Builtin> = HashMap::new();
@@ -128,6 +168,24 @@ pub(crate) fn build_module(
         }
 
         let mut params = Vec::with_capacity(function.params.len());
+        if let Some(instance) = specialization.instances.signatures.get(&function.id) {
+            if let Some(env) = instance.environment {
+                params.push(ParamSig::native(
+                    &shapes,
+                    ctx,
+                    crate::engine::NativeParam::Environment(env),
+                    Parameter::Environment(env),
+                )?);
+            }
+            if let Some(receiver) = instance.receiver {
+                params.push(ParamSig::native(
+                    &shapes,
+                    ctx,
+                    crate::engine::NativeParam::Value(receiver),
+                    Parameter::Receiver,
+                )?);
+            }
+        }
         for (idx, param) in function.params.iter().enumerate() {
             if param.is_rest && idx + 1 != function.params.len() {
                 return Err(locations.annotate_caller(
@@ -146,9 +204,9 @@ pub(crate) fn build_module(
                     .parameter_binding(ctx, function, idx)
                     .map_err(|error| {
                         let source = declarations
-                            .local_source_spans
+                            .locals
                             .get(&param.id)
-                            .and_then(|span| locations.source_at(span.start));
+                            .and_then(|span| locations.source_at(span.span.lo.0));
                         let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
                             format!("{}", idx + 1)
                         } else {
@@ -167,7 +225,7 @@ pub(crate) fn build_module(
             };
             params.push(ParamSig {
                 is_rest: param.is_rest,
-                default: param.default.as_ref(),
+                origin: Parameter::Source(function.id, param),
                 is_never,
                 binding: BindingType { carrier, ..base },
                 base,
@@ -213,16 +271,7 @@ pub(crate) fn build_module(
         let params = function
             .params
             .iter()
-            .map(|param| {
-                let (binding, is_never) = shapes.native_param(ctx, *param)?;
-                Ok(ParamSig {
-                    default: None,
-                    is_rest: false,
-                    is_never,
-                    binding,
-                    base: binding,
-                })
-            })
+            .map(|param| ParamSig::native(&shapes, ctx, *param, Parameter::Native))
             .collect::<Result<_>>()
             .map_err(&annotate)?;
         let result = shapes
@@ -256,7 +305,7 @@ pub(crate) fn build_module(
         // module once before the first entry point, and `run` only awaits that initialization.
         let persistent = bodies.functions.iter().any(|f| f.is_exported);
         let async_init = declarations.has_top_level_await;
-        let settled = BindingType::plain(shapes.settled_type(ctx, &HirType::Void)?);
+        let settled = BindingType::plain(void_type(ctx));
         let mut entries = vec![(
             Signature {
                 inline: None,
@@ -272,7 +321,7 @@ pub(crate) fn build_module(
                 returns_never: false,
                 result: (!persistent || async_init).then_some(settled),
             },
-            bodies.init.as_slice(),
+            bodies.init,
         )];
         if persistent {
             entries.push((
@@ -293,7 +342,7 @@ pub(crate) fn build_module(
             let func = FunctionBuilder::lower_body(
                 ctx,
                 signature,
-                builder::Body::Statements(None, &[], body),
+                builder::Body::Statements(None, body),
                 &signatures,
                 &shapes,
                 &builtins,
@@ -371,8 +420,7 @@ pub(crate) fn build_module(
         perry_mir::set_caller_notes(ctx, &func, &locations.caller_notes(name));
         module.append_operation(ctx, func.get_operation(), 0);
     }
-    let exports = metadata
-        .witnesses
+    let exports = witnesses
         .iter()
         .map(|witness| match witness.target {
             Some(id) => functions

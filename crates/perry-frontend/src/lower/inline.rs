@@ -44,16 +44,25 @@ impl<'s> FunctionBuilder<'s> {
         body: &'s [Stmt],
         exprs: impl IntoIterator<Item = &'s Expr>,
     ) {
-        self.variant_guards.assign_in(body, exprs, |id| {
-            if let Some(Expr::Closure { params, body, .. }) = self.shapes.lexical_functions.get(&id)
-            {
-                return Some(crate::source::authored_body(params, body));
-            }
-            self.signatures
-                .get(&id)?
-                .inline
-                .map(|f| self.shapes.specialization.instances.function_body(f))
-        });
+        self.variant_guards.assign_projected(
+            self.local_owner,
+            body,
+            exprs,
+            |id| {
+                if let Some(Expr::Closure { params, body, .. }) =
+                    self.shapes.lexical_functions.get(&id)
+                {
+                    return Some(crate::source::authored_body(params, body));
+                }
+                self.signatures.get(&id)?.inline.map(|f| f.body)
+            },
+            |owner, expr| {
+                let plans = &self.shapes.specialization.instances;
+                plans
+                    .call_target(owner, expr)
+                    .or_else(|| plans.reference(owner, expr))
+            },
+        );
     }
 
     pub(super) fn inline_body(

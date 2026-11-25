@@ -15,8 +15,8 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
-| 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
-| 2. Frontend | Perry HIR and solved instances | Binds WIT export witnesses and resource classes to source declarations. A fixed-point solver determines each reachable instance’s types, capture layout, dispatch targets, and resource operations. Generic declarations and inferred types share one interned type table. Specialized HIR carries source statement bodies. |
+| 1. Source analysis | TypeScript AST | Binds WIT imports against the resolved world and records source locations. Upstream Perry HIR normalizes lexical bindings, destructuring, closures and class syntax. |
+| 2. Frontend | Perry HIR and solved instances | The source module owns lexical declarations, source locations and WIT export witnesses. A fixed-point solver determines each reachable instance’s types, capture layout, dispatch targets, and resource operations. Generic declarations and inferred types share one interned type table. Specializations borrow each function body, parameter default and class field from its source declaration. MIR lowering reads the solved operation at each expression site. |
 | 3. Elaboration | Typed SSA MIR | Projects solved types into MIR and emits closure environments, captured-variable reads and writes, function dispatchers, promise reactions, timers and resource operations. Preserves JavaScript evaluation order. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
 | 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
@@ -55,7 +55,7 @@ The frontend returns an eager MIR module and the functions bound to world export
 The frontend indexes templates, locals, storage cells, and call sites into dense tables and iterates a monotone worklist solver to fixed point.
 Empty arrays and objects become storage cells whose element or value types are inferred from writes across branches, loops, local aliases, and helper returns. Numeric indices infer an array, and string keys or property names infer a dictionary. An array storing several types widens to a value union, while a dictionary requires a single value type.
 
-Escaping function values are represented by template-and-capture identities. Capture-free functions lower to zero-sized identities or tagged function unions with synthesized dispatchers, while escaping closures allocate environment classes and box mutable captures shared across calls.
+A function identity names its template and capture owner. Capture-free functions lower to zero-sized values or tagged function unions with MIR dispatchers. An escaping closure allocates a nominal MIR record. Its entry point receives that record as an implicit parameter and uses the same layout to read captures. Closures that share a mutable binding access it through a common cell.
 
 A dictionary is an array of key-value entries, so the MIR heap analysis treats its values like array elements. That analysis also tracks which parsed JSON records carry undeclared fields, preserving them when stored in a dictionary.
 

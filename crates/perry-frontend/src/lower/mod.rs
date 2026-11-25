@@ -30,7 +30,7 @@ mod url;
 mod value_unions;
 mod variants;
 use perry_hir::{
-    ir::{BinaryOp, CompareOp, Expr, Function, LogicalOp, Stmt, UnaryOp, UpdateOp},
+    ir::{BinaryOp, CompareOp, Expr, LogicalOp, Stmt, UnaryOp, UpdateOp},
     types::{FuncId, LocalId, Type as HirType},
 };
 use perry_mir::{
@@ -104,3 +104,5 @@ pub struct LoweredProgram {
 
 #[cfg(test)]
 mod tests;
+
+use crate::source::InstanceFunction as Function;

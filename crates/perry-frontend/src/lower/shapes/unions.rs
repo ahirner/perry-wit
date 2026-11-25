@@ -71,17 +71,16 @@ impl Shapes<'_> {
         members: &[Ty],
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
-        let scalar =
-            members.iter().any(
-                |&member| match self.specialization.types.borrow().kind(member) {
-                    TyKind::Number | TyKind::String | TyKind::Boolean => true,
-                    TyKind::Named(name) => self
-                        .decls
-                        .integer_spec(name.get(ctx))
-                        .is_some_and(|(width, _)| width <= 32),
-                    _ => false,
-                },
-            );
+        let types = self.specialization.types.borrow();
+        let scalar = members.iter().any(|&member| {
+            matches!(
+                types.kind(member),
+                TyKind::Number | TyKind::String | TyKind::Boolean
+            ) || types
+                .integer_domain(ctx, &self.decls, member)
+                .is_some_and(|domain| domain.deref(ctx).width() <= 32)
+        });
+        drop(types);
         if scalar {
             let mut cases = Vec::with_capacity(members.len());
             for member in members {

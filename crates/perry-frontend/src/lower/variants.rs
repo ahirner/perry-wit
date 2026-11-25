@@ -143,7 +143,7 @@ impl<'s> FunctionBuilder<'s> {
         let result = match payload {
             Some(ty) if absent => perry_mir::OptionalType::get(ctx, ty).into(),
             Some(ty) => ty,
-            None => self.shapes.value_type(ctx, &HirType::Void)?,
+            None => void_type(ctx),
         };
         Ok(self.emit_value(ctx, |ctx| VariantPayloadOp::new(ctx, value, result)))
     }
@@ -155,7 +155,9 @@ impl<'s> FunctionBuilder<'s> {
         fields: &[(&str, &'s Expr)],
     ) -> Result<Value> {
         ensure_diag!(
-            fields.iter().all(|&(n, _)| n == "tag" || n == "val"),
+            fields
+                .iter()
+                .all(|&(n, e)| self.erased_operand(e) || n == "tag" || n == "val"),
             codes::TYPE_MISMATCH,
             "variants have tag and val only"
         );
@@ -179,18 +181,26 @@ impl<'s> FunctionBuilder<'s> {
                     "literal tag is not a case of this variant",
                 )
             })?;
-        let argument = fields.iter().find_map(|&(n, e)| (n == "val").then_some(e));
-        let value = match (argument, payload) {
-            (Some(val_expr), Some(payload)) => {
-                let value = self.expression_with(ctx, val_expr, Some(payload))?;
-                Some(self.fit(ctx, value, payload)?)
+        let mut value = None;
+        for &(name, arg) in fields {
+            if self.erased_operand(arg) {
+                self.discard_function_operand(ctx, arg)?;
+            } else if name == "val" {
+                let payload = payload.ok_or_else(|| {
+                    diag!(
+                        codes::TYPE_MISMATCH,
+                        "variant val must match its active case"
+                    )
+                })?;
+                let raw = self.expression_with(ctx, arg, Some(payload))?;
+                value = Some(self.fit(ctx, raw, payload)?);
             }
-            (None, None) => None,
-            _ => bail_diag!(
-                codes::TYPE_MISMATCH,
-                "variant val must match its active case"
-            ),
-        };
+        }
+        ensure_diag!(
+            payload.is_some() == value.is_some(),
+            codes::TYPE_MISMATCH,
+            "variant val must match its active case"
+        );
         Ok(self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, ty, tag, value)))
     }
 }

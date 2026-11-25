@@ -301,7 +301,8 @@ impl<'s> FunctionBuilder<'s> {
                 layout.len() == closure.operands.len(),
                 "wrong number of closure captures"
             );
-            for ((name, _), &operand) in layout.iter().zip(&closure.operands) {
+            for (field, &operand) in layout.iter().zip(&closure.operands) {
+                let name = field.name();
                 let value = match operand {
                     CaptureOperand::Local(id) => {
                         let value = self.load_local(ctx, id)?;
@@ -374,7 +375,10 @@ impl<'s> FunctionBuilder<'s> {
         let expected = matching_record(
             ctx,
             expected,
-            fields.iter().map(|&(name, _)| name),
+            fields
+                .iter()
+                .filter(|(_, e)| !self.erased_operand(e))
+                .map(|&(name, _)| name),
             MissingFields::Diagnose,
         )?;
         let mut assembly = RecordAssembly {
@@ -382,6 +386,10 @@ impl<'s> FunctionBuilder<'s> {
             fields: Vec::with_capacity(fields.len()),
         };
         for &(name, arg) in fields {
+            if self.erased_operand(arg) {
+                self.discard_function_operand(ctx, arg)?;
+                continue;
+            }
             assembly.write(
                 self,
                 ctx,

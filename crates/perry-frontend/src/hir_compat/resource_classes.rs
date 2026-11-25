@@ -9,7 +9,7 @@ use perry_hir::{
 };
 use perry_wit_diagnostics::{Diagnostic, Result};
 
-pub(crate) fn synth_param(id: LocalId, name: String, ty: HirType) -> Param {
+fn synth_param(id: LocalId, name: String, ty: HirType) -> Param {
     Param {
         id,
         name,
@@ -21,7 +21,7 @@ pub(crate) fn synth_param(id: LocalId, name: String, ty: HirType) -> Param {
     }
 }
 
-pub(crate) fn synth_call(fid: FuncId, args: Vec<Expr>, byte_offset: u32, byte_end: u32) -> Expr {
+fn synth_call(fid: FuncId, args: Vec<Expr>, byte_offset: u32, byte_end: u32) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::FuncRef(fid)),
         args,
@@ -31,7 +31,7 @@ pub(crate) fn synth_call(fid: FuncId, args: Vec<Expr>, byte_offset: u32, byte_en
     }
 }
 
-pub(crate) fn synth_function(
+fn synth_function(
     id: FuncId,
     name: String,
     params: Vec<Param>,
@@ -71,13 +71,7 @@ fn fresh(id: &mut u32) -> Result<u32> {
     Ok(*id)
 }
 
-pub(crate) fn external(
-    name: &str,
-    args: Vec<Expr>,
-    result: HirType,
-    byte_offset: u32,
-    byte_end: u32,
-) -> Expr {
+fn external(name: &str, args: Vec<Expr>, result: HirType, byte_offset: u32, byte_end: u32) -> Expr {
     Expr::Call {
         callee: Box::new(Expr::ExternFuncRef {
             name: name.into(),
@@ -91,7 +85,7 @@ pub(crate) fn external(
     }
 }
 
-pub(crate) fn local(id: LocalId, name: &str, ty: HirType, init: Expr, mutable: bool) -> Stmt {
+fn local(id: LocalId, name: &str, ty: HirType, init: Expr, mutable: bool) -> Stmt {
     Stmt::Let {
         id,
         name: name.into(),

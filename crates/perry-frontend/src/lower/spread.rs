@@ -331,7 +331,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok(arr)
     }
 
-    fn func_call_spread(
+    pub(super) fn func_call_spread(
         &mut self,
         ctx: &mut Context,
         id: FuncId,
@@ -340,7 +340,6 @@ impl<'s> FunctionBuilder<'s> {
         let signature = self.signature(id)?;
         let callee_name = self
             .shapes
-            .metadata
             .locations
             .display_function_name(signature.name.as_ref());
         let (params, rest) = signature.parameters();

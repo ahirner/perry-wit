@@ -3,6 +3,7 @@ use super::*;
 use crate::lower::methods::Call;
 use crate::lower::{builtins::BytesCreation, json::JSON_CALLBACKS};
 
+mod instances;
 mod members;
 
 impl<'s> FunctionBuilder<'s> {
@@ -13,6 +14,25 @@ impl<'s> FunctionBuilder<'s> {
     /// Lower `expr`, using `expected` to type literals whose own type is not determined by their
     /// operands (such as empty arrays or object literals widened to a declared shape).
     pub(super) fn expression_with(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        if let Some(site) = self
+            .shapes
+            .specialization
+            .instances
+            .site(self.local_owner, expr)
+        {
+            return self
+                .instance_operand(ctx, expr, expected, site, true)?
+                .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"));
+        }
+        self.source_expression(ctx, expr, expected)
+    }
+
+    pub(super) fn source_expression(
         &mut self,
         ctx: &mut Context,
         expr: &'s Expr,
@@ -52,7 +72,7 @@ impl<'s> FunctionBuilder<'s> {
             let (last, effects) = parts
                 .split_last()
                 .ok_or_else(|| Diagnostic::internal("empty sequence expression"))?;
-            if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+            if let Some(span) = self.shapes.locations.operator_span(parts) {
                 return self
                     .expression_with(ctx, last, expected)
                     .map_err(|error| error.with_fallback_span(Some(span)));
@@ -61,6 +81,23 @@ impl<'s> FunctionBuilder<'s> {
                 self.effect(ctx, effect)?;
             }
             return self.expression_with(ctx, last, expected);
+        }
+        if let Some(args) = self.shapes.source.constructors.regexp(expr) {
+            let strings = &self.shapes.specialization.strings;
+            let text = |arg: Option<&Expr>| match arg {
+                Some(arg) => strings.regexp_operand(arg).ok_or_else(|| {
+                    unsupported!("RegExp construction is unsupported; use a bounded regex literal")
+                }),
+                None => Ok(String::new()),
+            };
+            let pattern = text(args.pattern)?;
+            let flags = text(args.flags)?;
+            for arg in args.operands() {
+                self.effect(ctx, arg)?;
+            }
+            return Ok(self.emit_value(ctx, |ctx| {
+                perry_mir::RegexConstOp::new(ctx, &pattern, &flags)
+            }));
         }
         if let Some(value) = self.date_expression(ctx, expr)? {
             return Ok(value);
@@ -87,7 +124,7 @@ impl<'s> FunctionBuilder<'s> {
             return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
         }
         let value = match expr {
-            Expr::FuncRef(id)
+            Expr::Closure { func_id: id, .. } | Expr::FuncRef(id)
                 if let Some(closure) = self
                     .shapes
                     .specialization
@@ -99,9 +136,6 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::RegExp { pattern, flags } => {
                 self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
-            }
-            Expr::RegExpDynamic { .. } => {
-                bail_unsupported!("RegExp construction is unsupported; use a bounded regex literal")
             }
             Expr::ObjectSpread { parts } => self.object_spread(ctx, parts, expected)?,
             Expr::ObjectRest {
@@ -185,11 +219,13 @@ impl<'s> FunctionBuilder<'s> {
                 byte_end,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset..*byte_end, expected)
-                .and_then(|value| {
-                    value.ok_or_else(|| {
-                        Diagnostic::new(codes::TYPE_MISMATCH, "a void call has no value")
-                    })
+                .call(ctx, callee, args, *byte_offset..*byte_end)
+                .and_then(|value| match value {
+                    Some(value) => Ok(value),
+                    None => Err(Diagnostic::new(
+                        codes::TYPE_MISMATCH,
+                        "a void call has no value",
+                    )),
                 })
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
@@ -312,14 +348,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             Expr::JsonParseTyped { text, ty, .. } => {
                 let text = self.string_operand(ctx, text)?;
-                let target = if let Some(int_ty) = self.shapes.integer_type(ctx, ty)
-                    && int_ty.deref(ctx).width() == 64
-                {
-                    int_ty.into()
-                } else if matches!(ty, HirType::Any | HirType::Unknown) {
+                let target = if matches!(ty, HirType::Any | HirType::Unknown) {
                     expected.unwrap_or_else(|| JsonType::get(ctx).into())
                 } else {
-                    self.shapes.value_type(ctx, ty)?
+                    self.shapes.source_binding(ctx, ty)?.expected_type(ctx)
                 };
                 let parsed = self.parse_json_text(ctx, text, Some(target))?;
                 let decoded = self.fit(ctx, parsed, target)?;
@@ -666,8 +698,13 @@ impl<'s> FunctionBuilder<'s> {
         if writes.carrier.deref(ctx).is::<JsonType>()
             && local.cell.is_none()
             && self.shapes.deferred_binding(id)
-            && self.shapes.binding_annotation(id)
-                != Some(crate::lower::shapes::BindingAnnotation::Explicit)
+            && self
+                .shapes
+                .source
+                .locals
+                .get(&id)
+                .map(|local| local.annotation)
+                != Some(crate::source::BindingAnnotation::Explicit)
             && !perry_mir::JsonSchema::supports_boxing(ctx, assigned.get_type(ctx))
         {
             let name = self.shapes.local_name(id).unwrap_or("<unknown>");

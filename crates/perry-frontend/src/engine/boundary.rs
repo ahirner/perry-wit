@@ -5,15 +5,15 @@ use super::types::{
     CaptureSpan, CapturedLocalSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage,
     NameId, Pool, SiteSpan, TemplateId, Ty, TypeTable,
 };
-use crate::hir_compat::{self, Locations};
-use crate::source::SourceFacts;
-use crate::source::SourceModule;
+use crate::hir_compat;
+use crate::source::{BindingAnnotation, SourceModule};
 use perry_hir::{
     ir::{Expr, Function, Param, Stmt},
     types::{FuncId, LocalId},
     walker::{stmt_any_expr, walk_expr_children},
 };
 use pliron::context::Context;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TemplateKind {
@@ -41,8 +41,7 @@ pub(crate) struct TemplateView<'h> {
     pub(crate) type_params: &'h [perry_hir::types::TypeParam],
     pub(crate) is_async: bool,
     pub(crate) is_generator: bool,
-    pub(crate) is_strict: bool,
-    pub(crate) construct_only: bool,
+
     pub(crate) captures_this: bool,
     pub(crate) captures_new_target: bool,
     pub(crate) uses_this: bool,
@@ -79,8 +78,7 @@ impl<'h> TemplateView<'h> {
             type_params: &f.type_params,
             is_async: f.is_async,
             is_generator: f.is_generator,
-            is_strict: f.is_strict,
-            construct_only: f.construct_only,
+
             captures_this: false,
             captures_new_target: false,
             uses_this: stmts_use_this(body),
@@ -135,7 +133,8 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) hir_class_is_literal: BitSet,
     literal_classes: Vec<(NameId, &'h [perry_hir::ir::ClassField])>,
     pub(crate) locals: IdxVec<LocalIdx, LocalInfo>,
-    local_regex_patterns: Vec<(LocalIdx, &'h str)>,
+    pub(crate) strings: crate::source::StringConstants,
+    local_regex: HashMap<LocalId, &'h Expr>,
     local_to_idx: Vec<Option<LocalIdx>>,
     pub(crate) capture_free_templates: BitSet,
     pub(crate) returns_empty_list: BitSet,
@@ -150,25 +149,20 @@ static VOID_HIR: perry_hir::types::Type = perry_hir::types::Type::Void;
 impl<'h> ModuleIndex<'h> {
     pub(crate) fn build(
         ctx: &Context,
-        hir: &'h SourceModule,
-        facts: &SourceFacts,
-        locations: &Locations<'_>,
+        bodies: &'h crate::source::Bodies,
+        declarations: &crate::source::ModuleDeclarations,
+        locations: &crate::hir_compat::Locations<'_>,
+        closure_names: &'h HashMap<FuncId, String>,
         types: &mut TypeTable,
     ) -> Self {
-        let max_local_hint = hir
-            .declarations
-            .local_source_spans
-            .keys()
-            .copied()
-            .max()
-            .unwrap_or(0);
+        let max_local_hint = declarations.locals.keys().copied().max().unwrap_or(0);
         let mut idx = Self {
-            func_to_template: Vec::with_capacity(hir.bodies.functions.len() + 1),
+            func_to_template: Vec::with_capacity(bodies.functions.len() + 1),
             local_to_idx: vec![None; max_local_hint as usize + 1],
             max_local_id: max_local_hint,
             ..Self::default()
         };
-        for (hir_idx, class) in hir.bodies.classes.iter().enumerate() {
+        for (hir_idx, class) in bodies.classes.iter().enumerate() {
             if hir_compat::is_object_literal(&class.name) {
                 idx.hir_class_is_literal.insert(hir_idx);
                 idx.literal_classes
@@ -181,13 +175,12 @@ impl<'h> ModuleIndex<'h> {
             func_id: 0,
             params: &[],
             return_type: &VOID_HIR,
-            body: &hir.bodies.init,
+            body: &bodies.init,
             captures: &[],
             type_params: &[],
-            is_async: hir.declarations.has_top_level_await,
+            is_async: declarations.has_top_level_await,
             is_generator: false,
-            is_strict: true,
-            construct_only: false,
+
             captures_this: false,
             captures_new_target: false,
             uses_this: false,
@@ -198,17 +191,19 @@ impl<'h> ModuleIndex<'h> {
         let mut defined_locals = BitSet::default();
         let mut pending_captures: Vec<(LocalId, bool, bool)> = Vec::new();
         let mut scan = ScanCtx {
+            constants: HashMap::new(),
+            regex_operands: Vec::new(),
             ctx,
-            hir,
-            facts,
+            declarations,
+            closure_names,
             types,
             raw_sites: &mut raw_sites,
             defined_locals: &mut defined_locals,
             pending_captures: &mut pending_captures,
         };
-        idx.scan_stmts(&mut scan, &hir.bodies.init, init_tid, true, false);
+        idx.scan_stmts(&mut scan, &bodies.init, init_tid, true, false);
 
-        for f in &hir.bodies.functions {
+        for f in &bodies.functions {
             idx.register_member(
                 &mut scan,
                 TemplateKind::Function,
@@ -217,7 +212,7 @@ impl<'h> ModuleIndex<'h> {
             );
         }
 
-        for (hir_idx, class) in hir.bodies.classes.iter().enumerate() {
+        for (hir_idx, class) in bodies.classes.iter().enumerate() {
             if idx.hir_class_is_literal.contains(hir_idx) {
                 continue;
             }
@@ -262,7 +257,7 @@ impl<'h> ModuleIndex<'h> {
                 .iter()
                 .chain(&class.methods)
                 .flat_map(|f| &f.params)
-                .any(|p| idx.param_is_unannotated(scan.hir, scan.facts, p))
+                .any(|p| idx.param_is_unannotated(scan.declarations, p))
             {
                 idx.class_has_implicit_params.insert(cid.index());
             }
@@ -339,6 +334,8 @@ impl<'h> ModuleIndex<'h> {
             info.static_field_locs = static_field_locs;
         }
 
+        idx.strings =
+            crate::source::StringConstants::for_operands(scan.constants, scan.regex_operands);
         raw_sites.resize_with(idx.views.len(), Vec::new);
         for (template, list) in idx.views.ids().zip(raw_sites) {
             let mut sites: Vec<_> = list
@@ -440,12 +437,29 @@ impl<'h> ModuleIndex<'h> {
         idx
     }
 
-    pub(crate) fn local_regex_pattern(&self, local: LocalIdx) -> Option<&'h str> {
-        self.local_regex_patterns
-            .iter()
-            .find(|&&(k, _)| k == local)
-            .map(|&(_, pat)| pat)
+    pub(crate) fn replacement_captures(
+        &self,
+        constructors: &crate::source::Constructors,
+        search: &Expr,
+    ) -> Option<(usize, bool)> {
+        let search = match search {
+            Expr::LocalGet(id) => *self.local_regex.get(id)?,
+            expr => expr,
+        };
+        match search {
+            Expr::String(_) => Some((0, false)),
+            Expr::RegExp { pattern, .. } => Some(crate::methods::regex_captures(pattern)),
+            _ => {
+                let args = constructors.regexp(search)?;
+                let pattern = match args.pattern {
+                    Some(pattern) => self.strings.regexp_operand(pattern)?,
+                    None => String::new(),
+                };
+                Some(crate::methods::regex_captures(&pattern))
+            }
+        }
     }
+
     pub(crate) fn template_frame_count(&self, t: TemplateId) -> usize {
         self.layouts[t].frame_slots as usize
     }
@@ -503,7 +517,7 @@ impl<'h> ModuleIndex<'h> {
         lidx: LocalIdx,
     ) -> bool {
         self.locals[lidx].flags.contains(LocalFlags::INFERRED)
-            || !hir.declarations.local_source_spans.contains_key(&id)
+            || !hir.declarations.locals.contains_key(&id)
     }
     pub(crate) fn is_for_head_local(&self, id: LocalId) -> bool {
         self.local_idx(id)
@@ -553,8 +567,7 @@ impl<'h> ModuleIndex<'h> {
             type_params: &[],
             is_async: false,
             is_generator: false,
-            is_strict: true,
-            construct_only: false,
+
             captures_this: false,
             captures_new_target: false,
             uses_this: false,
@@ -587,8 +600,7 @@ impl<'h> ModuleIndex<'h> {
         id: LocalId,
         owner: TemplateId,
         declared: Ty,
-        hir: &SourceModule,
-        facts: &SourceFacts,
+        declarations: &crate::source::ModuleDeclarations,
     ) -> LocalIdx {
         self.max_local_id = self.max_local_id.max(id);
         let lid = id as usize;
@@ -596,9 +608,8 @@ impl<'h> ModuleIndex<'h> {
             return existing;
         }
         let mut flags = LocalFlags::default();
-        if let Some(span) = hir.declarations.local_source_spans.get(&id) {
-            let binding = facts.binding(span.start);
-            if binding.inferred(span.end) {
+        if let Some(binding) = declarations.locals.get(&id) {
+            if binding.annotation == BindingAnnotation::Inferred {
                 flags.insert(LocalFlags::INFERRED);
             }
             if binding.deferred {
@@ -627,11 +638,15 @@ impl<'h> ModuleIndex<'h> {
         idx
     }
 
-    fn param_is_unannotated(&self, hir: &SourceModule, facts: &SourceFacts, param: &Param) -> bool {
-        !hir.declarations
-            .local_source_spans
+    fn param_is_unannotated(
+        &self,
+        declarations: &crate::source::ModuleDeclarations,
+        param: &Param,
+    ) -> bool {
+        !declarations
+            .locals
             .get(&param.id)
-            .is_some_and(|s| facts.binding(s.start).annotated_parameter)
+            .is_some_and(|s| s.annotated_parameter)
             && matches!(
                 param.ty,
                 perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
@@ -641,13 +656,12 @@ impl<'h> ModuleIndex<'h> {
     fn scan_params(&mut self, scan: &mut ScanCtx<'h, '_>, params: &'h [Param], owner: TemplateId) {
         for param in params {
             let explicit = scan
-                .hir
                 .declarations
-                .local_source_spans
+                .locals
                 .get(&param.id)
-                .is_some_and(|s| scan.facts.binding(s.start).annotated_parameter);
+                .is_some_and(|s| s.annotated_parameter);
             let ty = scan.types.intern_hir(scan.ctx, &param.ty, explicit);
-            let local = self.ensure_local(param.id, owner, ty, scan.hir, scan.facts);
+            let local = self.ensure_local(param.id, owner, ty, scan.declarations);
             self.locals[local].flags.insert(LocalFlags::PARAM);
             scan.defined_locals.insert(param.id as usize);
             if let Some(default) = &param.default {
@@ -666,15 +680,20 @@ impl<'h> ModuleIndex<'h> {
     ) {
         for stmt in stmts {
             match stmt {
-                Stmt::Let { id, ty, init, .. } => {
+                Stmt::Let {
+                    id,
+                    ty,
+                    init,
+                    mutable,
+                    ..
+                } => {
                     let explicit = scan
-                        .hir
                         .declarations
-                        .local_source_spans
+                        .locals
                         .get(id)
-                        .is_some_and(|s| !scan.facts.binding(s.start).inferred(s.end));
+                        .is_some_and(|s| s.annotation == BindingAnnotation::Explicit);
                     let declared = scan.types.intern_hir(scan.ctx, ty, explicit);
-                    let local = self.ensure_local(*id, owner, declared, scan.hir, scan.facts);
+                    let local = self.ensure_local(*id, owner, declared, scan.declarations);
                     if is_module_top && !self.locals[local].flags.contains(LocalFlags::FOR_HEAD) {
                         let loc = self.add_location(Ty::BOTTOM);
                         let entry = &mut self.locals[local];
@@ -685,8 +704,13 @@ impl<'h> ModuleIndex<'h> {
                         if matches!(init, Expr::Null | Expr::Undefined) {
                             self.locals[local].flags.insert(LocalFlags::NULLISH_INIT);
                         }
-                        if let Expr::RegExp { pattern, .. } = init {
-                            self.local_regex_patterns.push((local, pattern.as_str()));
+                        if !mutable {
+                            scan.constants.insert(*id, init);
+                        }
+                        if matches!(init, Expr::RegExp { .. })
+                            || scan.declarations.constructors.regexp(init).is_some()
+                        {
+                            self.local_regex.insert(*id, init);
                         }
                         Self::record_site_expr(scan, owner, init);
                         self.scan_expr(scan, init, owner, in_loop);
@@ -742,7 +766,7 @@ impl<'h> ModuleIndex<'h> {
                     if let Some(catch) = catch {
                         if let Some((id, _)) = &catch.param {
                             let err_ty = scan.types.named(scan.ctx, "Error");
-                            self.ensure_local(*id, owner, err_ty, scan.hir, scan.facts);
+                            self.ensure_local(*id, owner, err_ty, scan.declarations);
                         }
                         self.scan_stmts(scan, &catch.body, owner, false, in_loop);
                     }
@@ -788,6 +812,10 @@ impl<'h> ModuleIndex<'h> {
         owner: TemplateId,
         in_loop: bool,
     ) {
+        if let Some(args) = scan.declarations.constructors.regexp(expr) {
+            scan.regex_operands.extend(args.pattern);
+            scan.regex_operands.extend(args.flags);
+        }
         match expr {
             Expr::Call { args, .. } => {
                 Self::record_site_expr(scan, owner, expr);
@@ -872,7 +900,7 @@ impl<'h> ModuleIndex<'h> {
             }
             Expr::Update { id, .. } => self.record_local_use(*id, owner, true),
             Expr::ScopedTemp { id, .. } => {
-                self.ensure_local(*id, owner, Ty::OPEN, scan.hir, scan.facts);
+                self.ensure_local(*id, owner, Ty::OPEN, scan.declarations);
             }
             Expr::Closure {
                 func_id,
@@ -883,8 +911,7 @@ impl<'h> ModuleIndex<'h> {
                 mutable_captures,
                 is_async,
                 is_generator,
-                is_strict,
-                construct_only,
+
                 captures_this,
                 captures_new_target,
                 ..
@@ -898,11 +925,7 @@ impl<'h> ModuleIndex<'h> {
                 let body = crate::source::authored_body(params, body);
                 let tid = self.add_template(TemplateView {
                     kind: TemplateKind::Closure,
-                    name: scan
-                        .hir
-                        .closure_display_names
-                        .get(func_id)
-                        .map_or("", String::as_str),
+                    name: scan.closure_names.get(func_id).map_or("", String::as_str),
                     func_id: *func_id,
                     params: params.as_slice(),
                     return_type,
@@ -911,8 +934,7 @@ impl<'h> ModuleIndex<'h> {
                     type_params: &[],
                     is_async: *is_async,
                     is_generator: *is_generator,
-                    is_strict: *is_strict,
-                    construct_only: *construct_only,
+
                     captures_this: *captures_this,
                     captures_new_target: *captures_new_target,
                     uses_this: stmts_use_this(body),
@@ -962,9 +984,11 @@ impl<'h> ModuleIndex<'h> {
 }
 
 struct ScanCtx<'h, 'a> {
+    constants: HashMap<LocalId, &'h Expr>,
+    regex_operands: Vec<&'h Expr>,
     ctx: &'a Context,
-    hir: &'h SourceModule,
-    facts: &'a SourceFacts,
+    declarations: &'a crate::source::ModuleDeclarations,
+    closure_names: &'h HashMap<FuncId, String>,
     types: &'a mut TypeTable,
     raw_sites: &'a mut Vec<Vec<&'h Expr>>,
     defined_locals: &'a mut BitSet,

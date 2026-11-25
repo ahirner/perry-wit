@@ -13,15 +13,15 @@ enum ClassReceiver<'a, 's> {
     Instance(Value),
     Constructor(
         Value,
-        &'s perry_hir::ir::Class,
+        &'s crate::source::InstanceClass<'s>,
         &'a [(&'s str, TypeHandle, Option<&'s Expr>)],
     ),
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum ClassExpansion<'s> {
-    Callable(&'s Function),
-    Fields(&'s perry_hir::ir::Class),
+    Callable(&'s Function<'s>),
+    Fields(&'s crate::source::InstanceClass<'s>),
 }
 
 impl<'s> FunctionBuilder<'s> {
@@ -63,7 +63,7 @@ impl<'s> FunctionBuilder<'s> {
         let result = lower(self, ctx);
         self.class_expansions.pop();
         result.map_err(|error| {
-            let locations = &self.shapes.metadata.locations;
+            let locations = &self.shapes.locations;
             let member_span = match expansion {
                 ClassExpansion::Callable(func) => {
                     locations.function_span(&format!("{owner_class}::{}", func.name))
@@ -81,13 +81,11 @@ impl<'s> FunctionBuilder<'s> {
         class_name: &'s str,
         args: &'s [Expr],
     ) -> Result<Value> {
-        let (&class_name, &(_, class)) = self
+        let class = self
             .shapes
-            .decls
-            .classes
-            .named
-            .get_key_value(class_name)
+            .instance_class(class_name)
             .ok_or_else(|| unsupported!("unknown class {class_name}"))?;
+        let class_name = class.name.as_str();
         let rec_ty = self.shapes.named(ctx, class_name)?;
         let rec = TypedHandle::<RecordType>::from_handle(rec_ty, ctx)
             .map_err(|_| internal!("expected class record for {class_name}"))?;
@@ -118,18 +116,18 @@ impl<'s> FunctionBuilder<'s> {
                 .all(|p| !p.is_rest && p.default.is_none())
             && ctor.body.len() == class.fields.len()
             && args.len() == class.fields.len()
+            && args.iter().all(|e| !self.erased_operand(e))
             && ctor
                 .body
                 .iter()
                 .zip(class.fields.iter().zip(&ctor.params))
                 .all(|(stmt, (field, param))| {
-                    matches!(
-                        stmt,
-                        Stmt::Expr(Expr::PropertySet { object, property, value, .. })
+                    let Stmt::Expr(expr) = stmt else { return false };
+                    matches!(expr,
+                        Expr::PropertySet { object, property, value, .. }
                             if matches!(object.as_ref(), Expr::This)
                                 && property == &field.name
-                                && matches!(value.as_ref(), Expr::LocalGet(id) if *id == param.id)
-                    )
+                                && matches!(value.as_ref(), Expr::LocalGet(id) if *id == param.id))
                 })
         {
             let mut slots = vec![None; field_defs.len()];
@@ -195,7 +193,11 @@ impl<'s> FunctionBuilder<'s> {
             )?;
         } else {
             for arg in args {
-                self.effect(ctx, arg)?;
+                if self.erased_operand(arg) {
+                    self.discard_function_operand(ctx, arg)?;
+                } else {
+                    self.effect(ctx, arg)?;
+                }
             }
             self.init_own_class_fields(ctx, class_name, class, this_slot, &initializers)?;
         }
@@ -239,15 +241,35 @@ impl<'s> FunctionBuilder<'s> {
                 "class {class_name} field {field} has no placeholder before its constructor assignment"
             );
         };
-        let val = self.expression_with(ctx, init_expr, Some(ty))?;
+        let val = self.field_initializer(ctx, class_name, init_expr, ty)?;
         Ok((self.fit(ctx, val, ty)?, true))
+    }
+
+    fn field_initializer(
+        &mut self,
+        ctx: &mut Context,
+        class: &str,
+        expr: &'s Expr,
+        ty: TypeHandle,
+    ) -> Result<Value> {
+        let owner = self
+            .shapes
+            .specialization
+            .instances
+            .class_fields
+            .get(class)
+            .and_then(|fields| fields.initializer);
+        let saved = std::mem::replace(&mut self.local_owner, owner);
+        let result = self.expression_with(ctx, expr, Some(ty));
+        self.local_owner = saved;
+        result
     }
 
     fn init_own_class_fields(
         &mut self,
         ctx: &mut Context,
         class_name: &'s str,
-        class: &'s perry_hir::ir::Class,
+        class: &'s crate::source::InstanceClass<'s>,
         this_slot: Value,
         initializers: &[(&'s str, TypeHandle, Option<&'s Expr>)],
     ) -> Result<()> {
@@ -261,7 +283,7 @@ impl<'s> FunctionBuilder<'s> {
                     let Some(init_expr) = init else {
                         continue;
                     };
-                    let val = this.expression_with(ctx, init_expr, Some(field_ty))?;
+                    let val = this.field_initializer(ctx, class_name, init_expr, field_ty)?;
                     let val = this.fit(ctx, val, field_ty)?;
                     let target = this.load(ctx, this_slot)?;
                     this.emit(ctx, |ctx| {
@@ -289,6 +311,34 @@ impl<'s> FunctionBuilder<'s> {
             .and_then(|slot| self.slot_type(ctx, slot).ok())
             .and_then(|ty| self.shapes.class_of_type(ctx, ty))
             == Some(class_name)
+    }
+
+    pub(super) fn instance_method_call(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        id: FuncId,
+    ) -> Result<Option<Value>> {
+        let &(class, function) = self
+            .shapes
+            .methods_by_id
+            .get(&id)
+            .ok_or_else(|| internal!("missing specialized class method {id}"))?;
+        let (args, receiver) = match expr {
+            Expr::StaticMethodCall { args, .. } => (args, ClassReceiver::Static),
+            Expr::Call { callee, args, .. } if let Expr::PropertyGet { object, .. } = &**callee => {
+                let value = self.expression(ctx, object)?;
+                (args, ClassReceiver::Instance(self.defined(ctx, value)?))
+            }
+            _ => bail_internal!("method invocation requires a class member"),
+        };
+        self.inline_class_callable(
+            ctx,
+            class,
+            function,
+            ClassArguments::Expressions(args),
+            receiver,
+        )
     }
 
     pub(super) fn class_static_method_call(
@@ -361,7 +411,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        func: &'s Function,
+        func: &'s Function<'s>,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
         self.inline_class_callable(
@@ -378,7 +428,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        getter: &'s Function,
+        getter: &'s Function<'s>,
     ) -> Result<Value> {
         self.inline_class_callable(
             ctx,
@@ -395,7 +445,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        setter: &'s Function,
+        setter: &'s Function<'s>,
         value: &'s Expr,
     ) -> Result<Value> {
         let [_] = setter.params.as_slice() else {
@@ -412,7 +462,7 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         receiver: Value,
         owner_class: &'s str,
-        setter: &'s Function,
+        setter: &'s Function<'s>,
         val: Value,
     ) -> Result<Value> {
         self.inline_class_callable(
@@ -429,7 +479,7 @@ impl<'s> FunctionBuilder<'s> {
         &mut self,
         ctx: &mut Context,
         owner_class: &'s str,
-        func: &'s Function,
+        func: &'s Function<'s>,
         args: ClassArguments<'_, 's>,
         receiver: ClassReceiver<'_, 's>,
     ) -> Result<Option<Value>> {
@@ -449,6 +499,12 @@ impl<'s> FunctionBuilder<'s> {
                     Ok(value)
                 }
                 ClassArguments::Expressions(expressions) => {
+                    while let Some((arg, rest)) = expressions.split_first()
+                        && this.erased_operand(arg)
+                    {
+                        this.discard_function_operand(ctx, arg)?;
+                        *expressions = rest;
+                    }
                     let Some((expr, rest)) = expressions.split_first() else {
                         return Ok(None);
                     };
@@ -523,11 +579,7 @@ impl<'s> FunctionBuilder<'s> {
                                 InlineResult::Declared(binding.carrier)
                             })
                     };
-                    this.inline_body(
-                        ctx,
-                        this.shapes.specialization.instances.function_body(func),
-                        result_type,
-                    )
+                    this.inline_body(ctx, func.body, result_type)
                 })?;
                 if let ClassReceiver::Constructor(slot, _, _) = receiver {
                     return this.load(ctx, slot).map(Some);

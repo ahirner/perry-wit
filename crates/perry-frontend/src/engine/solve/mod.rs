@@ -19,8 +19,7 @@ use super::types::{
     Ty, TyKind, TypeParamSpan, TypeTable,
 };
 use crate::{
-    Absence,
-    hir_compat::{self, Metadata},
+    Absence, hir_compat,
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
 };
@@ -138,9 +137,9 @@ struct InstanceLocalSlot {
 
 pub(crate) fn solve<'h>(
     ctx: &Context,
-    hir: &'h SourceModule,
+    hir: &'h SourceModule<'h>,
     index: &ModuleIndex<'h>,
-    metadata: &Metadata<'_>,
+
     world: &crate::wit::WorldTypes<'_>,
     types: &mut TypeTable,
 ) -> Result<Solved> {
@@ -148,10 +147,13 @@ pub(crate) fn solve<'h>(
         &hir.declarations.interfaces,
         &hir.declarations.type_aliases,
         &hir.declarations.imports,
-        &hir.bodies.classes,
+        hir.bodies
+            .classes
+            .iter()
+            .map(crate::shapes::ClassShape::Source),
         world,
     );
-    let mut solver = Solver::new(ctx, hir, index, metadata, &decls, types);
+    let mut solver = Solver::new(ctx, hir, index, &decls, types);
     let init_inst = solver.seed_roots()?;
     solver.run_worklist(init_inst)?;
     solver.verify_fixed_point()?;
@@ -162,9 +164,9 @@ pub(crate) fn solve<'h>(
 struct Solver<'h, 'a> {
     resource_registries: HashMap<LocalId, Ty>,
     ctx: &'a Context,
-    hir: &'h SourceModule,
+    hir: &'h SourceModule<'h>,
     index: &'a ModuleIndex<'h>,
-    metadata: &'a Metadata<'a>,
+
     decls: &'a Declarations<'a>,
     types: &'a mut TypeTable,
     locations: IdxVec<LocId, Ty>,
@@ -255,9 +257,9 @@ fn bump_count(counts: &mut IdxVec<TemplateId, u16>, template: TemplateId) {
 impl<'h, 'a> Solver<'h, 'a> {
     fn new(
         ctx: &'a Context,
-        hir: &'h SourceModule,
+        hir: &'h SourceModule<'h>,
         index: &'a ModuleIndex<'h>,
-        metadata: &'a Metadata<'a>,
+
         decls: &'a Declarations<'a>,
         types: &'a mut TypeTable,
     ) -> Self {
@@ -296,7 +298,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .get(c.hir_idx)
                 .map_or_else(TypeParamSpan::default, |hc| intern_tps(&hc.type_params))
         });
-        let resource_registries = metadata
+        let resource_registries = hir
             .witnesses
             .iter()
             .filter_map(|w| {
@@ -316,7 +318,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             ctx,
             hir,
             index,
-            metadata,
             decls,
             types,
             reader_ends: locations.filled(0),
@@ -333,7 +334,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             worklist_head: 0,
             queued: BitSet::default(),
             instances: IdxVec::default(),
-            witness_instances: Vec::with_capacity(metadata.witnesses.len()),
+            witness_instances: Vec::with_capacity(hir.witnesses.len()),
             instance_index: HashMap::with_capacity(64),
             template_counts: index.views.filled(0),
             param_locs: Pool::default(),
@@ -463,7 +464,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
             }
-            CallbackCall::ThrowTypeError(_) => {}
+            CallbackCall::ThrowTypeError => {}
         }
     }
 
@@ -763,7 +764,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 _ => raw_actual,
             };
             if !self.types.accepts(contract.expected, actual) {
-                return Err(self.metadata.locations.annotate_call(
+                return Err(self.hir.locations.annotate_call(
                     diag!(
                         codes::TYPE_MISMATCH,
                         "callback result does not match the declared result of parameter '{}'",

@@ -27,12 +27,6 @@ impl<'s> FunctionBuilder<'s> {
         if let Expr::ClassRef(class_name) = object {
             return self.class_static_method_call(ctx, class_name, method.name(), args);
         }
-        if method == hir_compat::Method::Iteration && matches!(object, Expr::UrlSearchParamsNew(_))
-        {
-            bail_unsupported!(
-                "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
-            );
-        }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
         if let Some(resource) =
@@ -46,17 +40,6 @@ impl<'s> FunctionBuilder<'s> {
             ) {
                 return self.resource_call(ctx, member, Some(receiver), args);
             }
-        }
-        if method == hir_compat::Method::Iteration {
-            ensure_unsupported!(
-                matches!(kind(ctx, receiver)?, Kind::Array | Kind::String)
-                    || crate::lower::collections::is_collection_or_view_record(
-                        ctx,
-                        receiver.get_type(ctx)
-                    ),
-                "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
-            );
-            return Ok(Some(receiver));
         }
         if let Some(class_name) = self.shapes.class_of_type(ctx, receiver.get_type(ctx))
             && let Some((owner_class, func)) = self.shapes.class_method(class_name, method.name())
@@ -91,9 +74,7 @@ impl<'s> FunctionBuilder<'s> {
         Ok({
             let search_val = self.expression(ctx, search)?;
             let search_val = self.defined(ctx, search_val)?;
-            if matches!(replacement, Expr::Closure { .. } | Expr::FuncRef(_))
-                || self.shapes.bound_callback(replacement).is_some()
-            {
+            if self.is_callback(replacement) {
                 return self
                     .replace_callback(ctx, receiver, search_val, replacement, all)
                     .map(Some);

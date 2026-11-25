@@ -37,16 +37,8 @@ pub fn lower_world(
     world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
 ) -> Result<LoweredProgram> {
     let loaded = modules::load(source, identity, sources, types.foreign())?;
-    let mut lowered = hir_compat::lower(loaded, identity, world)?;
-    let (declarations, specialization) =
-        engine::run_engine(ctx, lowered.module, &mut lowered.metadata, types)?;
-    lower::program::build_module(
-        ctx,
-        &declarations,
-        types,
-        &mut lowered.metadata,
-        &specialization,
-    )
+    let source = hir_compat::lower(loaded, identity, world)?;
+    engine::lower_module(ctx, source, types)
 }
 
 pub(crate) fn is_identifier(name: &str) -> bool {

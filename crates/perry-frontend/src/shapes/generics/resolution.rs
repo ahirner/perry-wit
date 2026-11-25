@@ -94,7 +94,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
             .chain(
                 class
                     .into_iter()
-                    .flat_map(|c| c.fields.iter().map(|f| (&f.name, &f.ty, false))),
+                    .flat_map(|c| c.fields().map(|f| (&f.name, &f.ty, false))),
             );
         for (name, ty, optional) in fields {
             let ty = substitute(self.ctx, self.types, ty, bindings, &mut remaining).ok()?;

@@ -14,19 +14,23 @@ pub(crate) fn is_writable_to_web(expr: &perry_hir::ir::Expr) -> bool {
     } if matches!(module.as_str(), "stream" | "node:stream") && class == "Writable" && method == "toWeb")
 }
 
-/// The synthetic method a synchronous `for...of` calls on its source: lowering checks that
-/// the receiver is an array or string and yields it unchanged.
-pub(super) const ITERATION: &str = "$$perryIteration";
-
-/// Rewrite every `for...of` and `for await...of` into the indexed or reader loop it means.
-pub(super) fn lower(module: &mut ast::Module, names: &mut FreshNames) -> Result<()> {
-    let mut lower = Loops { names, error: None };
+/// Keep the iteration source, binding pattern, and body together through lexical name resolution.
+pub(super) fn lower(
+    module: &mut ast::Module,
+    names: &mut FreshNames,
+) -> Result<HashSet<swc_common::Span>> {
+    let mut lower = Loops {
+        names,
+        bindings: HashSet::new(),
+        error: None,
+    };
     module.visit_mut_with(&mut lower);
-    lower.error.map_or(Ok(()), Err)
+    lower.error.map_or(Ok(lower.bindings), Err)
 }
 
 struct Loops<'n> {
     names: &'n mut FreshNames,
+    bindings: HashSet<swc_common::Span>,
     error: Option<Diagnostic>,
 }
 
@@ -95,35 +99,21 @@ impl Loops<'_> {
                 try_finally(read_loop.into(), cleanup),
             ]
         } else {
-            let items = ident("items");
-            let index = ident("index");
-            let source = method(source, ITERATION)
-                .into_var_decl(ast::VarDeclKind::Const, items.clone().into());
-            let init = 0.0.into_var_decl(ast::VarDeclKind::Let, index.clone().into());
-            let test = index.clone().make_bin(
-                ast::BinaryOp::Lt,
-                items.clone().make_member("length".into()),
-            );
-            let item = items
-                .computed_member(index.clone())
-                .into_var_decl(kind, binding);
-            let update = ast::UpdateExpr {
-                span: DUMMY_SP,
-                op: ast::UpdateOp::PlusPlus,
-                prefix: false,
-                arg: index.into(),
-            };
-            vec![
-                source.into(),
-                ast::ForStmt {
-                    span: DUMMY_SP,
-                    init: Some(ast::VarDeclOrExpr::VarDecl(Box::new(init))),
-                    test: Some(test.into()),
-                    update: Some(update.into()),
-                    body: Box::new(block(vec![item.into(), body]).into()),
-                }
-                .into(),
-            ]
+            // Perry resolves the lexical scope and destructuring pattern. MIR supplies
+            // the current element and owns the loop bounds, cursor, and control flow.
+            let element =
+                ast::Ident::new_no_ctxt(format!("{prefix}element").into(), iteration.span);
+            self.bindings.insert(iteration.span);
+            let init = source.into_var_decl(ast::VarDeclKind::Const, element.clone().into());
+            let item = element.into_var_decl(kind, binding);
+            return Ok(ast::ForStmt {
+                span: iteration.span,
+                init: Some(ast::VarDeclOrExpr::VarDecl(Box::new(init))),
+                test: None,
+                update: None,
+                body: Box::new(block(vec![item.into(), body]).into()),
+            }
+            .into());
         };
         Ok(ast::BlockStmt {
             span: iteration.span,

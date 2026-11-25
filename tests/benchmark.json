@@ -53,7 +53,7 @@
     "helper_functions": 111,
     "optimization": {
       "cleanup_rounds": 5,
-      "constraint_visits": 126,
+      "constraint_visits": 124,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -402,13 +402,13 @@
   },
   {
     "workload": "example: merge_task",
-    "bytes": 20635,
-    "core_bytes": 20243,
+    "bytes": 21344,
+    "core_bytes": 20952,
     "defined_functions": 57,
-    "helper_functions": 50,
+    "helper_functions": 51,
     "optimization": {
-      "cleanup_rounds": 5,
-      "constraint_visits": 322,
+      "cleanup_rounds": 4,
+      "constraint_visits": 269,
       "numeric_contexts": 3,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,

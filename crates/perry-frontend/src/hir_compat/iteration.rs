@@ -147,33 +147,6 @@ impl Iteration {
         matches!(expr, Expr::LocalSet(id, value) if self.released.contains(id) && matches!(&**value, Expr::Undefined))
     }
 
-    pub(crate) fn for_of_loop(&self, condition: Option<&Expr>) -> Option<(LocalId, LocalId)> {
-        let Some(Expr::Compare {
-            op: CompareOp::Lt,
-            left,
-            right,
-        }) = condition
-        else {
-            return None;
-        };
-        let (
-            Expr::LocalGet(index),
-            Expr::PropertyGet {
-                object, property, ..
-            },
-        ) = (left.as_ref(), right.as_ref())
-        else {
-            return None;
-        };
-        if property != "length" {
-            return None;
-        }
-        let Expr::LocalGet(items) = object.as_ref() else {
-            return None;
-        };
-        Some((*index, *items))
-    }
-
     pub(crate) fn element<'a>(&self, statements: &'a [Stmt]) -> Option<Element<'a>> {
         let [
             Stmt::Let {
@@ -214,14 +187,16 @@ impl Iteration {
         }
         let indexed = pull.iter().find_map(|statement| match statement {
             Stmt::Let {
-                init:
-                    Some(Expr::Conditional {
-                        condition,
-                        else_expr,
-                        ..
-                    }),
+                init: Some(init), ..
+            } if let Expr::Conditional {
+                condition,
+                else_expr,
                 ..
-            } if self.is_guard(condition) => Some(&**else_expr),
+            } = init
+                && self.is_guard(condition) =>
+            {
+                Some(&**else_expr)
+            }
             _ => None,
         })?;
         let (success, test) = match indexed {

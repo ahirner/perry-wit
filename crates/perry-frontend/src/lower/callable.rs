@@ -1,38 +1,18 @@
 //! MIR representations and operations for finite sets of function identities.
 use super::*;
+use crate::engine::types::{FuncIdentity, Idx, Ty, TyKind, func_tag};
 use crate::engine::{CallbackOperand, NativeCallback};
-use crate::engine::{
-    solve::CallableOp,
-    types::{FuncIdentity, Idx, Ty, TyKind, func_tag},
-};
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Callback<'s> {
     Source(&'s Expr),
-    Lexical(&'s Function, &'s Signature<'s>),
+    Function(FuncId),
+    Lexical(&'s Function<'s>, &'s Signature<'s>),
     Bound(&'s crate::engine::CallbackBinding, Value),
 }
 
 impl<'s> Shapes<'s> {
-    pub(super) fn bound_callback(
-        &self,
-        expr: &'s Expr,
-    ) -> Option<(&'s crate::engine::CallbackBinding, &'s Expr)> {
-        let Expr::Call { callee, args, .. } = expr else {
-            return None;
-        };
-        let (Expr::FuncRef(id), [value]) = (&**callee, args.as_slice()) else {
-            return None;
-        };
-        let crate::engine::NativeOperation::Callback(plan) =
-            self.specialization.instances.operations.get(id)?
-        else {
-            return None;
-        };
-        Some((plan, value))
-    }
-
     fn callable_environment(
         &self,
         ctx: &Context,
@@ -111,26 +91,27 @@ impl<'s> FunctionBuilder<'s> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Callback<'s>> {
-        if let Expr::FuncRef(id) = expr
-            && self
-                .shapes
-                .specialization
-                .instances
-                .inline_callbacks
-                .get(id)
-                == Some(&crate::engine::solve::Invocation::Lexical)
+        let plans = &self.shapes.specialization.instances;
+        if let Some(binding) = plans
+            .callbacks
+            .get(&(self.local_owner, std::ptr::from_ref(expr).addr()))
         {
-            let signature = self.signature(*id)?;
-            let function = signature
-                .inline
-                .ok_or_else(|| internal!("missing lexical callback body"))?;
-            return Ok(Callback::Lexical(function, signature));
+            return Ok(Callback::Bound(binding, self.expression(ctx, expr)?));
         }
-        let expr = self.shapes.callable(expr);
-        Ok(match self.shapes.bound_callback(expr) {
-            Some((plan, expr)) => Callback::Bound(plan, self.expression(ctx, expr)?),
-            None => Callback::Source(expr),
-        })
+        if let Some(id) = plans.reference(self.local_owner, expr) {
+            if plans.inline_callbacks.get(&id) == Some(&crate::engine::solve::Invocation::Lexical) {
+                let signature = self.signature(id)?;
+                let function = signature
+                    .inline
+                    .ok_or_else(|| internal!("missing lexical callback body"))?;
+                return Ok(Callback::Lexical(function, signature));
+            }
+            if let Some(expr) = self.shapes.lexical_functions.get(&id) {
+                return Ok(Callback::Source(expr));
+            }
+            return Ok(Callback::Function(id));
+        }
+        Ok(Callback::Source(expr))
     }
 
     pub(super) fn invoke_callback(
@@ -259,86 +240,83 @@ impl<'s> FunctionBuilder<'s> {
         Ok(())
     }
 
-    pub(super) fn callable_operation(
+    pub(super) fn raise_non_callable(&mut self, ctx: &mut Context) -> Value {
+        self.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
+        let ty = void_type(ctx);
+        let never = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
+        self.never_values.insert(never);
+        never
+    }
+    pub(super) fn callable_typeof(
         &mut self,
         ctx: &mut Context,
-        operation: CallableOp,
-        args: &'s [Expr],
+        operand: &'s Expr,
+        ty: Ty,
     ) -> Result<Value> {
-        match (operation, args) {
-            (CallableOp::ThrowTypeError, []) => {
-                self.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
-                let ty = void_type(ctx);
-                let never = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
-                self.never_values.insert(never);
-                Ok(never)
+        let value = self.callable_operand(ctx, operand, ty)?;
+        let result = StringType::get(ctx).into();
+        let done = self.result_block(ctx, result);
+        for (null, label) in [(true, "object"), (false, "undefined")] {
+            if let Some(test) = self.sentinel_test(ctx, value, null) {
+                let label = self.string(ctx, label);
+                self.yield_if(ctx, done, test, label);
             }
-            (CallableOp::TypeOfFn(ty), [operand]) => {
-                let value = self.callable_operand(ctx, operand, ty)?;
-                let result = StringType::get(ctx).into();
-                let done = self.result_block(ctx, result);
-                for (null, label) in [(true, "object"), (false, "undefined")] {
-                    if let Some(test) = self.sentinel_test(ctx, value, null) {
-                        let label = self.string(ctx, label);
-                        self.yield_if(ctx, done, test, label);
-                    }
-                }
-                let label = self.string(ctx, "function");
-                Ok(self.finish_result(ctx, done, label))
-            }
-            (CallableOp::Widener { from, to }, [operand]) => {
-                let value = self.callable_operand(ctx, operand, from)?;
-                self.widen_function(ctx, value, from, to)
-            }
-            (CallableOp::Comparer { left_ty, right_ty }, [a, b]) => {
-                let left = self.callable_operand(ctx, a, left_ty)?;
-                let right = self.callable_operand(ctx, b, right_ty)?;
-                let no = self.boolean(ctx, false);
-                let done = self.result_block(ctx, no.get_type(ctx));
-                for null in [true, false] {
-                    let left_absent = self.sentinel_test(ctx, left, null);
-                    let right_absent = self.sentinel_test(ctx, right, null);
-                    if let Some(test) = left_absent {
-                        self.yield_if(ctx, done, test, right_absent.unwrap_or(no));
-                    }
-                    if let Some(test) = right_absent {
-                        self.yield_if(ctx, done, test, no);
-                    }
-                }
-                let types = self.shapes.specialization.types.borrow();
-                let shared = types
-                    .func_members(&left_ty)
-                    .filter(|id| types.func_members(&right_ty).any(|other| other == *id))
-                    .collect::<Vec<_>>();
-                drop(types);
-                if !shared.is_empty() {
-                    let left = self.defined(ctx, left)?;
-                    let right = self.defined(ctx, right)?;
-                    let string = StringType::get(ctx).into();
-                    let left_tag = self.callable_field(ctx, left, "tag", string)?;
-                    let right_tag = self.callable_field(ctx, right, "tag", string)?;
-                    let differ = self.compare(ctx, CompareKind::Ne, left_tag, right_tag);
-                    self.yield_if(ctx, done, differ, no);
-                    for identity in shared {
-                        let wanted = self.string(ctx, &func_tag(identity));
-                        let test = self.compare(ctx, CompareKind::Eq, left_tag, wanted);
-                        let next = self.enter_case(ctx, test);
-                        let equal =
-                            if let Some(env) = self.shapes.callable_environment(ctx, identity)? {
-                                let l = self.callable_field(ctx, left, "val", env)?;
-                                let r = self.callable_field(ctx, right, "val", env)?;
-                                self.compare(ctx, CompareKind::Eq, l, r)
-                            } else {
-                                self.boolean(ctx, true)
-                            };
-                        self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![equal]));
-                        self.switch_to(next);
-                    }
-                }
-                Ok(self.finish_result(ctx, done, no))
-            }
-            _ => bail_internal!("invalid operands for solved function operation"),
         }
+        let label = self.string(ctx, "function");
+        Ok(self.finish_result(ctx, done, label))
+    }
+    pub(super) fn compare_callables(
+        &mut self,
+        ctx: &mut Context,
+        a: &'s Expr,
+        b: &'s Expr,
+        left_ty: Ty,
+        right_ty: Ty,
+    ) -> Result<Value> {
+        let left = self.callable_operand(ctx, a, left_ty)?;
+        let right = self.callable_operand(ctx, b, right_ty)?;
+        let no = self.boolean(ctx, false);
+        let done = self.result_block(ctx, no.get_type(ctx));
+        for null in [true, false] {
+            let left_absent = self.sentinel_test(ctx, left, null);
+            let right_absent = self.sentinel_test(ctx, right, null);
+            if let Some(test) = left_absent {
+                self.yield_if(ctx, done, test, right_absent.unwrap_or(no));
+            }
+            if let Some(test) = right_absent {
+                self.yield_if(ctx, done, test, no);
+            }
+        }
+        let types = self.shapes.specialization.types.borrow();
+        let shared = types
+            .func_members(&left_ty)
+            .filter(|id| types.func_members(&right_ty).any(|other| other == *id))
+            .collect::<Vec<_>>();
+        drop(types);
+        if !shared.is_empty() {
+            let left = self.defined(ctx, left)?;
+            let right = self.defined(ctx, right)?;
+            let string = StringType::get(ctx).into();
+            let left_tag = self.callable_field(ctx, left, "tag", string)?;
+            let right_tag = self.callable_field(ctx, right, "tag", string)?;
+            let differ = self.compare(ctx, CompareKind::Ne, left_tag, right_tag);
+            self.yield_if(ctx, done, differ, no);
+            for identity in shared {
+                let wanted = self.string(ctx, &func_tag(identity));
+                let test = self.compare(ctx, CompareKind::Eq, left_tag, wanted);
+                let next = self.enter_case(ctx, test);
+                let equal = if let Some(env) = self.shapes.callable_environment(ctx, identity)? {
+                    let l = self.callable_field(ctx, left, "val", env)?;
+                    let r = self.callable_field(ctx, right, "val", env)?;
+                    self.compare(ctx, CompareKind::Eq, l, r)
+                } else {
+                    self.boolean(ctx, true)
+                };
+                self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![equal]));
+                self.switch_to(next);
+            }
+        }
+        Ok(self.finish_result(ctx, done, no))
     }
 
     pub(super) fn widen_function(

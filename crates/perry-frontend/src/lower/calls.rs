@@ -6,7 +6,7 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn signature(&self, id: FuncId) -> Result<&'s Signature<'s>> {
         self.signatures
             .get(&id)
-            .ok_or_else(|| self.shapes.metadata.locations.missing_function(id))
+            .ok_or_else(|| self.shapes.locations.missing_function(id))
     }
 
     /// Bind an argument, evaluating its default only when omitted or undefined.
@@ -64,15 +64,6 @@ impl<'s> FunctionBuilder<'s> {
         }
         self.locals
             .insert(param.id, LocalBinding::slot(slot, binding, is_never));
-        if self
-            .shapes
-            .specialization
-            .instances
-            .receiver_parameters
-            .contains(&param.id)
-        {
-            self.this_slot = Some(slot);
-        }
         if let Some(owner) = self.local_owner
             && let Some(&ty) = self
                 .shapes
@@ -89,20 +80,222 @@ impl<'s> FunctionBuilder<'s> {
             self.locals
                 .insert(param.id, binding.captured(payload, false));
         }
-        if let Some(captures) = self.shapes.specialization.instances.captures.get(&param.id) {
-            let environment = self.load(ctx, slot)?;
-            for capture in captures {
-                let value = self.record_field(ctx, environment, &capture.field)?;
-                let mut binding = self.initialized_local(ctx, value);
-                if let crate::engine::Storage::Boxed { ty, init } = capture.storage {
-                    let deferred = init.admits_undefined();
-                    let (_, payload) = self.shapes.box_layout(ctx, ty, deferred)?;
-                    binding = binding.captured(payload, deferred);
-                }
-                self.locals.insert(capture.local, binding);
+        Ok(())
+    }
+
+    pub(super) fn bind_argument(
+        &mut self,
+        ctx: &mut Context,
+        param: &program::ParamSig<'s>,
+        value: Value,
+    ) -> Result<()> {
+        match param.origin {
+            program::Parameter::Source(_, source) => {
+                let binding = if matches!(param.default(), Some((_, expr)) if !matches!(expr, Expr::Undefined))
+                {
+                    param.base
+                } else {
+                    param.binding
+                };
+                return self.bind_parameter(ctx, source, Some(value), binding, param.is_never);
             }
+            program::Parameter::Receiver => {
+                self.this_slot = Some(self.initialized_local(ctx, value).slot);
+            }
+            program::Parameter::Environment(identity) => {
+                for field in &self.shapes.specialization.instances.environments[&identity] {
+                    let &crate::engine::EnvironmentField::Capture {
+                        local, ty, cell, ..
+                    } = field
+                    else {
+                        continue;
+                    };
+                    let captured = self.record_field(ctx, value, field.name())?;
+                    let mut binding = self.initialized_local(ctx, captured);
+                    if let Some(init) = cell {
+                        let deferred = init.admits_undefined();
+                        let (_, payload) = self.shapes.box_layout(ctx, ty, deferred)?;
+                        binding = binding.captured(payload, deferred);
+                    }
+                    self.locals.insert(local, binding);
+                }
+            }
+            program::Parameter::Native => bail_internal!("native argument in source function"),
         }
         Ok(())
+    }
+    pub(super) fn invoke_site(
+        &mut self,
+        ctx: &mut Context,
+        site: crate::engine::InvocationSite,
+        callee: &'s Expr,
+        args: &'s [Expr],
+    ) -> Result<Option<Value>> {
+        use crate::engine::CallbackOperand;
+        let signature = self.signature(site.target)?;
+        let (receiver, callable) = match callee {
+            Expr::PropertyGet {
+                object,
+                property,
+                byte_offset,
+                ..
+            } if site.receiver => {
+                let receiver = self.expression(ctx, object)?;
+                let callable = if site.operand == CallbackOperand::None {
+                    None
+                } else {
+                    Some(self.property_of_value(ctx, object, receiver, property, *byte_offset)?)
+                };
+                (Some(receiver), callable)
+            }
+            _ if site.operand == CallbackOperand::None => {
+                if !crate::source::is_pure_func_expr(callee) {
+                    let operand = match callee {
+                        Expr::PropertyGet { object, .. } => object.as_ref(),
+                        other => other,
+                    };
+                    self.effect(ctx, operand)?;
+                }
+                (None, None)
+            }
+            _ => (None, Some(self.expression(ctx, callee)?)),
+        };
+        let callable = match (site.operand, callable) {
+            (CallbackOperand::Environment, Some(wrapper)) => {
+                let wrapper = self.defined(ctx, wrapper)?;
+                Some(self.record_field(ctx, wrapper, "val")?)
+            }
+            (_, value) => value,
+        };
+        self.invoke_arguments(
+            ctx,
+            signature,
+            callable.into_iter().chain(receiver),
+            args,
+            Some(site.argument_types),
+        )
+    }
+
+    fn invoke_arguments(
+        &mut self,
+        ctx: &mut Context,
+        signature: &'s Signature<'s>,
+        implicit: impl Iterator<Item = Value>,
+        args: &'s [Expr],
+        argument_types: Option<crate::engine::types::Ty>,
+    ) -> Result<Option<Value>> {
+        let (fixed, rest) = signature.parameters();
+        let mut values = Vec::with_capacity(signature.params.len());
+        for value in implicit {
+            let param = fixed
+                .get(values.len())
+                .ok_or_else(|| internal!("missing implicit call parameter"))?;
+            values.push(self.fixed_value(ctx, param, value)?);
+        }
+        let callee_name = self
+            .shapes
+            .locations
+            .display_function_name(signature.name.as_ref());
+        let rest_element = rest
+            .map(|p| Self::rest_element_type(ctx, p.binding.carrier))
+            .transpose()?;
+        let mut items = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            let pass = argument_types.is_none_or(|argument_types| {
+                let facts = self.shapes.specialization;
+                let types = facts.types.borrow();
+                types.tuple_slice(argument_types).get(index).is_some_and(|&ty| {
+                    !matches!(types.kind(ty), crate::engine::types::TyKind::Func(identity) if !facts.escaping_envs.contains(crate::engine::types::Idx::index(identity.template)))
+                })
+            });
+            if !pass {
+                self.discard_function_operand(ctx, arg)?;
+                continue;
+            }
+            let position = values.len() + items.len() + 1;
+            let argument_error = |error: Diagnostic| {
+                error.with_note(format!("in argument {position} of '{callee_name}'"))
+            };
+            if let Some(param) = fixed.get(values.len()) {
+                values.push(
+                    self.bind_fixed_arg(ctx, param, Some(arg))
+                        .map_err(argument_error)?,
+                );
+            } else if let Some(element) = rest_element {
+                let value = self.expression_with(ctx, arg, Some(element))?;
+                items.push(self.fit(ctx, value, element).map_err(argument_error)?);
+            } else {
+                bail_diag!(
+                    codes::TYPE_MISMATCH,
+                    "call to {callee_name} with {position} arguments, expected {}",
+                    fixed.len()
+                );
+            }
+        }
+        for (index, param) in fixed.iter().enumerate().skip(values.len()) {
+            values.push(self.bind_fixed_arg(ctx, param, None).map_err(|error| {
+                error.with_note(format!("in argument {} of '{callee_name}'", index + 1))
+            })?);
+        }
+        if let Some(element) = rest_element {
+            values.push(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)));
+        }
+        self.emit_signature_call(ctx, signature, values)
+    }
+
+    pub(super) fn async_call(
+        &mut self,
+        ctx: &mut Context,
+        plan: crate::engine::AsyncCall,
+        callee: &'s Expr,
+        args: &'s [Expr],
+    ) -> Result<Option<Value>> {
+        match plan {
+            crate::engine::AsyncCall::StartTimer(runner) => {
+                self.start_timer(ctx, runner, args).map(Some)
+            }
+            crate::engine::AsyncCall::ClearTimer { has_handle } => {
+                let mut handle = None;
+                for (i, arg) in args.iter().enumerate() {
+                    if i == 0 && has_handle {
+                        handle = Some(self.expression(ctx, arg)?);
+                    } else {
+                        self.discard_function_operand(ctx, arg)?;
+                    }
+                }
+                if let Some(handle) = handle {
+                    self.clear_timer(ctx, handle)?;
+                }
+                Ok(None)
+            }
+            crate::engine::AsyncCall::Reaction { target, passed } => {
+                let Expr::PropertyGet { object, .. } = callee else {
+                    bail_internal!("reaction requires a promise receiver")
+                };
+                let signature = self.signature(target)?;
+                let mut params = signature.params.iter();
+                let mut values = vec![
+                    self.bind_fixed_arg(
+                        ctx,
+                        params
+                            .next()
+                            .ok_or_else(|| internal!("missing promise receiver"))?,
+                        Some(object),
+                    )?,
+                ];
+                for (i, arg) in args.iter().enumerate() {
+                    if passed.get(i) == Some(&true) {
+                        let param = params
+                            .next()
+                            .ok_or_else(|| internal!("missing reaction parameter"))?;
+                        values.push(self.bind_fixed_arg(ctx, param, Some(arg))?);
+                    } else {
+                        self.discard_function_operand(ctx, arg)?;
+                    }
+                }
+                self.emit_signature_call(ctx, signature, values)
+            }
+        }
     }
     pub(super) fn call(
         &mut self,
@@ -110,15 +303,10 @@ impl<'s> FunctionBuilder<'s> {
         callee: &'s Expr,
         args: &'s [Expr],
         span: std::ops::Range<u32>,
-        expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
         let byte_offset = span.start;
         if let Expr::IndexGet { object, .. } = callee
-            && self
-                .shapes
-                .metadata
-                .locations
-                .calls_dispose(span.start, span.end)
+            && self.shapes.locations.calls_dispose(span.start, span.end)
         {
             let receiver = self.expression(ctx, object)?;
             let receiver = self.defined(ctx, receiver)?;
@@ -365,116 +553,22 @@ impl<'s> FunctionBuilder<'s> {
                 ),
             });
         };
-        if let Some(operation) = self.shapes.specialization.instances.operations.get(id) {
-            return match operation {
-                crate::engine::NativeOperation::Callback(_) => {
-                    bail_internal!("expected a callback invocation")
-                }
-                crate::engine::NativeOperation::Expression(op) => {
-                    self.solved_expression(ctx, *op, args, expected)
-                }
-                crate::engine::NativeOperation::Callable(op) => {
-                    self.callable_operation(ctx, *op, args).map(Some)
-                }
-            };
-        }
         let signature = self.signature(*id)?;
-        let callee_name = self
-            .shapes
-            .metadata
-            .locations
-            .display_function_name(signature.name.as_ref());
-        let (fixed, rest) = signature.parameters();
-        ensure_diag!(
-            rest.is_some() || args.len() <= fixed.len(),
-            codes::TYPE_MISMATCH,
-            "call to {callee_name} with {} arguments, expected {}",
-            args.len(),
-            fixed.len()
-        );
-        let mut values = Vec::with_capacity(signature.params.len());
-        for (i, param) in fixed.iter().enumerate() {
-            values.push(
-                self.bind_fixed_arg(ctx, param, args.get(i))
-                    .map_err(|err| {
-                        err.with_note(format!("in argument {} of '{callee_name}'", i + 1))
-                    })?,
+        if let (fixed, None) = signature.parameters()
+            && args.len() > fixed.len()
+        {
+            let name = self
+                .shapes
+                .locations
+                .display_function_name(signature.name.as_ref());
+            bail_diag!(
+                codes::TYPE_MISMATCH,
+                "call to {name} with {} arguments, expected {}",
+                args.len(),
+                fixed.len()
             );
         }
-        if let Some(rest) = rest {
-            let element = Self::rest_element_type(ctx, rest.binding.carrier)?;
-            let mut items = Vec::with_capacity(args.len().saturating_sub(fixed.len()));
-            for (offset, arg) in args.iter().skip(fixed.len()).enumerate() {
-                let value = self.expression_with(ctx, arg, Some(element))?;
-                items.push(self.fit(ctx, value, element).map_err(|err| {
-                    err.with_note(format!(
-                        "in argument {} of '{callee_name}'",
-                        fixed.len() + offset + 1
-                    ))
-                })?);
-            }
-            values.push(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)));
-        }
-        self.emit_signature_call(ctx, signature, values)
-    }
-
-    fn solved_expression(
-        &mut self,
-        ctx: &mut Context,
-        operation: crate::engine::ExpressionOp,
-        args: &'s [Expr],
-        expected: Option<TypeHandle>,
-    ) -> Result<Option<Value>> {
-        use crate::engine::ExpressionOp;
-        match (operation, args) {
-            (ExpressionOp::Function { identity, target }, args) => {
-                let target = self.shapes.resolved_binding(ctx, target)?.carrier;
-                let payload = match args {
-                    [] => None,
-                    [source] => {
-                        let value = self.expression(ctx, source)?;
-                        let env = self.shapes.environment_type(ctx, identity)?;
-                        Some(self.callable_field(ctx, value, "val", env)?)
-                    }
-                    _ => bail_internal!("invalid function environment"),
-                };
-                self.function_value(ctx, identity, payload, Some(expected.unwrap_or(target)))
-                    .map(Some)
-            }
-            (
-                ExpressionOp::Matches {
-                    identity,
-                    source,
-                    equal,
-                },
-                [arg],
-            ) => self
-                .matches_function(ctx, arg, source, identity, equal)
-                .map(Some),
-            (ExpressionOp::Expected(ty), [value]) => {
-                let slot = match expected {
-                    Some(slot) if crate::lower::value_unions::is_value_union(ctx, slot) => slot,
-                    _ => self.shapes.resolved_binding(ctx, ty)?.carrier,
-                };
-                self.expression_with(ctx, value, Some(slot)).map(Some)
-            }
-            (
-                ExpressionOp::Promise {
-                    settled,
-                    executor,
-                    handles,
-                },
-                args,
-            ) => self
-                .new_promise(ctx, settled, executor, handles, args)
-                .map(Some),
-            (ExpressionOp::StartTimer(id), args) => self.start_timer(ctx, id, args).map(Some),
-            (ExpressionOp::ClearTimer, [handle]) => {
-                self.clear_timer(ctx, handle)?;
-                Ok(None)
-            }
-            _ => bail_internal!("invalid operands for specialized expression"),
-        }
+        self.invoke_arguments(ctx, signature, std::iter::empty(), args, None)
     }
 
     pub(super) fn rest_element_type(ctx: &Context, carrier: TypeHandle) -> Result<TypeHandle> {
@@ -502,9 +596,11 @@ impl<'s> FunctionBuilder<'s> {
         if admits_undefined(ctx, carrier) {
             return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier)));
         }
-        if let Some(default) = param.default {
-            let value = self.expression_with(ctx, default, Some(carrier))?;
-            return self.fit(ctx, value, carrier);
+        if let Some((owner, default)) = param.default() {
+            let saved = self.local_owner.replace(owner);
+            let value = self.expression_with(ctx, default, Some(carrier));
+            self.local_owner = saved;
+            return self.fit(ctx, value?, carrier);
         }
         bail_diag!(codes::TYPE_MISMATCH, "missing required argument")
     }
@@ -536,21 +632,15 @@ impl<'s> FunctionBuilder<'s> {
             );
             self.inline_functions.push(function.id);
             let result = self.with_inline_scope(ctx, function.id, self.this_slot, |this, ctx| {
-                for ((param, source), value) in
-                    signature.params.iter().zip(&function.params).zip(values)
-                {
-                    this.bind_parameter(ctx, source, Some(value), param.binding, param.is_never)?;
+                for (param, value) in signature.params.iter().zip(values) {
+                    this.bind_argument(ctx, param, value)?;
                 }
                 let result = signature
                     .result
                     .map_or(crate::lower::inline::InlineResult::Void, |ty| {
                         crate::lower::inline::InlineResult::Declared(ty.carrier)
                     });
-                let slot = this.inline_body(
-                    ctx,
-                    this.shapes.specialization.instances.function_body(function),
-                    result,
-                )?;
+                let slot = this.inline_body(ctx, function.body, result)?;
                 slot.map(|slot| this.load(ctx, slot)).transpose()
             });
             self.inline_functions.pop();

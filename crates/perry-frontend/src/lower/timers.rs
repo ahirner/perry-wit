@@ -14,10 +14,37 @@ impl<'s> FunctionBuilder<'s> {
             .params
             .split_first()
             .ok_or_else(|| internal!("missing timer handle parameter"))?;
+        let Some(crate::engine::NativeBody::Timer { kind, callback }) = self
+            .shapes
+            .specialization
+            .instances
+            .functions
+            .get(&id)
+            .map(|runner| &runner.body)
+        else {
+            bail_internal!("expected a timer runner")
+        };
+        let (callback_arg, remaining) = args
+            .split_first()
+            .ok_or_else(|| internal!("missing timer callback"))?;
+        let retained = if callback.takes_value() {
+            args
+        } else {
+            self.discard_function_operand(ctx, callback_arg)?;
+            remaining
+        };
+        let default_delay = *kind != TimerKind::Immediate && remaining.is_empty();
         ensure_internal!(
-            args.len() == params.len(),
+            retained.len() + usize::from(default_delay) == params.len(),
             "timer runner argument count mismatch"
         );
+        let mut operands = Vec::with_capacity(signature.params.len());
+        for (param, arg) in params.iter().zip(retained) {
+            operands.push(self.bind_fixed_arg(ctx, param, Some(arg))?);
+        }
+        if default_delay {
+            operands.push(self.number(ctx, 0.0));
+        }
         let controller = self.intrinsic(ctx, Intrinsic::AbortNew, vec![]);
         let cancelled = self.boolean(ctx, false);
         let record = perry_mir::typed::<RecordType>(ctx, handle.binding.carrier)
@@ -25,20 +52,16 @@ impl<'s> FunctionBuilder<'s> {
         let timer = self.emit_value(ctx, |ctx| {
             AllocOp::new(ctx, record, vec![cancelled, controller])
         });
-        let mut values = vec![timer];
-        for (param, arg) in params.iter().zip(args) {
-            values.push(self.bind_fixed_arg(ctx, param, Some(arg))?);
-        }
-        self.emit_signature_call(ctx, signature, values)?;
+        operands.insert(0, timer);
+        self.emit_signature_call(ctx, signature, operands)?;
         Ok(timer)
     }
 
-    pub(super) fn clear_timer(&mut self, ctx: &mut Context, handle: &'s Expr) -> Result<()> {
+    pub(super) fn clear_timer(&mut self, ctx: &mut Context, operand: Value) -> Result<()> {
         let ty = self
             .shapes
             .resolved_binding(ctx, crate::engine::types::Ty::TIMER)?
             .carrier;
-        let operand = self.expression(ctx, handle)?;
         let done = self.new_block(ctx, "timer_cleared");
         if absence(ctx, operand.get_type(ctx)).is_some() {
             let present = self.truthy(ctx, operand)?;

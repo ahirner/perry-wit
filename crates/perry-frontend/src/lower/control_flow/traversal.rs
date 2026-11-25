@@ -18,6 +18,8 @@ pub(crate) struct Span {
 }
 pub(crate) enum Input {
     Array(Value, Holes),
+    LiveArray(Value),
+    String(Value),
     Slice(Value, Span, Holes),
     Collection(Value),
     UndefinedCount(Value),
@@ -46,6 +48,11 @@ impl<'s> FunctionBuilder<'s> {
             Input::Array(array, _) => (
                 self.number(ctx, 0.0),
                 LoopBound::Fixed(self.array_length(ctx, *array)),
+            ),
+            Input::LiveArray(value) => (self.number(ctx, 0.0), LoopBound::Array(*value)),
+            Input::String(value) => (
+                self.number(ctx, 0.0),
+                LoopBound::Fixed(self.string_length(ctx, *value)),
             ),
             Input::Collection(value) => (self.number(ctx, 0.0), LoopBound::Collection(*value)),
             Input::UndefinedCount(limit) => (self.number(ctx, 0.0), LoopBound::Fixed(*limit)),
@@ -118,6 +125,10 @@ impl<'s> FunctionBuilder<'s> {
                                 }
                             }
                         }
+                    }
+                    Input::LiveArray(value) => b.array_value(ctx, value, current)?,
+                    Input::String(value) => {
+                        b.intrinsic(ctx, Intrinsic::StringIndex, vec![value, current])
                     }
                     Input::Collection(value) => {
                         b.collection_view_element_at(ctx, value, current)?

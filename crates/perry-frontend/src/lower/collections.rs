@@ -264,23 +264,11 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
-        if let Some(constructor) = self.shapes.metadata.source.constructors.get(expr) {
-            let expected = if let Some(&ty) = self
-                .shapes
-                .specialization
-                .instances
-                .collection_types
-                .get(&(self.local_owner, constructor.span))
-            {
-                Some(self.shapes.resolved_binding(ctx, ty)?.carrier)
-            } else {
-                match (constructor.kind, constructor.types) {
-                    (CollectionKind::Map, [key, value]) => {
-                        Some(self.shapes.map_type(ctx, key, value)?)
-                    }
-                    (CollectionKind::Set, [item]) => Some(self.shapes.set_type(ctx, item)?),
-                    _ => expected,
-                }
+        if let Some(constructor) = self.shapes.source.constructors.collection(expr) {
+            let expected = match (constructor.kind, constructor.types) {
+                (CollectionKind::Map, [key, value]) => Some(self.shapes.map_type(ctx, key, value)?),
+                (CollectionKind::Set, [item]) => Some(self.shapes.set_type(ctx, item)?),
+                _ => expected,
             };
             return self
                 .new_collection(

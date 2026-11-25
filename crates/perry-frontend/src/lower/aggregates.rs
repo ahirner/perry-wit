@@ -283,9 +283,13 @@ impl<'s> FunctionBuilder<'s> {
                 let inner = present_type(ctx, field_ty);
                 perry_mir::typed::<RecordType>(ctx, inner)?
             }
-            Expr::Call { callee, .. } => {
-                if let Expr::FuncRef(id) = &**callee
-                    && let Some(sig) = self.signatures.get(id)
+            Expr::Call { .. } => {
+                if let Some(id) = self
+                    .shapes
+                    .specialization
+                    .instances
+                    .call_target(self.local_owner, expr)
+                    && let Some(sig) = self.signatures.get(&id)
                     && let Some(ret) = sig.result
                 {
                     let inner = present_type(ctx, ret.carrier);

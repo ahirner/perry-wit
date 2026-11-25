@@ -92,7 +92,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 hir_compat::RecordExpr::Close => Ok(Ty::VOID),
             };
         }
-        if let Some(constructor) = self.metadata.source.constructors.get(expr) {
+        if let Some(args) = self.hir.declarations.constructors.regexp(expr) {
+            for arg in args.operands() {
+                self.eval_expr(s, arg)?;
+            }
+            return Ok(self.types.named(self.ctx, "RegExp"));
+        }
+        if let Some(constructor) = self.hir.declarations.constructors.collection(expr) {
             return self.eval_collection_constructor(s, expr, constructor);
         }
         if let Some(cb_ty) = self.try_eval_builtin_callback(s, expr)? {
@@ -110,13 +116,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
                         let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                        let local_span =
-                            self.hir.declarations.local_source_spans.get(id).map(|sp| {
-                                swc_common::Span::new(
-                                    swc_common::BytePos(sp.start),
-                                    swc_common::BytePos(sp.end),
-                                )
-                            });
+                        let local_span = self.hir.declarations.locals.get(id).map(|sp| sp.span);
                         if matches!(self.types.kind(existing), TyKind::Func(_))
                             || self.is_tagged_func_union_in(existing, s.inst)
                         {
@@ -337,7 +337,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(joined)
             }
             Expr::Sequence(parts) => {
-                if let Some(span) = self.metadata.locations.operator_raw_span(parts)
+                if let Some(span) = self.hir.locations.operator_raw_span(parts)
                     && let Some(last) = parts.last()
                 {
                     let prev = s.current_span;
@@ -727,7 +727,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 arg0: arg_tys.first().copied(),
                                 arg0_expr: args.first(),
                                 callback_result: None,
-                                sparse_arrays: self.metadata.source.sparse_arrays,
+                                sparse_arrays: self.hir.sparse_arrays,
                             },
                         ));
                     }
@@ -799,10 +799,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let op_ty = self.eval_expr(s, operand)?;
                 if op_ty != Ty::BOTTOM && self.types.has_func(op_ty) {
                     let has_nullish = self.types.strip_nullish(op_ty).1.is_some();
-                    let helper = has_nullish.then(|| {
-                        self.intern_helper(HelperSpec::Callable(CallableOp::TypeOfFn(op_ty)), 0)
-                    });
-                    self.record_site(s.inst, expr, SiteResolution::FuncTypeOf(helper));
+                    self.record_site(
+                        s.inst,
+                        expr,
+                        SiteResolution::FuncTypeOf(has_nullish.then_some(op_ty)),
+                    );
                 }
                 Ok(Ty::STRING)
             }

@@ -118,13 +118,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let span = self
                     .hir
                     .declarations
-                    .local_source_spans
+                    .locals
                     .get(id)
-                    .and_then(|s| {
-                        self.metadata
-                            .locations
-                            .offset_span(s.start, s.end.saturating_sub(s.start))
-                    });
+                    .and_then(|s| self.hir.locations.span(s.span));
                 return Err(Diagnostic::unsupported(
                     "using declarations for imported resources are unsupported",
                 )
@@ -175,9 +171,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             if pushed_cell {
                 return Ok(Ty::NUMBER);
             }
-        }
-        if method == hir_compat::Method::Iteration {
-            return Ok(obj_ty);
         }
 
         let mname_id = self.types.intern_name(name);
@@ -277,7 +270,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     arg0: arg_tys.first().copied(),
                     arg0_expr: args.first(),
                     callback_result: None,
-                    sparse_arrays: self.metadata.source.sparse_arrays,
+                    sparse_arrays: self.hir.sparse_arrays,
                 },
             ));
         }
@@ -312,7 +305,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             && !skip_host_cb
             && arg_tys.iter().any(|&a| self.types.has_func(a))
         {
-            return Err(self.metadata.locations.annotate_call(
+            return Err(self.hir.locations.annotate_call(
                 Diagnostic::unsupported(format!(
                     "passing a callback to runtime '{name}' requires the runtime to call a guest function"
                 )),

@@ -74,7 +74,10 @@ impl Shapes<'_> {
         source: &HirType,
     ) -> Result<Option<TypeHandle>> {
         (source != &HirType::Void)
-            .then(|| self.value_type(ctx, source))
+            .then(|| {
+                self.source_binding(ctx, source)
+                    .map(|binding| binding.carrier)
+            })
             .transpose()
     }
 
@@ -89,7 +92,7 @@ impl Shapes<'_> {
     pub(in crate::lower) fn parameter_binding(
         &self,
         ctx: &Context,
-        function: &perry_hir::ir::Function,
+        function: &crate::source::InstanceFunction<'_>,
         index: usize,
     ) -> Result<(BindingType, bool)> {
         self.param_type(
@@ -106,19 +109,11 @@ impl Shapes<'_> {
     fn param_type(
         &self,
         ctx: &Context,
-        solved: Option<crate::engine::NativeParam>,
+        solved: Option<Ty>,
         ty: &HirType,
     ) -> Result<(BindingType, bool)> {
-        if let Some(param) = solved {
-            return self.native_param(ctx, param);
-        }
-        Ok((
-            BindingType {
-                carrier: self.value_type(ctx, ty)?,
-                integer: self.integer_type(ctx, ty),
-            },
-            matches!(ty, HirType::Never),
-        ))
+        let ty = solved.unwrap_or_else(|| self.annotation(ctx, ty));
+        self.native_param(ctx, crate::engine::NativeParam::Value(ty))
     }
 
     pub(in crate::lower) fn native_param(
@@ -139,33 +134,23 @@ impl Shapes<'_> {
     pub(in crate::lower) fn function_result(
         &self,
         ctx: &Context,
-        function: &perry_hir::ir::Function,
+        function: &crate::source::InstanceFunction<'_>,
     ) -> Result<(Option<BindingType>, bool)> {
-        if let Some(ty) = self
+        let ty = match self
             .specialization
             .instances
             .signatures
             .get(&function.id)
-            .and_then(|signature| signature.result)
+            .map(|sig| sig.result)
         {
-            return Ok((
-                self.solved_result(ctx, ty, function.is_async)?,
-                ty == Ty::NEVER,
-            ));
-        }
-        let ty = &function.return_type;
-        let result = match (ty, function.is_async) {
-            (HirType::Void, false) => None,
-            (HirType::Promise(inner), true) => {
-                Some(BindingType::plain(self.settled_type(ctx, inner)?))
-            }
-            (ty, true) => Some(BindingType::plain(self.settled_type(ctx, ty)?)),
-            (ty, false) => Some(BindingType {
-                carrier: self.value_type(ctx, ty)?,
-                integer: self.integer_type(ctx, ty),
-            }),
+            Some(crate::engine::InstanceResult::Value(ty)) => ty,
+            Some(crate::engine::InstanceResult::ErasedFunction) => Ty::VOID,
+            _ => self.annotation(ctx, function.return_type),
         };
-        Ok((result, matches!(ty, HirType::Never)))
+        Ok((
+            self.solved_result(ctx, ty, function.is_async)?,
+            ty == Ty::NEVER,
+        ))
     }
 
     pub(in crate::lower) fn solved_result(
@@ -226,6 +211,12 @@ impl Shapes<'_> {
                     .into()
             }
             TyKind::Number | TyKind::Int32 => FP64Type::get(ctx).into(),
+            TyKind::Integer(domain) => {
+                return Ok(BindingType {
+                    carrier: integer_mir_carrier(ctx, domain.deref(ctx).width()),
+                    integer: Some(domain),
+                });
+            }
             TyKind::BigInt => perry_mir::BigIntType::get(ctx).into(),
             TyKind::String => StringType::get(ctx).into(),
             TyKind::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),

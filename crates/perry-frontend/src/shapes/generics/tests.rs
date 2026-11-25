@@ -20,7 +20,7 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
         &module.interfaces,
         &module.type_aliases,
         &module.imports,
-        &module.classes,
+        module.classes.iter().map(crate::shapes::ClassShape::Source),
         &foreign,
     );
     let mut types = TypeTable::new();

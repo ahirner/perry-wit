@@ -231,7 +231,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(ty);
         }
         if arg_tys.iter().any(|&a| self.types.has_func(a)) {
-            return Err(self.metadata.locations.annotate_call(
+            return Err(self.hir.locations.annotate_call(
                 Diagnostic::unsupported(format!(
                     "passing a callback to runtime '{class_name}' requires the runtime to call a guest function"
                 )),
@@ -256,10 +256,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     ) -> Result<Ty> {
         if let Expr::IndexGet { object, .. } = callee
             && let Expr::Call { byte_end, .. } = expr
-            && self
-                .metadata
-                .locations
-                .calls_dispose(byte_offset, *byte_end)
+            && self.hir.locations.calls_dispose(byte_offset, *byte_end)
         {
             let ty = self.eval_expr(s, object)?;
             if ty == Ty::BOTTOM {
@@ -333,7 +330,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 && hir_compat::is_source_extern(name, byte_offset)
                 && arg_tys.iter().any(|&a| self.types.has_func(a))
             {
-                return Err(self.metadata.locations.annotate_call(
+                return Err(self.hir.locations.annotate_call(
                     Diagnostic::unsupported(format!(
                         "passing a callback to runtime '{name}' requires the runtime to call a guest function"
                     )),
@@ -367,11 +364,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let helper = self.intern_helper(
-                HelperSpec::Callable(CallableOp::ThrowTypeError),
-                byte_offset,
-            );
-            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError(helper));
+            self.record_site(s.inst, expr, SiteResolution::ThrowTypeError);
             return Ok(Ty::NEVER);
         }
         if let Some(idents) = self.types.func_dispatch_members(callee_ty, true) {
@@ -390,8 +383,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Err(attach_inst_chain(
                     &self.instances,
                     self.index,
-                    &self.metadata.locations,
-                    self.metadata.locations.annotate_call(
+                    &self.hir.locations,
+                    self.hir.locations.annotate_call(
                         diag!(codes::TYPE_MISMATCH, "expression is not callable"),
                         byte_offset,
                     ),
@@ -419,7 +412,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             )
         }) {
-            return Err(self.metadata.locations.annotate_call(
+            return Err(self.hir.locations.annotate_call(
                 Diagnostic::unsupported(
                     "a callback that captures this or new.target requires its original receiver",
                 ),
@@ -566,7 +559,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let Some(ident) = func_ident else {
                 if !self.types.is_open(actual) {
-                    return Err(self.metadata.locations.annotate_call(
+                    return Err(self.hir.locations.annotate_call(
                         diag!(
                             codes::TYPE_MISMATCH,
                             "parameter '{}' of {fn_display} requires a statically known function",
@@ -579,7 +572,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let cb_view = self.index.view(ident.template);
             let mismatch = || {
-                self.metadata.locations.annotate_call(
+                self.hir.locations.annotate_call(
                     diag!(
                         codes::TYPE_MISMATCH,
                         "callback does not match parameter '{}' of {fn_display}",
@@ -704,14 +697,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     owner_name
                 )
                 .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
-                if let Some(span) = self.hir.declarations.local_source_spans.get(&param.id) {
-                    err = self.metadata.locations.annotate(
-                        err,
-                        swc_common::Span::new(
-                            swc_common::BytePos(span.start),
-                            swc_common::BytePos(span.end),
-                        ),
-                    );
+                if let Some(span) = self.hir.declarations.locals.get(&param.id) {
+                    err = self.hir.locations.annotate(err, span.span);
                 }
                 return Err(err);
             }

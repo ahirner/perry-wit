@@ -28,6 +28,10 @@ impl<'s> FunctionBuilder<'s> {
     ) -> Result<Value> {
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
         for &(name, val_expr) in fields {
+            if self.erased_operand(val_expr) {
+                self.discard_function_operand(ctx, val_expr)?;
+                continue;
+            }
             let k = self.string(ctx, name);
             let v = self.expression_with(ctx, val_expr, Some(v_ty))?;
             let v = self.fit(ctx, v, v_ty)?;

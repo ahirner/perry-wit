@@ -5,7 +5,7 @@ use super::bitset::BitSet;
 use crate::{Absence, shapes};
 pub(crate) use idx::*;
 use perry_hir::types::Type as HirType;
-use pliron::context::Context;
+use pliron::{builtin::types::IntegerType, context::Context, r#type::TypedHandle};
 use std::collections::HashMap;
 
 const MAX_TYPE_DEPTH: u8 = 16;
@@ -283,14 +283,29 @@ impl TypeTable {
         }
     }
 
+    pub(crate) fn integer_domain(
+        &self,
+        ctx: &Context,
+        decls: &shapes::Declarations<'_>,
+        ty: Ty,
+    ) -> Option<TypedHandle<IntegerType>> {
+        match self.kind(ty) {
+            TyKind::Integer(domain) => Some(domain),
+            TyKind::Named(name) => {
+                let (width, signedness) = decls.integer_spec(name.get(ctx))?;
+                Some(IntegerType::get(ctx, width, signedness))
+            }
+            _ => None,
+        }
+    }
+
     fn normalize_atom(&self, ctx: &Context, decls: &shapes::Declarations<'_>, ty: Ty) -> Ty {
         match self.kind(ty) {
             TyKind::Int32 => Ty::NUMBER,
             TyKind::Literal(_) => Ty::STRING,
-            TyKind::Named(name)
-                if decls
-                    .integer_spec(name.get(ctx))
-                    .is_some_and(|(width, _)| width < 64) =>
+            _ if self
+                .integer_domain(ctx, decls, ty)
+                .is_some_and(|domain| domain.deref(ctx).width() < 64) =>
             {
                 Ty::NUMBER
             }

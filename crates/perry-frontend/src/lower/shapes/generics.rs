@@ -110,14 +110,9 @@ impl<'s> Shapes<'s> {
                 self.pending
                     .borrow_mut()
                     .insert(key.clone(), PendingShape::Recursive(record));
-                let layout = self
-                    .specialization
-                    .instances
-                    .class_fields
-                    .get(class.name.as_str());
+                let layout = self.specialization.instances.class_fields.get(class.name());
                 let fields = class
-                    .fields
-                    .iter()
+                    .fields()
                     .map(|field| {
                         let ty = match layout.and_then(|layout| layout.instance.get(&field.name)) {
                             Some(&ty) => self.resolved_binding(ctx, ty)?.expected_type(ctx),
@@ -142,9 +137,7 @@ impl<'s> Shapes<'s> {
                 let ty = RecordType::get(ctx, name, Some(fields))
                     .to_diag(ctx)?
                     .into();
-                self.class_records
-                    .borrow_mut()
-                    .insert(ty, class.name.as_str());
+                self.class_records.borrow_mut().insert(ty, class.name());
                 ty
             }
             Declaration::Alias(alias) => {

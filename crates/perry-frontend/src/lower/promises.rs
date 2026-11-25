@@ -2,7 +2,7 @@
 use super::*;
 use crate::engine::{
     NativeCallback, Reaction,
-    types::{FuncIdentity, Ty, func_tag},
+    types::{Ty, func_tag},
 };
 
 impl<'s> FunctionBuilder<'s> {
@@ -39,15 +39,25 @@ impl<'s> FunctionBuilder<'s> {
     pub(super) fn new_promise(
         &mut self,
         ctx: &mut Context,
-        settled: Ty,
-        executor: NativeCallback,
-        handles: [Option<FuncIdentity>; 2],
+        constructor: crate::engine::PromiseConstructor,
         args: &'s [Expr],
     ) -> Result<Value> {
-        let value = args
-            .first()
-            .map(|arg| self.expression(ctx, arg))
-            .transpose()?;
+        let crate::engine::PromiseConstructor {
+            settled,
+            executor,
+            handles,
+        } = constructor;
+        let mut value = None;
+        for (i, arg) in args.iter().enumerate() {
+            if i == 0 && executor.takes_value() {
+                value = Some(self.expression(ctx, arg)?);
+            } else {
+                self.discard_function_operand(ctx, arg)?;
+            }
+        }
+        if matches!(executor, NativeCallback::ThrowTypeError) {
+            return Ok(self.raise_non_callable(ctx));
+        }
         if let Some(value) = value
             && absence(ctx, value.get_type(ctx)).is_some()
         {

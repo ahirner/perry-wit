@@ -1,5 +1,4 @@
 //! Normalize array and string method calls into uniform AST call shapes before HIR lowering.
-use super::*;
 use perry_parser::swc_ecma_ast as ast;
 use swc_common::{DUMMY_SP, SyntaxContext, util::take::Take};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
@@ -152,7 +151,6 @@ pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut crate::so
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Method<'a> {
     UsingCheck,
-    Iteration,
     Push,
     Ordinary(&'a str),
 }
@@ -160,7 +158,6 @@ pub(crate) enum Method<'a> {
 pub(crate) fn method(name: &str) -> Method<'_> {
     match name {
         "__perry_using_check__" => Method::UsingCheck,
-        streams::ITERATION => Method::Iteration,
         "push" => Method::Push,
         name => Method::Ordinary(name),
     }
@@ -170,7 +167,6 @@ impl<'a> Method<'a> {
     pub(crate) fn name(self) -> &'a str {
         match self {
             Self::UsingCheck => "using",
-            Self::Iteration => "[iteration]",
             Self::Push => "push",
             Self::Ordinary(name) => name,
         }

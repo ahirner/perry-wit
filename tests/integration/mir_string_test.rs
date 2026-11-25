@@ -382,6 +382,13 @@ export function named(n: number) {
     if (!new RegExp(`[${chars}]`).test('x')) return -16;
   }
   if (new RegExp(`[${chars}]`).test('x')) return -17;
+  const captured = RegExp('(' + chars + ')');
+  if ('cab'.replace(captured, (_, group) => group + group) !== 'cabab') return -18;
+  if (!new RegExp().test('') || !RegExp().test('')) return -19;
+  let order = '';
+  if (!new RegExp((order += 'p', 'a'), (order += 'f', ''), order += 'x').test('a')) return -20;
+  RegExp('b', '', order += 'y');
+  if (order !== 'pfxy') return -21;
   return n;
 }
 "#,

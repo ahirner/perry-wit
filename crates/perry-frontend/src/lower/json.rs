@@ -33,10 +33,9 @@ impl<'s> FunctionBuilder<'s> {
         }
         let value = self.expression(ctx, expr)?;
         let value = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
-        let callback = (matches!(replacer, Expr::Closure { .. } | Expr::FuncRef(_))
-            || self.shapes.bound_callback(replacer).is_some())
-        .then(|| self.prepare_callback(ctx, replacer))
-        .transpose()?;
+        let callback = (self.is_callback(replacer))
+            .then(|| self.prepare_callback(ctx, replacer))
+            .transpose()?;
         let keys = if callback.is_some() {
             self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
         } else {
@@ -241,13 +240,13 @@ impl<'s> FunctionBuilder<'s> {
             return Ok(None);
         }
         let json = JsonType::get(ctx).into();
-        let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
-        self.choose(
+        self.match_optional(
             ctx,
+            value,
             json,
-            undefined,
             |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])),
-            |b, ctx| b.defined(ctx, value),
+            |b, ctx| Ok(b.intrinsic(ctx, Intrinsic::JsonNull, vec![])),
+            |_, _, present| Ok(present),
         )
         .map(Some)
     }

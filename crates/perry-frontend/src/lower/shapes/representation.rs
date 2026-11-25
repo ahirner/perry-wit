@@ -10,36 +10,19 @@ pub(super) fn integer_mir_carrier(ctx: &Context, width: u32) -> TypeHandle {
 }
 
 impl Shapes<'_> {
-    pub(crate) fn value_type(&self, ctx: &Context, ty: &HirType) -> Result<TypeHandle> {
-        let ty = self
-            .specialization
+    pub(in crate::lower) fn annotation(&self, ctx: &Context, ty: &HirType) -> Ty {
+        self.specialization
             .types
             .borrow_mut()
-            .intern_hir(ctx, ty, true);
-        Ok(self.resolved_binding(ctx, ty)?.carrier)
+            .intern_hir(ctx, ty, true)
     }
 
-    /// Return the MIR value type that a promise of `ty` settles with, mapping `void` to `undefined`.
-    pub(crate) fn settled_type(&self, ctx: &Context, ty: &HirType) -> Result<TypeHandle> {
-        match ty {
-            HirType::Void => {
-                let number = FP64Type::get(ctx).into();
-                Ok(OptionalType::get(ctx, number).into())
-            }
-            ty => self.value_type(ctx, ty),
-        }
-    }
-
-    pub(crate) fn integer_type(
+    pub(in crate::lower) fn source_binding(
         &self,
         ctx: &Context,
         ty: &HirType,
-    ) -> Option<TypedHandle<IntegerType>> {
-        let HirType::Named(name) = ty else {
-            return None;
-        };
-        let (width, signedness) = self.decls.integer_spec(name)?;
-        Some(IntegerType::get(ctx, width, signedness))
+    ) -> Result<BindingType> {
+        self.resolved_binding(ctx, self.annotation(ctx, ty))
     }
 
     pub(super) fn foreign_value_type(

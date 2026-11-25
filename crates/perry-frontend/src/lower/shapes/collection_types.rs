@@ -110,14 +110,14 @@ impl Shapes<'_> {
 
     /// `Map<K, V>` from source types.
     pub(crate) fn map_type(&self, ctx: &Context, k: &HirType, v: &HirType) -> Result<TypeHandle> {
-        let k_ty = self.value_type(ctx, k)?;
-        let v_ty = self.value_type(ctx, v)?;
+        let k_ty = self.source_binding(ctx, k)?.carrier;
+        let v_ty = self.source_binding(ctx, v)?.carrier;
         Ok(self.map_box_type(ctx, k_ty, v_ty)?.into())
     }
 
     /// `Set<T>` from a source type.
     pub(crate) fn set_type(&self, ctx: &Context, elem: &HirType) -> Result<TypeHandle> {
-        let elem_ty = self.value_type(ctx, elem)?;
+        let elem_ty = self.source_binding(ctx, elem)?.carrier;
         Ok(self.set_box_type(ctx, elem_ty)?.into())
     }
 

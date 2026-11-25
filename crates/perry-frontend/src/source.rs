@@ -1,46 +1,30 @@
 //! Source validation, lexical binding facts and expression locations from SWC.
 use crate::hir_compat::Locations;
-mod collections;
-pub(crate) use collections::{CollectionKind, Constructor, Constructors};
+mod constructors;
+pub(crate) use constructors::{CollectionKind, Constructor, Constructors};
 mod names;
 mod parser;
 mod program;
+mod strings;
 pub(crate) use names::{FreshNames, MODULE_PREFIX, is_reserved_binding, module_binding_name};
 pub(crate) use parser::parse;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 pub(crate) use program::{
-    Bodies, BodyIndex, CallerKind, ModuleDeclarations, SourceModule, authored_body,
+    BindingAnnotation, Bodies, BodyIndex, CallerKind, InstanceBodies, InstanceClass,
+    InstanceFunction, ModuleDeclarations, SourceModule, authored_body, is_pure_func_expr,
 };
 use std::collections::{HashMap, HashSet};
+pub(crate) use strings::StringConstants;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitWith};
 
 #[derive(Clone, Copy, Default)]
-pub(crate) struct SourceBinding {
+struct SourceBinding {
     inferred_end: Option<u32>,
     pub(crate) deferred: bool,
     pub(crate) loop_let: bool,
     pub(crate) annotated_parameter: bool,
-}
-
-impl SourceBinding {
-    pub(crate) fn inferred(self, end: u32) -> bool {
-        self.inferred_end == Some(end)
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct SourceFacts {
-    pub(crate) constructors: Constructors,
-    pub(crate) sparse_arrays: bool,
-    bindings: HashMap<u32, SourceBinding>,
-}
-
-impl SourceFacts {
-    pub(crate) fn binding(&self, start: u32) -> SourceBinding {
-        self.bindings.get(&start).copied().unwrap_or_default()
-    }
 }
 
 pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> Result<()> {
@@ -105,8 +89,10 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
 
 #[derive(Default)]
 pub(crate) struct Analysis {
-    pub(crate) facts: SourceFacts,
+    bindings: HashMap<u32, SourceBinding>,
+    pub(crate) sparse_arrays: bool,
     pub(crate) expression_spans: HashSet<Span>,
+    pub(crate) for_of: HashSet<Span>,
     pub(crate) names: FreshNames,
 }
 
@@ -119,6 +105,18 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
     }
 
     impl AstScanner {
+        fn infer_pattern(&mut self, pattern: &ast::Pat) {
+            pattern_bindings(pattern, &mut |id, annotated| {
+                if !annotated {
+                    self.analysis
+                        .bindings
+                        .entry(id.span.lo.0)
+                        .or_default()
+                        .inferred_end = Some(id.span.hi.0);
+                }
+            });
+        }
+
         fn record_param(&mut self, pat: &ast::Pat) {
             walk_pattern(pat, false, &mut |site, annotated| {
                 if annotated {
@@ -127,7 +125,6 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
                         BindingSite::Pattern(span) => span,
                     };
                     self.analysis
-                        .facts
                         .bindings
                         .entry(span.lo.0)
                         .or_default()
@@ -150,7 +147,7 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
         }
 
         fn visit_array_lit(&mut self, array: &ast::ArrayLit) {
-            self.analysis.facts.sparse_arrays |= array.elems.iter().any(Option::is_none);
+            self.analysis.sparse_arrays |= array.elems.iter().any(Option::is_none);
             array.visit_children_with(self);
         }
         fn visit_param(&mut self, param: &ast::Param) {
@@ -180,7 +177,6 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
                 for decl in &var.decls {
                     pattern_bindings(&decl.name, &mut |id, _| {
                         self.analysis
-                            .facts
                             .bindings
                             .entry(id.span.lo.0)
                             .or_default()
@@ -193,6 +189,7 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
         fn visit_for_head(&mut self, head: &ast::ForHead) {
             if let ast::ForHead::VarDecl(var) = head {
                 for decl in &var.decls {
+                    self.infer_pattern(&decl.name);
                     decl.visit_children_with(self);
                 }
             } else {
@@ -206,22 +203,12 @@ pub(crate) fn analyze(module: &ast::Module) -> Analysis {
                     && let ast::Pat::Ident(b) = &decl.name
                 {
                     self.analysis
-                        .facts
                         .bindings
                         .entry(b.id.span.lo.0)
                         .or_default()
                         .deferred = true;
                 }
-                pattern_bindings(&decl.name, &mut |id, annotated| {
-                    if !annotated {
-                        self.analysis
-                            .facts
-                            .bindings
-                            .entry(id.span.lo.0)
-                            .or_default()
-                            .inferred_end = Some(id.span.hi.0);
-                    }
-                });
+                self.infer_pattern(&decl.name);
                 decl.name.visit_with(self);
                 if let Some(init) = &decl.init {
                     if is_const

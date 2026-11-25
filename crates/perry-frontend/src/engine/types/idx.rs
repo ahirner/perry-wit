@@ -302,6 +302,7 @@ pub(crate) enum TyKind {
     Boolean,
     Number,
     Int32,
+    Integer(pliron::r#type::TypedHandle<pliron::builtin::types::IntegerType>),
     BigInt,
     String,
     Symbol,

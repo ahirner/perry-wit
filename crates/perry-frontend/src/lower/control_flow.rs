@@ -21,6 +21,7 @@ pub(super) enum LoopCondition<'s> {
 #[derive(Clone, Copy)]
 pub(super) enum LoopBound {
     Fixed(Value),
+    Array(Value),
     Collection(Value),
 }
 
@@ -295,30 +296,12 @@ impl<'s> FunctionBuilder<'s> {
         };
         let guards = self.variant_guards.depth();
         self.invalidate_inline_writes(body, tested.into_iter().chain(update.expression));
-        let lowered = self.loop_body(ctx, condition, update, body, label);
-        // The loop exits from its test or a `break`, before narrowings later in its body.
-        self.variant_guards.truncate(guards);
-        lowered
-    }
-
-    fn loop_body(
-        &mut self,
-        ctx: &mut Context,
-        condition: LoopCondition<'s>,
-        update: LoopUpdate<'s>,
-        body: &'s [Stmt],
-        label: Option<&'s str>,
-    ) -> Result<()> {
-        let collection = match condition {
-            LoopCondition::Before(condition) => self.collection_loop(ctx, condition)?,
-            LoopCondition::After(_) | LoopCondition::Indices(..) => None,
-        };
-        self.repeat(
+        let lowered = self.repeat(
             ctx,
             "source",
             condition,
             update,
-            collection,
+            None,
             |b, ctx, next, done| {
                 b.controls.push(Control::Loop {
                     label,
@@ -329,39 +312,57 @@ impl<'s> FunctionBuilder<'s> {
                 b.controls.pop();
                 lowered
             },
-        )
+        );
+        self.variant_guards.truncate(guards);
+        lowered
     }
 
-    /// The live collection a lowered `for...of` (`for (; i < items.length; …)`) walks, with
-    /// a cursor so deletes in the body neither skip nor repeat entries.
-    fn collection_loop(
+    pub(super) fn for_of(
         &mut self,
         ctx: &mut Context,
-        condition: Option<&'s Expr>,
-    ) -> Result<Option<CollectionTraversal>> {
-        let Some((idx_id, arr_id)) = self.iteration.for_of_loop(condition) else {
-            return Ok(None);
-        };
-        let (Ok(arr_slot), Ok(index)) = (self.local(arr_id), self.local(idx_id)) else {
-            return Ok(None);
-        };
-        let arr_val = self.load(ctx, arr_slot)?;
-        let Ok(collection) = self.defined(ctx, arr_val) else {
-            return Ok(None);
-        };
-        let ty = collection.get_type(ctx);
-        if !(crate::lower::collections::is_collection_or_view_record(ctx, ty)
-            || crate::lower::collections::map_entry_types(ctx, ty).is_some()
-            || crate::lower::collections::set_entry_type(ctx, ty).is_some())
-        {
-            return Ok(None);
+        element: LocalId,
+        source: &'s Expr,
+        body: &'s [Stmt],
+        label: Option<&'s str>,
+    ) -> Result<()> {
+        if matches!(source, Expr::UrlSearchParamsNew(_)) {
+            bail_unsupported!(
+                "synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported"
+            );
         }
-        let cursor = LiveCursor::open(self, ctx, collection, index)?;
-        Ok(Some(CollectionTraversal {
-            index,
-            collection,
-            cursor,
-        }))
+        let value = self.expression(ctx, source)?;
+        let value = self.defined(ctx, value)?;
+        let input = match kind(ctx, value)? {
+            Kind::Array => Input::LiveArray(value),
+            Kind::String => Input::String(value),
+            Kind::Record
+                if crate::lower::collections::is_collection_or_view_record(
+                    ctx,
+                    value.get_type(ctx),
+                ) =>
+            {
+                Input::Collection(value)
+            }
+            _ => bail_unsupported!(
+                "synchronous for...of requires a dense typed array or string; this receiver has no supported iterator"
+            ),
+        };
+        let guards = self.variant_guards.depth();
+        self.invalidate_inline_writes(body, []);
+        let result = self.iterate(ctx, input, |b, ctx, item, _, next, done| {
+            let local = b.initialized_local(ctx, item);
+            b.locals.insert(element, local);
+            b.controls.push(Control::Loop {
+                label,
+                continue_to: next,
+                break_to: done,
+            });
+            let result = b.statements(ctx, body);
+            b.controls.pop();
+            result
+        });
+        self.variant_guards.truncate(guards);
+        result
     }
 }
 
@@ -403,6 +404,7 @@ impl<'s> FunctionBuilder<'s> {
                 let current = self.load(ctx, index)?;
                 let limit = match bound {
                     LoopBound::Fixed(limit) => limit,
+                    LoopBound::Array(array) => self.array_length(ctx, array),
                     LoopBound::Collection(collection) => {
                         self.collection_backing_length(ctx, collection)?
                     }

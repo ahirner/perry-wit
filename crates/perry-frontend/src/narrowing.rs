@@ -288,21 +288,33 @@ impl<'s> Guards<'s> {
     /// reach its start on the next iteration. Include writes in statically called closures.
     pub(crate) fn assign_in<'e>(
         &mut self,
-        statements: &[Stmt],
+        statements: &'e [Stmt],
         expressions: impl IntoIterator<Item = &'e Expr>,
         closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
+    ) {
+        self.assign_projected(None, statements, expressions, closure, |_, _| None);
+    }
+
+    pub(crate) fn assign_projected<'e>(
+        &mut self,
+        owner: Option<FuncId>,
+        statements: &'e [Stmt],
+        expressions: impl IntoIterator<Item = &'e Expr>,
+        closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
+        project: impl Fn(Option<FuncId>, &'e Expr) -> Option<FuncId>,
     ) {
         if self.stack.is_empty() {
             return;
         }
         let mut scan = Assignments {
             closure,
+            project,
             entered: Vec::new(),
             assigned: Vec::new(),
         };
-        scan.statements(statements);
+        scan.statements(owner, statements);
         for expr in expressions {
-            scan.expression(expr);
+            scan.expression(owner, expr);
         }
         for local in scan.assigned {
             self.assign(local);
@@ -358,37 +370,46 @@ impl<'s> Guards<'s> {
 }
 
 /// The locals that statements may assign, entering closures they define or read.
-struct Assignments<F> {
+struct Assignments<F, P> {
     closure: F,
+    project: P,
     /// Bound closures already scanned, which also ends recursion through self-reference.
     entered: Vec<FuncId>,
     assigned: Vec<LocalId>,
 }
 
-impl<'e, F: Fn(FuncId) -> Option<&'e [Stmt]>> Assignments<F> {
-    fn statements(&mut self, statements: &[Stmt]) {
+impl<'e, F, P> Assignments<F, P>
+where
+    F: Fn(FuncId) -> Option<&'e [Stmt]>,
+    P: Fn(Option<FuncId>, &'e Expr) -> Option<FuncId>,
+{
+    fn statements(&mut self, owner: Option<FuncId>, statements: &'e [Stmt]) {
         for statement in statements {
             stmt_any_expr(statement, &mut |expr| {
-                self.expression(expr);
+                self.expression(owner, expr);
                 false
             });
         }
     }
 
-    fn expression(&mut self, expr: &Expr) {
+    fn expression(&mut self, owner: Option<FuncId>, expr: &'e Expr) {
+        let target = (self.project)(owner, expr);
+        let target = target.or(match *expr {
+            Expr::FuncRef(id) => Some(id),
+            _ => None,
+        });
+        if let Some(id) = target
+            && !self.entered.contains(&id)
+            && let Some(body) = (self.closure)(id)
+        {
+            self.entered.push(id);
+            self.statements(Some(id), body);
+        }
         match expr {
             Expr::LocalSet(id, _) | Expr::Update { id, .. } => self.assigned.push(*id),
-            Expr::FuncRef(id) => {
-                if !self.entered.contains(id)
-                    && let Some(body) = (self.closure)(*id)
-                {
-                    self.entered.push(*id);
-                    self.statements(body);
-                }
-            }
-            Expr::Closure { body, .. } => self.statements(body),
+            Expr::Closure { func_id, body, .. } => self.statements(Some(*func_id), body),
             _ => {}
         }
-        walk_expr_children(expr, &mut |child| self.expression(child));
+        walk_expr_children(expr, &mut |child| self.expression(owner, child));
     }
 }

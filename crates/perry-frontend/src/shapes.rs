@@ -5,7 +5,7 @@ use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub(crate) mod generics;
 mod records;
-pub(crate) use records::Classes;
+pub(crate) use records::{ClassShape, Classes};
 pub(crate) type TypeName = pliron::uniqued_any::Uniqued<String>;
 
 pub(crate) struct Declarations<'h> {
@@ -23,7 +23,7 @@ impl<'h> Declarations<'h> {
         interfaces: &'h [perry_hir::ir::Interface],
         type_aliases: &'h [perry_hir::ir::TypeAlias],
         imports: &'h [perry_hir::ir::Import],
-        classes: &'h [perry_hir::ir::Class],
+        classes: impl Iterator<Item = ClassShape<'h>>,
         world: &'h crate::wit::WorldTypes<'h>,
     ) -> Self {
         let foreign = world.foreign();
@@ -98,12 +98,6 @@ impl<'h> Declarations<'h> {
         name: &'a str,
         seen: &mut HashSet<&'a str>,
     ) -> Option<(u32, Signedness)> {
-        if let Some(spec) = name
-            .strip_prefix("perry:types/")
-            .and_then(perry_integer_spec)
-        {
-            return Some(spec);
-        }
         if !seen.insert(name) {
             return None;
         }

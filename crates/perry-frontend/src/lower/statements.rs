@@ -1,11 +1,11 @@
 //! Statements: bindings, `return`, `throw`, jumps and expression statements.
 use super::*;
 use crate::engine::{CellInit, Storage};
-use crate::lower::shapes::BindingAnnotation;
 use crate::lower::{
     builder::Jump,
     control_flow::{LoopCondition, LoopUpdate},
 };
+use crate::source::BindingAnnotation;
 
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
@@ -36,43 +36,34 @@ impl<'s> FunctionBuilder<'s> {
                         element_ty,
                         perry_mir::Absence::Undefined,
                     );
-                    let value = self.conditional(
+                    let done = self.condition(ctx, element.condition)?;
+                    let available = self.choose(
                         ctx,
-                        element.condition,
-                        element.missing,
-                        element.value,
-                        Some(element_ty),
+                        done.get_type(ctx),
+                        done,
+                        |b, ctx| Ok(b.boolean(ctx, false)),
+                        |b, ctx| match element.available {
+                            hir_compat::Availability::Test(test) => b.condition(ctx, test),
+                            hir_compat::Availability::Known(value) => Ok(b.boolean(ctx, value)),
+                        },
+                    )?;
+                    let value = self.choose(
+                        ctx,
+                        element_ty,
+                        available,
+                        |b, ctx| {
+                            let value = b.expression_with(ctx, element.value, Some(element_ty))?;
+                            if let Some(advance) = element.advance {
+                                b.effect(ctx, advance)?;
+                            }
+                            Ok(value)
+                        },
+                        |b, ctx| b.expression_with(ctx, element.missing, Some(element_ty)),
                     )?;
                     let binding = self.initialized_local(ctx, value);
                     self.variant_guards.assign(element.id);
                     self.locals.insert(element.id, binding);
-                    let done = self.condition(ctx, element.condition)?;
-                    let done = self.choose(
-                        ctx,
-                        done.get_type(ctx),
-                        done,
-                        |b, ctx| Ok(b.boolean(ctx, true)),
-                        |b, ctx| {
-                            let available = match element.available {
-                                hir_compat::Availability::Test(test) => b.condition(ctx, test)?,
-                                hir_compat::Availability::Known(available) => {
-                                    b.boolean(ctx, available)
-                                }
-                            };
-                            b.choose(
-                                ctx,
-                                available.get_type(ctx),
-                                available,
-                                |b, ctx| {
-                                    if let Some(advance) = element.advance {
-                                        b.effect(ctx, advance)?;
-                                    }
-                                    Ok(b.boolean(ctx, false))
-                                },
-                                |b, ctx| Ok(b.boolean(ctx, true)),
-                            )
-                        },
-                    )?;
+                    let done = self.not(ctx, available);
                     self.store(ctx, self.local(element.done)?, done);
                     element.rest
                 }
@@ -150,7 +141,16 @@ impl<'s> FunctionBuilder<'s> {
             Stmt::Let {
                 id, name, ty, init, ..
             } => {
-                self.iteration.register_binding(*id, name, init.as_ref());
+                if matches!(self.local_storage(*id), Some(Storage::ErasedFunction)) {
+                    if let Some(expr) = init
+                        && !crate::source::is_pure_func_expr(expr)
+                    {
+                        self.effect(ctx, expr)?;
+                    }
+                    return Ok(());
+                }
+                let init = init.as_ref();
+                self.iteration.register_binding(*id, name, init);
                 let storage = self.local_storage(*id);
                 if matches!(
                     storage,
@@ -163,17 +163,36 @@ impl<'s> FunctionBuilder<'s> {
                         self.local_set(ctx, *id, value)?;
                     }
                 } else {
-                    self.binding(ctx, *id, ty, init.as_ref(), storage)
+                    self.binding(ctx, *id, ty, init, storage)
                         .map_err(|error| self.shapes.annotate_local(error, *id))?;
                 }
             }
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
-            Stmt::Return(value) if !self.inline_returns.is_empty() => {
-                self.inline_return(ctx, value.as_ref())?;
-            }
             Stmt::Return(value) => {
+                let erased = self
+                    .local_owner
+                    .and_then(|owner| self.shapes.specialization.instances.signatures.get(&owner))
+                    .is_some_and(|signature| {
+                        matches!(
+                            signature.result,
+                            crate::engine::InstanceResult::ErasedFunction
+                        )
+                    });
+                let value = if erased {
+                    if let Some(expr) = value
+                        && !crate::source::is_pure_func_expr(expr)
+                    {
+                        self.effect(ctx, expr)?;
+                    }
+                    None
+                } else {
+                    value.as_ref()
+                };
+                if !self.inline_returns.is_empty() {
+                    return self.inline_return(ctx, value);
+                }
                 // An async function adopts a returned promise (and its result type) after
                 // the finalizers ran.
                 let (mut values, adopted) = match value {
@@ -284,6 +303,9 @@ impl<'s> FunctionBuilder<'s> {
                 update,
                 body,
             } => {
+                if let Some((id, source)) = self.shapes.source.for_of(init.as_deref()) {
+                    return self.for_of(ctx, id, source, body, label);
+                }
                 let mut cells = loop_cells.to_vec();
                 if let Some(Stmt::Let { id, .. }) = init.as_deref()
                     && self
@@ -426,10 +448,7 @@ impl<'s> FunctionBuilder<'s> {
             ));
         }
         Ok((
-            BindingType {
-                carrier: self.shapes.value_type(ctx, ty)?,
-                integer: self.shapes.integer_type(ctx, ty),
-            },
+            self.shapes.source_binding(ctx, ty)?,
             matches!(ty, HirType::Never),
         ))
     }
@@ -485,10 +504,20 @@ impl<'s> FunctionBuilder<'s> {
             self.locals.insert(id, binding.captured(payload, deferred));
             return Ok(());
         }
-        if matches!(init, Some(Expr::Closure { .. }))
-            || matches!(init, Some(Expr::FuncRef(id)) if !self.shapes.specialization.instances.closure_values.contains_key(&(self.local_owner, *id)))
-        {
-            return Ok(());
+        if let Some(expr) = init {
+            let plans = &self.shapes.specialization.instances;
+            let function = match expr {
+                Expr::Closure { func_id, .. } => Some(*func_id),
+                _ => plans.reference(self.local_owner, expr),
+            };
+            if function
+                .is_some_and(|id| !plans.closure_values.contains_key(&(self.local_owner, id)))
+                && plans
+                    .site(self.local_owner, expr)
+                    .is_none_or(|site| site.conversion.is_none())
+            {
+                return Ok(());
+            }
         }
         if let Some(init) = init
             && let Some(source) = self.iteration.guard(id, init)
@@ -505,7 +534,12 @@ impl<'s> FunctionBuilder<'s> {
             }
             return Ok(());
         }
-        let annotation = self.shapes.binding_annotation(id);
+        let annotation = self
+            .shapes
+            .source
+            .locals
+            .get(&id)
+            .map(|local| local.annotation);
         let explicit = annotation == Some(BindingAnnotation::Explicit);
         let (mut binding, is_never) = match self.declared_local(ctx, storage, ty) {
             Err(error)
@@ -601,6 +635,25 @@ impl<'s> FunctionBuilder<'s> {
         expr: &'s Expr,
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
+        let result = if let Some(site) = self
+            .shapes
+            .specialization
+            .instances
+            .site(self.local_owner, expr)
+        {
+            self.instance_operand(ctx, expr, expected, site, false)?
+        } else {
+            self.source_operand(ctx, expr, expected)?
+        };
+        Ok(result.filter(|value| !self.never_values.contains(value)))
+    }
+
+    pub(super) fn source_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Option<Value>> {
         if self.iteration.is_release(expr) {
             return Ok(None);
         }
@@ -614,7 +667,7 @@ impl<'s> FunctionBuilder<'s> {
                 let Some((last, effects)) = parts.split_last() else {
                     return Ok(None);
                 };
-                if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+                if let Some(span) = self.shapes.locations.operator_span(parts) {
                     return self
                         .optional_operand(ctx, last, expected)
                         .map_err(|error| error.with_fallback_span(Some(span)));
@@ -625,8 +678,11 @@ impl<'s> FunctionBuilder<'s> {
                 return self.optional_operand(ctx, last, expected);
             }
             Expr::Undefined => None,
-            Expr::Call { .. } if self.shapes.metadata.source.constructors.get(expr).is_some() => {
-                Some(self.expression_with(ctx, expr, expected)?)
+            Expr::Call { .. }
+                if self.shapes.source.constructors.collection(expr).is_some()
+                    || self.shapes.source.constructors.regexp(expr).is_some() =>
+            {
+                Some(self.source_expression(ctx, expr, expected)?)
             }
             Expr::Call {
                 callee,
@@ -636,7 +692,7 @@ impl<'s> FunctionBuilder<'s> {
                 byte_end,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset..*byte_end, expected)
+                .call(ctx, callee, args, *byte_offset..*byte_end)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::StaticMethodCall {
                 class_name,
@@ -662,9 +718,20 @@ impl<'s> FunctionBuilder<'s> {
                 self.after_terminator(ctx);
                 None
             }
-            _ => Some(self.expression_with(ctx, expr, expected)?),
+            _ => Some(self.source_expression(ctx, expr, expected)?),
         };
-        Ok(value.filter(|v| !self.never_values.contains(v)))
+        Ok(value)
+    }
+
+    pub(super) fn discard_function_operand(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+    ) -> Result<()> {
+        if !crate::source::is_pure_func_expr(expr) {
+            self.effect(ctx, expr)?;
+        }
+        Ok(())
     }
 
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {

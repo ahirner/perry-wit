@@ -22,9 +22,8 @@ pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset, mark_non_null};
 mod iteration;
 mod methods;
-mod regex;
 pub(crate) use iteration::{Availability, Iteration, RecordExpr};
-pub(crate) mod resource_classes;
+mod resource_classes;
 mod streams;
 mod timers;
 mod witnesses;
@@ -34,22 +33,11 @@ pub(crate) use streams::is_writable_to_web;
 pub(crate) use timers::is_timer_module;
 pub(crate) use witnesses::Witness;
 
-pub(crate) struct Metadata<'s> {
-    pub(crate) witnesses: Vec<Witness<'s, perry_hir::types::FuncId>>,
-    pub(crate) locations: Locations<'s>,
-    pub(crate) source: crate::source::SourceFacts,
-}
-
-pub(crate) struct LoweredHir<'s> {
-    pub(crate) module: crate::source::SourceModule,
-    pub(crate) metadata: Metadata<'s>,
-}
-
 pub(crate) fn lower<'s>(
     loaded: modules::Loaded<'s>,
     identity: &str,
     world: Option<(&'s wit_parser::Resolve, wit_parser::WorldId)>,
-) -> Result<LoweredHir<'s>> {
+) -> Result<crate::source::SourceModule<'s>> {
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
     let (constructors, witnesses) = GLOBALS.set(&Globals::new(), || {
@@ -58,7 +46,6 @@ pub(crate) fn lower<'s>(
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
         locations.collect(&ast, unresolved);
         timers::check_imports(&ast, &locations)?;
-        regex::fold(&mut ast, unresolved);
         let constructors = crate::source::Constructors::bind(&mut ast, unresolved, &locations)?;
         streams::preserve_options(&mut ast, unresolved, &locations)?;
         Ok::<_, Diagnostic>((
@@ -66,16 +53,11 @@ pub(crate) fn lower<'s>(
             witnesses::resolve(&ast, &loaded.exports, world, &locations, unresolved)?,
         ))
     })?;
-    let crate::source::Analysis {
-        mut facts,
-        expression_spans,
-        mut names,
-    } = crate::source::analyze(&ast);
-    facts.constructors = constructors;
-    streams::lower(&mut ast, &mut names)?;
-    methods::preserve_arguments(&mut ast, &mut names);
+    let mut analysis = crate::source::analyze(&ast);
+    analysis.for_of = streams::lower(&mut ast, &mut analysis.names)?;
+    methods::preserve_arguments(&mut ast, &mut analysis.names);
     classes::preserve_field_types(&mut ast);
-    locations.preserve_expressions(&mut ast, &expression_spans);
+    locations.preserve_expressions(&mut ast, &analysis.expression_spans);
     if !witnesses.witnesses.is_empty() {
         perry_hir::ir::set_current_module_source(locations.module_text());
     }
@@ -106,14 +88,13 @@ pub(crate) fn lower<'s>(
         }
     }
     let witnesses = witnesses.in_hir(&mut module)?;
-    Ok(LoweredHir {
-        module: module.into(),
-        metadata: Metadata {
-            witnesses,
-            locations,
-            source: facts,
-        },
-    })
+    Ok(crate::source::SourceModule::bind(
+        module,
+        analysis,
+        constructors,
+        locations,
+        witnesses,
+    ))
 }
 
 fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
@@ -163,13 +144,13 @@ function builtin() { return new Set<string>(); }
         let modules = std::collections::BTreeMap::new();
         let loaded = modules::load(source, "shadow.ts", &modules, &HashMap::new()).unwrap();
         let lowered = lower(loaded, "shadow.ts", None).unwrap();
-        for function in &lowered.module.bodies.functions {
+        for function in &lowered.bodies.functions {
             let Stmt::Return(Some(expr)) = &function.body[0] else {
                 panic!("expected constructor return");
             };
             if function.name == "builtin" {
                 assert!(matches!(
-                    lowered.metadata.source.constructors.get(expr),
+                    lowered.declarations.constructors.collection(expr),
                     Some(crate::source::Constructor {
                         kind: crate::source::CollectionKind::Set,
                         types: [HirType::String],
@@ -178,7 +159,7 @@ function builtin() { return new Set<string>(); }
                     })
                 ));
             } else {
-                assert!(lowered.metadata.source.constructors.get(expr).is_none());
+                assert!(lowered.declarations.constructors.collection(expr).is_none());
                 let args = match expr {
                     Expr::New { args, .. } | Expr::NewDynamic { args, .. } => args,
                     other => panic!("unexpected shadowed constructor: {other:?}"),
@@ -209,7 +190,7 @@ function builtin() { return new Set<string>(); }
             let modules = std::collections::BTreeMap::new();
             let loaded = modules::load(source, "names.ts", &modules, &HashMap::new()).unwrap();
             let lowered = lower(loaded, "names.ts", None).unwrap();
-            let function = &lowered.module.bodies.functions[0];
+            let function = &lowered.bodies.functions[0];
             let user = function.body.iter().find_map(|stmt| match stmt {
                 Stmt::Let {
                     id,

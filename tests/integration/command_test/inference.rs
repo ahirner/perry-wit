@@ -485,6 +485,9 @@ function extra(tag) { trace += tag; return 0; }
 function executor(resolve) { trace += "x"; resolve(4, extra("s")); }
 function makeExecutor() { trace += "e"; return executor; }
 function optionalExecutor(flag) { return flag ? executor : null; }
+class Ticket {
+  ready: Promise<number> = new Promise<number>(resolve => resolve(6)).then(n => n + 1);
+}
 async function verify() {
   try { new Promise(optionalExecutor(false)); } catch (e) { trace += "t"; }
   const p = new Promise(makeExecutor(), extra("a"));
@@ -492,11 +495,12 @@ async function verify() {
   const clear = () => clearTimeout(undefined, extra("c"));
   clear();
   const rejection = await p.finally(() => Promise.reject(new Error("override"))).catch(e => e.message);
-  console.log(trace, value, rejection, await p.then(optional(false)), await p.then(optional(true)));
+  console.log(trace, value, rejection, await p.then(optional(false)), await p.then(optional(true)),
+    await new Ticket().ready, clearTimeout(undefined) === undefined);
 }
 await verify();
 "#,
-            "teaxshbc 4 override 4 5\n",
+            "teaxshbc 4 override 4 5 7 true\n",
         ),
         (
             "conditional_evaluation_in_fields_defaults_and_lazy_operands",

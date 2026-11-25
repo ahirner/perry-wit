@@ -219,16 +219,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(None);
             }
             let mut inputs = vec![Ty::STRING];
-            let captures = match first_arg {
-                Expr::RegExp { pattern, .. } => Some(crate::methods::regex_captures(pattern)),
-                Expr::LocalGet(id) => self
-                    .index
-                    .local_idx(*id)
-                    .and_then(|li| self.index.local_regex_pattern(li))
-                    .map(crate::methods::regex_captures),
-                Expr::String(_) => Some((0, false)),
-                _ => None,
-            };
+            let captures = self
+                .index
+                .replacement_captures(&self.hir.declarations.constructors, first_arg);
             if let Some((count, named)) = captures {
                 let opt = self.types.with_absences(Ty::STRING, Absence::Undefined);
                 inputs.extend(std::iter::repeat_n(opt, count));
@@ -270,7 +263,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 method.result_rule(),
                 MethodResultArgs {
                     arg0: init_ty,
-                    sparse_arrays: self.metadata.source.sparse_arrays,
+                    sparse_arrays: self.hir.sparse_arrays,
                     ..MethodResultArgs::receiver_only(obj_ty)
                 },
             ),

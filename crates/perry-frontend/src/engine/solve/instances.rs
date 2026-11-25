@@ -5,7 +5,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn seed_roots(&mut self) -> Result<InstanceId> {
         let init_inst = self.request_instance(InstanceReq::new(TemplateId::INIT, &[], None))?;
         self.enqueue(init_inst);
-        for witness in &self.metadata.witnesses {
+        for witness in &self.hir.witnesses {
             let Some(fid) = witness.target else {
                 self.witness_instances.push(None);
                 continue;
@@ -194,7 +194,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     w.signature.as_ref()
                 } else {
                     let mut candidates = self
-                        .metadata
+                        .hir
                         .witnesses
                         .iter()
                         .filter(|w| w.target == Some(view.func_id))
@@ -276,13 +276,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                         hir_compat::display_name(view.name)
                     );
                     if hir_compat::has_source_offset(call_byte_offset) {
-                        err = self.metadata.locations.annotate_call(err, call_byte_offset);
+                        err = self.hir.locations.annotate_call(err, call_byte_offset);
                     }
                     if let Some(cid) = caller {
                         err = attach_inst_chain(
                             &self.instances,
                             self.index,
-                            &self.metadata.locations,
+                            &self.hir.locations,
                             err,
                             cid,
                         );
@@ -556,7 +556,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
         }
-        self.metadata.locations.annotate_call(err, call_byte_offset)
+        self.hir.locations.annotate_call(err, call_byte_offset)
     }
 
     pub(super) fn request_class_inst(

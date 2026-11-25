@@ -93,6 +93,17 @@ impl<'s> FunctionBuilder<'s> {
             return self.class_static_field_get(ctx, class_name, property);
         }
         let value = self.expression(ctx, object)?;
+        self.property_of_value(ctx, object, value, property, byte_offset)
+    }
+
+    pub(in crate::lower) fn property_of_value(
+        &mut self,
+        ctx: &mut Context,
+        object: &'s Expr,
+        value: Value,
+        property: &str,
+        byte_offset: u32,
+    ) -> Result<Value> {
         let value = self.receiver(ctx, value, byte_offset)?;
         let ty = value.get_type(ctx);
         if crate::lower::value_unions::is_value_union(ctx, ty) {

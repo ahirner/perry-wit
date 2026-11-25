@@ -1,13 +1,13 @@
 //! Emission of guest-settled promises (`new Promise`, `then`/`catch`/`finally`) and global timers.
-use super::{Emitter, RewriteCtx, sequence, synth_call};
-use crate::engine::ExpressionOp;
+use super::InstancePlanner;
+use crate::engine::PromiseConstructor;
 use crate::engine::boundary::TemplateKind;
 use crate::engine::solve::{CallbackCall, Instance, ReactionKind};
-use crate::engine::types::{CaptureOwner, FuncIdentity, HelperId, LocId, TemplateId, Ty};
-use perry_hir::{ir::Expr, types::FuncId};
+use crate::engine::types::{CaptureOwner, FuncIdentity, LocId, TemplateId, Ty};
+use perry_hir::types::FuncId;
 use perry_wit_diagnostics::Result;
 
-impl<'h> Emitter<'h, '_> {
+impl<'h> InstancePlanner<'h, '_> {
     pub(super) fn promise_handle_function(
         &mut self,
         inst: &Instance,
@@ -43,31 +43,19 @@ impl<'h> Emitter<'h, '_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn emit_promise_new(
+    pub(super) fn promise_constructor(
         &mut self,
-        rctx: &RewriteCtx<'_>,
-        args: &'h [Expr],
+        instance: crate::engine::types::InstanceId,
         value_loc: LocId,
         resolve: TemplateId,
         reject: TemplateId,
         executor: CallbackCall,
         pass_resolve: bool,
         pass_reject: bool,
-    ) -> Result<Expr> {
-        let mut values = Vec::new();
-        let effects =
-            self.project_arguments(&rctx.with_expected(true), args, &mut values, |_, index| {
-                index == 0 && executor.needs_value()
-            })?;
-        if let CallbackCall::ThrowTypeError(helper) = executor {
-            return Ok(sequence(
-                effects,
-                synth_call(self.emit_helper(helper)?, vec![], 0, 0),
-            ));
-        }
+    ) -> Result<PromiseConstructor> {
         let settled = self.solved.locations[value_loc];
         self.prepare_layouts(settled)?;
-        let owner = CaptureOwner::Instance(rctx.inst_id);
+        let owner = CaptureOwner::Instance(instance);
         let handles = [
             pass_resolve.then_some(resolve),
             pass_reject.then_some(reject),
@@ -82,15 +70,11 @@ impl<'h> Emitter<'h, '_> {
             self.environment(handle)?;
         }
         let executor = self.native_callback(executor)?;
-        let promise = self.expression_op(
-            ExpressionOp::Promise {
-                settled,
-                executor,
-                handles,
-            },
-            values,
-        )?;
-        Ok(sequence(effects, promise))
+        Ok(PromiseConstructor {
+            settled,
+            executor,
+            handles,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -153,7 +137,7 @@ impl<'h> Emitter<'h, '_> {
     ) -> Result<crate::engine::NativeCallback> {
         use crate::engine::{CallbackOperand, NativeCallback};
         Ok(match call {
-            CallbackCall::ThrowTypeError(_) => NativeCallback::ThrowTypeError,
+            CallbackCall::ThrowTypeError => NativeCallback::ThrowTypeError,
             CallbackCall::Direct {
                 target,
                 pass_env,
@@ -168,7 +152,7 @@ impl<'h> Emitter<'h, '_> {
                 receiver: pass_receiver,
             },
             CallbackCall::Dispatch { helper, needs_recv } => NativeCallback::Call {
-                target: self.emit_helper(helper)?,
+                target: self.helper_function(helper)?,
                 operand: CallbackOperand::Callee,
                 receiver: needs_recv,
             },
@@ -207,52 +191,5 @@ impl<'h> Emitter<'h, '_> {
                 callback: self.native_callback(cb_call)?,
             },
         })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn emit_timer_start(
-        &mut self,
-        rctx: &RewriteCtx<'_>,
-        args: &'h [Expr],
-        helper: HelperId,
-        has_delay: bool,
-        is_immediate: bool,
-        pass_cb: bool,
-        byte_offset: u32,
-        byte_end: u32,
-    ) -> Result<Expr> {
-        let runner = self.emit_helper(helper)?;
-        let operation = self.expression_id(ExpressionOp::StartTimer(runner))?;
-        let mut values = Vec::new();
-        let effects =
-            self.project_arguments(&rctx.with_expected(true), args, &mut values, |_, i| {
-                i != 0 || pass_cb
-            })?;
-        if !is_immediate && !has_delay {
-            values.insert(usize::from(pass_cb), Expr::Number(0.0));
-        }
-        Ok(sequence(
-            effects,
-            synth_call(operation, values, byte_offset, byte_end),
-        ))
-    }
-
-    pub(super) fn emit_timer_clear(
-        &mut self,
-        rctx: &RewriteCtx<'_>,
-        args: &'h [Expr],
-        arg_ty: Option<Ty>,
-    ) -> Result<Expr> {
-        let mut values = Vec::new();
-        let effects = self.project_arguments(rctx, args, &mut values, |_, i| {
-            i == 0 && arg_ty.is_some_and(|t| !matches!(t, Ty::VOID | Ty::NULL))
-        })?;
-        let Some(handle) = values.pop() else {
-            return Ok(sequence(effects, Expr::Undefined));
-        };
-        Ok(sequence(
-            effects,
-            self.expression_op(ExpressionOp::ClearTimer, vec![handle])?,
-        ))
     }
 }

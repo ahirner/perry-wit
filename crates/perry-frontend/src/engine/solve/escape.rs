@@ -185,7 +185,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return;
         }
         let inner = match expr {
-            Expr::Sequence(parts) if self.metadata.locations.operator_span(parts).is_some() => {
+            Expr::Sequence(parts) if self.hir.locations.operator_span(parts).is_some() => {
                 parts.last().unwrap_or(expr)
             }
             _ => expr,
@@ -210,14 +210,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.is_tagged_func_union_in(src_ty, inst_id)
             && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
         {
-            let helper = self.intern_helper(
-                HelperSpec::Callable(CallableOp::Widener {
+            self.record_site_coercion(
+                inst_id,
+                expr,
+                FuncCoercion::Widen {
                     from: src_ty,
                     to: dst_ty,
-                }),
-                0,
+                },
             );
-            self.record_site_coercion(inst_id, expr, FuncCoercion::Widen(helper));
         }
     }
 
@@ -229,11 +229,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         span: Option<swc_common::Span>,
     ) -> Diagnostic {
         if hir_compat::has_source_offset(byte_offset) {
-            err = self.metadata.locations.annotate_call(err, byte_offset);
+            err = self.hir.locations.annotate_call(err, byte_offset);
         } else if let Some(sp) = span {
-            err = self.metadata.locations.annotate(err, sp);
+            err = self.hir.locations.annotate(err, sp);
         } else if let Some(sp) = self
-            .metadata
+            .hir
             .locations
             .function_span(self.index.view(self.instances[inst_id].template).name)
         {
@@ -242,7 +242,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         attach_inst_chain(
             &self.instances,
             self.index,
-            &self.metadata.locations,
+            &self.hir.locations,
             err,
             inst_id,
         )

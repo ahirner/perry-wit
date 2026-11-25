@@ -40,16 +40,16 @@ impl<'h, 'a> Solver<'h, 'a> {
                 "reassigning function property '{property}' on an object literal is not supported yet"
             ));
             if hir_compat::has_source_offset(byte_offset) {
-                if let Some(sp) = self.metadata.locations.member_span(byte_offset) {
+                if let Some(sp) = self.hir.locations.member_span(byte_offset) {
                     err = err.with_span(sp);
                 }
             } else if let Some(sp) = span {
-                err = self.metadata.locations.annotate(err, sp);
+                err = self.hir.locations.annotate(err, sp);
             }
             return Err(attach_inst_chain(
                 &self.instances,
                 self.index,
-                &self.metadata.locations,
+                &self.hir.locations,
                 err,
                 inst_id,
             ));
@@ -99,13 +99,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                         "cannot compare a capture-free closure literal that may be evaluated more than once",
                     );
                     let err = match span {
-                        Some(sp) => self.metadata.locations.annotate(err, sp),
+                        Some(sp) => self.hir.locations.annotate(err, sp),
                         None => err,
                     };
                     return Err(attach_inst_chain(
                         &self.instances,
                         self.index,
-                        &self.metadata.locations,
+                        &self.hir.locations,
                         err,
                         inst_id,
                     ));
@@ -133,23 +133,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(());
             }
         }
-        let l_zero = self
-            .types
-            .is_zero_sized_func(l, &self.index.capture_free_templates);
-        let r_zero = self
-            .types
-            .is_zero_sized_func(r, &self.index.capture_free_templates);
-        let l_env = self.types.is_env_func(l, &self.escaping_env_templates);
-        let r_env = self.types.is_env_func(r, &self.escaping_env_templates);
-        let helper = (!(l_zero || r_zero || (l_env && r_env && l == r))).then(|| {
-            self.intern_helper(
-                HelperSpec::Callable(CallableOp::Comparer {
-                    left_ty: l,
-                    right_ty: r,
-                }),
-                0,
-            )
-        });
         self.record_site(
             inst_id,
             expr,
@@ -157,7 +140,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 left_ty: l,
                 right_ty: r,
                 op,
-                helper,
             },
         );
         Ok(())
@@ -257,14 +239,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 *ty = concrete;
             }
             let ty = self.types.generic(base, &arg_tys);
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::CollectionNew {
-                    span: constructor.span,
-                    ty,
-                },
-            );
+            self.record_site(s.inst, expr, SiteResolution::CollectionNew(ty));
             return Ok(ty);
         }
         if let Some(init) = init {
@@ -333,7 +308,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn check_timer_member(&self, receiver: Ty, offset: u32) -> Result<()> {
         if receiver == Ty::TIMER {
-            let locations = &self.metadata.locations;
+            let locations = &self.hir.locations;
             let member = locations
                 .member_text(offset)
                 .ok_or_else(|| Diagnostic::internal("Timeout member has no source expression"))?;
@@ -366,16 +341,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Err(Diagnostic::unsupported(format!(
                 "property {property} is not supported on Error yet"
             ))
-            .with_fallback_span(
-                self.metadata
+            .with_fallback_span(self.hir.locations.member_span(byte_offset).or_else(|| {
+                self.hir
                     .locations
-                    .member_span(byte_offset)
-                    .or_else(|| {
-                        self.metadata
-                            .locations
-                            .offset_span(s.iteration.object_pattern_offset(object)?, 1)
-                    }),
-            ));
+                    .offset_span(s.iteration.object_pattern_offset(object)?, 1)
+            })));
         }
         if let TyKind::Cell {
             loc,

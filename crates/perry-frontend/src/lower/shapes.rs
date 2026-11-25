@@ -31,7 +31,6 @@ mod generics;
 mod representation;
 mod resolved;
 mod unions;
-use crate::shapes::perry_integer_spec;
 use representation::integer_mir_carrier;
 
 fn fresh_record(
@@ -69,12 +68,6 @@ impl BindingType {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum BindingAnnotation {
-    Inferred,
-    Explicit,
-}
-
 #[derive(Clone, Copy)]
 enum PendingShape {
     Resolving,
@@ -89,7 +82,7 @@ pub(super) struct StaticField<'h> {
 }
 
 pub(super) struct Shapes<'h> {
-    pub(super) specialization: &'h crate::engine::Specialization,
+    pub(super) specialization: &'h crate::engine::Specialization<'h>,
     pub(super) module: pliron::builtin::ops::ModuleOp,
     pub(super) foreign_wrappers: RefCell<HashMap<(&'h str, Vec<TypeHandle>), Identifier>>,
     pub(super) globals: RefCell<HashMap<perry_hir::types::LocalId, BindingType>>,
@@ -100,10 +93,12 @@ pub(super) struct Shapes<'h> {
     environments: RefCell<HashMap<crate::engine::types::FuncIdentity, TypedHandle<RecordType>>>,
     timer: std::cell::Cell<Option<TypeHandle>>,
     class_records: RefCell<HashMap<TypeHandle, &'h str>>,
+    pub(super) methods_by_id:
+        HashMap<perry_hir::types::FuncId, (&'h str, &'h crate::source::InstanceFunction<'h>)>,
     pub(super) lexical_functions: HashMap<perry_hir::types::FuncId, &'h Expr>,
     function_names: HashSet<&'h str>,
-    local_source_spans: &'h HashMap<perry_hir::types::LocalId, perry_hir::ir::LocalSourceSpan>,
-    pub(super) metadata: &'h crate::hir_compat::Metadata<'h>,
+    pub(super) source: &'h crate::source::ModuleDeclarations,
+    pub(super) locations: &'h crate::hir_compat::Locations<'h>,
     /// Named types whose fields are being computed, with a fresh record handle reserved when a
     /// field refers back to the type.
     pending: RefCell<HashMap<InstanceKey, PendingShape>>,
@@ -130,8 +125,8 @@ impl<'h> Shapes<'h> {
         module: pliron::builtin::ops::ModuleOp,
         declarations: &'h crate::source::ModuleDeclarations,
         world: &'h crate::wit::WorldTypes<'h>,
-        metadata: &'h crate::hir_compat::Metadata<'h>,
-        specialization: &'h crate::engine::Specialization,
+        locations: &'h crate::hir_compat::Locations<'h>,
+        specialization: &'h crate::engine::Specialization<'h>,
         index: crate::source::BodyIndex<'h>,
     ) -> Self {
         let bodies = &specialization.bodies;
@@ -139,7 +134,10 @@ impl<'h> Shapes<'h> {
             &declarations.interfaces,
             &declarations.type_aliases,
             &declarations.imports,
-            &bodies.classes,
+            bodies
+                .classes
+                .iter()
+                .map(crate::shapes::ClassShape::Instance),
             world,
         );
         let mut static_fields = HashMap::new();
@@ -149,7 +147,7 @@ impl<'h> Shapes<'h> {
             .iter()
             .filter(|class| decls.classes.named.contains_key(class.name.as_str()))
         {
-            for field in &class.static_fields {
+            for field in &class.declaration.static_fields {
                 static_fields.insert(
                     (class.name.as_str(), field.name.as_str()),
                     StaticField {
@@ -164,6 +162,14 @@ impl<'h> Shapes<'h> {
                     },
                 );
                 next_static_id += 1;
+            }
+        }
+        let mut methods_by_id = HashMap::new();
+        for class in &bodies.classes {
+            for method in class.methods.iter().chain(&class.static_methods) {
+                methods_by_id
+                    .entry(method.id)
+                    .or_insert((class.name.as_str(), method));
             }
         }
         let function_names = bodies
@@ -191,9 +197,10 @@ impl<'h> Shapes<'h> {
             environments: RefCell::default(),
             timer: Default::default(),
             lexical_functions: closures,
+            methods_by_id,
             function_names,
-            local_source_spans: &declarations.local_source_spans,
-            metadata,
+            source: declarations,
+            locations,
             pending: RefCell::new(HashMap::new()),
             named: RefCell::new(HashMap::new()),
             structural_records: RefCell::default(),
@@ -202,11 +209,10 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn local_name(&self, id: perry_hir::types::LocalId) -> Option<&str> {
-        let span = self.local_source_spans.get(&id)?;
-        self.metadata
-            .locations
-            .source_at(span.start)?
-            .get(..span.end.checked_sub(span.start)? as usize)
+        let span = self.source.locals.get(&id)?.span;
+        self.locations
+            .source_at(span.lo.0)?
+            .get(..span.hi.0.checked_sub(span.lo.0)? as usize)
     }
 
     pub(super) fn annotate_local(
@@ -214,12 +220,8 @@ impl<'h> Shapes<'h> {
         error: Diagnostic,
         id: perry_hir::types::LocalId,
     ) -> Diagnostic {
-        match self.local_source_spans.get(&id) {
-            Some(span) => error.with_fallback_span(
-                self.metadata
-                    .locations
-                    .offset_span(span.start, span.end.saturating_sub(span.start)),
-            ),
+        match self.source.locals.get(&id) {
+            Some(local) => error.with_fallback_span(self.locations.span(local.span)),
             None => error,
         }
     }
@@ -230,7 +232,7 @@ impl<'h> Shapes<'h> {
         byte_offset: u32,
         len: u32,
     ) -> Diagnostic {
-        error.with_fallback_span(self.metadata.locations.offset_span(byte_offset, len))
+        error.with_fallback_span(self.locations.offset_span(byte_offset, len))
     }
 
     fn annotate_site(
@@ -255,11 +257,11 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn annotate_call(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
-        self.annotate_site(error, self.metadata.locations.call_span(byte_offset))
+        self.annotate_site(error, self.locations.call_span(byte_offset))
     }
 
     pub(super) fn annotate_member(&self, error: Diagnostic, byte_offset: u32) -> Diagnostic {
-        self.annotate_site(error, self.metadata.locations.member_span(byte_offset))
+        self.annotate_site(error, self.locations.member_span(byte_offset))
     }
 
     pub(super) fn has_function(&self, name: &str) -> bool {
@@ -337,9 +339,10 @@ impl<'h> Shapes<'h> {
     }
 
     pub(super) fn deferred_binding(&self, id: perry_hir::types::LocalId) -> bool {
-        self.local_source_spans
+        self.source
+            .locals
             .get(&id)
-            .is_some_and(|span| self.metadata.source.binding(span.start).deferred)
+            .is_some_and(|local| local.deferred)
     }
 
     pub(super) fn deferred_storage(
@@ -352,20 +355,6 @@ impl<'h> Shapes<'h> {
             && !perry_mir::admits_undefined(ctx, ty)
             && !ty.deref(ctx).is::<perry_mir::JsonType>())
         .then(|| crate::lower::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined))
-    }
-
-    pub(super) fn binding_annotation(
-        &self,
-        id: perry_hir::types::LocalId,
-    ) -> Option<BindingAnnotation> {
-        let span = self.local_source_spans.get(&id)?;
-        Some(
-            if self.metadata.source.binding(span.start).inferred(span.end) {
-                BindingAnnotation::Inferred
-            } else {
-                BindingAnnotation::Explicit
-            },
-        )
     }
 
     /// Whether the program declares a type of this name (shadowing a built-in class).
@@ -388,20 +377,30 @@ impl<'h> Shapes<'h> {
             .map(|field| field.id)
     }
 
+    pub(super) fn instance_class(
+        &self,
+        name: &str,
+    ) -> Option<&'h crate::source::InstanceClass<'h>> {
+        let (index, _) = self.decls.classes.named.get(name)?;
+        self.specialization.bodies.classes.get(*index)
+    }
+
     fn class_member(
         &self,
         class_name: &str,
-        find: impl FnOnce(&'h perry_hir::ir::Class) -> Option<&'h perry_hir::ir::Function>,
-    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
-        let (&owner_name, &(_, class)) = self.decls.classes.named.get_key_value(class_name)?;
-        Some((owner_name, find(class)?))
+        find: impl FnOnce(
+            &'h crate::source::InstanceClass<'h>,
+        ) -> Option<&'h crate::source::InstanceFunction<'h>>,
+    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
+        let class = self.instance_class(class_name)?;
+        Some((&class.name, find(class)?))
     }
 
     pub(super) fn class_method(
         &self,
         class_name: &str,
         method_name: &str,
-    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
         let norm = crate::hir_compat::method(method_name).name();
         self.class_member(class_name, |c| c.methods.iter().find(|m| m.name == norm))
     }
@@ -410,7 +409,7 @@ impl<'h> Shapes<'h> {
         &self,
         class_name: &str,
         method_name: &str,
-    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
         let norm = crate::hir_compat::method(method_name).name();
         self.class_member(class_name, |c| {
             c.static_methods.iter().find(|m| m.name == norm)
@@ -421,11 +420,11 @@ impl<'h> Shapes<'h> {
         &self,
         class_name: &str,
         prop_name: &str,
-    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
         self.class_member(class_name, |c| {
             c.getters
                 .iter()
-                .find(|(n, _)| n == prop_name)
+                .find(|(n, _)| *n == prop_name)
                 .map(|(_, f)| f)
         })
     }
@@ -434,18 +433,18 @@ impl<'h> Shapes<'h> {
         &self,
         class_name: &str,
         prop_name: &str,
-    ) -> Option<(&'h str, &'h perry_hir::ir::Function)> {
+    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
         self.class_member(class_name, |c| {
             c.setters
                 .iter()
-                .find(|(n, _)| n == prop_name)
+                .find(|(n, _)| *n == prop_name)
                 .map(|(_, f)| f)
         })
     }
 
     pub(super) fn named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
         self.resolve_named(ctx, name)
-            .map_err(|error| error.with_fallback_span(self.metadata.locations.type_span(name)))
+            .map_err(|error| error.with_fallback_span(self.locations.type_span(name)))
     }
 
     pub(super) fn storage_binding(
@@ -455,6 +454,9 @@ impl<'h> Shapes<'h> {
     ) -> Result<BindingType> {
         use crate::engine::{Storage, types::Ty};
         let ty = match storage {
+            Storage::ErasedFunction => {
+                return Err(Diagnostic::internal("static function has no storage"));
+            }
             Storage::Value(ty) => return self.resolved_binding(ctx, ty),
             Storage::Promise(ty) => PromiseType::get(
                 ctx,
@@ -502,10 +504,11 @@ impl<'h> Shapes<'h> {
         self.environments.borrow_mut().insert(identity, record);
         let mut fields = layout
             .iter()
-            .map(|(field, storage)| {
+            .map(|field| {
                 Ok((
-                    field.clone(),
-                    self.storage_binding(ctx, *storage)?.expected_type(ctx),
+                    field.name().to_owned(),
+                    self.storage_binding(ctx, field.storage())?
+                        .expected_type(ctx),
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -517,12 +520,6 @@ impl<'h> Shapes<'h> {
     }
 
     fn resolve_named(&self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        if let Some((width, _)) = name
-            .strip_prefix("perry:types/")
-            .and_then(perry_integer_spec)
-        {
-            return Ok(integer_mir_carrier(ctx, width));
-        }
         // Built-in classes the subset models (a user type or explicit import takes precedence).
         let user = self.is_user_type(name);
         if !user {

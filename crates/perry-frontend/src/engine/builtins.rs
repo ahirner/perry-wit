@@ -36,6 +36,11 @@ pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Re
         }
         TyKind::String => Some(Receiver::Value(Kind::String)),
         TyKind::Number | TyKind::Int32 => Some(Receiver::Value(Kind::Number)),
+        TyKind::Integer(domain) => Some(Receiver::Value(if domain.deref(ctx).width() == 64 {
+            Kind::BigInt
+        } else {
+            Kind::Number
+        })),
         TyKind::Boolean => Some(Receiver::Value(Kind::Boolean)),
         TyKind::BigInt => Some(Receiver::Value(Kind::BigInt)),
         TyKind::Literal(_) => Some(Receiver::Value(Kind::String)),
@@ -546,10 +551,12 @@ pub(crate) fn property_type(
                 } else {
                     ty
                 };
-                if let TyKind::Named(lid) = types.kind(ty)
-                    && let Some((width, _)) = decls.integer_spec(lid.get(ctx))
-                {
-                    return Some(if width == 64 { Ty::BIGINT } else { Ty::NUMBER });
+                if let Some(domain) = types.integer_domain(ctx, decls, ty) {
+                    return Some(if domain.deref(ctx).width() == 64 {
+                        Ty::BIGINT
+                    } else {
+                        Ty::NUMBER
+                    });
                 }
                 return Some(ty);
             }

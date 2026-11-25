@@ -1,6 +1,6 @@
 //! Closure environments, callback bindings, and finite function dispatch.
-use super::{Emitter, EnvField, synth_call};
-use crate::engine::Storage;
+use super::InstancePlanner;
+use crate::engine::EnvironmentField;
 use crate::engine::bitset::BitSet;
 use crate::engine::boundary::{LocalFlags, TemplateKind};
 use crate::engine::solve::HelperSpec;
@@ -8,13 +8,10 @@ use crate::engine::types::{
     CaptureOwner, DispatchArmSpan, FuncIdentity, HelperId, Idx, TemplateId, Ty, TyKind,
 };
 use crate::hir_compat;
-use perry_hir::{
-    ir::Expr,
-    types::{FuncId, LocalId},
-};
+use perry_hir::types::{FuncId, LocalId};
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 
-impl<'h, 'a> Emitter<'h, 'a> {
+impl<'h, 'a> InstancePlanner<'h, 'a> {
     pub(super) fn is_boxed_local(&self, id: LocalId) -> bool {
         self.index
             .local_idx(id)
@@ -73,7 +70,7 @@ impl<'h, 'a> Emitter<'h, 'a> {
         }
     }
 
-    pub(super) fn env_layout(&self, ident: FuncIdentity) -> Result<Vec<EnvField>> {
+    fn capture_fields(&mut self, ident: FuncIdentity) -> Result<Vec<EnvironmentField>> {
         let caps = self.index.template_captures(ident.template);
         let mut fields = Vec::with_capacity(caps.len());
         for &cap_id in caps {
@@ -96,9 +93,16 @@ impl<'h, 'a> Emitter<'h, 'a> {
             if self.is_zero_sized_func(cap_ty) {
                 continue;
             }
-            let boxed = self.is_boxed_local(cap_id);
-            let name = format!("c{}", fields.len());
-            fields.push((cap_id, name, cap_ty, boxed));
+            self.prepare_layouts(cap_ty)?;
+            fields.push(EnvironmentField::Capture {
+                local: cap_id,
+                name: format!("c{}", fields.len()),
+                ty: cap_ty,
+                cell: self.is_boxed_local(cap_id).then(|| self.cell_init(cap_id)),
+            });
+        }
+        if fields.is_empty() {
+            fields.push(EnvironmentField::Unit);
         }
         Ok(fields)
     }
@@ -113,33 +117,12 @@ impl<'h, 'a> Emitter<'h, 'a> {
                     super::SiteEntry::promise(&self.solved.inst_sites, ident.capture_owner, site)?;
                 let elem = self.solved.locations[loc];
                 self.prepare_layouts(elem)?;
-                vec![("c0".into(), Storage::Promise(elem))]
+                vec![EnvironmentField::Settler(elem)]
             }
             _ => self.capture_fields(ident)?,
         };
         self.plans.environments.insert(ident, fields);
         Ok(())
-    }
-
-    fn capture_fields(&mut self, ident: FuncIdentity) -> Result<Vec<(String, Storage)>> {
-        let layout = self.env_layout(ident)?;
-        let mut fields = Vec::with_capacity(layout.len().max(1));
-        for (id, name, ty, boxed) in layout {
-            self.prepare_layouts(ty)?;
-            let storage = if boxed {
-                Storage::Boxed {
-                    ty,
-                    init: self.cell_init(id),
-                }
-            } else {
-                Storage::Value(ty)
-            };
-            fields.push((name, storage));
-        }
-        if fields.is_empty() {
-            fields.push(("_u".into(), Storage::Value(Ty::NUMBER)));
-        }
-        Ok(fields)
     }
 
     fn collect_env_idents_in(&self, ty: Ty, seen: &mut BitSet, out: &mut Vec<FuncIdentity>) {
@@ -188,12 +171,8 @@ impl<'h, 'a> Emitter<'h, 'a> {
         source: CaptureOwner,
         local: LocalId,
         to: Ty,
-        boxed: bool,
     ) -> crate::engine::CaptureOperand {
         use crate::engine::CaptureOperand;
-        if boxed {
-            return CaptureOperand::Cell(local);
-        }
         if matches!(owner, CaptureOwner::Template(_))
             && let Some(from) = self.local_ty_in_owner(source, local)
             && from != to
@@ -237,14 +216,6 @@ impl<'h, 'a> Emitter<'h, 'a> {
         self.solved.escaping_env_templates.contains(tid.index())
     }
 
-    pub(super) fn fresh_synthetic_local(&mut self) -> Result<LocalId> {
-        let next = self.next_local;
-        self.next_local = next
-            .checked_add(1)
-            .ok_or_else(|| Diagnostic::internal("local identifier limit"))?;
-        Ok(next)
-    }
-
     pub(super) fn fresh_func_id(&mut self) -> Result<FuncId> {
         let next = self.next_func_id;
         self.next_func_id = next
@@ -253,43 +224,31 @@ impl<'h, 'a> Emitter<'h, 'a> {
         Ok(next)
     }
 
-    pub(super) fn prop_get(object: Expr, property: &str) -> Expr {
-        Expr::PropertyGet {
-            object: Box::new(object),
-            property: property.to_owned(),
-            byte_offset: 0,
-            byte_end: 0,
-        }
-    }
-
-    pub(super) fn bind_callback(
+    pub(super) fn callback_binding(
         &mut self,
         target: FuncId,
         operand: crate::engine::CallbackOperand,
-        expression: Expr,
         inputs: &[Ty],
-    ) -> Result<Expr> {
+    ) -> Result<crate::engine::CallbackBinding> {
         let mut params = Vec::with_capacity(inputs.len());
         for &ty in inputs {
             self.prepare_layouts(ty)?;
             params.push((!self.erases_argument(ty)).then_some(ty));
         }
-        let id = self.fresh_func_id()?;
-        self.plans.operations.insert(
-            id,
-            crate::engine::NativeOperation::Callback(crate::engine::CallbackBinding {
-                call: crate::engine::NativeCallback::Call {
-                    target,
-                    operand,
-                    receiver: false,
-                },
-                params,
-            }),
-        );
-        Ok(synth_call(id, vec![expression], 0, 0))
+        Ok(crate::engine::CallbackBinding {
+            call: crate::engine::NativeCallback::Call {
+                target,
+                operand,
+                receiver: false,
+            },
+            params,
+        })
+    }
+    pub(super) fn erases_argument(&self, ty: Ty) -> bool {
+        matches!(self.types.kind(ty), TyKind::Func(id) if !self.is_env_template(id.template))
     }
 
-    pub(super) fn emit_helper(&mut self, id: HelperId) -> Result<FuncId> {
+    pub(super) fn helper_function(&mut self, id: HelperId) -> Result<FuncId> {
         if let Some(fid) = self.helper_slots[id] {
             return Ok(fid);
         }
@@ -298,11 +257,6 @@ impl<'h, 'a> Emitter<'h, 'a> {
         let fid = self.fresh_func_id()?;
         self.helper_slots[id] = Some(fid);
         match spec {
-            HelperSpec::Callable(operation) => {
-                self.plans
-                    .operations
-                    .insert(fid, crate::engine::NativeOperation::Callable(operation));
-            }
             HelperSpec::Dispatcher {
                 result,
                 callee_ty,

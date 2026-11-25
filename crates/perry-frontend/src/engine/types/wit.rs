@@ -48,14 +48,9 @@ impl TypeTable {
                 ty => (WitValue { ty, ..value })
                     .integer()
                     .map_or(Ty::OPEN, |(width, sign)| {
-                        let prefix = if sign == pliron::builtin::types::Signedness::Unsigned {
-                            'u'
-                        } else {
-                            's'
-                        };
                         table
                             .borrow_mut()
-                            .named(ctx, &format!("perry:types/{prefix}{width}"))
+                            .intern_kind(TyKind::Integer(IntegerType::get(ctx, width, sign)))
                     }),
             },
             Contract::Resource { id, .. } => {

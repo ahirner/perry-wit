@@ -593,10 +593,20 @@ impl<'s> FunctionBuilder<'s> {
 
     /// The truthiness of `expr`, as a branch condition.
     pub(super) fn condition(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        if self
+            .shapes
+            .specialization
+            .instances
+            .reference(self.local_owner, expr)
+            .is_some()
+            || matches!(expr, Expr::Closure { .. })
+        {
+            return Ok(self.boolean(ctx, true));
+        }
         if let Expr::Sequence(parts) = expr
             && let Some((last, effects)) = parts.split_last()
         {
-            if let Some(span) = self.shapes.metadata.locations.operator_span(parts) {
+            if let Some(span) = self.shapes.locations.operator_span(parts) {
                 return self
                     .condition(ctx, last)
                     .map_err(|e| e.with_fallback_span(Some(span)));

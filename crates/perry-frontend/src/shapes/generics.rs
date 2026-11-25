@@ -1,7 +1,7 @@
 //! Instantiation of generic interfaces, type aliases, and classes.
 use super::*;
 use crate::engine::types::{Ty, TyKind, TypeTable};
-use perry_hir::ir::{Class, Interface, TypeAlias};
+use perry_hir::ir::{Interface, TypeAlias};
 use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported};
 use pliron::utils::vec_exns::VecExtns;
 
@@ -46,7 +46,7 @@ pub(crate) type InstanceKey = (DeclarationId, Vec<Ty>);
 pub(crate) enum Declaration<'a> {
     Interface(&'a Interface),
     Alias(&'a TypeAlias),
-    Class(&'a Class),
+    Class(crate::shapes::ClassShape<'a>),
 }
 
 fn validate(types: &TypeTable, ctx: &Context, ty: Ty, remaining: &mut usize) -> Result<Ty> {
@@ -115,7 +115,7 @@ impl<'a> Declaration<'a> {
         match self {
             Self::Interface(interface) => &interface.type_params,
             Self::Alias(alias) => &alias.type_params,
-            Self::Class(class) => &class.type_params,
+            Self::Class(class) => class.parameters(),
         }
     }
 

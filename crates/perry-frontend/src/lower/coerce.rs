@@ -124,7 +124,7 @@ impl<'s> FunctionBuilder<'s> {
         if !self.is_optional(ctx, value) {
             return Ok(value);
         }
-        let locations = &self.shapes.metadata.locations;
+        let locations = &self.shapes.locations;
         let op =
             UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset)).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
@@ -304,6 +304,10 @@ impl<'s> FunctionBuilder<'s> {
         }
         if ty == target {
             Ok(value)
+        } else if target.deref(ctx).is::<JsonType>()
+            && let Some(json) = self.json_operand(ctx, value)?
+        {
+            Ok(json)
         } else if wanted.deref(ctx).is::<JsonType>() && !thrown.deref(ctx).is::<JsonType>() {
             let boxed = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
             self.fit(ctx, boxed, target)

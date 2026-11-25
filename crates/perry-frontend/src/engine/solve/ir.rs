@@ -76,7 +76,7 @@ pub(crate) enum CallbackCall {
         helper: HelperId,
         needs_recv: bool,
     },
-    ThrowTypeError(HelperId),
+    ThrowTypeError,
 }
 
 impl CallbackCall {
@@ -89,14 +89,6 @@ impl CallbackCall {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum CallableOp {
-    Widener { from: Ty, to: Ty },
-    Comparer { left_ty: Ty, right_ty: Ty },
-    TypeOfFn(Ty),
-    ThrowTypeError,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum HelperSpec {
     Dispatcher {
         result: Ty,
@@ -105,7 +97,6 @@ pub(crate) enum HelperSpec {
         arg_tys: Ty,
         recv_ty: Option<Ty>,
     },
-    Callable(CallableOp),
     PromiseReaction {
         kind: ReactionKind,
         promise_ty: Ty,
@@ -128,7 +119,10 @@ pub(crate) enum FuncCoercion {
     Zero,
     Tag(FuncIdentity, Ty),
     BoxEnv(FuncIdentity, Ty),
-    Widen(HelperId),
+    Widen {
+        from: Ty,
+        to: Ty,
+    },
     DispatchCallback {
         helper: HelperId,
         arms: DispatchArmSpan,
@@ -140,7 +134,7 @@ pub(crate) enum FuncCoercion {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum SiteResolution {
     DirectCall {
         target: InstanceId,
@@ -153,13 +147,12 @@ pub(crate) enum SiteResolution {
         argument_types: Ty,
         needs_recv: bool,
     },
-    ThrowTypeError(HelperId),
-    FuncTypeOf(Option<HelperId>),
+    ThrowTypeError,
+    FuncTypeOf(Option<Ty>),
     FuncCompare {
         left_ty: Ty,
         right_ty: Ty,
         op: CompareOp,
-        helper: Option<HelperId>,
     },
     MethodCall {
         target: InstanceId,
@@ -177,10 +170,7 @@ pub(crate) enum SiteResolution {
     ZeroSizedArray,
     TypedArray(Ty),
     ZeroSizedFieldSet,
-    CollectionNew {
-        span: swc_common::Span,
-        ty: Ty,
-    },
+    CollectionNew(Ty),
     Cell(LocId),
     FoldBool(bool),
     PromiseNew {
@@ -197,16 +187,13 @@ pub(crate) enum SiteResolution {
     },
     TimerStart {
         helper: HelperId,
-        has_delay: bool,
-        is_immediate: bool,
-        pass_cb: bool,
     },
     TimerClear {
         arg_ty: Option<Ty>,
     },
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct SiteEntry {
     pub(crate) resolution: Option<SiteResolution>,
     pub(crate) coercion: Option<FuncCoercion>,

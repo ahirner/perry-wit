@@ -578,7 +578,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.write_local_value(s, lidx, declared);
                 }
                 let is_i64_cast = is_inferred
-                    && matches!(self.types.kind(declared), TyKind::Named(id) if matches!(self.decls.integer_spec(id.get(self.ctx)),Some((64,_))));
+                    && self
+                        .types
+                        .integer_domain(self.ctx, self.decls, declared)
+                        .is_some_and(|domain| domain.deref(self.ctx).width() == 64);
                 if is_i64_cast {
                     self.write_local_value(s, lidx, declared);
                 }
@@ -753,7 +756,22 @@ impl<'h, 'a> Solver<'h, 'a> {
                 update,
                 body,
             } => {
-                if let Some(init) = init {
+                if let Some((id, source)) = self.hir.declarations.for_of(init.as_deref()) {
+                    let iterable = self.eval_expr(s, source)?;
+                    let iterable = self.resolve_cell_read(s.inst, iterable);
+                    let element = if iterable == Ty::BOTTOM {
+                        Ty::BOTTOM
+                    } else {
+                        builtins::iterated_element(self.ctx, self.types, iterable)
+                            .unwrap_or(Ty::OPEN)
+                    };
+                    let local = self
+                        .index
+                        .local_idx(id)
+                        .ok_or_else(|| Diagnostic::internal("missing iteration binding"))?;
+                    self.write_local_value(s, local, element);
+                    self.mark_written(s.inst, local);
+                } else if let Some(init) = init {
                     self.eval_stmt(s, init)?;
                 }
                 s.guards.assign_in(

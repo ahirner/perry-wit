@@ -120,11 +120,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(None);
         }
         if matches!(cb_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let helper = self.intern_helper(
-                HelperSpec::Callable(CallableOp::ThrowTypeError),
-                byte_offset,
-            );
-            return Ok(Some((CallbackCall::ThrowTypeError(helper), Ty::NEVER)));
+            return Ok(Some((CallbackCall::ThrowTypeError, Ty::NEVER)));
         }
         if let Some(idents) = self.types.func_dispatch_members(cb_ty, true) {
             let (helper, _, needs_recv, ret) =
@@ -233,7 +229,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     (arity >= 1, arity >= 2)
                 }
                 CallbackCall::Dispatch { .. } => (true, true),
-                CallbackCall::ThrowTypeError(_) => (false, false),
+                CallbackCall::ThrowTypeError => (false, false),
             };
             self.record_site(
                 s.inst,
@@ -452,7 +448,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.resolve_callback_call(s, cb_ty, Some(timer_ty), &extra_arg_tys, byte_offset)?
         {
             let extra_tuple = self.types.tuple(&extra_arg_tys);
-            let pass_cb = cb_call.needs_value();
             let helper = self.intern_helper(
                 HelperSpec::TimerRunner {
                     kind,
@@ -463,16 +458,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 },
                 byte_offset,
             );
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::TimerStart {
-                    helper,
-                    has_delay,
-                    is_immediate,
-                    pass_cb,
-                },
-            );
+            self.record_site(s.inst, expr, SiteResolution::TimerStart { helper });
         }
         Ok(timer_ty)
     }

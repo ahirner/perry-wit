@@ -107,7 +107,7 @@ impl LocalBinding {
 }
 
 pub(super) enum Body<'s> {
-    Statements(Option<FuncId>, &'s [perry_hir::ir::Param], &'s [Stmt]),
+    Statements(Option<FuncId>, &'s [Stmt]),
     Native(&'s crate::engine::NativeBody),
 }
 
@@ -145,7 +145,7 @@ pub(super) struct FunctionBuilder<'s> {
 impl<'s> FunctionBuilder<'s> {
     pub(super) fn lower(
         ctx: &mut Context,
-        function: &'s Function,
+        function: &'s Function<'s>,
         signatures: &'s HashMap<FuncId, Signature<'s>>,
         shapes: &'s Shapes<'s>,
         builtins: &'s HashMap<&'s str, Builtin>,
@@ -164,11 +164,7 @@ impl<'s> FunctionBuilder<'s> {
         Self::lower_body(
             ctx,
             signature,
-            Body::Statements(
-                Some(function.id),
-                &function.params,
-                shapes.specialization.instances.function_body(function),
-            ),
+            Body::Statements(Some(function.id), function.body),
             signatures,
             shapes,
             builtins,
@@ -227,10 +223,10 @@ impl<'s> FunctionBuilder<'s> {
             }
             builder.locals.insert(id, local);
         }
-        let (parameters, statements) = match body {
-            Body::Statements(owner, parameters, statements) => {
+        let statements = match body {
+            Body::Statements(owner, statements) => {
                 builder.local_owner = owner;
-                (parameters, statements)
+                statements
             }
             Body::Native(body) => {
                 let args = builder.entry.deref(ctx).arguments().collect::<Vec<_>>();
@@ -253,17 +249,9 @@ impl<'s> FunctionBuilder<'s> {
                 return Ok(func);
             }
         };
-        for (index, (source, param)) in parameters.iter().zip(&signature.params).enumerate() {
-            let arg_val = builder.entry.deref(ctx).get_argument(index);
-            let binding = if param
-                .default
-                .is_some_and(|expr| !matches!(expr, Expr::Undefined))
-            {
-                param.base
-            } else {
-                param.binding
-            };
-            builder.bind_parameter(ctx, source, Some(arg_val), binding, param.is_never)?;
+        for (index, param) in signature.params.iter().enumerate() {
+            let value = builder.entry.deref(ctx).get_argument(index);
+            builder.bind_argument(ctx, param, value)?;
         }
         if signature.await_initialization {
             let promise = builder.intrinsic(ctx, Intrinsic::ModuleInitialize, vec![]);

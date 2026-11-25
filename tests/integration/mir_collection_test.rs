@@ -875,7 +875,14 @@ export function callbacks() {
  if(retained[0].label!=='cell0' || retained[1].label!=='cell1')return 10;
  return small.filter(nothing).length;
 }
+class IterationName { $$perryIteration(): number { return 13; } }
 export function iteration() {
+ if (new IterationName().$$perryIteration() !== 13) return 6;
+ let steps = 0;
+ outer: for (const row of [[1, 2], [3]]) {
+   for (const n of row) { steps += n; continue outer; }
+ }
+ if (steps !== 4) return 7;
  const values:number[]=[1,2];
  let visits=0;
  for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}
