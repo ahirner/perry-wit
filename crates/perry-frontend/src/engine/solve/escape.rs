@@ -58,7 +58,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let cloc = match self.capture_locs.collapsed[lidx] {
                 Some(loc) => loc,
                 None => {
-                    let loc = self.locations.alloc(Ty::BOTTOM);
+                    let loc = self.facts.alloc(Ty::BOTTOM);
                     self.capture_locs.collapsed[lidx] = Some(loc);
                     loc
                 }
@@ -77,7 +77,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.capture_locs.slots[id]
                             .iter()
                             .find(|s| s.local == lidx)
-                            .map(|s| self.locations[s.loc])
+                            .map(|s| self.facts[s.loc])
                     }
                 })
                 .collect();
@@ -99,23 +99,13 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn is_escaping_env(&mut self, tid: TemplateId, reader: InstanceId) -> bool {
-        let loc = self.template_escape_locs[tid];
-        self.read_loc(loc, reader) != Ty::BOTTOM
+        self.subscriptions.read(reader, Fact::Escape(tid));
+        self.facts.escaping.contains(tid.index())
     }
 
     fn track_function_escapes(&mut self, ty: Ty, reader: InstanceId) {
-        match self.types.kind(ty) {
-            TyKind::Func(id) => {
-                self.is_escaping_env(id.template, reader);
-            }
-            TyKind::Union(span) => {
-                for member in self.types.ty_slice(span).to_vec() {
-                    if let TyKind::Func(id) = self.types.kind(member) {
-                        self.is_escaping_env(id.template, reader);
-                    }
-                }
-            }
-            _ => {}
+        for id in self.types.func_members(&ty) {
+            self.subscriptions.read(reader, Fact::Escape(id.template));
         }
     }
 
@@ -127,29 +117,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.types.is_tagged_func_union(
             ty,
             &self.index.capture_free_templates,
-            &self.escaping_env_templates,
+            &self.facts.escaping,
         )
     }
 
-    pub(super) fn mark_escaping_env(&mut self, _caller: InstanceId, ty: Ty) {
-        let members: Vec<_> = self
-            .types
-            .func_members(&ty)
-            .filter(|ident| {
-                !ident.capture_owner.is_none()
-                    || !self
-                        .index
-                        .capture_free_templates
-                        .contains(ident.template.index())
-            })
-            .collect();
-        for ident in members {
+    pub(super) fn mark_escaping_env(&mut self, ty: Ty) {
+        for ident in self.types.func_members(&ty) {
             let tid = ident.template;
-            if !self.escaping_env_templates.insert(tid.index()) {
+            if ident.capture_owner.is_none()
+                && self.index.capture_free_templates.contains(tid.index())
+            {
                 continue;
             }
-            let loc = self.template_escape_locs[tid];
-            self.write_loc(loc, Ty::BOOLEAN);
+            if !self.facts.escaping.insert(tid.index()) {
+                continue;
+            }
+            self.facts.dirty.insert(Fact::Escape(tid));
             for &cap_id in self.index.template_captures(tid) {
                 if let Some(lidx) = self.index.local_idx(cap_id) {
                     let flags = self.index.locals[lidx].flags;
@@ -201,7 +184,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         arg_tys: &[Ty],
     ) {
         for &at in arg_tys {
-            self.mark_escaping_env(inst_id, at);
+            self.mark_escaping_env(at);
         }
         let array = self.resolve_cell_read(inst_id, arr_def);
         let TyKind::Array(elem_ty) = self.types.kind(array) else {
@@ -247,7 +230,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             src_ty,
             dst_ty,
             &self.index.capture_free_templates,
-            &self.escaping_env_templates,
+            &self.facts.escaping,
         ) {
             self.record_site_coercion(inst_id, expr, FuncCoercion::Value(conversion));
         }
@@ -267,7 +250,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         } else if let Some(sp) = self
             .hir
             .locations
-            .function_span(self.index.view(self.instances[inst_id].template).name)
+            .function_span(&self.index.view(self.instances[inst_id].template).name)
         {
             err = err.with_span(sp);
         }
@@ -296,7 +279,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         byte_offset: u32,
         span: Option<swc_common::Span>,
     ) -> Result<()> {
-        self.mark_escaping_env(inst_id, ty);
+        self.mark_escaping_env(ty);
         if let TyKind::Union(u_span) = self.types.kind(ty)
             && self
                 .types

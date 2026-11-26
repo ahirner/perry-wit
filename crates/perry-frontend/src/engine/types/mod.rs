@@ -13,6 +13,7 @@ const MAX_TYPE_DEPTH: u8 = 16;
 
 #[derive(Clone, Copy, Default)]
 struct TyMeta {
+    contains_cell: bool,
     open: bool,
     depth: u8,
 }
@@ -39,6 +40,7 @@ pub(crate) struct TypeTable {
     names: IdxVec<NameId, String>,
     name_index: HashMap<String, NameId>,
     scratch: Vec<Ty>,
+    pub(crate) applications: HashMap<shapes::generics::InstanceKey, shapes::generics::Application>,
     wit_shapes: HashMap<(*const wit_parser::Resolve, wit_parser::Type, WitView), Ty>,
 }
 
@@ -109,7 +111,13 @@ impl TypeTable {
             _ => (false, 0),
         };
         let ty = self.kinds.push(kind);
-        let meta_ty = self.meta.push(TyMeta { open, depth });
+        let contains_cell = matches!(kind, TyKind::Cell { .. })
+            || self.any_child(ty, &mut |child| self.meta[child].contains_cell);
+        let meta_ty = self.meta.push(TyMeta {
+            open,
+            depth,
+            contains_cell,
+        });
         debug_assert_eq!(ty, meta_ty);
         ty
     }
@@ -185,6 +193,17 @@ impl TypeTable {
     }
     pub(crate) fn class_inst(&mut self, inst: ClassInstId) -> Ty {
         self.intern_kind(TyKind::ClassInst(inst))
+    }
+
+    pub(crate) fn application_key(
+        &mut self,
+        base: &str,
+        args: &[Ty],
+    ) -> shapes::generics::InstanceKey {
+        (
+            self.intern_name(base),
+            self.ty_pool.intern(&mut self.members_index, args),
+        )
     }
 
     pub(crate) fn tuple(&mut self, items: &[Ty]) -> Ty {
@@ -477,7 +496,7 @@ impl TypeTable {
     fn any_with_cells(
         &self,
         ty: Ty,
-        resolve: &impl Fn(LocId) -> (LocId, Ty),
+        resolve: &mut impl FnMut(LocId) -> (LocId, Ty),
         visiting: &mut Vec<LocId>,
         seen: &mut BitSet,
         on_cell: &impl Fn(LocId, CellKind, Ty) -> Option<bool>,
@@ -511,12 +530,12 @@ impl TypeTable {
     pub(crate) fn is_open_with(
         &self,
         ty: Ty,
-        resolve: impl Fn(LocId) -> (LocId, Ty),
+        mut resolve: impl FnMut(LocId) -> (LocId, Ty),
         dict_reads: &BitSet,
     ) -> bool {
         self.any_with_cells(
             ty,
-            &resolve,
+            &mut resolve,
             &mut Vec::new(),
             &mut BitSet::default(),
             &|loc, ck, elem| match ck {
@@ -528,6 +547,19 @@ impl TypeTable {
             },
             &|k| matches!(k, TyKind::Bottom | TyKind::Open | TyKind::TypeVar(_)),
         )
+    }
+
+    pub(super) fn promise_argument(&mut self, ty: Ty, mut read: impl FnMut(LocId) -> Ty) -> Ty {
+        if let TyKind::Cell {
+            loc,
+            kind: CellKind::Promise,
+        } = self.kind(ty)
+        {
+            let inner = read(loc);
+            self.promise(if inner == Ty::BOTTOM { Ty::VOID } else { inner })
+        } else {
+            ty
+        }
     }
 
     pub(crate) fn is_promise_ty(&self, ty: Ty) -> bool {
@@ -546,11 +578,11 @@ impl TypeTable {
         &self,
         ty: Ty,
         target: LocId,
-        resolve: impl Fn(LocId) -> (LocId, Ty),
+        mut resolve: impl FnMut(LocId) -> (LocId, Ty),
     ) -> bool {
         self.any_with_cells(
             ty,
-            &resolve,
+            &mut resolve,
             &mut Vec::new(),
             &mut BitSet::default(),
             &|loc, _, _| (loc == target).then_some(true),
@@ -668,8 +700,11 @@ impl TypeTable {
         )
     }
 
-    pub(crate) fn erases_argument(&self, ty: Ty, escaping_env: &BitSet) -> bool {
-        matches!(self.kind(ty), TyKind::Func(id) if !escaping_env.contains(id.template.index()))
+    pub(super) fn erased_function(&self, ty: Ty, escaping_env: &BitSet) -> Option<FuncIdentity> {
+        match self.kind(ty) {
+            TyKind::Func(id) if !escaping_env.contains(id.template.index()) => Some(id),
+            _ => None,
+        }
     }
 
     pub(crate) fn is_env_func(&self, ty: Ty, escaping_env: &BitSet) -> bool {
@@ -789,11 +824,17 @@ impl TypeTable {
         if bindings.is_empty() {
             return ty;
         }
+        self.substitute_with(ty, |_, name| {
+            bindings.iter().find(|(p, _)| *p == name).map(|&(_, ty)| ty)
+        })
+    }
+    pub(super) fn substitute_with(
+        &mut self,
+        ty: Ty,
+        binding: impl Fn(&Self, shapes::TypeName) -> Option<Ty>,
+    ) -> Ty {
         self.rewrite(ty, &mut |types, ty| match types.kind(ty) {
-            TyKind::TypeVar(name) | TyKind::Named(name) => bindings
-                .iter()
-                .find(|(p, _)| *p == name)
-                .map(|&(_, bound)| bound),
+            TyKind::TypeVar(name) | TyKind::Named(name) => binding(types, name),
             _ => None,
         })
     }
@@ -869,17 +910,18 @@ impl TypeTable {
         &self,
         pattern: Ty,
         actual: Ty,
-        type_params: &[shapes::TypeName],
-        bindings: &mut Vec<(shapes::TypeName, Ty)>,
+        type_params: &impl Fn(shapes::TypeName) -> Option<usize>,
+        bindings: &mut [Ty],
     ) {
         if matches!(actual, Ty::BOTTOM | Ty::OPEN | Ty::NEVER) {
             return;
         }
         match (self.kind(pattern), self.kind(actual)) {
             (TyKind::TypeVar(name) | TyKind::Named(name), _)
-                if type_params.contains(&name) && !bindings.iter().any(|(k, _)| *k == name) =>
+                if let Some(slot) = type_params(name).and_then(|i| bindings.get_mut(i))
+                    && *slot == Ty::OPEN =>
             {
-                bindings.push((name, actual));
+                *slot = actual;
             }
             (TyKind::Array(p), TyKind::Array(a)) | (TyKind::Promise(p), TyKind::Promise(a)) => {
                 self.unify(p, a, type_params, bindings)

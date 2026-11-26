@@ -51,11 +51,10 @@ impl Solver<'_, '_> {
         expr: &Expr,
         element: Ty,
     ) -> Result<Ty> {
-        let loc = self.expr_cell_loc(inst, expr)?;
+        let (site, loc, array) = self.storage_site(inst, expr, CellKind::Array)?;
+        site.resolution = Some(SiteResolution::TypedArray(array));
         self.write_loc(loc, element);
-        let array = self.types.cell(loc, CellKind::Array);
         self.arrays.literals.entry(array).or_insert((loc, element));
-        self.record_site(inst, expr, SiteResolution::TypedArray(array));
         Ok(array)
     }
 
@@ -67,7 +66,7 @@ impl Solver<'_, '_> {
                 .iter()
                 .zip(self.arrays.bindings(original))
             {
-                self.locations.share_elements(self.types, left, right);
+                self.facts.share_elements(self.types, left, right);
             }
         }
     }
@@ -84,7 +83,7 @@ impl Solver<'_, '_> {
             })
             .collect();
         for other in locations {
-            self.locations.share_elements(self.types, first, other);
+            self.facts.share_elements(self.types, first, other);
         }
     }
 }

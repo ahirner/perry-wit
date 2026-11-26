@@ -1,6 +1,6 @@
 //! Lower a solved operation at its lexical expression.
 use super::*;
-use crate::engine::solve::{FuncCoercion, SiteResolution};
+use crate::engine::solve::SiteResolution;
 use crate::engine::types::Ty;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -10,15 +10,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             .instances
             .site(self.frame.owner, expr)
             .erased
-    }
-    pub(in crate::lower) fn is_callback(&self, expr: &Expr) -> bool {
-        let plans = &self.shapes.specialization.instances;
-        matches!(expr, Expr::Closure { .. })
-            || plans.reference(self.frame.owner, expr).is_some()
-            || matches!(
-                plans.site(self.frame.owner, expr).coercion,
-                Some(FuncCoercion::Callback { .. })
-            )
     }
     pub(in crate::lower) fn instance_operand(
         &mut self,
@@ -42,7 +33,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             })
             .map(Some)
     }
-    fn instance_value(
+    pub(in crate::lower) fn instance_value(
         &mut self,
         ctx: &mut Context,
         expr: &'s Expr,
@@ -54,7 +45,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let reference = match site {
             Some(SiteResolution::Callback { target }) => Some(plans.function(target)),
             _ => match expr {
-                Expr::LocalGet(id) => plans.parameter_function(self.frame.owner, *id),
+                Expr::LocalGet(id) => plans.erased_parameter_declaration(self.frame.owner, *id),
                 _ => None,
             },
         };
@@ -109,6 +100,18 @@ impl<'s> FunctionBuilder<'s, '_> {
                         byte_offset,
                         ..
                     } => (callee, Arguments::Spread(args), *byte_offset),
+                    Expr::StaticMethodCall { args, .. } => {
+                        return target.invoke(
+                            self,
+                            ctx,
+                            None,
+                            None,
+                            crate::lower::calls::CallArguments::Expressions(
+                                Arguments::Plain(args),
+                                argument_types,
+                            ),
+                        );
+                    }
                     _ => bail_internal!("solved call requires a call expression"),
                 };
                 return self
@@ -184,9 +187,82 @@ impl<'s> FunctionBuilder<'s, '_> {
                 }
                 self.absent_literal(ctx, false, expected)?
             }
-            (MemberCall(target), _) => {
-                use crate::engine::solve::MemberTarget;
-                use crate::lower::classes::{ClassArguments::Expressions, ClassReceiver::*};
+            (
+                ReadMember(id),
+                Expr::PropertyGet { object, .. }
+                | Expr::StringCoerce(object)
+                | Expr::TemplateStringCoerce(object),
+            ) => {
+                let value = self.expression(ctx, object)?;
+                let value = self.defined(ctx, value)?;
+                self.read_member(ctx, plans.function(id), value)?
+            }
+            (
+                WriteMember(id),
+                Expr::PropertySet { object, value, .. }
+                | Expr::PutValueSet {
+                    target: object,
+                    value,
+                    ..
+                },
+            ) => {
+                let receiver = self.expression(ctx, object)?;
+                let receiver = self.defined(ctx, receiver)?;
+                let id = plans.function(id);
+                let value = if let Some(param) = self.signature(id)?.params.get(1) {
+                    Some(self.expression_with(ctx, value, Some(param.base.carrier))?)
+                } else {
+                    self.discard_function_operand(ctx, value)?;
+                    None
+                };
+                self.call_values(ctx, id, std::iter::once(receiver).chain(value))?;
+                return Ok(value);
+            }
+            (
+                UpdateMember { get, set },
+                Expr::PropertyUpdate {
+                    object,
+                    property,
+                    op,
+                    prefix,
+                    ..
+                },
+            ) => self.property_update(
+                ctx,
+                object,
+                property,
+                op,
+                *prefix,
+                (
+                    get.map(|id| plans.function(id)),
+                    set.map(|id| plans.function(id)),
+                ),
+            )?,
+            (
+                Builtin(method),
+                Expr::Call {
+                    callee,
+                    args,
+                    byte_offset,
+                    ..
+                },
+            ) if let Some((receiver, Some(name))) = hir_compat::member(callee) => {
+                return self
+                    .builtin_call(ctx, receiver, method, hir_compat::method(name).name(), args)
+                    .map_err(|e| self.shapes.annotate_call(e, *byte_offset));
+            }
+            (
+                Builtin(selected),
+                Expr::NativeMethodCall {
+                    object: Some(receiver),
+                    method,
+                    args,
+                    ..
+                },
+            ) => {
+                return self.builtin_call(ctx, receiver, selected, method, args);
+            }
+            (ResourceCall(id), _) => {
                 let (args, offset) = hir_compat::call_arguments(expr)
                     .ok_or_else(|| internal!("expected a member invocation"))?;
                 let receiver = if let Expr::Call { callee, .. } = expr
@@ -198,30 +274,19 @@ impl<'s> FunctionBuilder<'s, '_> {
                 } else {
                     None
                 };
-                return match target {
-                    MemberTarget::Resource(id) => self.resource_call(ctx, id, receiver, args),
-                    MemberTarget::Class(id) => self.solved_member(
-                        ctx,
-                        plans.function(id),
-                        Expressions(args),
-                        receiver.map_or(Static, Instance),
-                    ),
-                }
-                .map_err(|error| self.shapes.annotate_call(error, offset));
+                return self
+                    .resource_call(ctx, id, receiver, args)
+                    .map_err(|error| self.shapes.annotate_call(error, offset));
             }
             (
-                ClassNew(id),
+                ClassNew(id, arguments),
                 Expr::New {
                     args, byte_offset, ..
                 },
             ) => {
                 let class = &self.shapes.specialization.bodies.classes[id];
-                self.class_new(
-                    ctx,
-                    class,
-                    crate::lower::classes::ClassArguments::Expressions(args),
-                )
-                .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?
+                self.class_new(ctx, class, args, Some(plans.arguments(arguments)?))
+                    .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?
             }
             (
                 ZeroSizedFieldSet,

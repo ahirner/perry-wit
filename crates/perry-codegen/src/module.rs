@@ -2,6 +2,7 @@
 //! functions, drivers and boundary glue are emitted, and the raw (test) export wrappers.
 use crate::{
     DATA_BASE, Exports, HELPER_MODULE,
+    aggregates::RecordLayouts,
     analysis::{ModuleAnalyses, module_analyses, reachable_functions},
     async_split, boundary,
     function::FunctionLowering,
@@ -131,6 +132,7 @@ pub(crate) struct ModuleState<'e> {
     /// Operations whose previous results are dead whenever they run again (`lease`).
     pub(crate) leased: HashSet<Ptr<Operation>>,
     pub(crate) layout_descriptors: HashMap<TypeHandle, u32>,
+    pub(crate) record_layouts: RecordLayouts,
     pub(crate) json_copy_plans: HashMap<(TypeHandle, TypeHandle), u32>,
     pub(crate) json_result: Option<u32>,
     pub(crate) json_write_data: Option<u32>,
@@ -276,6 +278,7 @@ pub(crate) fn lower(
         program_facts: &effects,
         live: &live,
         count_roots: matches!(exports, Exports::RawChecked),
+        record_layouts: Default::default(),
         pointer_maps: HashMap::new(),
         globals: HashMap::new(),
         initializer: None,
@@ -409,7 +412,7 @@ fn bind_exports(
     if exports.iter().any(|e| {
         e.params
             .iter()
-            .any(|p| matches!(p, boundary::AbiType::ByteStream))
+            .any(|p| matches!(p.kind, boundary::AbiKind::ByteStream))
     }) {
         state.uses_streams = true;
     }

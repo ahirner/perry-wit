@@ -161,7 +161,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             Stmt::Return(value) => {
                 let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.source(id)
-                    .and_then(|f| f.signature.as_ref()).is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
+                    .is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
                     if let Some(expr) = value
                         && !crate::source::is_pure_func_expr(expr)
@@ -652,8 +652,11 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::StaticMethodCall {
                 class_name,
                 method_name,
-                args,
-            } => self.class_static_method_call(ctx, class_name, method_name, args)?,
+                ..
+            } => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "static method {class_name}.{method_name} not found"
+            ),
             Expr::ProcessExit(code) => {
                 let code = match code {
                     Some(code) => {

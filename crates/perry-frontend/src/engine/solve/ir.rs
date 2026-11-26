@@ -37,7 +37,6 @@ pub(crate) struct Instance {
     pub(crate) receiver: Option<Receiver>,
     pub(crate) capture_owner: CaptureOwner,
     pub(crate) args: Ty,
-    pub(crate) explicit_type_args: Ty,
     pub(crate) return_loc: LocId,
     pub(crate) partial_record_result: Option<Ty>,
     pub(crate) has_explicit_return: bool,
@@ -47,7 +46,6 @@ pub(crate) struct Instance {
     pub(crate) invocation: Invocation,
     pub(crate) emitted_func_id: u32,
     pub(crate) emitted_name: String,
-    pub(crate) emitted_method_name: String,
 }
 
 impl Instance {
@@ -105,6 +103,14 @@ impl CallTarget {
             Self::Direct { pass_env: true, .. } | Self::Dispatch { .. }
         )
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DispatchArm {
+    pub(crate) identity: FuncIdentity,
+    pub(crate) target: InstanceId,
+    pub(crate) receiver: bool,
+    pub(crate) arguments: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -187,12 +193,6 @@ pub(crate) struct PromiseExecutor {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum MemberTarget {
-    Class(InstanceId),
-    Resource(crate::wit::MemberId),
-}
-
-#[derive(Clone, Copy, Debug)]
 pub(crate) enum SiteResolution {
     Call {
         target: CallTarget,
@@ -211,11 +211,18 @@ pub(crate) enum SiteResolution {
         left_erased: bool,
         equal: bool,
     },
-    MemberCall(MemberTarget),
+    ResourceCall(crate::wit::MemberId),
+    Builtin(crate::methods::Method),
+    ReadMember(InstanceId),
+    WriteMember(InstanceId),
+    UpdateMember {
+        get: Option<InstanceId>,
+        set: Option<InstanceId>,
+    },
     Callback {
         target: InstanceId,
     },
-    ClassNew(ClassInstId),
+    ClassNew(ClassInstId, Ty),
     Closure(FuncIdentity),
     BranchResult(Ty),
     ObjectSpread(Ty),
@@ -283,11 +290,9 @@ pub(crate) struct HelperEntry {
     pub(crate) byte_offset: u32,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct ClassInstMembers {
-    pub(crate) methods: Vec<InstanceId>,
-    pub(crate) getters: Vec<(usize, InstanceId)>,
-    pub(crate) setters: Vec<(usize, InstanceId)>,
+pub(crate) enum AdapterResult {
+    Declared(Ty),
+    Inferred(LocId),
 }
 
 pub(crate) enum ExportRoot {
@@ -295,11 +300,12 @@ pub(crate) enum ExportRoot {
     Adapter {
         target: hir_compat::Target<InstanceId>,
         params: Ty,
-        result: LocId,
+        result: AdapterResult,
     },
 }
 
 pub(crate) struct Solved {
+    pub(crate) writes: crate::narrowing::WriteEffects,
     pub(crate) witness_instances: Vec<Option<ExportRoot>>,
     pub(crate) resource_instances: HashMap<u32, ClassInstId>,
     pub(crate) init_inst: InstanceId,
@@ -308,7 +314,7 @@ pub(crate) struct Solved {
     pub(crate) locations: IdxVec<LocId, Ty>,
     pub(crate) param_locs: Pool<ParamLocSpan, LocId>,
     pub(crate) field_locs: Pool<FieldLocSpan, LocId>,
-    pub(crate) dispatch_arms: Pool<DispatchArmSpan, (FuncIdentity, InstanceId)>,
+    pub(crate) dispatch_arms: Pool<DispatchArmSpan, DispatchArm>,
     pub(crate) helpers: IdxVec<HelperId, HelperEntry>,
     pub(in crate::engine) capture_locs: super::CaptureLocations,
     pub(crate) inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
@@ -318,9 +324,6 @@ pub(crate) struct Solved {
 
     pub(crate) boxed_locals: BitSet,
 
-    pub(crate) class_static_field_tys: IdxVec<ClassId, Vec<Ty>>,
-    pub(crate) class_inst_members: IdxVec<ClassInstId, ClassInstMembers>,
-    pub(crate) class_static_methods: IdxVec<ClassId, Vec<InstanceId>>,
     pub(crate) dict_reads: BitSet,
     pub(crate) self_nested_locs: BitSet,
     pub(crate) self_nested_locals: BitSet,

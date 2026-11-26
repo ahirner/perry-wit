@@ -17,7 +17,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Some(method) = method
             && let Expr::ClassRef(class_name) = object
         {
-            return self.class_static_method_call(ctx, class_name, method.name(), args);
+            bail_diag!(
+                codes::TYPE_MISMATCH,
+                "static method {class_name}.{} not found",
+                method.name()
+            );
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
@@ -33,11 +37,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         let method = method.ok_or_else(|| {
             unsupported!("computed method or element calls are not supported yet")
         })?;
-        if let Some(class_name) = self.shapes.class_of_type(ctx, receiver.get_type(ctx))
-            && let Some((owner_class, func)) = self.shapes.class_method(class_name, method.name())
-        {
-            return self.class_method_call(ctx, receiver, owner_class, func, args);
-        }
         if method == hir_compat::Method::Push {
             ensure_unsupported!(
                 kind(ctx, receiver)? == Kind::Array,
@@ -45,13 +44,26 @@ impl<'s> FunctionBuilder<'s, '_> {
             );
         }
         let method = method.name();
-        if let Some(call) = Call::parse(Receiver::of(ctx, receiver)?, method, args)? {
+        if let Some(call) = Call::member(Receiver::of(ctx, receiver)?, method, Some(args))? {
             return call.lower(self, ctx, receiver);
         }
         bail_unsupported!(
             "method {method} is not supported on {} yet",
             kind(ctx, receiver)?.label()
         )
+    }
+
+    pub(super) fn builtin_call(
+        &mut self,
+        ctx: &mut Context,
+        object: &'s Expr,
+        method: crate::methods::Method,
+        name: &str,
+        args: &'s [Expr],
+    ) -> Result<Option<Value>> {
+        let value = self.expression(ctx, object)?;
+        let receiver = self.defined(ctx, value)?;
+        method.bind(name, args)?.lower(self, ctx, receiver)
     }
 
     pub(super) fn replace_string(
@@ -66,9 +78,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok({
             let search_val = self.expression(ctx, search)?;
             let search_val = self.defined(ctx, search_val)?;
-            if self.is_callback(replacement) {
+            if let Some(callback) = self.optional_callback(ctx, replacement)? {
                 return self
-                    .replace_callback(ctx, receiver, (search, search_val), replacement, all)
+                    .replace_callback(ctx, receiver, (search, search_val), callback, all)
                     .map(Some);
             }
             let repl_val = self.string_operand(ctx, replacement)?;
@@ -229,17 +241,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             Kind::Number => value,
             _ => bail_unsupported!("Number conversion requires a number, bigint or string"),
         })
-    }
-
-    /// A one-argument `Math` function such as `Math.floor`, lowered as `intrinsic`.
-    pub(super) fn math_unary(
-        &mut self,
-        ctx: &mut Context,
-        intrinsic: Intrinsic,
-        value: &'s Expr,
-    ) -> Result<Value> {
-        let value = self.number_operand(ctx, value)?;
-        Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }
 
     /// `Math.min(…)` or `Math.max(…)`: `intrinsic` folded over `values` from `empty`.

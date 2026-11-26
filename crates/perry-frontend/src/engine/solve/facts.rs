@@ -1,16 +1,23 @@
 use super::*;
 use std::{cell::Cell, collections::BTreeSet, ops::Index};
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum Fact {
+    Escape(TemplateId),
+    Storage(LocId),
+}
+
 #[derive(Default)]
-pub(super) struct Locations {
+pub(super) struct Facts {
     values: IdxVec<LocId, Ty>,
     parents: HashMap<LocId, Cell<LocId>>,
-    pub(super) dirty: BTreeSet<LocId>,
+    pub(super) dirty: BTreeSet<Fact>,
+    pub(super) escaping: BitSet,
     declared: BitSet,
     pub(super) self_nested: BitSet,
 }
 
-impl Locations {
+impl Facts {
     pub(super) fn new(values: IdxVec<LocId, Ty>) -> Self {
         Self {
             values,
@@ -63,7 +70,7 @@ impl Locations {
     fn set(&mut self, loc: LocId, value: Ty) {
         if self.values[loc] != value {
             self.values[loc] = value;
-            self.dirty.insert(loc);
+            self.dirty.insert(Fact::Storage(loc));
         }
     }
 
@@ -78,13 +85,13 @@ impl Locations {
         self.write(types, root, self.values[alias]);
         self.parents.insert(alias, Cell::new(root));
         // Readers of the retired location must resubscribe even when its type matched.
-        self.dirty.insert(alias);
+        self.dirty.insert(Fact::Storage(alias));
         if self.self_nested.contains(alias.index()) {
             self.self_nested.insert(root.index());
         }
     }
 
-    pub(super) fn finish(mut self) -> (IdxVec<LocId, Ty>, BitSet) {
+    pub(super) fn finish(mut self) -> (IdxVec<LocId, Ty>, BitSet, BitSet) {
         for &alias in self.parents.keys() {
             let (root, ty) = self.resolve(alias);
             self.values[alias] = ty;
@@ -92,11 +99,11 @@ impl Locations {
                 self.self_nested.insert(alias.index());
             }
         }
-        (self.values, self.self_nested)
+        (self.values, self.self_nested, self.escaping)
     }
 }
 
-impl Index<LocId> for Locations {
+impl Index<LocId> for Facts {
     type Output = Ty;
 
     fn index(&self, loc: LocId) -> &Ty {
@@ -106,22 +113,22 @@ impl Index<LocId> for Locations {
 
 #[derive(Default)]
 pub(super) struct Subscriptions {
-    pub(super) inputs: IdxVec<InstanceId, Vec<LocId>>,
-    readers: HashMap<LocId, Vec<InstanceId>>,
+    pub(super) inputs: IdxVec<InstanceId, Vec<Fact>>,
+    readers: HashMap<Fact, Vec<InstanceId>>,
 }
 
 impl Subscriptions {
-    pub(super) fn read(&mut self, reader: InstanceId, loc: LocId) {
-        let readers = self.readers.entry(loc).or_default();
+    pub(super) fn read(&mut self, reader: InstanceId, fact: Fact) {
+        let readers = self.readers.entry(fact).or_default();
         if let Err(index) = readers.binary_search(&reader) {
             readers.insert(index, reader);
-            self.inputs[reader].push(loc);
+            self.inputs[reader].push(fact);
         }
     }
 
     pub(super) fn forget(&mut self, reader: InstanceId) {
-        for loc in self.inputs[reader].drain(..) {
-            if let Some(readers) = self.readers.get_mut(&loc)
+        for fact in self.inputs[reader].drain(..) {
+            if let Some(readers) = self.readers.get_mut(&fact)
                 && let Ok(index) = readers.binary_search(&reader)
             {
                 readers.remove(index);
@@ -129,7 +136,7 @@ impl Subscriptions {
         }
     }
 
-    pub(super) fn readers(&self, loc: LocId) -> &[InstanceId] {
-        self.readers.get(&loc).map_or(&[], Vec::as_slice)
+    pub(super) fn readers(&self, fact: Fact) -> &[InstanceId] {
+        self.readers.get(&fact).map_or(&[], Vec::as_slice)
     }
 }

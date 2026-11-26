@@ -24,7 +24,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             byte_offset,
             s.current_span,
         )?;
-        self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?;
+        if let Some(setter) =
+            self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?
+        {
+            self.record_site(s.inst, site, SiteResolution::WriteMember(setter));
+            return Ok(());
+        }
         let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
             && let Some(loc) = self.class_field_loc(cinst_id, property)
         {
@@ -44,20 +49,16 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn read_static_field(
-        &mut self,
-        inst_id: InstanceId,
-        class_name: &str,
-        field_name: &str,
-    ) -> Ty {
-        let (cn, fn_) = (
-            self.types.intern_name(class_name),
-            self.types.intern_name(field_name),
-        );
+    fn static_field_loc(&mut self, class: &str, field: &str) -> Option<LocId> {
+        let class = self.index.class_by_name_id(self.types.intern_name(class))?;
         self.index
-            .class_by_name_id(cn)
-            .and_then(|cid| self.index.class(cid).static_field(fn_))
-            .map_or(Ty::OPEN, |loc| self.read_loc(loc, inst_id))
+            .class(class)
+            .static_field(self.types.intern_name(field))
+    }
+
+    pub(super) fn read_static_field(&mut self, reader: InstanceId, class: &str, field: &str) -> Ty {
+        self.static_field_loc(class, field)
+            .map_or(Ty::OPEN, |loc| self.read_loc(loc, reader))
     }
 
     pub(super) fn eval_expr(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<Ty> {
@@ -84,8 +85,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(constructor) = self.index.expressions.collection(expr) {
             return self.eval_collection_constructor(s, expr, constructor);
         }
-        if let Some(SiteResolution::MemberCall(MemberTarget::Resource(id))) =
-            self.index.expressions.declared(expr)
+        if let Some(SiteResolution::ResourceCall(id)) = self.index.expressions.declared(expr)
             && let Some((args, _)) = hir_compat::call_arguments(expr)
         {
             let types = self.eval_args(s, args)?;
@@ -238,7 +238,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         if let Some(lidx) = self.index.local_idx(cap_id)
                             && let Some(cap_ty) = self.read_local_value(s.inst, lidx)
                         {
-                            self.mark_escaping_env(s.inst, cap_ty);
+                            self.mark_escaping_env(cap_ty);
                         }
                     }
                 }
@@ -255,7 +255,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let l = self.eval_expr(s, left)?;
                 let depth = s.guards.depth();
                 if matches!(op, LogicalOp::And | LogicalOp::Or) {
-                    s.guards.exclude_absences(left, *op == LogicalOp::And);
+                    self.assume(s, left, *op == LogicalOp::And);
                 }
                 let r = self.eval_expr(s, right)?;
                 s.guards.truncate(depth);
@@ -274,13 +274,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(s, condition)?;
                 let guard = DefinedGuard::of(condition);
                 let branch = s.guards.branch();
-                s.guards.exclude_absences(condition, true);
+                self.assume(s, condition, true);
                 let mut then_ty = self.eval_expr(s, then_expr)?;
                 if guard.as_ref().is_some_and(|g| g.proves(true, then_expr)) {
                     then_ty = self.types.exclude_absences(then_ty, Absence::Undefined);
                 }
                 let then_writes = s.guards.other_arm(branch);
-                s.guards.exclude_absences(condition, false);
+                self.assume(s, condition, false);
                 let mut else_ty = self.eval_expr(s, else_expr)?;
                 if guard.as_ref().is_some_and(|g| g.proves(false, else_expr)) {
                     else_ty = self.types.exclude_absences(else_ty, Absence::Undefined);
@@ -481,12 +481,45 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(Ty::OPEN)
             }
+            Expr::StringCoerce(object) | Expr::TemplateStringCoerce(object) => {
+                let ty = self.eval_expr(s, object)?;
+                let receiver = self.types.strip_nullish(ty).0;
+                if let Some(class) = self.resolve_class_inst(s.inst, receiver, 0)?
+                    && let Some(template) = self
+                        .index
+                        .method_template(&self.class_declaration(class).methods, "toString")
+                {
+                    let target = self.request_instance(
+                        InstanceReq::new(template, &[], Some(s.inst))
+                            .receiver(Some(Receiver::Class(class))),
+                    )?;
+                    self.record_site(s.inst, expr, SiteResolution::ReadMember(target));
+                }
+                Ok(Ty::STRING)
+            }
+            Expr::PropertyUpdate {
+                object,
+                property,
+                byte_offset,
+                ..
+            } => {
+                let ty = self.eval_expr(s, object)?;
+                let receiver = self.types.strip_nullish(ty).0;
+                if let Some(class) = self.resolve_class_inst(s.inst, receiver, *byte_offset)? {
+                    let get = self.request_accessor(s.inst, class, property, None)?;
+                    let set = self.request_accessor(s.inst, class, property, Some(Ty::NUMBER))?;
+                    if get.is_some() || set.is_some() {
+                        self.record_site(s.inst, expr, SiteResolution::UpdateMember { get, set });
+                    }
+                }
+                Ok(Ty::NUMBER)
+            }
             Expr::PropertyGet {
                 object,
                 property,
                 byte_offset,
                 ..
-            } => self.eval_property_get(s, object, property, *byte_offset),
+            } => self.eval_property_get(s, expr, object, property, *byte_offset),
             Expr::PropertySet {
                 object,
                 property,
@@ -518,7 +551,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let idx_ty = self.eval_expr(s, index)?;
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
                     if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
-                        self.locations.dirty.insert(loc);
+                        self.facts.dirty.insert(Fact::Storage(loc));
                     }
                     if idx_ty != Ty::BOTTOM
                         && !(if kind.is_array() {
@@ -589,15 +622,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 value,
             } => {
                 let val_ty = self.eval_expr(s, value)?;
-                let (cn, fn_) = (
-                    self.types.intern_name(class_name),
-                    self.types.intern_name(field_name),
-                );
-                if let Some(loc) = self
-                    .index
-                    .class_by_name_id(cn)
-                    .and_then(|cid| self.index.class(cid).static_field(fn_))
-                {
+                if let Some(loc) = self.static_field_loc(class_name, field_name) {
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, val_ty);
@@ -681,20 +706,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                     {
                         return Ok(Ty::NUMBER);
                     }
-                    let rule = args
-                        .is_empty()
-                        .then(|| {
-                            builtins::lookup_method_result(
-                                self.ctx, self.types, stripped, method, true,
-                            )
-                        })
-                        .flatten()
-                        .or_else(|| {
-                            builtins::lookup_method_result(
-                                self.ctx, self.types, stripped, method, false,
-                            )
-                        });
-                    if let Some(rule) = rule {
+                    if let Some(rule) =
+                        self.builtin_rule(s, expr, stripped, method, args.is_empty())
+                    {
                         return Ok(self.method_result(
                             s.inst,
                             rule,

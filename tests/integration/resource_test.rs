@@ -124,10 +124,10 @@ fn imported_error_cases_throw_and_release_owned_payloads() -> Result<()> {
 
     let wit = "package demo:io; interface streams {
         resource failure; variant fault {closed,last-operation-failed(failure)}
-        resource reader {read:static func(closed:bool)->result<u8,fault>;}
+        resource reader {read:static func(input:result<_,string>)->result<u8,fault>;}
     } world app {import streams;export run:func(closed:bool)->string;}";
     let source = "import {Reader} from 'demo:io/streams';
-export function run(closed) {try {Reader.read(closed); return 'ok';}
+export function run(closed) {try {if(closed) Reader.read({tag:'ok'}); else Reader.read({tag:'err',val:'failed'}); return 'ok';}
 catch(e) {return e.message;}}";
     let compile = |source: &str| MemoryChecked.component(wit, "app", "read.js", source);
     for (read, column) in [
@@ -154,14 +154,19 @@ catch(e) {return e.message;}}";
         *store.data_mut() += 1;
         Ok(())
     })?;
-    io.func_wrap("[static]reader.read", |_, (closed,): (bool,)| {
-        let fault = if closed {
-            Fault::Closed
-        } else {
-            Fault::Failed(Resource::new_own(2))
-        };
-        Ok((Err::<u8, _>(fault),))
-    })?;
+    io.func_wrap(
+        "[static]reader.read",
+        |_, (input,): (Result<(), String>,)| {
+            let fault = match input {
+                Ok(()) => Fault::Closed,
+                Err(message) => {
+                    assert_eq!(message, "failed");
+                    Fault::Failed(Resource::new_own(2))
+                }
+            };
+            Ok((Err::<u8, _>(fault),))
+        },
+    )?;
     let mut store = Store::new(&engine, 0);
     let instance = linker.instantiate(&mut store, &component)?;
     let run = instance.get_typed_func::<(bool,), (String,)>(&mut store, "run")?;

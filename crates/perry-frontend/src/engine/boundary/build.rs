@@ -1,11 +1,41 @@
 //! Assemble the lexical index and close over capture, frame and promise sites.
 use super::*;
 
+fn assigns_constructor_arguments(class: &perry_hir::ir::Class) -> bool {
+    let Some(ctor) = &class.constructor else {
+        return false;
+    };
+    ctor.params.len() == class.fields.len()
+        && ctor.body.len() == class.fields.len()
+        && ctor
+            .body
+            .iter()
+            .zip(&ctor.params)
+            .zip(&class.fields)
+            .all(|((stmt, param), field)| {
+                let Stmt::Expr(Expr::PropertySet {
+                    object,
+                    property,
+                    value,
+                    ..
+                }) = stmt
+                else {
+                    return false;
+                };
+                field.init.is_none()
+                    && param.default.is_none()
+                    && !param.is_rest
+                    && matches!(object.as_ref(), Expr::This)
+                    && property == &field.name
+                    && matches!(value.as_ref(), Expr::LocalGet(id) if *id == param.id)
+            })
+}
+
 impl<'h> ModuleIndex<'h> {
     pub(crate) fn build(
         ctx: &Context,
         bodies: &'h crate::source::Bodies,
-        declarations: &crate::source::ModuleDeclarations,
+        declarations: &'h crate::source::ModuleDeclarations,
         locations: &crate::hir_compat::Locations<'_>,
         closure_names: &'h HashMap<FuncId, String>,
         (constructors, decls): (
@@ -23,7 +53,7 @@ impl<'h> ModuleIndex<'h> {
         };
         let init_tid = idx.add_template(TemplateView {
             kind: TemplateKind::ModuleInit,
-            name: "<init>",
+            name: "<init>".into(),
             func_id: 0,
             params: &[],
             return_type: &VOID_HIR,
@@ -78,25 +108,23 @@ impl<'h> ModuleIndex<'h> {
                 name_id: scan.types.intern_name(&class.name),
                 field_init: None,
                 ctor: None,
+                direct_constructor: assigns_constructor_arguments(class),
                 static_field_locs: Vec::new(),
             });
+            idx.register_type_params(scan.ctx, GenericOwner::Class(cid), &class.type_params);
             for field in &class.static_fields {
                 let ty = idx.annotations.register(&mut scan, &field.ty, true);
-                let loc = idx.add_location(ty);
+                let loc = idx.add_location(if ty == Ty::OPEN { Ty::BOTTOM } else { ty });
                 idx.classes[cid]
                     .static_field_locs
                     .push((scan.types.intern_name(&field.name), loc));
-                if let Some(init) = &field.init {
-                    Self::record_site_expr(&mut scan, init_tid, init);
-                    idx.scan_expr(&mut scan, init, init_tid, false);
-                }
             }
             let mut initializers = class
                 .fields
                 .iter()
                 .filter_map(|field| field.init.as_ref())
                 .peekable();
-            if initializers.peek().is_some() {
+            if class.constructor.is_none() || initializers.peek().is_some() {
                 let owner =
                     idx.add_synthetic_template(TemplateKind::FieldInitializers, &class.name);
                 idx.classes[cid].field_init = Some(owner);
@@ -120,9 +148,14 @@ impl<'h> ModuleIndex<'h> {
                 .as_ref()
                 .map(|c| idx.register_member(&mut scan, TemplateKind::ClassConstructor, c, false));
             let mut register = |kind, function, prefix: &str, name: &str| {
-                let explicit_return =
-                    locations.has_explicit_return(&format!("{}::{prefix}{name}", class.name));
-                idx.register_member(&mut scan, kind, function, explicit_return);
+                let name = format!("{}::{prefix}{name}", class.name);
+                let tid = idx.register_member(
+                    &mut scan,
+                    kind,
+                    function,
+                    locations.has_explicit_return(&name),
+                );
+                idx.views[tid].name = name.into();
             };
             for method in &class.methods {
                 register(TemplateKind::ClassMethod, method, "", &method.name);
@@ -135,11 +168,19 @@ impl<'h> ModuleIndex<'h> {
                     &method.name,
                 );
             }
-            for (i, (name, getter)) in class.getters.iter().enumerate() {
-                register(TemplateKind::ClassGetter(i), getter, "get_", name);
+            for (name, getter) in &class.getters {
+                register(TemplateKind::ClassGetter, getter, "get_", name);
             }
-            for (i, (name, setter)) in class.setters.iter().enumerate() {
-                register(TemplateKind::ClassSetter(i), setter, "set_", name);
+            for (name, setter) in &class.setters {
+                register(TemplateKind::ClassSetter, setter, "set_", name);
+            }
+            for member in &class.computed_members {
+                idx.register_member(
+                    &mut scan,
+                    TemplateKind::ClassMethod,
+                    &member.function,
+                    false,
+                );
             }
         }
 
@@ -246,5 +287,96 @@ impl<'h> ModuleIndex<'h> {
             }
         }
         idx
+    }
+}
+
+impl ModuleIndex<'_> {
+    pub(crate) fn emitted_uses(
+        &self,
+        bodies: &crate::source::InstanceBodies<'_>,
+        solved: &super::super::solve::Solved,
+        plans: &super::super::InstancePlans,
+        locations: &mut hir_compat::Locations,
+    ) -> std::collections::HashSet<LocalId> {
+        use crate::engine::BodyOwner;
+        use crate::source::CallerKind;
+        let mut origins = self.views.filled(Vec::new());
+        for (id, inst) in solved
+            .instances
+            .iter_enumerated()
+            .filter(|(id, _)| solved.live_instances.contains(id.index()))
+        {
+            let (kind, name) = match self.view(inst.template).kind {
+                TemplateKind::ModuleInit => (CallerKind::Initializer, None),
+                TemplateKind::Closure | TemplateKind::Function => (
+                    if inst.is_witness {
+                        CallerKind::Export
+                    } else {
+                        CallerKind::Function
+                    },
+                    Some(inst.emitted_name.as_str()),
+                ),
+                _ => (CallerKind::Class, None),
+            };
+            origins[inst.template].push((solved.body_owner(id), kind, name));
+        }
+        let mut source = |id, kind, name| {
+            if let Some(tid) = self.template_of_func(id) {
+                origins[tid].push((BodyOwner::Function(id), kind, name));
+            }
+        };
+        let mut field_initializers = std::collections::HashSet::new();
+        for c in bodies.classes.iter() {
+            if c.initializer.is_none() {
+                field_initializers.insert(c.declaration.name.as_str());
+            }
+            for m in &c.declaration.computed_members {
+                source(m.function.id, CallerKind::Class, None);
+            }
+        }
+        let names: HashMap<_, _> = bodies
+            .functions
+            .iter()
+            .filter(|_| locations.has_imports())
+            .map(|f| (f.id, f.name.as_ref()))
+            .collect();
+        for (tid, view) in self.views.iter_enumerated() {
+            if origins[tid].is_empty() {
+                if view.kind == TemplateKind::FieldInitializers
+                    && field_initializers.contains(view.name.as_ref())
+                {
+                    origins[tid].push((BodyOwner::Initializer, CallerKind::Class, None));
+                } else if let Some(parent) = self.closure_owner(tid)
+                    && let Some(&(_, kind, name)) = origins[parent].first()
+                {
+                    origins[tid].push((BodyOwner::Function(view.func_id), kind, name));
+                }
+            }
+            if !names.is_empty() {
+                for &(owner, kind, caller) in &origins[tid] {
+                    for site in self.sites(tid) {
+                        if let Expr::Call { byte_offset, .. } = site.expr
+                            && let Some(callee) = plans
+                                .call_target(owner, site.expr)
+                                .and_then(|id| names.get(&id))
+                        {
+                            locations.record_cross_file_call(callee, *byte_offset, caller, kind);
+                        }
+                    }
+                }
+            }
+        }
+        self.global_uses
+            .iter()
+            .filter_map(|&(template, id)| {
+                (origins[template]
+                    .iter()
+                    .any(|(_, kind, _)| *kind != CallerKind::Initializer)
+                    && self
+                        .local_idx(id)
+                        .is_some_and(|i| self.locals[i].flags.contains(LocalFlags::MODULE)))
+                .then_some(id)
+            })
+            .collect()
     }
 }

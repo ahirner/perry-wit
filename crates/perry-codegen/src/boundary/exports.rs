@@ -1,6 +1,10 @@
 //! Canonical export wrappers, async callbacks and reallocation.
 use super::*;
 
+fn core_types(ctx: &mut Context, types: &[WasmType]) -> Vec<TypeHandle> {
+    types.iter().map(|&ty| flat_type(ctx, ty.into())).collect()
+}
+
 /// Emit the export function and its post-return function for `export`.
 pub(crate) fn export(
     ctx: &mut Context,
@@ -21,13 +25,6 @@ pub(crate) fn export(
         if is_async { "" } else { "not " },
         if export.is_async() { "" } else { "not " },
     );
-    if let ExportKind::Async {
-        task_return,
-        command,
-    } = &export.kind
-    {
-        return async_export(ctx, state, function, export, task_return, *command);
-    }
     let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
     ensure_diag!(
         mir_params.len() == export.params.len(),
@@ -37,10 +34,38 @@ pub(crate) fn export(
         mir_params.len(),
         export.params.len()
     );
-    let completion = export
-        .result
-        .as_ref()
-        .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
+    let completion =
+        if let Some(AbiKind::Result { ok, err }) = export.result.as_ref().map(|ty| &ty.kind) {
+            let layout = mir_results
+                .first()
+                .and_then(|&ty| perry_mir::typed::<RecordType>(ctx, ty))
+                .map(|record| state.record_layouts.get(ctx, record))
+                .transpose()?;
+            !layout
+                .as_ref()
+                .and_then(|layout| layout.result.as_deref())
+                .is_some_and(|fields| {
+                    let [value, error] = fields.payloads;
+                    (ok.is_none() || value.is_some()) && (err.is_none() || error.is_some())
+                })
+        } else {
+            false
+        };
+    if let ExportKind::Async {
+        task_return,
+        command,
+    } = &export.kind
+    {
+        return async_export(
+            ctx,
+            state,
+            function,
+            export,
+            (task_return, *command),
+            (&mir_params, &mir_results),
+            completion,
+        );
+    }
     if !completion && mir_results.len() != usize::from(export.result.is_some()) {
         return Err(diag!(
             codes::CONTRACT_MISMATCH,
@@ -55,21 +80,9 @@ pub(crate) fn export(
                 .or_else(|| perry_mir::source_span(ctx, function)),
         ));
     }
-    let flat_params = parameters::export_signature(&export.params);
-    let flat_result = export
-        .result
-        .as_ref()
-        .map(AbiType::flat)
-        .unwrap_or_default();
-    let flat_result_len = flat_result.len();
-    let core_results: Vec<Flat> = if flat_result_len > 1 {
-        vec![Flat::I32]
-    } else {
-        flat_result
-    };
-
-    let params: Vec<_> = flat_params.iter().map(|f| flat_type(ctx, *f)).collect();
-    let results: Vec<_> = core_results.iter().map(|f| flat_type(ctx, *f)).collect();
+    let indirect = export.signature.retptr;
+    let params = core_types(ctx, &export.signature.params);
+    let results: Vec<_> = core_types(ctx, &export.signature.results);
     let post_ty = FunctionType::get(ctx, results.clone(), vec![]);
     let fn_ty = FunctionType::get(ctx, params, results);
     let glue = FuncOp::new(ctx, identifier(&export.core_name), fn_ty);
@@ -124,22 +137,14 @@ pub(crate) fn export(
     };
     if let Some(status) = status {
         // An uncaught exception without a WIT error type has no value to return.
-        let trap = b.new_block(ctx, vec![]);
-        let normal = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, status, (trap, vec![]), (normal, vec![]));
-        b.block = trap;
+        let normal = b.enter_if(ctx, status);
         b.return_resources(ctx);
-        if let Some(ty @ AbiType::Result { .. }) =
-            export.result.as_ref().filter(|r| r.accepts_exception())
+        if let Some(ty) = export
+            .result
+            .as_ref()
+            .filter(|r| matches!(r.kind, AbiKind::Result { .. }) && r.accepts_exception())
         {
-            let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
-            let payload = b.completion_error(ctx, ty, exception)?;
-            let returned = b.lower_return(
-                ctx,
-                ty,
-                BoundaryValue::Completion { case: 1, payload },
-                flat_result_len != 1,
-            )?;
+            let returned = b.lower_exception(ctx, ty, status, indirect)?;
             b.ret(ctx, returned);
         } else {
             b.task_free(ctx);
@@ -169,15 +174,13 @@ pub(crate) fn export(
         payload.map(|(mir, value)| BoundaryValue::Native(mir, value))
     };
     let returned = match (&export.result, source) {
-        (Some(ty), Some(source)) => b
-            .lower_return(ctx, ty, source, flat_result_len != 1)
-            .map_err(|e| {
-                e.with_fallback_span(
-                    export
-                        .annotation(export.params.len())
-                        .or_else(|| perry_mir::source_span(ctx, function)),
-                )
-            })?,
+        (Some(ty), Some(source)) => b.lower_return(ctx, ty, source, indirect).map_err(|e| {
+            e.with_fallback_span(
+                export
+                    .annotation(export.params.len())
+                    .or_else(|| perry_mir::source_span(ctx, function)),
+            )
+        })?,
         _ => vec![],
     };
     b.commit_resources(ctx);
@@ -212,42 +215,24 @@ fn async_export(
     state: &mut ModuleState,
     function: &FuncOp,
     export: &Export,
-    (module, wit_name): &(String, String),
-    command: bool,
+    ((module, wit_name), command): (&(String, String), bool),
+    (mir_params, mir_results): (&[TypeHandle], &[TypeHandle]),
+    completion: bool,
 ) -> Result<()> {
-    let (mir_params, mir_results) = crate::analysis::function_signature(ctx, function)?;
-    let completion = export
-        .result
-        .as_ref()
-        .is_some_and(|ty| ty.is_completion(ctx, mir_results.first().copied()));
-    ensure_diag!(
-        mir_params.len() == export.params.len(),
-        codes::CONTRACT_MISMATCH,
-        "{} takes {} parameters but the WIT export has {}",
-        export.declaration(),
-        mir_params.len(),
-        export.params.len()
-    );
-    let flat_params = parameters::export_signature(&export.params);
     // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
-    let result_flat = if command {
-        vec![Flat::I32]
+    let result = if command {
+        Some([Flat::I32].as_slice())
     } else {
         export
             .result
             .as_ref()
-            .map(AbiType::flat)
-            .unwrap_or_default()
+            .map_or(Some(&[][..]), |ty| ty.flat.as_deref())
     };
-    let indirect = result_flat.len() > MAX_FLAT_PARAMS;
+    let indirect = result.is_none();
     let task_return = EffectHost::TaskReturn(
         module.clone(),
         wit_name.clone(),
-        if indirect {
-            vec![Flat::I32]
-        } else {
-            result_flat
-        },
+        result.unwrap_or(&[Flat::I32]).to_vec(),
     );
     let i32 = i32_type(ctx);
 
@@ -361,47 +346,26 @@ fn async_export(
             settled = completion.deref(ctx).get_argument(1);
             let rejected_state = b.i32_const(ctx, perry_abi::layout::promise::REJECTED as i32);
             let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
-            let trap = b.new_block(ctx, vec![]);
-            let fulfilled = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, rejected, (trap, vec![]), (fulfilled, vec![]));
-            b.block = trap;
+            let fulfilled = b.enter_if(ctx, rejected);
             b.return_resources(ctx);
-            if uses_io
-                && export
-                    .result
-                    .as_ref()
-                    .is_some_and(AbiType::accepts_exception)
-            {
-                let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
-                let closed = b.new_block(ctx, vec![]);
-                b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
-                b.block = closed;
-            }
-            if export
-                .result
-                .as_ref()
-                .is_some_and(AbiType::accepts_exception)
-            {
-                let mut values = Vec::new();
-                if let Some(ty @ AbiType::Result { .. }) = &export.result {
-                    let status = b.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
-                    let exception = b.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
-                    let payload = b.completion_error(ctx, ty, exception)?;
-                    values = b.lower_return(
-                        ctx,
-                        ty,
-                        BoundaryValue::Completion { case: 1, payload },
-                        indirect,
-                    )?;
-                } else if let Some(AbiType::OkHandle { flat, error_case }) = &export.result {
+            if let Some(ty) = export.result.as_ref().filter(|r| r.accepts_exception()) {
+                if uses_io {
+                    b.flush_io(ctx, wait);
+                }
+                let values = if let AbiKind::OkHandle { error_case } = ty.kind {
                     // `err(error_case(some(description)))`, then end the task.
                     let text = b.runtime(ctx, Runtime::RejectionText, vec![promise]);
                     let data = b.load(ctx, MemKind::I32, text, strings::DATA);
                     let len = b.load(ctx, MemKind::I32, text, strings::LEN);
                     let one = b.i32_const(ctx, 1);
-                    let case = b.i32_const(ctx, *error_case as i32);
-                    b.flat_i32s(ctx, flat, &[one, case, one, data, len], &mut values)?;
-                }
+                    let case = b.i32_const(ctx, error_case as i32);
+                    let mut values = Vec::new();
+                    b.flat_i32s(ctx, ty.direct()?, &[one, case, one, data, len], &mut values)?;
+                    values
+                } else {
+                    let status = b.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
+                    b.lower_exception(ctx, ty, status, indirect)?
+                };
                 b.close_web_handles(ctx, true);
                 b.host_void(ctx, task_return.clone(), values);
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
@@ -411,10 +375,7 @@ fn async_export(
             } else {
                 if uses_io || b.state.reports_rejection {
                     b.runtime_void(ctx, Runtime::ReportRejection, vec![promise]);
-                    let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
-                    let closed = b.new_block(ctx, vec![]);
-                    b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
-                    b.block = closed;
+                    b.flush_io(ctx, wait);
                 }
                 b.close_web_handles(ctx, true);
                 b.runtime_void(ctx, Runtime::TaskCloseSet, vec![]);
@@ -426,10 +387,7 @@ fn async_export(
             None
         };
         if uses_io {
-            let flushed = b.runtime(ctx, Runtime::IoClose, vec![]);
-            let closed = b.new_block(ctx, vec![]);
-            b.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
-            b.block = closed;
+            b.flush_io(ctx, wait);
         }
         b.return_resources(ctx);
         b.begin_resources(
@@ -494,7 +452,7 @@ fn async_export(
 
     // [async-lift]<export>(params) -> code
     let lift_name = format!("[async-lift]{}", export.core_name);
-    let params: Vec<_> = flat_params.iter().map(|f| flat_type(ctx, *f)).collect();
+    let params = core_types(ctx, &export.signature.params);
     let lift_ty = FunctionType::get(ctx, params, vec![i32]);
     let lift = FuncOp::new(ctx, identifier(&lift_name), lift_ty);
     set_export(ctx, &lift, &lift_name);
@@ -520,7 +478,7 @@ fn async_export(
             b.block = active;
             joined
         });
-        let args = b.lift_parameters(ctx, export, &mir_params, &mut flat)?;
+        let args = b.lift_parameters(ctx, export, mir_params, &mut flat)?;
         let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
         let mut promise = b.result(ctx, ramp.get_operation());
         if let Some(joined) = joined {
@@ -552,10 +510,7 @@ fn async_export(
         b.runtime_void(ctx, Runtime::TaskResume, vec![task]);
         let cancellation = b.i32_const(ctx, 6);
         let cancelled = b.num(ctx, NumOpcode::I32Eq, vec![event, cancellation]);
-        let abort = b.new_block(ctx, vec![]);
-        let active = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, cancelled, (abort, vec![]), (active, vec![]));
-        b.block = abort;
+        let active = b.enter_if(ctx, cancelled);
         b.abort_task(ctx)?;
         b.host_void(ctx, EffectHost::TaskCancel, vec![]);
         let exit = b.i32_const(ctx, EXIT);
@@ -590,10 +545,7 @@ fn async_export(
         }
         let subtask_event = b.i32_const(ctx, EVENT_SUBTASK);
         let is_subtask = b.num(ctx, NumOpcode::I32Eq, vec![event, subtask_event]);
-        let settle = b.new_block(ctx, vec![]);
-        let other = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, is_subtask, (settle, vec![]), (other, vec![]));
-        b.block = settle;
+        let other = b.enter_if(ctx, is_subtask);
         b.runtime_void(ctx, Runtime::TaskSubtaskEvent, vec![handle, subtask_state]);
         b.br(ctx, next, vec![]);
         b.block = other;
@@ -618,6 +570,34 @@ fn async_export(
 }
 
 impl FunctionLowering<'_, '_> {
+    fn flush_io(
+        &mut self,
+        ctx: &mut Context,
+        wait: pliron::context::Ptr<pliron::basic_block::BasicBlock>,
+    ) {
+        let flushed = self.runtime(ctx, Runtime::IoClose, vec![]);
+        let closed = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, flushed, (closed, vec![]), (wait, vec![]));
+        self.block = closed;
+    }
+
+    fn lower_exception(
+        &mut self,
+        ctx: &mut Context,
+        ty: &AbiType,
+        status: Value,
+        indirect: bool,
+    ) -> Result<Vec<Value>> {
+        let exception = self.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
+        let payload = self.completion_error(ctx, ty, exception)?;
+        self.lower_return(
+            ctx,
+            ty,
+            BoundaryValue::Completion { case: 1, payload },
+            indirect,
+        )
+    }
+
     fn lower_return(
         &mut self,
         ctx: &mut Context,
@@ -627,7 +607,7 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<Vec<Value>> {
         let mut flat = Vec::new();
         let area = if indirect {
-            let size = self.i32_const(ctx, ty.size() as i32);
+            let size = self.i32_const(ctx, ty.size as i32);
             Some(self.alloc(ctx, size))
         } else {
             None

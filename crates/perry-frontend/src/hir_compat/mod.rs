@@ -56,11 +56,12 @@ pub(crate) fn lower<'s>(
     streams::lower(&mut ast, &mut analysis)?;
     methods::preserve_arguments(&mut ast, &mut analysis.names);
     classes::preserve_field_types(&mut ast);
-    if !witnesses.witnesses.is_empty() {
+    let capture_spans = !witnesses.witnesses.is_empty() || !analysis.signature_prefix.is_empty();
+    if capture_spans {
         perry_hir::ir::set_current_module_source(locations.module_text());
     }
     let result = perry_hir::lower_module(&ast, "main", identity);
-    if !witnesses.witnesses.is_empty() {
+    if capture_spans {
         perry_hir::ir::clear_current_module_source();
     }
     let mut module = result.map_err(|error| {
@@ -252,16 +253,6 @@ pub(crate) fn error_class(code: u32) -> Result<ErrorClass> {
         4 => ErrorClass::Syntax,
         _ => bail_internal!("unsupported Error constructor kind {code}"),
     })
-}
-
-pub(crate) fn native_member_is_property(
-    receiver: crate::methods::Receiver,
-    name: &str,
-    arguments: &[Expr],
-) -> bool {
-    arguments.is_empty()
-        && crate::methods::Method::lookup(receiver, name)
-            .is_some_and(crate::methods::Method::is_property)
 }
 
 mod objects;

@@ -76,6 +76,7 @@ pub(super) fn definitions<'r>(
                         module: module.clone(),
                         name,
                         params: vec![],
+                        indirect_size: None,
                         result: None,
                         asynchronous: false,
                         kind: ImportKind::Resource { key, operation },

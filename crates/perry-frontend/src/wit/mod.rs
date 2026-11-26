@@ -36,12 +36,10 @@ impl<'r> WitValue<'r> {
     }
 
     pub(crate) fn integer(self) -> Option<(u32, Signedness)> {
-        let ty = match self.ty {
-            Type::Id(id) => match self.resolve.types[canonical_type(self.resolve, id)].kind {
-                TypeDefKind::Type(ty) => ty,
-                _ => return None,
-            },
-            ty => ty,
+        let ty = match perry_contract::type_kind(self.resolve, self.ty) {
+            Some(TypeDefKind::Type(ty)) => *ty,
+            Some(_) => return None,
+            None => self.ty,
         };
         INTEGERS
             .iter()

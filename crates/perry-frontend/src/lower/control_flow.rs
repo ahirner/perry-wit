@@ -26,6 +26,14 @@ pub(super) enum LoopBound {
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
+    pub(super) fn enter_case(&mut self, ctx: &mut Context, test: Value) -> Ptr<BasicBlock> {
+        let matched = self.new_block(ctx, "case");
+        let next = self.new_block(ctx, "next");
+        self.branch(ctx, test, matched, next);
+        self.switch_to(matched);
+        next
+    }
+
     pub(super) fn reachable(&self, ctx: &Context, block: Ptr<BasicBlock>) -> bool {
         let entry = self.entry_block();
         let mut seen = HashSet::new();

@@ -4,9 +4,9 @@ use crate::Absence;
 use crate::engine::BodyOwner;
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Stmt, UnaryOp},
-    types::{FuncId, LocalId},
-    walker::{stmt_any_expr, walk_expr_children},
+    types::LocalId,
 };
+use std::collections::HashMap;
 
 /// Access path rooted at a local through property reads, such as `x` or `x.a.b`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -229,10 +229,6 @@ impl<'s> Guards<'s> {
         truthy_locals(condition, truth, &mut |local| {
             self.push(Path::local(local), Fact::Excludes(Absence::Both));
         });
-        // A later operand may write a value tested by an earlier operand.
-        if self.depth() != 0 {
-            self.assign_in(&[], [condition], |_| None);
-        }
     }
 
     /// Record the tag guards `condition` establishes where it evaluates to `truth`.
@@ -285,49 +281,6 @@ impl<'s> Guards<'s> {
         self.push(Path::local(local), Fact::Tag(discriminant, tag, true));
     }
 
-    /// End the guards on every local a loop or callback body assigns: its later stores
-    /// reach its start on the next iteration. Include writes in statically called closures.
-    pub(crate) fn assign_in<'e>(
-        &mut self,
-        statements: &'e [Stmt],
-        expressions: impl IntoIterator<Item = &'e Expr>,
-        closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
-    ) {
-        self.assign_projected(
-            BodyOwner::Initializer,
-            statements,
-            expressions,
-            closure,
-            |_, _| None,
-        );
-    }
-
-    pub(crate) fn assign_projected<'e>(
-        &mut self,
-        owner: BodyOwner,
-        statements: &'e [Stmt],
-        expressions: impl IntoIterator<Item = &'e Expr>,
-        closure: impl Fn(FuncId) -> Option<&'e [Stmt]>,
-        project: impl Fn(BodyOwner, &'e Expr) -> Option<FuncId>,
-    ) {
-        if self.stack.is_empty() {
-            return;
-        }
-        let mut scan = Assignments {
-            closure,
-            project,
-            entered: Vec::new(),
-            assigned: Vec::new(),
-        };
-        scan.statements(owner, statements);
-        for expr in expressions {
-            scan.expression(owner, expr);
-        }
-        for local in scan.assigned {
-            self.assign(local);
-        }
-    }
-
     pub(crate) fn branch(&self) -> Branch {
         Branch {
             depth: self.depth(),
@@ -376,49 +329,20 @@ impl<'s> Guards<'s> {
     }
 }
 
-/// The locals that statements may assign, entering closures they define or read.
-struct Assignments<F, P> {
-    closure: F,
-    project: P,
-    /// Bound closures already scanned, which also ends recursion through self-reference.
-    entered: Vec<FuncId>,
-    assigned: Vec<LocalId>,
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Region {
+    Body(*const [Stmt]),
+    Expression(*const Expr),
 }
 
-impl<'e, F, P> Assignments<F, P>
-where
-    F: Fn(FuncId) -> Option<&'e [Stmt]>,
-    P: Fn(BodyOwner, &'e Expr) -> Option<FuncId>,
-{
-    fn statements(&mut self, owner: BodyOwner, statements: &'e [Stmt]) {
-        for statement in statements {
-            stmt_any_expr(statement, &mut |expr| {
-                self.expression(owner, expr);
-                false
-            });
-        }
-    }
-
-    fn expression(&mut self, owner: BodyOwner, expr: &'e Expr) {
-        let target = (self.project)(owner, expr);
-        let target = target.or(match *expr {
-            Expr::FuncRef(id) => Some(id),
-            _ => None,
-        });
-        if let Some(id) = target
-            && !self.entered.contains(&id)
-            && let Some(body) = (self.closure)(id)
-        {
-            self.entered.push(id);
-            self.statements(BodyOwner::Function(id), body);
-        }
-        match expr {
-            Expr::LocalSet(id, _) | Expr::Update { id, .. } => self.assigned.push(*id),
-            Expr::Closure { func_id, body, .. } => {
-                self.statements(BodyOwner::Function(*func_id), body)
-            }
-            _ => {}
-        }
-        walk_expr_children(expr, &mut |child| self.expression(owner, child));
+impl Region {
+    pub(crate) fn of<'s>(
+        body: &[Stmt],
+        exprs: impl IntoIterator<Item = &'s Expr>,
+    ) -> impl Iterator<Item = Self> {
+        std::iter::once(Self::Body(std::ptr::from_ref(body)))
+            .chain(exprs.into_iter().map(|expr| Self::Expression(expr)))
     }
 }
+
+pub(crate) type WriteEffects = HashMap<(BodyOwner, Region), Vec<LocalId>>;

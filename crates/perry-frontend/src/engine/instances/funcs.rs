@@ -259,55 +259,24 @@ impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
         receiver: Option<Ty>,
         result: Ty,
     ) -> Result<crate::engine::NativeFunction> {
-        let args = self.types.tuple_slice(args);
+        self.prepare_arguments(args);
+        let slots = self.plans.arguments(args)?;
         let mut params = vec![callee];
         params.extend(receiver);
-        params.extend(args.iter().copied().filter(|&ty| {
-            !self
-                .types
-                .erases_argument(ty, &self.solved.escaping_env_templates)
-        }));
-        for &ty in &params {
-            self.prepare_layouts(ty)?;
-        }
+        params.extend(slots.iter().map(|&(_, ty)| ty));
         let result = if matches!(result, Ty::BOTTOM | Ty::NEVER) || self.is_zero_sized_func(result)
         {
             Ty::VOID
         } else {
             result
         };
-        self.prepare_layouts(result)?;
-        let mut is_async = false;
-        let mut arms = Vec::new();
-        for &(identity, instance) in &self.solved.dispatch_arms[span] {
-            let view = self.index.view(identity.template);
-            let target = &self.solved.instances[instance];
-            is_async |= view.is_async;
-            let count = if matches!(
-                view.kind,
-                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-            ) {
-                self.types.tuple_slice(target.args).len()
-            } else if view.params.iter().any(|p| p.is_rest) {
-                args.len()
-            } else {
-                view.params.len()
-            };
-            arms.push(crate::engine::DispatchArm {
-                identity,
-                target: target.emitted_func_id,
-                receiver: view.uses_this && receiver.is_some(),
-                arguments: args
-                    .iter()
-                    .take(count)
-                    .filter(|&&ty| {
-                        !self
-                            .types
-                            .erases_argument(ty, &self.solved.escaping_env_templates)
-                    })
-                    .count(),
-            });
+        let is_async = self.solved.dispatch_arms[span]
+            .iter()
+            .any(|arm| self.index.view(arm.identity.template).is_async);
+        for &ty in &params {
+            self.prepare_layouts(ty)?;
         }
+        self.prepare_layouts(result)?;
         Ok(crate::engine::NativeFunction {
             name: format!("__dispatch_{id}"),
             params: params
@@ -318,7 +287,8 @@ impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
             is_async,
             body: crate::engine::NativeBody::Dispatch {
                 receiver: receiver.is_some(),
-                arms,
+                arms: span,
+                inputs: args,
             },
         })
     }

@@ -34,6 +34,12 @@ function checkOmitted(a?:string, b?:string) {
     holder.y = short;
     return a===b && short===undefined && ('x' in holder) && ('y' in holder);
 }
+class Pair<T> {
+    z:T; a:T;
+    constructor(z:T,a:T) { this.z=z; this.a=a; }
+    get(key:string) { return this.z; }
+}
+function firstValue(x) { return x.get("first"); }
 class Rest {
     field:number=next();
     first:number;
@@ -41,6 +47,11 @@ class Rest {
     constructor(...values:number[]) { this.first=values[0]; this.last=values[1]; }
 }
 export function constructorOrder() {
+    step=0;
+    const pair=new Pair(next(),next());
+    if(pair.z!==1 || pair.a!==2 || Object.keys(pair).join(',')!=='z,a')return 11;
+    const table=new Map<string,number>(); table.set("first", 7);
+    if(firstValue(table)!==7 || firstValue(new Pair("s","t"))!=="s")return 12;
     step=0;
     const explicit=new Counter(next());
     if(explicit.field!==2 || explicit.arg!==1 || step!==2)return 1;
@@ -137,16 +148,35 @@ export function loopHoisting() {
     return 0;
 }
 
+class Accumulate {
+    sum:number;
+    constructor(n:number, tick) {
+        try {
+            this.sum=tick();
+            if (n===0) return;
+            this.sum+=new Accumulate(n-1, tick).sum;
+        } finally { this.sum+=10; }
+    }
+}
+export function recursiveConstructor() {
+    let count=0;
+    const total=new Accumulate(2, ()=>++count).sum;
+    return total+count;
+}
+
 class Nested {
     count:number;
     constructor(count:number=1) { this.count=count; }
     add(n:number=this.count) { return this.count+n; }
     static identity(n:number) { return n; }
+    descend(n:number):number { return n === 0 ? this.count : 1 + this.descend(n-1); }
     get value() { return this.count; }
     set value(n:number) { this.count=n; }
 }
 export function finiteNesting() {
     const counter=new Nested(new Nested().count);
+    step=0;
+    if(counter.descend(3,next())!==4 || step!==1 || new Nested(2).descend(3)!==5) return -1;
     const another=new Nested(counter.add(counter.add(1)));
     counter.value=another.value;
     return Nested.identity(Nested.identity(counter.add()));
@@ -158,6 +188,7 @@ export function finiteNesting() {
             ("genericConstruction", &[], 0.0),
             ("loopHoisting", &[], 0.0),
             ("finiteNesting", &[], 6.0),
+            ("recursiveConstructor", &[], 39.0),
         ],
     )
 }

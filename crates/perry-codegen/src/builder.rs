@@ -40,6 +40,15 @@ impl FunctionLowering<'_, '_> {
         block
     }
 
+    /// Enter the true arm and return the block for the false arm.
+    pub(super) fn enter_if(&mut self, ctx: &mut Context, condition: Value) -> Ptr<BasicBlock> {
+        let yes = self.new_block(ctx, vec![]);
+        let no = self.new_block(ctx, vec![]);
+        self.cond_br(ctx, condition, (yes, vec![]), (no, vec![]));
+        self.block = yes;
+        no
+    }
+
     pub(crate) fn insert(&mut self, ctx: &mut Context, op: Ptr<Operation>) -> Ptr<Operation> {
         op.insert_at_back(self.block, ctx);
         op

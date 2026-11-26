@@ -58,9 +58,13 @@ impl CallTarget {
         };
         let prefix = callee.into_iter().chain(receiver);
         match args {
-            CallArguments::Expressions(args, types) => {
-                b.invoke_arguments(ctx, b.signature(id)?, prefix, args, Some(types))
-            }
+            CallArguments::Expressions(args, types) => b.invoke_arguments(
+                ctx,
+                b.signature(id)?,
+                prefix,
+                args,
+                Some(b.shapes.specialization.instances.arguments(types)?),
+            ),
             CallArguments::Values(args) => {
                 b.call_values(ctx, id, prefix.chain(args.iter().copied()))
             }
@@ -220,6 +224,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.discard_function_operand(ctx, callee)?;
                 (None, None)
             }
+            Expr::IndexGet { object, index, .. }
+                if target.needs_receiver() && !target.needs_value() =>
+            {
+                let receiver = self.expression(ctx, object)?;
+                self.effect(ctx, index)?;
+                (Some(self.defined(ctx, receiver)?), None)
+            }
             Expr::PropertyGet {
                 object,
                 property,
@@ -232,15 +243,21 @@ impl<'s> FunctionBuilder<'s, '_> {
                 } else {
                     Some(self.property_of_value(ctx, object, receiver, property, *byte_offset)?)
                 };
-                (Some(receiver), callable)
+                (Some(self.defined(ctx, receiver)?), callable)
             }
             _ if !target.needs_value() => {
-                if !crate::source::is_pure_func_expr(callee) {
-                    let operand = match callee {
-                        Expr::PropertyGet { object, .. } => object.as_ref(),
-                        other => other,
-                    };
-                    self.effect(ctx, operand)?;
+                match callee {
+                    Expr::PropertyGet { object, .. }
+                        if hir_compat::class_receiver(object).is_some() => {}
+                    Expr::IndexGet { object, index, .. }
+                        if hir_compat::class_receiver(object).is_some() =>
+                    {
+                        self.effect(ctx, index)?
+                    }
+                    Expr::PropertyGet { object, .. } => {
+                        self.discard_function_operand(ctx, object)?
+                    }
+                    _ => self.discard_function_operand(ctx, callee)?,
                 }
                 (None, None)
             }
@@ -261,7 +278,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         signature: &'s Signature<'s>,
         implicit: impl Iterator<Item = Value>,
         args: Arguments<'s>,
-        argument_types: Option<Ty>,
+        arguments: Option<&[(usize, Ty)]>,
     ) -> Result<Option<Value>> {
         let (fixed, rest) = signature.parameters();
         let rest_element = rest
@@ -282,16 +299,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             .shapes
             .locations
             .display_function_name(signature.name.as_ref());
-        let arguments = argument_types.map(|ty| self.shapes.types.source.tuple_slice(ty));
         if let Arguments::Plain(args) = args
             && rest.is_none()
         {
-            let count = arguments.map_or(args.len(), |types| {
-                types
-                    .iter()
-                    .filter(|&&ty| self.shapes.passes_argument(ty))
-                    .count()
-            });
+            let count = arguments.map_or(args.len(), |slots| slots.len());
             if count > fixed.len() {
                 bail_diag!(
                     codes::TYPE_MISMATCH,
@@ -300,6 +311,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                 );
             }
         }
+        let mut remaining = arguments.map(|slots| slots.iter().peekable());
+        let mut passed = |index| {
+            remaining
+                .as_mut()
+                .is_none_or(|slots| slots.next_if(|&&(pos, _)| pos == index).is_some())
+        };
         let mut argument_index = 0;
         let mut rest_array = None;
         for (expr, spread) in args {
@@ -322,6 +339,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                             let source = self.fit(ctx, source, ty)?;
                             self.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, source));
                         }
+                        passed(argument_index);
                         argument_index += 1;
                         continue;
                     }
@@ -332,12 +350,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             for field in 0..count {
                 let index = argument_index;
                 argument_index += 1;
-                let passed = arguments.is_none_or(|args| {
-                    args.get(index)
-                        .is_some_and(|&ty| self.shapes.passes_argument(ty))
-                });
                 let param = fixed.as_slice().first();
-                if !passed || (param.is_none() && rest_element.is_none()) {
+                if !passed(index) || (param.is_none() && rest_element.is_none()) {
                     if tuple.is_none() {
                         self.discard_function_operand(ctx, expr)?;
                     }
@@ -742,7 +756,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Option<Value>> {
         if let Some(function) = signature.inline {
             ensure_unsupported!(
-                !function.is_async && !self.inline_functions.contains(&function.id),
+                !signature.is_async && !self.inline_functions.contains(&function.id),
                 "recursive or async calls to capturing function '{}' require a persistent environment",
                 function.name
             );
@@ -757,7 +771,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                         .map_or(crate::lower::inline::InlineResult::Void, |ty| {
                             crate::lower::inline::InlineResult::Declared(ty.carrier)
                         });
-                    let slot = this.inline_body(ctx, function.body, result)?;
+                    let slot = this.inline_body(
+                        ctx,
+                        this.shapes.specialization.templates[function.template].body,
+                        result,
+                    )?;
                     slot.map(|slot| this.load(ctx, slot)).transpose()
                 });
             self.inline_functions.pop();

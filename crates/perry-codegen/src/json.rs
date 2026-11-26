@@ -99,13 +99,11 @@ impl FunctionLowering<'_, '_> {
             Some(JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant)) => Some(variant),
             _ => None,
         };
-        let record = definition.downcast_ref::<RecordType>();
-        let record_fields = record
-            .map(|r| r.fields().map(|fields| (r.is_tuple(), fields)))
-            .transpose()
-            .map_err(|_| Diagnostic::internal("unresolved native record"))?;
-        let count = record_fields.map_or(0, |(_, fields)| fields.len());
-        let bytes = if record_fields.is_some() {
+        let layout = perry_mir::typed::<RecordType>(ctx, ty)
+            .map(|record| self.state.record_layouts.get(ctx, record))
+            .transpose()?;
+        let count = layout.as_ref().map_or(0, |layout| layout.fields.len());
+        let bytes = if layout.is_some() {
             28 + 20 * count
         } else if let Some(variant) = variant_schema {
             20 + 12 * variant.deref(ctx).cases().len()
@@ -116,20 +114,20 @@ impl FunctionLowering<'_, '_> {
         };
         let address = self.state.data.append(4, &vec![0; bytes]);
         self.state.layout_descriptors.insert(ty, address);
-        let words = if let Some((tuple, fields)) = record_fields {
+        let words = if let Some(layout) = layout {
+            let tuple = layout.record.deref(ctx).is_tuple();
             let mut words = Vec::with_capacity(bytes / 4);
             words.extend([if tuple { JSON_TUPLE } else { RECORD }, count as u32]);
-            let mut field_offset = record::HEADER;
             let mut offsets = Vec::with_capacity(count + 1);
             let mut required = 0u32;
             let mut numeric = Vec::new();
-            for (index, (name, field_ty)) in fields.iter().enumerate() {
-                let field_ty = *field_ty;
+            for (name, slot) in &layout.fields {
+                let field_ty = slot.ty;
                 let name_addr = self.state.data.string(name);
                 let field = self.layout_descriptor(ctx, field_ty)?;
-                words.extend([name_addr, field, field_offset]);
+                words.extend([name_addr, field, slot.offset]);
                 if crate::repr::repr(ctx, field_ty).ok() == Some(crate::repr::Repr::Ref) {
-                    offsets.push(field_offset);
+                    offsets.push(slot.offset);
                 }
                 if !perry_mir::admits_undefined(ctx, field_ty)
                     && !field_ty.deref(ctx).is::<JsonType>()
@@ -137,14 +135,13 @@ impl FunctionLowering<'_, '_> {
                     required += 1;
                 }
                 if let Some(number) = perry_abi::json::array_index(name.as_bytes()) {
-                    numeric.push((number, index));
+                    numeric.push((number, slot.index as usize));
                 }
-                field_offset += slot_size(ctx, field_ty);
             }
             offsets.push(record::JSON);
             let shape = self.pointer_shape(&offsets);
             let (table, _) = self.json_field_table(ctx, ty)?;
-            words.extend([field_offset, shape, table, required]);
+            words.extend([layout.size, shape, table, required]);
             numeric.sort_unstable();
             let mut next = vec![u32::MAX; count];
             for (position, &(_, index)) in numeric.iter().enumerate() {
@@ -153,7 +150,7 @@ impl FunctionLowering<'_, '_> {
                     .map_or(0, |&(_, index)| index as u32 + 1);
             }
             words.push(numeric.first().map_or(0, |&(_, index)| index as u32 + 1));
-            for ((name, _), next) in fields.iter().zip(next) {
+            for (name, next) in layout.fields.keys().zip(next) {
                 words.extend([self.state.data.string(&json_key(name)), next]);
             }
             words

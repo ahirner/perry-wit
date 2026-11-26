@@ -136,8 +136,10 @@ impl TypeTable {
                     }
                 }
                 Contract::Result { ok, err } => {
-                    let cases = [("value", ok), ("error", err)]
-                        .map(|(name, value)| case(table, "ok", Ty::BOOLEAN, name, value));
+                    use perry_mir::{RESULT_PAYLOADS, RESULT_TAG};
+                    let [value, error] = RESULT_PAYLOADS;
+                    let cases = [(value, ok), (error, err)]
+                        .map(|(name, payload)| case(table, RESULT_TAG, Ty::BOOLEAN, name, payload));
                     table.union(&cases)
                 }
                 Contract::Unsupported(_) => Ty::OPEN,

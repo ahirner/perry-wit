@@ -1,6 +1,4 @@
 //! Canonical handles retain guest class instances until their destructor runs.
-use super::classes::ClassArguments::Evaluated;
-use super::classes::ClassReceiver::{Instance, Static};
 use super::*;
 use crate::engine::types::ClassInstId;
 use crate::hir_compat::ResourceClass;
@@ -82,21 +80,16 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
         }
         let result = match target {
-            Target::Function(id) => self.call_values(ctx, id, args.into_iter())?,
+            Target::Function(id) | Target::Static(_, id) | Target::Method(_, id) => {
+                self.call_values(ctx, id, args.into_iter())?
+            }
             Target::Constructor(owner) => {
                 let id = self.guest_class(owner)?.class;
-                Some(self.class_new(
+                self.call_values(
                     ctx,
-                    &self.shapes.specialization.bodies.classes[id],
-                    Evaluated(&args),
-                )?)
-            }
-            Target::Static(_, id) => self.solved_member(ctx, id, Evaluated(&args), Static)?,
-            Target::Method(_, id) => {
-                let (&receiver, args) = args
-                    .split_first()
-                    .ok_or_else(|| internal!("missing resource method receiver"))?;
-                self.solved_member(ctx, id, Evaluated(args), Instance(receiver))?
+                    self.shapes.specialization.bodies.classes[id].factory()?,
+                    args.into_iter(),
+                )?
             }
             Target::Destructor(owner, id) => {
                 let &[rep] = args.as_slice() else {
@@ -104,7 +97,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 };
                 if let Some(id) = id {
                     let receiver = self.resource_instance(ctx, owner, rep)?;
-                    self.solved_member(ctx, id, Evaluated(&[]), Instance(receiver))?;
+                    self.call_values(ctx, id, std::iter::once(receiver))?;
                 }
                 let (slot, _) = self.resource_table(ctx, owner)?;
                 let table = self.load(ctx, slot)?;

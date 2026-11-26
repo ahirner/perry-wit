@@ -125,6 +125,23 @@ impl Shapes<'_> {
             .carrier)
     }
 
+    fn resource_result_type(
+        &self,
+        ctx: &Context,
+        wit: crate::wit::WitValue<'_>,
+        result: &wit_parser::Result_,
+    ) -> Result<TypeHandle> {
+        let mut payload = |ty| self.wit_carrier(crate::wit::WitValue { ty, ..wit });
+        Ok(perry_mir::VariantType::get(
+            ctx,
+            vec![
+                ("ok".into(), result.ok.map(&mut payload).transpose()?),
+                ("err".into(), result.err.map(payload).transpose()?),
+            ],
+        )
+        .into())
+    }
+
     fn import_input(
         &mut self,
         ctx: &Context,
@@ -182,10 +199,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let resource_method = matches!(kind, CallKind::Resource(_));
         for (arg, &wit) in args.iter().zip(params) {
-            let ty = self.shapes.import_input(ctx, wit)?;
-            let value = if resource_method && let Some(result) = wit.result() {
-                self.resource_input(ctx, arg, wit, result, ty)?
-            } else if resource_method
+            let ty = if resource_method && let Some(result) = wit.result() {
+                self.shapes.resource_result_type(ctx, wit, result)?
+            } else {
+                self.shapes.import_input(ctx, wit)?
+            };
+            let value = if resource_method
                 && matches!(arg, Expr::Undefined)
                 && absence(ctx, ty).is_some_and(|states| states.admits_null())
             {
@@ -212,10 +231,17 @@ impl<'s> FunctionBuilder<'s, '_> {
             };
             values.push(value);
         }
-        let result = signature
+        let resource_result = signature
             .result
-            .map(|ty| self.shapes.wit_carrier(ty))
-            .transpose()?;
+            .filter(|_| resource_method && !signature.is_async)
+            .and_then(|wit| Some((wit, wit.result()?)));
+        let result = match resource_result {
+            Some((wit, result)) => Some(self.shapes.resource_result_type(ctx, wit, result)?),
+            None => signature
+                .result
+                .map(|ty| self.shapes.wit_carrier(ty))
+                .transpose()?,
+        };
         if signature.is_async {
             let payload = result.unwrap_or_else(|| void_type(ctx));
             let params = values.iter().map(|v| v.get_type(ctx)).collect();
@@ -232,10 +258,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         );
         self.append(ctx, &op);
         let raw = op.get_operation().deref(ctx).results().next();
-        if resource_method
-            && let (Some(wit), Some(value)) = (signature.result, raw)
-            && let Some(result) = wit.result()
-        {
+        if let (Some((wit, result)), Some(value)) = (resource_result, raw) {
             return self.resource_result(ctx, value, wit, result);
         }
         Ok(raw)
@@ -243,59 +266,6 @@ impl<'s> FunctionBuilder<'s, '_> {
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
-    fn resource_input(
-        &mut self,
-        ctx: &mut Context,
-        arg: &'s Expr,
-        wit: crate::wit::WitValue<'_>,
-        result: &wit_parser::Result_,
-        raw: TypeHandle,
-    ) -> Result<Value> {
-        let mut payload = |ty| self.shapes.wit_carrier(crate::wit::WitValue { ty, ..wit });
-        let ok = result.ok.map(&mut payload).transpose()?;
-        let err = result.err.map(payload).transpose()?;
-        let variant =
-            perry_mir::VariantType::get(ctx, vec![("ok".into(), ok), ("err".into(), err)]).into();
-        let value = self.expression_with(ctx, arg, Some(variant))?;
-        let value = self.fit(ctx, value, variant)?;
-        let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value));
-        let ok_tag = self.string(ctx, "ok");
-        let test = self.compare(ctx, CompareKind::Eq, tag, ok_tag);
-        let record = perry_mir::typed::<RecordType>(ctx, raw)
-            .ok_or_else(|| internal!("WIT result requires a record"))?;
-        let build = |builder: &mut Self,
-                     ctx: &mut Context,
-                     success,
-                     active: Option<TypeHandle>|
-         -> Result<Value> {
-            let active_field = if success { "value" } else { "error" };
-            let fields = record.deref(ctx).fields().to_diag(ctx)?.to_vec();
-            let mut values = Vec::with_capacity(fields.len());
-            for (name, ty) in fields {
-                values.push(if name == "ok" {
-                    builder.boolean(ctx, success)
-                } else if name == active_field {
-                    let payload =
-                        active.ok_or_else(|| internal!("missing WIT result payload type"))?;
-                    let content = builder.emit_value(ctx, |ctx| {
-                        perry_mir::VariantPayloadOp::new(ctx, value, payload)
-                    });
-                    builder.fit(ctx, content, ty)?
-                } else {
-                    builder.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
-                });
-            }
-            Ok(builder.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)))
-        };
-        self.choose(
-            ctx,
-            raw,
-            test,
-            |b, ctx| build(b, ctx, true, ok),
-            |b, ctx| build(b, ctx, false, err),
-        )
-    }
-
     fn resource_result(
         &mut self,
         ctx: &mut Context,
@@ -303,25 +273,21 @@ impl<'s> FunctionBuilder<'s, '_> {
         wit: crate::wit::WitValue<'_>,
         result: &wit_parser::Result_,
     ) -> Result<Option<Value>> {
-        let ok = self.record_field(ctx, raw, "ok")?;
-        let success = self.new_block(ctx, "resource_ok");
-        let failure = self.new_block(ctx, "resource_error");
-        self.branch(ctx, ok, success, failure);
-        self.switch_to(failure);
+        let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, raw));
+        let err_tag = self.string(ctx, "err");
+        let failed = self.compare(ctx, CompareKind::Eq, tag, err_tag);
+        let success = self.enter_case(ctx, failed);
+        let payload = |b: &mut Self, ctx: &mut Context, ty| -> Result<Value> {
+            let carrier = b.shapes.wit_carrier(crate::wit::WitValue { ty, ..wit })?;
+            Ok(b.emit_value(ctx, |ctx| {
+                perry_mir::VariantPayloadOp::new(ctx, raw, carrier)
+            }))
+        };
         if let Some(ty) = result.err {
-            let error = self.record_field(ctx, raw, "error")?;
-            let variant = match ty {
-                wit_parser::Type::Id(id) => match &wit.resolve.types
-                    [perry_contract::names::canonical_type(wit.resolve, id)]
-                .kind
-                {
-                    wit_parser::TypeDefKind::Variant(variant) => Some(variant),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let error = if let Some(variant) = variant {
-                let error = self.defined(ctx, error)?;
+            let error = payload(self, ctx, ty)?;
+            let error = if let Some(wit_parser::TypeDefKind::Variant(variant)) =
+                perry_contract::type_kind(wit.resolve, ty)
+            {
                 let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, error));
                 for case in &variant.cases {
                     let Some(owner) = case
@@ -339,10 +305,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     let binding = &world.members[drop].binding;
                     let expected = self.string(ctx, &case.name);
                     let matches = self.compare(ctx, CompareKind::Eq, tag, expected);
-                    let release = self.new_block(ctx, "resource_drop");
-                    let next = self.new_block(ctx, "resource_drop_done");
-                    self.branch(ctx, matches, release, next);
-                    self.switch_to(release);
+                    let next = self.enter_case(ctx, matches);
                     let resource = perry_mir::ResourceType::get(ctx, owner.index() as u32).into();
                     let handle = self.emit_value(ctx, |ctx| {
                         perry_mir::VariantPayloadOp::new(ctx, error, resource)
@@ -362,15 +325,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.raise_error(ctx, ErrorKind::Any, "");
         }
         self.switch_to(success);
-        result
-            .ok
-            .map(|ty| {
-                let expected = self
-                    .shapes
-                    .wit_carrier(crate::wit::WitValue { ty, ..wit })?;
-                let value = self.record_field(ctx, raw, "value")?;
-                self.fit(ctx, value, expected)
-            })
-            .transpose()
+        result.ok.map(|ty| payload(self, ctx, ty)).transpose()
     }
 }

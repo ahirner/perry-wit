@@ -6,6 +6,8 @@ publish = false
 description = "Lowers perry MIR to the pliron `wasm` dialect and core Wasm"
 
 [dependencies]
+indexmap = "2"
+wit-parser.workspace = true
 perry-abi.workspace = true
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true

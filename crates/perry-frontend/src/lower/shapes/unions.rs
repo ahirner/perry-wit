@@ -131,7 +131,7 @@ impl Shapes<'_, Preparing<'_>> {
         if !records.is_empty()
             && records.iter().all(|&props| {
                 self.runtime_properties(props)
-                    .any(|(name, ty)| name == "ok" && ty == Ty::BOOLEAN)
+                    .any(|(name, ty)| name == perry_mir::RESULT_TAG && ty == Ty::BOOLEAN)
             })
         {
             return self.result(ctx, &records, visiting);
@@ -152,38 +152,34 @@ impl Shapes<'_, Preparing<'_>> {
             codes::UNSUPPORTED_TYPE,
             "a tagged result needs exactly two alternatives"
         );
-        let mut value_arg = None;
-        let mut error_arg = None;
+        use perry_mir::{RESULT_PAYLOADS, RESULT_TAG};
+        let mut payloads = [None; 2];
         for &props in alternatives {
             for (name, ty) in self.runtime_properties(props) {
-                match name {
-                    "ok" => {}
-                    "value" => {
-                        ensure_diag!(
-                            value_arg.replace(ty).is_none(),
-                            codes::UNSUPPORTED_TYPE,
-                            "result payload value appears in both alternatives"
-                        );
-                    }
-                    "error" => {
-                        ensure_diag!(
-                            error_arg.replace(ty).is_none(),
-                            codes::UNSUPPORTED_TYPE,
-                            "result payload error appears in both alternatives"
-                        );
-                    }
-                    _ => bail_diag!(
-                        codes::UNSUPPORTED_TYPE,
-                        "result alternatives only contain ok, value and error"
-                    ),
+                if name == RESULT_TAG {
+                    continue;
                 }
+                let index = RESULT_PAYLOADS
+                    .iter()
+                    .position(|&field| field == name)
+                    .ok_or_else(|| {
+                        diag!(
+                            codes::UNSUPPORTED_TYPE,
+                            "result alternatives only contain ok, value and error"
+                        )
+                    })?;
+                ensure_diag!(
+                    payloads[index].replace(ty).is_none(),
+                    codes::UNSUPPORTED_TYPE,
+                    "result payload {name} appears in both alternatives"
+                );
             }
         }
         let mut fields = vec![(
-            "ok".to_string(),
+            RESULT_TAG.into(),
             IntegerType::get(ctx, 1, Signedness::Signless).into(),
         )];
-        for (name, arg) in [("value", value_arg), ("error", error_arg)] {
+        for (name, arg) in RESULT_PAYLOADS.into_iter().zip(payloads) {
             if let Some(prop_ty) = arg {
                 let ty = self.project_type(ctx, prop_ty, visiting)?.carrier;
                 fields.push((name.to_string(), OptionalType::get(ctx, ty).into()));

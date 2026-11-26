@@ -888,7 +888,7 @@ fn generic_pages_and_results_use_concrete_wit_records() -> Result<()> {
     boundary!(
         r#"package test:generics;
 world boundary {
-  record page { data: list<f64>, next: option<string> }
+  record page { next: option<string>, data: list<f64> }
   export echo: func(value: page) -> result<page, string>;
   export parsed: func() -> result<page>;
   export stringify: func(value: page) -> result<string>;
@@ -919,7 +919,7 @@ export function stringify(value:Page<number>) {return JSON.stringify(value);}
     instance.check(
         "stringify",
         (&page,),
-        &Ok::<_, ()>("{\"data\":[1,2],\"next\":null}".to_owned()),
+        &Ok::<_, ()>("{\"next\":null,\"data\":[1,2]}".to_owned()),
     )?;
     Ok(())
 }

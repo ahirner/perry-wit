@@ -276,14 +276,15 @@ impl FunctionLowering<'_, '_> {
                 if intrinsic == Intrinsic::JsonOrderCopy {
                     let record = TypedHandle::<perry_mir::RecordType>::from_handle(target_ty, ctx)
                         .to_diag(ctx)?;
-                    let fields = record.deref(ctx).fields().to_diag(ctx)?.to_vec();
-                    for (name, ty) in fields {
+                    let layout = self.state.record_layouts.get(ctx, record)?;
+                    for (name, field) in &layout.fields {
+                        let ty = field.ty;
                         if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
-                            let (offset, _) = Self::record_type_field_slot(ctx, record, &name)?;
+                            let offset = field.offset;
                             let value = self.load_slot_value(ctx, args[0], offset, ty)?;
                             let omitted = self.is_omitted(ctx, value, ty)?;
                             let present = self.num(ctx, NumOpcode::I32Eqz, vec![omitted]);
-                            let key = self.state.data.string(&name);
+                            let key = self.state.data.string(name);
                             let key = self.i32_const(ctx, key as i32);
                             self.runtime_void(
                                 ctx,

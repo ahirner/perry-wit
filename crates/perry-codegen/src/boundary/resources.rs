@@ -49,12 +49,12 @@ pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
 
 impl AbiType {
     pub(super) fn has_resources(&self) -> bool {
-        match self {
-            Self::Resource { .. } => true,
-            Self::List(value) | Self::Option(value) => value.has_resources(),
-            Self::Record(fields) => fields.iter().any(|(_, ty)| ty.has_resources()),
-            Self::Result { ok, err } => ok.iter().chain(err).any(|ty| ty.has_resources()),
-            Self::Variant(cases) => cases
+        match &self.kind {
+            AbiKind::Resource { .. } => true,
+            AbiKind::List(value) | AbiKind::Option(value) => value.has_resources(),
+            AbiKind::Record(fields) => fields.iter().any(|(_, ty)| ty.has_resources()),
+            AbiKind::Result { ok, err } => ok.iter().chain(err).any(|ty| ty.has_resources()),
+            AbiKind::Variant(_, cases) => cases
                 .iter()
                 .any(|(_, payload)| payload.as_ref().is_some_and(Self::has_resources)),
             _ => false,
@@ -88,10 +88,7 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
     for resource in resources {
         let key = b.i32_const(ctx, resource.key as i32 + 1);
         let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, key]);
-        let selected = b.new_block(ctx, vec![]);
-        let other = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, matches, (selected, vec![]), (other, vec![]));
-        b.block = selected;
+        let other = b.enter_if(ctx, matches);
         b.resource_drop(ctx, resource.key, handle);
         b.br(ctx, next, vec![]);
         b.block = other;
@@ -187,10 +184,7 @@ impl FunctionLowering<'_, '_> {
     }
     fn resource_status(&mut self, ctx: &mut Context) {
         let status = self.runtime(ctx, Runtime::Status, vec![]);
-        let failed = self.new_block(ctx, vec![]);
-        let normal = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, status, (failed, vec![]), (normal, vec![]));
-        self.block = failed;
+        let normal = self.enter_if(ctx, status);
         if let Some((scope, roots)) = self.resource_scope {
             self.runtime_void(ctx, Runtime::ResourceScopeFinish, vec![scope]);
             if let Some(roots) = roots {

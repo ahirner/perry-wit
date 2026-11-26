@@ -47,8 +47,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .template_of_func(fid)
                     .ok_or_else(|| Diagnostic::internal("missing export template"))?;
                 let view = self.index.view(tid);
-                let mut args = Vec::with_capacity(view.params.len());
-                if let Some((params, _)) = &signature {
+                let args = if let Some((params, _)) = &signature {
+                    let mut args = Vec::with_capacity(params.len());
                     for (i, &ty) in params
                         .iter()
                         .skip(usize::from(receiver.is_some()))
@@ -64,24 +64,16 @@ impl<'h, 'a> Solver<'h, 'a> {
                             .get(i)
                             .filter(|p| self.index.is_param_annotated(p.id))
                         {
-                            self.types.intern_hir(self.ctx, &p.ty, true)
+                            self.index.param_type(p)?
                         } else {
                             ty
                         };
                         args.push(self.instantiate_annotated_class(ty, 0, None)?);
                     }
+                    args
                 } else {
-                    let bindings = self.default_type_param_bindings(tid);
-                    for p in view.params {
-                        let ty = self.types.intern_hir(
-                            self.ctx,
-                            &p.ty,
-                            self.index.is_param_annotated(p.id),
-                        );
-                        let ty = self.types.substitute(ty, &bindings);
-                        args.push(self.instantiate_annotated_class(ty, 0, None)?);
-                    }
-                }
+                    self.declared_arguments(tid)?
+                };
                 let mut request = InstanceReq::new(tid, &args, None).receiver(receiver);
                 request.witness = (!adapter).then_some(witness);
                 self.request_instance(request)
@@ -95,13 +87,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                     let params = self.types.tuple(&params);
                     let result = match (result, target) {
                         (Some(ty), _) if self.exported_resource(ty).is_some() => {
-                            self.locations.alloc(ty)
+                            AdapterResult::Declared(ty)
                         }
                         (
                             Some(_),
                             Target::Function(id) | Target::Method(_, id) | Target::Static(_, id),
-                        ) => self.instances[id].return_loc,
-                        _ => self.locations.alloc(Ty::VOID),
+                        ) => AdapterResult::Inferred(self.instances[id].return_loc),
+                        _ => AdapterResult::Declared(Ty::VOID),
                     };
                     ExportRoot::Adapter {
                         target,
@@ -113,6 +105,20 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.witness_instances.push(Some(root));
         }
         Ok(init_inst)
+    }
+
+    pub(super) fn declared_arguments(&mut self, template: TemplateId) -> Result<Vec<Ty>> {
+        let bindings = self.default_type_param_bindings(template);
+        self.index
+            .view(template)
+            .params
+            .iter()
+            .map(|p| {
+                let declared = self.index.param_type(p)?;
+                let ty = self.types.substitute(declared, &bindings);
+                self.instantiate_annotated_class(ty, 0, None)
+            })
+            .collect()
     }
 
     fn exported_resource(&self, ty: Ty) -> Option<u32> {
@@ -179,13 +185,11 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeName, Ty)> {
         let view = self.index.view(tid);
-        let tps = &self.type_param_pool[self.template_type_params[tid]];
         view.type_params
             .iter()
-            .zip(tps)
-            .filter_map(|(tp, &tp_id)| {
+            .filter_map(|tp| {
                 Some((
-                    tp_id,
+                    shapes::TypeName::new(self.ctx, tp.name.clone()),
                     self.types.intern_hir(
                         self.ctx,
                         tp.constraint.as_deref().or(tp.default.as_deref())?,
@@ -284,12 +288,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             && explicit_type_args.is_empty()
             && !view.params.is_empty()
         {
-            let mut declared = Vec::with_capacity(view.params.len());
-            for param in view.params {
-                let ty = self.types.intern_hir(self.ctx, &param.ty, true);
-                declared.push(self.instantiate_annotated_class(ty, 0, None)?);
-            }
-            canonical_buf = declared;
+            canonical_buf = self.declared_arguments(template)?;
             canonical_buf.as_slice()
         } else {
             args
@@ -305,7 +304,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         let inputs = self.types.tuple(args);
         let args_key = self.arrays.argument_key(self.types, inputs);
-        let targs_key = self.types.tuple(explicit_type_args);
         let list_result =
             if self.index.returns_empty_list.contains(template.index()) && !view.explicit_return {
                 let signature = if let Some(w) = witness {
@@ -339,12 +337,32 @@ impl<'h, 'a> Solver<'h, 'a> {
             Receiver::Object(ty) => Receiver::Object(self.arrays.argument_key(self.types, ty)),
             Receiver::Class(class) => Receiver::Class(class),
         });
+        let declaration = GenericOwner::Function(template);
+        let mut arguments = vec![Ty::OPEN; view.type_params.len()];
+        for (slot, &ty) in arguments.iter_mut().zip(explicit_type_args) {
+            if !self.types.is_open(ty) {
+                *slot = ty;
+            }
+        }
+        if arguments.contains(&Ty::OPEN) {
+            self.unify_params(view.params, args, declaration, &mut arguments, caller)?;
+        }
+        if witness.is_some() {
+            for (slot, tp) in arguments.iter_mut().zip(view.type_params) {
+                if *slot == Ty::OPEN
+                    && let Some(default) = tp.constraint.as_deref().or(tp.default.as_deref())
+                {
+                    *slot = self.types.intern_hir(self.ctx, default, true);
+                }
+            }
+        }
+        let type_arguments = self.types.tuple(&arguments);
         let key: InstanceKey = (
             template,
             receiver_key,
             capture_owner,
             args_key,
-            targs_key,
+            type_arguments,
             list_result,
             invocation == Invocation::Lexical,
         );
@@ -375,43 +393,48 @@ impl<'h, 'a> Solver<'h, 'a> {
         let first_instance = self.template_counts[template] == 0;
         bump_count(&mut self.template_counts, template);
 
-        let mut type_bindings = self.compute_type_param_bindings(
-            template,
-            receiver,
-            capture_owner,
-            args,
-            explicit_type_args,
-        );
-        if witness.is_some() && type_bindings.is_empty() {
-            type_bindings = self.default_type_param_bindings(template);
+        if let Some(caller) = caller
+            && let Some((param, _)) = view
+                .type_params
+                .iter()
+                .zip(&arguments)
+                .find(|(_, ty)| **ty == Ty::OPEN)
+        {
+            let err = diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "cannot infer type argument '{}' for generic function '{}'",
+                param.name,
+                hir_compat::display_name(&view.name)
+            );
+            let err = self.hir.locations.annotate_call(err, call_byte_offset);
+            return Err(attach_inst_chain(
+                &self.instances,
+                self.index,
+                &self.hir.locations,
+                err,
+                caller,
+            ));
         }
-        if caller.is_some() && !view.type_params.is_empty() {
-            let own_tps = &self.type_param_pool[self.template_type_params[template]];
-            for (tp, &tp_id) in view.type_params.iter().zip(own_tps) {
-                if !type_bindings.iter().any(|(id, _)| *id == tp_id) {
-                    let mut err = diag!(
-                        codes::MISSING_TYPE_ANNOTATION,
-                        "cannot infer type argument '{}' for generic function '{}'",
-                        tp.name,
-                        hir_compat::display_name(view.name)
-                    );
-                    if hir_compat::has_source_offset(call_byte_offset) {
-                        err = self.hir.locations.annotate_call(err, call_byte_offset);
-                    }
-                    if let Some(cid) = caller {
-                        err = attach_inst_chain(
-                            &self.instances,
-                            self.index,
-                            &self.hir.locations,
-                            err,
-                            cid,
-                        );
-                    }
-                    return Err(err);
-                }
+        let mut type_bindings = Vec::new();
+        if !arguments.is_empty() {
+            type_bindings.push(TypeScope {
+                declaration,
+                arguments: type_arguments,
+            });
+        }
+        if let Some(class) = receiver.and_then(Receiver::class) {
+            let instance = &self.class_insts[class];
+            let declaration = GenericOwner::Class(instance.class);
+            if !self.types.tuple_slice(instance.args).is_empty() {
+                type_bindings.push(TypeScope {
+                    declaration,
+                    arguments: instance.args,
+                });
             }
         }
-
+        if let Some(owner) = capture_owner.instance() {
+            type_bindings.extend_from_slice(&self.type_bindings[owner]);
+        }
         let mut param_loc_buf = Vec::with_capacity(view.params.len());
         let mut local_slots = Vec::with_capacity(view.params.len() + 4);
         let fixed_count = view
@@ -420,10 +443,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             .position(|p| p.is_rest)
             .unwrap_or(view.params.len());
         for (p_idx, param) in view.params.iter().enumerate() {
-            let declared =
-                self.types
-                    .intern_hir(self.ctx, &param.ty, self.index.is_param_annotated(param.id));
-            let declared = self.types.substitute(declared, &type_bindings);
+            let declared = self.index.param_type(param)?;
+            let declared = self.index.substitute(self.types, declared, &type_bindings);
             let bound_ty = if param.is_rest {
                 let extra_args = args.get(fixed_count..).unwrap_or(&[]);
                 if !extra_args.is_empty() {
@@ -460,7 +481,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     incoming
                 }
             };
-            let loc = self.locations.alloc(bound_ty);
+            let loc = self.facts.alloc(bound_ty);
             param_loc_buf.push(loc);
             if let Some(local) = self.index.local_idx(param.id) {
                 local_slots.push(InstanceLocalSlot { local, loc });
@@ -471,7 +492,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         for &cap_local in self.index.template_captured_locals(template) {
             if !local_slots.iter().any(|s| s.local == cap_local) {
-                let loc = self.locations.alloc(Ty::BOTTOM);
+                let loc = self.facts.alloc(Ty::BOTTOM);
                 local_slots.push(InstanceLocalSlot {
                     local: cap_local,
                     loc,
@@ -484,16 +505,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             .explicit_return
             .then(|| {
                 let ret = self.types.intern_hir(self.ctx, view.return_type, true);
-                let ret = self.types.substitute(ret, &type_bindings);
+                let ret = self.index.substitute(self.types, ret, &type_bindings);
                 (!self.types.is_open(ret)).then_some(ret)
             })
             .flatten();
         let return_loc = if view.is_async && explicit_return.is_none() {
-            let inner_loc = self.locations.alloc(Ty::BOTTOM);
+            let inner_loc = self.facts.alloc(Ty::BOTTOM);
             let cell = self.types.cell(inner_loc, CellKind::Promise);
-            self.locations.alloc(cell)
+            self.facts.alloc(cell)
         } else {
-            self.locations.alloc(explicit_return.unwrap_or(Ty::BOTTOM))
+            self.facts.alloc(explicit_return.unwrap_or(Ty::BOTTOM))
         };
 
         let keep_original = first_instance && (witness.is_some() || is_monomorphic_plain);
@@ -506,29 +527,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         let emitted_name = if let Some(w) = witness.filter(|w| w.signature.is_none()) {
             w.name.clone()
+        } else if view.kind.is_class_member()
+            || matches!(
+                view.kind,
+                TemplateKind::ClassConstructor | TemplateKind::FieldInitializers
+            )
+        {
+            format!("{}{emitted_func_id}", self.hir.member_prefix)
         } else if template == TemplateId::INIT || keep_original {
             view.raw_name()
         } else {
             format!("{}_instance_{emitted_func_id}", view.raw_name())
         };
-        let emitted_method_name = match view.kind {
-            TemplateKind::ClassMethod
-            | TemplateKind::ClassStaticMethod(_)
-            | TemplateKind::ClassGetter(_)
-            | TemplateKind::ClassSetter(_) => {
-                if self
-                    .instances
-                    .iter()
-                    .any(|i| i.template == template && i.receiver == receiver)
-                {
-                    format!("{}__inst_{emitted_func_id}", view.name)
-                } else {
-                    view.name.to_owned()
-                }
-            }
-            _ => String::new(),
-        };
-
         let inst_id = self.instances.push(Instance {
             is_witness: witness.is_some(),
             list_result,
@@ -536,7 +546,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             receiver,
             capture_owner,
             args: inputs,
-            explicit_type_args: targs_key,
             return_loc,
             partial_record_result: None,
             has_explicit_return: explicit_return.is_some(),
@@ -546,8 +555,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             invocation,
             emitted_func_id,
             emitted_name,
-            emitted_method_name,
         });
+        self.type_bindings.push(type_bindings.into_boxed_slice());
         self.instance_index.insert(key, inst_id);
         self.capture_locs.slots.push(local_slots);
         self.inst_frame_locals
@@ -560,7 +569,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .map(|site| SiteEntry {
                 resolution: site.handles.map(|(resolve_tid, reject_tid)| {
                     SiteResolution::PromiseNew {
-                        value_loc: self.locations.alloc(Ty::BOTTOM),
+                        value_loc: self.facts.alloc(Ty::BOTTOM),
                         resolve_tid,
                         reject_tid,
                         executor: None,
@@ -575,77 +584,37 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(inst_id)
     }
 
-    pub(super) fn compute_type_param_bindings(
-        &mut self,
-        template: TemplateId,
-        receiver: Option<Receiver>,
-        capture_owner: CaptureOwner,
-        args: &[Ty],
-        explicit_type_args: &[Ty],
-    ) -> Vec<(shapes::TypeName, Ty)> {
-        let mut bindings = capture_owner
-            .instance()
-            .map_or_else(Vec::new, |o| self.active_instance_type_bindings(o));
-        if let Some(id) = receiver.and_then(Receiver::class) {
-            let cinst = &self.class_insts[id];
-            bindings.extend(
-                self.type_param_pool[self.class_type_params[cinst.class]]
-                    .iter()
-                    .copied()
-                    .zip(self.types.tuple_slice(cinst.args).iter().copied()),
-            );
-        }
-        let view = self.index.view(template);
-        let tp_span = self.template_type_params[template];
-        if self.type_param_pool[tp_span].is_empty() {
-            return bindings;
-        }
-        for (&tp_id, &et) in self.type_param_pool[tp_span].iter().zip(explicit_type_args) {
-            if !self.types.is_open(et) {
-                bindings.push((tp_id, et));
-            }
-        }
-        self.unify_params(view.params, args, tp_span, &mut bindings);
-        bindings
-    }
-
     pub(super) fn unify_params(
         &mut self,
         params: &[perry_hir::ir::Param],
         args: &[Ty],
-        tps: TypeParamSpan,
-        bindings: &mut Vec<(shapes::TypeName, Ty)>,
-    ) {
+        owner: GenericOwner,
+        bindings: &mut [Ty],
+        reader: Option<InstanceId>,
+    ) -> Result<()> {
+        let mut read = |loc| {
+            let (root, value) = self.facts.resolve(loc);
+            if let Some(reader) = reader {
+                self.subscriptions.read(reader, Fact::Storage(root));
+            }
+            (root, value)
+        };
         for skip_open in [true, false] {
             for (param, &arg_ty) in params.iter().zip(args) {
-                if skip_open
-                    && self.types.is_open_with(
-                        arg_ty,
-                        |loc| self.locations.resolve(loc),
-                        &self.dict_reads,
-                    )
-                {
+                if skip_open && self.types.is_open_with(arg_ty, &mut read, &self.dict_reads) {
                     continue;
                 }
-                let resolved_arg = match self.types.kind(arg_ty) {
-                    TyKind::Cell {
-                        loc,
-                        kind: CellKind::Promise,
-                    } => {
-                        let inner = self.locations[loc];
-                        if inner == Ty::BOTTOM {
-                            self.types.promise(Ty::VOID)
-                        } else {
-                            self.types.promise(inner)
-                        }
-                    }
-                    _ => arg_ty,
-                };
-                let pat = self.types.intern_hir(self.ctx, &param.ty, true);
-                self.types
-                    .unify(pat, resolved_arg, &self.type_param_pool[tps], bindings);
+                let resolved_arg = self.types.promise_argument(arg_ty, |loc| read(loc).1);
+                let pat = self.index.param_type(param)?;
+                self.types.unify(
+                    pat,
+                    resolved_arg,
+                    &|name| self.index.type_slots.get(&(owner, name)).copied(),
+                    bindings,
+                );
             }
         }
+        Ok(())
     }
 
     fn budget_error(
@@ -656,7 +625,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         call_byte_offset: u32,
     ) -> Diagnostic {
         let view = self.index.view(template);
-        let name = hir_compat::function_label(view.name);
+        let name = hir_compat::function_label(&view.name);
         let mut err = Diagnostic::unsupported(format!(
             "generic specialization limit of {INSTANCE_BUDGET} distinct argument lists reached for {name}"
         ));
@@ -699,11 +668,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         let cinfo = self.index.class(class);
         let hir_class = cinfo.declaration;
 
-        let bindings: Vec<_> = self.type_param_pool[self.class_type_params[class]]
-            .iter()
-            .copied()
-            .zip(args.iter().copied())
-            .collect();
+        let scope = TypeScope {
+            declaration: GenericOwner::Class(class),
+            arguments: inputs,
+        };
         let mut field_loc_buf = Vec::with_capacity(hir_class.fields.len());
         for field in &hir_class.fields {
             let is_func_ty = matches!(field.ty, HirType::Function(_));
@@ -715,11 +683,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     HirType::Any | HirType::Unknown | HirType::Function(_)
                 ),
             );
-            let ty = self.types.substitute(ty, &bindings);
+            let ty = self.index.substitute(self.types, ty, &[scope]);
             let declared = !is_func_ty && !self.types.is_open(ty);
-            let loc = self.locations.alloc(if declared { ty } else { Ty::BOTTOM });
+            let loc = self.facts.alloc(if declared { ty } else { Ty::BOTTOM });
             if declared {
-                self.locations.declare(loc, ty);
+                self.facts.declare(loc, ty);
             }
             field_loc_buf.push(loc);
         }

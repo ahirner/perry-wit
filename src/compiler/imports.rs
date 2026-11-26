@@ -1,10 +1,11 @@
 //! Canonical bindings for the functions exposed by the frontend's WIT source view.
-use super::bind::abi_type;
+use super::abi::Layouts;
 use perry_codegen::boundary::Import;
 use perry_frontend::wit::WorldTypes;
 use wit_parser::{Resolve, WorldId};
 
 pub(super) fn bindings<'r>(
+    layouts: &Layouts,
     resolve: &'r Resolve,
     world: WorldId,
     types: &mut WorldTypes<'r>,
@@ -17,20 +18,16 @@ pub(super) fn bindings<'r>(
             "$root".into()
         };
         let function = entry.function;
-        let Ok(params) = function
-            .params
-            .iter()
-            .map(|parameter| abi_type(resolve, &parameter.ty))
-            .collect()
-        else {
-            continue;
-        };
         let Ok(result) = function
             .result
             .as_ref()
-            .map(|ty| abi_type(resolve, ty))
+            .map(|ty| layouts.value(*ty))
             .transpose()
         else {
+            continue;
+        };
+        let core = layouts.signature(function, true);
+        let Ok((params, indirect_size)) = layouts.parameters(function, &core) else {
             continue;
         };
         let binding = types.import_function(
@@ -46,9 +43,10 @@ pub(super) fn bindings<'r>(
             module,
             name: function.name.clone(),
             params,
+            indirect_size,
             result,
             asynchronous: function.kind.is_async(),
-            kind: perry_codegen::boundary::ImportKind::Function,
+            kind: perry_codegen::boundary::ImportKind::Function(core),
         });
     }
     imports

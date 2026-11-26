@@ -3,14 +3,22 @@ use super::*;
 #[test]
 fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn std::error::Error>>
 {
-    let mut source = String::from("type Cycle = Cycle; type Fields = {a:number};");
+    let mut source =
+        String::from("type Cycle = Cycle; type Fields = {a:number}; interface Base { a:number }");
     for index in 0..64 {
         let next = if index == 63 {
             "Fields".into()
         } else {
             format!("Chain{}", index + 1)
         };
-        source.push_str(&format!("type Chain{index} = {next};"));
+        let parent = if index == 0 {
+            "Base".into()
+        } else {
+            format!("Parent{}", index - 1)
+        };
+        source.push_str(&format!(
+            "type Chain{index} = {next}; interface Parent{index} extends {parent} {{}}"
+        ));
     }
     let ast = crate::source::parse(&source, "resolution.ts")?;
     let module = perry_hir::lower_module(&ast, "main", "resolution.ts")?;
@@ -27,6 +35,13 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
     let mut resolver = Resolver::new(&ctx, &decls, &mut types);
     for name in ["Cycle", "Chain0"] {
         assert_eq!(resolver.property(name, &[], "a"), None, "{name}");
+    }
+    // Warm the parents in order; a deep query has the same limit with a warm cache.
+    for index in 0..64 {
+        let field = resolver.property(&format!("Parent{index}"), &[], "a");
+        if index == 63 {
+            assert_eq!(field, None);
+        }
     }
     Ok(())
 }

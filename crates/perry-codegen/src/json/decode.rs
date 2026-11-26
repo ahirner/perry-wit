@@ -1,8 +1,4 @@
-use crate::{
-    function::FunctionLowering,
-    repr::{optional_inner, slot_size},
-    runtime::Runtime,
-};
+use crate::{function::FunctionLowering, repr::optional_inner, runtime::Runtime};
 use perry_mir::{ArrayType, JsonSchema, PlironResultExt as _, RecordType};
 use perry_wit_diagnostics::Result;
 use pliron::{
@@ -138,16 +134,10 @@ impl FunctionLowering<'_, '_> {
         words.extend([target_desc, source_desc]);
         if let Some(target) = perry_mir::typed::<RecordType>(ctx, target_inner) {
             let source = TypedHandle::<RecordType>::from_handle(source_inner, ctx).to_diag(ctx)?;
-            let source = source.deref(ctx);
+            let source = self.state.record_layouts.get(ctx, source)?;
             for (name, ty) in target.deref(ctx).fields().to_diag(ctx)? {
-                let mut offset = perry_abi::layout::record::HEADER;
-                let field = source.fields().to_diag(ctx)?.iter().find_map(|(key, ty)| {
-                    let slot = offset;
-                    offset += slot_size(ctx, *ty);
-                    (key == name).then_some((*ty, slot))
-                });
-                if let Some((from, offset)) = field {
-                    words.extend([self.json_copy_plan(ctx, from, *ty)?, offset]);
+                if let Some(field) = source.fields.get(name) {
+                    words.extend([self.json_copy_plan(ctx, field.ty, *ty)?, field.offset]);
                 } else {
                     words.extend([0, 0]);
                 }

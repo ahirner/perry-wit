@@ -17,15 +17,11 @@ impl Query {
     }
 }
 
-pub(crate) enum Expansion<'h> {
-    Type(Ty),
-    Class(crate::shapes::ClassShape<'h>, PropSpan),
-}
-
 pub(crate) struct Resolver<'a, 'h> {
     ctx: &'a Context,
     decls: &'a Declarations<'h>,
     pub(crate) types: &'a mut TypeTable,
+    reads_class_fields: bool,
 }
 
 impl<'a, 'h> Resolver<'a, 'h> {
@@ -34,25 +30,74 @@ impl<'a, 'h> Resolver<'a, 'h> {
         decls: &'a Declarations<'h>,
         types: &'a mut TypeTable,
     ) -> Self {
-        Self { ctx, decls, types }
+        Self {
+            ctx,
+            decls,
+            types,
+            reads_class_fields: false,
+        }
     }
 
-    pub(crate) fn expand(
+    pub(crate) fn application(
+        &mut self,
+        declaration: Declaration<'h>,
+        base: &str,
+        args: &[Ty],
+        depth: usize,
+    ) -> Result<Application> {
+        let written = self.types.application_key(base, args);
+        // Inherited fields are resolved recursively. A cached parent must respect the caller's depth budget.
+        let cacheable = depth == 0
+            || !matches!(declaration, Declaration::Interface(i) if !i.extends.is_empty());
+        if cacheable && let Some(&app) = self.types.applications.get(&written) {
+            self.reads_class_fields |= app.reads_class_fields;
+            return Ok(app);
+        }
+        let bindings = declaration.bind(self.ctx, base, self.types, args)?;
+        let key = if bindings.len() == args.len() {
+            written
+        } else {
+            self.types.application_key(
+                base,
+                &bindings.iter().map(|&(_, ty)| ty).collect::<Vec<_>>(),
+            )
+        };
+        let app = if cacheable
+            && key != written
+            && let Some(&app) = self.types.applications.get(&key)
+        {
+            app
+        } else {
+            let mut nested = Resolver::new(self.ctx, self.decls, self.types);
+            let ty = nested.expand(declaration, &bindings, depth + 1)?;
+            let reads_class_fields =
+                matches!(declaration, Declaration::Class(_)) || nested.reads_class_fields;
+            Application {
+                key,
+                ty,
+                reads_class_fields,
+            }
+        };
+        self.reads_class_fields |= app.reads_class_fields;
+        if cacheable {
+            self.types.applications.insert(written, app);
+            if key != written {
+                self.types.applications.insert(key, app);
+            }
+        }
+        Ok(app)
+    }
+
+    fn expand(
         &mut self,
         declaration: Declaration<'h>,
         bindings: &[(TypeName, Ty)],
         depth: usize,
-    ) -> Result<Expansion<'h>> {
+    ) -> Result<Ty> {
         let mut remaining = ARGUMENT_LIMIT;
         let interface = match declaration {
             Declaration::Alias(alias) => {
-                return Ok(Expansion::Type(substitute(
-                    self.ctx,
-                    self.types,
-                    &alias.ty,
-                    bindings,
-                    &mut remaining,
-                )?));
+                return substitute(self.ctx, self.types, &alias.ty, bindings, &mut remaining);
             }
             Declaration::Class(class) => {
                 let mut remaining = usize::MAX;
@@ -72,10 +117,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
                         Ok(self.types.property(&field.name, ty, false))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                return Ok(Expansion::Class(
-                    class,
-                    self.types.intern_properties(&fields),
-                ));
+                return Ok(self.types.object(&fields, None));
             }
             Declaration::Interface(interface) => interface,
         };
@@ -107,7 +149,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
                 .map_err(|_| unresolved())?;
             merge(self.types.property(&field.name, ty, field.optional));
         }
-        Ok(Expansion::Type(self.types.object(&properties, None)))
+        Ok(self.types.object(&properties, None))
     }
 
     pub(crate) fn named(
@@ -121,38 +163,27 @@ impl<'a, 'h> Resolver<'a, 'h> {
         if depth >= RESOLUTION_DEPTH {
             return None;
         }
-        let declaration = if plain && query.aliases_only() {
-            let &(_, alias) = self.decls.type_aliases.get(base)?;
-            if !alias.type_params.is_empty() {
-                return None;
-            }
-            Declaration::Alias(alias)
-        } else {
-            if let Some(expanded) = self.utility(base, arguments, query, depth) {
-                return Some(expanded);
-            }
-            Declaration::find(self.decls, base)?.1
+        let Some(declaration) = Declaration::find(self.decls, base) else {
+            return self.utility(base, arguments, query, depth);
         };
-        if (query.aliases_only() && !matches!(declaration, Declaration::Alias(_)))
-            || (matches!(declaration, Declaration::Class(_)) && query == Query::Dictionary)
+        if query.aliases_only()
+            && !(matches!(declaration, Declaration::Alias(_))
+                && (!plain || declaration.parameters().is_empty()))
+            || matches!(declaration, Declaration::Class(_)) && query == Query::Dictionary
         {
             return None;
         }
-        let bindings = declaration
-            .bind(self.ctx, base, self.types, arguments)
-            .ok()?;
-        match self.expand(declaration, &bindings, depth + 1).ok()? {
-            Expansion::Type(target) => {
-                let union = matches!(self.types.kind(target), TyKind::Union(_));
-                let resolved = self.resolve(target, query, depth + 1)?;
-                // Flatten aliases only when they expose a union or a utility expansion.
-                if query == Query::Union && !union && resolved.0 == target {
-                    return None;
-                }
-                Some(resolved)
-            }
-            Expansion::Class(_, props) => Some((self.types.object_type(props, None), depth)),
+        let target = self
+            .application(declaration, base, arguments, depth)
+            .ok()?
+            .ty;
+        if matches!(declaration, Declaration::Class(_)) {
+            return Some((target, depth));
         }
+        let union = matches!(self.types.kind(target), TyKind::Union(_));
+        let resolved = self.resolve(target, query, depth + 1)?;
+        // Flatten aliases only when they expose a union or a utility expansion.
+        (query != Query::Union || union || resolved.0 != target).then_some(resolved)
     }
 
     fn resolve(&mut self, ty: Ty, query: Query, depth: usize) -> Option<(Ty, usize)> {
@@ -263,10 +294,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         arguments: &[Ty],
         depth: usize,
     ) -> Option<Ty> {
-        if depth >= RESOLUTION_DEPTH
-            || self.decls.interfaces.contains_key(base)
-            || self.decls.type_aliases.contains_key(base)
-        {
+        if depth >= RESOLUTION_DEPTH || self.decls.is_user_type(base) {
             return None;
         }
         let members: Vec<Ty> = match (base, arguments) {
@@ -303,12 +331,6 @@ impl<'a, 'h> Resolver<'a, 'h> {
         query: Query,
         depth: usize,
     ) -> Option<(Ty, usize)> {
-        if depth >= RESOLUTION_DEPTH
-            || self.decls.interfaces.contains_key(base)
-            || self.decls.type_aliases.contains_key(base)
-        {
-            return None;
-        }
         if matches!(base, "Exclude" | "Extract" | "NonNullable") {
             let target = self.utility_type(base, arguments, depth)?;
             return if query == Query::Dictionary {

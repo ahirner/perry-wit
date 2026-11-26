@@ -5,6 +5,7 @@
 //! support explicit tags and checked completion-style returns and throws. Async exports use
 //! stackless P3 callbacks, and async imports retain a canonical transfer until the host settles it.
 use crate::{
+    aggregates::{RecordField, RecordLayout},
     function::FunctionLowering,
     host::{EffectHost, Foreign, ValueHost},
     module::ModuleState,
@@ -34,6 +35,10 @@ use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
     ops::{CallOp, set_export},
 };
+use wit_parser::{
+    Type as Wit,
+    abi::{WasmSignature, WasmType},
+};
 
 mod canonical;
 mod exports;
@@ -52,18 +57,16 @@ use sums::BoundaryValue;
 
 /// A WIT value type as the canonical ABI sees it.
 #[derive(Clone, Debug, PartialEq)]
-pub enum AbiType {
-    Bool,
-    S8,
-    U8,
-    S16,
-    U16,
-    S32,
-    U32,
-    S64,
-    U64,
-    F32,
-    F64,
+pub struct AbiType {
+    pub kind: AbiKind,
+    pub flat: Option<Box<[Flat]>>,
+    pub size: u32,
+    pub offset: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AbiKind {
+    Scalar(Wit),
     String,
     List(Box<AbiType>),
     /// Fields in WIT order, named as the TypeScript record fields.
@@ -73,8 +76,8 @@ pub enum AbiType {
         ok: Option<Box<AbiType>>,
         err: Option<Box<AbiType>>,
     },
-    Enum(Vec<String>),
-    Variant(Vec<(String, Option<AbiType>)>),
+    Enum(wit_parser::Int, Vec<String>),
+    Variant(wit_parser::Int, Vec<(String, Option<AbiType>)>),
     /// `stream<u8>`: the readable end's handle, a `ReadableStream<Uint8Array>` in TypeScript.
     ByteStream,
     Resource {
@@ -86,7 +89,6 @@ pub enum AbiType {
     /// `err` with the case `error_case` of the error variant carrying `option<string>`
     /// (`internal-error`), the rejection's description.
     OkHandle {
-        flat: Vec<Flat>,
         error_case: u32,
     },
 }
@@ -105,9 +107,9 @@ pub enum ResourceOperation {
     Representation,
     Drop,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum ImportKind {
-    Function,
+    Function(WasmSignature),
     Resource {
         key: u32,
         operation: ResourceOperation,
@@ -120,6 +122,7 @@ pub struct Import {
     pub module: String,
     pub name: String,
     pub params: Vec<AbiType>,
+    pub indirect_size: Option<u32>,
     pub result: Option<AbiType>,
     pub asynchronous: bool,
 }
@@ -145,9 +148,11 @@ pub struct Export {
     pub annotations: Vec<Option<perry_wit_diagnostics::SourceSpan>>,
     /// Core export name: the WIT function name, or `interface#function`.
     pub core_name: String,
+    pub signature: WasmSignature,
     /// The MIR function implementing it.
     pub function: String,
     pub params: Vec<AbiType>,
+    pub indirect_size: Option<u32>,
     pub result: Option<AbiType>,
     pub kind: ExportKind,
 }
@@ -168,8 +173,6 @@ impl Export {
     }
 }
 
-const MAX_FLAT_PARAMS: usize = 16;
-
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Flat {
     I32,
@@ -178,170 +181,74 @@ pub enum Flat {
     F64,
 }
 
+impl From<WasmType> for Flat {
+    fn from(ty: WasmType) -> Self {
+        match ty {
+            WasmType::I64 | WasmType::PointerOrI64 => Self::I64,
+            WasmType::F32 => Self::F32,
+            WasmType::F64 => Self::F64,
+            WasmType::I32 | WasmType::Pointer | WasmType::Length => Self::I32,
+        }
+    }
+}
+
 impl AbiType {
     /// Whether this type is one of the 11 Canonical ABI scalars.
     pub(super) fn is_scalar(&self) -> bool {
-        matches!(
-            self,
-            Self::Bool
-                | Self::S8
-                | Self::U8
-                | Self::S16
-                | Self::U16
-                | Self::S32
-                | Self::U32
-                | Self::S64
-                | Self::U64
-                | Self::F32
-                | Self::F64
-        )
+        matches!(self.kind, AbiKind::Scalar(_))
     }
 
-    /// The WIT spelling of this type's outermost constructor, for diagnostics.
-    pub(crate) fn wit_name(&self) -> &'static str {
-        match self {
-            Self::Bool => "bool",
-            Self::S8 => "s8",
-            Self::U8 => "u8",
-            Self::S16 => "s16",
-            Self::U16 => "u16",
-            Self::S32 => "s32",
-            Self::U32 => "u32",
-            Self::S64 => "s64",
-            Self::U64 => "u64",
-            Self::F32 => "f32",
-            Self::F64 => "f64",
-            Self::String => "string",
-            Self::List(_) => "list",
-            Self::Record(_) => "record",
-            Self::Option(_) => "option",
-            Self::Result { .. } => "result",
-            Self::Enum(_) => "enum",
-            Self::Variant(_) => "variant",
-            Self::ByteStream => "stream<u8>",
-            Self::Resource { owned: false, .. } => "borrow",
-            // The ok case of `OkHandle` is a resource handle, a number in TypeScript.
-            Self::Resource { owned: true, .. } | Self::OkHandle { .. } => "own",
+    fn number_name(&self) -> &'static str {
+        match self.kind {
+            AbiKind::Scalar(Wit::U8) => "u8",
+            AbiKind::Scalar(Wit::S8) => "s8",
+            AbiKind::Scalar(Wit::U16) => "u16",
+            AbiKind::Scalar(Wit::S16) => "s16",
+            AbiKind::Scalar(Wit::U32) => "u32",
+            AbiKind::Scalar(Wit::S32) => "s32",
+            AbiKind::Scalar(Wit::U64) => "u64",
+            AbiKind::Scalar(Wit::S64) => "s64",
+            AbiKind::Scalar(Wit::F32) => "f32",
+            AbiKind::Scalar(Wit::F64) => "f64",
+            _ => "own",
         }
     }
-
+    fn direct(&self) -> Result<&[Flat]> {
+        self.flat
+            .as_deref()
+            .ok_or_else(|| internal!("indirect WIT type in a flat signature"))
+    }
     /// Exact integer domain supplied by WIT, independent of the source representation.
     pub fn integer_type(&self, ctx: &Context) -> Option<TypeHandle> {
         use Signedness::{Signed, Unsigned};
-        let (bits, sign) = match self {
-            Self::S8 => (8, Signed),
-            Self::U8 => (8, Unsigned),
-            Self::S16 => (16, Signed),
-            Self::U16 => (16, Unsigned),
-            Self::S32 => (32, Signed),
-            Self::U32 => (32, Unsigned),
-            Self::S64 => (64, Signed),
-            Self::U64 => (64, Unsigned),
+        let (bits, sign) = match &self.kind {
+            AbiKind::Scalar(Wit::S8) => (8, Signed),
+            AbiKind::Scalar(Wit::U8) => (8, Unsigned),
+            AbiKind::Scalar(Wit::S16) => (16, Signed),
+            AbiKind::Scalar(Wit::U16) => (16, Unsigned),
+            AbiKind::Scalar(Wit::S32) => (32, Signed),
+            AbiKind::Scalar(Wit::U32) => (32, Unsigned),
+            AbiKind::Scalar(Wit::S64) => (64, Signed),
+            AbiKind::Scalar(Wit::U64) => (64, Unsigned),
             _ => return None,
         };
         Some(IntegerType::get(ctx, bits, sign).into())
     }
 
-    fn flatten(&self, out: &mut Vec<Flat>) {
-        match self {
-            Self::Bool
-            | Self::S8
-            | Self::U8
-            | Self::S16
-            | Self::U16
-            | Self::S32
-            | Self::U32
-            | Self::ByteStream
-            | Self::Resource { .. } => out.push(Flat::I32),
-            Self::S64 | Self::U64 => out.push(Flat::I64),
-            Self::F32 => out.push(Flat::F32),
-            Self::F64 => out.push(Flat::F64),
-            Self::String | Self::List(_) => out.extend([Flat::I32, Flat::I32]),
-            Self::Record(fields) => fields.iter().for_each(|(_, ty)| ty.flatten(out)),
-            Self::Option(_) | Self::Result { .. } | Self::Enum(_) | Self::Variant(_) => {
-                out.extend(self.sum_flat())
-            }
-            Self::OkHandle { flat, .. } => out.extend(flat.iter().copied()),
-        }
-    }
-
-    fn flat(&self) -> Vec<Flat> {
-        let mut out = Vec::new();
-        self.flatten(&mut out);
-        out
-    }
-
-    /// Canonical ABI `(alignment, size)` in bytes.
-    fn layout(&self) -> (u32, u32) {
-        match self {
-            Self::Bool | Self::S8 | Self::U8 => (1, 1),
-            Self::S16 | Self::U16 => (2, 2),
-            Self::S32 | Self::U32 | Self::F32 | Self::ByteStream | Self::Resource { .. } => (4, 4),
-            Self::S64 | Self::U64 | Self::F64 => (8, 8),
-            Self::String | Self::List(_) => (4, 8),
-            Self::Record(fields) => (
-                fields.iter().map(|(_, t)| t.alignment()).max().unwrap_or(1),
-                record_size(fields.iter().map(|(_, ty)| ty)),
-            ),
-            Self::Option(_) | Self::Result { .. } | Self::Enum(_) | Self::Variant(_) => {
-                (self.sum_alignment(), self.sum_size())
-            }
-            Self::OkHandle { flat, .. } => (8, 8 * flat.len() as u32),
-        }
-    }
-
-    fn alignment(&self) -> u32 {
-        self.layout().0
-    }
-
-    fn size(&self) -> u32 {
-        self.layout().1
-    }
-
-    fn field_offsets(&self) -> impl Iterator<Item = u32> + '_ {
-        let fields = match self {
-            AbiType::Record(fields) => fields.as_slice(),
-            _ => &[],
-        };
-        record_offsets(fields.iter().map(|(_, ty)| ty))
-    }
-
     /// The memory access for a scalar, or `None` for compound types.
     fn mem_kind(&self) -> Option<MemKind> {
-        Some(match self {
-            Self::Bool | Self::U8 => MemKind::I32U8,
-            Self::S8 => MemKind::I32S8,
-            Self::U16 => MemKind::I32U16,
-            Self::S16 => MemKind::I32S16,
-            Self::S32 | Self::U32 | Self::Resource { .. } => MemKind::I32,
-            Self::S64 | Self::U64 => MemKind::I64,
-            Self::F32 => MemKind::F32,
-            Self::F64 => MemKind::F64,
+        Some(match &self.kind {
+            AbiKind::Scalar(Wit::Bool | Wit::U8) => MemKind::I32U8,
+            AbiKind::Scalar(Wit::S8) => MemKind::I32S8,
+            AbiKind::Scalar(Wit::U16) => MemKind::I32U16,
+            AbiKind::Scalar(Wit::S16) => MemKind::I32S16,
+            AbiKind::Scalar(Wit::S32 | Wit::U32) | AbiKind::Resource { .. } => MemKind::I32,
+            AbiKind::Scalar(Wit::S64 | Wit::U64) => MemKind::I64,
+            AbiKind::Scalar(Wit::F32) => MemKind::F32,
+            AbiKind::Scalar(Wit::F64) => MemKind::F64,
             _ => return None,
         })
     }
-}
-
-fn align(value: u32, alignment: u32) -> u32 {
-    value.div_ceil(alignment) * alignment
-}
-
-fn record_offsets<'a>(types: impl Iterator<Item = &'a AbiType>) -> impl Iterator<Item = u32> {
-    types.scan(0, |offset, ty| {
-        let at = align(*offset, ty.alignment());
-        *offset = at + ty.size();
-        Some(at)
-    })
-}
-
-fn record_size<'a>(types: impl Iterator<Item = &'a AbiType>) -> u32 {
-    let (end, alignment) = types.fold((0, 1), |(end, alignment), ty| {
-        (
-            align(end, ty.alignment()) + ty.size(),
-            alignment.max(ty.alignment()),
-        )
-    });
-    align(end, alignment)
 }
 
 pub(crate) fn flat_type(ctx: &mut Context, flat: Flat) -> TypeHandle {
@@ -363,7 +270,7 @@ fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> 
         mir_ty.deref(ctx).is::<FP64Type>(),
         codes::CONTRACT_MISMATCH,
         "WIT {} needs a TypeScript number",
-        ty.wit_name()
+        ty.number_name()
     );
     Ok(())
 }
@@ -448,11 +355,11 @@ impl FunctionLowering<'_, '_> {
             let value = self.normalize_integer(ctx, raw, source);
             return self.numeric_cast(ctx, value, source, mir_ty);
         }
-        let opcode = match ty {
-            AbiType::Resource { key, owned } => {
+        let opcode = match &ty.kind {
+            AbiKind::Resource { key, owned } => {
                 return self.lift_resource(ctx, *key, *owned, mir_ty, raw);
             }
-            AbiType::Bool => {
+            AbiKind::Scalar(Wit::Bool) => {
                 ensure_diag!(
                     repr(ctx, mir_ty)? == Repr::Bool,
                     codes::CONTRACT_MISMATCH,
@@ -461,13 +368,18 @@ impl FunctionLowering<'_, '_> {
                 let zero = self.i32_const(ctx, 0);
                 return Ok(self.num(ctx, NumOpcode::I32Ne, vec![raw, zero]));
             }
-            AbiType::S8 | AbiType::S16 | AbiType::S32 => NumOpcode::F64ConvertI32S,
-            AbiType::U8 | AbiType::U16 | AbiType::U32 => NumOpcode::F64ConvertI32U,
-            AbiType::S64 | AbiType::U64 => {
-                return self.lift_integer(ctx, matches!(ty, AbiType::S64), mir_ty, raw);
+            AbiKind::Scalar(Wit::S8 | Wit::S16 | Wit::S32) => NumOpcode::F64ConvertI32S,
+            AbiKind::Scalar(Wit::U8 | Wit::U16 | Wit::U32) => NumOpcode::F64ConvertI32U,
+            AbiKind::Scalar(Wit::S64 | Wit::U64) => {
+                return self.lift_integer(
+                    ctx,
+                    matches!(ty.kind, AbiKind::Scalar(Wit::S64)),
+                    mir_ty,
+                    raw,
+                );
             }
-            AbiType::F32 => NumOpcode::F64PromoteF32,
-            AbiType::F64 => {
+            AbiKind::Scalar(Wit::F32) => NumOpcode::F64PromoteF32,
+            AbiKind::Scalar(Wit::F64) => {
                 expect_number(ctx, mir_ty, ty)?;
                 return Ok(raw);
             }
@@ -484,37 +396,38 @@ impl FunctionLowering<'_, '_> {
         mir_ty: TypeHandle,
         mut source: Canonical<'_>,
     ) -> Result<Value> {
-        match ty {
-            ty if ty.is_sum() => self.lift_sum(ctx, ty, mir_ty, source),
-            AbiType::String | AbiType::List(_) => {
+        match &ty.kind {
+            _ if ty.is_sum() => self.lift_sum(ctx, ty, mir_ty, source),
+            AbiKind::String | AbiKind::List(_) => {
                 let ptr = source.read(self, ctx, MemKind::I32, 0)?;
                 let len = source.read(self, ctx, MemKind::I32, 4)?;
-                match ty {
-                    AbiType::List(element) => self.lift_list(ctx, element, mir_ty, ptr, len),
+                match &ty.kind {
+                    AbiKind::List(element) => self.lift_list(ctx, element, mir_ty, ptr, len),
                     _ => self.lift_string(ctx, mir_ty, ptr, len),
                 }
             }
-            AbiType::ByteStream => {
+            AbiKind::ByteStream => {
                 let handle = source.read(self, ctx, MemKind::I32, 0)?;
                 self.lift_stream(ctx, mir_ty, handle)
             }
-            AbiType::Record(fields) => {
-                let record = self.record_type(ctx, mir_ty)?;
+            AbiKind::Record(fields) => {
+                let layout = self.boundary_record(ctx, mir_ty)?;
                 let mut values = Vec::with_capacity(fields.len());
-                for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
-                    let (_, field_mir) = record_field(ctx, record, name)?;
-                    let lift_mir = scalar_mir_type(ctx, field_mir);
+                for (name, field_ty) in fields {
+                    let at = field_ty.offset;
+                    let field = layout.field(ctx, name)?;
+                    let lift_mir = scalar_mir_type(ctx, field.ty);
                     let value = self.lift_abi(ctx, field_ty, lift_mir, source.at(at))?;
-                    values.push((name.as_str(), value));
+                    values.push((field, value));
                 }
-                self.build_record(ctx, mir_ty, values)
+                self.build_record(ctx, &layout, values)
             }
-            scalar => {
-                let kind = scalar
+            _ => {
+                let kind = ty
                     .mem_kind()
-                    .ok_or_else(|| internal!("{scalar:?} is not a scalar"))?;
+                    .ok_or_else(|| internal!("{ty:?} is not a scalar"))?;
                 let raw = source.read(self, ctx, kind, 0)?;
-                self.lift_scalar(ctx, scalar, mir_ty, raw)
+                self.lift_scalar(ctx, ty, mir_ty, raw)
             }
         }
     }
@@ -562,7 +475,9 @@ impl FunctionLowering<'_, '_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
-        if *element == AbiType::U8 && mir_ty.deref(ctx).is::<perry_mir::BytesType>() {
+        if element.kind == AbiKind::Scalar(Wit::U8)
+            && mir_ty.deref(ctx).is::<perry_mir::BytesType>()
+        {
             let bytes = self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, ptr]);
             if self.state.collectible {
                 self.runtime_void(ctx, Runtime::CabiRelease, vec![ptr]);
@@ -581,7 +496,7 @@ impl FunctionLowering<'_, '_> {
         let lift_mir = scalar_mir_type(ctx, element_mir);
         let array = self.new_array(ctx, len, element_mir)?;
         let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-        let size = element.size() as i32;
+        let size = element.size as i32;
         self.counted_loop(ctx, len, |b, ctx, i| {
             let stride = b.i32_const(ctx, size);
             let offset = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
@@ -599,7 +514,11 @@ impl FunctionLowering<'_, '_> {
         Ok(array)
     }
 
-    fn record_type(&self, ctx: &Context, mir_ty: TypeHandle) -> Result<TypedHandle<RecordType>> {
+    fn boundary_record(
+        &mut self,
+        ctx: &Context,
+        mir_ty: TypeHandle,
+    ) -> Result<std::rc::Rc<RecordLayout>> {
         let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx).map_err(|_| {
             Diagnostic::new(
                 codes::CONTRACT_MISMATCH,
@@ -616,55 +535,39 @@ impl FunctionLowering<'_, '_> {
             codes::CONTRACT_MISMATCH,
             "WIT record needs a TypeScript object type"
         );
-        Ok(record)
+        self.state.record_layouts.get(ctx, record)
     }
 
-    /// Allocate a MIR record from named field values.
+    /// Store fields in native slots and preserve their incoming insertion order.
     fn build_record(
         &mut self,
         ctx: &mut Context,
-        mir_ty: TypeHandle,
-        values: Vec<(&str, Value)>,
+        layout: &RecordLayout,
+        values: Vec<(RecordField, Value)>,
     ) -> Result<Value> {
-        let record = self.record_type(ctx, mir_ty)?;
-        let field_count = record
-            .deref(ctx)
-            .fields()
-            .map_err(|_| Diagnostic::internal("record without fields"))?
-            .len();
+        let field_count = layout.fields.len();
         ensure_diag!(
             values.len() == field_count,
             codes::CONTRACT_MISMATCH,
             "the WIT record has {} fields but the TypeScript type {} has {field_count}",
             values.len(),
-            record.deref(ctx).name()
+            layout.record.deref(ctx).name()
         );
-        let byte_size = Self::record_size(ctx, record)?;
-        let size = self.i32_const(ctx, byte_size as i32);
-        let object = self.record_storage(ctx, record.into(), size)?;
-        let order = values
-            .iter()
-            .map(|(name, _)| {
-                record
-                    .deref(ctx)
-                    .field(name)
-                    .map(|(index, _)| index as u32)
-                    .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "record has no field {name}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let order = self.record_order(ctx, record, Some(&order))?;
+        let size = self.i32_const(ctx, layout.size as i32);
+        let object = self.record_storage(ctx, layout.record.into(), size)?;
+        let order: Vec<_> = values.iter().map(|(field, _)| field.index).collect();
+        let order = self.record_order(field_count, Some(&order));
         self.record_header(ctx, object, order);
         for (field, value) in values {
-            let (offset, field_mir) = Self::record_type_field_slot(ctx, record, field)?;
-            let source_mir = scalar_mir_type(ctx, field_mir);
-            let carriers = self.cast_value(ctx, Carriers::Scalar(value), source_mir, field_mir)?;
-            self.store_slot_value(ctx, object, offset, field_mir, carriers)?;
+            let source = scalar_mir_type(ctx, field.ty);
+            let carriers = self.cast_value(ctx, Carriers::Scalar(value), source, field.ty)?;
+            self.store_slot_value(ctx, object, field.offset, field.ty, carriers)?;
         }
         Ok(object)
     }
 
     /// Convert a MIR value to a scalar core value.
-    fn lower_flat(
+    fn lower_scalar(
         &mut self,
         ctx: &mut Context,
         ty: &AbiType,
@@ -674,48 +577,48 @@ impl FunctionLowering<'_, '_> {
         if let Some(target) = ty.integer_type(ctx)
             && (matches!(repr(ctx, mir_ty)?, Repr::I32 | Repr::I64) || is_numeric_type(ctx, mir_ty))
         {
-            if matches!(ty, AbiType::S64 | AbiType::U64)
+            if matches!(ty.kind, AbiKind::Scalar(Wit::S64 | Wit::U64))
                 && crate::numeric::integer(ctx, mir_ty).is_some_and(|(bits, signed)| {
-                    bits == 64 && signed != matches!(ty, AbiType::S64)
+                    bits == 64 && signed != matches!(ty.kind, AbiKind::Scalar(Wit::S64))
                 })
             {
                 self.check_integer_signedness(ctx, value.scalar()?);
             }
             return self.cast_value(ctx, value, mir_ty, target)?.scalar();
         }
-        if matches!(ty, AbiType::F32 | AbiType::F64)
+        if matches!(ty.kind, AbiKind::Scalar(Wit::F32 | Wit::F64))
             && (crate::numeric::integer(ctx, mir_ty).is_some_and(|(bits, _)| bits > 1)
                 || is_numeric_type(ctx, mir_ty))
         {
             let target = FP64Type::get(ctx).into();
             let value = self.cast_value(ctx, value, mir_ty, target)?.scalar()?;
-            return Ok(if matches!(ty, AbiType::F32) {
+            return Ok(if matches!(ty.kind, AbiKind::Scalar(Wit::F32)) {
                 self.num(ctx, NumOpcode::F32DemoteF64, vec![value])
             } else {
                 value
             });
         }
         let value = value.scalar()?;
-        let opcode = match ty {
-            AbiType::Resource { key, owned } => {
+        let opcode = match &ty.kind {
+            AbiKind::Resource { key, owned } => {
                 return self.lower_resource(ctx, *key, *owned, mir_ty, value);
             }
-            AbiType::Bool => return Ok(value),
-            AbiType::S8
-            | AbiType::S16
-            | AbiType::S32
-            | AbiType::U8
-            | AbiType::U16
-            | AbiType::U32 => {
+            AbiKind::Scalar(Wit::Bool) => return Ok(value),
+            AbiKind::Scalar(Wit::S8 | Wit::S16 | Wit::S32 | Wit::U8 | Wit::U16 | Wit::U32) => {
                 expect_number(ctx, mir_ty, ty)?;
-                let signed = matches!(ty, AbiType::S8 | AbiType::S16 | AbiType::S32);
+                let signed = matches!(ty.kind, AbiKind::Scalar(Wit::S8 | Wit::S16 | Wit::S32));
                 return Ok(self.int32_bits(ctx, value, signed, None));
             }
-            AbiType::S64 | AbiType::U64 => {
-                return self.lower_integer(ctx, matches!(ty, AbiType::S64), mir_ty, value);
+            AbiKind::Scalar(Wit::S64 | Wit::U64) => {
+                return self.lower_integer(
+                    ctx,
+                    matches!(ty.kind, AbiKind::Scalar(Wit::S64)),
+                    mir_ty,
+                    value,
+                );
             }
-            AbiType::F32 => NumOpcode::F32DemoteF64,
-            AbiType::F64 => {
+            AbiKind::Scalar(Wit::F32) => NumOpcode::F32DemoteF64,
+            AbiKind::Scalar(Wit::F64) => {
                 expect_number(ctx, mir_ty, ty)?;
                 return Ok(value);
             }
@@ -733,7 +636,7 @@ impl FunctionLowering<'_, '_> {
         mir_ty: TypeHandle,
         value: Value,
     ) -> Result<(Value, Value)> {
-        if *element == AbiType::U8 {
+        if element.kind == AbiKind::Scalar(Wit::U8) {
             if mir_ty.deref(ctx).is::<perry_mir::StringType>() {
                 return Ok((
                     self.load(ctx, MemKind::I32, value, strings::DATA),
@@ -765,10 +668,10 @@ impl FunctionLowering<'_, '_> {
             .element();
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);
         let data = self.load(ctx, MemKind::I32, value, layout::DATA);
-        let stride = self.i32_const(ctx, element.size() as i32);
+        let stride = self.i32_const(ctx, element.size as i32);
         let bytes = self.num(ctx, NumOpcode::I32Mul, vec![len, stride]);
         let buffer = self.alloc(ctx, bytes);
-        let size = element.size() as i32;
+        let size = element.size as i32;
         self.counted_loop(ctx, len, |b, ctx, i| {
             let slot = b.slot_address(ctx, data, i, element_mir);
             let item = b.load_slot_value(ctx, slot, 0, element_mir)?;
@@ -778,7 +681,7 @@ impl FunctionLowering<'_, '_> {
             let mut done = None;
             if b.state.program_facts.has_array_holes() {
                 let present = b.array_slot_present(ctx, value, i);
-                if matches!(element, AbiType::Option(_)) {
+                if matches!(element.kind, AbiKind::Option(_)) {
                     let existing = b.new_block(ctx, vec![]);
                     let missing = b.new_block(ctx, vec![]);
                     let next = b.new_block(ctx, vec![]);
@@ -839,14 +742,15 @@ impl FunctionLowering<'_, '_> {
         value: Carriers<Value>,
         mut target: Canonical<'_>,
     ) -> Result<()> {
-        match ty {
-            ty if ty.is_sum() => {
+        match &ty.kind {
+            _ if ty.is_sum() => {
                 self.lower_sum(ctx, ty, BoundaryValue::Native(mir_ty, value), target)?
             }
-            AbiType::ByteStream => {
+            AbiKind::ByteStream => {
                 bail_unsupported!("returning a stream<u8> is not supported yet")
             }
-            AbiType::OkHandle { flat, .. } => {
+            AbiKind::OkHandle { .. } => {
+                let flat = ty.direct()?;
                 let Canonical::Flat(out) = target else {
                     bail_internal!("handle results are returned flat");
                 };
@@ -862,7 +766,7 @@ impl FunctionLowering<'_, '_> {
                 let handle = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![value]);
                 self.flat_i32s(ctx, flat, &[zero, handle], out)?;
             }
-            AbiType::String => {
+            AbiKind::String => {
                 let value = value.scalar()?;
                 ensure_diag!(
                     mir_ty.deref(ctx).is::<perry_mir::StringType>(),
@@ -874,46 +778,30 @@ impl FunctionLowering<'_, '_> {
                 target.write(self, ctx, MemKind::I32, 0, data)?;
                 target.write(self, ctx, MemKind::I32, 4, len)?;
             }
-            AbiType::List(element) => {
+            AbiKind::List(element) => {
                 let value = value.scalar()?;
                 let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
                 target.write(self, ctx, MemKind::I32, 0, buffer)?;
                 target.write(self, ctx, MemKind::I32, 4, len)?;
             }
-            AbiType::Record(fields) => {
+            AbiKind::Record(fields) => {
                 let value = value.scalar()?;
-                let record = self.record_type(ctx, mir_ty)?;
-                for ((name, field_ty), at) in fields.iter().zip(ty.field_offsets()) {
-                    let (field_offset, field_mir) =
-                        Self::record_type_field_slot(ctx, record, name)?;
-                    let field = self.load_slot_value(ctx, value, field_offset, field_mir)?;
-                    self.lower_abi(ctx, field_ty, field_mir, field, target.at(at))?;
+                let layout = self.boundary_record(ctx, mir_ty)?;
+                for (name, field_ty) in fields {
+                    let at = field_ty.offset;
+                    let field = layout.field(ctx, name)?;
+                    let value = self.load_slot_value(ctx, value, field.offset, field.ty)?;
+                    self.lower_abi(ctx, field_ty, field.ty, value, target.at(at))?;
                 }
             }
-            scalar => {
-                let raw = self.lower_flat(ctx, scalar, mir_ty, value)?;
-                let kind = scalar
+            _ => {
+                let raw = self.lower_scalar(ctx, ty, mir_ty, value)?;
+                let kind = ty
                     .mem_kind()
-                    .ok_or_else(|| internal!("{scalar:?} is not a scalar"))?;
+                    .ok_or_else(|| internal!("{ty:?} is not a scalar"))?;
                 target.write(self, ctx, kind, 0, raw)?;
             }
         }
         Ok(())
     }
-}
-
-/// Slot index and MIR type of the TypeScript field `name`.
-fn record_field(
-    ctx: &Context,
-    record: TypedHandle<RecordType>,
-    name: &str,
-) -> Result<(usize, TypeHandle)> {
-    let record = record.deref(ctx);
-    record.field(name).ok_or_else(|| {
-        diag!(
-            codes::CONTRACT_MISMATCH,
-            "TypeScript type {} has no field {name}",
-            record.name()
-        )
-    })
 }

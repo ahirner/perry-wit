@@ -74,6 +74,10 @@ pub(crate) fn is_reference(ctx: &Context, ty: TypeHandle) -> bool {
         && !ty.is::<NumericType>()
 }
 
+/// Field names of a TypeScript tagged result, in WIT case order.
+pub const RESULT_TAG: &str = "ok";
+pub const RESULT_PAYLOADS: [&str; 2] = ["value", "error"];
+
 /// A closed-shape record, referenced by value of this type.
 ///
 /// Records are nominal and uniqued by name, so recursive shapes can declare an opaque record

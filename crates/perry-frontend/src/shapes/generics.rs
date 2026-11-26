@@ -6,40 +6,19 @@ use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported};
 use pliron::utils::vec_exns::VecExtns;
 
 mod resolution;
-pub(crate) use resolution::{Expansion, Query, Resolver};
+pub(crate) use resolution::{Query, Resolver};
 
 const RESOLUTION_DEPTH: usize = 32;
 pub(crate) const ARGUMENT_LIMIT: usize = 4096;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Utility {
-    Partial,
-    Required,
-    Pick,
-    Omit,
-}
+pub(crate) type InstanceKey = (crate::engine::types::NameId, crate::engine::types::TySpan);
 
-impl Utility {
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "Partial" => Some(Self::Partial),
-            "Required" => Some(Self::Required),
-            "Pick" => Some(Self::Pick),
-            "Omit" => Some(Self::Omit),
-            _ => None,
-        }
-    }
+#[derive(Clone, Copy)]
+pub(crate) struct Application {
+    pub(crate) key: InstanceKey,
+    pub(crate) ty: Ty,
+    pub(crate) reads_class_fields: bool,
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum DeclarationId {
-    Interface(usize),
-    Alias(usize),
-    Class(usize),
-    Utility(Utility),
-}
-
-pub(crate) type InstanceKey = (DeclarationId, Vec<Ty>);
 
 /// The generic declaration an instantiation expands.
 #[derive(Clone, Copy)]
@@ -100,15 +79,13 @@ pub(crate) fn substitute(
 }
 
 impl<'a> Declaration<'a> {
-    pub(crate) fn find(decls: &Declarations<'a>, base: &str) -> Option<(DeclarationId, Self)> {
-        if let Some(&(index, interface)) = decls.interfaces.get(base) {
-            return Some((DeclarationId::Interface(index), Self::Interface(interface)));
-        }
-        if let Some(&(index, class)) = decls.classes.get(base) {
-            return Some((DeclarationId::Class(index), Self::Class(class)));
-        }
-        let &(index, alias) = decls.type_aliases.get(base)?;
-        Some((DeclarationId::Alias(index), Self::Alias(alias)))
+    pub(crate) fn find(decls: &Declarations<'a>, base: &str) -> Option<Self> {
+        decls
+            .interfaces
+            .get(base)
+            .map(|i| Self::Interface(i))
+            .or_else(|| decls.classes.get(base).copied().map(Self::Class))
+            .or_else(|| decls.type_aliases.get(base).map(|a| Self::Alias(a)))
     }
 
     pub(crate) fn parameters(self) -> &'a [perry_hir::types::TypeParam] {
@@ -119,7 +96,7 @@ impl<'a> Declaration<'a> {
         }
     }
 
-    pub(crate) fn bind(
+    fn bind(
         self,
         ctx: &Context,
         base: &str,

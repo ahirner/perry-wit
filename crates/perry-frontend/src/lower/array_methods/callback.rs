@@ -43,10 +43,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 callee,
             } => {
                 let mut inputs = Vec::new();
-                for (index, &ty) in params.iter().enumerate() {
-                    if !self.shapes.passes_argument(ty) {
-                        continue;
-                    }
+                for &(index, ty) in params {
                     let ty = self.shapes.resolved_binding(ty)?.carrier;
                     let value = match arguments.get(index) {
                         Some(&value) => self.fit(ctx, value, ty)?,
@@ -77,15 +74,18 @@ impl<'s> FunctionBuilder<'s, '_> {
                     },
                 );
             }
-            Callback::Lexical(function, signature) => (
-                function.id,
-                &[][..],
-                function.body,
-                function.return_type,
-                function.is_async,
-                function.is_generator,
-                Some(signature),
-            ),
+            Callback::Lexical(function, signature) => {
+                let declaration = &self.shapes.specialization.templates[function.template];
+                (
+                    function.id,
+                    &[][..],
+                    declaration.body,
+                    declaration.return_type,
+                    declaration.is_async,
+                    declaration.is_generator,
+                    Some(signature),
+                )
+            }
             Callback::Source(Expr::Closure {
                 func_id,
                 params,

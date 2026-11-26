@@ -1,5 +1,6 @@
 //! TypeScript → MIR → core Wasm → WASI 0.3 component.
 
+mod abi;
 mod bind;
 mod http;
 mod imports;
@@ -126,7 +127,8 @@ pub(crate) fn compile_sources(
     }
     let ctx = &mut Context::new();
     let mut foreign = perry_frontend::wit::WorldTypes::new(resolve, Some(world));
-    let mut bindings = imports::bindings(resolve, world, &mut foreign);
+    let layouts = abi::Layouts::new(resolve)?;
+    let mut bindings = imports::bindings(&layouts, resolve, world, &mut foreign);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
     let perry_frontend::LoweredProgram {
         module: mir,
@@ -139,7 +141,7 @@ pub(crate) fn compile_sources(
         &foreign,
         Some((resolve, world)),
     )?;
-    let mut exports = bind::exports(ctx, targets, resolve, world)?;
+    let mut exports = bind::exports(&layouts, ctx, targets, resolve, world)?;
     let mut analyses = optimize(ctx, &mir, options.limits)?;
     bind::finalize_exports(ctx, &mir, &mut exports)?;
     emit_component(

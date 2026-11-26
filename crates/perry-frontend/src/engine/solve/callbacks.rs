@@ -24,6 +24,12 @@ impl<'h> CallbackSite<'h> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum DispatchSite {
+    Call(Option<Ty>, u32),
+    Builtin,
+}
+
 impl TemplateView<'_> {
     fn callback_inputs<'i>(&self, inputs: &'i [Ty]) -> &'i [Ty] {
         if self.params.iter().any(|p| p.is_rest) {
@@ -149,26 +155,32 @@ impl<'h, 'a> Solver<'h, 'a> {
                     return Ok(Some(Err(Ty::BOTTOM)));
                 }
                 let (raw_stripped, _) = self.types.strip_nullish(raw_obj);
-                if name.name() == "forEach"
-                    && let TyKind::Generic { base, args: gargs } = self.types.kind(raw_stripped)
-                {
-                    let inputs = match (base.get(self.ctx).as_str(), self.types.ty_slice(gargs)) {
-                        ("Map" | "ReadonlyMap", [k, v]) => vec![*v, *k, raw_stripped],
-                        ("Set" | "ReadonlySet", [v]) => vec![*v, *v, raw_stripped],
-                        _ => return Ok(None),
-                    };
-                    return Ok(Some(Ok(CallbackSite::new(
-                        first,
-                        inputs,
-                        MethodResult::Void,
-                        raw_obj,
-                    ))));
-                }
-                let Some(method) = builtins::receiver_of(self.ctx, self.types, raw_stripped)
-                    .and_then(|r| Method::lookup(r, name.name()))
+                let Some(method) =
+                    builtins::receiver_of(self.ctx, self.decls, self.types, raw_stripped)
+                        .and_then(|r| Method::lookup(r, name.name()))
                 else {
                     return Ok(None);
                 };
+                if method.callback().is_some()
+                    || matches!(method, Method::MapForEach | Method::SetForEach)
+                {
+                    self.record_site(s.inst, expr, SiteResolution::Builtin(method));
+                }
+                if let TyKind::Generic { args, .. } = self.types.kind(raw_stripped) {
+                    let inputs = match (method, self.types.ty_slice(args)) {
+                        (Method::MapForEach, [k, v]) => Some(vec![*v, *k, raw_stripped]),
+                        (Method::SetForEach, [v]) => Some(vec![*v, *v, raw_stripped]),
+                        _ => None,
+                    };
+                    if let Some(inputs) = inputs {
+                        return Ok(Some(Ok(CallbackSite::new(
+                            first,
+                            inputs,
+                            MethodResult::Void,
+                            raw_obj,
+                        ))));
+                    }
+                }
                 (raw_obj, method, first, args.get(1))
             } else {
                 return Ok(None);
@@ -291,6 +303,83 @@ impl<'h, 'a> Solver<'h, 'a> {
         }))
     }
 
+    pub(super) fn callback_target(
+        &mut self,
+        s: &mut EvalState<'h>,
+        identity: FuncIdentity,
+        recv_ty: Option<Ty>,
+        arg_tys: &[Ty],
+        byte_offset: u32,
+    ) -> Result<(DispatchArm, Ty)> {
+        let view = self.index.view(identity.template);
+        let is_promise_handle =
+            self.apply_promise_handle_call(s, identity, arg_tys, None, byte_offset)?;
+        self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
+        let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
+        let call_args = if is_promise_handle {
+            arg_tys.get(..1).unwrap_or(&[])
+        } else {
+            view.callback_inputs(arg_tys)
+        };
+        let target = self.request_instance(
+            InstanceReq::new(identity.template, call_args, Some(s.inst))
+                .receiver(recv)
+                .owner(identity.capture_owner)
+                .at(byte_offset),
+        )?;
+        self.propagate_writes(s.inst, target);
+        let ret = self.read_loc(self.instances[target].return_loc, s.inst);
+        Ok((
+            DispatchArm {
+                identity,
+                target,
+                receiver: recv.is_some(),
+                arguments: call_args.len(),
+            },
+            ret,
+        ))
+    }
+
+    pub(super) fn callback_dispatcher(
+        &mut self,
+        s: &mut EvalState<'h>,
+        callee_ty: Ty,
+        identities: &[FuncIdentity],
+        inputs: &[Ty],
+        site: DispatchSite,
+    ) -> Result<(CallTarget, Ty, Ty)> {
+        let (receiver, byte_offset, mut width) = match site {
+            DispatchSite::Call(receiver, byte_offset) => (receiver, byte_offset, inputs.len()),
+            DispatchSite::Builtin => (None, 0, 0),
+        };
+        let mut result = Ty::BOTTOM;
+        let mut needs_recv = false;
+        let mut arms = Vec::with_capacity(identities.len());
+        for &input in inputs {
+            self.invalidate_conservative_cell(input);
+        }
+        for &identity in identities {
+            let (arm, ret) = self.callback_target(s, identity, receiver, inputs, byte_offset)?;
+            width = width.max(arm.arguments);
+            result = self.types.join(result, ret);
+            needs_recv |= arm.receiver;
+            arms.push(arm);
+        }
+        let arms = self.intern_dispatch_arms(&arms);
+        let arg_tys = self.types.tuple(&inputs[..width]);
+        let helper = self.intern_helper(
+            HelperSpec::Dispatcher {
+                result,
+                callee_ty,
+                arms,
+                arg_tys,
+                recv_ty: receiver.filter(|_| needs_recv),
+            },
+            byte_offset,
+        );
+        Ok((CallTarget::Dispatch { helper, needs_recv }, arg_tys, result))
+    }
+
     fn contextual_callback(
         &mut self,
         s: &mut EvalState<'h>,
@@ -309,45 +398,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(Some(Ty::BOTTOM));
             }
             if let Some(idents) = self.types.func_dispatch_members(cb_val, false) {
-                let mut arms = Vec::with_capacity(idents.len());
-                let mut cb_ret = Ty::BOTTOM;
-                let mut widest_inputs: &[Ty] = &[];
-                for ident in idents {
-                    let cb_view = self.index.view(ident.template);
-                    let arm_inputs = cb_view.callback_inputs(inputs);
-                    if arm_inputs.len() > widest_inputs.len() {
-                        widest_inputs = arm_inputs;
-                    }
-                    let cb_inst = self.request_instance(
-                        InstanceReq::new(ident.template, arm_inputs, Some(s.inst))
-                            .owner(ident.capture_owner),
-                    )?;
-                    let r = self.read_loc(self.instances[cb_inst].return_loc, s.inst);
-                    cb_ret = self.types.join(cb_ret, r);
-                    arms.push((ident, cb_inst));
-                }
-                let arms_span = self.intern_dispatch_arms(&arms);
-                let input_tys = self.types.tuple(widest_inputs);
-                let helper = self.intern_helper(
-                    HelperSpec::Dispatcher {
-                        result: cb_ret,
-                        callee_ty: cb_val,
-                        arms: arms_span,
-                        arg_tys: input_tys,
-                        recv_ty: None,
-                    },
-                    0,
-                );
+                let (target, inputs, cb_ret) =
+                    self.callback_dispatcher(s, cb_val, &idents, inputs, DispatchSite::Builtin)?;
                 self.record_site_coercion(
                     s.inst,
                     callback,
-                    FuncCoercion::Callback {
-                        target: CallTarget::Dispatch {
-                            helper,
-                            needs_recv: false,
-                        },
-                        inputs: input_tys,
-                    },
+                    FuncCoercion::Callback { target, inputs },
                 );
                 return Ok(Some(cb_ret));
             }

@@ -243,7 +243,6 @@ span_type!(
     EnvFieldSpan,
     CaptureSpan,
     CapturedLocalSpan,
-    TypeParamSpan,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

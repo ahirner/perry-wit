@@ -115,6 +115,20 @@ impl<'s> FunctionBuilder<'s, '_> {
             return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
         }
         let value = match expr {
+            expr if let Some((intrinsic, operands)) =
+                crate::engine::builtins::numeric_builtin(expr) =>
+            {
+                use crate::engine::builtins::NumericOperands::*;
+                let values = match operands {
+                    Nullary => vec![],
+                    Unary(v) => vec![self.number_operand(ctx, v)?],
+                    Binary(l, r) => {
+                        vec![self.number_operand(ctx, l)?, self.number_operand(ctx, r)?]
+                    }
+                    Coerce(v) => vec![self.number_coerce(ctx, v)?],
+                };
+                self.intrinsic(ctx, intrinsic, values)
+            }
             Expr::PrivateGuard {
                 kind: 0, object, ..
             } => self.expression_with(ctx, object, expected)?,
@@ -141,18 +155,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::NumberCoerce(expr) => self.number_coerce(ctx, expr)?,
             Expr::StringCoerce(expr) | Expr::TemplateStringCoerce(expr) => {
                 let value = self.expression(ctx, expr)?;
-                if let Some(class_name) = self.shapes.class_of_type(ctx, value.get_type(ctx))
-                    && let Some((owner_class, func)) =
-                        self.shapes.class_method(class_name, "toString")
-                {
-                    let recv = self.defined(ctx, value)?;
-                    self.class_method_call(ctx, recv, owner_class, func, &[])?
-                        .ok_or_else(|| {
-                            Diagnostic::new(codes::TYPE_MISMATCH, "toString() produced no value")
-                        })?
-                } else {
-                    self.display(ctx, value)?
-                }
+                self.display(ctx, value)?
             }
             Expr::Number(value) => self.number(ctx, *value),
             Expr::Integer(value) => self.number(ctx, *value as f64),
@@ -178,7 +181,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 op,
                 prefix,
                 ..
-            } => self.property_update(ctx, object, property, op, *prefix)?,
+            } => self.property_update(ctx, object, property, op, *prefix, (None, None))?,
             Expr::Binary { op, left, right } => self.binary_expression(ctx, op, left, right)?,
             Expr::Compare { op, left, right } => self.comparison(ctx, op, left, right)?,
             Expr::Logical { op, left, right } => self.logical(ctx, op, left, right, expected)?,
@@ -213,17 +216,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                     )
                 })?
             }
-            Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
-            Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
-            Expr::MathTrunc(value) => self.math_unary(ctx, Intrinsic::MathTrunc, value)?,
-            Expr::MathAbs(value) => self.math_unary(ctx, Intrinsic::MathAbs, value)?,
-            Expr::MathRound(value) => self.math_unary(ctx, Intrinsic::MathRound, value)?,
-            Expr::MathSqrt(value) => self.math_unary(ctx, Intrinsic::MathSqrt, value)?,
-            Expr::MathImul(left, right) => {
-                let left = self.number_operand(ctx, left)?;
-                let right = self.number_operand(ctx, right)?;
-                self.intrinsic(ctx, Intrinsic::MathImul, vec![left, right])
-            }
             Expr::MathMin(values) => {
                 self.math_extremum(ctx, Intrinsic::MathMin, f64::INFINITY, values)?
             }
@@ -250,30 +242,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let value = self.expression(ctx, string)?;
                 let text = self.display(ctx, value)?;
                 self.intrinsic(ctx, Intrinsic::ParseFloat, vec![text])
-            }
-            Expr::IsNaN(value) => {
-                let value = self.number_coerce(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::NumberIsNaN, vec![value])
-            }
-            Expr::IsFinite(value) => {
-                let value = self.number_coerce(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::NumberIsFinite, vec![value])
-            }
-            Expr::NumberIsNaN(value) => {
-                let value = self.number_operand(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::NumberIsNaN, vec![value])
-            }
-            Expr::NumberIsFinite(value) => {
-                let value = self.number_operand(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::NumberIsFinite, vec![value])
-            }
-            Expr::NumberIsInteger(value) => {
-                let value = self.number_operand(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::NumberIsInteger, vec![value])
-            }
-            Expr::NumberIsSafeInteger(value) => {
-                let value = self.number_operand(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::NumberIsSafeInteger, vec![value])
             }
             Expr::Uint8ArrayNew(None) => {
                 let zero = self.number(ctx, 0.0);
@@ -362,7 +330,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let text = self.string_operand(ctx, text)?;
                 self.parse_json_text(ctx, text, expected)?
             }
-            Expr::MathRandom => self.intrinsic(ctx, Intrinsic::MathRandom, vec![]),
             Expr::CryptoRandomUUID => self.intrinsic(ctx, Intrinsic::RandomUuid, vec![]),
             Expr::TypeOf(value) => {
                 let value = self.expression(ctx, value)?;
@@ -372,7 +339,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let name = self.string(ctx, name);
                 self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
             }
-            Expr::DateNow => self.intrinsic(ctx, Intrinsic::DateNow, vec![]),
             Expr::ErrorNew(message) => {
                 let message = match message {
                     Some(message) => self.string_operand(ctx, message)?,
@@ -472,12 +438,16 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::StaticFieldGet {
                 class_name,
                 field_name,
-            } => self.class_static_field_get(ctx, class_name, field_name)?,
+            } => self.load_local(ctx, self.shapes.static_field(class_name, field_name)?)?,
             Expr::StaticFieldSet {
                 class_name,
                 field_name,
                 value,
-            } => self.class_static_field_set(ctx, class_name, field_name, value)?,
+            } => self.local_set(
+                ctx,
+                self.shapes.static_field(class_name, field_name)?,
+                value,
+            )?,
             Expr::StaticMethodCall { .. } => {
                 self.source_operand(ctx, expr, expected)?.ok_or_else(|| {
                     diag!(
@@ -492,11 +462,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 byte_offset,
                 ..
             } if let Some(class) = self.shapes.instance_class(class_name) => self
-                .class_new(
-                    ctx,
-                    class,
-                    crate::lower::classes::ClassArguments::Expressions(args),
-                )
+                .class_new(ctx, class, args, None)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
                 class_name, args, ..

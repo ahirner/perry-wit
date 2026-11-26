@@ -243,10 +243,7 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
     for (frame_kind, handler) in runtime_frames {
         let frame_kind = b.i32_const(ctx, frame_kind as i32);
         let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, frame_kind]);
-        let handle = b.new_block(ctx, vec![]);
-        let next = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, matches, (handle, vec![]), (next, vec![]));
-        b.block = handle;
+        let next = b.enter_if(ctx, matches);
         b.runtime_void(ctx, handler, vec![frame]);
         b.br(ctx, done, vec![]);
         b.block = next;
@@ -343,10 +340,7 @@ impl FunctionLowering<'_, '_> {
             let rejected_state = self.i32_const(ctx, promises::REJECTED as i32);
             let rejected = self.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
             // A rejection makes its exception object pending again and throws its status.
-            let rethrow = self.new_block(ctx, vec![]);
-            let fulfilled = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, rejected, (rethrow, vec![]), (fulfilled, vec![]));
-            self.block = rethrow;
+            let fulfilled = self.enter_if(ctx, rejected);
             let status = self.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
             let (throw, args) = self.throw_target(ctx, status);
             self.br(ctx, throw, args);
@@ -429,10 +423,7 @@ impl FunctionLowering<'_, '_> {
         };
         if let Some(signal) = signal {
             let aborted = self.runtime(ctx, Runtime::AbortAborted, vec![signal]);
-            let reject = self.new_block(ctx, vec![]);
-            let start = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, aborted, (reject, vec![]), (start, vec![]));
-            self.block = reject;
+            let start = self.enter_if(ctx, aborted);
             let message = self.state.data.string("The operation was aborted");
             let message = self.i32_const(ctx, message as i32);
             self.runtime_void(ctx, Runtime::AbortReject, vec![promise, message]);
@@ -444,10 +435,7 @@ impl FunctionLowering<'_, '_> {
         let subtask_state = self.num(ctx, NumOpcode::I32And, vec![status, mask]);
         let returned_state = self.i32_const(ctx, 2);
         let returned = self.num(ctx, NumOpcode::I32Eq, vec![subtask_state, returned_state]);
-        let now = self.new_block(ctx, vec![]);
-        let later = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, returned, (now, vec![]), (later, vec![]));
-        self.block = now;
+        let later = self.enter_if(ctx, returned);
         self.runtime_void(ctx, Runtime::PromiseResolve, vec![promise, bits]);
         self.br(ctx, joined, vec![]);
         self.block = later;

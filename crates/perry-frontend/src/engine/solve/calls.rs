@@ -11,12 +11,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         if type_args.is_empty() {
             return Vec::new();
         }
-        let bindings = self.active_instance_type_bindings(inst_id);
+        let bindings = &self.type_bindings[inst_id];
         type_args
             .iter()
             .map(|ta| {
                 let t = self.types.intern_hir(self.ctx, ta, true);
-                self.types.substitute(t, &bindings)
+                self.index.substitute(self.types, t, bindings)
             })
             .collect()
     }
@@ -42,19 +42,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Ty::BOTTOM);
         }
         Ok(self.types.object(&props, None))
-    }
-
-    fn record_class_arguments(
-        &mut self,
-        inst: InstanceId,
-        args: &[Expr],
-        types: &[Ty],
-    ) -> Result<()> {
-        for (arg, &ty) in args.iter().zip(types) {
-            let erased = matches!(self.types.kind(ty), TyKind::Func(id) if !self.is_escaping_env(id.template, inst));
-            self.site_mut(inst, arg)?.erased = erased;
-        }
-        Ok(())
     }
 
     pub(super) fn resource_result(&mut self, member: crate::wit::MemberId) -> Ty {
@@ -89,7 +76,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 s.inst,
                 expr,
                 InstanceReq::new(tid, &arg_tys, Some(s.inst)).at(byte_offset),
-                Some(args),
                 false,
             )?;
             return Ok(ret);
@@ -101,25 +87,23 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         inst_id: InstanceId,
         expr: &'h Expr,
-        req: InstanceReq<'_>,
-        method_arguments: Option<&[Expr]>,
+        mut req: InstanceReq<'_>,
         pass_env: bool,
     ) -> Result<(InstanceId, Ty)> {
+        let view = self.index.view(req.template);
+        if view.kind.is_class_member() && !view.params.last().is_some_and(|p| p.is_rest) {
+            req.args = &req.args[..req.args.len().min(view.params.len())];
+        }
         let arg_types = req.args;
-        let pass_receiver = matches!(req.receiver, Some(Receiver::Object(_)));
+        let pass_receiver = req.receiver.is_some();
         let target = self.request_instance(req)?;
-        let res = if let Some(args) = method_arguments {
-            self.record_class_arguments(inst_id, args, arg_types)?;
-            SiteResolution::MemberCall(MemberTarget::Class(target))
-        } else {
-            SiteResolution::Call {
-                target: CallTarget::Direct {
-                    target,
-                    pass_receiver,
-                    pass_env,
-                },
-                argument_types: self.types.tuple(arg_types),
-            }
+        let res = SiteResolution::Call {
+            target: CallTarget::Direct {
+                target,
+                pass_receiver,
+                pass_env,
+            },
+            argument_types: self.types.tuple(arg_types),
         };
         self.record_site(inst_id, expr, res);
         let return_loc = self.instances[target].return_loc;
@@ -179,8 +163,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             let explicit = self.eval_type_args(s.inst, type_args);
             let class_inst =
                 self.construct_class(cid, &arg_tys, explicit, byte_offset, Some(s.inst))?;
-            self.record_class_arguments(s.inst, args, &arg_tys)?;
-            self.record_site(s.inst, expr, SiteResolution::ClassNew(class_inst));
+            for &ty in &arg_tys {
+                self.mark_escaping_env(ty);
+            }
+            let arguments = self.types.tuple(&arg_tys);
+            self.record_site(
+                s.inst,
+                expr,
+                SiteResolution::ClassNew(class_inst, arguments),
+            );
             return Ok(self.types.class_inst(class_inst));
         }
         if arg_tys.iter().any(|&a| self.types.has_func(a)) {
@@ -206,24 +197,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         byte_offset: u32,
         caller: Option<InstanceId>,
     ) -> Result<ClassInstId> {
-        let tp_span = self.class_type_params[cid];
+        let count = self.index.class(cid).declaration.type_params.len();
         let class_args = if !explicit.is_empty() {
             explicit
-        } else if !self.type_param_pool[tp_span].is_empty() {
-            let mut bindings = Vec::new();
+        } else if count != 0 {
+            let mut bindings = vec![Ty::OPEN; count];
             if let Some(ctor_tid) = self.index.class(cid).ctor {
                 let ctor_view = self.index.view(ctor_tid);
-                self.unify_params(ctor_view.params, arg_tys, tp_span, &mut bindings);
+                self.unify_params(
+                    ctor_view.params,
+                    arg_tys,
+                    GenericOwner::Class(cid),
+                    &mut bindings,
+                    caller,
+                )?;
             }
-            self.type_param_pool[tp_span]
-                .iter()
-                .map(|tp| {
-                    bindings
-                        .iter()
-                        .find(|(k, _)| k == tp)
-                        .map_or(Ty::OPEN, |(_, v)| *v)
-                })
-                .collect()
+            bindings
         } else if self.index.class_has_implicit_params.contains(cid.index()) {
             arg_tys.to_vec()
         } else {
@@ -348,11 +337,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 && let Some(member) = self.index.receiver_members.get(object, owner)
             {
                 self.eval_args(s, args)?;
-                self.record_site(
-                    s.inst,
-                    expr,
-                    SiteResolution::MemberCall(MemberTarget::Resource(member)),
-                );
+                self.record_site(s.inst, expr, SiteResolution::ResourceCall(member));
                 return Ok(Ty::VOID);
             }
         }
@@ -482,7 +467,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .owner(ident.capture_owner)
                 .type_args(&explicit_targs)
                 .at(byte_offset),
-            None,
             pass_env,
         )?;
         self.propagate_writes(s.inst, target_inst);
@@ -558,13 +542,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         arg_tys: &[Ty],
         byte_offset: u32,
     ) -> Result<Ty> {
-        let (helper, argument_types, needs_recv, ret) =
-            self.build_callback_dispatcher(s, callee_ty, idents, recv_ty, arg_tys, byte_offset)?;
+        let (target, argument_types, ret) = self.callback_dispatcher(
+            s,
+            callee_ty,
+            idents,
+            arg_tys,
+            callbacks::DispatchSite::Call(recv_ty, byte_offset),
+        )?;
         self.record_site(
             s.inst,
             expr,
             SiteResolution::Call {
-                target: CallTarget::Dispatch { helper, needs_recv },
+                target,
                 argument_types,
             },
         );
@@ -578,7 +567,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         arg_tys: &[Ty],
         byte_offset: u32,
     ) -> Result<()> {
-        let fn_display = hir_compat::display_name(target_view.name);
+        let fn_display = hir_compat::display_name(&target_view.name);
         for (param, &actual) in target_view.params.iter().zip(arg_tys) {
             let func_ident = match self.types.kind(actual) {
                 TyKind::Func(id) => Some(id),
@@ -640,11 +629,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             )?;
             let exp_ret = self.types.intern_hir(self.ctx, &expected.return_type, true);
             if exp_ret != Ty::VOID {
-                self.contract_insts.insert(bound_cb.index());
-                self.result_contracts.push(ResultContract {
+                self.result_contracts.insert(ResultContract {
+                    caller,
+                    parameter: param.id,
                     inst: bound_cb,
                     expected: exp_ret,
-                    param_name: param.name.clone(),
+                    param_name: &param.name,
                     byte_offset,
                 });
             }

@@ -112,12 +112,19 @@ impl Shapes<'_> {
         &self,
         function: &crate::source::InstanceFunction<'_>,
     ) -> Result<(Option<BindingType>, bool)> {
-        let ty = match function.signature.as_ref().map(|sig| sig.result) {
-            Some(crate::engine::InstanceResult::Value(ty)) => ty,
-            Some(crate::engine::InstanceResult::ErasedFunction) => Ty::VOID,
-            _ => self.specialization.annotations.get(function.return_type)?,
+        let declaration = &self.specialization.templates[function.template];
+        let ty = match function.result {
+            crate::engine::InstanceResult::Value(ty) => ty,
+            crate::engine::InstanceResult::ErasedFunction => Ty::VOID,
+            crate::engine::InstanceResult::Source => self
+                .specialization
+                .annotations
+                .get(declaration.return_type)?,
         };
-        Ok((self.solved_result(ty, function.is_async)?, ty == Ty::NEVER))
+        Ok((
+            self.solved_result(ty, declaration.is_async)?,
+            ty == Ty::NEVER,
+        ))
     }
 
     pub(in crate::lower) fn solved_result(

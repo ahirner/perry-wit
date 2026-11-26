@@ -178,8 +178,9 @@ export function run():number {
  const value:Pair<string,Item> = {a:'x',b:{n:17}};
  const defaults:Pair<string> = {a:'a',b:'bc'};
  const page:Page<Entry> = {items:[{value:'hello'}],next:null};
+ const explicit:Pair<string,string> = defaults;
  const link:Link<number> = {value:3,next:null};
- return value.b.n + defaults.b.length + size(page) + unbox({item:2}) + link.value;
+ return value.b.n + explicit.b.length + size(page) + unbox({item:2}) + link.value;
 }
 
 export function charLoop(s: string) {
@@ -190,6 +191,7 @@ export function charLoop(s: string) {
 "#,
         "projections.ts",
     )?);
+    assert_eq!(program.call("run", &[]).0[0].unwrap_f64(), 29.0);
     for export in ["run", "charLoop"] {
         let function = program
             .instance

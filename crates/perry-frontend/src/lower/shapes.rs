@@ -15,7 +15,7 @@ use pliron::{
     identifier::Identifier,
     r#type::{TypeHandle, TypedHandle},
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 mod collection_types;
 use crate::engine::types::{LocId, ObjectProp, PropSpan, Ty, TyKind};
@@ -65,10 +65,10 @@ impl BindingType {
     }
 }
 
-#[derive(Clone, Copy)]
-enum PendingShape {
-    Resolving,
-    Recursive(TypedHandle<RecordType>),
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ShapeKey {
+    Application(InstanceKey),
+    Structural(PropSpan),
 }
 
 pub(super) struct Prepared<'h> {
@@ -80,9 +80,14 @@ pub(super) struct Preparing<'h> {
     source: &'h mut crate::engine::types::TypeTable,
     resolved: HashMap<Ty, BindingType>,
     timer: Option<TypeHandle>,
-    pending: HashMap<InstanceKey, PendingShape>,
-    named: HashMap<InstanceKey, TypeHandle>,
-    structural_records: HashMap<PropSpan, TypedHandle<RecordType>>,
+    depth: usize,
+    projections: HashMap<ShapeKey, Option<TypeHandle>>,
+}
+
+pub(super) struct ClassLayout<'h> {
+    pub(super) name: &'h str,
+    pub(super) fields: Box<[TypeHandle]>,
+    pub(super) order: perry_mir::FieldOrder,
 }
 
 pub(super) struct Shapes<'h, T = Prepared<'h>> {
@@ -95,7 +100,7 @@ pub(super) struct Shapes<'h, T = Prepared<'h>> {
     pub(super) globals: BTreeMap<perry_hir::types::LocalId, Option<BindingType>>,
     pub(super) decls: &'h Declarations<'h>,
     callables: crate::engine::bitset::BitSet,
-    class_records: HashMap<TypeHandle, crate::shapes::ClassShape<'h>>,
+    pub(super) class_records: HashMap<TypeHandle, std::rc::Rc<ClassLayout<'h>>>,
     pub(super) source: &'h crate::source::ModuleDeclarations,
     pub(super) locations: &'h crate::hir_compat::Locations<'h>,
 }
@@ -116,14 +121,12 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             &'h mut crate::engine::types::TypeTable,
             perry_mir::RecordLayouts,
         ),
-        mut global_ids: HashSet<perry_hir::types::LocalId>,
     ) -> Self {
-        global_ids.extend(
+        let global_ids = specialization.globals.iter().copied().chain(
             specialization
                 .bodies
-                .classes
-                .iter()
-                .flat_map(|class| &class.static_fields)
+                .static_fields
+                .values()
                 .map(|field| field.id),
         );
         Shapes {
@@ -134,13 +137,12 @@ impl<'h> Shapes<'h, Preparing<'h>> {
                 source: layouts.0,
                 resolved: HashMap::default(),
                 timer: None,
-                pending: HashMap::new(),
-                named: HashMap::new(),
-                structural_records: HashMap::default(),
+                depth: 0,
+                projections: HashMap::new(),
             },
             module,
             foreign_wrappers: HashMap::new(),
-            globals: global_ids.into_iter().map(|id| (id, None)).collect(),
+            globals: global_ids.map(|id| (id, None)).collect(),
             decls,
             callables: Default::default(),
             class_records: HashMap::default(),
@@ -335,86 +337,35 @@ impl<'h, T> Shapes<'h, T> {
 
     pub(super) fn class_of_type(&self, ctx: &Context, ty: TypeHandle) -> Option<&'h str> {
         let inner = crate::lower::present_type(ctx, ty);
-        self.class_records.get(&inner).map(|class| class.name())
+        self.class_records.get(&inner).map(|class| class.name)
     }
 
     pub(super) fn static_field(
         &self,
-        class_name: &str,
-        field_name: &str,
-    ) -> Option<perry_hir::types::LocalId> {
-        self.instance_class(class_name)?
+        class: &str,
+        name: &str,
+    ) -> Result<perry_hir::types::LocalId> {
+        self.specialization
+            .bodies
             .static_fields
-            .iter()
-            .find(|entry| entry.field.name == field_name)
+            .get(&(class, name))
             .map(|field| field.id)
+            .ok_or_else(|| {
+                diag!(
+                    codes::TYPE_MISMATCH,
+                    "static field {class}.{name} not found"
+                )
+            })
     }
 
     pub(super) fn instance_class(
         &self,
         name: &str,
     ) -> Option<&'h crate::source::InstanceClass<'h>> {
-        match self.decls.classes.get(name)?.1 {
+        match *self.decls.classes.get(name)? {
             crate::shapes::ClassShape::Instance(class) => Some(class),
             crate::shapes::ClassShape::Source(_) => None,
         }
-    }
-
-    fn class_member(
-        &self,
-        class_name: &str,
-        find: impl FnOnce(
-            &'h crate::source::InstanceClass<'h>,
-        ) -> Option<&'h crate::source::InstanceFunction<'h>>,
-    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
-        let class = self.instance_class(class_name)?;
-        Some((&class.name, find(class)?))
-    }
-
-    pub(super) fn class_method(
-        &self,
-        class_name: &str,
-        method_name: &str,
-    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
-        let norm = crate::hir_compat::method(method_name).name();
-        self.class_member(class_name, |c| c.methods.iter().find(|m| m.name == norm))
-    }
-
-    pub(super) fn class_static_method(
-        &self,
-        class_name: &str,
-        method_name: &str,
-    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
-        let norm = crate::hir_compat::method(method_name).name();
-        self.class_member(class_name, |c| {
-            c.static_methods.iter().find(|m| m.name == norm)
-        })
-    }
-
-    pub(super) fn class_getter(
-        &self,
-        class_name: &str,
-        prop_name: &str,
-    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
-        self.class_member(class_name, |c| {
-            c.getters
-                .iter()
-                .find(|(n, _)| *n == prop_name)
-                .map(|(_, f)| f)
-        })
-    }
-
-    pub(super) fn class_setter(
-        &self,
-        class_name: &str,
-        prop_name: &str,
-    ) -> Option<(&'h str, &'h crate::source::InstanceFunction<'h>)> {
-        self.class_member(class_name, |c| {
-            c.setters
-                .iter()
-                .find(|(n, _)| *n == prop_name)
-                .map(|(_, f)| f)
-        })
     }
 }
 
@@ -426,13 +377,6 @@ impl Shapes<'_, Preparing<'_>> {
 }
 
 impl Shapes<'_> {
-    pub(super) fn passes_argument(&self, ty: Ty) -> bool {
-        !self
-            .types
-            .source
-            .erases_argument(ty, &self.specialization.escaping_env_templates)
-    }
-
     pub(super) fn resolved_binding(&self, ty: Ty) -> Result<BindingType> {
         self.types.bindings[ty].clone()
     }
@@ -518,7 +462,7 @@ impl Shapes<'_> {
     }
 }
 
-impl Shapes<'_, Preparing<'_>> {
+impl<'h> Shapes<'h, Preparing<'_>> {
     fn resolve_named(&mut self, ctx: &Context, name: &str) -> Result<TypeHandle> {
         // Built-in classes the subset models (a user type or explicit import takes precedence).
         let user = self.is_user_type(name);
@@ -562,57 +506,69 @@ impl Shapes<'_, Preparing<'_>> {
             .collect()
     }
 
-    /// Reserve recursive identity before resolving source fields.
-    fn source_record(
+    fn declared_record(
         &mut self,
         ctx: &Context,
-        named: &InstanceKey,
+        key: InstanceKey,
         props: PropSpan,
-    ) -> Result<TypedHandle<RecordType>> {
+        class: Option<crate::shapes::ClassShape<'h>>,
+    ) -> Result<TypeHandle> {
         let mut fields = self.types.source.object_slice(props).to_vec();
-        for field in &mut fields {
-            field.readonly = false;
-        }
-        let types = &self.types.source;
-        fields.sort_unstable_by_key(|p| types.name_str(p.name));
-        let props = self.types.source.intern_properties(&fields);
-        if let Some(record) = self.types.structural_records.get(&props) {
-            return Ok(*record);
-        }
-        match self.types.pending.get(named).copied() {
-            Some(PendingShape::Recursive(reserved)) => return Ok(reserved),
-            Some(PendingShape::Resolving) => {
-                let reserved = self
-                    .records
-                    .fresh(ctx, RecordKind::Object, None)
-                    .to_diag(ctx)?;
-                self.types.structural_records.insert(props, reserved);
-                self.types
-                    .pending
-                    .insert(named.clone(), PendingShape::Recursive(reserved));
-                return Ok(reserved);
+        let identity = if class.is_some() {
+            ShapeKey::Application(key)
+        } else {
+            for field in &mut fields {
+                field.readonly = false;
             }
-            None => {
-                self.types
-                    .pending
-                    .insert(named.clone(), PendingShape::Resolving);
+            fields.sort_unstable_by_key(|p| self.types.source.name_str(p.name));
+            ShapeKey::Structural(self.types.source.intern_properties(&fields))
+        };
+        if let Some(slot) = self.types.projections.get_mut(&identity) {
+            if let Some(record) = *slot {
+                return Ok(record);
             }
+            let record = self
+                .records
+                .fresh(ctx, RecordKind::Object, None)
+                .to_diag(ctx)?;
+            return Ok(*slot.insert(record.into()));
         }
-        let typed = self.record_fields(ctx, &fields, &mut Vec::new());
-        let reserved = self.types.pending.remove(named);
-        let typed = typed.inspect_err(|_| {
-            self.types.structural_records.remove(&props);
-        })?;
-        let record = match reserved {
-            Some(PendingShape::Recursive(record)) => {
-                let name = record.deref(ctx).name().clone();
-                RecordType::get(ctx, name, Some(typed)).to_diag(ctx)
+        self.types.projections.insert(identity, None);
+        let fields = self.record_fields(ctx, &fields, &mut Vec::new());
+        let recursive = self.types.projections.remove(&identity).flatten();
+        let fields = fields?;
+        let layout = class.map(|class| ClassLayout {
+            name: class.name(),
+            fields: fields.iter().map(|(_, ty)| *ty).collect(),
+            order: perry_mir::FieldOrder(
+                class
+                    .fields()
+                    .enumerate()
+                    .filter(|(_, (f, _))| !(f.is_private && f.name.starts_with('#')))
+                    .map(|(index, _)| index as u32)
+                    .collect(),
+            ),
+        });
+        let record = match recursive {
+            Some(record) => {
+                let name = perry_mir::typed::<RecordType>(ctx, record)
+                    .expect("reserved record")
+                    .deref(ctx)
+                    .name()
+                    .clone();
+                RecordType::get(ctx, name, Some(fields)).to_diag(ctx)?
             }
-            _ if let Some(record) = self.types.structural_records.get(&props) => Ok(*record),
-            _ => self.mir_record(ctx, typed),
-        }?;
-        self.types.structural_records.insert(props, record);
-        Ok(record)
+            None if class.is_some() => self
+                .records
+                .fresh(ctx, RecordKind::Object, Some(fields))
+                .to_diag(ctx)?,
+            None => self.mir_record(ctx, fields)?,
+        };
+        self.types.projections.insert(identity, Some(record.into()));
+        if let Some(layout) = layout {
+            self.class_records.insert(record.into(), layout.into());
+        }
+        Ok(record.into())
     }
 }
 

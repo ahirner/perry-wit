@@ -1,5 +1,6 @@
 //! Statement, instance, local-slot, cell, and finalization logic for solver instances.
 use super::*;
+use crate::completion::{EMPTY_RETURN, FALLTHROUGH};
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn evaluate_instance(&mut self, inst_id: InstanceId) -> Result<()> {
@@ -46,9 +47,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     } else if !self.types.is_open_with(
                         norm,
-                        |loc| self.locations.resolve(loc),
+                        |loc| self.facts.resolve(loc),
                         &self.dict_reads,
-                    ) || self.types.is_open(self.locations[ploc])
+                    ) || self.types.is_open(self.facts[ploc])
                     {
                         self.write_loc(ploc, norm);
                     }
@@ -56,22 +57,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        if template == TemplateId::INIT {
-            for (cid, f_idx, loc) in self.static_field_locs.clone() {
-                if let Some(init) = self
-                    .index
-                    .class(cid)
-                    .declaration
-                    .static_fields
-                    .get(f_idx)
-                    .and_then(|f| f.init.as_ref())
-                {
-                    let ty = self.eval_expr(&mut s, init)?;
-                    let norm = self.types.normalize_for_storage(self.ctx, self.decls, ty);
-                    self.write_loc(loc, norm);
-                }
-            }
-        }
         if view.kind == TemplateKind::FieldInitializers {
             let Some(Receiver::Class(id)) = receiver else {
                 return Err(Diagnostic::internal(
@@ -88,15 +73,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                     break;
                 };
                 if matches!(init, Expr::Array(items, _) if items.is_empty()) {
-                    if self.types.is_open(self.locations[loc])
-                        && !matches!(self.types.kind(self.locations[loc]), TyKind::Cell { .. })
+                    if self.types.is_open(self.facts[loc])
+                        && !matches!(self.types.kind(self.facts[loc]), TyKind::Cell { .. })
                     {
-                        let element = self.locations.alloc(Ty::BOTTOM);
+                        let element = self.facts.alloc(Ty::BOTTOM);
                         let cell = self.types.cell(element, CellKind::Array);
                         self.write_loc(loc, cell);
                     }
                     if matches!(
-                        self.types.kind(self.locations[loc]),
+                        self.types.kind(self.facts[loc]),
                         TyKind::Cell {
                             kind: CellKind::Array,
                             ..
@@ -123,19 +108,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         if template == TemplateId::INIT
             || matches!(
                 view.kind,
-                TemplateKind::ClassConstructor | TemplateKind::ClassSetter(_)
+                TemplateKind::ClassConstructor | TemplateKind::ClassSetter
             )
         {
             return Ok(());
         }
         if !has_explicit_return {
             let mut result_ty = if s.has_return_value {
-                if crate::completion::returns_optional(&self.hir.declarations, view.body) {
+                if self.index.has_exit(view.body, FALLTHROUGH | EMPTY_RETURN) {
                     self.types.with_absences(s.returned, Absence::Undefined)
                 } else {
                     s.returned
                 }
-            } else if !crate::completion::falls_through(&self.hir.declarations, view.body) {
+            } else if !self.index.has_exit(view.body, FALLTHROUGH) {
                 Ty::NEVER
             } else {
                 Ty::VOID
@@ -150,7 +135,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let TyKind::Cell {
                     loc: inner_loc,
                     kind: CellKind::Promise,
-                } = self.types.kind(self.locations[return_loc])
+                } = self.types.kind(self.facts[return_loc])
                 {
                     if result_ty != Ty::BOTTOM {
                         self.write_loc(inner_loc, result_ty);
@@ -206,9 +191,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             .unwrap_or_else(|| self.ensure_instance_local(s.inst, local, Ty::BOTTOM));
         self.write_loc(loc, value);
         if self
-            .locations
+            .facts
             .self_nested
-            .contains(self.locations.root(loc).index())
+            .contains(self.facts.root(loc).index())
         {
             self.self_nested_locals.insert(local.index());
         }
@@ -242,7 +227,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         {
             return slot.loc;
         }
-        let loc = self.locations.alloc(initial);
+        let loc = self.facts.alloc(initial);
         self.capture_locs.slots[inst_id].push(InstanceLocalSlot { local, loc });
         loc
     }
@@ -260,12 +245,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         if val_ty == Ty::BOTTOM {
             return;
         }
-        let root = self.locations.root(elem_loc);
+        let root = self.facts.root(elem_loc);
         let self_nested = self
             .types
-            .contains_cell(val_ty, root, |loc| self.locations.resolve(loc));
+            .contains_cell(val_ty, root, |loc| self.facts.resolve(loc));
         if self_nested {
-            self.locations.self_nested.insert(root.index());
+            self.facts.self_nested.insert(root.index());
         }
         let next = if self_nested || self.types.has_nested_unresolved(val_ty, false) {
             Ty::OPEN
@@ -376,7 +361,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.types.is_open(expected) {
             return;
         }
-        self.locations.declare(loc, expected);
+        self.facts.declare(loc, expected);
     }
 
     pub(super) fn resolve_promise_cells(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
@@ -711,7 +696,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(inst) = self.instances.get(s.inst)
                     && inst.has_explicit_return
                     && let TyKind::Promise(expected_inner) =
-                        self.types.kind(self.locations[inst.return_loc])
+                        self.types.kind(self.facts[inst.return_loc])
                     && let TyKind::Cell {
                         loc,
                         kind: CellKind::Promise,
@@ -732,7 +717,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     let dst = self
                         .instances
                         .get(s.inst)
-                        .map(|i| self.locations[i.return_loc])
+                        .map(|i| self.facts[i.return_loc])
                         .map_or(s.returned, |r| self.types.join(r, s.returned));
                     self.record_coercion(s.inst, e, norm, dst);
                 }
@@ -745,37 +730,37 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(s, condition)?;
                 let otherwise = else_branch.as_deref().unwrap_or(&[]);
                 let (then_reaches, else_reaches) = (
-                    crate::completion::falls_through(&self.hir.declarations, then_branch),
-                    crate::completion::falls_through(&self.hir.declarations, otherwise),
+                    self.index.has_exit(then_branch, FALLTHROUGH),
+                    self.index.has_exit(otherwise, FALLTHROUGH),
                 );
                 let branch = s.guards.branch();
-                s.guards.exclude_absences(condition, true);
+                self.assume(s, condition, true);
                 self.eval_stmts(s, then_branch)?;
                 let then_writes = s.guards.other_arm(branch);
-                s.guards.exclude_absences(condition, false);
+                self.assume(s, condition, false);
                 self.eval_stmts(s, otherwise)?;
                 if let Some(truth) = s
                     .guards
                     .join(branch, then_writes, then_reaches, else_reaches)
                 {
-                    s.guards.exclude_absences(condition, truth);
-                    s.guards.assign_in(
+                    self.assume(s, condition, truth);
+                    self.invalidate_writes(
+                        s,
                         if then_reaches { then_branch } else { otherwise },
                         [],
-                        |_| None,
                     );
                 }
             }
             Stmt::While { condition, body } => {
-                s.guards.assign_in(body, [condition], |_| None);
+                self.invalidate_writes(s, body, [condition]);
                 let depth = s.guards.depth();
                 self.eval_expr(s, condition)?;
-                s.guards.exclude_absences(condition, true);
+                self.assume(s, condition, true);
                 self.eval_stmts(s, body)?;
                 s.guards.truncate(depth);
             }
             Stmt::DoWhile { condition, body } => {
-                s.guards.assign_in(body, [condition], |_| None);
+                self.invalidate_writes(s, body, [condition]);
                 self.eval_stmts(s, body)?;
                 self.eval_expr(s, condition)?;
             }
@@ -803,15 +788,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else if let Some(init) = init {
                     self.eval_stmt(s, init)?;
                 }
-                s.guards.assign_in(
+                self.invalidate_writes(
+                    s,
                     body,
                     condition.as_ref().into_iter().chain(update.as_ref()),
-                    |_| None,
                 );
                 let depth = s.guards.depth();
                 if let Some(cond) = condition {
                     self.eval_expr(s, cond)?;
-                    s.guards.exclude_absences(cond, true);
+                    self.assume(s, cond, true);
                 }
                 self.eval_stmts(s, body)?;
                 s.guards.truncate(depth);
@@ -857,51 +842,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
+    pub(super) fn assume(&self, s: &mut EvalState<'h>, condition: &'h Expr, truth: bool) {
+        s.guards.exclude_absences(condition, truth);
+        self.invalidate_writes(s, &[], [condition]);
+    }
+
     pub(super) fn finish(self, init_inst: InstanceId) -> Solved {
         let live_instances = self.compute_live_instances();
-
-        let mut class_static_field_tys = self
-            .index
-            .classes
-            .map(|c| vec![Ty::OPEN; c.declaration.static_fields.len()]);
-        for &(cid, f_idx, loc) in &self.static_field_locs {
-            if let Some(slot) = class_static_field_tys[cid].get_mut(f_idx) {
-                *slot = self.locations[loc];
-            }
-        }
-
-        let mut class_inst_members = self.class_insts.filled(ClassInstMembers::default());
-        let mut class_static_methods = self.index.classes.filled(Vec::new());
-        for (id, inst) in self.instances.iter_enumerated() {
-            if !live_instances.contains(id.index()) {
-                continue;
-            }
-            let view = self.index.view(inst.template);
-            match view.kind {
-                TemplateKind::ClassMethod => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_members[ci].methods.push(id);
-                    }
-                }
-                TemplateKind::ClassGetter(getter_idx) => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_members[ci].getters.push((getter_idx, id));
-                    }
-                }
-                TemplateKind::ClassSetter(setter_idx) => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_members[ci].setters.push((setter_idx, id));
-                    }
-                }
-                TemplateKind::ClassStaticMethod(class) => {
-                    class_static_methods[class].push(id);
-                }
-                _ => {}
-            }
-        }
-
-        let (locations, self_nested_locs) = self.locations.finish();
+        let writes = self.write_effects(init_inst, &live_instances);
+        let (locations, self_nested_locs, escaping_env_templates) = self.facts.finish();
         Solved {
+            writes,
             witness_instances: self.witness_instances,
             resource_instances: self.resource_instances,
             init_inst,
@@ -916,13 +867,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,
             live_instances,
-            escaping_env_templates: self.escaping_env_templates,
+            escaping_env_templates,
 
             boxed_locals: self.boxed_locals,
 
-            class_static_field_tys,
-            class_inst_members,
-            class_static_methods,
             dict_reads: self.dict_reads,
             self_nested_locs,
             self_nested_locals: self.self_nested_locals,

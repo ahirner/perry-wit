@@ -18,8 +18,12 @@ pub(super) struct Expressions {
 }
 
 impl Expressions {
+    pub(super) fn end(&self) -> ExprIdx {
+        ExprIdx(self.sites.len())
+    }
+
     pub(super) fn register(&mut self, expr: &Expr, sites: &impl ConstructorSites) -> ExprIdx {
-        let next = ExprIdx(self.sites.len());
+        let next = self.end();
         self.sites
             .entry(std::ptr::from_ref(expr))
             .or_insert_with(|| (next, sites.constructor(expr)))

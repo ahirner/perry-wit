@@ -62,16 +62,16 @@ pub fn world_functions<'a>(
     })
 }
 
-pub fn result_type(
-    resolve: &wit_parser::Resolve,
-    mut ty: wit_parser::Type,
-) -> Option<&wit_parser::Result_> {
-    while let wit_parser::Type::Id(id) = ty {
-        match &resolve.types[id].kind {
-            wit_parser::TypeDefKind::Type(inner) => ty = *inner,
-            wit_parser::TypeDefKind::Result(result) => return Some(result),
-            _ => break,
-        }
+pub fn type_kind(resolve: &Resolve, ty: wit_parser::Type) -> Option<&wit_parser::TypeDefKind> {
+    let wit_parser::Type::Id(id) = ty else {
+        return None;
+    };
+    Some(&resolve.types[names::canonical_type(resolve, id)].kind)
+}
+
+pub fn result_type(resolve: &Resolve, ty: wit_parser::Type) -> Option<&wit_parser::Result_> {
+    match type_kind(resolve, ty)? {
+        wit_parser::TypeDefKind::Result(result) => Some(result),
+        _ => None,
     }
-    None
 }

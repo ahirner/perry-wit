@@ -9,9 +9,9 @@ pub(crate) use records::ClassShape;
 pub(crate) type TypeName = pliron::uniqued_any::Uniqued<String>;
 
 pub(crate) struct Declarations<'h> {
-    pub(crate) interfaces: HashMap<&'h str, (usize, &'h perry_hir::ir::Interface)>,
-    pub(crate) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
-    pub(crate) classes: HashMap<&'h str, (usize, ClassShape<'h>)>,
+    pub(crate) interfaces: HashMap<&'h str, &'h perry_hir::ir::Interface>,
+    pub(crate) type_aliases: HashMap<&'h str, &'h perry_hir::ir::TypeAlias>,
+    pub(crate) classes: HashMap<&'h str, ClassShape<'h>>,
     pub(crate) world: &'h crate::wit::WorldTypes<'h>,
     pub(crate) resource_signatures: crate::engine::types::IdxVec<
         crate::wit::MemberId,
@@ -33,13 +33,11 @@ impl<'h> Declarations<'h> {
         let foreign = world.foreign();
         let interfaces = interfaces
             .iter()
-            .enumerate()
-            .map(|(idx, interface)| (interface.name.as_str(), (idx, interface)))
+            .map(|interface| (interface.name.as_str(), interface))
             .collect();
         let type_aliases = type_aliases
             .iter()
-            .enumerate()
-            .map(|(idx, alias)| (alias.name.as_str(), (idx, alias)))
+            .map(|alias| (alias.name.as_str(), alias))
             .collect();
         let mut integer_imports = HashMap::new();
         let mut imported_types = HashMap::new();
@@ -93,9 +91,8 @@ impl<'h> Declarations<'h> {
 
     pub(crate) fn with_classes(mut self, classes: impl Iterator<Item = ClassShape<'h>>) -> Self {
         self.classes = classes
-            .enumerate()
-            .filter(|(_, c)| !crate::hir_compat::is_object_literal(c.name()))
-            .map(|(index, c)| (c.name(), (index, c)))
+            .filter(|c| !crate::hir_compat::is_object_literal(c.name()))
+            .map(|c| (c.name(), c))
             .collect();
         self
     }
@@ -113,7 +110,7 @@ impl<'h> Declarations<'h> {
     ) -> Option<(u32, Signedness)> {
         let mut seen = HashSet::new();
         while self.is_user_type(name) {
-            let (_, alias) = self.type_aliases.get(name)?;
+            let alias = self.type_aliases.get(name)?;
             let HirType::Named(target) = &alias.ty else {
                 return None;
             };

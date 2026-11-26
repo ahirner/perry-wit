@@ -137,20 +137,24 @@ fn nullable_property_guards_follow_control_flow() {
 fn variant_narrowing_ends_at_closure_writes() {
     // The loop reads `local` before `flip` assigns it, so the next iteration may hold case b.
     let source = r#"type Shape = { tag: "a"; val: number } | { tag: "b"; val: string };
-export function run(): number {
+export function run(flag: boolean): number {
   let local: Shape = { tag: "a", val: 1 };
   const flip = (): void => { local = { tag: "b", val: "x" }; };
+  const writer = CALLBACK;
   let total = 0;
   if (local.tag === "a") {
-    for (let i = 0; i < 2; i++) { total += local.val; flip(); }
+    for (let i = 0; i < 2; i++) { total += local.val; writer(); }
   }
   return total;
 }"#;
-    let diagnostic = rejection(source, "narrowing.ts");
-    assert_eq!(
-        diagnostic.message(),
-        "narrow a heterogeneous variant by its tag before reading val"
-    );
+    for callback in ["flip", "flag ? flip : (): void => {}"] {
+        let diagnostic = rejection(&source.replace("CALLBACK", callback), "narrowing.ts");
+        assert_eq!(
+            diagnostic.message(),
+            "narrow a heterogeneous variant by its tag before reading val",
+            "{callback}"
+        );
+    }
 }
 
 #[test]
@@ -264,76 +268,87 @@ export function run(input:string):string {
 }
 
 #[test]
-fn recursive_class_calls_have_located_diagnostics() {
-    for (members, entry, target) in [
-        (
-            "count(n:number):number { if(n<=0)return 0; return 1+this.count(n-1); }",
-            "return new Counter().count(3);",
-            "Counter.count",
-        ),
+fn repeated_and_recursive_method_calls_share_a_body() {
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, operation::Operation};
+    let ctx = &mut Context::new();
+    let module = lower_without_foreign(ctx, "class Counter {
+        count(n:number):number { return n <= 0 ? 0 : 1 + this.count(n-1); }
+    }
+    export function run(n:number):number { const c=new Counter(); return c.count(n) + c.count(1, 0); }", "classes.ts").unwrap();
+    let functions = perry_mir::functions(module.get_operation(), ctx);
+    let calls = |f| {
+        perry_mir::operations(ctx, f)
+            .into_iter()
+            .filter_map(|op| {
+                Operation::get_op::<perry_mir::CallOp>(op, ctx).map(|call| call.callee(ctx))
+            })
+            .collect::<Vec<_>>()
+    };
+    let run = functions
+        .iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == "run")
+        .unwrap();
+    let targets = calls(run);
+    let [factory, first, second] = targets.as_slice() else {
+        panic!("expected a constructor and two method calls: {targets:?}")
+    };
+    assert_ne!(factory, first);
+    assert_eq!(first, second);
+    let method = functions
+        .iter()
+        .find(|f| f.get_symbol_name(ctx) == *first)
+        .unwrap();
+    assert_eq!(calls(method), std::slice::from_ref(first));
+}
+
+#[test]
+fn class_members_can_call_their_own_mir_function() {
+    for (members, entry) in [
         (
             "first(n:number):number { return this.second(n); }
              second(n:number):number { return this.first(n); }",
             "return new Counter().first(3);",
-            "Counter.first",
         ),
         (
             "count(n:number):number { return this.count(this.count(n-1)); }",
             "return new Counter().count(3);",
-            "Counter.count",
         ),
         (
             "static count(n:number):number { return Counter.count(n-1); }",
             "return Counter.count(3);",
-            "Counter.count",
         ),
         (
             "count(n:number=this.count()):number { return n; }",
             "return new Counter().count();",
-            "Counter.count",
         ),
         (
             "get count():number { return this.count; }",
             "return new Counter().count;",
-            "Counter",
         ),
         (
             "set count(n:number) { this.count=n; }",
             "const c=new Counter(); c.count=3; return 0;",
-            "Counter",
         ),
         (
             "constructor() { new Counter(); }",
             "new Counter(); return 0;",
-            "Counter",
         ),
         (
             "count:number=1;
              constructor(n:number=new Counter().count) { this.count=n; }",
             "return new Counter().count;",
-            "Counter",
         ),
         (
             "count:number=new Counter().count;",
             "return new Counter().count;",
-            "field initialization of class Counter",
         ),
         (
             "count:number=new Counter().count; constructor() {}",
             "return new Counter().count;",
-            "Counter",
         ),
     ] {
         let source =
             format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
-        let diagnostic = rejection(&source, "classes.ts");
-        let message = diagnostic.message();
-        assert!(
-            message.contains("recursive inline") && message.contains(target),
-            "{source}\n{diagnostic:?}"
-        );
-        let span = diagnostic.span().expect("source location");
-        assert_eq!(span.file.to_string_lossy(), "classes.ts");
-        assert!(span.end_byte > span.start_byte, "{source}\n{span:?}");
+        lower_without_foreign(&mut Context::new(), &source, "classes.ts").unwrap();
     }
 }

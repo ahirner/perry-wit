@@ -12,12 +12,17 @@ use pliron::context::Context;
 
 pub(crate) const SETTLED: &str = "PromiseSettledResult";
 
-fn is_array_like_ty(types: &TypeTable, ty: Ty) -> bool {
-    matches!(types.kind(ty), TyKind::Array(_) | TyKind::Tuple(_))
+fn dense_array(types: &TypeTable, ty: Ty) -> bool {
+    matches!(types.kind(ty), TyKind::Array(_))
         || matches!(types.kind(ty), TyKind::Cell { kind, .. } if kind.is_array())
 }
 
-pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Receiver> {
+pub(crate) fn receiver_of(
+    ctx: &Context,
+    decls: &Declarations,
+    types: &TypeTable,
+    ty: Ty,
+) -> Option<Receiver> {
     let for_name = |name: &str| match name {
         "Map" | "ReadonlyMap" => Some(Receiver::Map),
         "Set" | "ReadonlySet" => Some(Receiver::Set),
@@ -25,13 +30,10 @@ pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Re
         other => Some(Receiver::Value(Kind::builtin(other)?)),
     };
     match types.kind(ty) {
-        _ if is_array_like_ty(types, ty) => Some(Receiver::Value(Kind::Array)),
+        _ if dense_array(types, ty) => Some(Receiver::Value(Kind::Array)),
         TyKind::Union(span)
             if !types.ty_slice(span).is_empty()
-                && types
-                    .ty_slice(span)
-                    .iter()
-                    .all(|&m| is_array_like_ty(types, m)) =>
+                && types.ty_slice(span).iter().all(|&m| dense_array(types, m)) =>
         {
             Some(Receiver::Value(Kind::Array))
         }
@@ -45,27 +47,14 @@ pub(crate) fn receiver_of(ctx: &Context, types: &TypeTable, ty: Ty) -> Option<Re
         TyKind::Boolean => Some(Receiver::Value(Kind::Boolean)),
         TyKind::BigInt => Some(Receiver::Value(Kind::BigInt)),
         TyKind::Literal(_) => Some(Receiver::Value(Kind::String)),
-        TyKind::Named(id) | TyKind::Generic { base: id, .. } => for_name(id.get(ctx)),
+        TyKind::Named(id) | TyKind::Generic { base: id, .. }
+            if !decls.is_user_type(id.get(ctx))
+                && !decls.imported_types.contains_key(id.get(ctx).as_str()) =>
+        {
+            for_name(id.get(ctx))
+        }
         _ => None,
     }
-}
-
-pub(crate) fn lookup_method_result(
-    ctx: &Context,
-    types: &TypeTable,
-    receiver: Ty,
-    name: &str,
-    property: bool,
-) -> Option<MethodResult> {
-    if let Some(recv) = receiver_of(ctx, types, receiver) {
-        return Method::lookup(recv, name)
-            .filter(|m| m.is_property() == property)
-            .map(Method::result_rule);
-    }
-    if property || matches!(types.kind(receiver), TyKind::ClassInst(_)) {
-        return None;
-    }
-    Method::unique_result_rule(name)
 }
 
 pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> Option<Ty> {
@@ -369,7 +358,44 @@ pub(crate) fn unary_result(op: UnaryOp, operand: Ty) -> Ty {
     }
 }
 
+pub(crate) enum NumericOperands<'h> {
+    Nullary,
+    Unary(&'h Expr),
+    Binary(&'h Expr, &'h Expr),
+    Coerce(&'h Expr),
+}
+
+pub(crate) fn numeric_builtin(expr: &Expr) -> Option<(perry_mir::Intrinsic, NumericOperands<'_>)> {
+    use NumericOperands::*;
+    use perry_mir::Intrinsic;
+    Some(match expr {
+        Expr::MathFloor(value) => (Intrinsic::MathFloor, Unary(value)),
+        Expr::MathCeil(value) => (Intrinsic::MathCeil, Unary(value)),
+        Expr::MathTrunc(value) => (Intrinsic::MathTrunc, Unary(value)),
+        Expr::MathAbs(value) => (Intrinsic::MathAbs, Unary(value)),
+        Expr::MathRound(value) => (Intrinsic::MathRound, Unary(value)),
+        Expr::MathSqrt(value) => (Intrinsic::MathSqrt, Unary(value)),
+        Expr::MathImul(a, b) => (Intrinsic::MathImul, Binary(a, b)),
+        Expr::IsNaN(value) => (Intrinsic::NumberIsNaN, Coerce(value)),
+        Expr::IsFinite(value) => (Intrinsic::NumberIsFinite, Coerce(value)),
+        Expr::NumberIsNaN(value) => (Intrinsic::NumberIsNaN, Unary(value)),
+        Expr::NumberIsFinite(value) => (Intrinsic::NumberIsFinite, Unary(value)),
+        Expr::NumberIsInteger(value) => (Intrinsic::NumberIsInteger, Unary(value)),
+        Expr::NumberIsSafeInteger(value) => (Intrinsic::NumberIsSafeInteger, Unary(value)),
+        Expr::MathRandom => (Intrinsic::MathRandom, Nullary),
+        Expr::DateNow => (Intrinsic::DateNow, Nullary),
+        _ => return None,
+    })
+}
+
 pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) -> Ty {
+    if let Some((intrinsic, _)) = numeric_builtin(expr) {
+        return if intrinsic.returns_bool() {
+            Ty::BOOLEAN
+        } else {
+            Ty::NUMBER
+        };
+    }
     match expr {
         Expr::Undefined | Expr::Void(_) => Ty::VOID,
         Expr::Null => Ty::NULL,
@@ -385,35 +411,20 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
             let p = types.intern_hir(ctx, ty, true);
             if p == Ty::OPEN { Ty::DYNAMIC } else { p }
         }
-        Expr::MathAbs(_)
-        | Expr::MathCeil(_)
-        | Expr::MathFloor(_)
-        | Expr::MathTrunc(_)
-        | Expr::MathRound(_)
-        | Expr::MathSqrt(_)
-        | Expr::MathImul(..)
-        | Expr::MathMin(_)
+        Expr::MathMin(_)
         | Expr::MathMax(_)
         | Expr::MathMinSpread(_)
         | Expr::MathMaxSpread(_)
-        | Expr::MathRandom
         | Expr::NumberCoerce(_)
         | Expr::ParseInt { .. }
         | Expr::ParseFloat(_)
-        | Expr::DateNow
         | Expr::DateParse(_)
         | Expr::DateUtc(_)
         | Expr::MapSize(_)
         | Expr::SetSize(_)
         | Expr::Uint8ArraySet { .. }
         | Expr::PropertyUpdate { .. } => Ty::NUMBER,
-        Expr::IsNaN(_)
-        | Expr::IsFinite(_)
-        | Expr::NumberIsNaN(_)
-        | Expr::NumberIsFinite(_)
-        | Expr::NumberIsInteger(_)
-        | Expr::NumberIsSafeInteger(_)
-        | Expr::ArrayIsArray(_)
+        Expr::ArrayIsArray(_)
         | Expr::ObjectIs(..)
         | Expr::TextDecoderFatal(_)
         | Expr::TextDecoderIgnoreBom(_) => Ty::BOOLEAN,
@@ -567,9 +578,17 @@ pub(crate) fn property_type(
                 }
             }
             dict_value_ty(ctx, decls, types, stripped).or_else(|| {
-                lookup_method_result(ctx, types, stripped, property, true).map(|rule| {
-                    apply_method_result(ctx, types, rule, MethodResultArgs::receiver_only(stripped))
-                })
+                receiver_of(ctx, decls, types, stripped)
+                    .and_then(|r| Method::lookup(r, property))
+                    .filter(|m| m.is_property())
+                    .map(|m| {
+                        apply_method_result(
+                            ctx,
+                            types,
+                            m.result_rule(),
+                            MethodResultArgs::receiver_only(stripped),
+                        )
+                    })
             })
         }
         TyKind::Union(span) => {

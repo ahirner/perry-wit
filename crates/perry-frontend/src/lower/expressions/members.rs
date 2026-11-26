@@ -13,17 +13,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         property: &str,
         op: &BinaryOp,
         prefix: bool,
+        (get, set): (Option<FuncId>, Option<FuncId>),
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
-            let id = self
-                .shapes
-                .static_field(class_name, property)
-                .ok_or_else(|| {
-                    diag!(
-                        codes::TYPE_MISMATCH,
-                        "static field {class_name}.{property} not found"
-                    )
-                })?;
+            let id = self.shapes.static_field(class_name, property)?;
             let update_op = match op {
                 BinaryOp::Add => UpdateOp::Increment,
                 BinaryOp::Sub => UpdateOp::Decrement,
@@ -33,11 +26,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let object = self.expression(ctx, object)?;
         let object = self.defined(ctx, object)?;
-        let class_info = self.shapes.class_of_type(ctx, object.get_type(ctx));
-        let previous = if let Some(class_name) = class_info
-            && let Some((owner_class, getter)) = self.shapes.class_getter(class_name, property)
-        {
-            self.class_getter_call(ctx, object, owner_class, getter)?
+        let previous = if let Some(get) = get {
+            self.read_member(ctx, get, object)?
         } else {
             let get = FieldGetOp::new(ctx, object, property.to_string()).map_err(|_| {
                 Diagnostic::new(
@@ -62,10 +52,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         let next = self.binary(ctx, kind, old, one);
         let stored = self.fit(ctx, next, field_type)?;
-        if let Some(class_name) = class_info
-            && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, property)
-        {
-            self.class_setter_call_value(ctx, object, owner_class, setter, stored)?;
+        if let Some(set) = set {
+            self.call_values(ctx, set, [object, stored].into_iter())?;
         } else {
             self.emit(ctx, |ctx| {
                 FieldSetOp::new(ctx, object, property.to_string(), stored)
@@ -90,7 +78,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         byte_offset: u32,
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
-            return self.class_static_field_get(ctx, class_name, property);
+            return self.load_local(ctx, self.shapes.static_field(class_name, property)?);
         }
         let value = self.expression(ctx, object)?;
         self.property_of_value(ctx, object, value, property, byte_offset)
@@ -160,13 +148,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             (Kind::Record, "length") if let Some(len) = tuple_length(ctx, ty)? => {
                 self.number(ctx, len as f64)
-            }
-            (Kind::Record, field)
-                if let Some(class_name) = self.shapes.class_of_type(ctx, ty)
-                    && let Some((owner_class, getter)) =
-                        self.shapes.class_getter(class_name, field) =>
-            {
-                self.class_getter_call(ctx, value, owner_class, getter)?
             }
             (Kind::Record, field) => match FieldGetOp::new(ctx, value, field.to_string()) {
                 Ok(op) => self.field_read(ctx, &op)?,

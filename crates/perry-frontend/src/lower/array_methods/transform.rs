@@ -165,8 +165,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let expected_acc = match callback {
                 crate::lower::callable::Callback::Bound { params, .. } => params
                     .first()
-                    .copied()
-                    .filter(|&ty| self.shapes.passes_argument(ty))
+                    .and_then(|&(i, ty)| (i == 0).then_some(ty))
                     .map(|ty| self.shapes.resolved_binding(ty).map(|b| b.carrier))
                     .transpose()?,
                 crate::lower::callable::Callback::Lexical(_, signature) => {

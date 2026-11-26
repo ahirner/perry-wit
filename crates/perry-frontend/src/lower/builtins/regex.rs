@@ -35,10 +35,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         text: Value,
         (source, search): (&'s Expr, Value),
-        callback: &'s Expr,
+        callback: crate::lower::callable::Callback<'s>,
         all: bool,
     ) -> Result<Value> {
-        let callback = self.prepare_callback(ctx, callback)?;
         let regex = kind(ctx, search)? == Kind::Regex;
         ensure_unsupported!(
             regex || kind(ctx, search)? == Kind::String,

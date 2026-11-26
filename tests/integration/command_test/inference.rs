@@ -27,13 +27,20 @@ function contract(value) {
     return first+" "+checks;
 }
 console.log(contract(3),contract(1));
+function cb(){console.log("cb");return inc;}
+function mark(n:number){console.log(n);return n;}
+function sum(f,x:number,...rest:number[]){return f(x)+rest[0];}
+function sub(f,x:number,...rest:number[]){return f(x)-rest[0];}
+function test(flag:boolean){const fn=flag?sum:sub; console.log(fn(cb(),mark(3),mark(2)));}
+console.log(sum(cb(),mark(3),mark(2)));
+test(true); test(false);
 "#,
     )
     .await?;
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "Error: boom none 3\ntrue false 3 2,3\n6 1,2,3 A-B\nnone 2 Error: small 1\n"
+        "Error: boom none 3\ntrue false 3 2,3\n6 1,2,3 A-B\nnone 2 Error: small 1\ncb\n3\n2\n6\ncb\n3\n2\n6\ncb\n3\n2\n2\n"
     );
     Ok(())
 }
@@ -59,25 +66,70 @@ async fn inference_engine_specializes_generics_classes_cells_and_fixed_points() 
         (
             "static_generic_and_implicit_classes",
             r#"
-class Util { static wrap(x) { return [x]; } }
+class Util {
+  static mark = "u";
+  static label(s: string): string { return s + Util.mark; }
+  static wrap(x) { return [x]; }
+}
 class Box {
   constructor(v) { this.v = v; }
   get value() { return this.v; }
   set value(x) { this.v = x; }
   map(f) { return f(this.v); }
   $$perryMethod_map() { return this.v; }
+  toString() { return "box"; }
 }
+console.log("before Pair");
+function mark(): number { console.log("Pair initialized"); return 2; }
 class Pair {
+  static first = mark();
+  static mark = Pair.first + 1;
+  static scale(n: number): number { return Pair.mark * n; }
   constructor(a, b) { this.a = a; this.b = b; }
   swap() { return new Pair(this.b, this.a); }
 }
 const bn = new Box(1);
 const bs = new Box("a");
+console.log(bn.value++, ++bn.value, String(bs));
 bn.value = 5;
 const swapped = new Pair(1, "x").swap();
-console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b, bs.$$perryMethod_map());
+console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b, bs.$$perryMethod_map(), Util.label("x"), Pair.scale(2));
 "#,
-            "2 a! true true 5 a! x 1 a\n",
+            "before Pair\nPair initialized\n1 3 box\n2 a! true true 5 a! x 1 a xu 6\n",
+        ),
+        (
+            "class_and_method_type_parameters_have_separate_scopes",
+            r#"
+class Box<T> {
+  value: T;
+  constructor(value: T) { this.value = value; }
+  contains<T>(value: T) {
+    const items = new Set<T>(); items.add(value);
+    console.log(this.value); return items.has(value);
+  }
+}
+const box = new Box(3);
+console.log(box.contains<string>("x"), box.contains(true));
+function outer<T>(value:T){
+  function inner<T>(items:T[]){const s=new Set<T>(); s.add(items[0]); console.log(value); return s.has(items[0]);}
+  return inner(["x"]);
+}
+console.log(outer(4));
+"#,
+            "3\n3\ntrue true\n4\ntrue\n",
+        ),
+        (
+            "generic_promise_settles_after_specialization",
+            r#"
+async function contains<T>(p: Promise<T>) {
+  const value = await p;
+  function matches(x: T) { const s = new Set<T>(); s.add(x); return s.has(value); }
+  return matches(value);
+}
+async function source() { return "abc"; }
+console.log(await contains(source()));
+"#,
+            "true\n",
         ),
         (
             "capture_owners_and_mutual_recursion",
@@ -240,6 +292,12 @@ function select(flag) { selections++; return pick(flag); }
 const empty: number[] = [];
 empty.map(select(true));
 const mapped = [3, 4].map(select(false));
+function counter(start, indexed) {
+  let n = start;
+  return indexed ? (x, i) => x + i + ++n : x => x + ++n;
+}
+const short = counter(0, false), long = counter(10, true);
+console.log([2, 2].map(short).join(","), [2, 2].map(long).join(","), short(1, 9));
 console.log(
   events.join(","),
   f0(3),
@@ -252,7 +310,7 @@ console.log(
   selections, mapped.join(","),
 );
 "#,
-            "a,b,c 4 6 8 2,3 6 6 10 2 6,8\n",
+            "3,4 13,15 4\na,b,c 4 6 8 2,3 6 6 10 2 6,8\n",
         ),
         (
             "callable_array_writes_through_aliases_and_parameters",
@@ -387,6 +445,9 @@ function num(label) { trace += label; return 2; }
 function apply(a, f, b) { return f(a + b); }
 function last(n, f) { return f(n); }
 function only(f) { trace += "n"; return f(1); }
+function forward(f) { return use(f); }
+function use(f) { return f(2) + ["ok"].map(f)[0]; }
+console.log(forward(id));
 const same = get("a") === get("b");
 const distinct = get("c") !== other;
 const obj = { first: num("d"), middle: get("e"), last: num("f"), end: get("g") };
@@ -399,12 +460,13 @@ const receiver = make(2);
 function getReceiver() { reads++; return receiver; }
 getReceiver().f(0);
 console.log(getReceiver().f(1), reads);
-class Runner { static run(f, n) { return f(n); } }
+class Runner { static run(f, n) { return f(n); } set callback(f) { trace += f(3); } }
 function choose(flag) { return flag ? id : other; }
-console.log(Runner.run(get("o"), num("p")), Runner.run(choose(false), num("q")));
+console.log(Runner.run(get("o"), num("p")), Runner["run"](choose(false), num("q")));
+const runner = new Runner(); runner.callback=get("r");
 console.log(trace, same, distinct, obj.first, obj.end(1), result, tail);
 "#,
-            "5 2\n2 -2\nabcdefghijklmnopq true true 2 1 4 2\n",
+            "2ok\n5 2\n2 -2\nabcdefghijklmnopqr3 true true 2 1 4 2\n",
         ),
         (
             "loop_let_boxes_nullable_functions_typeof_and_wide_objects",

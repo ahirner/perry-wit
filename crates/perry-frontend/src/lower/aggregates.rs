@@ -115,7 +115,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         value: &'s Expr,
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
-            return self.class_static_field_set(ctx, class_name, field, value);
+            return self.local_set(ctx, self.shapes.static_field(class_name, field)?, value);
         }
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
@@ -145,11 +145,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             let val = self.fit(ctx, val, v_ty)?;
             self.kv_set(ctx, record, key, val)?;
             return Ok(val);
-        }
-        if let Some(class_name) = self.shapes.class_of_type(ctx, record.get_type(ctx))
-            && let Some((owner_class, setter)) = self.shapes.class_setter(class_name, field)
-        {
-            return self.class_setter_call(ctx, record, owner_class, setter, value);
         }
         let rec_ty = perry_mir::typed::<RecordType>(ctx, record.get_type(ctx))
             .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object)

@@ -45,6 +45,7 @@ impl LocalBinding {
 pub(super) enum Body<'s> {
     Statements(BodyOwner, &'s [Stmt]),
     Native(&'s crate::engine::NativeBody),
+    Constructor(&'s crate::source::InstanceClass<'s>, &'s Function<'s>),
 }
 
 pub(super) struct FunctionBuilder<'s, 'm> {
@@ -60,7 +61,6 @@ pub(super) struct FunctionBuilder<'s, 'm> {
     pub(super) never_values: HashSet<Value>,
     pub(super) global_slots: HashSet<Value>,
     pub(super) inline_functions: Vec<FuncId>,
-    pub(super) class_expansions: Vec<crate::lower::classes::ClassExpansion<'s>>,
     pub(super) signatures: &'s Functions<'s>,
     pub(super) shapes: &'m mut Shapes<'s>,
     /// Imported built-ins by local name.
@@ -133,15 +133,39 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
                 builder.frame.owner = owner;
                 statements
             }
+            Body::Constructor(class, function) => {
+                let inputs = builder.entry.deref(ctx).arguments().collect::<Vec<_>>();
+                let instance = builder.construct(
+                    ctx,
+                    class,
+                    class.direct_constructor.then_some(inputs.as_slice()),
+                )?;
+                if !class.direct_constructor {
+                    builder.frame.owner = BodyOwner::Function(function.id);
+                    for (param, value) in signature.params.iter().zip(inputs) {
+                        builder.bind_argument(ctx, param, value)?;
+                    }
+                    builder.inline_body(
+                        ctx,
+                        builder.shapes.specialization.templates[function.template].body,
+                        super::inline::InlineResult::Void,
+                    )?;
+                }
+                builder.emit(ctx, |ctx| ReturnOp::new(ctx, vec![instance]));
+                remove_unreachable(ctx, builder.region);
+                return Ok(func);
+            }
             Body::Native(body) => {
                 let args = builder.entry.deref(ctx).arguments().collect::<Vec<_>>();
                 match body {
                     crate::engine::NativeBody::Resource(target) => {
                         builder.resource_adapter(ctx, *target, args)?
                     }
-                    crate::engine::NativeBody::Dispatch { receiver, arms } => {
-                        builder.dispatch_body(ctx, *receiver, arms, &args)?
-                    }
+                    crate::engine::NativeBody::Dispatch {
+                        receiver,
+                        arms,
+                        inputs,
+                    } => builder.dispatch_body(ctx, *receiver, *arms, *inputs, &args)?,
                     crate::engine::NativeBody::Reaction {
                         reaction,
                         returns_void,
@@ -168,19 +192,12 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
         }
         if signature.top_level {
             builder.initialize_resources(ctx)?;
-            for entry in builder
-                .shapes
-                .specialization
-                .bodies
-                .classes
-                .iter()
-                .flat_map(|class| &class.static_fields)
-            {
+            for entry in builder.shapes.specialization.bodies.static_fields.values() {
                 builder.binding(
                     ctx,
                     entry.id,
                     &entry.field.ty,
-                    entry.field.init.as_ref(),
+                    None,
                     entry.ty.map(crate::engine::Storage::Value),
                 )?;
             }
@@ -217,7 +234,6 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             never_values: HashSet::new(),
             global_slots: HashSet::new(),
             inline_functions: Vec::new(),
-            class_expansions: Vec::new(),
             signatures,
             shapes,
             builtins,

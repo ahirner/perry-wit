@@ -126,6 +126,10 @@ macro_rules! intrinsics {
 crate::intrinsic_catalog!(intrinsics);
 
 impl Intrinsic {
+    pub fn returns_bool(self) -> bool {
+        matches!(self.types().1, [Ty::Bool])
+    }
+
     /// Whether the service may throw (as an ECMAScript exception).
     pub fn throws(self) -> bool {
         self.policy().effect == ServiceEffect::Throws

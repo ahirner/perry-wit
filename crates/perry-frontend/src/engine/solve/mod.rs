@@ -6,19 +6,20 @@ mod calls;
 mod escape;
 mod eval;
 mod expr;
+mod facts;
 mod instances;
 mod ir;
-mod locations;
 mod members;
 mod methods;
 mod promises;
+mod writes;
 use super::bitset::BitSet;
-use super::boundary::{LocalFlags, ModuleIndex, TemplateKind};
+use super::boundary::{GenericOwner, LocalFlags, ModuleIndex, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
     CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity,
     HelperId, Idx, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp, ParamLocSpan, Pool, TemplateId,
-    Ty, TyKind, TypeParamSpan, TypeTable,
+    Ty, TyKind, TypeTable,
 };
 use crate::{
     Absence, hir_compat,
@@ -27,8 +28,8 @@ use crate::{
 };
 use array_layouts::{ArgumentKey, ArrayLayouts};
 use eval::first_type_var_name;
+use facts::{Fact, Facts, Subscriptions};
 pub(crate) use ir::*;
-use locations::{Locations, Subscriptions};
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Stmt},
     types::{LocalId, Type as HirType},
@@ -49,11 +50,40 @@ type InstanceKey = (
     bool,
 );
 
-struct ResultContract {
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ResultContract<'h> {
+    byte_offset: u32,
+    caller: InstanceId,
+    parameter: LocalId,
     inst: InstanceId,
     expected: Ty,
-    param_name: String,
-    byte_offset: u32,
+    param_name: &'h str,
+}
+
+#[derive(Clone, Copy)]
+struct TypeScope {
+    declaration: GenericOwner,
+    arguments: Ty,
+}
+
+impl ModuleIndex<'_> {
+    fn substitute(&self, types: &mut TypeTable, ty: Ty, scopes: &[TypeScope]) -> Ty {
+        if scopes.is_empty() {
+            return ty;
+        }
+        types.substitute_with(ty, |types, name| {
+            scopes.iter().find_map(|scope| {
+                let &ordinal = self.type_slots.get(&(scope.declaration, name))?;
+                Some(
+                    types
+                        .tuple_slice(scope.arguments)
+                        .get(ordinal)
+                        .copied()
+                        .unwrap_or(Ty::OPEN),
+                )
+            })
+        })
+    }
 }
 
 struct InstanceReq<'a> {
@@ -178,6 +208,27 @@ pub(crate) fn solve<'h>(
     let mut solver = Solver::new(ctx, hir, index, decls, types);
     let init_inst = solver.seed_roots()?;
     solver.run_worklist()?;
+    let live = solver.compute_live_instances();
+    if !solver.instances.iter_enumerated().any(|(id, inst)| {
+        live.contains(id.index())
+            && matches!(
+                index.view(inst.template).kind,
+                TemplateKind::Function | TemplateKind::Closure
+            )
+    }) {
+        for (tid, view) in index.views.iter_enumerated() {
+            if view.kind == TemplateKind::Function
+                && !view.is_generator
+                && view.type_params.is_empty()
+                && view.params.iter().all(|p| !matches!(p.ty, HirType::Any))
+                && !matches!(view.return_type, HirType::Any)
+            {
+                let args = solver.declared_arguments(tid)?;
+                solver.request_instance(InstanceReq::new(tid, &args, None))?;
+            }
+        }
+        solver.run_worklist()?;
+    }
     solver.verify_fixed_point()?;
     solver.verify_contracts()?;
     Ok(solver.finish(init_inst))
@@ -191,7 +242,7 @@ struct Solver<'h, 'a> {
 
     decls: &'a Declarations<'a>,
     types: &'a mut TypeTable,
-    locations: Locations,
+    facts: Facts,
     arrays: ArrayLayouts,
     subscriptions: Subscriptions,
     worklist: Vec<InstanceId>,
@@ -202,7 +253,7 @@ struct Solver<'h, 'a> {
     template_counts: IdxVec<TemplateId, u16>,
     param_locs: Pool<ParamLocSpan, LocId>,
     field_locs: Pool<FieldLocSpan, LocId>,
-    dispatch_arms: Pool<DispatchArmSpan, (FuncIdentity, InstanceId)>,
+    dispatch_arms: Pool<DispatchArmSpan, DispatchArm>,
     dispatch_arm_spans: Vec<DispatchArmSpan>,
     helpers: IdxVec<HelperId, HelperEntry>,
     helper_index: HashMap<HelperSpec, HelperId>,
@@ -211,21 +262,15 @@ struct Solver<'h, 'a> {
     inst_written: IdxVec<InstanceId, BitSet>,
     inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
     inst_superseded: BitSet,
-    escaping_env_templates: BitSet,
-    template_escape_locs: IdxVec<TemplateId, LocId>,
     collapsed_closures: BitSet,
 
     boxed_locals: BitSet,
     dict_reads: BitSet,
     self_nested_locals: BitSet,
-    static_field_locs: Vec<(ClassId, usize, LocId)>,
     class_insts: IdxVec<ClassInstId, ClassInst>,
     class_index: HashMap<(ClassId, ArgumentKey), ClassInstId>,
-    type_param_pool: Pool<TypeParamSpan, shapes::TypeName>,
-    template_type_params: IdxVec<TemplateId, TypeParamSpan>,
-    class_type_params: IdxVec<ClassId, TypeParamSpan>,
-    result_contracts: Vec<ResultContract>,
-    contract_insts: BitSet,
+    type_bindings: IdxVec<InstanceId, Box<[TypeScope]>>,
+    result_contracts: std::collections::BTreeSet<ResultContract<'h>>,
     next_func_id: u32,
     deletes_array_elements: bool,
 }
@@ -278,34 +323,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         if values.is_empty() {
             values.push(Ty::VOID);
         }
-        let template_escape_locs = index.views.map(|_| values.push(Ty::BOTTOM));
-        let static_field_locs = index
-            .classes
-            .iter_enumerated()
-            .flat_map(|(cid, c)| {
-                c.static_field_locs
-                    .iter()
-                    .enumerate()
-                    .map(move |(f_idx, &(_, loc))| (cid, f_idx, loc))
-            })
-            .collect();
-        let mut type_param_pool = Pool::default();
-        let mut tp_buf = Vec::new();
-        let mut intern_tps = |tps: &[perry_hir::types::TypeParam]| -> TypeParamSpan {
-            if tps.is_empty() {
-                return TypeParamSpan::default();
-            }
-            tp_buf.clear();
-            tp_buf.extend(
-                tps.iter()
-                    .map(|tp| shapes::TypeName::new(ctx, tp.name.clone())),
-            );
-            type_param_pool.extend_from_slice(&tp_buf)
-        };
-        let template_type_params = index.views.map(|v| intern_tps(v.type_params));
-        let class_type_params = index
-            .classes
-            .map(|class| intern_tps(&class.declaration.type_params));
         Self {
             resource_instances: HashMap::new(),
             ctx,
@@ -313,7 +330,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             index,
             decls,
             types,
-            locations: Locations::new(values),
+            facts: Facts::new(values),
             arrays: Default::default(),
             subscriptions: Subscriptions::default(),
             worklist: Vec::new(),
@@ -336,62 +353,59 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_written: IdxVec::default(),
             inst_sites: IdxVec::default(),
             inst_superseded: BitSet::default(),
-            escaping_env_templates: BitSet::default(),
-            template_escape_locs,
             collapsed_closures: BitSet::default(),
 
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locals: BitSet::default(),
-            static_field_locs,
             class_insts: IdxVec::default(),
             class_index: HashMap::with_capacity(16),
-            type_param_pool,
-            template_type_params,
-            class_type_params,
-            result_contracts: Vec::new(),
-            contract_insts: BitSet::default(),
+            type_bindings: IdxVec::default(),
+            result_contracts: Default::default(),
             next_func_id: index.max_func_id.saturating_add(1),
             deletes_array_elements: false,
         }
     }
 
-    fn expr_cell_loc(&mut self, inst: InstanceId, expr: &Expr) -> Result<LocId> {
+    fn storage_site(
+        &mut self,
+        inst: InstanceId,
+        expr: &Expr,
+        kind: CellKind,
+    ) -> Result<(&mut SiteEntry, LocId, Ty)> {
         let entry = self
             .index
             .site_of(self.instances[inst].template, expr)
             .and_then(|site| self.inst_sites[inst].get_mut(site))
             .ok_or_else(|| Diagnostic::internal("missing storage site for expression"))?;
-        match entry.resolution {
+        let loc = match entry.resolution {
             Some(
                 SiteResolution::Cell(loc) | SiteResolution::PromiseReaction { result: loc, .. },
-            ) => Ok(loc),
+            ) => loc,
             Some(SiteResolution::TypedArray(ty))
                 if let TyKind::Cell { loc, .. } = self.types.kind(ty) =>
             {
-                Ok(loc)
+                loc
             }
-            _ => {
-                let loc = self.locations.alloc(Ty::BOTTOM);
-                self.record_site(inst, expr, SiteResolution::Cell(loc));
-                Ok(loc)
-            }
-        }
+            _ => self.facts.alloc(Ty::BOTTOM),
+        };
+        Ok((entry, loc, self.types.cell(loc, kind)))
     }
 
     fn alloc_expr_cell(&mut self, inst: InstanceId, expr: &Expr, kind: CellKind) -> Result<Ty> {
-        let loc = self.expr_cell_loc(inst, expr)?;
-        Ok(self.types.cell(loc, kind))
+        let (site, loc, cell) = self.storage_site(inst, expr, kind)?;
+        site.resolution = Some(SiteResolution::Cell(loc));
+        Ok(cell)
     }
 
     fn read_loc(&mut self, loc: LocId, reader: InstanceId) -> Ty {
-        let (loc, ty) = self.locations.resolve(loc);
-        self.subscriptions.read(reader, loc);
+        let (loc, ty) = self.facts.resolve(loc);
+        self.subscriptions.read(reader, Fact::Storage(loc));
         ty
     }
 
     fn write_loc(&mut self, loc: LocId, value: Ty) {
-        self.locations.write(self.types, loc, value);
+        self.facts.write(self.types, loc, value);
     }
 
     fn is_non_site_root(&self, inst_id: InstanceId) -> bool {
@@ -400,10 +414,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             || matches!(
                 self.index.view(inst.template).kind,
                 TemplateKind::ClassConstructor
-                    | TemplateKind::ClassGetter(_)
-                    | TemplateKind::ClassSetter(_)
             )
-            || self.contract_insts.contains(inst_id.index())
     }
 
     fn for_each_callback_target(&self, cb: CallTarget, mut f: impl FnMut(InstanceId)) {
@@ -411,8 +422,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             CallTarget::Direct { target, .. } => f(target),
             CallTarget::Dispatch { helper, .. } => {
                 if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper].spec {
-                    for &(_, target) in &self.dispatch_arms[arms] {
-                        f(target);
+                    for arm in &self.dispatch_arms[arms] {
+                        f(arm.target);
                     }
                 }
             }
@@ -420,12 +431,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn for_each_site_target(&self, res: &SiteResolution, mut f: impl FnMut(InstanceId)) {
-        match *res {
+    fn for_each_site_target(&self, entry: &SiteEntry, mut f: impl FnMut(InstanceId)) {
+        if let Some(FuncCoercion::Callback { target, .. }) = entry.coercion {
+            self.for_each_callback_target(target, &mut f);
+        }
+        let Some(resolution) = entry.resolution else {
+            return;
+        };
+        match resolution {
             SiteResolution::Call { target, .. } => self.for_each_callback_target(target, f),
-            SiteResolution::MemberCall(MemberTarget::Class(target))
+            SiteResolution::ReadMember(target)
+            | SiteResolution::WriteMember(target)
             | SiteResolution::Callback { target } => f(target),
-            SiteResolution::ClassNew(class_inst) => {
+            SiteResolution::UpdateMember { get, set } => {
+                get.into_iter().chain(set).for_each(f);
+            }
+            SiteResolution::ClassNew(class_inst, _) => {
                 let instance = &self.class_insts[class_inst];
                 for target in instance.field_init.into_iter().chain(instance.ctor_inst) {
                     f(target);
@@ -464,10 +485,14 @@ impl<'h, 'a> Solver<'h, 'a> {
     fn compute_live_instances(&self) -> BitSet {
         let mut live = BitSet::default();
         let mut queue = Vec::new();
-        for (id, _) in self.instances.iter_enumerated() {
+        let roots = self
+            .instances
+            .ids()
+            .filter(|&id| self.is_non_site_root(id))
+            .chain(self.result_contracts.iter().map(|contract| contract.inst));
+        for id in roots {
             let idx = id.index();
-            if !self.inst_superseded.contains(idx) && self.is_non_site_root(id) && live.insert(idx)
-            {
+            if !self.inst_superseded.contains(idx) && live.insert(idx) {
                 queue.push(id);
             }
         }
@@ -475,20 +500,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         while let Some(&caller) = queue.get(head) {
             head += 1;
             for entry in &self.inst_sites[caller] {
-                if let Some(res) = &entry.resolution {
-                    self.for_each_site_target(res, |t| {
-                        if live.insert(t.index()) {
-                            queue.push(t);
-                        }
-                    });
-                }
-                if let Some(FuncCoercion::Callback { target, .. }) = entry.coercion {
-                    self.for_each_callback_target(target, |t| {
-                        if live.insert(t.index()) {
-                            queue.push(t);
-                        }
-                    });
-                }
+                self.for_each_site_target(entry, |target| {
+                    if live.insert(target.index()) {
+                        queue.push(target);
+                    }
+                });
             }
         }
         live
@@ -532,8 +548,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.evaluate_instance(inst_id)?;
                 }
             }
-            for &loc in &self.locations.dirty {
-                for &reader in self.subscriptions.readers(loc) {
+            for &fact in &self.facts.dirty {
+                for &reader in self.subscriptions.readers(fact) {
                     if !self.inst_superseded.contains(reader.index())
                         && self.queued.insert(reader.index())
                     {
@@ -541,7 +557,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
             }
-            self.locations.dirty.clear();
+            self.facts.dirty.clear();
         }
         Ok(())
     }
@@ -557,18 +573,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             .filter_map(|(id, _)| live.contains(id.index()).then_some(id))
             .collect();
         let prev_inst_count = self.instances.len();
-        let prev_loc_count = self.locations.len();
+        let prev_loc_count = self.facts.len();
         let prev_frames = self.inst_frame_locals.clone();
-        let prev_escaping = self.escaping_env_templates.clone();
         let prev_collapsed = self.collapsed_closures.clone();
-        self.locations.dirty.clear();
+        self.facts.dirty.clear();
         for id in live_ids {
             self.evaluate_instance(id)?;
-        }
-        if self.escaping_env_templates != prev_escaping {
-            return Err(Diagnostic::internal(
-                "fixed-point check marked a new escaping closure",
-            ));
         }
         if self.collapsed_closures != prev_collapsed {
             return Err(Diagnostic::internal(
@@ -580,7 +590,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 "fixed-point check spawned a new instance",
             ));
         }
-        if self.locations.len() != prev_loc_count {
+        if self.facts.len() != prev_loc_count {
             return Err(Diagnostic::internal(
                 "fixed-point check allocated a storage location",
             ));
@@ -590,18 +600,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                 "fixed-point check mutated a local frame slot",
             ));
         }
-        if !self.locations.dirty.is_empty() {
+        if !self.facts.dirty.is_empty() {
             return Err(Diagnostic::internal(
-                "fixed-point check dirtied a storage location",
+                "fixed-point check changed a solver fact",
             ));
         }
         Ok(())
     }
 
-    pub(super) fn intern_dispatch_arms(
-        &mut self,
-        arms: &[(FuncIdentity, InstanceId)],
-    ) -> DispatchArmSpan {
+    pub(super) fn intern_dispatch_arms(&mut self, arms: &[DispatchArm]) -> DispatchArmSpan {
         for &span in &self.dispatch_arm_spans {
             if &self.dispatch_arms[span] == arms {
                 return span;
@@ -626,21 +633,12 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn verify_contracts(&mut self) -> Result<()> {
-        let contracts = std::mem::take(&mut self.result_contracts);
-        for contract in contracts {
+        for contract in &self.result_contracts {
             let inst = &self.instances[contract.inst];
-            let raw_actual = self.locations[inst.return_loc];
-            let actual = match self.types.kind(raw_actual) {
-                TyKind::Cell {
-                    loc,
-                    kind: CellKind::Promise,
-                } => {
-                    let inner = self.locations[loc];
-                    self.types
-                        .promise(if inner == Ty::BOTTOM { Ty::VOID } else { inner })
-                }
-                _ => raw_actual,
-            };
+            let raw_actual = self.facts[inst.return_loc];
+            let actual = self
+                .types
+                .promise_argument(raw_actual, |loc| self.facts[loc]);
             if !self.types.accepts(contract.expected, actual) {
                 return Err(self.hir.locations.annotate_call(
                     diag!(

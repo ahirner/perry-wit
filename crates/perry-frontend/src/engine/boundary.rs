@@ -1,12 +1,13 @@
 //! Single-pass boundary indexing over Perry HIR.
 use super::bitset::BitSet;
-use super::solve::{MemberTarget, SiteResolution};
+use super::solve::SiteResolution;
 pub(crate) use super::types::LocalFlags;
 use super::types::{
     BindingSpan, CaptureSpan, CapturedLocalSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo,
     LocalStorage, NameId, Pool, SiteSpan, TemplateId, Ty, TypeTable,
 };
 use crate::hir_compat;
+use crate::narrowing::Region;
 use crate::source::{ConstructorSites, SourceModule};
 use perry_hir::{
     ir::{Expr, Function, Param, Stmt},
@@ -24,16 +25,25 @@ pub(crate) enum TemplateKind {
     ClassConstructor,
     ClassMethod,
     ClassStaticMethod(ClassId),
-    ClassGetter(usize),
-    ClassSetter(usize),
+    ClassGetter,
+    ClassSetter,
     Closure,
     PromiseResolve(usize),
     PromiseReject(usize),
 }
 
+impl TemplateKind {
+    pub(super) fn is_class_member(self) -> bool {
+        matches!(
+            self,
+            Self::ClassMethod | Self::ClassStaticMethod(_) | Self::ClassGetter | Self::ClassSetter
+        )
+    }
+}
+
 pub(crate) struct TemplateView<'h> {
     pub(crate) kind: TemplateKind,
-    pub(crate) name: &'h str,
+    pub(crate) name: std::borrow::Cow<'h, str>,
     pub(crate) func_id: FuncId,
     pub(crate) params: &'h [Param],
     pub(crate) return_type: &'h perry_hir::types::Type,
@@ -55,7 +65,7 @@ impl<'h> TemplateView<'h> {
             let raw = self.raw_name();
             hir_compat::function_label(locations.display_function_name(&raw)).to_owned()
         } else {
-            locations.display_function_name(self.name).to_owned()
+            locations.display_function_name(&self.name).to_owned()
         }
     }
 
@@ -63,7 +73,7 @@ impl<'h> TemplateView<'h> {
         if self.name.is_empty() {
             format!("callback_{}", self.func_id)
         } else {
-            self.name.to_owned()
+            self.name.to_string()
         }
     }
 
@@ -71,7 +81,7 @@ impl<'h> TemplateView<'h> {
         let body = crate::source::authored_body(&f.params, &f.body);
         Self {
             kind,
-            name: f.name.as_str(),
+            name: f.name.as_str().into(),
             func_id: f.id,
             params: &f.params,
             return_type: &f.return_type,
@@ -95,10 +105,20 @@ pub(crate) struct ClassInfo<'h> {
     pub(crate) name_id: NameId,
     pub(crate) field_init: Option<TemplateId>,
     pub(crate) ctor: Option<TemplateId>,
-    pub(crate) static_field_locs: Vec<(NameId, LocId)>,
+    pub(super) direct_constructor: bool,
+    static_field_locs: Vec<(NameId, LocId)>,
 }
 
-impl ClassInfo<'_> {
+impl<'h> ClassInfo<'h> {
+    pub(super) fn static_fields(
+        &self,
+    ) -> impl Iterator<Item = (&'h perry_hir::ir::ClassField, LocId)> {
+        self.declaration
+            .static_fields
+            .iter()
+            .zip(self.static_field_locs.iter().map(|&(_, loc)| loc))
+    }
+
     pub(super) fn static_field(&self, name: NameId) -> Option<LocId> {
         self.static_field_locs
             .iter()
@@ -176,8 +196,23 @@ impl Annotations {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum GenericOwner {
+    Function(TemplateId),
+    Class(ClassId),
+}
+
+pub(super) struct SourceRegion {
+    pub(super) template: TemplateId,
+    pub(super) sites: std::ops::Range<super::plans::ExprIdx>,
+    exits: u8,
+}
+
 #[derive(Default)]
 pub(crate) struct ModuleIndex<'h> {
+    pub(super) regions: HashMap<Region, SourceRegion>,
+    pub(super) type_slots: HashMap<(GenericOwner, crate::shapes::TypeName), usize>,
+    global_uses: std::collections::HashSet<(TemplateId, LocalId)>,
     pub(crate) iteration: hir_compat::Iteration<'h>,
     pub(super) annotations: Annotations,
     pub(super) expressions: super::plans::Expressions,
@@ -280,14 +315,6 @@ impl<'h> ModuleIndex<'h> {
             .find(|m| hir_compat::method(&m.name).name() == name)?;
         self.template_of_func(method.id)
     }
-    pub(super) fn accessor_template(
-        &self,
-        accessors: &[(String, Function)],
-        name: &str,
-    ) -> Option<TemplateId> {
-        let (_, accessor) = accessors.iter().find(|(property, _)| property == name)?;
-        self.template_of_func(accessor.id)
-    }
     pub(crate) fn local_idx(&self, id: LocalId) -> Option<LocalIdx> {
         self.local_to_idx.get(id as usize).copied().flatten()
     }
@@ -315,7 +342,7 @@ impl<'h> ModuleIndex<'h> {
     fn add_synthetic_template(&mut self, kind: TemplateKind, name: &'h str) -> TemplateId {
         self.add_template(TemplateView {
             kind,
-            name,
+            name: name.into(),
             func_id: 0,
             params: &[],
             return_type: &VOID_HIR,
@@ -332,6 +359,18 @@ impl<'h> ModuleIndex<'h> {
         })
     }
 
+    fn register_type_params(
+        &mut self,
+        ctx: &Context,
+        owner: GenericOwner,
+        params: &[perry_hir::types::TypeParam],
+    ) {
+        for (index, p) in params.iter().enumerate() {
+            let name = crate::shapes::TypeName::new(ctx, p.name.clone());
+            self.type_slots.insert((owner, name), index);
+        }
+    }
+
     fn register_member(
         &mut self,
         scan: &mut ScanCtx<'h, '_>,
@@ -344,7 +383,7 @@ impl<'h> ModuleIndex<'h> {
         let tid = self.add_template(TemplateView::from_function(kind, func, explicit_return));
         scan.raw_sites.resize_with(self.views.len(), Vec::new);
         self.set_func_template(func.id, tid, Declaration::Function);
-        self.scan_params(scan, &func.params, tid);
+        self.scan_params(scan, &func.params, tid, &[]);
         self.scan_stmts(scan, self.view(tid).body, tid, false, false);
         tid
     }
@@ -401,7 +440,30 @@ impl<'h> ModuleIndex<'h> {
             )
     }
 
-    fn scan_params(&mut self, scan: &mut ScanCtx<'h, '_>, params: &'h [Param], owner: TemplateId) {
+    pub(super) fn param_type(&self, param: &Param) -> perry_wit_diagnostics::Result<Ty> {
+        self.local_idx(param.id)
+            .map(|i| self.locals[i].declared)
+            .ok_or_else(|| {
+                perry_wit_diagnostics::internal!("missing indexed parameter {}", param.name)
+            })
+    }
+
+    fn scan_params(
+        &mut self,
+        scan: &mut ScanCtx<'h, '_>,
+        params: &'h [Param],
+        owner: TemplateId,
+        authored_types: &[perry_hir::types::Type],
+    ) {
+        self.register_type_params(
+            scan.ctx,
+            GenericOwner::Function(owner),
+            self.view(owner).type_params,
+        );
+        for (param, authored) in params.iter().zip(authored_types) {
+            let ty = scan.types.intern_hir(scan.ctx, authored, true);
+            self.annotations.0.insert(std::ptr::from_ref(&param.ty), ty);
+        }
         for param in params {
             let explicit = scan
                 .declarations
@@ -418,6 +480,31 @@ impl<'h> ModuleIndex<'h> {
         }
     }
 
+    pub(super) fn has_exit(&self, body: &[Stmt], mask: u8) -> bool {
+        self.regions
+            .get(&Region::Body(body))
+            .map_or(crate::completion::FALLTHROUGH, |r| r.exits)
+            & mask
+            != 0
+    }
+
+    fn record_region(
+        &mut self,
+        region: Region,
+        template: TemplateId,
+        start: super::plans::ExprIdx,
+        exits: u8,
+    ) {
+        self.regions.insert(
+            region,
+            SourceRegion {
+                template,
+                sites: start..self.expressions.end(),
+                exits,
+            },
+        );
+    }
+
     fn scan_stmts(
         &mut self,
         scan: &mut ScanCtx<'h, '_>,
@@ -425,9 +512,12 @@ impl<'h> ModuleIndex<'h> {
         owner: TemplateId,
         is_module_top: bool,
         in_loop: bool,
-    ) {
+    ) -> u8 {
+        use crate::completion::*;
+        let start = self.expressions.end();
+        let mut exits = FALLTHROUGH;
         for stmt in stmts {
-            match stmt {
+            let next = match stmt {
                 Stmt::Let {
                     id,
                     ty,
@@ -464,6 +554,7 @@ impl<'h> ModuleIndex<'h> {
                         self.scan_expr(scan, init, owner, in_loop);
                     }
                     scan.defined_locals.insert(*id as usize);
+                    FALLTHROUGH
                 }
                 Stmt::Return(Some(val)) => {
                     if matches!(val, Expr::Array(items, _) if items.is_empty()) {
@@ -471,21 +562,37 @@ impl<'h> ModuleIndex<'h> {
                     }
                     Self::record_site_expr(scan, owner, val);
                     self.scan_expr(scan, val, owner, in_loop);
+                    if matches!(val, Expr::Undefined) {
+                        RETURN | EMPTY_RETURN
+                    } else {
+                        RETURN
+                    }
+                }
+                Stmt::Return(None) => RETURN | EMPTY_RETURN,
+                Stmt::Break => BREAK,
+                Stmt::Continue => CONTINUE,
+                Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => LABELLED,
+                Stmt::Throw(value) => {
+                    self.scan_expr(scan, value, owner, in_loop);
+                    RETURN
                 }
                 Stmt::If {
                     condition,
                     then_branch,
                     else_branch,
                 } => {
-                    self.scan_expr(scan, condition, owner, in_loop);
-                    self.scan_stmts(scan, then_branch, owner, false, in_loop);
-                    if let Some(b) = else_branch {
-                        self.scan_stmts(scan, b, owner, false, in_loop);
-                    }
+                    self.scan_test(scan, condition, owner, in_loop);
+                    self.scan_stmts(scan, then_branch, owner, false, in_loop)
+                        | else_branch.as_ref().map_or(FALLTHROUGH, |b| {
+                            self.scan_stmts(scan, b, owner, false, in_loop)
+                        })
                 }
                 Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
-                    self.scan_expr(scan, condition, owner, true);
-                    self.scan_stmts(scan, body, owner, false, true);
+                    self.scan_test(scan, condition, owner, true);
+                    loop_exits(
+                        self.scan_stmts(scan, body, owner, false, true),
+                        matches!(condition, Expr::Bool(true)),
+                    )
                 }
                 Stmt::For {
                     init,
@@ -497,12 +604,16 @@ impl<'h> ModuleIndex<'h> {
                         self.scan_stmts(scan, std::slice::from_ref(i), owner, false, in_loop);
                     }
                     if let Some(c) = condition {
-                        self.scan_expr(scan, c, owner, true);
+                        self.scan_test(scan, c, owner, true);
                     }
                     if let Some(u) = update {
-                        self.scan_expr(scan, u, owner, true);
+                        self.scan_test(scan, u, owner, true);
                     }
-                    self.scan_stmts(scan, body, owner, false, true);
+                    let infinite = scan.declarations.for_of(init.as_deref()).is_none()
+                        && condition
+                            .as_ref()
+                            .is_none_or(|c| matches!(c, Expr::Bool(true)));
+                    loop_exits(self.scan_stmts(scan, body, owner, false, true), infinite)
                 }
                 Stmt::Try {
                     body,
@@ -510,47 +621,81 @@ impl<'h> ModuleIndex<'h> {
                     finally,
                     ..
                 } => {
-                    self.scan_stmts(scan, body, owner, false, in_loop);
+                    let mut exits = self.scan_stmts(scan, body, owner, false, in_loop);
                     if let Some(catch) = catch {
                         if let Some((id, _)) = &catch.param {
                             let err_ty = scan.types.named(scan.ctx, "Error");
                             self.ensure_local(*id, owner, err_ty, scan.declarations);
                         }
-                        self.scan_stmts(scan, &catch.body, owner, false, in_loop);
+                        exits |= self.scan_stmts(scan, &catch.body, owner, false, in_loop);
                     }
-                    if let Some(f) = finally {
-                        self.scan_stmts(scan, f, owner, false, in_loop);
-                    }
+                    let cleanup = finally.as_ref().map_or(FALLTHROUGH, |f| {
+                        self.scan_stmts(scan, f, owner, false, in_loop)
+                    });
+                    sequence(cleanup, exits)
                 }
                 Stmt::Switch {
                     discriminant,
                     cases,
                 } => {
                     self.scan_expr(scan, discriminant, owner, in_loop);
+                    let mut branches = FALLTHROUGH;
+                    let mut has_default = false;
                     for case in cases {
+                        has_default |= case.test.is_none();
                         if let Some(t) = &case.test {
                             self.scan_expr(scan, t, owner, in_loop);
                         }
-                        self.scan_stmts(scan, &case.body, owner, false, in_loop);
+                        branches = (branches & !FALLTHROUGH)
+                            | self.scan_stmts(scan, &case.body, owner, false, in_loop);
                     }
+                    if !has_default || branches & BREAK != 0 {
+                        branches |= FALLTHROUGH;
+                    }
+                    branches & !BREAK
                 }
                 Stmt::Labeled { body, .. } => {
-                    self.scan_stmts(scan, std::slice::from_ref(body), owner, false, in_loop)
+                    FALLTHROUGH
+                        | (self.scan_stmts(scan, std::slice::from_ref(body), owner, false, in_loop)
+                            & EMPTY_RETURN)
                 }
                 other => {
                     stmt_any_expr(other, &mut |e| {
                         self.scan_expr(scan, e, owner, in_loop);
                         false
                     });
+                    FALLTHROUGH
                 }
-            }
+            };
+            exits = sequence(exits, next);
         }
+        if !stmts.is_empty() {
+            self.record_region(Region::Body(stmts), owner, start, exits);
+        }
+        exits
     }
 
     fn record_site_expr(scan: &mut ScanCtx<'h, '_>, owner: TemplateId, expr: &'h Expr) {
         if let Some(list) = scan.raw_sites.get_mut(owner.index()) {
             list.push(expr);
         }
+    }
+
+    fn scan_test(
+        &mut self,
+        scan: &mut ScanCtx<'h, '_>,
+        expr: &'h Expr,
+        owner: TemplateId,
+        in_loop: bool,
+    ) {
+        let start = self.expressions.end();
+        self.scan_expr(scan, expr, owner, in_loop);
+        self.record_region(
+            Region::Expression(expr),
+            owner,
+            start,
+            crate::completion::FALLTHROUGH,
+        );
     }
 
     fn scan_expr(
@@ -560,6 +705,24 @@ impl<'h> ModuleIndex<'h> {
         owner: TemplateId,
         in_loop: bool,
     ) {
+        if owner != TemplateId::INIT
+            && let Expr::LocalGet(id)
+            | Expr::LocalSet(id, _)
+            | Expr::Update { id, .. }
+            | Expr::ArrayPush { array_id: id, .. }
+            | Expr::ArrayPushSpread { array_id: id, .. }
+            | Expr::ArrayUnshift { array_id: id, .. }
+            | Expr::ArraySplice { array_id: id, .. }
+            | Expr::ArrayCopyWithin { array_id: id, .. }
+            | Expr::ArrayPop(id)
+            | Expr::ArrayShift(id)
+            | Expr::SetAdd { set_id: id, .. } = expr
+            && self
+                .local_idx(*id)
+                .is_none_or(|i| self.locals[i].flags.contains(LocalFlags::MODULE))
+        {
+            self.global_uses.insert((owner, *id));
+        }
         let site = self.expressions.register(expr, scan.constructors);
         match expr {
             Expr::JsonParseTyped { ty, .. }
@@ -587,7 +750,7 @@ impl<'h> ModuleIndex<'h> {
         if let Some(id) = self.receiver_members.bind(expr, scan.decls, scan.locations) {
             self.expressions
                 .declared
-                .insert(site, SiteResolution::MemberCall(MemberTarget::Resource(id)));
+                .insert(site, SiteResolution::ResourceCall(id));
         }
         if matches!(expr, Expr::RegExp { .. }) || self.expressions.regexp(expr).is_some() {
             scan.regexes.sites.push(expr);
@@ -625,15 +788,22 @@ impl<'h> ModuleIndex<'h> {
                 Self::record_site_expr(scan, owner, expr);
                 Self::record_site_expr(scan, owner, left);
                 Self::record_site_expr(scan, owner, right);
+                self.scan_test(scan, left, owner, in_loop);
+                self.scan_expr(scan, right, owner, in_loop);
+                return;
             }
             Expr::Conditional {
+                condition,
                 then_expr,
                 else_expr,
-                ..
             } => {
                 Self::record_site_expr(scan, owner, expr);
                 Self::record_site_expr(scan, owner, then_expr);
                 Self::record_site_expr(scan, owner, else_expr);
+                self.scan_test(scan, condition, owner, in_loop);
+                self.scan_expr(scan, then_expr, owner, in_loop);
+                self.scan_expr(scan, else_expr, owner, in_loop);
+                return;
             }
             Expr::Object(fields) => {
                 Self::record_site_expr(scan, owner, expr);
@@ -650,6 +820,10 @@ impl<'h> ModuleIndex<'h> {
             | Expr::SetNewFromArray(_)
             | Expr::Compare { .. }
             | Expr::TypeOf(_)
+            | Expr::PropertyGet { .. }
+            | Expr::PropertyUpdate { .. }
+            | Expr::StringCoerce(_)
+            | Expr::TemplateStringCoerce(_)
             | Expr::FuncRef(_) => Self::record_site_expr(scan, owner, expr),
             expr if let Some((_, _, callback, _)) = crate::methods::Call::array_callback(expr) => {
                 Self::record_site_expr(scan, owner, callback)
@@ -662,10 +836,14 @@ impl<'h> ModuleIndex<'h> {
             } => Self::record_site_expr(scan, owner, callback),
             Expr::LocalGet(id) => self.record_local_use(*id, owner, false),
             Expr::LocalSet(id, value) => {
+                Self::record_site_expr(scan, owner, expr);
                 Self::record_site_expr(scan, owner, value);
                 self.record_local_use(*id, owner, true);
             }
-            Expr::Update { id, .. } => self.record_local_use(*id, owner, true),
+            Expr::Update { id, .. } => {
+                Self::record_site_expr(scan, owner, expr);
+                self.record_local_use(*id, owner, true);
+            }
             Expr::ScopedTemp { id, .. } => {
                 self.ensure_local(*id, owner, Ty::OPEN, scan.declarations);
             }
@@ -685,20 +863,31 @@ impl<'h> ModuleIndex<'h> {
             } => {
                 Self::record_site_expr(scan, owner, expr);
                 self.max_func_id = self.max_func_id.max(*func_id);
+                let signature = scan.declarations.closure_signatures.get(func_id);
+                let (result, params_ty) = signature
+                    .and_then(|alias| match &alias.ty {
+                        perry_hir::types::Type::Tuple(types) => types.split_last(),
+                        _ => None,
+                    })
+                    .unwrap_or((return_type, &[]));
                 let exp_ret = !matches!(
-                    return_type,
+                    result,
                     perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
                 );
                 let body = crate::source::authored_body(params, body);
                 let tid = self.add_template(TemplateView {
                     kind: TemplateKind::Closure,
-                    name: scan.closure_names.get(func_id).map_or("", String::as_str),
+                    name: scan
+                        .closure_names
+                        .get(func_id)
+                        .map_or("", String::as_str)
+                        .into(),
                     func_id: *func_id,
                     params: params.as_slice(),
-                    return_type,
+                    return_type: result,
                     body,
                     captures: captures.as_slice(),
-                    type_params: &[],
+                    type_params: signature.map_or(&[], |s| s.type_params.as_slice()),
                     is_async: *is_async,
                     is_generator: *is_generator,
 
@@ -721,7 +910,7 @@ impl<'h> ModuleIndex<'h> {
                     let forward = !scan.defined_locals.contains(cap as usize);
                     scan.pending_captures.push((cap, true, forward));
                 }
-                self.scan_params(scan, params, tid);
+                self.scan_params(scan, params, tid, params_ty);
                 self.scan_stmts(scan, body, tid, false, false);
                 return;
             }
@@ -756,7 +945,7 @@ struct ScanCtx<'h, 'a> {
     locations: &'a hir_compat::Locations<'a>,
     regexes: crate::source::RegexInputs<'h>,
     ctx: &'a Context,
-    declarations: &'a crate::source::ModuleDeclarations,
+    declarations: &'h crate::source::ModuleDeclarations,
     closure_names: &'h HashMap<FuncId, String>,
     types: &'a mut TypeTable,
     raw_sites: &'a mut Vec<Vec<&'h Expr>>,

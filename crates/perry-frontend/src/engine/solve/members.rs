@@ -72,8 +72,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         if matches!(l, Ty::NULL | Ty::VOID) || matches!(r, Ty::NULL | Ty::VOID) {
             return Ok(());
         }
-        self.mark_escaping_env(inst_id, l);
-        self.mark_escaping_env(inst_id, r);
+        self.mark_escaping_env(l);
+        self.mark_escaping_env(r);
         let same_local = matches!((left, right), (Expr::LocalGet(a), Expr::LocalGet(b)) if a == b);
         if !same_local {
             let shared: Vec<_> = self
@@ -181,15 +181,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         property: &str,
         value: &Expr,
         val_ty: Ty,
-    ) -> Result<()> {
+    ) -> Result<Option<InstanceId>> {
         let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def) else {
-            return Ok(());
+            return Ok(None);
         };
         let norm = self
             .types
             .normalize_for_storage(self.ctx, self.decls, val_ty);
         if let Some(loc) = self.class_field_loc(cinst_id, property) {
-            let existing = self.locations[loc];
+            let existing = self.facts[loc];
             if matches!(value, Expr::Array(items, _) if items.is_empty()) {
                 if !matches!(
                     self.types.kind(existing),
@@ -206,17 +206,37 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.write_loc(loc, norm);
             }
         }
-        if norm != Ty::BOTTOM
-            && let Some(setter_tid) = self
-                .index
-                .accessor_template(&self.class_declaration(cinst_id).setters, property)
-        {
-            self.request_instance(
-                InstanceReq::new(setter_tid, &[norm], Some(inst_id))
-                    .receiver(Some(Receiver::Class(cinst_id))),
-            )?;
+        if norm == Ty::BOTTOM {
+            return Ok(None);
         }
-        Ok(())
+        self.request_accessor(inst_id, cinst_id, property, Some(norm))
+    }
+
+    pub(super) fn request_accessor(
+        &mut self,
+        caller: InstanceId,
+        receiver: ClassInstId,
+        property: &str,
+        assigned: Option<Ty>,
+    ) -> Result<Option<InstanceId>> {
+        let class = self.class_declaration(receiver);
+        let accessors = if assigned.is_some() {
+            &class.setters
+        } else {
+            &class.getters
+        };
+        let Some((_, member)) = accessors.iter().find(|(name, _)| name == property) else {
+            return Ok(None);
+        };
+        let template = self
+            .index
+            .template_of_func(member.id)
+            .ok_or_else(|| Diagnostic::internal("missing accessor declaration"))?;
+        self.request_instance(
+            InstanceReq::new(template, assigned.as_slice(), Some(caller))
+                .receiver(Some(Receiver::Class(receiver))),
+        )
+        .map(Some)
     }
 
     pub(super) fn eval_local_get(&mut self, s: &mut EvalState<'h>, id: LocalId) -> Result<Ty> {
@@ -254,8 +274,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if let Some(SiteResolution::CollectionNew(declared)) = self.index.expressions.declared(expr)
         {
-            let bindings = self.active_instance_type_bindings(s.inst);
-            let bound = self.types.substitute(declared, &bindings);
+            let bound = self
+                .index
+                .substitute(self.types, declared, &self.type_bindings[s.inst]);
             let ty = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
             self.record_site(s.inst, expr, SiteResolution::CollectionNew(ty));
             return Ok(ty);
@@ -306,25 +327,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         ))
     }
 
-    pub(super) fn active_instance_type_bindings(
-        &mut self,
-        inst_id: InstanceId,
-    ) -> Vec<(shapes::TypeName, Ty)> {
-        let Some(inst) = self.instances.get(inst_id) else {
-            return Vec::new();
-        };
-        let (template, receiver, capture_owner, args_ty, targs_ty) = (
-            inst.template,
-            inst.receiver,
-            inst.capture_owner,
-            inst.args,
-            inst.explicit_type_args,
-        );
-        let args = self.types.tuple_slice(args_ty).to_vec();
-        let explicit_targs = self.types.tuple_slice(targs_ty).to_vec();
-        self.compute_type_param_bindings(template, receiver, capture_owner, &args, &explicit_targs)
-    }
-
     pub(super) fn check_timer_member(&self, receiver: Ty, offset: u32) -> Result<()> {
         if receiver == Ty::TIMER {
             let locations = &self.hir.locations;
@@ -342,6 +344,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_property_get(
         &mut self,
         s: &mut EvalState<'h>,
+        site: &'h Expr,
         object: &'h Expr,
         property: &str,
         byte_offset: u32,
@@ -372,7 +375,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         } = self.types.kind(stripped)
         {
             if self.dict_reads.insert(loc.index()) {
-                self.locations.dirty.insert(loc);
+                self.facts.dirty.insert(Fact::Storage(loc));
             }
             obj_ty = self.resolve_cell_read(s.inst, obj_ty);
         }
@@ -381,14 +384,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(loc) = self.class_field_loc(cinst_id, property) {
                 return Ok(self.read_loc(loc, s.inst));
             }
-            if let Some(getter_tid) = self
-                .index
-                .accessor_template(&self.class_declaration(cinst_id).getters, property)
-            {
-                let target = self.request_instance(
-                    InstanceReq::new(getter_tid, &[], Some(s.inst))
-                        .receiver(Some(Receiver::Class(cinst_id))),
-                )?;
+            if let Some(target) = self.request_accessor(s.inst, cinst_id, property, None)? {
+                self.record_site(s.inst, site, SiteResolution::ReadMember(target));
                 return Ok(self.read_loc(self.instances[target].return_loc, s.inst));
             }
         }

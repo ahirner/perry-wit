@@ -42,72 +42,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn callback_target(
-        &mut self,
-        s: &mut EvalState<'h>,
-        ident: FuncIdentity,
-        recv_ty: Option<Ty>,
-        arg_tys: &[Ty],
-        byte_offset: u32,
-    ) -> Result<(InstanceId, Ty, bool)> {
-        let view = self.index.view(ident.template);
-        let is_promise_handle =
-            self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
-        self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
-        let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
-        let call_args = if is_promise_handle {
-            arg_tys.get(..1).unwrap_or(&[])
-        } else {
-            arg_tys
-        };
-        let target = self.request_instance(
-            InstanceReq::new(ident.template, call_args, Some(s.inst))
-                .receiver(recv)
-                .owner(ident.capture_owner)
-                .at(byte_offset),
-        )?;
-        self.propagate_writes(s.inst, target);
-        let ret = self.read_loc(self.instances[target].return_loc, s.inst);
-        Ok((target, ret, recv.is_some()))
-    }
-
-    pub(super) fn build_callback_dispatcher(
-        &mut self,
-        s: &mut EvalState<'h>,
-        callee_ty: Ty,
-        idents: &[FuncIdentity],
-        recv_ty: Option<Ty>,
-        arg_tys: &[Ty],
-        byte_offset: u32,
-    ) -> Result<(HelperId, Ty, bool, Ty)> {
-        for &a in arg_tys {
-            self.invalidate_conservative_cell(a);
-        }
-        let mut arms = Vec::with_capacity(idents.len());
-        let mut ret = Ty::BOTTOM;
-        let mut needs_recv = false;
-        for &ident in idents {
-            let (target, r, pass_receiver) =
-                self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
-            needs_recv |= pass_receiver;
-            ret = self.types.join(ret, r);
-            arms.push((ident, target));
-        }
-        let arms_span = self.intern_dispatch_arms(&arms);
-        let arg_tuple = self.types.tuple(arg_tys);
-        let helper = self.intern_helper(
-            HelperSpec::Dispatcher {
-                result: ret,
-                callee_ty,
-                arms: arms_span,
-                arg_tys: arg_tuple,
-                recv_ty: needs_recv.then_some(recv_ty).flatten(),
-            },
-            byte_offset,
-        );
-        Ok((helper, arg_tuple, needs_recv, ret))
-    }
-
     fn resolve_callback_call(
         &mut self,
         s: &mut EvalState<'h>,
@@ -123,9 +57,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Some((CallTarget::ThrowTypeError, Ty::NEVER)));
         }
         if let Some(idents) = self.types.func_dispatch_members(cb_ty, true) {
-            let (helper, _, needs_recv, ret) =
-                self.build_callback_dispatcher(s, cb_ty, &idents, recv_ty, arg_tys, byte_offset)?;
-            return Ok(Some((CallTarget::Dispatch { helper, needs_recv }, ret)));
+            let (target, _, ret) = self.callback_dispatcher(
+                s,
+                cb_ty,
+                &idents,
+                arg_tys,
+                callbacks::DispatchSite::Call(recv_ty, byte_offset),
+            )?;
+            return Ok(Some((target, ret)));
         }
         let TyKind::Func(ident) = self.types.kind(cb_ty) else {
             if !self.types.is_open(cb_ty) && cb_ty != Ty::DYNAMIC {
@@ -140,14 +79,13 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let (target, ret, pass_receiver) =
-            self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
+        let (arm, ret) = self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
         let pass_env = self.is_escaping_env(ident.template, s.inst);
         Ok(Some((
             CallTarget::Direct {
-                target,
+                target: arm.target,
                 pass_env,
-                pass_receiver,
+                pass_receiver: arm.receiver,
             },
             ret,
         )))
@@ -194,8 +132,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             template: reject_tid,
             capture_owner: owner,
         });
-        self.mark_escaping_env(s.inst, resolve_ty);
-        self.mark_escaping_env(s.inst, reject_ty);
+        self.mark_escaping_env(resolve_ty);
+        self.mark_escaping_env(reject_ty);
 
         let Some((exec_expr, tail)) = args.split_first() else {
             return Err(self.annotate_expr_error(
@@ -231,28 +169,27 @@ impl<'h, 'a> Solver<'h, 'a> {
                 CallTarget::Dispatch { .. } => (true, true),
                 CallTarget::ThrowTypeError => (false, false),
             };
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::PromiseNew {
-                    value_loc,
-                    resolve_tid,
-                    reject_tid,
-                    executor: Some(PromiseExecutor {
-                        call: executor,
-                        handles: [
-                            pass_resolve.then_some(resolve_tid),
-                            pass_reject.then_some(reject_tid),
-                        ]
-                        .map(|tid| {
-                            tid.map(|template| FuncIdentity {
-                                template,
-                                capture_owner: owner,
-                            })
-                        }),
+            let entry = self.inst_sites[s.inst]
+                .get_mut(site)
+                .ok_or_else(|| Diagnostic::internal("missing promise constructor site"))?;
+            entry.resolution = Some(SiteResolution::PromiseNew {
+                value_loc,
+                resolve_tid,
+                reject_tid,
+                executor: Some(PromiseExecutor {
+                    call: executor,
+                    handles: [
+                        pass_resolve.then_some(resolve_tid),
+                        pass_reject.then_some(reject_tid),
+                    ]
+                    .map(|tid| {
+                        tid.map(|template| FuncIdentity {
+                            template,
+                            capture_owner: owner,
+                        })
                     }),
-                },
-            );
+                }),
+            });
         }
         Ok(promise_cell)
     }
@@ -389,8 +326,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             ReactionKind::Finally => inner_raw,
         };
 
-        let result = self.expr_cell_loc(s.inst, expr)?;
-        self.write_loc(result, ret_settled);
         let pass_fulfilled = on_fulfilled.is_some_and(|(cb, _)| cb.needs_value());
         let pass_rejected = on_rejected.is_some_and(|(cb, _)| cb.needs_value());
         let helper = self.intern_helper(
@@ -404,22 +339,19 @@ impl<'h, 'a> Solver<'h, 'a> {
             },
             byte_offset,
         );
-        self.record_site(
-            s.inst,
-            expr,
-            SiteResolution::PromiseReaction {
-                result,
-                helper,
-                pass_first: if kind == ReactionKind::Catch {
-                    pass_rejected
-                } else {
-                    pass_fulfilled
-                },
-                pass_second: kind == ReactionKind::Then && pass_rejected,
+        let (site, result, cell) = self.storage_site(s.inst, expr, CellKind::Promise)?;
+        site.resolution = Some(SiteResolution::PromiseReaction {
+            result,
+            helper,
+            pass_first: if kind == ReactionKind::Catch {
+                pass_rejected
+            } else {
+                pass_fulfilled
             },
-        );
-
-        Ok(self.types.cell(result, CellKind::Promise))
+            pass_second: kind == ReactionKind::Then && pass_rejected,
+        });
+        self.write_loc(result, ret_settled);
+        Ok(cell)
     }
 
     pub(super) fn eval_timer_start(

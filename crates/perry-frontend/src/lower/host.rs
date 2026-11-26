@@ -205,24 +205,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok((self.optional(ctx, value), text))
     }
 
-    /// A property (`args` is `None`) or method of `Headers`, `Response` or `Request`.
-    fn web_member(
-        &mut self,
-        ctx: &mut Context,
-        receiver: Value,
-        name: &str,
-        args: Option<&'s [Expr]>,
-    ) -> Result<Value> {
-        crate::lower::methods::Call::member(
-            crate::lower::methods::Receiver::of(ctx, receiver)?,
-            name,
-            args,
-        )?
-        .ok_or_else(|| unsupported!("{name} is not supported on this receiver"))?
-        .lower(self, ctx, receiver)?
-        .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "web members produce a value"))
-    }
-
     /// `Writable.toWeb(process.stdout)` or of `process.stderr`.
     pub(super) fn writable_to_web(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         let intrinsic = match args {
@@ -244,12 +226,12 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        let property = hir_compat::native_member_is_property(
-            crate::lower::methods::Receiver::of(ctx, receiver)?,
-            method,
-            args,
-        );
-        self.web_member(ctx, receiver, method, (!property).then_some(args))
+        crate::methods::Method::lookup(crate::methods::Receiver::of(ctx, receiver)?, method)
+            .filter(|m| !m.is_property() || args.is_empty())
+            .ok_or_else(|| unsupported!("{method} is not supported on this receiver"))?
+            .bind(method, args)?
+            .lower(self, ctx, receiver)?
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "web members produce a value"))
     }
 
     fn fs_path(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {

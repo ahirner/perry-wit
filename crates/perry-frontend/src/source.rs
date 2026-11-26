@@ -94,6 +94,7 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
 #[derive(Default)]
 pub(crate) struct Analysis {
     bindings: HashMap<u32, SourceBinding>,
+    pub(crate) signature_prefix: String,
     pub(crate) sparse_arrays: bool,
 
     pub(crate) names: FreshNames,
@@ -110,6 +111,7 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
         locations: &'a mut Locations<'s>,
         mark_spans: bool,
         analysis: Analysis,
+        closure_signatures: Vec<ast::TsTypeAliasDecl>,
         closures: HashSet<ast::Id>,
         enclosing_depth: u32,
     }
@@ -127,6 +129,56 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
             });
         }
 
+        // Perry erases nested declaration parameters. A type-only alias lets Perry lower
+        // their annotations and bounds with the same rules as top-level declarations.
+        fn closure_signature<'p>(
+            &mut self,
+            span: Span,
+            generics: Option<&ast::TsTypeParamDecl>,
+            params: impl Iterator<Item = &'p ast::Pat>,
+            result: Option<&ast::TsTypeAnn>,
+        ) {
+            let Some(generics) = generics else { return };
+            let types = params
+                .map(|mut p| {
+                    while let ast::Pat::Assign(a) = p {
+                        p = &a.left;
+                    }
+                    match p {
+                        ast::Pat::Ident(p) => p.type_ann.as_deref(),
+                        ast::Pat::Array(p) => p.type_ann.as_deref(),
+                        ast::Pat::Object(p) => p.type_ann.as_deref(),
+                        ast::Pat::Rest(p) => p.type_ann.as_deref(),
+                        _ => None,
+                    }
+                })
+                .chain([result]);
+            let elem_types = types
+                .map(|ann| ast::TsTupleElement {
+                    span,
+                    label: None,
+                    ty: ann.map_or_else(
+                        || {
+                            Box::new(
+                                ast::TsKeywordType {
+                                    span,
+                                    kind: ast::TsKeywordTypeKind::TsAnyKeyword,
+                                }
+                                .into(),
+                            )
+                        },
+                        |a| a.type_ann.clone(),
+                    ),
+                })
+                .collect();
+            self.closure_signatures.push(ast::TsTypeAliasDecl {
+                span,
+                declare: true,
+                id: ast::Ident::new_no_ctxt("".into(), span),
+                type_params: Some(Box::new(generics.clone())),
+                type_ann: Box::new(ast::TsTupleType { span, elem_types }.into()),
+            });
+        }
         fn record_param(&mut self, pat: &ast::Pat) {
             walk_pattern(pat, false, &mut |site, annotated| {
                 if annotated {
@@ -198,6 +250,12 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
             param.visit_mut_children_with(self);
         }
         fn visit_mut_arrow_expr(&mut self, arrow: &mut ast::ArrowExpr) {
+            self.closure_signature(
+                arrow.span,
+                arrow.type_params.as_deref(),
+                arrow.params.iter(),
+                arrow.return_type.as_deref(),
+            );
             for pat in &arrow.params {
                 self.record_param(pat);
             }
@@ -205,12 +263,32 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
             arrow.visit_mut_children_with(self);
             self.enclosing_depth -= 1;
         }
+        fn visit_mut_fn_expr(&mut self, expr: &mut ast::FnExpr) {
+            let f = &expr.function;
+            self.closure_signature(
+                f.span,
+                f.type_params.as_deref(),
+                f.params.iter().map(|p| &p.pat),
+                f.return_type.as_deref(),
+            );
+            expr.visit_mut_children_with(self);
+        }
         fn visit_mut_fn_decl(&mut self, decl: &mut ast::FnDecl) {
             if self.enclosing_depth > 0 {
+                let f = &decl.function;
+                self.closure_signature(
+                    f.span,
+                    f.type_params.as_deref(),
+                    f.params.iter().map(|p| &p.pat),
+                    f.return_type.as_deref(),
+                );
                 self.closures.insert(decl.ident.to_id());
             }
-            self.enclosing_depth += 1;
             decl.visit_mut_children_with(self);
+        }
+        fn visit_mut_function(&mut self, function: &mut ast::Function) {
+            self.enclosing_depth += 1;
+            function.visit_mut_children_with(self);
             self.enclosing_depth -= 1;
         }
         fn visit_mut_for_stmt(&mut self, stmt: &mut ast::ForStmt) {
@@ -285,10 +363,21 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
         locations,
         mark_spans: true,
         analysis: Analysis::default(),
+        closure_signatures: Vec::new(),
         closures: HashSet::new(),
         enclosing_depth: 0,
     };
     module.visit_mut_with(&mut scanner);
+    let analysis = &mut scanner.analysis;
+    if !scanner.closure_signatures.is_empty() {
+        analysis.signature_prefix = analysis.names.prefix("closure_signature");
+        for mut alias in scanner.closure_signatures {
+            alias.id.sym = format!("{}{}", analysis.signature_prefix, alias.span.lo.0).into();
+            module
+                .body
+                .push(ast::Stmt::Decl(ast::Decl::TsTypeAlias(Box::new(alias))).into());
+        }
+    }
     scanner.analysis
 }
 

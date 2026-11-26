@@ -2,7 +2,7 @@
 use crate::{
     analysis::{ModuleAnalyses, module_analyses},
     function::FunctionLowering,
-    repr::{Repr, i32_type, repr, slot_size},
+    repr::{Repr, i32_type, repr},
     runtime::Runtime,
 };
 use perry_abi::layout::{array, record, roots as root_stack};
@@ -173,7 +173,7 @@ impl FunctionLowering<'_, '_> {
                     )
                     .to_diag(ctx)?;
                     self.frame_slots.insert(op, bytes);
-                    bytes += Self::record_size(ctx, record)?;
+                    bytes += self.state.record_layouts.get(ctx, record)?.size;
                 }
             }
         }
@@ -557,14 +557,13 @@ impl FunctionLowering<'_, '_> {
             shape
         } else {
             let record = TypedHandle::<RecordType>::from_handle(ty, ctx).to_diag(ctx)?;
-            let mut offsets = Vec::new();
-            let mut field_offset = record::HEADER;
-            for (_, field_ty) in record.deref(ctx).fields().to_diag(ctx)?.iter() {
-                if repr(ctx, *field_ty).is_ok_and(|kind| kind == Repr::Ref) {
-                    offsets.push(field_offset);
-                }
-                field_offset += slot_size(ctx, *field_ty);
-            }
+            let layout = self.state.record_layouts.get(ctx, record)?;
+            let mut offsets: Vec<_> = layout
+                .fields
+                .values()
+                .filter(|field| repr(ctx, field.ty).is_ok_and(|kind| kind == Repr::Ref))
+                .map(|field| field.offset)
+                .collect();
             if self.state.retains_json {
                 offsets.push(record::JSON);
             }

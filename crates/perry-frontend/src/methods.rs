@@ -203,7 +203,7 @@ macro_rules! registry {
             )*
         } )*
     ) => {
-        #[derive(Clone, Copy)]
+        #[derive(Clone, Copy, Debug)]
         pub(crate) enum Method { $($($variant,)*)* }
 
         impl Method {
@@ -250,21 +250,22 @@ macro_rules! registry {
                 match self { $($(Self::$variant(..) => Method::$variant,)*)* }
             }
 
-            pub(crate) fn parse(receiver: Receiver, name: &str, args: &'s [Expr]) -> Result<Option<Self>> {
-                Self::member(receiver, name, Some(args))
-            }
-
             pub(crate) fn member(receiver: Receiver, name: &str, args: Option<&'s [Expr]>) -> Result<Option<Self>> {
-                let Some(method) = Method::lookup(receiver, name).filter(|m| m.is_property() == args.is_none()) else { return Ok(None) };
-                let args = args.unwrap_or(&[]);
-                Ok(Some(match method {
-                    $($(Method::$variant => {
+                Method::lookup(receiver, name).filter(|m| m.is_property() == args.is_none())
+                    .map(|m| m.bind(name, args.unwrap_or_default())).transpose()
+            }
+        }
+
+        impl Method {
+            pub(crate) fn bind<'s>(self, name: &str, args: &'s [Expr]) -> Result<Call<'s>> {
+                Ok(match self {
+                    $($(Self::$variant => {
                         let Some(($($argument,)*)) = arguments!(args; $($argument $(:$mode)?),*) else {
                             bail_unsupported!("{}.{} {}", $class, name, $requirement);
                         };
-                        Self::$variant($($argument),*)
+                        Call::$variant($($argument),*)
                     },)*)*
-                }))
+                })
             }
         }
     };

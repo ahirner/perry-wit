@@ -4,7 +4,6 @@ use crate::engine::types::{EmittedId, IdxVec};
 
 pub(super) enum Callee<'s> {
     Source(&'s Function<'s>, Signature<'s>),
-    Member(&'s str, &'s Function<'s>),
     Native(&'s crate::engine::NativeFunction, Signature<'s>),
 }
 
@@ -22,7 +21,6 @@ impl<'s> Functions<'s> {
     pub(super) fn get(&self, id: &FuncId) -> Option<&Signature<'s>> {
         match self.callee(*id)? {
             Callee::Source(_, signature) | Callee::Native(_, signature) => Some(signature),
-            Callee::Member(..) => None,
         }
     }
 
@@ -32,7 +30,7 @@ impl<'s> Functions<'s> {
 
     pub(super) fn source(&self, id: FuncId) -> Option<&'s Function<'s>> {
         match self.callee(id)? {
-            Callee::Member(_, function) | Callee::Source(function, _) => Some(function),
+            Callee::Source(function, _) => Some(function),
             Callee::Native(..) => None,
         }
     }

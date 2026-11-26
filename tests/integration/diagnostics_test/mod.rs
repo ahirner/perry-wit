@@ -195,7 +195,7 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
             "export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}",
             "import { Box } from './lib';\nexport function run(): number {\n  return new Box('bad').asNumber();\n}",
             codes::TYPE_MISMATCH,
-            "called from here",
+            "while instantiating 'Box::asNumber'",
         ),
     ] {
         let err = api::compile_core(&program_with(

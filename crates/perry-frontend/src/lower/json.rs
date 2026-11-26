@@ -33,9 +33,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let value = self.expression(ctx, expr)?;
         let value = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
-        let callback = (self.is_callback(replacer))
-            .then(|| self.prepare_callback(ctx, replacer))
-            .transpose()?;
+        let callback = self.optional_callback(ctx, replacer)?;
         let keys = if callback.is_some() {
             self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
         } else {

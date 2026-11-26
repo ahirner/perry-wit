@@ -112,7 +112,6 @@ pub(crate) fn build_module(
     let bodies = &specialization.bodies;
     let mut functions = HashMap::new();
     let mut command = None;
-    let index = bodies.index(locations, &specialization.instances);
     let module = ModuleOp::new(ctx, identifier(&module_name(&declarations.name))?);
     // Subclass instances flow into base-typed bindings, where methods would bind statically
     // and `instanceof` would read the declared type: reject inheritance instead of miscompiling.
@@ -130,6 +129,7 @@ pub(crate) fn build_module(
             .map(crate::shapes::ClassShape::Instance),
     );
     let (mut types, records) = layouts;
+    types.applications.retain(|_, app| !app.reads_class_fields);
     let shapes = Shapes::new(
         module,
         declarations,
@@ -137,7 +137,6 @@ pub(crate) fn build_module(
         locations,
         specialization,
         (&mut types, records),
-        index,
     );
     // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
     // functions of `node:fs/promises`.
@@ -190,9 +189,16 @@ pub(crate) fn build_module(
     let mut shapes = shapes.prepare(ctx);
     shapes.define_environments(ctx)?;
     let mut signatures = Functions::default();
-    for function in &bodies.functions {
+    let source_functions = bodies.functions.iter().map(|f| (f, None)).chain(
+        bodies
+            .classes
+            .iter()
+            .filter_map(|class| Some((class.constructor.as_ref()?, Some(class)))),
+    );
+    for (function, class) in source_functions.clone() {
         let display_name = locations.display_function_name(&function.name);
-        if function.is_generator {
+        let declaration = &specialization.templates[function.template];
+        if declaration.is_generator {
             return Err(locations.annotate_caller(
                 unsupported!("generator function {display_name} is not supported yet")
                     .with_fallback_span(locations.function_span(&function.name)),
@@ -201,21 +207,19 @@ pub(crate) fn build_module(
         }
 
         let mut params = Vec::with_capacity(function.params.len());
-        if let Some(instance) = &function.signature {
-            if let Some(env) = instance.environment {
-                params.push(ParamSig::native(
-                    &shapes,
-                    crate::engine::NativeParam::Environment(env),
-                    Parameter::Environment(env),
-                )?);
-            }
-            if let Some(receiver) = instance.receiver {
-                params.push(ParamSig::native(
-                    &shapes,
-                    crate::engine::NativeParam::Value(receiver),
-                    Parameter::Receiver,
-                )?);
-            }
+        if let Some(env) = function.environment {
+            params.push(ParamSig::native(
+                &shapes,
+                crate::engine::NativeParam::Environment(env),
+                Parameter::Environment(env),
+            )?);
+        }
+        if let Some(receiver) = function.receiver {
+            params.push(ParamSig::native(
+                &shapes,
+                crate::engine::NativeParam::Value(receiver),
+                Parameter::Receiver,
+            )?);
         }
         for (idx, &(param, solved)) in function.params.iter().enumerate() {
             if param.is_rest && idx + 1 != function.params.len() {
@@ -278,18 +282,17 @@ pub(crate) fn build_module(
             Callee::Source(
                 function,
                 Signature {
-                    inline: (function
-                        .signature
-                        .as_ref()
-                        .is_some_and(|s| s.inline.is_some())
-                        || function
-                            .captures
-                            .iter()
-                            .any(|id| !shapes.globals.contains_key(id)))
+                    inline: (class.is_none()
+                        && (function.inline.is_some()
+                            || (function.environment.is_none()
+                                && declaration
+                                    .captures
+                                    .iter()
+                                    .any(|id| !shapes.globals.contains_key(id)))))
                     .then_some(function),
-                    is_async: function.is_async,
+                    is_async: declaration.is_async,
                     await_initialization: function.is_exported
-                        && function.is_async
+                        && declaration.is_async
                         && declarations.has_top_level_await,
                     top_level: false,
                     name: identifier(&function.name)?,
@@ -317,25 +320,11 @@ pub(crate) fn build_module(
         .map_err(annotate)?;
         signatures.insert(id, Callee::Native(function, signature));
     }
-    for class in bodies.classes.iter() {
-        for function in class
-            .methods
-            .iter()
-            .chain(&class.static_methods)
-            .chain(&class.constructor)
-            .chain(class.getters.iter().chain(&class.setters).map(|(_, f)| f))
-        {
-            signatures.insert(function.id, Callee::Member(&class.name, function));
-        }
-    }
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run (calls lower it to nothing); without other statements there is no main
     // function.
     let has_init = !specialization.resources.is_empty()
-        || bodies
-            .classes
-            .iter()
-            .any(|class| !class.static_fields.is_empty())
+        || !bodies.static_fields.is_empty()
         || bodies.init.iter().any(|statement| {
             !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
                 if hir_compat::is_import_initializer(callee))
@@ -399,12 +388,20 @@ pub(crate) fn build_module(
             module.append_operation(ctx, func.get_operation(), 0);
         }
     }
-    let source = bodies.functions.iter().map(|f| {
+    let source = source_functions.map(|(f, class)| {
+        let declaration = &specialization.templates[f.template];
         (
             f.id,
-            builder::Body::Statements(BodyOwner::Function(f.id), f.body),
+            class.map_or(
+                builder::Body::Statements(BodyOwner::Function(f.id), declaration.body),
+                |c| builder::Body::Constructor(c, f),
+            ),
             f.is_exported,
-            f.captures,
+            if f.environment.is_some() {
+                &[]
+            } else {
+                declaration.captures
+            },
         )
     });
     let native = bodies.native.iter().map(|(id, f)| {

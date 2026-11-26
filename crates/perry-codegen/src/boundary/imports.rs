@@ -16,9 +16,12 @@ impl FunctionLowering<'_, '_> {
                 "WIT import {binding} is absent from the selected world"
             )
         })?;
-        if let ImportKind::Resource { key, operation } = import.kind {
-            return self.resource_helper(ctx, op, key, operation);
-        }
+        let signature = match &import.kind {
+            ImportKind::Function(signature) => signature,
+            ImportKind::Resource { key, operation } => {
+                return self.resource_helper(ctx, op, *key, *operation);
+            }
+        };
         let operands: Vec<_> = op.deref(ctx).operands().collect();
         ensure_diag!(
             operands.len() == import.params.len(),
@@ -42,56 +45,26 @@ impl FunctionLowering<'_, '_> {
         )?;
         self.canonical_borrows = true;
         let mut args = Vec::new();
-        let mut params: Vec<_> = import.params.iter().flat_map(AbiType::flat).collect();
-        if params.len()
-            > if import.asynchronous {
-                4
-            } else {
-                MAX_FLAT_PARAMS
-            }
-        {
-            let size = self.i32_const(ctx, record_size(import.params.iter()) as i32);
-            let area = self.alloc(ctx, size);
-            for (((abi, mir), value), offset) in import
-                .params
-                .iter()
-                .zip(&operands)
-                .zip(&values)
-                .zip(record_offsets(import.params.iter()))
-            {
-                self.lower_abi(
-                    ctx,
-                    abi,
-                    mir.get_type(ctx),
-                    *value,
-                    Canonical::Memory(area, offset),
-                )?;
-            }
-            args.push(area);
-            params = vec![Flat::I32];
-        } else {
-            for ((abi, mir), value) in import.params.iter().zip(&operands).zip(&values) {
-                self.lower_abi(
-                    ctx,
-                    abi,
-                    mir.get_type(ctx),
-                    *value,
-                    Canonical::Flat(&mut args),
-                )?;
-            }
+        let param_area = import.indirect_size.map(|size| {
+            let bytes = self.i32_const(ctx, size as i32);
+            self.alloc(ctx, bytes)
+        });
+        for ((abi, mir), value) in import.params.iter().zip(&operands).zip(&values) {
+            let target = match param_area {
+                Some(area) => Canonical::Memory(area, abi.offset),
+                None => Canonical::Flat(&mut args),
+            };
+            self.lower_abi(ctx, abi, mir.get_type(ctx), *value, target)?;
         }
-        let result_flat = import
-            .result
-            .as_ref()
-            .map(AbiType::flat)
-            .unwrap_or_default();
+        if let Some(area) = param_area {
+            args.push(area);
+        }
         let area = if let Some(result) = &import.result
-            && (result_flat.len() > 1 || import.asynchronous)
+            && signature.retptr
         {
-            let size = self.i32_const(ctx, result.size() as i32);
+            let size = self.i32_const(ctx, result.size as i32);
             let area = self.alloc(ctx, size);
             args.push(area);
-            params.push(Flat::I32);
             Some(area)
         } else {
             None
@@ -131,7 +104,7 @@ impl FunctionLowering<'_, '_> {
         let foreign = Foreign {
             module: import.module.clone(),
             name,
-            params,
+            params: signature.params.iter().copied().map(Flat::from).collect(),
         };
         self.commit_resources(ctx);
         if let Some(transfer) = transfer {
@@ -166,8 +139,8 @@ impl FunctionLowering<'_, '_> {
         } else {
             // A synchronous lowering returns one flat result directly; none, or more through
             // `area`.
-            let result = self.preserving_task(ctx, |b, ctx| match *result_flat.as_slice() {
-                [flat] => Some(b.host(ctx, ValueHost::Foreign(foreign, flat), args)),
+            let result = self.preserving_task(ctx, |b, ctx| match signature.results.as_slice() {
+                &[flat] => Some(b.host(ctx, ValueHost::Foreign(foreign, flat.into()), args)),
                 _ => {
                     b.host_void(ctx, EffectHost::Foreign(foreign), args);
                     None
@@ -194,10 +167,7 @@ impl FunctionLowering<'_, '_> {
     }
     fn finish_transfer_scope(&mut self, ctx: &mut Context, transfer: Value) {
         let scope = self.load(ctx, MemKind::I32, transfer, transfer::SCOPE);
-        let release = self.new_block(ctx, vec![]);
-        let done = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, scope, (release, vec![]), (done, vec![]));
-        self.block = release;
+        let done = self.enter_if(ctx, scope);
         self.runtime_void(ctx, Runtime::ResourceScopeFinish, vec![scope]);
         let zero = self.i32_const(ctx, 0);
         self.store(ctx, MemKind::I32, transfer, transfer::SCOPE, zero);
@@ -256,12 +226,9 @@ impl FunctionLowering<'_, '_> {
         let area = self.load(ctx, MemKind::I32, transfer, transfer::AREA);
         for index in 0..self.state.foreign_transfers.len() {
             let import = self.state.foreign_transfers[index];
-            let selected = self.new_block(ctx, vec![]);
-            let other = self.new_block(ctx, vec![]);
             let index = self.i32_const(ctx, index as i32);
             let matches = self.num(ctx, NumOpcode::I32Eq, vec![kind, index]);
-            self.cond_br(ctx, matches, (selected, vec![]), (other, vec![]));
-            self.block = selected;
+            let other = self.enter_if(ctx, matches);
             if let Some(abi) = &import.result {
                 self.discard_canonical(ctx, abi, area, 0)?;
             }
@@ -286,13 +253,13 @@ impl FunctionLowering<'_, '_> {
         area: Value,
         offset: u32,
     ) -> Result<()> {
-        match abi {
-            AbiType::String | AbiType::List(_) => {
+        match &abi.kind {
+            AbiKind::String | AbiKind::List(_) => {
                 let data = self.load(ctx, MemKind::I32, area, offset);
-                if let AbiType::List(element) = abi {
+                if let AbiKind::List(element) = &abi.kind {
                     let len = self.load(ctx, MemKind::I32, area, offset + 4);
                     self.counted_loop(ctx, len, |b, ctx, index| {
-                        let stride = b.i32_const(ctx, element.size() as i32);
+                        let stride = b.i32_const(ctx, element.size as i32);
                         let position = b.num(ctx, NumOpcode::I32Mul, vec![index, stride]);
                         let element_area = b.num(ctx, NumOpcode::I32Add, vec![data, position]);
                         b.discard_canonical(ctx, element, element_area, 0)
@@ -300,28 +267,29 @@ impl FunctionLowering<'_, '_> {
                 }
                 self.runtime_void(ctx, Runtime::CabiRelease, vec![data]);
             }
-            AbiType::Record(fields) => {
-                for ((_, field), at) in fields.iter().zip(abi.field_offsets()) {
+            AbiKind::Record(fields) => {
+                for (_, field) in fields {
+                    let at = field.offset;
                     self.discard_canonical(ctx, field, area, offset + at)?;
                 }
             }
-            AbiType::Option(_)
-            | AbiType::Result { .. }
-            | AbiType::Enum(_)
-            | AbiType::Variant(_) => {
+            AbiKind::Option(_)
+            | AbiKind::Result { .. }
+            | AbiKind::Enum(_, _)
+            | AbiKind::Variant(_, _) => {
                 let tag = self.load(ctx, abi.discriminant_kind(), area, offset);
-                self.sum_switch(ctx, tag, abi.cases(), vec![], |b, ctx, _, payload| {
+                self.sum_switch(ctx, tag, abi.cases(), vec![], |b, ctx, _, (_, payload)| {
                     if let Some(payload) = payload {
-                        b.discard_canonical(ctx, payload, area, offset + abi.payload_offset())?;
+                        b.discard_canonical(ctx, payload, area, offset + payload.offset)?;
                     }
                     Ok(vec![])
                 })?;
             }
-            AbiType::Resource { key, owned: true } => {
+            AbiKind::Resource { key, owned: true } => {
                 let handle = self.load(ctx, MemKind::I32, area, offset);
                 self.discard_resource(ctx, *key, handle);
             }
-            AbiType::ByteStream | AbiType::OkHandle { .. } => {
+            AbiKind::ByteStream | AbiKind::OkHandle { .. } => {
                 bail_unsupported!("resource-bearing async imports need an ownership binding")
             }
             _ => {}

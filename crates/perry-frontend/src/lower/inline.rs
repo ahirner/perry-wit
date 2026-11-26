@@ -22,25 +22,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         body: &'s [Stmt],
         exprs: impl IntoIterator<Item = &'s Expr>,
     ) {
-        self.variant_guards.assign_projected(
-            self.frame.owner,
-            body,
-            exprs,
-            |id| {
-                if let Some(Expr::Closure { params, body, .. }) =
-                    self.shapes.specialization.lexical.closure(id)
-                {
-                    return Some(crate::source::authored_body(params, body));
+        if self.variant_guards.depth() != 0 {
+            let writes = &self.shapes.specialization.writes;
+            for region in crate::narrowing::Region::of(body, exprs) {
+                if let Some(locals) = writes.get(&(self.frame.owner, region)) {
+                    for &local in locals {
+                        self.variant_guards.assign(local);
+                    }
                 }
-                self.signatures.get(&id)?.inline.map(|f| f.body)
-            },
-            |owner, expr| {
-                let plans = &self.shapes.specialization.instances;
-                plans
-                    .call_target(owner, expr)
-                    .or_else(|| plans.reference(owner, expr))
-            },
-        );
+            }
+        }
     }
 
     pub(super) fn inline_body(

@@ -9,13 +9,10 @@
 //! export runs until the host has read it.
 use super::{Compiled, emit_component, lower};
 use crate::component;
-use perry_codegen::boundary::{AbiType, Export, ExportKind, Flat};
+use perry_codegen::boundary::{AbiKind, Export, ExportKind};
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal};
 use pliron::context::Context;
-use wit_parser::{
-    Resolve, Type, TypeDefKind, WorldId, WorldItem,
-    abi::{FlatTypes, WasmType},
-};
+use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 /// The world programs implement.
 pub(crate) fn is_handler_world(resolve: &Resolve, world: WorldId) -> bool {
@@ -134,16 +131,21 @@ pub(crate) fn compile(
     let result = handle
         .result
         .ok_or_else(|| Diagnostic::internal("handle returns a result"))?;
+    let layouts = super::abi::Layouts::new(&resolve)?;
     let exports = vec![Export {
         source_name: None,
         annotations: Vec::new(),
         core_name: format!("{name}#handle"),
         function: "__perryHttpHandle".into(),
-        params: vec![AbiType::U32],
-        result: Some(AbiType::OkHandle {
-            flat: flat(&resolve, &result),
-            error_case: internal_error(&resolve, &result)?,
-        }),
+        signature: layouts.signature(handle, false),
+        params: vec![layouts.value(Type::U32)?],
+        indirect_size: None,
+        result: Some(layouts.layout(
+            result,
+            AbiKind::OkHandle {
+                error_case: internal_error(&resolve, &result)?,
+            },
+        )),
         kind: ExportKind::Async {
             task_return: (format!("[export]{name}"), "handle".into()),
             command: false,
@@ -162,22 +164,6 @@ pub(crate) fn compile(
         vec![],
         false,
     )
-}
-
-/// The flat core types of `ty` (at most the 16 that `task.return` takes directly).
-fn flat(resolve: &Resolve, ty: &Type) -> Vec<Flat> {
-    let mut storage = [WasmType::I32; 17];
-    let mut flat = FlatTypes::new(&mut storage);
-    resolve.push_flat(ty, &mut flat);
-    flat.to_vec()
-        .into_iter()
-        .map(|ty| match ty {
-            WasmType::I64 | WasmType::PointerOrI64 => Flat::I64,
-            WasmType::F32 => Flat::F32,
-            WasmType::F64 => Flat::F64,
-            _ => Flat::I32,
-        })
-        .collect()
 }
 
 /// The case of `error-code` (the `err` of `result`) that reports a handler's exception:

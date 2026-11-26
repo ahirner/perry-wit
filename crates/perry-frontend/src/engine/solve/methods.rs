@@ -1,8 +1,33 @@
 //! Method call resolution on classes, resources, function properties, and built-ins.
 use super::*;
-use crate::methods::MethodResult;
+use crate::methods::{Method, MethodResult};
 
 impl<'h, 'a> Solver<'h, 'a> {
+    pub(super) fn builtin_rule(
+        &mut self,
+        s: &EvalState<'h>,
+        expr: &'h Expr,
+        receiver: Ty,
+        name: &str,
+        allow_property: bool,
+    ) -> Option<MethodResult> {
+        let Some(family) = builtins::receiver_of(self.ctx, self.decls, self.types, receiver) else {
+            return match self.types.kind(receiver) {
+                TyKind::ClassInst(_) => None,
+                TyKind::Tuple(_) => Method::lookup(
+                    crate::methods::Receiver::Value(crate::methods::Kind::Array),
+                    name,
+                )
+                .filter(|m| !m.is_property() || allow_property)
+                .map(Method::result_rule),
+                _ => Method::unique_result_rule(name),
+            };
+        };
+        let method = Method::lookup(family, name).filter(|m| !m.is_property() || allow_property)?;
+        self.record_site(s.inst, expr, SiteResolution::Builtin(method));
+        Some(method.result_rule())
+    }
+
     pub(super) fn method_result(
         &mut self,
         inst: InstanceId,
@@ -162,11 +187,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .with_fallback_span(span));
             }
             if let Some(member) = self.index.receiver_members.get(object, owner) {
-                self.record_site(
-                    s.inst,
-                    expr,
-                    SiteResolution::MemberCall(MemberTarget::Resource(member)),
-                );
+                self.record_site(s.inst, expr, SiteResolution::ResourceCall(member));
                 return Ok(self.resource_result(member));
             }
             return Err(self.annotate_expr_error(
@@ -201,11 +222,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             for (value, &ty) in args.iter().zip(&arg_tys) {
                 self.push_argument(s.inst, stripped, value, ty, self.type_may_be_array(ty));
             }
+            self.builtin_rule(s, expr, stripped, name, false);
             return Ok(stripped);
         }
         if name == "set"
             && arg_tys.get(1).is_some_and(|&ty| self.types.has_func(ty))
-            && builtins::receiver_of(self.ctx, self.types, stripped)
+            && builtins::receiver_of(self.ctx, self.decls, self.types, stripped)
                 == Some(crate::methods::Receiver::Map)
         {
             return Err(self.annotate_expr_error(
@@ -216,6 +238,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if matches!(name, "push" | "unshift") && self.push_values(s.inst, stripped, args, &arg_tys)
         {
+            self.builtin_rule(s, expr, stripped, name, false);
             return Ok(Ty::NUMBER);
         }
 
@@ -235,7 +258,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 InstanceReq::new(method_tid, &arg_tys, Some(s.inst))
                     .receiver(Some(Receiver::Class(cinst_id)))
                     .at(byte_offset),
-                Some(args),
                 false,
             )?;
             return Ok(ret);
@@ -247,9 +269,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return self.eval_callable(s, expr, ty, Some(stripped), &arg_tys);
         }
 
-        if let Some(rule) =
-            builtins::lookup_method_result(self.ctx, self.types, stripped, name, false)
-        {
+        if let Some(rule) = self.builtin_rule(s, expr, stripped, name, false) {
             return Ok(self.method_result(
                 s.inst,
                 rule,

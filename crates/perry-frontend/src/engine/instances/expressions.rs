@@ -29,6 +29,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         let owner = self.solved.body_owner(instance);
         match site.coercion {
             Some(FuncCoercion::Callback { target, inputs }) => {
+                self.prepare_arguments(inputs);
                 self.prepare_call(target)?;
                 for &ty in self.types.tuple_slice(inputs) {
                     self.prepare_layouts(ty)?;
@@ -48,7 +49,15 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 | SiteResolution::TypedArray(ty)
                 | SiteResolution::CollectionNew(ty),
             ) => self.prepare_layouts(ty)?,
-            Some(SiteResolution::Call { target, .. }) => self.prepare_call(target)?,
+            Some(SiteResolution::Call {
+                target,
+                argument_types,
+                ..
+            }) => {
+                self.prepare_arguments(argument_types);
+                self.prepare_call(target)?;
+            }
+            Some(SiteResolution::ClassNew(_, arguments)) => self.prepare_arguments(arguments),
             Some(SiteResolution::Callback { .. }) => return Ok(()),
             Some(
                 SiteResolution::PromiseReaction { helper, .. }
