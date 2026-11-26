@@ -91,13 +91,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.after_terminator(ctx);
     }
 
-    fn object_literal_pairs(
-        &self,
-        expr: &'s Expr,
-    ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
-        crate::hir_compat::object_literal_pairs(expr, &self.shapes.specialization.literal_classes)
-    }
-
     fn temporal_fields(
         &mut self,
         ctx: &mut Context,
@@ -108,9 +101,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         let mut fields = vec![None; names.len()];
         let mut literal = false;
         let record = match input {
-            Some(FieldValue::Literal(expr)) if self.object_literal_pairs(expr).is_some() => {
+            Some(FieldValue::Literal(expr))
+                if let Some(properties) = self.object_literal_pairs(expr) =>
+            {
                 literal = true;
-                for (name, expr) in self.object_literal_pairs(expr).into_iter().flatten() {
+                for (name, expr) in properties {
                     let index = names.iter().position(|&(field, _)| field == name);
                     if index.is_none()
                         && let Fields::Duration(method) = schema

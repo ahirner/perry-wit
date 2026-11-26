@@ -403,28 +403,15 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         parts: &'s [ObjectPart],
-        first_evaluated: Option<Value>,
         expected: Option<TypedHandle<RecordType>>,
+        fallback: Option<TypedHandle<RecordType>>,
     ) -> Result<Value> {
-        let fallback = expected.or_else(|| {
-            first_evaluated
-                .and_then(|value| {
-                    perry_mir::typed::<RecordType>(ctx, present_type(ctx, value.get_type(ctx)))
-                        .filter(|record| record.deref(ctx).kind() == RecordKind::Object)
-                })
-                .or_else(|| {
-                    parts.iter().find_map(|part| match part {
-                        ObjectPart::Spread(value) => self.peek_record_type(ctx, value),
-                        _ => None,
-                    })
-                })
-        });
         let mut assembly = RecordAssembly {
             expected,
             fields: Vec::new(),
         };
         let mut sources = Vec::new();
-        for (index, part) in parts.iter().enumerate() {
+        for part in parts {
             let expr = part.value();
             if let Some(key) = hir_compat::static_property(part) {
                 sources.push(RecordSource::Insert(key));
@@ -435,13 +422,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     RecordInput::Expression(expr, fallback),
                 )?;
             } else {
-                let raw = if index == 0
-                    && let Some(first) = first_evaluated
-                {
-                    first
-                } else {
-                    self.expression(ctx, expr)?
-                };
+                let raw = self.expression(ctx, expr)?;
                 if matches!(kind(ctx, raw), Ok(Kind::Exception)) {
                     continue;
                 }

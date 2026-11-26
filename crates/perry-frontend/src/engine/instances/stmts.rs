@@ -1,7 +1,7 @@
 //! Local storage and statement contexts for each solved instance.
 use super::*;
 
-impl<'h> InstancePlanner<'h, '_> {
+impl<'h> InstancePlanner<'h, '_, '_> {
     pub(super) fn local_storage(
         &mut self,
         instance: InstanceId,

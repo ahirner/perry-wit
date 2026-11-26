@@ -28,8 +28,9 @@ struct Counts {
 #[test]
 fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()> {
     let wit = "package test:counter; interface counters {
-        resource counter {constructor(value:u32); get:func()->u32;}
+        resource counter {constructor(value:u32); get:func()->u32; twice:static func(value:u32)->counter;}
         resource label {constructor(); text:func()->string;}
+        copy:func(value:borrow<counter>)->counter;
         visit:func(values:list<u32>);
         drops:func()->u32;
     } world api {export counters;}";
@@ -39,9 +40,10 @@ fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()>
         "export let disposed=0;
         export function drops() {return disposed;} function read(instance) {return instance.value;}
         export class Local { constructor(value) {this.value=value;} get() {return read(this);}
+        static twice(value:number) {return new Local(value*2);}
         [Symbol.dispose]() {disposed++;} }",
     )?;
-    let source = "import { Local, drops } from './counter'; class Label { text(){return 'label';} } export const counters={Counter:Local,Label,drops,visit(values){for (const n of values) { if(n) continue; }}};";
+    let source = "import { Local, drops } from './counter'; class Label { text(){return 'label';} } export const counters={Counter:Local,Label,drops,copy(value){return new Local(value.get());},visit(values){for (const n of values) { if(n) continue; }}};";
     let entry = directory.path().join("entry.ts");
     let engine = Engine::default();
     let bytes = MemoryChecked.component(wit, "api", &entry.to_string_lossy(), source)?;
@@ -59,13 +61,51 @@ fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()>
     let get = instance
         .get_typed_func::<(ResourceAny,), (u32,)>(&mut store, &member("[method]counter.get")?)?;
     let drops = instance.get_typed_func::<(), (u32,)>(&mut store, &member("drops")?)?;
+    let twice = instance
+        .get_typed_func::<(u32,), (ResourceAny,)>(&mut store, &member("[static]counter.twice")?)?;
+    let copy =
+        instance.get_typed_func::<(ResourceAny,), (ResourceAny,)>(&mut store, &member("copy")?)?;
     let (a,) = new.call(&mut store, (42,))?;
-    let (b,) = new.call(&mut store, (7,))?;
+    let (b,) = twice.call(&mut store, (7,))?;
+    let (c,) = copy.call(&mut store, (b,))?;
     a.resource_drop(&mut store)?;
-    assert_eq!(get.call(&mut store, (b,))?, (7,));
+    assert_eq!(get.call(&mut store, (b,))?, (14,));
     assert_eq!(drops.call(&mut store, ())?, (1,));
     b.resource_drop(&mut store)?;
-    assert_eq!(drops.call(&mut store, ())?, (2,));
+    assert_eq!(get.call(&mut store, (c,))?, (14,));
+    c.resource_drop(&mut store)?;
+    assert_eq!(drops.call(&mut store, ())?, (3,));
+    Ok(())
+}
+
+#[test]
+fn resource_members_follow_the_receiver_in_retained_and_specialized_bodies() -> Result<()> {
+    let wit = "package test:members; interface host {
+        resource text { constructor(); read:func()->string; }
+        resource count { read:func()->u32; open:static func()->count; }
+        next:func()->text;
+    } world source { import host; } world solved { import host; export run:func()->u32; }";
+    let imports = "import {Text,Count,next} from 'test:members/host';";
+    let retained = format!(
+        "{imports} function retained():number {{
+        new Text()[Symbol.dispose](); return next().read().length + Count.open().read(); }}"
+    );
+    MemoryChecked.compile(wit, "source", "retained.ts", &retained)?;
+    let wrong_arity = retained.replace("next().read()", "next().read(1)");
+    let error = MemoryChecked
+        .compile(wit, "source", "retained.ts", &wrong_arity)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("retained body skipped WIT arity checking"))?;
+    assert!(
+        error
+            .to_string()
+            .contains("MethodTextRead expects 0 arguments, got 1"),
+        "{error}"
+    );
+    let solved = format!("{imports} function read(x) {{ return x.read(); }}
+        class Local {{ read() {{ return 2; }} }}
+        export function run() {{ return read(new Text()).length + read(Count.open()) + read(new Local()); }}");
+    MemoryChecked.compile(wit, "solved", "solved.ts", &solved)?;
     Ok(())
 }
 

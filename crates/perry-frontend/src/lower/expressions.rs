@@ -75,20 +75,19 @@ impl<'s> FunctionBuilder<'s, '_> {
             return self.expression_with(ctx, last, expected);
         }
         if let Some(args) = self.shapes.specialization.instances.regexp(expr) {
-            let facts = self.shapes.specialization;
-            let text = |arg: Option<&Expr>| match arg {
-                Some(arg) => facts.regexp_operand(arg).ok_or_else(|| {
+            let regex = self
+                .shapes
+                .specialization
+                .regexes
+                .get(expr)
+                .ok_or_else(|| {
                     unsupported!("RegExp construction is unsupported; use a bounded regex literal")
-                }),
-                None => Ok(String::new()),
-            };
-            let pattern = text(args.pattern)?;
-            let flags = text(args.flags)?;
+                })?;
             for arg in args.operands() {
                 self.effect(ctx, arg)?;
             }
             return Ok(self.emit_value(ctx, |ctx| {
-                perry_mir::RegexConstOp::new(ctx, &pattern, &flags)
+                perry_mir::RegexConstOp::new(ctx, &regex.pattern, &regex.flags)
             }));
         }
         if let Some(value) = self.date_expression(ctx, expr)? {
@@ -132,7 +131,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::RegExp { pattern, flags } => {
                 self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
             }
-            Expr::ObjectSpread { parts } => self.object_spread(ctx, parts, expected)?,
+            Expr::ObjectSpread { parts } => self.object_spread(ctx, parts, expected, None)?,
             Expr::ObjectRest {
                 object,
                 exclude_keys,
@@ -206,23 +205,14 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.array_length(ctx, array)
             }
             Expr::CallSpread { callee, args, .. } => self.array_push_spread(ctx, callee, args)?,
-            Expr::Call {
-                callee,
-                args,
-
-                byte_offset,
-                byte_end,
-                ..
-            } => self
-                .call(ctx, callee, args, *byte_offset..*byte_end)
-                .and_then(|value| match value {
-                    Some(value) => Ok(value),
-                    None => Err(Diagnostic::new(
-                        codes::TYPE_MISMATCH,
-                        "a void call has no value",
-                    )),
-                })
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
+            Expr::Call { byte_offset, .. } => {
+                self.source_operand(ctx, expr, expected)?.ok_or_else(|| {
+                    self.shapes.annotate_call(
+                        diag!(codes::TYPE_MISMATCH, "a void call has no value"),
+                        *byte_offset,
+                    )
+                })?
+            }
             Expr::MathFloor(value) => self.math_unary(ctx, Intrinsic::MathFloor, value)?,
             Expr::MathCeil(value) => self.math_unary(ctx, Intrinsic::MathCeil, value)?,
             Expr::MathTrunc(value) => self.math_unary(ctx, Intrinsic::MathTrunc, value)?,
@@ -241,10 +231,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.math_extremum(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, values)?
             }
             Expr::MathMinSpread(array) => {
-                self.math_extremum_spread(ctx, Intrinsic::MathMin, f64::INFINITY, array)?
+                self.math_extremum_spread(ctx, false, Arguments::OneSpread(array))?
             }
             Expr::MathMaxSpread(array) => {
-                self.math_extremum_spread(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, array)?
+                self.math_extremum_spread(ctx, true, Arguments::OneSpread(array))?
             }
             Expr::StructuredClone { value, .. } => {
                 let val = self.expression_with(ctx, value, expected)?;
@@ -488,46 +478,29 @@ impl<'s> FunctionBuilder<'s, '_> {
                 field_name,
                 value,
             } => self.class_static_field_set(ctx, class_name, field_name, value)?,
-            Expr::StaticMethodCall {
-                class_name,
-                method_name,
-                args,
-            } => self
-                .class_static_method_call(ctx, class_name, method_name, args)?
-                .ok_or_else(|| {
-                    Diagnostic::new(
+            Expr::StaticMethodCall { .. } => {
+                self.source_operand(ctx, expr, expected)?.ok_or_else(|| {
+                    diag!(
                         codes::TYPE_MISMATCH,
-                        "a void static method call has no value",
+                        "a void static method call has no value"
                     )
-                })?,
+                })?
+            }
             Expr::New {
                 class_name,
                 args,
                 byte_offset,
                 ..
             } if let Some(class) = self.shapes.instance_class(class_name) => self
-                .class_new(ctx, class, args)
+                .class_new(
+                    ctx,
+                    class,
+                    crate::lower::classes::ClassArguments::Expressions(args),
+                )
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
-                class_name,
-                args,
-                byte_offset,
-                ..
-            } => {
-                if let Some(owner) = self.shapes.decls.resource(class_name)
-                    && let Some(member) = self.shapes.decls.world.member(
-                        owner,
-                        crate::wit::MemberKind::Constructor,
-                        "",
-                    )
-                {
-                    self.resource_call(ctx, member, None, args)
-                        .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?
-                        .ok_or_else(|| internal!("WIT constructor has no result"))?
-                } else {
-                    self.object_literal(ctx, class_name, args, expected)?
-                }
-            }
+                class_name, args, ..
+            } => self.object_literal(ctx, class_name, args, expected)?,
             // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
             Expr::Array(items, _)
                 if expected.is_some_and(|ty| {

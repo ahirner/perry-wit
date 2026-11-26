@@ -10,23 +10,15 @@ impl Shapes<'_, Preparing<'_>> {
             _ => None,
         }
     }
-    fn variant_properties(&mut self, ctx: &Context, ty: Ty) -> Option<Vec<(String, Ty)>> {
-        let types = &mut self.types.source;
-        let ty = match types.kind(ty) {
-            TyKind::ClassInst(id) => self.specialization.bodies.classes[id].ty,
-            _ => ty,
-        };
-        Some(
-            Resolver::new(ctx, self.decls, types)
-                .record(ty, 0)?
-                .into_iter()
-                .filter(|(_, ty, _)| {
-                    !types.is_zero_sized_func(*ty, &self.specialization.capture_free)
-                })
-                .map(|(name, ty, _)| (name, ty))
-                .collect(),
-        )
+    fn runtime_properties(&self, props: PropSpan) -> impl Iterator<Item = (&str, Ty)> {
+        let types = &self.types.source;
+        types
+            .object_slice(props)
+            .iter()
+            .filter(|p| !types.is_zero_sized_func(p.ty, &self.specialization.capture_free))
+            .map(|p| (types.name_str(p.name), p.ty))
     }
+
     pub(super) fn solved_union(
         &mut self,
         ctx: &Context,
@@ -60,7 +52,7 @@ impl Shapes<'_, Preparing<'_>> {
         }))
     }
 
-    fn union_layout(
+    pub(super) fn union_layout(
         &mut self,
         ctx: &Context,
         members: &[Ty],
@@ -122,19 +114,24 @@ impl Shapes<'_, Preparing<'_>> {
         let records = members
             .iter()
             .map(|&ty| {
-                self.variant_properties(ctx, ty).ok_or_else(|| {
-                    Diagnostic::new(
-                        codes::UNSUPPORTED_TYPE,
-                        "unions other than tagged object types are not supported yet",
-                    )
-                })
+                let ty = match self.types.source.kind(ty) {
+                    TyKind::ClassInst(id) => self.specialization.bodies.classes[id].ty,
+                    _ => ty,
+                };
+                Resolver::new(ctx, self.decls, self.types.source)
+                    .record(ty, 0)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            codes::UNSUPPORTED_TYPE,
+                            "unions other than tagged object types are not supported yet",
+                        )
+                    })
             })
             .collect::<Result<Vec<_>>>()?;
         if !records.is_empty()
-            && records.iter().all(|props| {
-                props
-                    .iter()
-                    .any(|(name, prop_ty)| name == "ok" && *prop_ty == Ty::BOOLEAN)
+            && records.iter().all(|&props| {
+                self.runtime_properties(props)
+                    .any(|(name, ty)| name == "ok" && ty == Ty::BOOLEAN)
             })
         {
             return self.result(ctx, &records, visiting);
@@ -146,33 +143,31 @@ impl Shapes<'_, Preparing<'_>> {
     fn result(
         &mut self,
         ctx: &Context,
-        alternatives: &[Vec<(String, Ty)>],
+        alternatives: &[PropSpan],
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
         ensure_diag!(
             alternatives.len() == 2
-                || (alternatives.len() == 1
-                    && alternatives[0].len() == 1
-                    && alternatives[0][0].0 == "ok"),
+                || matches!(alternatives, [props] if self.runtime_properties(*props).count() == 1),
             codes::UNSUPPORTED_TYPE,
             "a tagged result needs exactly two alternatives"
         );
         let mut value_arg = None;
         let mut error_arg = None;
-        for properties in alternatives {
-            for (p_name, prop_ty) in properties {
-                match p_name.as_str() {
+        for &props in alternatives {
+            for (name, ty) in self.runtime_properties(props) {
+                match name {
                     "ok" => {}
                     "value" => {
                         ensure_diag!(
-                            value_arg.replace(*prop_ty).is_none(),
+                            value_arg.replace(ty).is_none(),
                             codes::UNSUPPORTED_TYPE,
                             "result payload value appears in both alternatives"
                         );
                     }
                     "error" => {
                         ensure_diag!(
-                            error_arg.replace(*prop_ty).is_none(),
+                            error_arg.replace(ty).is_none(),
                             codes::UNSUPPORTED_TYPE,
                             "result payload error appears in both alternatives"
                         );
@@ -200,18 +195,18 @@ impl Shapes<'_, Preparing<'_>> {
     fn variant(
         &mut self,
         ctx: &Context,
-        members: &[Vec<(String, Ty)>],
+        members: &[PropSpan],
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
         let mut cases = Vec::with_capacity(members.len());
-        for properties in members {
+        for &props in members {
             let mut tag = None;
             let mut val_arg = None;
             let mut invalid = false;
-            for (p_name, ty) in properties {
-                match p_name.as_str() {
+            for (name, ty) in self.runtime_properties(props) {
+                match name {
                     "tag" => {
-                        let Some(lit) = self.literal(ctx, *ty) else {
+                        let Some(lit) = self.literal(ctx, ty) else {
                             bail_diag!(
                                 codes::UNSUPPORTED_TYPE,
                                 "union members need a literal `tag`"
@@ -219,7 +214,7 @@ impl Shapes<'_, Preparing<'_>> {
                         };
                         tag = Some(lit.to_owned());
                     }
-                    "val" => val_arg = Some(*ty),
+                    "val" => val_arg = Some(ty),
                     _ => invalid = true,
                 }
             }

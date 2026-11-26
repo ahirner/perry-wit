@@ -7,6 +7,32 @@ use perry_hir::{
 };
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Copy)]
+pub(crate) enum Arguments<'s> {
+    Plain(&'s [Expr]),
+    Spread(&'s [perry_hir::CallArg]),
+    OneSpread(&'s Expr),
+}
+
+impl<'s> Iterator for Arguments<'s> {
+    type Item = (&'s Expr, bool);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Plain(args) => Some((args.split_off_first()?, false)),
+            Self::Spread(args) => Some(match args.split_off_first()? {
+                perry_hir::CallArg::Expr(expr) => (expr, false),
+                perry_hir::CallArg::Spread(expr) => (expr, true),
+            }),
+            Self::OneSpread(expr) => {
+                let arg = (*expr, true);
+                *self = Self::Plain(&[]);
+                Some(arg)
+            }
+        }
+    }
+}
+
 pub(crate) struct ModuleDeclarations {
     pub(crate) name: String,
     pub(crate) imports: Vec<Import>,
@@ -42,7 +68,7 @@ pub(crate) struct LocalDeclaration {
 pub(crate) struct SourceModule<'s> {
     pub(crate) constructors: super::Constructors,
     pub(crate) locations: crate::hir_compat::Locations<'s>,
-    pub(crate) witnesses: Vec<crate::hir_compat::Witness<'s, FuncId>>,
+    pub(crate) exports: crate::hir_compat::Exports<'s>,
     pub(crate) sparse_arrays: bool,
     pub(crate) declarations: ModuleDeclarations,
     pub(crate) bodies: Bodies,
@@ -55,7 +81,7 @@ impl<'s> SourceModule<'s> {
         analysis: super::Analysis,
         constructors: super::Constructors,
         locations: crate::hir_compat::Locations<'s>,
-        witnesses: Vec<crate::hir_compat::Witness<'s, FuncId>>,
+        exports: crate::hir_compat::Exports<'s>,
     ) -> Self {
         let locals = module
             .local_source_spans
@@ -83,7 +109,7 @@ impl<'s> SourceModule<'s> {
         Self {
             locations,
             constructors,
-            witnesses,
+            exports,
             sparse_arrays: analysis.sparse_arrays,
             declarations: ModuleDeclarations {
                 name: module.name,
@@ -155,7 +181,7 @@ pub(crate) struct InstanceFunction<'s> {
     pub(crate) params: Vec<(&'s Param, Option<crate::engine::types::Ty>)>,
     pub(crate) return_type: &'s perry_hir::types::Type,
     pub(crate) body: &'s [Stmt],
-    pub(crate) captures: std::borrow::Cow<'s, [LocalId]>,
+    pub(crate) captures: &'s [LocalId],
     pub(crate) is_async: bool,
     pub(crate) is_exported: bool,
     pub(crate) is_generator: bool,
@@ -170,7 +196,7 @@ impl<'s> From<&'s Function> for InstanceFunction<'s> {
             params: function.params.iter().map(|param| (param, None)).collect(),
             return_type: &function.return_type,
             body: authored_body(&function.params, &function.body),
-            captures: function.captures.as_slice().into(),
+            captures: &function.captures,
             is_async: function.is_async,
             is_exported: function.is_exported,
             is_generator: function.is_generator,
@@ -202,6 +228,7 @@ pub(crate) struct InstanceClass<'s> {
 }
 
 pub(crate) struct InstanceBodies<'s> {
+    pub(crate) exports: Vec<Option<FuncId>>,
     pub(crate) native: Vec<(FuncId, crate::engine::NativeFunction)>,
     pub(crate) init: &'s [Stmt],
     pub(crate) functions: Vec<InstanceFunction<'s>>,
@@ -240,7 +267,8 @@ impl InstanceBodies<'_> {
             | Expr::ArrayPop(id)
             | Expr::ArrayShift(id)
             | Expr::SetAdd { set_id: id, .. }
-                if kind != CallerKind::Initializer && plans.module_binding(*id) =>
+                if kind != CallerKind::Initializer
+                    && plans.binding_has_any(*id, LocalFlags::MODULE) =>
             {
                 globals.insert(*id);
             }

@@ -11,7 +11,7 @@ use crate::hir_compat;
 use perry_hir::types::{FuncId, LocalId};
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 
-impl<'h, 'a> InstancePlanner<'h, 'a> {
+impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
     pub(super) fn is_boxed_local(&self, id: LocalId) -> bool {
         self.index
             .local_idx(id)
@@ -34,40 +34,13 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
     }
 
     pub(super) fn local_ty_in_owner(&self, owner: CaptureOwner, id: LocalId) -> Option<Ty> {
-        let mut cur = owner;
-        loop {
-            match cur {
-                CaptureOwner::Instance(c) => {
-                    let inst = &self.solved.instances[c];
-                    let locs = &self.solved.param_locs[inst.param_locs];
-                    if let Some(&loc) = self
-                        .index
-                        .view(inst.template)
-                        .params
-                        .iter()
-                        .zip(locs)
-                        .find_map(|(p, loc)| (p.id == id).then_some(loc))
-                        && let ty = self.solved.locations[loc]
-                        && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
-                    {
-                        return Some(ty);
-                    }
-                    if let Some(ty) = self.local_ty(c, id)
-                        && !matches!(ty, Ty::BOTTOM | Ty::OPEN)
-                    {
-                        return Some(ty);
-                    }
-                    cur = inst.capture_owner;
-                }
-                CaptureOwner::Template(_) => {
-                    let lidx = self.index.local_idx(id)?;
-                    return self.solved.collapsed_local_locs[lidx]
-                        .map(|loc| self.solved.locations[loc])
-                        .filter(|&ty| !matches!(ty, Ty::BOTTOM | Ty::OPEN));
-                }
-                CaptureOwner::None => return None,
-            }
-        }
+        let loc = self.solved.capture_locs.get(
+            self.index,
+            &self.solved.instances,
+            owner,
+            self.index.local_idx(id)?,
+        )?;
+        Some(self.solved.locations[loc])
     }
 
     fn capture_fields(&mut self, ident: FuncIdentity) -> Result<Vec<EnvironmentField>> {
@@ -75,8 +48,8 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
         let mut fields = Vec::with_capacity(caps.len());
         for &cap_id in caps {
             let cap_ty = match self.local_ty_in_owner(ident.capture_owner, cap_id) {
-                Some(ty) => ty,
-                None => {
+                Some(ty) if !matches!(ty, Ty::BOTTOM | Ty::OPEN) => ty,
+                _ => {
                     let err = self.annotate_local(
                         diag!(
                             codes::MISSING_TYPE_ANNOTATION,
@@ -185,6 +158,7 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
         use crate::engine::CaptureOperand;
         if matches!(owner, CaptureOwner::Template(_))
             && let Some(from) = self.local_ty_in_owner(source, local)
+            && !matches!(from, Ty::BOTTOM | Ty::OPEN)
             && from != to
             && self.types.is_tagged_func_union(
                 to,
@@ -254,11 +228,12 @@ impl<'h, 'a> InstancePlanner<'h, 'a> {
                     self.build_dispatcher(fid, callee_ty, arms, arg_tys, recv_ty, result)?;
                 self.native.push((fid, dispatcher));
                 if hir_compat::has_source_offset(byte_offset) {
-                    self.instantiations
-                        .push(crate::engine::InstantiationOrigin::Dispatch {
-                            function: fid,
-                            offset: byte_offset,
-                        });
+                    self.locations.record_instantiation(
+                        format!("__dispatch_{fid}"),
+                        "dispatch".into(),
+                        byte_offset,
+                        None,
+                    );
                 }
             }
             HelperSpec::PromiseReaction {

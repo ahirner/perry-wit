@@ -2,6 +2,46 @@
 use super::*;
 
 impl<'h, 'a> Solver<'h, 'a> {
+    pub(super) fn closure_identity(
+        &mut self,
+        owner: InstanceId,
+        template: TemplateId,
+    ) -> FuncIdentity {
+        let captures = self.index.template_captures(template);
+        let capture_owner = if captures.is_empty() {
+            CaptureOwner::None
+        } else {
+            let instance = &self.instances[owner];
+            let owner_template = instance.template;
+            let nested = self.collapsed_closures.contains(template.index())
+                || self
+                    .types
+                    .contains_func_template(instance.args, template, None)
+                || captures.iter().any(|&id| {
+                    self.index
+                        .local_idx(id)
+                        .and_then(|local| self.read_local_value(owner, local))
+                        .is_some_and(|ty| {
+                            self.types.contains_func_template(
+                                ty,
+                                template,
+                                Some(CaptureOwner::Instance(owner)),
+                            )
+                        })
+                });
+            if nested {
+                self.collapse_closure(template, owner_template);
+                CaptureOwner::Template(owner_template)
+            } else {
+                CaptureOwner::Instance(owner)
+            }
+        };
+        FuncIdentity {
+            template,
+            capture_owner,
+        }
+    }
+
     pub(super) fn collapse_closure(&mut self, tid: TemplateId, owner_tid: TemplateId) {
         if !self.collapsed_closures.insert(tid.index()) {
             return;
@@ -15,11 +55,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             if local.flags.contains(LocalFlags::MODULE) {
                 continue;
             }
-            let cloc = match self.collapsed_local_locs[lidx] {
+            let cloc = match self.capture_locs.collapsed[lidx] {
                 Some(loc) => loc,
                 None => {
                     let loc = self.alloc_loc(Ty::BOTTOM);
-                    self.collapsed_local_locs[lidx] = Some(loc);
+                    self.capture_locs.collapsed[lidx] = Some(loc);
                     loc
                 }
             };
@@ -34,7 +74,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if let Some(slot) = self.local_frame_slot_in(id, lidx) {
                         self.inst_frame_locals[id].get(slot).copied()
                     } else {
-                        self.inst_locals[id]
+                        self.capture_locs.slots[id]
                             .iter()
                             .find(|s| s.local == lidx)
                             .map(|s| self.locations[s.loc])

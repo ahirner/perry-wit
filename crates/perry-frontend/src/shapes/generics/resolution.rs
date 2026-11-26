@@ -1,19 +1,7 @@
 use super::*;
 
-pub(crate) type Properties = Vec<(String, Ty, bool)>;
+use crate::engine::types::{ObjectProp, PropSpan};
 
-pub(crate) fn object_properties(
-    types: &TypeTable,
-    props: crate::engine::types::PropSpan,
-) -> Properties {
-    let mut fields: Properties = types
-        .object_slice(props)
-        .iter()
-        .map(|p| (types.name_str(p.name).to_owned(), p.ty, p.optional))
-        .collect();
-    fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    fields
-}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Query {
     Union,
@@ -29,28 +17,9 @@ impl Query {
     }
 }
 
-pub(crate) enum View {
-    Type(Ty),
-    Fields(Properties),
-    Index(Ty),
-}
-
-impl View {
-    pub(crate) fn properties(self, types: &TypeTable) -> Option<Properties> {
-        match self {
-            Self::Fields(properties) => Some(properties),
-            Self::Type(ty) if let TyKind::Object { props, index: None } = types.kind(ty) => {
-                Some(object_properties(types, props))
-            }
-            _ => None,
-        }
-    }
-}
-
 pub(crate) enum Expansion<'h> {
-    Alias(Ty),
-    Interface(Properties),
-    Class(crate::shapes::ClassShape<'h>, Properties),
+    Type(Ty),
+    Class(crate::shapes::ClassShape<'h>, PropSpan),
 }
 
 pub(crate) struct Resolver<'a, 'h> {
@@ -77,7 +46,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         let mut remaining = ARGUMENT_LIMIT;
         let interface = match declaration {
             Declaration::Alias(alias) => {
-                return Ok(Expansion::Alias(substitute(
+                return Ok(Expansion::Type(substitute(
                     self.ctx,
                     self.types,
                     &alias.ty,
@@ -100,16 +69,19 @@ impl<'a, 'h> Resolver<'a, 'h> {
                                 &mut remaining,
                             )?,
                         };
-                        Ok((field.name.clone(), ty, false))
+                        Ok(self.types.property(&field.name, ty, false))
                     })
-                    .collect::<Result<_>>()?;
-                return Ok(Expansion::Class(class, fields));
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(Expansion::Class(
+                    class,
+                    self.types.intern_properties(&fields),
+                ));
             }
             Declaration::Interface(interface) => interface,
         };
-        let mut properties: Properties = Vec::new();
-        let mut merge = |field: (String, Ty, bool)| {
-            if let Some(existing) = properties.iter_mut().find(|p| p.0 == field.0) {
+        let mut properties: Vec<ObjectProp> = Vec::new();
+        let mut merge = |field: ObjectProp| {
+            if let Some(existing) = properties.iter_mut().find(|p| p.name == field.name) {
                 *existing = field;
             } else {
                 properties.push(field);
@@ -125,16 +97,17 @@ impl<'a, 'h> Resolver<'a, 'h> {
         for parent in &interface.extends {
             let parent = substitute(self.ctx, self.types, parent, bindings, &mut remaining)
                 .map_err(|_| unresolved())?;
-            for field in self.record(parent, depth).ok_or_else(unresolved)? {
+            let fields = self.record(parent, depth).ok_or_else(unresolved)?;
+            for &field in self.types.object_slice(fields) {
                 merge(field);
             }
         }
         for field in &interface.properties {
             let ty = substitute(self.ctx, self.types, &field.ty, bindings, &mut remaining)
                 .map_err(|_| unresolved())?;
-            merge((field.name.clone(), ty, field.optional));
+            merge(self.types.property(&field.name, ty, field.optional));
         }
-        Ok(Expansion::Interface(properties))
+        Ok(Expansion::Type(self.types.object(&properties, None)))
     }
 
     pub(crate) fn named(
@@ -144,7 +117,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         plain: bool,
         query: Query,
         depth: usize,
-    ) -> Option<(View, usize)> {
+    ) -> Option<(Ty, usize)> {
         if depth >= RESOLUTION_DEPTH {
             return None;
         }
@@ -169,25 +142,20 @@ impl<'a, 'h> Resolver<'a, 'h> {
             .bind(self.ctx, base, self.types, arguments)
             .ok()?;
         match self.expand(declaration, &bindings, depth + 1).ok()? {
-            Expansion::Alias(target) => {
+            Expansion::Type(target) => {
                 let union = matches!(self.types.kind(target), TyKind::Union(_));
                 let resolved = self.resolve(target, query, depth + 1)?;
                 // Flatten aliases only when they expose a union or a utility expansion.
-                if query == Query::Union
-                    && !union
-                    && matches!(resolved.0, View::Type(ty) if ty == target)
-                {
+                if query == Query::Union && !union && resolved.0 == target {
                     return None;
                 }
                 Some(resolved)
             }
-            Expansion::Interface(fields) | Expansion::Class(_, fields) => {
-                Some((View::Fields(fields), depth))
-            }
+            Expansion::Class(_, props) => Some((self.types.object_type(props, None), depth)),
         }
     }
 
-    fn resolve(&mut self, ty: Ty, query: Query, depth: usize) -> Option<(View, usize)> {
+    fn resolve(&mut self, ty: Ty, query: Query, depth: usize) -> Option<(Ty, usize)> {
         let kind = self.types.kind(ty);
         let named = match kind {
             TyKind::Generic { base, args } => {
@@ -199,7 +167,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         if let Some((id, args, plain)) = named {
             return self
                 .named(id.get(self.ctx), &args, plain, query, depth)
-                .or_else(|| (query == Query::Union).then_some((View::Type(ty), depth)));
+                .or_else(|| (query == Query::Union).then_some((ty, depth)));
         }
         if query == Query::Property
             && let TyKind::Union(span) = kind
@@ -215,13 +183,12 @@ impl<'a, 'h> Resolver<'a, 'h> {
             }
             return self.resolve(one, query, depth);
         }
-        Some((View::Type(ty), depth))
+        Some((ty, depth))
     }
 
-    pub(crate) fn record(&mut self, ty: Ty, depth: usize) -> Option<Properties> {
-        self.resolve(ty, Query::Record, depth)?
-            .0
-            .properties(self.types)
+    pub(crate) fn record(&mut self, ty: Ty, depth: usize) -> Option<PropSpan> {
+        let (ty, _) = self.resolve(ty, Query::Record, depth)?;
+        self.types.closed_record(ty)
     }
 
     pub(crate) fn flatten(&mut self, members: &[Ty], depth: usize) -> Vec<Ty> {
@@ -241,9 +208,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         out: &mut Vec<Ty>,
     ) -> Option<()> {
         for &member in members {
-            let (View::Type(target), resolved_depth) = self.resolve(member, query, depth)? else {
-                return None;
-            };
+            let (target, resolved_depth) = self.resolve(member, query, depth)?;
             if resolved_depth < RESOLUTION_DEPTH
                 && let TyKind::Union(nested) = self.types.kind(target)
             {
@@ -280,12 +245,14 @@ impl<'a, 'h> Resolver<'a, 'h> {
         ) else {
             return false;
         };
+        let pattern = self.types.object_slice(pattern).to_vec();
+        let member = self.types.object_slice(member).to_vec();
         !pattern.is_empty()
-            && pattern.iter().all(|(name, ty, optional)| {
-                member.iter().any(|(other_name, other_ty, other_optional)| {
-                    name == other_name
-                        && (!other_optional || *optional)
-                        && self.matches(*other_ty, *ty, depth + 1)
+            && pattern.iter().all(|p| {
+                member.iter().any(|m| {
+                    p.name == m.name
+                        && (!m.optional || p.optional)
+                        && self.matches(m.ty, p.ty, depth + 1)
                 })
             })
     }
@@ -335,7 +302,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         arguments: &[Ty],
         query: Query,
         depth: usize,
-    ) -> Option<(View, usize)> {
+    ) -> Option<(Ty, usize)> {
         if depth >= RESOLUTION_DEPTH
             || self.decls.interfaces.contains_key(base)
             || self.decls.type_aliases.contains_key(base)
@@ -345,7 +312,9 @@ impl<'a, 'h> Resolver<'a, 'h> {
         if matches!(base, "Exclude" | "Extract" | "NonNullable") {
             let target = self.utility_type(base, arguments, depth)?;
             return if query == Query::Dictionary {
-                Some((View::Fields(self.record(target, depth + 1)?), depth))
+                let resolved = self.resolve(target, Query::Record, depth + 1)?;
+                self.types.closed_record(resolved.0)?;
+                Some(resolved)
             } else {
                 self.resolve(target, query, depth + 1)
             };
@@ -357,7 +326,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
             && let &[_, value] = arguments
             && matches!(query, Query::Property | Query::Dictionary)
         {
-            return Some((View::Index(value), depth));
+            return Some((self.types.object(&[], Some(value)), depth));
         }
         let (&inner, keys) = match (base, arguments) {
             ("Readonly" | "Partial" | "Required", [inner]) => (inner, None),
@@ -373,30 +342,37 @@ impl<'a, 'h> Resolver<'a, 'h> {
                 &mut selected,
             )?;
         }
-        let mut properties = self.record(inner, depth + 1)?;
+        let (inner, _) = self.resolve(inner, Query::Record, depth + 1)?;
+        let fields = self.types.closed_record(inner)?;
+        if base == "Readonly" {
+            return Some((inner, depth));
+        }
+        let mut properties = self.types.object_slice(fields).to_vec();
         match base {
             "Partial" => {
-                for (_, _, optional) in &mut properties {
-                    *optional = true;
+                for field in &mut properties {
+                    field.optional = true;
                 }
             }
             "Required" => {
-                for (_, ty, optional) in &mut properties {
-                    *optional = false;
-                    if *ty != Ty::VOID {
-                        *ty = self.types.exclude_absences(*ty, crate::Absence::Undefined);
+                for field in &mut properties {
+                    field.optional = false;
+                    if field.ty != Ty::VOID {
+                        field.ty = self
+                            .types
+                            .exclude_absences(field.ty, crate::Absence::Undefined);
                     }
                 }
             }
-            "Pick" | "Omit" => properties.retain(|(name, _, _)| {
+            "Pick" | "Omit" => properties.retain(|field| {
                 selected
                     .iter()
-                    .any(|key| self.literal(*key) == Some(name.as_str()))
+                    .any(|key| self.literal(*key) == Some(self.types.name_str(field.name)))
                     == (base == "Pick")
             }),
             _ => {}
         }
-        Some((View::Fields(properties), depth))
+        Some((self.types.object(&properties, None), depth))
     }
 
     pub(crate) fn property(
@@ -405,45 +381,36 @@ impl<'a, 'h> Resolver<'a, 'h> {
         arguments: &[Ty],
         property: &str,
     ) -> Option<(Ty, bool)> {
-        match self.named(base, arguments, false, Query::Property, 0)?.0 {
-            View::Fields(fields) => fields
-                .into_iter()
-                .find(|(name, _, _)| name == property)
-                .map(|(_, ty, optional)| (ty, optional)),
-            View::Index(value) => Some((value, true)),
-            View::Type(ty) => match self.types.kind(ty) {
-                TyKind::Object { props, index } => self
-                    .types
-                    .object_slice(props)
-                    .iter()
-                    .find(|p| self.types.name_str(p.name) == property)
-                    .map(|p| (p.ty, p.optional))
-                    .or_else(|| index.map(|ty| (ty, true))),
-                _ => None,
-            },
-        }
+        let (ty, _) = self.named(base, arguments, false, Query::Property, 0)?;
+        let TyKind::Object { props, index } = self.types.kind(ty) else {
+            return None;
+        };
+        self.types
+            .object_slice(props)
+            .iter()
+            .find(|p| self.types.name_str(p.name) == property)
+            .map(|p| (p.ty, p.optional))
+            .or_else(|| index.map(|ty| (ty, true)))
     }
 
     pub(crate) fn dictionary(&mut self, ty: Ty) -> Option<(Ty, Ty)> {
-        let view = self.resolve(ty, Query::Dictionary, 0)?.0;
-        let fields = match view {
-            View::Index(value) => return Some((Ty::STRING, value)),
-            View::Type(ty)
-                if let TyKind::Object {
-                    index: Some(value), ..
-                } = self.types.kind(ty) =>
-            {
-                return Some((Ty::STRING, value));
-            }
-            other => other.properties(self.types)?,
+        let (ty, _) = self.resolve(ty, Query::Dictionary, 0)?;
+        let TyKind::Object { props, index } = self.types.kind(ty) else {
+            return None;
         };
-        let (_, first, mut optional) = *fields.first()?;
+        if let Some(value) = index {
+            return Some((Ty::STRING, value));
+        }
+        let fields = self.types.object_slice(props).to_vec();
+        let first = fields.first()?.ty;
+        let mut optional = false;
         let defined = self
             .types
             .exclude_absences(first, crate::Absence::Undefined);
         let mut exact = true;
-        for (_, ty, opt) in fields.into_iter().skip(1) {
-            optional |= opt;
+        for field in fields {
+            let ty = field.ty;
+            optional |= field.optional;
             if first != ty {
                 if self.types.exclude_absences(ty, crate::Absence::Undefined) != defined {
                     return None;

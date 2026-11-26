@@ -8,7 +8,10 @@ impl<'h> ModuleIndex<'h> {
         declarations: &crate::source::ModuleDeclarations,
         locations: &crate::hir_compat::Locations<'_>,
         closure_names: &'h HashMap<FuncId, String>,
-        constructors: &crate::source::Constructors,
+        (constructors, decls): (
+            &crate::source::Constructors,
+            &crate::shapes::Declarations<'h>,
+        ),
         types: &mut TypeTable,
     ) -> Self {
         let max_local_hint = declarations.locals.keys().copied().max().unwrap_or(0);
@@ -41,7 +44,9 @@ impl<'h> ModuleIndex<'h> {
         let mut pending_captures: Vec<(LocalId, bool, bool)> = Vec::new();
         let mut scan = ScanCtx {
             constructors,
-            regex_operands: Vec::new(),
+            decls,
+            locations,
+            regexes: Default::default(),
             ctx,
             declarations,
             closure_names,
@@ -73,17 +78,14 @@ impl<'h> ModuleIndex<'h> {
                 name_id: scan.types.intern_name(&class.name),
                 field_init: None,
                 ctor: None,
-                methods: Vec::new(),
-                static_methods: Vec::new(),
-                getters: Vec::new(),
-                setters: Vec::new(),
                 static_field_locs: Vec::new(),
             });
-            let mut static_field_locs = Vec::new();
             for field in &class.static_fields {
                 let ty = idx.annotations.register(&mut scan, &field.ty, true);
                 let loc = idx.add_location(ty);
-                static_field_locs.push((scan.types.intern_name(&field.name), loc));
+                idx.classes[cid]
+                    .static_field_locs
+                    .push((scan.types.intern_name(&field.name), loc));
                 if let Some(init) = &field.init {
                     Self::record_site_expr(&mut scan, init_tid, init);
                     idx.scan_expr(&mut scan, init, init_tid, false);
@@ -113,81 +115,35 @@ impl<'h> ModuleIndex<'h> {
             {
                 idx.class_has_implicit_params.insert(cid.index());
             }
-            let ctor = class
+            idx.classes[cid].ctor = class
                 .constructor
                 .as_ref()
                 .map(|c| idx.register_member(&mut scan, TemplateKind::ClassConstructor, c, false));
-            let methods: Vec<_> = class
-                .methods
-                .iter()
-                .map(|m| {
-                    let tid = idx.register_member(
-                        &mut scan,
-                        TemplateKind::ClassMethod,
-                        m,
-                        locations.has_explicit_return(&format!("{}::{}", class.name, m.name)),
-                    );
-                    (
-                        scan.types.intern_name(hir_compat::method(&m.name).name()),
-                        tid,
-                    )
-                })
-                .collect();
-            let static_methods: Vec<_> = class
-                .static_methods
-                .iter()
-                .map(|m| {
-                    let tid = idx.register_member(
-                        &mut scan,
-                        TemplateKind::ClassStaticMethod(cid),
-                        m,
-                        locations.has_explicit_return(&format!("{}::{}", class.name, m.name)),
-                    );
-                    (
-                        scan.types.intern_name(hir_compat::method(&m.name).name()),
-                        tid,
-                    )
-                })
-                .collect();
-            let getters: Vec<_> = class
-                .getters
-                .iter()
-                .enumerate()
-                .map(|(i, (name, g))| {
-                    let tid = idx.register_member(
-                        &mut scan,
-                        TemplateKind::ClassGetter(i),
-                        g,
-                        locations.has_explicit_return(&format!("{}::get_{name}", class.name)),
-                    );
-                    (scan.types.intern_name(name), tid)
-                })
-                .collect();
-            let setters: Vec<_> = class
-                .setters
-                .iter()
-                .enumerate()
-                .map(|(i, (name, s))| {
-                    let tid = idx.register_member(
-                        &mut scan,
-                        TemplateKind::ClassSetter(i),
-                        s,
-                        locations.has_explicit_return(&format!("{}::set_{name}", class.name)),
-                    );
-                    (scan.types.intern_name(name), tid)
-                })
-                .collect();
-            let info = &mut idx.classes[cid];
-            info.ctor = ctor;
-            info.methods = methods;
-            info.static_methods = static_methods;
-            info.getters = getters;
-            info.setters = setters;
-            info.static_field_locs = static_field_locs;
+            let mut register = |kind, function, prefix: &str, name: &str| {
+                let explicit_return =
+                    locations.has_explicit_return(&format!("{}::{prefix}{name}", class.name));
+                idx.register_member(&mut scan, kind, function, explicit_return);
+            };
+            for method in &class.methods {
+                register(TemplateKind::ClassMethod, method, "", &method.name);
+            }
+            for method in &class.static_methods {
+                register(
+                    TemplateKind::ClassStaticMethod(cid),
+                    method,
+                    "",
+                    &method.name,
+                );
+            }
+            for (i, (name, getter)) in class.getters.iter().enumerate() {
+                register(TemplateKind::ClassGetter(i), getter, "get_", name);
+            }
+            for (i, (name, setter)) in class.setters.iter().enumerate() {
+                register(TemplateKind::ClassSetter(i), setter, "set_", name);
+            }
         }
 
-        idx.strings
-            .resolve_operands(scan.regex_operands, &idx.local_to_idx);
+        idx.regexes = scan.regexes.finish(&idx.expressions);
         scan.bindings.sort_by_key(|(owner, _)| *owner);
         for group in scan.bindings.chunk_by(|a, b| a.0 == b.0) {
             if let Some((owner, _)) = group.first() {

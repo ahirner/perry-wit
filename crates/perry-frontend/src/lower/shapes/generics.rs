@@ -32,7 +32,7 @@ impl Shapes<'_, Preparing<'_>> {
                     let types = &mut *self.types.source;
                     Resolver::new(ctx, self.decls, types)
                         .named(base, &key.1, false, Query::Record, 0)
-                        .and_then(|(view, _)| view.properties(types))
+                        .and_then(|(ty, _)| types.closed_record(ty))
                 }
                 .ok_or_else(|| {
                     diag!(
@@ -40,7 +40,7 @@ impl Shapes<'_, Preparing<'_>> {
                         "could not resolve utility type {base}"
                     )
                 })?;
-                let ty: TypeHandle = self.source_record(ctx, Some(&key), properties)?.into();
+                let ty: TypeHandle = self.source_record(ctx, &key, properties)?.into();
                 if !self.types.pending.contains_key(&key) {
                     self.types.named.insert(key, ty);
                 }
@@ -81,10 +81,7 @@ impl Shapes<'_, Preparing<'_>> {
         let expansion =
             Resolver::new(ctx, self.decls, self.types.source).expand(declaration, &bindings, 0)?;
         let ty = match expansion {
-            Expansion::Interface(properties) => {
-                self.source_record(ctx, Some(&key), properties)?.into()
-            }
-            Expansion::Class(class, properties) => {
+            Expansion::Class(class, props) => {
                 if let Some(PendingShape::Recursive(record)) = self.types.pending.get(&key) {
                     return Ok((*record).into());
                 }
@@ -95,12 +92,8 @@ impl Shapes<'_, Preparing<'_>> {
                 self.types
                     .pending
                     .insert(key.clone(), PendingShape::Recursive(record));
-                let fields = properties
-                    .into_iter()
-                    .map(|(name, ty, _)| {
-                        Ok((name, self.resolved_binding(ctx, ty)?.expected_type(ctx)))
-                    })
-                    .collect::<Result<Vec<_>>>();
+                let fields = self.types.source.object_slice(props).to_vec();
+                let fields = self.record_fields(ctx, &fields, &mut Vec::new());
                 self.types.pending.remove(&key);
                 let mut fields = fields?;
                 fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -111,11 +104,9 @@ impl Shapes<'_, Preparing<'_>> {
                 self.class_records.insert(ty, class);
                 ty
             }
-            Expansion::Alias(value) => {
-                let kind = self.types.source.kind(value);
-                if let TyKind::Object { props, index: None } = kind {
-                    let fields = object_properties(self.types.source, props);
-                    self.source_record(ctx, Some(&key), fields)?.into()
+            Expansion::Type(value) => {
+                if let Some(props) = self.types.source.closed_record(value) {
+                    self.source_record(ctx, &key, props)?.into()
                 } else {
                     ensure_diag!(
                         !self.types.pending.contains_key(&key),

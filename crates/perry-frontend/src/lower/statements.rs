@@ -655,9 +655,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .shapes
                     .specialization
                     .instances
-                    .collection(expr)
-                    .is_some()
-                    || self.shapes.specialization.instances.regexp(expr).is_some() =>
+                    .constructor(expr)
+                    .is_some() =>
             {
                 Some(self.source_expression(ctx, expr, expected)?)
             }
@@ -666,10 +665,9 @@ impl<'s> FunctionBuilder<'s, '_> {
                 args,
 
                 byte_offset,
-                byte_end,
                 ..
             } => self
-                .call(ctx, callee, args, *byte_offset..*byte_end)
+                .call(ctx, callee, args, *byte_offset)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::StaticMethodCall {
                 class_name,

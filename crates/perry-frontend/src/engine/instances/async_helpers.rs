@@ -2,21 +2,18 @@
 use super::InstancePlanner;
 use crate::engine::boundary::TemplateKind;
 use crate::engine::solve::{CallTarget, Instance, ReactionKind};
-use crate::engine::types::{FuncIdentity, Ty};
+use crate::engine::types::Ty;
 use perry_hir::types::FuncId;
 use perry_wit_diagnostics::Result;
 
-impl<'h> InstancePlanner<'h, '_> {
+impl<'h> InstancePlanner<'h, '_, '_> {
     pub(super) fn promise_handle_function(
         &mut self,
         inst: &Instance,
         kind: TemplateKind,
     ) -> Result<()> {
         use crate::engine::{NativeBody, NativeFunction, NativeParam};
-        let identity = FuncIdentity {
-            template: inst.template,
-            capture_owner: inst.capture_owner,
-        };
+        let identity = inst.identity();
         self.environment(identity)?;
         let mut params = vec![NativeParam::Environment(identity)];
         if let [ty] = self.types.tuple_slice(inst.args) {

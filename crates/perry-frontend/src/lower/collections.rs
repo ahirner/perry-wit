@@ -266,11 +266,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         expected: Option<TypeHandle>,
     ) -> Result<Option<Value>> {
         if let Some(constructor) = self.shapes.specialization.instances.collection(expr) {
-            let expected = match (constructor.kind, constructor.types) {
-                (CollectionKind::Map, [key, value]) => Some(self.shapes.map_type(ctx, key, value)?),
-                (CollectionKind::Set, [item]) => Some(self.shapes.set_type(ctx, item)?),
-                _ => expected,
-            };
             return self
                 .new_collection(
                     ctx,
@@ -387,7 +382,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         })
     }
 
-    fn empty_map(&mut self, ctx: &mut Context, expected: Option<TypeHandle>) -> Result<Value> {
+    pub(super) fn empty_map(
+        &mut self,
+        ctx: &mut Context,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
         let Some(expected) = expected else {
             bail_diag!(
                 codes::MISSING_TYPE_ANNOTATION,

@@ -36,20 +36,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         let signal = match args.get(2) {
             None => None,
             Some(options) => {
-                let signal = match options {
-                    Expr::New {
-                        class_name, args, ..
-                    } if self.shapes.literal_fields(class_name).is_some_and(
-                        |fields| matches!(fields, [field] if field.name == "signal"),
-                    ) =>
-                    {
-                        &args[0]
-                    }
-                    Expr::Object(fields) if fields.len() == 1 && fields[0].0 == "signal" => {
-                        &fields[0].1
-                    }
-                    _ => bail_unsupported!("setTimeout options must be a literal {{ signal }}"),
-                };
+                let signal = hir_compat::literal_option(
+                    options,
+                    &self.shapes.specialization.literal_classes,
+                    "signal",
+                )
+                .ok_or_else(|| unsupported!("setTimeout options must be a literal {{ signal }}"))?;
                 Some(self.typed_operand(ctx, signal, Kind::Abort, "an AbortSignal")?)
             }
         };
@@ -118,12 +110,22 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(self.intrinsic(ctx, Intrinsic::RequestNew, operands))
     }
 
-    /// The fields of an init object literal, by name.
-    pub(super) fn init_fields<'e>(
+    pub(super) fn object_literal_pairs(
         &self,
-        init: Option<&'e Expr>,
-    ) -> Result<Vec<(&'s str, &'e Expr)>> {
-        hir_compat::init_fields(init, &self.shapes.specialization.literal_classes)
+        expr: &'s Expr,
+    ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
+        crate::hir_compat::object_literal_pairs(expr, &self.shapes.specialization.literal_classes)
+    }
+
+    /// The fields of an init object literal, by name.
+    pub(super) fn init_fields(&self, init: Option<&'s Expr>) -> Result<Vec<(&'s str, &'s Expr)>> {
+        match init {
+            None | Some(Expr::Undefined) => Ok(Vec::new()),
+            Some(expr @ Expr::New { .. }) if let Some(fields) = self.object_literal_pairs(expr) => {
+                Ok(fields.collect())
+            }
+            Some(_) => bail_unsupported!("init objects must be object literals yet"),
+        }
     }
 
     pub(super) fn fetch(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
@@ -250,45 +252,36 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.web_member(ctx, receiver, method, (!property).then_some(args))
     }
 
-    /// A `node:fs/promises` function: an operation whose promise settles from host events.
+    fn fs_path(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
+        let path = args
+            .first()
+            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "a path is required"))?;
+        self.typed_operand(ctx, path, Kind::String, "a path string")
+    }
+
+    pub(super) fn read_file(
+        &mut self,
+        ctx: &mut Context,
+        args: &'s [Expr],
+        text: bool,
+    ) -> Result<Value> {
+        let path = self.fs_path(ctx, args)?;
+        let intrinsic = if text {
+            Intrinsic::FsReadText
+        } else {
+            Intrinsic::FsReadBytes
+        };
+        Ok(self.intrinsic(ctx, intrinsic, vec![path]))
+    }
+
     pub(super) fn fs(
         &mut self,
         ctx: &mut Context,
         builtin: Builtin,
         args: &'s [Expr],
     ) -> Result<Value> {
-        let path = args
-            .first()
-            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "a path is required"))?;
-        let path = self.typed_operand(ctx, path, Kind::String, "a path string")?;
+        let path = self.fs_path(ctx, args)?;
         let (intrinsic, operands) = match builtin {
-            Builtin::ReadFile => {
-                let text = match args.get(1) {
-                    None => false,
-                    Some(Expr::String(encoding)) if is_utf8(encoding) => true,
-                    // `{ encoding: 'utf8' }`: an object literal of one field.
-                    Some(Expr::New {
-                        class_name, args, ..
-                    }) if matches!(args.as_slice(), [Expr::String(encoding)] if is_utf8(encoding))
-                        && self.shapes.literal_fields(class_name).is_some_and(
-                            |fields| matches!(fields, [field] if field.name == "encoding"),
-                        ) =>
-                    {
-                        true
-                    }
-                    Some(_) => {
-                        bail_unsupported!(
-                            "readFile supports no options but the 'utf8' encoding yet"
-                        )
-                    }
-                };
-                let intrinsic = if text {
-                    Intrinsic::FsReadText
-                } else {
-                    Intrinsic::FsReadBytes
-                };
-                (intrinsic, vec![path])
-            }
             Builtin::WriteFile => {
                 ensure_unsupported!(args.len() == 2, "writeFile options are not supported yet");
                 let data = self.expression(ctx, &args[1])?;
@@ -317,8 +310,4 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         Ok(self.intrinsic(ctx, intrinsic, operands))
     }
-}
-
-fn is_utf8(encoding: &str) -> bool {
-    matches!(encoding, "utf8" | "utf-8" | "UTF-8" | "UTF8")
 }

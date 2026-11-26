@@ -16,12 +16,30 @@ impl<'s> FunctionBuilder<'s, '_> {
         source: &'s Expr,
         element: Option<TypeHandle>,
     ) -> Result<Value> {
+        let val = self.spread_operand(ctx, source, element)?;
+        self.spread_items(ctx, val, element)
+    }
+
+    pub(super) fn spread_operand(
+        &mut self,
+        ctx: &mut Context,
+        source: &'s Expr,
+        element: Option<TypeHandle>,
+    ) -> Result<Value> {
         let expected = if matches!(source, Expr::Array(items, _) if items.is_empty()) {
             element.map(|element| ArrayType::get(ctx, element).into())
         } else {
             None
         };
-        let val = self.expression_with(ctx, source, expected)?;
+        self.expression_with(ctx, source, expected)
+    }
+
+    pub(super) fn spread_items(
+        &mut self,
+        ctx: &mut Context,
+        val: Value,
+        element: Option<TypeHandle>,
+    ) -> Result<Value> {
         let val_ty = optional_value(ctx, val.get_type(ctx)).unwrap_or_else(|| val.get_type(ctx));
         if val_ty.deref(ctx).is::<StringType>() {
             let val = self.defined(ctx, val)?;
@@ -185,7 +203,15 @@ impl<'s> FunctionBuilder<'s, '_> {
         args: &'s [perry_hir::CallArg],
     ) -> Result<Value> {
         if let Expr::FuncRef(id) = callee {
-            return self.func_call_spread(ctx, *id, args);
+            let signature = self.signature(*id)?;
+            let result = self.invoke_arguments(
+                ctx,
+                signature,
+                std::iter::empty(),
+                Arguments::Spread(args),
+                None,
+            )?;
+            return result.map_or_else(|| self.absent_literal(ctx, false, None), Ok);
         }
         let Expr::PropertyGet {
             object, property, ..
@@ -195,28 +221,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         let method_name = hir_compat::method(property).name();
         if matches!(method_name, "max" | "min") {
-            let (init_val, op) = if method_name == "max" {
-                (f64::NEG_INFINITY, Intrinsic::MathMax)
-            } else {
-                (f64::INFINITY, Intrinsic::MathMin)
-            };
-            let init = self.number(ctx, init_val);
-            let acc_slot = self.entry_slot(ctx, FP64Type::get(ctx).into());
-            self.store(ctx, acc_slot, init);
-            for argument in args {
-                match argument {
-                    perry_hir::CallArg::Expr(expr) => {
-                        let val = self.number_operand(ctx, expr)?;
-                        let cur = self.load(ctx, acc_slot)?;
-                        let next = self.intrinsic(ctx, op, vec![cur, val]);
-                        self.store(ctx, acc_slot, next);
-                    }
-                    perry_hir::CallArg::Spread(expr) => {
-                        self.fold_math_spread(ctx, op, acc_slot, expr)?;
-                    }
-                }
-            }
-            return self.load(ctx, acc_slot);
+            return self.math_extremum_spread(ctx, method_name == "max", Arguments::Spread(args));
         }
         ensure_unsupported!(
             matches!(method_name, "push" | "concat"),
@@ -237,31 +242,53 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(self.array_length(ctx, receiver))
     }
 
+    pub(super) fn math_extremum_spread(
+        &mut self,
+        ctx: &mut Context,
+        maximum: bool,
+        args: Arguments<'s>,
+    ) -> Result<Value> {
+        let (init, op) = if maximum {
+            (f64::NEG_INFINITY, Intrinsic::MathMax)
+        } else {
+            (f64::INFINITY, Intrinsic::MathMin)
+        };
+        let number = FP64Type::get(ctx).into();
+        let result = self.entry_slot(ctx, number);
+        let init = self.number(ctx, init);
+        self.store(ctx, result, init);
+        self.for_each_spread_arg(ctx, args, number, "math_spread", |b, ctx, item| {
+            let value = b.arithmetic(ctx, item);
+            let previous = b.load(ctx, result)?;
+            let next = b.intrinsic(ctx, op, vec![previous, value]);
+            b.store(ctx, result, next);
+            Ok(())
+        })?;
+        self.load(ctx, result)
+    }
+
     fn for_each_spread_arg(
         &mut self,
         ctx: &mut Context,
-        args: &'s [perry_hir::CallArg],
+        args: Arguments<'s>,
         hint: TypeHandle,
         label: &str,
         mut on_value: impl FnMut(&mut Self, &mut Context, Value) -> Result<()>,
     ) -> Result<()> {
-        for argument in args {
-            match argument {
-                perry_hir::CallArg::Expr(expression) => {
-                    let value = self.expression(ctx, expression)?;
-                    on_value(self, ctx, value)?;
-                }
-                perry_hir::CallArg::Spread(expression) => {
-                    let source = self.spread_value(ctx, expression, Some(hint))?;
-                    let source = self.defined(ctx, source)?;
-                    self.array_element(ctx, source)?;
-                    let limit = self.array_length(ctx, source);
-                    let zero = self.number(ctx, 0.0);
-                    self.index_loop(ctx, label, zero, limit, |b, ctx, current, _, _| {
-                        let value = b.element_at(ctx, source, current)?;
-                        on_value(b, ctx, value)
-                    })?;
-                }
+        for (expression, spread) in args {
+            if !spread {
+                let value = self.expression(ctx, expression)?;
+                on_value(self, ctx, value)?;
+            } else {
+                let source = self.spread_value(ctx, expression, Some(hint))?;
+                let source = self.defined(ctx, source)?;
+                self.array_element(ctx, source)?;
+                let limit = self.array_length(ctx, source);
+                let zero = self.number(ctx, 0.0);
+                self.index_loop(ctx, label, zero, limit, |b, ctx, current, _, _| {
+                    let value = b.element_at(ctx, source, current)?;
+                    on_value(b, ctx, value)
+                })?;
             }
         }
         Ok(())
@@ -281,7 +308,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.store(ctx, result, receiver);
             self.for_each_spread_arg(
                 ctx,
-                args,
+                Arguments::Spread(args),
                 text,
                 "string_concat_arguments",
                 |b, ctx, value| {
@@ -297,11 +324,17 @@ impl<'s> FunctionBuilder<'s, '_> {
         let element = self.array_element(ctx, receiver)?;
         let array = ArrayType::get(ctx, element).into();
         let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, array, vec![receiver]));
-        self.for_each_spread_arg(ctx, args, element, "concat_arguments", |b, ctx, value| {
-            let segment = b.concat_segment(ctx, value, element)?;
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
-            Ok(())
-        })?;
+        self.for_each_spread_arg(
+            ctx,
+            Arguments::Spread(args),
+            element,
+            "concat_arguments",
+            |b, ctx, value| {
+                let segment = b.concat_segment(ctx, value, element)?;
+                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
+                Ok(())
+            },
+        )?;
         Ok(self.emit_value(ctx, |ctx| ConcatSegmentsOp::new(ctx, sources)))
     }
 
@@ -329,73 +362,5 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
         }
         Ok(arr)
-    }
-
-    pub(super) fn func_call_spread(
-        &mut self,
-        ctx: &mut Context,
-        id: FuncId,
-        args: &'s [perry_hir::CallArg],
-    ) -> Result<Value> {
-        let signature = self.signature(id)?;
-        let callee_name = self
-            .shapes
-            .locations
-            .display_function_name(signature.name.as_ref());
-        let (params, rest) = signature.parameters();
-        let fixed_len = params.len();
-        let mut values = Vec::with_capacity(signature.params.len());
-        let mut arg_idx = 0usize;
-        while values.len() < fixed_len && arg_idx < args.len() {
-            let param = &params[values.len()];
-            match &args[arg_idx] {
-                perry_hir::CallArg::Expr(expr) => {
-                    let arg_num = values.len() + 1;
-                    values.push(self.bind_fixed_arg(ctx, param, Some(expr)).map_err(|err| {
-                        err.with_note(format!("in argument {arg_num} of '{callee_name}'"))
-                    })?);
-                    arg_idx += 1;
-                }
-                perry_hir::CallArg::Spread(expr) => {
-                    let src = self.expression(ctx, expr)?;
-                    let src = self.defined(ctx, src)?;
-                    if let Some(rec) = perry_mir::typed::<RecordType>(ctx, src.get_type(ctx))
-                        && rec.deref(ctx).kind() == RecordKind::Tuple
-                    {
-                        let fields_len = rec.deref(ctx).fields().to_diag(ctx)?.len();
-                        for tuple_idx in 0..fields_len {
-                            if values.len() >= fixed_len {
-                                break;
-                            }
-                            let p = &params[values.len()];
-                            let op =
-                                FieldGetOp::new(ctx, src, format!("_{tuple_idx}")).to_diag(ctx)?;
-                            let loaded = self.field_read(ctx, &op)?;
-                            values.push(self.fit(ctx, loaded, p.binding.carrier)?);
-                        }
-                        arg_idx += 1;
-                    } else {
-                        bail_unsupported!("spreading into fixed parameters requires a tuple");
-                    }
-                }
-            }
-        }
-        while values.len() < fixed_len {
-            let arg_num = values.len() + 1;
-            let param = &params[values.len()];
-            values.push(self.bind_fixed_arg(ctx, param, None).map_err(|err| {
-                err.with_note(format!("in argument {arg_num} of '{callee_name}'"))
-            })?);
-        }
-        if let Some(rest_param) = rest {
-            let elem_ty = Self::rest_element_type(ctx, rest_param.binding.carrier)?;
-            values.push(self.collect_spread_args(ctx, &args[arg_idx..], elem_ty)?);
-        }
-        Ok(self
-            .emit_signature_call(ctx, signature, values)?
-            .unwrap_or_else(|| {
-                let void = void_type(ctx);
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, void))
-            }))
     }
 }

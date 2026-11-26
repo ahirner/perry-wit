@@ -122,6 +122,24 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.load(ctx, result)
     }
 
+    /// The private handle table only inserts fresh keys. Its insertion sequence survives deletions.
+    pub(in crate::lower) fn insert_resource(
+        &mut self,
+        ctx: &mut Context,
+        table: Value,
+        instance: Value,
+    ) -> Result<Value> {
+        let sequence = self.record_field(ctx, table, StorageField::BoxSequence.name())?;
+        let one = self.number(ctx, 1.0);
+        let rep = self.binary(ctx, BinaryKind::Add, sequence, one);
+        let (_, ty, _) = map_entry_types(ctx, table.get_type(ctx))
+            .ok_or_else(|| internal!("invalid resource table"))?;
+        let value = self.fit(ctx, instance, ty)?;
+        let entries = self.collection_entries_array(ctx, table)?;
+        self.append_entry(ctx, entries, Some(table), &[rep, value])?;
+        Ok(rep)
+    }
+
     /// Insert or overwrite `(key, val)` in a `Map<K, V>` or `Record<K, V>`.
     pub(crate) fn kv_set(
         &mut self,
@@ -164,14 +182,27 @@ impl<'s> FunctionBuilder<'s, '_> {
         owner: Option<Value>,
         payload: &[Value],
     ) -> Result<()> {
-        let record = TypedHandle::<RecordType>::from_handle(self.array_element(ctx, entries)?, ctx)
-            .map_err(|_| Diagnostic::internal("collection entries must be records"))?;
-        let mut fields = Vec::with_capacity(record.deref(ctx).fields().to_diag(ctx)?.len());
-        fields.extend_from_slice(payload);
         let append_bb = self.new_block(ctx, &format!("{label}_append"));
         let after_bb = self.new_block(ctx, &format!("{label}_after"));
         self.branch(ctx, present, after_bb, append_bb);
         self.switch_to(append_bb);
+        self.append_entry(ctx, entries, owner, payload)?;
+        self.jump(ctx, after_bb);
+        self.switch_to(after_bb);
+        Ok(())
+    }
+
+    fn append_entry(
+        &mut self,
+        ctx: &mut Context,
+        entries: Value,
+        owner: Option<Value>,
+        payload: &[Value],
+    ) -> Result<()> {
+        let record = TypedHandle::<RecordType>::from_handle(self.array_element(ctx, entries)?, ctx)
+            .map_err(|_| Diagnostic::internal("collection entries must be records"))?;
+        let mut fields = Vec::with_capacity(record.deref(ctx).fields().to_diag(ctx)?.len());
+        fields.extend_from_slice(payload);
         if let Some(box_val) = owner {
             fields.push(self.boolean(ctx, true));
             fields.push(self.next_collection_seq(ctx, box_val)?);
@@ -181,8 +212,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Some(box_val) = owner {
             self.bump_live_count(ctx, box_val, BinaryKind::Add)?;
         }
-        self.jump(ctx, after_bb);
-        self.switch_to(after_bb);
         Ok(())
     }
 

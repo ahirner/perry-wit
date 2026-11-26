@@ -1,5 +1,6 @@
 //! Built-in expression, method, property, and constructor typing over dense `Ty`.
-use super::types::{ObjectProp, Ty, TyKind, TypeTable};
+use super::types::{Ty, TyKind, TypeTable};
+use crate::engine::types::WitView;
 use crate::{
     Absence,
     collections::IteratorMethod,
@@ -307,12 +308,7 @@ pub(crate) fn apply_method_result(
                 ("weeks", Ty::NUMBER),
                 ("years", Ty::NUMBER),
             ]
-            .map(|(n, ty)| ObjectProp {
-                name: types.intern_name(n),
-                ty,
-                optional: false,
-                readonly: false,
-            });
+            .map(|(name, ty)| types.property(name, ty, false));
             types.object(&props, None)
         }
     }
@@ -563,7 +559,7 @@ pub(crate) fn property_type(
             if gargs.is_none()
                 && let Some(resolved) = decls.foreign_type(base_name)
             {
-                let rty = types.wit_type(ctx, resolved, true);
+                let rty = types.wit_type(ctx, resolved, WitView::Definition);
                 if rty != stripped
                     && let Some(found) = property_type(ctx, decls, types, rty, property)
                 {
@@ -621,7 +617,7 @@ pub(crate) fn index_type(
             Some(types.with_absences(Ty::NUMBER, Absence::Undefined))
         }
         TyKind::Named(id) => dict_value_ty(ctx, decls, types, stripped).or_else(|| {
-            let ty = types.wit_type(ctx, decls.foreign_type(id.get(ctx))?, true);
+            let ty = types.wit_type(ctx, decls.foreign_type(id.get(ctx))?, WitView::Definition);
             match types.kind(ty) {
                 TyKind::Array(elem) => Some(elem),
                 _ => None,

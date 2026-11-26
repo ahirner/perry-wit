@@ -1,50 +1,178 @@
 //! Seed reachable functions and specialize function and class instances.
 use super::*;
+use hir_compat::Target;
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn seed_roots(&mut self) -> Result<InstanceId> {
         let init_inst = self.request_instance(InstanceReq::new(TemplateId::INIT, &[], None))?;
         self.enqueue(init_inst);
-        for witness in &self.hir.witnesses {
-            let Some(fid) = witness.target else {
+        for &owner in self.hir.exports.resources.keys() {
+            self.exported_class(owner, &mut Vec::new())?;
+        }
+        for witness in &self.hir.exports.functions {
+            let Some(target) = witness.target else {
                 self.witness_instances.push(None);
                 continue;
             };
-            let tid = self
-                .index
-                .template_of_func(fid)
-                .ok_or_else(|| Diagnostic::internal("missing witness template"))?;
-            let view = self.index.view(tid);
-            let mut args = Vec::with_capacity(view.params.len());
-            if let Some(signature) = &witness.signature {
-                for (i, ty) in signature.params.iter().enumerate() {
-                    let ty = match view
-                        .params
-                        .get(i)
-                        .filter(|p| self.index.is_param_annotated(p.id))
+            let signature = witness.signature.as_ref().map(|sig| {
+                let mut resolve = |wit| self.types.export_type(self.ctx, wit);
+                (
+                    sig.params
+                        .iter()
+                        .copied()
+                        .map(&mut resolve)
+                        .collect::<Vec<_>>(),
+                    sig.result.map(resolve),
+                )
+            });
+            let adapter = !matches!(target, Target::Function(_))
+                || signature.as_ref().is_some_and(|(params, result)| {
+                    params
+                        .iter()
+                        .chain(result)
+                        .any(|&ty| self.exported_resource(ty).is_some())
+                });
+            let receiver = match target {
+                Target::Method(owner, _) | Target::Destructor(owner, _) => Some(Receiver::Class(
+                    *self
+                        .resource_instances
+                        .get(&owner)
+                        .ok_or_else(|| Diagnostic::internal("missing resource receiver"))?,
+                )),
+                _ => None,
+            };
+            let target = target.try_map(|fid| {
+                let tid = self
+                    .index
+                    .template_of_func(fid)
+                    .ok_or_else(|| Diagnostic::internal("missing export template"))?;
+                let view = self.index.view(tid);
+                let mut args = Vec::with_capacity(view.params.len());
+                if let Some((params, _)) = &signature {
+                    for (i, &ty) in params
+                        .iter()
+                        .skip(usize::from(receiver.is_some()))
+                        .enumerate()
                     {
-                        Some(p) => self.types.intern_hir(self.ctx, &p.ty, true),
-                        None => self.types.export_type(self.ctx, *ty),
+                        let ty = if let Some(class) = self
+                            .exported_resource(ty)
+                            .and_then(|id| self.resource_instances.get(&id))
+                        {
+                            self.types.class_inst(*class)
+                        } else if let Some(p) = view
+                            .params
+                            .get(i)
+                            .filter(|p| self.index.is_param_annotated(p.id))
+                        {
+                            self.types.intern_hir(self.ctx, &p.ty, true)
+                        } else {
+                            ty
+                        };
+                        args.push(self.instantiate_annotated_class(ty, 0, None)?);
+                    }
+                } else {
+                    let bindings = self.default_type_param_bindings(tid);
+                    for p in view.params {
+                        let ty = self.types.intern_hir(
+                            self.ctx,
+                            &p.ty,
+                            self.index.is_param_annotated(p.id),
+                        );
+                        let ty = self.types.substitute(ty, &bindings);
+                        args.push(self.instantiate_annotated_class(ty, 0, None)?);
+                    }
+                }
+                let mut request = InstanceReq::new(tid, &args, None).receiver(receiver);
+                request.witness = (!adapter).then_some(witness);
+                self.request_instance(request)
+            })?;
+            let root = match target {
+                Target::Function(id) if !adapter => ExportRoot::Function(id),
+                _ => {
+                    let (params, result) = signature.ok_or_else(|| {
+                        Diagnostic::internal("resource export requires a WIT signature")
+                    })?;
+                    let params = self.types.tuple(&params);
+                    let result = match (result, target) {
+                        (Some(ty), _) if self.exported_resource(ty).is_some() => self.alloc_loc(ty),
+                        (
+                            Some(_),
+                            Target::Function(id) | Target::Method(_, id) | Target::Static(_, id),
+                        ) => self.instances[id].return_loc,
+                        _ => self.alloc_loc(Ty::VOID),
                     };
-                    args.push(self.instantiate_annotated_class(ty, 0, None)?);
+                    ExportRoot::Adapter {
+                        target,
+                        params,
+                        result,
+                    }
                 }
-            } else {
-                let bindings = self.default_type_param_bindings(tid);
-                for p in view.params {
-                    let ty =
-                        self.types
-                            .intern_hir(self.ctx, &p.ty, self.index.is_param_annotated(p.id));
-                    let ty = self.types.substitute(ty, &bindings);
-                    args.push(self.instantiate_annotated_class(ty, 0, None)?);
-                }
-            }
-            let mut request = InstanceReq::new(tid, &args, None);
-            request.witness = Some(witness);
-            let inst = self.request_instance(request)?;
-            self.witness_instances.push(Some(inst));
-            self.enqueue(inst);
+            };
+            self.witness_instances.push(Some(root));
         }
         Ok(init_inst)
+    }
+
+    fn exported_resource(&self, ty: Ty) -> Option<u32> {
+        let TyKind::Named(name) = self.types.kind(ty) else {
+            return None;
+        };
+        let owner = self.decls.resource(name.get(self.ctx))?;
+        self.hir
+            .exports
+            .resources
+            .contains_key(&owner)
+            .then_some(owner)
+    }
+
+    fn exported_class(&mut self, owner: u32, active: &mut Vec<u32>) -> Result<ClassInstId> {
+        if let Some(&id) = self.resource_instances.get(&owner) {
+            return Ok(id);
+        }
+        let resource = self
+            .hir
+            .exports
+            .resources
+            .get(&owner)
+            .ok_or_else(|| Diagnostic::internal("unknown exported resource"))?;
+        let name = self.types.intern_name(&resource.class);
+        let cid = self
+            .index
+            .class_by_name_id(name)
+            .ok_or_else(|| Diagnostic::internal("unknown resource class"))?;
+        let constructor = self
+            .hir
+            .exports
+            .functions
+            .iter()
+            .find(|w| matches!(w.target,Some(Target::Constructor(id)) if id==owner));
+        let mut args = Vec::new();
+        active.push(owner);
+        for &p in constructor
+            .and_then(|w| w.signature.as_ref())
+            .into_iter()
+            .flat_map(|sig| &sig.params)
+        {
+            let ty = self.types.export_type(self.ctx, p);
+            let ty = if let Some((id, r)) = self
+                .exported_resource(ty)
+                .and_then(|id| self.hir.exports.resources.get_key_value(&id))
+            {
+                if active.contains(id) {
+                    self.types.named(self.ctx, &r.class)
+                } else {
+                    let class = self.exported_class(*id, active)?;
+                    self.types.class_inst(class)
+                }
+            } else {
+                ty
+            };
+            args.push(ty);
+        }
+        active.pop();
+        let id = self.construct_class(cid, &args, Vec::new(), 0, None)?;
+        self.resource_instances.insert(owner, id);
+        Ok(id)
     }
 
     fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeName, Ty)> {
@@ -124,19 +252,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn collect_non_global_caps(&self, captures: &[LocalId], out: &mut Vec<LocalId>) -> bool {
-        let mut any = false;
-        for &cap in captures {
-            if self.index.is_non_global_local(cap) {
-                any = true;
-                if !out.contains(&cap) {
-                    out.push(cap);
-                }
-            }
-        }
-        any
-    }
-
     pub(super) fn request_instance(&mut self, req: InstanceReq<'_>) -> Result<InstanceId> {
         let InstanceReq {
             witness,
@@ -194,11 +309,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                     w.signature.as_ref()
                 } else {
                     let mut candidates = self
-                        .hir
-                        .witnesses
-                        .iter()
-                        .filter(|w| w.target == Some(view.func_id))
-                        .filter_map(|w| w.signature.as_ref());
+                    .hir
+                    .exports
+                    .functions
+                    .iter()
+                    .filter(
+                        |w| matches!(w.target, Some(Target::Function(id)) if id == view.func_id),
+                    )
+                    .filter_map(|w| w.signature.as_ref());
                     candidates.next().filter(|first| {
                         candidates.all(|s| s.result.map(|v| v.ty) == first.result.map(|v| v.ty))
                     })
@@ -224,6 +342,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             invocation == Invocation::Lexical,
         );
         if let Some(&id) = self.instance_index.get(&key) {
+            self.instances[id].is_witness |= witness.is_some();
             if invocation == Invocation::Inline {
                 self.instances[id].invocation = invocation;
             }
@@ -242,18 +361,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let first_instance = self.template_counts[template] == 0;
         bump_count(&mut self.template_counts, template);
-
-        let mut inst_caps = Vec::new();
-        let mut captures_non_global = capture_owner.is_some();
-        if capture_owner.is_some() {
-            captures_non_global |= self.collect_non_global_caps(view.captures, &mut inst_caps);
-        }
-        for &arg in args {
-            if let TyKind::Func(ident) = self.types.kind(arg) {
-                let cb = self.index.view(ident.template);
-                captures_non_global |= self.collect_non_global_caps(cb.captures, &mut inst_caps);
-            }
-        }
 
         let mut type_bindings = self.compute_type_param_bindings(
             template,
@@ -342,7 +449,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             param_loc_buf.push(loc);
             if let Some(local) = self.index.local_idx(param.id) {
                 local_slots.push(InstanceLocalSlot { local, loc });
-                if let Some(cloc) = self.collapsed_local_locs[local] {
+                if let Some(cloc) = self.capture_locs.collapsed[local] {
                     self.write_loc(cloc, bound_ty);
                 }
             }
@@ -422,17 +529,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             caller,
             call_byte_offset,
             invocation,
-            captures_non_global,
             emitted_func_id,
             emitted_name,
             emitted_method_name,
         });
         self.instance_index.insert(key, inst_id);
-        self.inst_locals.push(local_slots);
+        self.capture_locs.slots.push(local_slots);
         self.inst_frame_locals
             .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
         self.inst_written.push(BitSet::default());
-        self.inst_captures.push(inst_caps);
         let sites = self
             .index
             .sites(template)

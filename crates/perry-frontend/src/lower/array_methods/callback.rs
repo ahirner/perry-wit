@@ -66,22 +66,15 @@ impl<'s> FunctionBuilder<'s, '_> {
                     !signature.is_async && signature.params.iter().all(|p| !p.is_rest),
                     "array callbacks require synchronous functions without rest parameters"
                 );
-                let values = signature
-                    .params
-                    .iter()
-                    .enumerate()
-                    .map(|(index, param)| match arguments.get(index) {
-                        Some(&value) => self.fit(ctx, value, param.binding.carrier),
-                        None => self.bind_fixed_arg(ctx, param, None),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                return Ok(match self.emit_signature_call(ctx, signature, values)? {
-                    Some(value) => value,
-                    None => {
-                        let ty = FP64Type::get(ctx).into();
-                        self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
-                    }
-                });
+                return Ok(
+                    match self.call_values(ctx, id, arguments.iter().copied())? {
+                        Some(value) => value,
+                        None => {
+                            let ty = FP64Type::get(ctx).into();
+                            self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
+                        }
+                    },
+                );
             }
             Callback::Lexical(function, signature) => (
                 function.id,

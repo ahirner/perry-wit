@@ -182,12 +182,7 @@ impl Shapes<'_, Preparing<'_>> {
                     .into()
             }
             TyKind::Number | TyKind::Int32 => FP64Type::get(ctx).into(),
-            TyKind::Integer(domain) => {
-                return Ok(BindingType {
-                    carrier: integer_mir_carrier(ctx, domain.deref(ctx).width()),
-                    integer: Some(domain),
-                });
-            }
+            TyKind::Integer(domain) => return Ok(BindingType::integer(ctx, domain)),
             TyKind::BigInt => perry_mir::BigIntType::get(ctx).into(),
             TyKind::String => StringType::get(ctx).into(),
             TyKind::Boolean => IntegerType::get(ctx, 1, Signedness::Signless).into(),
@@ -212,6 +207,11 @@ impl Shapes<'_, Preparing<'_>> {
                     timer
                 }
             }
+            TyKind::WitCarrier(carrier) => carrier,
+            TyKind::Variant(span) => {
+                let arms = self.types.source.ty_slice(span).to_vec();
+                self.union_layout(ctx, &arms, visiting)?
+            }
             TyKind::Symbol => {
                 bail_diag!(codes::UNSUPPORTED_TYPE, "type Symbol is not supported yet")
             }
@@ -226,14 +226,10 @@ impl Shapes<'_, Preparing<'_>> {
                 id.get(ctx)
             ),
             TyKind::Named(id) => {
-                let name = id.get(ctx);
-                return Ok(BindingType {
-                    carrier: self.named(ctx, name)?,
-                    integer: self
-                        .decls
-                        .integer_spec(name)
-                        .map(|(w, s)| IntegerType::get(ctx, w, s)),
-                });
+                if let Some(domain) = self.types.source.integer_domain(ctx, self.decls, ty) {
+                    return Ok(BindingType::integer(ctx, domain));
+                }
+                self.named(ctx, id.get(ctx))?
             }
             TyKind::ClassInst(id) => self.named(ctx, &facts.bodies.classes[id].name)?,
             TyKind::Array(elem) => ArrayType::get(ctx, slot(self, elem, visiting)?.carrier).into(),
@@ -259,11 +255,12 @@ impl Shapes<'_, Preparing<'_>> {
                         .object_slice(props)
                         .iter()
                         .filter(|p| !types.is_zero_sized_func(p.ty, &facts.capture_free))
-                        .map(|p| (types.name_str(p.name).to_owned(), p.ty, p.optional))
+                        .copied()
                         .collect()
                 };
                 if self.types.source.is_open(ty) {
-                    fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    let types = &self.types.source;
+                    fields.sort_unstable_by_key(|p| types.name_str(p.name));
                 }
                 if let Some(index) = index {
                     ensure_diag!(
@@ -273,20 +270,7 @@ impl Shapes<'_, Preparing<'_>> {
                     );
                     dict(self, index, visiting)?
                 } else {
-                    let fields = fields
-                        .into_iter()
-                        .map(|(name, ty, optional)| {
-                            let field = self
-                                .project_type(ctx, ty, visiting)
-                                .map_err(|e| e.with_note(format!("in field '{name}'")))?;
-                            let carrier = if optional {
-                                OptionalType::get(ctx, field.carrier).into()
-                            } else {
-                                field.expected_type(ctx)
-                            };
-                            Ok((name, carrier))
-                        })
-                        .collect::<Result<_>>()?;
+                    let fields = self.record_fields(ctx, &fields, visiting)?;
                     self.mir_record(ctx, fields)?.into()
                 }
             }

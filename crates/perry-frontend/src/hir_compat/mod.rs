@@ -14,16 +14,15 @@ use swc_ecma_visit::VisitMutWith;
 
 mod calls;
 mod classes;
-pub(crate) use calls::{RuntimeCall, runtime_call};
+pub(crate) use calls::{RuntimeCall, call_arguments, class_receiver, member, runtime_call};
 mod locations;
 pub(crate) use calls::{is_array_insertion, is_source_extern};
 pub(crate) use iteration::is_object_coercibility_check;
 pub(crate) use locations::{Locations, non_null_assertion};
-pub(crate) use locations::{display_name, function_label, has_source_offset, mark_non_null};
+pub(crate) use locations::{display_name, function_label, has_source_offset};
 mod iteration;
 mod methods;
 pub(crate) use iteration::{Availability, CursorPositions, Iteration, RecordExpr};
-mod resource_classes;
 mod streams;
 mod timers;
 mod witnesses;
@@ -31,7 +30,7 @@ pub(crate) use methods::Preservation;
 pub(crate) use methods::{Method, method};
 pub(crate) use streams::is_writable_to_web;
 pub(crate) use timers::is_timer_module;
-pub(crate) use witnesses::Witness;
+pub(crate) use witnesses::{Exports, ResourceClass, Target, Witness, adapter_name};
 
 pub(crate) fn lower<'s>(
     loaded: modules::Loaded<'s>,
@@ -50,7 +49,7 @@ pub(crate) fn lower<'s>(
         streams::preserve_options(&mut ast, unresolved, &locations)?;
         Ok::<_, Diagnostic>((
             constructors,
-            witnesses::resolve(&ast, &loaded.exports, world, &locations, unresolved)?,
+            witnesses::resolve(&ast, &loaded.exports, world, &mut locations, unresolved)?,
         ))
     })?;
     let mut analysis = crate::source::analyze(&mut ast, &mut locations);
@@ -236,41 +235,6 @@ pub(crate) fn static_property(part: &perry_hir::ir::ObjectPart) -> Option<&str> 
     }
 }
 
-/// Object fields retained across Perry's duplicate-key and literal-class desugarings.
-pub(crate) fn object_literal_pairs<'s>(
-    expr: &'s Expr,
-    literals: &crate::source::LiteralClasses<'s>,
-) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
-    let (fields, defined, names, args) = match expr {
-        Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
-        Expr::ObjectSpread { parts }
-            if parts.iter().all(|part| static_property(part).is_some()) =>
-        {
-            (&[][..], &parts[..], &[][..], &[][..])
-        }
-        Expr::New {
-            class_name, args, ..
-        } => (
-            &[][..],
-            &[][..],
-            *literals.get(class_name.as_str())?,
-            &args[..],
-        ),
-        _ => return None,
-    };
-    Some(
-        fields
-            .iter()
-            .map(|(name, value)| (name.as_str(), value))
-            .chain(
-                defined
-                    .iter()
-                    .filter_map(|part| Some((static_property(part)?, part.value()))),
-            )
-            .chain(names.iter().map(|field| field.name.as_str()).zip(args)),
-    )
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum ErrorClass {
     Any,
@@ -301,4 +265,4 @@ pub(crate) fn native_member_is_property(
 }
 
 mod objects;
-pub(crate) use objects::init_fields;
+pub(crate) use objects::{literal_option, object_literal_pairs, read_file_text};

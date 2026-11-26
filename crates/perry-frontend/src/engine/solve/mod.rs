@@ -11,7 +11,7 @@ mod members;
 mod methods;
 mod promises;
 use super::bitset::BitSet;
-use super::boundary::{ClassInfo, LocalFlags, ModuleIndex, TemplateKind};
+use super::boundary::{LocalFlags, ModuleIndex, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
     CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity,
@@ -53,7 +53,7 @@ struct ResultContract {
 }
 
 struct InstanceReq<'a> {
-    witness: Option<&'a hir_compat::Witness<'a, perry_hir::types::FuncId>>,
+    witness: Option<&'a hir_compat::Witness<'a, hir_compat::Target<perry_hir::types::FuncId>>>,
     template: TemplateId,
     receiver: Option<Receiver>,
     capture_owner: CaptureOwner,
@@ -128,6 +128,37 @@ impl EvalState<'_> {
     }
 }
 
+pub(super) struct CaptureLocations {
+    slots: IdxVec<InstanceId, Vec<InstanceLocalSlot>>,
+    collapsed: IdxVec<LocalIdx, Option<LocId>>,
+}
+
+impl CaptureLocations {
+    pub(super) fn get(
+        &self,
+        index: &ModuleIndex,
+        instances: &IdxVec<InstanceId, Instance>,
+        mut owner: CaptureOwner,
+        local: LocalIdx,
+    ) -> Option<LocId> {
+        if let Some(loc) = index.locals[local].module_loc() {
+            return Some(loc);
+        }
+        loop {
+            match owner {
+                CaptureOwner::Instance(id) => {
+                    if let Some(slot) = self.slots[id].iter().find(|s| s.local == local) {
+                        return Some(slot.loc);
+                    }
+                    owner = instances[id].capture_owner;
+                }
+                CaptureOwner::Template(_) => return self.collapsed[local],
+                CaptureOwner::None => return None,
+            }
+        }
+    }
+}
+
 struct InstanceLocalSlot {
     local: LocalIdx,
     loc: LocId,
@@ -137,21 +168,10 @@ pub(crate) fn solve<'h>(
     ctx: &Context,
     hir: &'h SourceModule<'h>,
     index: &ModuleIndex<'h>,
-
-    world: &crate::wit::WorldTypes<'_>,
+    decls: &Declarations,
     types: &mut TypeTable,
 ) -> Result<Solved> {
-    let decls = Declarations::new(
-        &hir.declarations.interfaces,
-        &hir.declarations.type_aliases,
-        &hir.declarations.imports,
-        hir.bodies
-            .classes
-            .iter()
-            .map(crate::shapes::ClassShape::Source),
-        world,
-    );
-    let mut solver = Solver::new(ctx, hir, index, &decls, types);
+    let mut solver = Solver::new(ctx, hir, index, decls, types);
     let init_inst = solver.seed_roots()?;
     solver.run_worklist(init_inst)?;
     solver.verify_fixed_point()?;
@@ -160,7 +180,7 @@ pub(crate) fn solve<'h>(
 }
 
 struct Solver<'h, 'a> {
-    resource_registries: HashMap<LocalId, Ty>,
+    resource_instances: HashMap<u32, ClassInstId>,
     ctx: &'a Context,
     hir: &'h SourceModule<'h>,
     index: &'a ModuleIndex<'h>,
@@ -182,7 +202,7 @@ struct Solver<'h, 'a> {
     worklist_head: usize,
     queued: BitSet,
     instances: IdxVec<InstanceId, Instance>,
-    witness_instances: Vec<Option<InstanceId>>,
+    witness_instances: Vec<Option<ExportRoot>>,
     instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: IdxVec<TemplateId, u16>,
     param_locs: Pool<ParamLocSpan, LocId>,
@@ -191,16 +211,15 @@ struct Solver<'h, 'a> {
     dispatch_arm_spans: Vec<DispatchArmSpan>,
     helpers: IdxVec<HelperId, HelperEntry>,
     helper_index: HashMap<HelperSpec, HelperId>,
-    inst_locals: IdxVec<InstanceId, Vec<InstanceLocalSlot>>,
+    capture_locs: CaptureLocations,
     inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
     inst_written: IdxVec<InstanceId, BitSet>,
-    inst_captures: IdxVec<InstanceId, Vec<LocalId>>,
     inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
     inst_superseded: BitSet,
     escaping_env_templates: BitSet,
     template_escape_locs: IdxVec<TemplateId, LocId>,
     collapsed_closures: BitSet,
-    collapsed_local_locs: IdxVec<LocalIdx, Option<LocId>>,
+
     boxed_locals: BitSet,
     dict_reads: BitSet,
     self_nested_locs: BitSet,
@@ -293,23 +312,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         let class_type_params = index
             .classes
             .map(|class| intern_tps(&class.declaration.type_params));
-        let resource_registries = hir
-            .witnesses
-            .iter()
-            .filter_map(|w| {
-                let signature = w.signature.as_ref()?;
-                let (local, class) = signature.registry.as_ref()?;
-                let params = signature
-                    .params
-                    .iter()
-                    .map(|&p| types.export_type(ctx, p))
-                    .collect::<Vec<_>>();
-                let class = types.generic(shapes::TypeName::new(ctx, class.clone()), &params);
-                Some((*local, class))
-            })
-            .collect();
         Self {
-            resource_registries,
+            resource_instances: HashMap::new(),
             ctx,
             hir,
             index,
@@ -329,7 +333,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             worklist_head: 0,
             queued: BitSet::default(),
             instances: IdxVec::default(),
-            witness_instances: Vec::with_capacity(hir.witnesses.len()),
+            witness_instances: Vec::with_capacity(hir.exports.functions.len()),
             instance_index: HashMap::with_capacity(64),
             template_counts: index.views.filled(0),
             param_locs: Pool::default(),
@@ -338,16 +342,18 @@ impl<'h, 'a> Solver<'h, 'a> {
             dispatch_arm_spans: Vec::new(),
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
-            inst_locals: IdxVec::default(),
+            capture_locs: CaptureLocations {
+                slots: IdxVec::default(),
+                collapsed: index.locals.filled(None),
+            },
             inst_frame_locals: IdxVec::default(),
             inst_written: IdxVec::default(),
-            inst_captures: IdxVec::default(),
             inst_sites: IdxVec::default(),
             inst_superseded: BitSet::default(),
             escaping_env_templates: BitSet::default(),
             template_escape_locs,
             collapsed_closures: BitSet::default(),
-            collapsed_local_locs: index.locals.filled(None),
+
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
             self_nested_locs: BitSet::default(),
@@ -466,7 +472,8 @@ impl<'h, 'a> Solver<'h, 'a> {
     fn for_each_site_target(&self, res: &SiteResolution, mut f: impl FnMut(InstanceId)) {
         match *res {
             SiteResolution::Call { target, .. } => self.for_each_callback_target(target, f),
-            SiteResolution::MethodCall(target) | SiteResolution::Callback { target } => f(target),
+            SiteResolution::MemberCall(MemberTarget::Class(target))
+            | SiteResolution::Callback { target } => f(target),
             SiteResolution::ClassNew(class_inst) => {
                 let instance = &self.class_insts[class_inst];
                 for target in instance.field_init.into_iter().chain(instance.ctor_inst) {

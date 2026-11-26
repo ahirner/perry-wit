@@ -1,5 +1,6 @@
 //! Single-pass boundary indexing over Perry HIR.
 use super::bitset::BitSet;
+use super::solve::{MemberTarget, SiteResolution};
 pub(crate) use super::types::LocalFlags;
 use super::types::{
     BindingSpan, CaptureSpan, CapturedLocalSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo,
@@ -94,16 +95,15 @@ pub(crate) struct ClassInfo<'h> {
     pub(crate) name_id: NameId,
     pub(crate) field_init: Option<TemplateId>,
     pub(crate) ctor: Option<TemplateId>,
-    pub(crate) methods: Vec<(NameId, TemplateId)>,
-    pub(crate) static_methods: Vec<(NameId, TemplateId)>,
-    pub(crate) getters: Vec<(NameId, TemplateId)>,
-    pub(crate) setters: Vec<(NameId, TemplateId)>,
     pub(crate) static_field_locs: Vec<(NameId, LocId)>,
 }
 
 impl ClassInfo<'_> {
-    pub(crate) fn find<T: Copy>(table: &[(NameId, T)], name: NameId) -> Option<T> {
-        table.iter().find(|&&(k, _)| k == name).map(|&(_, v)| v)
+    pub(super) fn static_field(&self, name: NameId) -> Option<LocId> {
+        self.static_field_locs
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|&(_, loc)| loc)
     }
 }
 
@@ -192,7 +192,8 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) class_has_implicit_params: BitSet,
     pub(super) literal_classes: crate::source::LiteralClasses<'h>,
     pub(crate) locals: IdxVec<LocalIdx, LocalInfo>,
-    pub(crate) strings: crate::source::StringConstants<'h>,
+    pub(crate) receiver_members: crate::wit::ReceiverMembers<'h>,
+    pub(crate) regexes: crate::source::RegexSites<'h>,
     pub(super) local_to_idx: Vec<Option<LocalIdx>>,
     pub(crate) capture_free_templates: BitSet,
     pub(crate) returns_empty_list: BitSet,
@@ -207,25 +208,6 @@ static VOID_HIR: perry_hir::types::Type = perry_hir::types::Type::Void;
 mod build;
 
 impl<'h> ModuleIndex<'h> {
-    pub(crate) fn replacement_captures(&self, search: &Expr) -> Option<(usize, bool)> {
-        let search = match search {
-            Expr::LocalGet(id) => self.strings.regex(self.local_idx(*id)?)?,
-            expr => expr,
-        };
-        match search {
-            Expr::String(_) => Some((0, false)),
-            Expr::RegExp { pattern, .. } => Some(crate::methods::regex_captures(pattern)),
-            _ => {
-                let args = self.expressions.regexp(search)?;
-                let pattern = match args.pattern {
-                    Some(pattern) => self.strings.regexp_operand(pattern, &self.local_to_idx)?,
-                    None => String::new(),
-                };
-                Some(crate::methods::regex_captures(&pattern))
-            }
-        }
-    }
-
     pub(crate) fn template_frame_count(&self, t: TemplateId) -> usize {
         self.layouts[t].frame_slots as usize
     }
@@ -291,6 +273,20 @@ impl<'h> ModuleIndex<'h> {
     }
     pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
         Some(self.functions.0.get(id as usize)?.as_ref()?.0)
+    }
+    pub(super) fn method_template(&self, methods: &[Function], name: &str) -> Option<TemplateId> {
+        let method = methods
+            .iter()
+            .find(|m| hir_compat::method(&m.name).name() == name)?;
+        self.template_of_func(method.id)
+    }
+    pub(super) fn accessor_template(
+        &self,
+        accessors: &[(String, Function)],
+        name: &str,
+    ) -> Option<TemplateId> {
+        let (_, accessor) = accessors.iter().find(|(property, _)| property == name)?;
+        self.template_of_func(accessor.id)
     }
     pub(crate) fn local_idx(&self, id: LocalId) -> Option<LocalIdx> {
         self.local_to_idx.get(id as usize).copied().flatten()
@@ -463,7 +459,7 @@ impl<'h> ModuleIndex<'h> {
                         }
                         let regex = matches!(init, Expr::RegExp { .. })
                             || scan.constructors.regexp(init).is_some();
-                        self.strings.bind(local, init, regex, !mutable);
+                        scan.regexes.bind(*id, init, regex, !mutable);
                         Self::record_site_expr(scan, owner, init);
                         self.scan_expr(scan, init, owner, in_loop);
                     }
@@ -564,7 +560,7 @@ impl<'h> ModuleIndex<'h> {
         owner: TemplateId,
         in_loop: bool,
     ) {
-        self.expressions.register(expr, scan.constructors);
+        let site = self.expressions.register(expr, scan.constructors);
         match expr {
             Expr::JsonParseTyped { ty, .. }
             | Expr::Closure {
@@ -572,16 +568,29 @@ impl<'h> ModuleIndex<'h> {
             } => {
                 self.annotations.register(scan, ty, true);
             }
-            Expr::Call { type_args, .. } if scan.constructors.collection(expr).is_some() => {
-                for ty in type_args {
-                    self.annotations.register(scan, ty, true);
-                }
+            _ if let Some(constructor) = self.expressions.collection(expr)
+                && !constructor.types.is_empty() =>
+            {
+                let args: Vec<_> = constructor
+                    .types
+                    .iter()
+                    .map(|ty| scan.types.intern_hir(scan.ctx, ty, true))
+                    .collect();
+                let base = crate::shapes::TypeName::new(scan.ctx, constructor.kind.name().into());
+                self.expressions.declared.insert(
+                    site,
+                    SiteResolution::CollectionNew(scan.types.generic(base, &args)),
+                );
             }
             _ => {}
         }
-        if let Some(args) = self.expressions.regexp(expr) {
-            scan.regex_operands.extend(args.pattern);
-            scan.regex_operands.extend(args.flags);
+        if let Some(id) = self.receiver_members.bind(expr, scan.decls, scan.locations) {
+            self.expressions
+                .declared
+                .insert(site, SiteResolution::MemberCall(MemberTarget::Resource(id)));
+        }
+        if matches!(expr, Expr::RegExp { .. }) || self.expressions.regexp(expr).is_some() {
+            scan.regexes.sites.push(expr);
         }
         match expr {
             Expr::Call { args, .. }
@@ -636,25 +645,10 @@ impl<'h> ModuleIndex<'h> {
             | Expr::Compare { .. }
             | Expr::TypeOf(_)
             | Expr::FuncRef(_) => Self::record_site_expr(scan, owner, expr),
-            Expr::ArrayMap { callback, .. }
-            | Expr::ArrayFlatMap { callback, .. }
-            | Expr::ArrayFilter { callback, .. }
-            | Expr::ArrayForEach { callback, .. }
-            | Expr::ArrayReduce { callback, .. }
-            | Expr::ArrayReduceRight { callback, .. }
-            | Expr::ArraySome { callback, .. }
-            | Expr::ArrayEvery { callback, .. }
-            | Expr::ArrayFind { callback, .. }
-            | Expr::ArrayFindIndex { callback, .. }
-            | Expr::ArraySort {
-                comparator: callback,
-                ..
+            expr if let Some((_, _, callback, _)) = crate::methods::Call::array_callback(expr) => {
+                Self::record_site_expr(scan, owner, callback)
             }
-            | Expr::ArrayToSorted {
-                comparator: Some(callback),
-                ..
-            }
-            | Expr::ArrayFromMapped {
+            Expr::ArrayFromMapped {
                 map_fn: callback, ..
             }
             | Expr::MapGroupBy {
@@ -752,7 +746,9 @@ impl<'h> ModuleIndex<'h> {
 
 struct ScanCtx<'h, 'a> {
     constructors: &'a crate::source::Constructors,
-    regex_operands: Vec<&'h Expr>,
+    decls: &'a crate::shapes::Declarations<'h>,
+    locations: &'a hir_compat::Locations<'a>,
+    regexes: crate::source::RegexInputs<'h>,
     ctx: &'a Context,
     declarations: &'a crate::source::ModuleDeclarations,
     closure_names: &'h HashMap<FuncId, String>,

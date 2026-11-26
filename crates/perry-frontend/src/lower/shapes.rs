@@ -18,17 +18,13 @@ use pliron::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 mod collection_types;
-use crate::engine::types::{Ty, TyKind};
-use crate::shapes::{
-    Declarations,
-    generics::{InstanceKey, Properties, object_properties},
-};
+use crate::engine::types::{LocId, ObjectProp, PropSpan, Ty, TyKind};
+use crate::shapes::{Declarations, generics::InstanceKey};
 
 mod generics;
 mod representation;
 mod resolved;
 mod unions;
-use representation::integer_mir_carrier;
 
 /// The runtime carrier type of a binding, paired with its declared WIT integer domain when
 /// annotated with a width-specific integer type.
@@ -43,6 +39,18 @@ impl BindingType {
         Self {
             carrier,
             integer: None,
+        }
+    }
+
+    fn integer(ctx: &Context, domain: TypedHandle<IntegerType>) -> Self {
+        let carrier = if domain.deref(ctx).width() == 64 {
+            perry_mir::BigIntType::get(ctx).into()
+        } else {
+            FP64Type::get(ctx).into()
+        };
+        Self {
+            carrier,
+            integer: Some(domain),
         }
     }
 
@@ -74,13 +82,13 @@ pub(super) struct Preparing<'h> {
     timer: Option<TypeHandle>,
     pending: HashMap<InstanceKey, PendingShape>,
     named: HashMap<InstanceKey, TypeHandle>,
-    structural_records: HashMap<Properties, TypedHandle<RecordType>>,
-    inputs: HashMap<TypeHandle, TypeHandle>,
+    structural_records: HashMap<PropSpan, TypedHandle<RecordType>>,
 }
 
 pub(super) struct Shapes<'h, T = Prepared<'h>> {
     pub(super) specialization: &'h crate::engine::Specialization<'h>,
     pub(super) records: perry_mir::RecordLayouts,
+    inputs: HashMap<TypeHandle, TypeHandle>,
     pub(super) types: T,
     pub(super) module: pliron::builtin::ops::ModuleOp,
     pub(super) foreign_wrappers: HashMap<(&'h str, Vec<TypeHandle>), Identifier>,
@@ -120,6 +128,7 @@ impl<'h> Shapes<'h, Preparing<'h>> {
         );
         Shapes {
             records: layouts.1,
+            inputs: HashMap::new(),
             specialization,
             types: Preparing {
                 source: layouts.0,
@@ -128,7 +137,6 @@ impl<'h> Shapes<'h, Preparing<'h>> {
                 pending: HashMap::new(),
                 named: HashMap::new(),
                 structural_records: HashMap::default(),
-                inputs: HashMap::new(),
             },
             module,
             foreign_wrappers: HashMap::new(),
@@ -142,6 +150,7 @@ impl<'h> Shapes<'h, Preparing<'h>> {
     }
 
     pub(super) fn prepare(mut self, ctx: &Context) -> Shapes<'h> {
+        self.types.source.intern_imports(ctx, self.decls.world);
         let mut bindings = crate::engine::types::IdxVec::default();
         for ty in self.types.source.ids() {
             let value = self.resolved_binding(ctx, ty);
@@ -153,6 +162,7 @@ impl<'h> Shapes<'h, Preparing<'h>> {
                 bindings,
             },
             records: self.records,
+            inputs: self.inputs,
             specialization: self.specialization,
             module: self.module,
             foreign_wrappers: self.foreign_wrappers,
@@ -239,20 +249,13 @@ impl<'h, T> Shapes<'h, T> {
             .foreign_functions
             .get(local)
             .copied()
-            .or_else(|| {
-                let (binding, crate::wit::Foreign::Function(sig)) =
-                    self.decls.world.foreign().get_key_value(local)?
-                else {
-                    return None;
-                };
-                Some((binding, sig))
-            })
+            .or_else(|| self.decls.world.function(local))
     }
 }
 
-impl Shapes<'_, Preparing<'_>> {
+impl<T> Shapes<'_, T> {
     pub(super) fn input_type(&mut self, ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {
-        if let Some(mapped) = self.types.inputs.get(&ty) {
+        if let Some(mapped) = self.inputs.get(&ty) {
             return Ok(*mapped);
         }
         let deref = ty.deref(ctx);
@@ -287,7 +290,7 @@ impl Shapes<'_, Preparing<'_>> {
                 .to_vec();
             drop(deref);
             let mapped = self.records.fresh(ctx, kind, None).to_diag(ctx)?;
-            self.types.inputs.insert(ty, mapped.into());
+            self.inputs.insert(ty, mapped.into());
             let fields = fields
                 .into_iter()
                 .map(|(name, ty)| Ok((name, self.input_type(ctx, ty)?)))
@@ -299,7 +302,7 @@ impl Shapes<'_, Preparing<'_>> {
         } else {
             ty
         };
-        self.types.inputs.insert(ty, mapped);
+        self.inputs.insert(ty, mapped);
         Ok(mapped)
     }
 }
@@ -520,9 +523,6 @@ impl Shapes<'_, Preparing<'_>> {
         // Built-in classes the subset models (a user type or explicit import takes precedence).
         let user = self.is_user_type(name);
         if !user {
-            if let Some(&(width, _)) = self.decls.integer_imports.get(name) {
-                return Ok(integer_mir_carrier(ctx, width));
-            }
             if let Some(entry) = self.decls.imported_types.get(name) {
                 return self.foreign_value_type(ctx, entry);
             }
@@ -539,74 +539,79 @@ impl Shapes<'_, Preparing<'_>> {
         bail_diag!(codes::UNSUPPORTED_TYPE, "type {name} is not supported yet")
     }
 
+    fn record_fields(
+        &mut self,
+        ctx: &Context,
+        properties: &[ObjectProp],
+        visiting: &mut Vec<LocId>,
+    ) -> Result<Vec<(String, TypeHandle)>> {
+        properties
+            .iter()
+            .map(|p| {
+                let name = self.types.source.name_str(p.name).to_owned();
+                let field = self
+                    .project_type(ctx, p.ty, visiting)
+                    .map_err(|e| e.with_note(format!("in field '{name}'")))?;
+                let carrier = if p.optional {
+                    OptionalType::get(ctx, field.carrier).into()
+                } else {
+                    field.expected_type(ctx)
+                };
+                Ok((name, carrier))
+            })
+            .collect()
+    }
+
     /// Reserve recursive identity before resolving source fields.
     fn source_record(
         &mut self,
         ctx: &Context,
-        named: Option<&InstanceKey>,
-        mut fields: Properties,
+        named: &InstanceKey,
+        props: PropSpan,
     ) -> Result<TypedHandle<RecordType>> {
-        fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        if let Some(record) = self.types.structural_records.get(&fields) {
+        let mut fields = self.types.source.object_slice(props).to_vec();
+        for field in &mut fields {
+            field.readonly = false;
+        }
+        let types = &self.types.source;
+        fields.sort_unstable_by_key(|p| types.name_str(p.name));
+        let props = self.types.source.intern_properties(&fields);
+        if let Some(record) = self.types.structural_records.get(&props) {
             return Ok(*record);
         }
-        if let Some(named) = named {
-            let reentry = self.types.pending.get(named).copied();
-            match reentry {
-                Some(PendingShape::Recursive(reserved)) => return Ok(reserved),
-                Some(PendingShape::Resolving) => {
-                    let reserved = self
-                        .records
-                        .fresh(ctx, RecordKind::Object, None)
-                        .to_diag(ctx)?;
-                    self.types.structural_records.insert(fields, reserved);
-                    self.types
-                        .pending
-                        .insert(named.clone(), PendingShape::Recursive(reserved));
-                    return Ok(reserved);
-                }
-                None => {
-                    self.types
-                        .pending
-                        .insert(named.clone(), PendingShape::Resolving);
-                }
+        match self.types.pending.get(named).copied() {
+            Some(PendingShape::Recursive(reserved)) => return Ok(reserved),
+            Some(PendingShape::Resolving) => {
+                let reserved = self
+                    .records
+                    .fresh(ctx, RecordKind::Object, None)
+                    .to_diag(ctx)?;
+                self.types.structural_records.insert(props, reserved);
+                self.types
+                    .pending
+                    .insert(named.clone(), PendingShape::Recursive(reserved));
+                return Ok(reserved);
+            }
+            None => {
+                self.types
+                    .pending
+                    .insert(named.clone(), PendingShape::Resolving);
             }
         }
-        let typed = fields
-            .iter()
-            .map(|(field, ty, optional)| {
-                let binding = self
-                    .resolved_binding(ctx, *ty)
-                    .map_err(|e| e.with_note(format!("in field '{field}'")))?;
-                let ty = if *optional {
-                    binding.carrier
-                } else {
-                    binding.expected_type(ctx)
-                };
-                let ty = if *optional {
-                    OptionalType::get(ctx, ty).into()
-                } else {
-                    ty
-                };
-                Ok((field.to_string(), ty))
-            })
-            .collect::<Result<Vec<_>>>();
-        let reserved = named.and_then(|named| match self.types.pending.remove(named) {
-            Some(PendingShape::Recursive(record)) => Some(record),
-            _ => None,
-        });
+        let typed = self.record_fields(ctx, &fields, &mut Vec::new());
+        let reserved = self.types.pending.remove(named);
         let typed = typed.inspect_err(|_| {
-            self.types.structural_records.remove(&fields);
+            self.types.structural_records.remove(&props);
         })?;
         let record = match reserved {
-            Some(record) => {
+            Some(PendingShape::Recursive(record)) => {
                 let name = record.deref(ctx).name().clone();
                 RecordType::get(ctx, name, Some(typed)).to_diag(ctx)
             }
-            None if let Some(record) = self.types.structural_records.get(&fields) => Ok(*record),
-            None => self.mir_record(ctx, typed),
+            _ if let Some(record) = self.types.structural_records.get(&props) => Ok(*record),
+            _ => self.mir_record(ctx, typed),
         }?;
-        self.types.structural_records.insert(fields, record);
+        self.types.structural_records.insert(props, record);
         Ok(record)
     }
 }

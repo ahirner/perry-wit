@@ -1,10 +1,6 @@
 //! Guest promise creation, settlement, and reaction handlers.
 use super::*;
-use crate::engine::{
-    Reaction,
-    solve::CallTarget,
-    types::{Ty, func_tag},
-};
+use crate::engine::{Reaction, solve::CallTarget, types::Ty};
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn settle_body(
@@ -85,15 +81,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         for handle in handles.into_iter().flatten() {
             let record = self.shapes.environment_record(handle)?;
             let capture = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![promise]));
-            let tag = self.string(ctx, &func_tag(handle));
-            let wrapper = self.shapes.mir_record(
-                ctx,
-                vec![
-                    ("tag".into(), tag.get_type(ctx)),
-                    ("val".into(), record.into()),
-                ],
-            )?;
-            inputs.push(self.emit_value(ctx, |ctx| AllocOp::new(ctx, wrapper, vec![tag, capture])));
+            inputs.push(self.function_value(ctx, handle, Some(capture), None)?);
         }
         let handler = self.catch_handler(ctx, "executor_threw");
         self.handlers.push(handler);

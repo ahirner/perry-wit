@@ -6,7 +6,7 @@ use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported};
 use pliron::utils::vec_exns::VecExtns;
 
 mod resolution;
-pub(crate) use resolution::{Expansion, Properties, Query, Resolver, object_properties};
+pub(crate) use resolution::{Expansion, Query, Resolver};
 
 const RESOLUTION_DEPTH: usize = 32;
 pub(crate) const ARGUMENT_LIMIT: usize = 4096;

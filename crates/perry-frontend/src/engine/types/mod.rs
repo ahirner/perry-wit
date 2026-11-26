@@ -7,6 +7,7 @@ pub(crate) use idx::*;
 use perry_hir::types::Type as HirType;
 use pliron::{builtin::types::IntegerType, context::Context, r#type::TypedHandle};
 use std::collections::HashMap;
+pub(crate) use wit::WitView;
 
 const MAX_TYPE_DEPTH: u8 = 16;
 
@@ -28,6 +29,7 @@ pub(crate) struct TypeTable {
     names: IdxVec<NameId, String>,
     name_index: HashMap<String, NameId>,
     scratch: Vec<Ty>,
+    wit_shapes: HashMap<(*const wit_parser::Resolve, wit_parser::Type, WitView), Ty>,
 }
 
 impl TypeTable {
@@ -65,7 +67,7 @@ impl TypeTable {
                 let m = self.meta[i];
                 (m.open, m.depth.saturating_add(1))
             }
-            TyKind::Tuple(s) | TyKind::Generic { args: s, .. } => {
+            TyKind::Tuple(s) | TyKind::Variant(s) | TyKind::Generic { args: s, .. } => {
                 let (mut o, mut d) = (false, 0u8);
                 for &c in self.ty_slice(s) {
                     let m = self.meta[c];
@@ -174,9 +176,33 @@ impl TypeTable {
         let args = self.ty_pool.intern(&mut self.members_index, args);
         self.intern_kind(TyKind::Generic { base, args })
     }
+    pub(crate) fn property(&mut self, name: &str, ty: Ty, optional: bool) -> ObjectProp {
+        ObjectProp {
+            name: self.intern_name(name),
+            ty,
+            optional,
+            readonly: false,
+        }
+    }
+
+    pub(crate) fn closed_record(&self, ty: Ty) -> Option<PropSpan> {
+        match self.kind(ty) {
+            TyKind::Object { props, index: None } => Some(props),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn intern_properties(&mut self, props: &[ObjectProp]) -> PropSpan {
+        self.object_props.intern(&mut self.props_index, props)
+    }
+
+    pub(crate) fn object_type(&mut self, props: PropSpan, index: Option<Ty>) -> Ty {
+        self.intern_kind(TyKind::Object { props, index })
+    }
+
     pub(crate) fn object(&mut self, props: &[ObjectProp], index: Option<Ty>) -> Ty {
-        let span = self.object_props.intern(&mut self.props_index, props);
-        self.intern_kind(TyKind::Object { props: span, index })
+        let span = self.intern_properties(props);
+        self.object_type(span, index)
     }
 
     fn finish_union(&mut self, flat: &mut Vec<Ty>) -> Ty {
@@ -296,7 +322,7 @@ impl TypeTable {
         match self.kind(ty) {
             TyKind::Integer(domain) => Some(domain),
             TyKind::Named(name) => {
-                let (width, signedness) = decls.integer_spec(name.get(ctx))?;
+                let (width, signedness) = decls.integer_spec(ctx, name.get(ctx))?;
                 Some(IntegerType::get(ctx, width, signedness))
             }
             _ => None,
@@ -533,14 +559,12 @@ impl TypeTable {
                 let params: Vec<_> = signature
                     .params
                     .iter()
-                    .map(|(name, ty, optional)| ObjectProp {
-                        name: self.intern_name(name),
-                        ty: self.intern_hir(ctx, ty, explicit),
-                        optional: *optional,
-                        readonly: false,
+                    .map(|(name, ty, optional)| {
+                        let ty = self.intern_hir(ctx, ty, explicit);
+                        self.property(name, ty, *optional)
                     })
                     .collect();
-                let params = self.object_props.intern(&mut self.props_index, &params);
+                let params = self.intern_properties(&params);
                 let result = self.intern_hir(ctx, &signature.return_type, explicit);
                 self.intern_kind(TyKind::Signature {
                     params,
@@ -750,7 +774,7 @@ impl TypeTable {
                 for p in &mut params {
                     p.ty = self.substitute(p.ty, bindings);
                 }
-                let params = self.object_props.intern(&mut self.props_index, &params);
+                let params = self.intern_properties(&params);
                 let result = self.substitute(result, bindings);
                 self.intern_kind(TyKind::Signature {
                     params,

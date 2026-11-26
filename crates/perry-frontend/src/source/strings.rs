@@ -1,106 +1,117 @@
 //! Bounded RegExp constructors use the constant text of their lexical operands.
-use crate::engine::types::{IdxVec, LocalIdx};
+use super::ConstructorSites;
 use perry_hir::{
     ir::{BinaryOp, Expr},
     types::LocalId,
 };
+use std::{borrow::Cow, collections::HashMap};
 
-#[derive(Default)]
 enum Constant<'s> {
-    #[default]
-    Unknown,
     Initializer(&'s Expr),
     Text(String),
-    Regex(&'s Expr),
 }
 
 #[derive(Default)]
-pub(crate) struct StringConstants<'s>(IdxVec<LocalIdx, Constant<'s>>);
+pub(crate) struct RegexInputs<'s> {
+    pub(crate) sites: Vec<&'s Expr>,
+    strings: HashMap<LocalId, Constant<'s>>,
+    bindings: HashMap<LocalId, &'s Expr>,
+}
 
-impl<'s> StringConstants<'s> {
-    pub(crate) fn bind(&mut self, id: LocalIdx, init: &'s Expr, regex: bool, immutable: bool) {
-        if !regex && !immutable {
-            return;
-        }
-        self.0.fill_through(id, Constant::default);
-        self.0[id] = if regex {
-            Constant::Regex(init)
-        } else {
-            Constant::Initializer(init)
+pub(crate) struct RegexPattern<'s> {
+    pub(crate) pattern: Cow<'s, str>,
+    pub(crate) flags: Cow<'s, str>,
+    pub(crate) captures: (usize, bool),
+}
+
+#[derive(Default)]
+pub(crate) struct RegexSites<'s> {
+    patterns: HashMap<*const Expr, RegexPattern<'s>>,
+    bindings: HashMap<LocalId, &'s Expr>,
+}
+
+impl RegexSites<'_> {
+    pub(crate) fn get(&self, expr: &Expr) -> Option<&RegexPattern<'_>> {
+        let expr = match expr {
+            Expr::LocalGet(id) => *self.bindings.get(id)?,
+            _ => expr,
         };
-    }
-
-    pub(crate) fn regex(&self, id: LocalIdx) -> Option<&'s Expr> {
-        match self.0.get(id)? {
-            Constant::Regex(expr) => Some(expr),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn resolve_operands(&mut self, operands: Vec<&Expr>, ids: &[Option<LocalIdx>]) {
-        for operand in operands {
-            text(operand, &mut String::new(), &mut |id, out| {
-                self.resolve(id, ids, out)
-            });
-        }
-        for slot in self.0.as_mut_slice() {
-            if matches!(slot, Constant::Initializer(_)) {
-                *slot = Constant::Unknown;
-            }
-        }
-    }
-
-    fn resolve(&mut self, id: LocalId, ids: &[Option<LocalIdx>], out: &mut String) -> Option<()> {
-        let id = ids.get(id as usize).copied().flatten()?;
-        let slot = self.0.get_mut(id)?;
-        if let Constant::Initializer(expr) = *slot {
-            *slot = Constant::Unknown;
-            let mut value = String::new();
-            text(expr, &mut value, &mut |id, out| self.resolve(id, ids, out))?;
-            self.0[id] = Constant::Text(value);
-        }
-        let Constant::Text(value) = &self.0[id] else {
-            return None;
-        };
-        out.push_str(value);
-        Some(())
-    }
-
-    pub(crate) fn regexp_operand(&self, expr: &Expr, ids: &[Option<LocalIdx>]) -> Option<String> {
-        let mut value = String::new();
-        if !matches!(expr, Expr::Undefined) {
-            text(expr, &mut value, &mut |id, out| {
-                let Constant::Text(value) = self.0.get(ids.get(id as usize).copied().flatten()?)?
-                else {
-                    return None;
-                };
-                out.push_str(value);
-                Some(())
-            })?;
-        }
-        Some(value)
+        self.patterns.get(&std::ptr::from_ref(expr))
     }
 }
 
-fn text(
-    expr: &Expr,
-    output: &mut String,
-    binding: &mut impl FnMut(LocalId, &mut String) -> Option<()>,
-) -> Option<()> {
-    match expr {
-        Expr::String(text) => output.push_str(text),
-        Expr::LocalGet(id) => binding(*id, output)?,
-        Expr::TemplateStringCoerce(value) => text(value, output, binding)?,
-        Expr::Sequence(parts) => text(parts.last()?, output, binding)?,
-        Expr::Binary {
-            op: BinaryOp::Add,
-            left,
-            right,
-        } => {
-            text(left, output, binding)?;
-            text(right, output, binding)?;
+impl<'s> RegexInputs<'s> {
+    pub(crate) fn bind(&mut self, id: LocalId, init: &'s Expr, regex: bool, immutable: bool) {
+        if regex {
+            self.bindings.insert(id, init);
+        } else if immutable {
+            self.strings.insert(id, Constant::Initializer(init));
         }
-        _ => return None,
     }
-    Some(())
+
+    pub(crate) fn finish(mut self, constructors: &impl ConstructorSites) -> RegexSites<'s> {
+        let sites = std::mem::take(&mut self.sites);
+        let patterns = sites
+            .into_iter()
+            .filter_map(|expr| {
+                let (pattern, flags) = if let Expr::RegExp { pattern, flags } = expr {
+                    (Cow::from(pattern.as_str()), Cow::from(flags.as_str()))
+                } else {
+                    let args = constructors.regexp(expr)?;
+                    (self.operand(args.pattern)?, self.operand(args.flags)?)
+                };
+                let captures = crate::methods::regex_captures(&pattern);
+                Some((
+                    std::ptr::from_ref(expr),
+                    RegexPattern {
+                        pattern,
+                        flags,
+                        captures,
+                    },
+                ))
+            })
+            .collect();
+        RegexSites {
+            patterns,
+            bindings: self.bindings,
+        }
+    }
+
+    fn operand(&mut self, arg: Option<&Expr>) -> Option<Cow<'s, str>> {
+        let mut value = String::new();
+        if let Some(arg) = arg
+            && !matches!(arg, Expr::Undefined)
+        {
+            self.append(arg, &mut value)?;
+        }
+        Some(Cow::Owned(value))
+    }
+
+    fn append(&mut self, expr: &Expr, output: &mut String) -> Option<()> {
+        match expr {
+            Expr::String(text) => output.push_str(text),
+            Expr::LocalGet(id) => match *self.strings.get(id)? {
+                Constant::Text(ref text) => output.push_str(text),
+                Constant::Initializer(init) => {
+                    self.strings.remove(id);
+                    let mut value = String::new();
+                    self.append(init, &mut value)?;
+                    output.push_str(&value);
+                    self.strings.insert(*id, Constant::Text(value));
+                }
+            },
+            Expr::TemplateStringCoerce(value) => self.append(value, output)?,
+            Expr::Sequence(parts) => self.append(parts.last()?, output)?,
+            Expr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => {
+                self.append(left, output)?;
+                self.append(right, output)?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
 }

@@ -57,11 +57,6 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
         self.data.push(value);
         id
     }
-    pub(crate) fn fill_through(&mut self, id: I, value: impl FnMut() -> T) {
-        if self.len() <= id.index() {
-            self.data.resize_with(id.index() + 1, value);
-        }
-    }
     pub(crate) fn get(&self, id: I) -> Option<&T> {
         self.data.get(id.index())
     }
@@ -145,6 +140,7 @@ id_type!(
     ClassInstId,
     EnvId,
     EmittedId,
+    MemberId,
     LocId,
     LocalIdx,
     NameId,
@@ -326,6 +322,8 @@ pub(crate) enum TyKind {
     Timer,
     Named(shapes::TypeName),
     Literal(shapes::TypeName),
+    WitCarrier(pliron::r#type::TypeHandle),
+    Variant(TySpan),
     Signature {
         params: PropSpan,
         result: Ty,
@@ -386,13 +384,9 @@ impl LocalFlags {
     pub(crate) const FORWARD_CAPTURED: Self = Self(1 << 10);
     pub(crate) const FOR_OF: Self = Self(1 << 11);
     pub(crate) const MODULE_OR_PARAM: Self = Self(Self::MODULE.0 | Self::PARAM.0);
-    pub(crate) const BOXED_TRIGGER: Self = Self(
-        Self::REASSIGNED.0
-            | Self::WRITTEN_FROM_CLOSURE.0
-            | Self::DEFERRED.0
-            | Self::FOR_HEAD.0
-            | Self::FORWARD_CAPTURED.0,
-    );
+    pub(crate) const WRITTEN: Self = Self(Self::REASSIGNED.0 | Self::WRITTEN_FROM_CLOSURE.0);
+    pub(crate) const BOXED_TRIGGER: Self =
+        Self(Self::WRITTEN.0 | Self::DEFERRED.0 | Self::FOR_HEAD.0 | Self::FORWARD_CAPTURED.0);
     pub(crate) const DEFERRED_OR_NULLISH: Self = Self(Self::DEFERRED.0 | Self::NULLISH_INIT.0);
 
     pub(crate) fn insert(&mut self, other: Self) {

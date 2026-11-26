@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::types::LocalFlags;
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(crate) fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
@@ -33,7 +34,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         text: Value,
-        search: Value,
+        (source, search): (&'s Expr, Value),
         callback: &'s Expr,
         all: bool,
     ) -> Result<Value> {
@@ -44,19 +45,28 @@ impl<'s> FunctionBuilder<'s, '_> {
             "string replacement requires a string or literal regex pattern"
         );
         let (global, captures, named) = if regex {
-            let global = Self::regex_global(ctx, search)?;
+            let facts = self.shapes.specialization;
+            let known = facts.regexes.get(source).filter(|_| !matches!(source, Expr::LocalGet(id) if facts.instances.binding_has_any(*id, LocalFlags::WRITTEN)));
+            let global = known.map_or_else(
+                || Self::regex_global(ctx, search),
+                |r| Ok(r.flags.contains('g')),
+            )?;
             ensure_unsupported!(
                 !all || global,
                 "String.prototype.replaceAll called with a non-global RegExp argument"
             );
-            let (captures, named) = static_regex(ctx, search, |op| {
-                crate::methods::regex_captures(&op.pattern(ctx))
-            })
-            .ok_or_else(|| {
-                Diagnostic::unsupported(
-                    "replacement callbacks require statically known capture arity",
-                )
-            })?;
+            let (captures, named) = known
+                .map(|r| r.captures)
+                .or_else(|| {
+                    static_regex(ctx, search, |op| {
+                        crate::methods::regex_captures(&op.pattern(ctx))
+                    })
+                })
+                .ok_or_else(|| {
+                    Diagnostic::unsupported(
+                        "replacement callbacks require statically known capture arity",
+                    )
+                })?;
             (global, captures, named)
         } else {
             (all, 0, false)

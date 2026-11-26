@@ -21,15 +21,13 @@ use perry_hir::{
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 use pliron::context::Context;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn build<'h>(
     bodies: &'h Bodies,
     declarations: &ModuleDeclarations,
-    locations: &crate::hir_compat::Locations<'_>,
+    locations: &mut crate::hir_compat::Locations<'_>,
     index: &ModuleIndex<'h>,
     types: &TypeTable,
     solved: &Solved,
-    instantiations: &mut Vec<super::InstantiationOrigin>,
     layouts: (&Context, &mut perry_mir::RecordLayouts),
 ) -> Result<(
     InstanceBodies<'h>,
@@ -51,7 +49,6 @@ pub(super) fn build<'h>(
         solved,
         next_static_id: 0x8000_0000,
         next_func_id: index.max_func_id.max(max_inst_fid).saturating_add(1),
-        instantiations,
         layouts,
 
         native: Default::default(),
@@ -66,16 +63,15 @@ pub(super) fn build<'h>(
     Ok((bodies, planner.plans, planner.decisions))
 }
 
-struct InstancePlanner<'h, 'a> {
+struct InstancePlanner<'h, 'a, 's> {
     bodies: &'h Bodies,
     declarations: &'a ModuleDeclarations,
-    locations: &'a crate::hir_compat::Locations<'a>,
+    locations: &'a mut crate::hir_compat::Locations<'s>,
     index: &'a ModuleIndex<'h>,
     types: &'a TypeTable,
     solved: &'a Solved,
     next_func_id: FuncId,
     next_static_id: LocalId,
-    instantiations: &'a mut Vec<super::InstantiationOrigin>,
     layouts: (&'a Context, &'a mut perry_mir::RecordLayouts),
 
     native: Vec<(FuncId, super::NativeFunction)>,
@@ -83,7 +79,7 @@ struct InstancePlanner<'h, 'a> {
     decisions: super::plans::Pending,
 }
 
-impl<'h> InstancePlanner<'h, '_> {
+impl<'h> InstancePlanner<'h, '_, '_> {
     fn is_resolved(&self, ty: Ty) -> bool {
         !self.types.is_open_with(
             ty,
@@ -110,21 +106,14 @@ impl<'h> InstancePlanner<'h, '_> {
     }
 
     fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
-        if let Some(lidx) = self.index.local_idx(id) {
-            let local = self.index.locals[lidx];
-            if local.flags.contains(LocalFlags::MODULE) {
-                return local.module_loc().map(|loc| self.solved.locations[loc]);
-            }
-            if let Some(slot) = local.frame_slot()
-                && local.owner == self.solved.instances[inst_id].template
-            {
-                return self.solved.inst_frame_locals[inst_id].get(slot).copied();
-            }
+        let lidx = self.index.local_idx(id)?;
+        let info = self.index.locals[lidx];
+        if let Some(slot) = info.frame_slot()
+            && info.owner == self.solved.instances[inst_id].template
+        {
+            return self.solved.inst_frame_locals[inst_id].get(slot).copied();
         }
-        self.solved.inst_local_tys[inst_id]
-            .iter()
-            .find(|&&(lid, _)| lid == id)
-            .map(|&(_, ty)| ty)
+        self.local_ty_in_owner(CaptureOwner::Instance(inst_id), id)
     }
 
     fn build_all(&mut self) -> Result<InstanceBodies<'h>> {
@@ -179,8 +168,52 @@ impl<'h> InstancePlanner<'h, '_> {
                 new_classes.push(self.plan_class(cid, None, orig)?);
             }
         }
+        let mut exports = Vec::with_capacity(self.solved.witness_instances.len());
+        for (i, root) in self.solved.witness_instances.iter().enumerate() {
+            use crate::engine::{NativeBody, NativeFunction, NativeParam, solve::ExportRoot};
+            exports.push(match root {
+                None => None,
+                Some(ExportRoot::Function(id)) => Some(self.plans.function(*id)),
+                Some(ExportRoot::Adapter {
+                    target,
+                    params,
+                    result,
+                }) => {
+                    let id = self.fresh_func_id()?;
+                    let name = crate::hir_compat::adapter_name(i);
+                    if let crate::hir_compat::Target::Function(id) = target {
+                        let template = self
+                            .index
+                            .view(self.solved.instances[*id].template)
+                            .raw_name();
+                        self.locations
+                            .record_instantiation(name.clone(), template, 0, None);
+                    }
+                    self.native.push((
+                        id,
+                        NativeFunction {
+                            name,
+                            params: self
+                                .types
+                                .tuple_slice(*params)
+                                .iter()
+                                .copied()
+                                .map(NativeParam::Value)
+                                .collect(),
+                            result: self.solved.locations[*result],
+                            is_async: false,
+                            body: NativeBody::Resource(
+                                target.try_map(|id| Ok(self.plans.function(id)))?,
+                            ),
+                        },
+                    ));
+                    Some(id)
+                }
+            });
+        }
         self.native.sort_unstable_by_key(|&(id, _)| id);
         Ok(InstanceBodies {
+            exports,
             native: std::mem::take(&mut self.native),
             init: &self.bodies.init,
             functions: new_functions,
@@ -335,10 +368,7 @@ impl<'h> InstancePlanner<'h, '_> {
         let mut params = Vec::with_capacity(view.params.len());
         let lexical = inst.invocation == Invocation::Lexical;
         let is_env_fn = !lexical && self.is_env_template(inst.template);
-        let self_ident = FuncIdentity {
-            template: inst.template,
-            capture_owner: inst.capture_owner,
-        };
+        let self_ident = inst.identity();
         let environment = is_env_fn.then_some(self_ident);
         if let Some(identity) = environment {
             self.environment(identity)?;
@@ -424,28 +454,26 @@ impl<'h> InstancePlanner<'h, '_> {
             super::InstanceResult::Source
         };
         self.prepare_instance(inst_id)?;
-        let inherited = &self.solved.inst_captures[inst_id];
-        let captures = if is_env_fn {
-            std::borrow::Cow::Borrowed(&[][..])
-        } else if inherited.is_empty() && view.captures.windows(2).all(|pair| pair[0] < pair[1]) {
-            std::borrow::Cow::Borrowed(view.captures)
-        } else {
-            let mut caps = view.captures.to_vec();
-            caps.extend_from_slice(inherited);
-            caps.sort_unstable();
-            caps.dedup();
-            caps.into()
-        };
-
-        if !inst.is_witness && inst.caller.is_some() {
-            self.instantiations
-                .push(super::InstantiationOrigin::Instance(inst_id));
+        if !inst.is_witness
+            && let Some(caller) = inst.caller
+        {
+            let caller = &self.solved.instances[caller];
+            self.locations.record_instantiation(
+                inst.emitted_name.clone(),
+                view.raw_name(),
+                inst.call_byte_offset,
+                (caller.template != super::types::TemplateId::INIT)
+                    .then(|| caller.emitted_name.clone()),
+            );
         }
 
+        let captures_frame = inst.capture_owner.is_some() || self.types.tuple_slice(inst.args).iter().any(|&arg| {
+            matches!(self.types.kind(arg), TyKind::Func(id) if !self.index.template_captures(id.template).is_empty())
+        });
         let inline = (matches!(view.kind, TemplateKind::Function | TemplateKind::Closure)
             && (inst.invocation == Invocation::Lexical
                 || (!self.is_env_template(inst.template)
-                    && (inst.invocation == Invocation::Inline || inst.captures_non_global))))
+                    && (inst.invocation == Invocation::Inline || captures_frame))))
             .then_some(inst.invocation);
         Ok(InstanceFunction {
             signature: Some(super::InstanceSignature {
@@ -463,7 +491,7 @@ impl<'h> InstancePlanner<'h, '_> {
             params,
             return_type: view.return_type,
             body: view.body,
-            captures,
+            captures: if is_env_fn { &[] } else { view.captures },
             is_async: view.is_async,
             is_generator: view.is_generator,
             is_exported: inst.is_witness,
@@ -477,8 +505,7 @@ impl<'h> InstancePlanner<'h, '_> {
             .find_map(|(id, inst)| {
                 (self.solved.live_instances.contains(id.index())
                     && inst.invocation != Invocation::Lexical
-                    && inst.template == ident.template
-                    && inst.capture_owner == ident.capture_owner)
+                    && inst.identity() == ident)
                     .then_some(inst.emitted_func_id)
             })
             .unwrap_or_else(|| self.index.view(ident.template).func_id)

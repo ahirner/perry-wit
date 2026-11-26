@@ -3,12 +3,39 @@ use super::*;
 use crate::lower::inline::InlineResult;
 use pliron::utils::vec_exns::VecExtns;
 
-enum ClassArguments<'a, 's> {
+#[derive(Clone, Copy)]
+pub(super) enum ClassArguments<'a, 's> {
     Expressions(&'s [Expr]),
     Evaluated(&'a [Value]),
 }
 
-enum ClassReceiver<'a, 's> {
+impl<'s> ClassArguments<'_, 's> {
+    fn next_value(
+        &mut self,
+        b: &mut FunctionBuilder<'s, '_>,
+        ctx: &mut Context,
+        expected: Option<TypeHandle>,
+        default: Option<&Expr>,
+    ) -> Result<Option<Value>> {
+        match self {
+            Self::Evaluated(values) => Ok(values.split_off_first().copied()),
+            Self::Expressions(args) => {
+                while let Some(expr) = args.split_off_first() {
+                    if b.erased_operand(expr) {
+                        b.discard_function_operand(ctx, expr)?;
+                    } else if matches!(expr, Expr::Undefined) && default.is_some() {
+                        return Ok(None);
+                    } else {
+                        return b.expression_with(ctx, expr, expected).map(Some);
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+}
+
+pub(super) enum ClassReceiver<'a, 's> {
     Static,
     Instance(Value),
     Constructor(
@@ -79,7 +106,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         class: &'s crate::source::InstanceClass<'s>,
-        args: &'s [Expr],
+        mut args: ClassArguments<'_, 's>,
     ) -> Result<Value> {
         let class_name = class.name.as_str();
         let rec_ty = self.shapes.resolved_binding(class.ty)?.carrier;
@@ -111,8 +138,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .iter()
                 .all(|(p, _)| !p.is_rest && p.default.is_none())
             && ctor.body.len() == class.fields.len()
-            && args.len() == class.fields.len()
-            && args.iter().all(|e| !self.erased_operand(e))
+            && match args {
+                ClassArguments::Expressions(args) => {
+                    args.len() == class.fields.len() && args.iter().all(|e| !self.erased_operand(e))
+                }
+                ClassArguments::Evaluated(args) => args.len() == class.fields.len(),
+            }
             && ctor
                 .body
                 .iter()
@@ -127,8 +158,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 })
         {
             let mut slots = vec![None; field_defs.len()];
-            for (&(index, field_ty), expr) in field_slots.iter().zip(args) {
-                let val = self.expression_with(ctx, expr, Some(field_ty))?;
+            for &(index, field_ty) in &field_slots {
+                let val = args
+                    .next_value(self, ctx, Some(field_ty), None)?
+                    .ok_or_else(|| internal!("missing direct initializer"))?;
                 *slots.get_mut(index).ok_or_else(|| {
                     internal!("field slot {index} out of range on {class_name}")
                 })? = Some(self.fit(ctx, val, field_ty)?);
@@ -186,15 +219,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 ctx,
                 class_name,
                 ctor,
-                ClassArguments::Expressions(args),
+                args,
                 ClassReceiver::Constructor(this_slot, class, &initializers),
             )?;
         } else {
-            for arg in args {
-                if self.erased_operand(arg) {
+            if let ClassArguments::Expressions(args) = args {
+                for arg in args {
                     self.discard_function_operand(ctx, arg)?;
-                } else {
-                    self.effect(ctx, arg)?;
                 }
             }
             self.init_own_class_fields(ctx, class_name, class, this_slot, &initializers)?;
@@ -309,30 +340,17 @@ impl<'s> FunctionBuilder<'s, '_> {
             == Some(class_name)
     }
 
-    pub(super) fn instance_method_call(
+    pub(super) fn solved_member(
         &mut self,
         ctx: &mut Context,
-        expr: &'s Expr,
         id: FuncId,
+        args: ClassArguments<'_, 's>,
+        receiver: ClassReceiver<'_, 's>,
     ) -> Result<Option<Value>> {
         let Some(&Callee::Member(class, function)) = self.signatures.callee(id) else {
             bail_internal!("missing specialized class method {id}");
         };
-        let (args, receiver) = match expr {
-            Expr::StaticMethodCall { args, .. } => (args, ClassReceiver::Static),
-            Expr::Call { callee, args, .. } if let Expr::PropertyGet { object, .. } = &**callee => {
-                let value = self.expression(ctx, object)?;
-                (args, ClassReceiver::Instance(self.defined(ctx, value)?))
-            }
-            _ => bail_internal!("method invocation requires a class member"),
-        };
-        self.inline_class_callable(
-            ctx,
-            class,
-            function,
-            ClassArguments::Expressions(args),
-            receiver,
-        )
+        self.inline_class_callable(ctx, class, function, args, receiver)
     }
 
     pub(super) fn class_static_method_call(
@@ -342,15 +360,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         method: &str,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        if let Some(owner) = self.shapes.decls.resource(class_name)
-            && let Some(member) =
-                self.shapes
-                    .decls
-                    .world
-                    .member(owner, crate::wit::MemberKind::Static, method)
-        {
-            return self.resource_call(ctx, member, None, args);
-        }
         let (owner_class, func) = self
             .shapes
             .class_static_method(class_name, method)
@@ -482,35 +491,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             "async or generator class methods are not supported yet"
         );
         let mut args = args;
-        let mut next_arg = |this: &mut Self,
-                            ctx: &mut Context,
-                            expected,
-                            default: Option<&Expr>| {
-            match &mut args {
-                ClassArguments::Evaluated(values) => {
-                    let value = values.first().copied();
-                    *values = values.get(1..).unwrap_or_default();
-                    Ok(value)
-                }
-                ClassArguments::Expressions(expressions) => {
-                    while let Some((arg, rest)) = expressions.split_first()
-                        && this.erased_operand(arg)
-                    {
-                        this.discard_function_operand(ctx, arg)?;
-                        *expressions = rest;
-                    }
-                    let Some((expr, rest)) = expressions.split_first() else {
-                        return Ok(None);
-                    };
-                    *expressions = rest;
-                    if matches!(expr, Expr::Undefined) && default.is_some() {
-                        Ok(None)
-                    } else {
-                        this.expression_with(ctx, expr, expected).map(Some)
-                    }
-                }
-            }
-        };
         let mut evaluated_args = Vec::with_capacity(func.params.len());
         for &(param, solved) in &func.params {
             let (binding, is_never) = self.shapes.param_type(solved, &param.ty)?;
@@ -518,19 +498,19 @@ impl<'s> FunctionBuilder<'s, '_> {
             let value = if param.is_rest {
                 let element = Self::rest_element_type(ctx, param_ty)?;
                 let mut items = Vec::new();
-                while let Some(value) = next_arg(self, ctx, Some(element), None)? {
+                while let Some(value) = args.next_value(self, ctx, Some(element), None)? {
                     items.push(self.fit(ctx, value, element)?);
                 }
                 Some(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)))
             } else {
-                next_arg(self, ctx, Some(param_ty), param.default.as_ref())?
+                args.next_value(self, ctx, Some(param_ty), param.default.as_ref())?
             };
             evaluated_args.push((param_ty, value, is_never));
             if param.is_rest {
                 break;
             }
         }
-        while next_arg(self, ctx, None, None)?.is_some() {}
+        while args.next_value(self, ctx, None, None)?.is_some() {}
 
         self.with_class_expansion(
             ctx,

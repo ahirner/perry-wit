@@ -1,8 +1,26 @@
 //! Method call resolution on classes, resources, function properties, and built-ins.
 use super::*;
-use crate::{methods::MethodResult, wit::MemberKind};
+use crate::methods::MethodResult;
 
 impl<'h, 'a> Solver<'h, 'a> {
+    pub(super) fn method_property(
+        &mut self,
+        s: &mut EvalState<'h>,
+        stripped: Ty,
+        name: &str,
+        byte_offset: u32,
+    ) -> Result<Option<Ty>> {
+        Ok(
+            if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, byte_offset)?
+                && let Some(loc) = self.class_field_loc(cinst_id, name)
+            {
+                Some(self.read_loc(loc, s.inst))
+            } else {
+                builtins::property_type(self.ctx, self.decls, self.types, stripped, name)
+            },
+        )
+    }
+
     pub(super) fn eval_method_call(
         &mut self,
         s: &mut EvalState<'h>,
@@ -15,13 +33,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         let method = hir_compat::method(property);
         let name = method.name();
 
-        if let Expr::ExternFuncRef { name: class, .. } = object
-            && let Some(owner) = self.decls.resource(class)
-            && let Some(ty) = self.resource_operation(owner, MemberKind::Static, name)
-        {
-            self.eval_args(s, args)?;
-            return Ok(ty);
-        }
         if matches!(object, Expr::GlobalGet(_)) {
             match name {
                 "log" | "info" | "debug" | "error" | "warn"
@@ -126,8 +137,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 )
                 .with_fallback_span(span));
             }
-            if let Some(ty) = self.resource_operation(owner, MemberKind::Instance, name) {
-                return Ok(ty);
+            if let Some(member) = self.index.receiver_members.get(object, owner) {
+                self.record_site(
+                    s.inst,
+                    expr,
+                    SiteResolution::MemberCall(MemberTarget::Resource(member)),
+                );
+                return Ok(self.resource_result(member));
             }
             return Err(self.annotate_expr_error(
                 s,
@@ -173,12 +189,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        let mname_id = self.types.intern_name(name);
         if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, byte_offset)?
-            && let Some(method_tid) = ClassInfo::find(
-                &self.index.class(self.class_insts[cinst_id].class).methods,
-                mname_id,
-            )
+            && let Some(method_tid) = self
+                .index
+                .method_template(&self.class_declaration(cinst_id).methods, name)
         {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
@@ -197,51 +211,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(ret);
         }
 
-        let prop_ty = if let Some(cinst_id) =
-            self.resolve_class_inst(s.inst, stripped, byte_offset)?
-            && let Some(loc) = self.class_field_loc(cinst_id, name)
+        if let Some(ty) = self.method_property(s, stripped, name, byte_offset)?
+            && self.types.has_func(ty)
         {
-            Some(self.read_loc(loc, s.inst))
-        } else {
-            builtins::property_type(self.ctx, self.decls, self.types, stripped, name)
-        };
-        if let Some(prop_ty) = prop_ty
-            && let Some(idents) = self.types.func_dispatch_members(prop_ty, true)
-        {
-            if arg_tys.contains(&Ty::BOTTOM) {
-                return Ok(Ty::BOTTOM);
-            }
-            return self.eval_dispatch_call(
-                s,
-                expr,
-                prop_ty,
-                &idents,
-                Some(stripped),
-                &arg_tys,
-                byte_offset,
-            );
-        }
-        if let Some(prop_ty) = prop_ty
-            && let TyKind::Func(ident) = self.types.kind(prop_ty)
-        {
-            if arg_tys.contains(&Ty::BOTTOM) {
-                return Ok(Ty::BOTTOM);
-            }
-            let method_view = self.index.view(ident.template);
-            self.check_callback_params(s.inst, method_view, &arg_tys, byte_offset)?;
-            let recv = method_view.uses_this.then_some(Receiver::Object(stripped));
-            let pass_env = self.is_escaping_env(ident.template, s.inst);
-            let (_, ret) = self.dispatch_call_site(
-                s.inst,
-                expr,
-                InstanceReq::new(ident.template, &arg_tys, Some(s.inst))
-                    .receiver(recv)
-                    .owner(ident.capture_owner)
-                    .at(byte_offset),
-                None,
-                pass_env,
-            )?;
-            return Ok(ret);
+            return self.eval_callable(s, expr, ty, Some(stripped), &arg_tys);
         }
 
         if let Some(rule) =

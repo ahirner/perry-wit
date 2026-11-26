@@ -1,6 +1,12 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
+use crate::engine::types::Ty;
 use crate::lower::{builder::LocalBinding, hir_compat::RuntimeCall};
+
+enum SpreadInput {
+    Tuple(Value, usize),
+    Items(Value),
+}
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn signature(&self, id: FuncId) -> Result<&'s Signature<'s>> {
@@ -121,13 +127,33 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         Ok(())
     }
+    fn call_spread_input(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        element: Option<TypeHandle>,
+    ) -> Result<SpreadInput> {
+        let source = self.spread_operand(ctx, expr, element)?;
+        let source = self.defined(ctx, source)?;
+        if let Some(record) = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
+            && record.deref(ctx).kind() == RecordKind::Tuple
+        {
+            Ok(SpreadInput::Tuple(
+                source,
+                record.deref(ctx).fields().to_diag(ctx)?.len(),
+            ))
+        } else {
+            Ok(SpreadInput::Items(self.spread_items(ctx, source, element)?))
+        }
+    }
+
     pub(super) fn invoke_site(
         &mut self,
         ctx: &mut Context,
         target: crate::engine::solve::CallTarget,
-        argument_types: crate::engine::types::Ty,
+        argument_types: Ty,
         callee: &'s Expr,
-        args: &'s [Expr],
+        args: Arguments<'s>,
     ) -> Result<Option<Value>> {
         let Some(function) = self
             .shapes
@@ -137,8 +163,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             .transpose()?
         else {
             self.discard_function_operand(ctx, callee)?;
-            for arg in args {
-                self.discard_function_operand(ctx, arg)?;
+            for (arg, spread) in args {
+                if spread {
+                    self.call_spread_input(ctx, arg, None)?;
+                } else {
+                    self.discard_function_operand(ctx, arg)?;
+                }
             }
             return Ok(Some(self.raise_non_callable(ctx)));
         };
@@ -180,67 +210,126 @@ impl<'s> FunctionBuilder<'s, '_> {
         )
     }
 
-    fn invoke_arguments(
+    pub(super) fn invoke_arguments(
         &mut self,
         ctx: &mut Context,
         signature: &'s Signature<'s>,
         implicit: impl Iterator<Item = Value>,
-        args: &'s [Expr],
-        argument_types: Option<crate::engine::types::Ty>,
+        args: Arguments<'s>,
+        argument_types: Option<Ty>,
     ) -> Result<Option<Value>> {
         let (fixed, rest) = signature.parameters();
+        let rest_element = rest
+            .map(|p| Self::rest_element_type(ctx, p.binding.carrier))
+            .transpose()?;
         let mut values = Vec::with_capacity(signature.params.len());
+        let arity = fixed.len();
+        let mut fixed = fixed.iter();
+        let mut rest_values = Vec::new();
         for value in implicit {
-            let param = fixed
-                .get(values.len())
-                .ok_or_else(|| internal!("missing implicit call parameter"))?;
-            values.push(self.fixed_value(ctx, param, value)?);
+            if let Some(param) = fixed.next() {
+                values.push(self.fixed_value(ctx, param, value)?);
+            } else if let Some(element) = rest_element {
+                rest_values.push(self.fit(ctx, value, element)?);
+            }
         }
         let callee_name = self
             .shapes
             .locations
             .display_function_name(signature.name.as_ref());
-        let rest_element = rest
-            .map(|p| Self::rest_element_type(ctx, p.binding.carrier))
-            .transpose()?;
         let arguments = argument_types.map(|ty| self.shapes.types.source.tuple_slice(ty));
-        let mut items = Vec::new();
-        for (index, arg) in args.iter().enumerate() {
-            if arguments.is_some_and(|args| {
-                !args
-                    .get(index)
-                    .is_some_and(|&ty| self.shapes.passes_argument(ty))
-            }) {
-                self.discard_function_operand(ctx, arg)?;
-                continue;
-            }
-            let position = values.len() + items.len() + 1;
-            let argument_error = |error: Diagnostic| {
-                error.with_note(format!("in argument {position} of '{callee_name}'"))
-            };
-            if let Some(param) = fixed.get(values.len()) {
-                values.push(
-                    self.bind_fixed_arg(ctx, param, Some(arg))
-                        .map_err(argument_error)?,
-                );
-            } else if let Some(element) = rest_element {
-                let value = self.expression_with(ctx, arg, Some(element))?;
-                items.push(self.fit(ctx, value, element).map_err(argument_error)?);
-            } else {
+        if let Arguments::Plain(args) = args
+            && rest.is_none()
+        {
+            let count = arguments.map_or(args.len(), |types| {
+                types
+                    .iter()
+                    .filter(|&&ty| self.shapes.passes_argument(ty))
+                    .count()
+            });
+            if count > fixed.len() {
                 bail_diag!(
                     codes::TYPE_MISMATCH,
-                    "call to {callee_name} with {position} arguments, expected {}",
-                    fixed.len()
+                    "call to {callee_name} with {} arguments, expected {arity}",
+                    values.len() + count
                 );
             }
         }
-        for (index, param) in fixed.iter().enumerate().skip(values.len()) {
+        let mut argument_index = 0;
+        let mut rest_array = None;
+        for (expr, spread) in args {
+            let (tuple, count) = if spread {
+                let hint = rest_element.filter(|_| fixed.len() == 0);
+                match self.call_spread_input(ctx, expr, hint)? {
+                    SpreadInput::Tuple(value, count) => (Some(value), count),
+                    SpreadInput::Items(source) => {
+                        ensure_unsupported!(
+                            fixed.len() == 0,
+                            "spreading into fixed parameters requires a tuple"
+                        );
+                        if let Some(element) = rest_element {
+                            let array = *rest_array.get_or_insert_with(|| {
+                                self.emit_value(ctx, |ctx| {
+                                    ArrayNewOp::new(ctx, element, std::mem::take(&mut rest_values))
+                                })
+                            });
+                            let ty = array.get_type(ctx);
+                            let source = self.fit(ctx, source, ty)?;
+                            self.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, source));
+                        }
+                        argument_index += 1;
+                        continue;
+                    }
+                }
+            } else {
+                (None, 1)
+            };
+            for field in 0..count {
+                let index = argument_index;
+                argument_index += 1;
+                let passed = arguments.is_none_or(|args| {
+                    args.get(index)
+                        .is_some_and(|&ty| self.shapes.passes_argument(ty))
+                });
+                let param = fixed.as_slice().first();
+                if !passed || (param.is_none() && rest_element.is_none()) {
+                    if tuple.is_none() {
+                        self.discard_function_operand(ctx, expr)?;
+                    }
+                    continue;
+                }
+                let hint =
+                    param.map_or(rest_element, |p| (!p.is_never).then_some(p.binding.carrier));
+                let value = match tuple {
+                    Some(source) => self.record_field(ctx, source, &format!("_{field}"))?,
+                    None => self.expression_with(ctx, expr, hint)?,
+                };
+                let note = |error: Diagnostic| {
+                    error.with_note(format!("in argument {} of '{callee_name}'", index + 1))
+                };
+                if let Some(param) = fixed.next() {
+                    values.push(self.fixed_value(ctx, param, value).map_err(note)?);
+                } else if let Some(element) = rest_element {
+                    let value = self.fit(ctx, value, element).map_err(note)?;
+                    match rest_array {
+                        Some(array) => {
+                            self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+                        }
+                        None => rest_values.push(value),
+                    }
+                }
+            }
+        }
+        for param in fixed {
+            let position = values.len() + 1;
             values.push(self.bind_fixed_arg(ctx, param, None).map_err(|error| {
-                error.with_note(format!("in argument {} of '{callee_name}'", index + 1))
+                error.with_note(format!("in argument {position} of '{callee_name}'"))
             })?);
         }
         if let Some(element) = rest_element {
-            values.push(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)));
+            values.push(rest_array.unwrap_or_else(|| {
+                self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, rest_values))
+            }));
         }
         self.emit_signature_call(ctx, signature, values)
     }
@@ -304,29 +393,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         callee: &'s Expr,
         args: &'s [Expr],
-        span: std::ops::Range<u32>,
+        byte_offset: u32,
     ) -> Result<Option<Value>> {
-        let byte_offset = span.start;
-        if let Expr::IndexGet { object, .. } = callee
-            && self.shapes.locations.calls_dispose(span.start, span.end)
-        {
-            let receiver = self.expression(ctx, object)?;
-            let receiver = self.defined(ctx, receiver)?;
-            if let Some(resource) =
-                perry_mir::typed::<perry_mir::ResourceType>(ctx, receiver.get_type(ctx))
-            {
-                let owner = resource.deref(ctx).key();
-                if let Some(member) =
-                    self.shapes
-                        .decls
-                        .world
-                        .member(owner, crate::wit::MemberKind::Dispose, "")
-                {
-                    return self.resource_call(ctx, member, Some(receiver), args);
-                }
-            }
-            bail_unsupported!("computed method or element calls are not supported yet");
-        }
         if let Some(call) = hir_compat::runtime_call(callee, args) {
             return match call {
                 RuntimeCall::Unresolved(ident) => Err(self.shapes.annotate_byte_offset(
@@ -407,19 +475,18 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.call_intrinsic(ctx, intrinsic, vec![line]);
             return Ok(None);
         }
-        if let Expr::PropertyGet {
-            object, property, ..
-        } = callee
+        if let Some((object, property)) = self.shapes.specialization.receiver_members.method(callee)
         {
-            if let Expr::PropertyGet {
-                object: global,
-                property: class,
-                ..
-            } = &**object
+            if let Some(property) = property
+                && let Expr::PropertyGet {
+                    object: global,
+                    property: class,
+                    ..
+                } = object
                 && matches!(**global, Expr::GlobalGet(_))
             {
                 if class == "performance" {
-                    return match property.as_str() {
+                    return match property {
                         "now" => {
                             for arg in args {
                                 self.expression(ctx, arg)?;
@@ -438,10 +505,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                             self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, undef)),
                         ));
                     }
-                    if let ("resolve" | "reject", [value]) = (property.as_str(), args) {
+                    if let ("resolve" | "reject", [value]) = (property, args) {
                         return self.promise_settled(ctx, property, value, None).map(Some);
                     }
-                    let combinator = match property.as_str() {
+                    let combinator = match property {
                         "all" => Combinator::All,
                         "race" => Combinator::Race,
                         "allSettled" => Combinator::AllSettled,
@@ -495,6 +562,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                             self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
                         }
                     }))
+                }
+                Builtin::ReadFile => {
+                    let text = hir_compat::read_file_text(
+                        args.get(1),
+                        &self.shapes.specialization.literal_classes,
+                    )?;
+                    self.read_file(ctx, args, text).map(Some)
                 }
                 fs => self.fs(ctx, *fs, args).map(Some),
             };
@@ -559,21 +633,13 @@ impl<'s> FunctionBuilder<'s, '_> {
             });
         };
         let signature = self.signature(*id)?;
-        if let (fixed, None) = signature.parameters()
-            && args.len() > fixed.len()
-        {
-            let name = self
-                .shapes
-                .locations
-                .display_function_name(signature.name.as_ref());
-            bail_diag!(
-                codes::TYPE_MISMATCH,
-                "call to {name} with {} arguments, expected {}",
-                args.len(),
-                fixed.len()
-            );
-        }
-        self.invoke_arguments(ctx, signature, std::iter::empty(), args, None)
+        self.invoke_arguments(
+            ctx,
+            signature,
+            std::iter::empty(),
+            Arguments::Plain(args),
+            None,
+        )
     }
 
     pub(super) fn rest_element_type(ctx: &Context, carrier: TypeHandle) -> Result<TypeHandle> {

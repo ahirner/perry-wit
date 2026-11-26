@@ -121,25 +121,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         target: FuncId,
-        mut inputs: impl Iterator<Item = Value>,
+        inputs: impl Iterator<Item = Value>,
     ) -> Result<Option<Value>> {
         let signature = self.signature(target)?;
-        let (fixed, rest) = signature.parameters();
-        let mut values = Vec::with_capacity(signature.params.len());
-        for parameter in fixed {
-            values.push(match inputs.next() {
-                Some(value) => self.fixed_value(ctx, parameter, value)?,
-                None => self.bind_fixed_arg(ctx, parameter, None)?,
-            });
-        }
-        if let Some(rest) = rest {
-            let element = Self::rest_element_type(ctx, rest.binding.carrier)?;
-            let items = inputs
-                .map(|v| self.fit(ctx, v, element))
-                .collect::<Result<Vec<_>>>()?;
-            values.push(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, items)));
-        }
-        self.emit_signature_call(ctx, signature, values)
+        self.invoke_arguments(ctx, signature, inputs, Arguments::Plain(&[]), None)
     }
 
     pub(super) fn dispatch_body(

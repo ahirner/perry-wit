@@ -3,6 +3,10 @@ use crate::node_oracle::assert_numbers;
 
 #[test]
 fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<()> {
+    perry_wit::compile_core(
+        "function unused(): number { return new Map<string, boolean>().size + new Set<string>().size; }",
+        "unspecialized-collections.ts",
+    )?;
     let error = perry_wit::compile_core(
         "export function run():number { const row={value:1,extra:2}; const mixed:(number|{value:number})[]=[row]; return mixed.length; }",
         "union-layout.ts",

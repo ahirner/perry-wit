@@ -56,6 +56,27 @@ pub(super) struct Signature<'s> {
 }
 
 impl Signature<'_> {
+    fn native(
+        shapes: &Shapes<'_>,
+        name: &str,
+        params: impl Iterator<Item = crate::engine::NativeParam>,
+        result: crate::engine::types::Ty,
+        is_async: bool,
+    ) -> Result<Self> {
+        Ok(Self {
+            name: identifier(name)?,
+            inline: None,
+            top_level: false,
+            await_initialization: false,
+            returns_never: false,
+            is_async,
+            params: params
+                .map(|p| ParamSig::native(shapes, p, Parameter::Native))
+                .collect::<Result<_>>()?,
+            result: shapes.solved_result(result, is_async)?,
+        })
+    }
+
     pub(super) fn parameters(&self) -> (&[ParamSig<'_>], Option<&ParamSig<'_>>) {
         match self.params.split_last() {
             Some((last, fixed)) if last.is_rest => (fixed, Some(last)),
@@ -82,14 +103,14 @@ impl Signature<'_> {
 pub(crate) fn build_module(
     ctx: &mut Context,
     declarations: &crate::source::ModuleDeclarations,
-    world: &crate::wit::WorldTypes<'_>,
+    decls: crate::shapes::Declarations<'_>,
     locations: &mut hir_compat::Locations<'_>,
-    witnesses: &[hir_compat::Witness<'_, FuncId>],
+    witnesses: &[hir_compat::Witness<'_, hir_compat::Target<FuncId>>],
     specialization: &crate::engine::Specialization,
     layouts: (crate::engine::types::TypeTable, perry_mir::RecordLayouts),
 ) -> Result<LoweredProgram> {
     let bodies = &specialization.bodies;
-    let mut functions = Vec::new();
+    let mut functions = HashMap::new();
     let mut command = None;
     let index = bodies.index(locations, &specialization.instances);
     let module = ModuleOp::new(ctx, identifier(&module_name(&declarations.name))?);
@@ -102,15 +123,11 @@ pub(crate) fn build_module(
     {
         bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
-    let decls = crate::shapes::Declarations::new(
-        &declarations.interfaces,
-        &declarations.type_aliases,
-        &declarations.imports,
+    let decls = decls.with_classes(
         bodies
             .classes
             .iter()
             .map(crate::shapes::ClassShape::Instance),
-        world,
     );
     let (mut types, records) = layouts;
     let shapes = Shapes::new(
@@ -290,31 +307,15 @@ pub(crate) fn build_module(
                 &function.name,
             )
         };
-        let params = function
-            .params
-            .iter()
-            .map(|param| ParamSig::native(&shapes, *param, Parameter::Native))
-            .collect::<Result<_>>()
-            .map_err(&annotate)?;
-        let result = shapes
-            .solved_result(function.result, function.is_async)
-            .map_err(annotate)?;
-        signatures.insert(
-            id,
-            Callee::Native(
-                function,
-                Signature {
-                    inline: None,
-                    name: identifier(&function.name)?,
-                    is_async: function.is_async,
-                    await_initialization: false,
-                    top_level: false,
-                    params,
-                    returns_never: false,
-                    result,
-                },
-            ),
-        );
+        let signature = Signature::native(
+            &shapes,
+            &function.name,
+            function.params.iter().copied(),
+            function.result,
+            function.is_async,
+        )
+        .map_err(annotate)?;
+        signatures.insert(id, Callee::Native(function, signature));
     }
     for class in bodies.classes.iter() {
         for function in class
@@ -330,10 +331,11 @@ pub(crate) fn build_module(
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run (calls lower it to nothing); without other statements there is no main
     // function.
-    let has_init = bodies
-        .classes
-        .iter()
-        .any(|class| !class.static_fields.is_empty())
+    let has_init = !specialization.resources.is_empty()
+        || bodies
+            .classes
+            .iter()
+            .any(|class| !class.static_fields.is_empty())
         || bodies.init.iter().any(|statement| {
             !matches!(statement, Stmt::Expr(Expr::Call { callee, .. })
                 if hir_compat::is_import_initializer(callee))
@@ -342,7 +344,8 @@ pub(crate) fn build_module(
         // Without exported functions, the top-level statements (with top-level `await`) form
         // the body of a command's `wasi:cli/run`. With exported functions they initialize the
         // module once before the first entry point, and `run` only awaits that initialization.
-        let persistent = bodies.functions.iter().any(|f| f.is_exported);
+        let persistent =
+            !specialization.resources.is_empty() || bodies.functions.iter().any(|f| f.is_exported);
         let async_init = declarations.has_top_level_await;
         let settled = BindingType::plain(void_type(ctx));
         let mut entries = vec![(
@@ -396,99 +399,91 @@ pub(crate) fn build_module(
             module.append_operation(ctx, func.get_operation(), 0);
         }
     }
-    for function in &bodies.functions {
+    let source = bodies.functions.iter().map(|f| {
+        (
+            f.id,
+            builder::Body::Statements(BodyOwner::Function(f.id), f.body),
+            f.is_exported,
+            f.captures,
+        )
+    });
+    let native = bodies.native.iter().map(|(id, f)| {
+        (
+            *id,
+            builder::Body::Native(&f.body),
+            matches!(f.body, crate::engine::NativeBody::Resource(_)),
+            &[][..],
+        )
+    });
+    for (id, body, exported, captures) in source.chain(native) {
         let signature = signatures
-            .get(&function.id)
-            .ok_or_else(|| internal!("unknown function {}", function.id))?;
+            .get(&id)
+            .ok_or_else(|| internal!("unknown function {id}"))?;
         if signature.inline.is_some() {
             continue;
         }
-        let func = FunctionBuilder::lower(ctx, function, &signatures, &mut shapes, &builtins)
-            .map_err(|error| {
-                let error = error
-                    .with_fallback_span(locations.function_span(&function.name))
-                    .with_internal_context(format!("lowering function {}", function.name));
-                locations.annotate_caller(error, &function.name)
-            })?;
-        locations.set_mir_location(ctx, &func, &function.name);
-        if let Some((wit_params, wit_results)) = signature.wit_constraints() {
-            perry_mir::constrain_signature(ctx, &func, wit_params, wit_results);
-        }
-        if function.is_exported {
-            perry_mir::set_exported(ctx, &func);
-            let index = function.id as usize;
-            if functions.len() <= index {
-                functions.resize(index + 1, None);
-            }
-            *functions
-                .get_mut(index)
-                .ok_or_else(|| internal!("missing export slot"))? = Some(func);
-        }
-        if function.is_async {
-            set_async(ctx, &func);
-        }
-        module.append_operation(ctx, func.get_operation(), 0);
-    }
-    for (id, function) in &bodies.native {
-        let signature = signatures
-            .get(id)
-            .ok_or_else(|| internal!("unknown function {}", *id))?;
         let name = signature.name.as_ref();
-        let func = FunctionBuilder::lower_body(
-            ctx,
-            signature,
-            builder::Body::Native(&function.body),
-            &signatures,
-            &mut shapes,
-            &builtins,
-        )
-        .map_err(|error| {
-            locations.annotate_caller(
-                error.with_fallback_span(locations.function_span(name)),
-                name,
-            )
-        })?;
-        if function.is_async {
+        ensure_unsupported!(
+            captures
+                .iter()
+                .all(|id| shapes.globals.get(id).is_some_and(Option::is_some)),
+            "closures capturing activation-local values are unsupported: {name}"
+        );
+        let func =
+            FunctionBuilder::lower_body(ctx, signature, body, &signatures, &mut shapes, &builtins)
+                .map_err(|e| {
+                    locations.annotate_caller(
+                        e.with_fallback_span(locations.function_span(name))
+                            .with_internal_context(format!("lowering function {name}")),
+                        name,
+                    )
+                })?;
+        locations.set_mir_location(ctx, &func, name);
+        if let Some((params, results)) = signature.wit_constraints() {
+            perry_mir::constrain_signature(ctx, &func, params, results);
+        }
+        if exported {
+            perry_mir::set_exported(ctx, &func);
+            functions.insert(id, func);
+        }
+        if signature.is_async {
             set_async(ctx, &func);
         }
-        locations.set_mir_location(ctx, &func, name);
         module.append_operation(ctx, func.get_operation(), 0);
     }
     let exports = witnesses
         .iter()
-        .map(|witness| match witness.target {
-            Some(id) => functions
-                .get(id as usize)
-                .copied()
-                .flatten()
-                .map(|f| {
-                    if witness.is_destructor {
-                        ExportTarget::Destructor(f, witness.name.clone())
-                    } else {
-                        let symbol = f.get_symbol_name(ctx);
-                        let name = locations.display_function_name(symbol.as_ref());
-                        ExportTarget::Function(
-                            f,
-                            witness
-                                .signature
-                                .iter()
-                                .flat_map(|s| &s.annotations)
-                                .map(|span| {
-                                    span.and_then(|s| locations.span(s))
-                                        .or_else(|| locations.declaration_span(symbol.as_ref()))
-                                })
-                                .collect(),
-                            (name != symbol.as_ref()).then(|| name.to_owned()),
-                        )
-                    }
-                })
-                .ok_or_else(|| internal!("witness function was not emitted")),
-            None => command.map(ExportTarget::Command).ok_or_else(|| {
-                diag!(
-                    codes::MISSING_EXPORT,
-                    "wasi:cli/run requires an implementation or top-level statements"
-                )
-            }),
+        .zip(&bodies.exports)
+        .map(|(witness, id)| {
+            let Some(id) = id else {
+                return command.map(ExportTarget::Command).ok_or_else(|| {
+                    diag!(
+                        codes::MISSING_EXPORT,
+                        "wasi:cli/run requires an implementation or top-level statements"
+                    )
+                });
+            };
+            let &f = functions
+                .get(id)
+                .ok_or_else(|| internal!("witness function was not emitted"))?;
+            if matches!(witness.target, Some(hir_compat::Target::Destructor(..))) {
+                return Ok(ExportTarget::Destructor(f, witness.name.clone()));
+            }
+            let symbol = f.get_symbol_name(ctx);
+            let name = locations.display_function_name(symbol.as_ref());
+            Ok(ExportTarget::Function(
+                f,
+                witness
+                    .signature
+                    .iter()
+                    .flat_map(|s| &s.annotations)
+                    .map(|span| {
+                        span.and_then(|s| locations.span(s))
+                            .or_else(|| locations.declaration_span(symbol.as_ref()))
+                    })
+                    .collect(),
+                (name != symbol.as_ref()).then(|| name.to_owned()),
+            ))
         })
         .collect::<Result<_>>()?;
     Ok(LoweredProgram { module, exports })

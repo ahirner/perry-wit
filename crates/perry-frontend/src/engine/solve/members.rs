@@ -206,12 +206,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.write_loc(loc, norm);
             }
         }
-        let prop_id = self.types.intern_name(property);
         if norm != Ty::BOTTOM
-            && let Some(setter_tid) = ClassInfo::find(
-                &self.index.class(self.class_insts[cinst_id].class).setters,
-                prop_id,
-            )
+            && let Some(setter_tid) = self
+                .index
+                .accessor_template(&self.class_declaration(cinst_id).setters, property)
         {
             self.request_instance(
                 InstanceReq::new(setter_tid, &[norm], Some(inst_id))
@@ -254,23 +252,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(init) = init {
             self.eval_expr(s, init)?;
         }
-        let base = shapes::TypeName::new(self.ctx, if is_map { "Map" } else { "Set" }.into());
-        if !constructor.types.is_empty() {
-            let mut arg_tys: Vec<_> = constructor
-                .types
-                .iter()
-                .map(|ty| self.types.intern_hir(self.ctx, ty, true))
-                .collect();
+        if let Some(SiteResolution::CollectionNew(declared)) = self.index.expressions.declared(expr)
+        {
             let bindings = self.active_instance_type_bindings(s.inst);
-            for ty in &mut arg_tys {
-                let bound = self.types.substitute(*ty, &bindings);
-                let concrete = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
-                *ty = concrete;
-            }
-            let ty = self.types.generic(base, &arg_tys);
+            let bound = self.types.substitute(declared, &bindings);
+            let ty = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
             self.record_site(s.inst, expr, SiteResolution::CollectionNew(ty));
             return Ok(ty);
         }
+        let base = shapes::TypeName::new(self.ctx, constructor.kind.name().into());
         if let Some(init) = init {
             if is_map {
                 if let Expr::Array(entries, _) = init
@@ -391,11 +381,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             if let Some(loc) = self.class_field_loc(cinst_id, property) {
                 return Ok(self.read_loc(loc, s.inst));
             }
-            let pname = self.types.intern_name(property);
-            if let Some(getter_tid) = ClassInfo::find(
-                &self.index.class(self.class_insts[cinst_id].class).getters,
-                pname,
-            ) {
+            if let Some(getter_tid) = self
+                .index
+                .accessor_template(&self.class_declaration(cinst_id).getters, property)
+            {
                 let target = self.request_instance(
                     InstanceReq::new(getter_tid, &[], Some(s.inst))
                         .receiver(Some(Receiver::Class(cinst_id))),
@@ -409,12 +398,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         )
     }
 
+    pub(super) fn class_declaration(&self, id: ClassInstId) -> &'h perry_hir::ir::Class {
+        self.index.class(self.class_insts[id].class).declaration
+    }
+
     pub(super) fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
         let cinst = &self.class_insts[cinst_id];
         let f_idx = self
-            .index
-            .class(cinst.class)
-            .declaration
+            .class_declaration(cinst_id)
             .fields
             .iter()
             .position(|f| f.name == property)?;
@@ -425,30 +416,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let TyKind::Object { props, .. } = self.types.kind(stripped) {
             return Some(self.types.object_slice(props).to_vec());
         }
-        if matches!(
-            self.types.kind(stripped),
-            TyKind::Named(_) | TyKind::Generic { .. }
-        ) {
-            return Some(
-                crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
-                    .record(stripped, 0)?
-                    .into_iter()
-                    .map(|(n, mut ty, optional)| {
-                        let name = self.types.intern_name(&n);
-                        if optional {
-                            ty = self.types.with_absences(ty, Absence::Undefined);
-                        }
-                        ObjectProp {
-                            name,
-                            ty,
-                            optional,
-                            readonly: false,
-                        }
-                    })
-                    .collect(),
-            );
+        let props = crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+            .record(stripped, 0)?;
+        let mut props = self.types.object_slice(props).to_vec();
+        for p in &mut props {
+            if p.optional {
+                p.ty = self.types.with_absences(p.ty, Absence::Undefined);
+            }
         }
-        None
+        Some(props)
     }
 
     pub(super) fn eval_object_spread(
@@ -467,23 +443,18 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             if let Some(key) = hir_compat::static_property(part) {
                 self.check_escaping_func(s.inst, val_ty, 0, s.current_span)?;
-                let name = self.types.intern_name(key);
                 let norm = self
                     .types
                     .normalize_for_storage(self.ctx, self.decls, val_ty);
-                if let Some(ex) = props.iter_mut().find(|p| p.name == name) {
+                let field = self.types.property(key, norm, false);
+                if let Some(ex) = props.iter_mut().find(|p| p.name == field.name) {
                     ex.ty = match val_expr {
                         Expr::Null => self.types.with_absences(ex.ty, Absence::Null),
                         Expr::Undefined => self.types.with_absences(ex.ty, Absence::Undefined),
                         _ => norm,
                     };
                 } else {
-                    props.push(ObjectProp {
-                        name,
-                        ty: norm,
-                        optional: false,
-                        readonly: false,
-                    });
+                    props.push(field);
                 }
             } else if part.defines_key() {
                 return Ok(Ty::OPEN);

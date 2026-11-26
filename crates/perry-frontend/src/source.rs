@@ -14,11 +14,11 @@ pub(crate) use parser::parse;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 pub(crate) use program::{
-    Bodies, CallerKind, InstanceBodies, InstanceClass, InstanceFunction, ModuleDeclarations,
-    SourceModule, StaticField, authored_body, is_pure_func_expr,
+    Arguments, Bodies, CallerKind, InstanceBodies, InstanceClass, InstanceFunction,
+    ModuleDeclarations, SourceModule, StaticField, authored_body, is_pure_func_expr,
 };
 use std::collections::{HashMap, HashSet};
-pub(crate) use strings::StringConstants;
+pub(crate) use strings::{RegexInputs, RegexSites};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 

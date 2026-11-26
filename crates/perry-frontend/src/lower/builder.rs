@@ -141,34 +141,6 @@ pub(super) struct FunctionBuilder<'s, 'm> {
 }
 
 impl<'s, 'm> FunctionBuilder<'s, 'm> {
-    pub(super) fn lower(
-        ctx: &mut Context,
-        function: &'s Function<'s>,
-        signatures: &'s Functions<'s>,
-        shapes: &'m mut Shapes<'s>,
-        builtins: &'s HashMap<&'s str, Builtin>,
-    ) -> Result<FuncOp> {
-        ensure_unsupported!(
-            function
-                .captures
-                .iter()
-                .all(|id| shapes.globals.get(id).is_some_and(Option::is_some)),
-            "closures capturing activation-local values are unsupported: {}",
-            function.name
-        );
-        let signature = signatures
-            .get(&function.id)
-            .ok_or_else(|| internal!("no signature for function {}", function.name))?;
-        Self::lower_body(
-            ctx,
-            signature,
-            Body::Statements(BodyOwner::Function(function.id), function.body),
-            signatures,
-            shapes,
-            builtins,
-        )
-    }
-
     pub(super) fn lower_body(
         ctx: &mut Context,
         signature: &Signature<'s>,
@@ -234,6 +206,9 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             Body::Native(body) => {
                 let args = builder.entry.deref(ctx).arguments().collect::<Vec<_>>();
                 match body {
+                    crate::engine::NativeBody::Resource(target) => {
+                        builder.resource_adapter(ctx, *target, args)?
+                    }
                     crate::engine::NativeBody::Dispatch { receiver, arms } => {
                         builder.dispatch_body(ctx, *receiver, arms, &args)?
                     }
@@ -262,6 +237,7 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             builder.append_value(ctx, &await_);
         }
         if signature.top_level {
+            builder.initialize_resources(ctx)?;
             for entry in builder
                 .shapes
                 .specialization
@@ -546,7 +522,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         id: LocalId,
         ty: TypeHandle,
     ) -> Result<Value> {
-        let name = identifier(&format!("global_{id}"))?;
+        self.named_global_slot(ctx, format!("global_{id}"), ty)
+    }
+
+    pub(super) fn named_global_slot(
+        &mut self,
+        ctx: &mut Context,
+        name: String,
+        ty: TypeHandle,
+    ) -> Result<Value> {
+        let name = identifier(&name)?;
         let slot = self.emit_value(ctx, |ctx| perry_mir::GlobalOp::new(ctx, name, ty));
         self.global_slots.insert(slot);
         Ok(slot)

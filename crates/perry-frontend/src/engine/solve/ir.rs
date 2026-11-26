@@ -2,10 +2,11 @@
 use super::super::bitset::BitSet;
 use super::super::types::{
     CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity, HelperId,
-    IdxVec, InstanceId, LocId, LocalIdx, ParamLocSpan, Pool, TemplateId, Ty,
+    IdxVec, InstanceId, LocId, ParamLocSpan, Pool, TemplateId, Ty,
 };
-use perry_hir::types::LocalId;
+use crate::hir_compat;
 use perry_wit_diagnostics::{Diagnostic, Result};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Receiver {
@@ -44,10 +45,18 @@ pub(crate) struct Instance {
     pub(crate) caller: Option<InstanceId>,
     pub(crate) call_byte_offset: u32,
     pub(crate) invocation: Invocation,
-    pub(crate) captures_non_global: bool,
     pub(crate) emitted_func_id: u32,
     pub(crate) emitted_name: String,
     pub(crate) emitted_method_name: String,
+}
+
+impl Instance {
+    pub(crate) fn identity(&self) -> FuncIdentity {
+        FuncIdentity {
+            template: self.template,
+            capture_owner: self.capture_owner,
+        }
+    }
 }
 
 pub(crate) struct ClassInst {
@@ -145,6 +154,12 @@ pub(crate) struct PromiseExecutor {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub(crate) enum MemberTarget {
+    Class(InstanceId),
+    Resource(crate::wit::MemberId),
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum SiteResolution {
     Call {
         target: CallTarget,
@@ -163,16 +178,21 @@ pub(crate) enum SiteResolution {
         left_erased: bool,
         equal: bool,
     },
-    MethodCall(InstanceId),
+    MemberCall(MemberTarget),
     Callback {
         target: InstanceId,
     },
     ClassNew(ClassInstId),
+    Closure(FuncIdentity),
     BranchResult(Ty),
+    ObjectSpread(Ty),
     ZeroSizedArray,
     TypedArray(Ty),
     ZeroSizedFieldSet,
     CollectionNew(Ty),
+    ReadFile {
+        text: bool,
+    },
     Cell(LocId),
     FoldBool(bool),
     PromiseNew {
@@ -238,8 +258,18 @@ pub(crate) struct ClassInstMembers {
     pub(crate) setters: Vec<(usize, InstanceId)>,
 }
 
+pub(crate) enum ExportRoot {
+    Function(InstanceId),
+    Adapter {
+        target: hir_compat::Target<InstanceId>,
+        params: Ty,
+        result: LocId,
+    },
+}
+
 pub(crate) struct Solved {
-    pub(crate) witness_instances: Vec<Option<InstanceId>>,
+    pub(crate) witness_instances: Vec<Option<ExportRoot>>,
+    pub(crate) resource_instances: HashMap<u32, ClassInstId>,
     pub(crate) init_inst: InstanceId,
     pub(crate) instances: IdxVec<InstanceId, Instance>,
     pub(crate) class_insts: IdxVec<ClassInstId, ClassInst>,
@@ -248,15 +278,14 @@ pub(crate) struct Solved {
     pub(crate) field_locs: Pool<FieldLocSpan, LocId>,
     pub(crate) dispatch_arms: Pool<DispatchArmSpan, (FuncIdentity, InstanceId)>,
     pub(crate) helpers: IdxVec<HelperId, HelperEntry>,
-    pub(crate) inst_local_tys: IdxVec<InstanceId, Vec<(LocalId, Ty)>>,
+    pub(in crate::engine) capture_locs: super::CaptureLocations,
     pub(crate) inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
     pub(crate) inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
-    pub(crate) inst_captures: IdxVec<InstanceId, Vec<LocalId>>,
     pub(crate) live_instances: BitSet,
     pub(crate) escaping_env_templates: BitSet,
-    pub(crate) collapsed_closures: BitSet,
+
     pub(crate) boxed_locals: BitSet,
-    pub(crate) collapsed_local_locs: IdxVec<LocalIdx, Option<LocId>>,
+
     pub(crate) class_static_field_tys: IdxVec<ClassId, Vec<Ty>>,
     pub(crate) class_inst_members: IdxVec<ClassInstId, ClassInstMembers>,
     pub(crate) class_static_methods: IdxVec<ClassId, Vec<InstanceId>>,

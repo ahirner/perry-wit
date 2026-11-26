@@ -118,117 +118,19 @@ pub(super) fn wrapper<'h>(
     Ok(name)
 }
 
-impl crate::wit::WitValue<'_> {
-    pub(super) fn mir_type(
-        self,
-        ctx: &Context,
-        records: &mut perry_mir::RecordLayouts,
-        input: bool,
-    ) -> Result<TypeHandle> {
-        use perry_contract::types::{Contract, Input, convert};
-        use perry_mir::{OptionalType, ResourceType, VariantType};
-        use wit_parser::Type;
+impl Shapes<'_> {
+    fn wit_carrier(&self, value: crate::wit::WitValue<'_>) -> Result<TypeHandle> {
+        Ok(self
+            .resolved_binding(self.types.source.boundary_type(value)?)?
+            .carrier)
+    }
 
-        // A field or tuple slot preserves the exact bit pattern of an integer64.
-        let field = |binding: BindingType| {
-            binding
-                .integer
-                .filter(|integer| integer.deref(ctx).width() == 64)
-                .map_or(binding.carrier, Into::into)
-        };
-        let binding = convert(
-            self.resolve,
-            Input::Reference(self.ty),
-            records,
-            &|_, _| None,
-            &|records, contract: Contract<'_, Result<BindingType>>| {
-                Ok(BindingType::plain(match contract {
-                    Contract::Scalar(ty) => {
-                        if let Some((width, sign)) = (Self { ty, ..self }).integer() {
-                            return Ok(BindingType {
-                                carrier: if width == 64 {
-                                    BigIntType::get(ctx).into()
-                                } else {
-                                    FP64Type::get(ctx).into()
-                                },
-                                integer: Some(IntegerType::get(ctx, width, sign)),
-                            });
-                        }
-                        match ty {
-                            Type::Bool => IntegerType::get(ctx, 1, Signedness::Signless).into(),
-                            Type::F32 | Type::F64 => FP64Type::get(ctx).into(),
-                            Type::String | Type::Char => StringType::get(ctx).into(),
-                            _ => bail_unsupported!("unsupported WIT scalar {ty:?}"),
-                        }
-                    }
-                    Contract::Resource { id, .. } => ResourceType::get(
-                        ctx,
-                        perry_contract::names::canonical_type(self.resolve, id).index() as u32,
-                    )
-                    .into(),
-                    Contract::Bytes if input => perry_mir::ByteInputType::get(ctx).into(),
-                    Contract::Bytes => BytesType::get(ctx).into(),
-                    Contract::ByteStream => perry_mir::ReadableType::get(ctx).into(),
-                    Contract::List(element) => ArrayType::get(ctx, element?.carrier).into(),
-                    Contract::Option(value) => crate::lower::coerce::admitting(
-                        ctx,
-                        value?.carrier,
-                        perry_mir::Absence::Null,
-                    ),
-                    Contract::Enum(_) => StringType::get(ctx).into(),
-                    Contract::Record(fields) => {
-                        let fields = fields
-                            .into_iter()
-                            .map(|(name, b)| Ok((name, field(b?))))
-                            .collect::<Result<_>>()?;
-                        records
-                            .structural(ctx, RecordKind::Object, fields)
-                            .to_diag(ctx)?
-                            .into()
-                    }
-                    Contract::Tuple(elements) => {
-                        let fields = elements
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, b)| Ok((format!("_{i}"), field(b?))))
-                            .collect::<Result<_>>()?;
-                        records
-                            .structural(ctx, RecordKind::Tuple, fields)
-                            .to_diag(ctx)?
-                            .into()
-                    }
-                    Contract::Variant(cases) => {
-                        let cases = cases
-                            .into_iter()
-                            .map(|(tag, value)| {
-                                Ok((tag.into(), value.transpose()?.map(|b| b.carrier)))
-                            })
-                            .collect::<Result<_>>()?;
-                        VariantType::get(ctx, cases).into()
-                    }
-                    Contract::Result { ok, err } => {
-                        let mut fields = vec![(
-                            "ok".into(),
-                            IntegerType::get(ctx, 1, Signedness::Signless).into(),
-                        )];
-                        for (name, value) in [("value", ok), ("error", err)] {
-                            if let Some(value) = value {
-                                fields.push((
-                                    name.into(),
-                                    OptionalType::get(ctx, value?.carrier).into(),
-                                ));
-                            }
-                        }
-                        records
-                            .structural(ctx, RecordKind::Object, fields)
-                            .to_diag(ctx)?
-                            .into()
-                    }
-                    Contract::Unsupported(kind) => bail_unsupported!("unsupported WIT type {kind}"),
-                }))
-            },
-        )?;
-        Ok(binding.carrier)
+    fn import_input(
+        &mut self,
+        ctx: &Context,
+        value: crate::wit::WitValue<'_>,
+    ) -> Result<TypeHandle> {
+        self.input_type(ctx, self.wit_carrier(value)?)
     }
 }
 
@@ -241,14 +143,14 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn resource_call(
         &mut self,
         ctx: &mut Context,
-        member: &'s crate::wit::ResourceMember<'s>,
+        member: crate::wit::MemberId,
         receiver: Option<Value>,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        let (binding, signature) = self
-            .shapes
-            .foreign_function(&member.binding)
-            .ok_or_else(|| internal!("missing WIT resource binding {}", member.binding))?;
+        let decls = self.shapes.decls;
+        let binding = &decls.world.members[member].binding;
+        let signature = decls.resource_signatures[member]
+            .ok_or_else(|| internal!("missing WIT resource binding {binding}"))?;
         self.import_call(ctx, binding, signature, args, CallKind::Resource(receiver))
     }
 
@@ -266,7 +168,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let (this, rest) = params
                 .split_first()
                 .ok_or_else(|| internal!("WIT resource method has no receiver"))?;
-            let ty = this.mir_type(ctx, &mut self.shapes.records, true)?;
+            let ty = self.shapes.import_input(ctx, *this)?;
             values.push(self.fit(ctx, receiver, ty)?);
             params = rest;
         }
@@ -280,7 +182,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let resource_method = matches!(kind, CallKind::Resource(_));
         for (arg, &wit) in args.iter().zip(params) {
-            let ty = wit.mir_type(ctx, &mut self.shapes.records, true)?;
+            let ty = self.shapes.import_input(ctx, wit)?;
             let value = if resource_method && let Some(result) = wit.result() {
                 self.resource_input(ctx, arg, wit, result, ty)?
             } else if resource_method
@@ -312,7 +214,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let result = signature
             .result
-            .map(|ty| ty.mir_type(ctx, &mut self.shapes.records, false))
+            .map(|ty| self.shapes.wit_carrier(ty))
             .transpose()?;
         if signature.is_async {
             let payload = result.unwrap_or_else(|| void_type(ctx));
@@ -349,9 +251,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         result: &wit_parser::Result_,
         raw: TypeHandle,
     ) -> Result<Value> {
-        let mut payload = |ty| {
-            (crate::wit::WitValue { ty, ..wit }).mir_type(ctx, &mut self.shapes.records, false)
-        };
+        let mut payload = |ty| self.shapes.wit_carrier(crate::wit::WitValue { ty, ..wit });
         let ok = result.ok.map(&mut payload).transpose()?;
         let err = result.err.map(payload).transpose()?;
         let variant =
@@ -430,12 +330,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                     else {
                         continue;
                     };
-                    let drop = self
-                        .shapes
-                        .decls
-                        .world
-                        .member(owner.index() as u32, crate::wit::MemberKind::Dispose, "")
+                    let world = self.shapes.decls.world;
+                    let drop = world
+                        .drops
+                        .get(&(owner.index() as u32))
+                        .copied()
                         .ok_or_else(|| internal!("owned WIT error has no resource destructor"))?;
+                    let binding = &world.members[drop].binding;
                     let expected = self.string(ctx, &case.name);
                     let matches = self.compare(ctx, CompareKind::Eq, tag, expected);
                     let release = self.new_block(ctx, "resource_drop");
@@ -447,7 +348,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                         perry_mir::VariantPayloadOp::new(ctx, error, resource)
                     });
                     self.emit(ctx, |ctx| {
-                        ForeignOp::new(ctx, Phase::Call, &drop.binding, vec![handle], vec![])
+                        ForeignOp::new(ctx, Phase::Call, binding, vec![handle], vec![])
                     });
                     self.jump(ctx, next);
                     self.switch_to(next);
@@ -464,11 +365,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         result
             .ok
             .map(|ty| {
-                let expected = (crate::wit::WitValue { ty, ..wit }).mir_type(
-                    ctx,
-                    &mut self.shapes.records,
-                    false,
-                )?;
+                let expected = self
+                    .shapes
+                    .wit_carrier(crate::wit::WitValue { ty, ..wit })?;
                 let value = self.record_field(ctx, raw, "value")?;
                 self.fit(ctx, value, expected)
             })

@@ -155,71 +155,48 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         parts: &'s [ObjectPart],
         expected: Option<TypeHandle>,
+        solved: Option<crate::engine::types::Ty>,
     ) -> Result<Value> {
-        let expected_record = expected
-            .map(|ty| present_type(ctx, ty))
-            .and_then(|ty| perry_mir::typed::<RecordType>(ctx, ty))
-            .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object);
+        use crate::engine::types::{Ty, TyKind};
         if parts
             .iter()
             .any(|part| part.defines_key() && hir_compat::static_property(part).is_none())
         {
             bail_unsupported!("computed object spread properties require a static string key");
         }
-        let mut remaining = parts;
-        let mut initial = None;
-        if let Some(ObjectPart::Spread(first_spread)) = parts.first() {
-            let first_src = self.expression(ctx, first_spread)?;
-            let is_exc = matches!(kind(ctx, first_src), Ok(Kind::Exception));
-            let first_json = if is_exc {
-                None
-            } else {
-                self.json_operand(ctx, first_src)?
-            };
-            if first_json.is_none()
-                && (expected_record.is_some()
-                    || (!is_exc
-                        && parts[1..]
-                            .iter()
-                            .all(|part| part.defines_key() || self.peek_record_type(ctx, part.value()).is_some())))
-            {
-                return self.record_object_spread(ctx, parts, Some(first_src), expected_record);
+        let record = |ty| {
+            perry_mir::typed::<RecordType>(ctx, present_type(ctx, ty))
+                .filter(|r| r.deref(ctx).kind() == RecordKind::Object)
+        };
+        let expected = expected.and_then(record);
+        if solved != Some(Ty::DYNAMIC) {
+            let shape = solved
+                .filter(|&ty| matches!(self.shapes.types.source.kind(ty), TyKind::Object { .. }));
+            if shape.is_some() || expected.is_some() {
+                let hint = match expected {
+                    Some(record) => Some(record),
+                    None => shape
+                        .filter(|&ty| !self.shapes.types.source.is_open(ty))
+                        .map(|ty| self.shapes.resolved_binding(ty))
+                        .transpose()?
+                        .and_then(|b| record(b.carrier)),
+                };
+                return self.record_object_spread(ctx, parts, expected, hint);
             }
-            if !is_exc {
-                initial = Some(first_json.ok_or_else(|| Diagnostic::unsupported("object spread is supported over typed records or JSON values with static keys"))?);
-            }
-            remaining = &parts[1..];
-        } else if (expected_record.is_some()
-            && !parts.iter().any(|part| {
-                !part.defines_key()
-                    && matches!(part.value(), Expr::LocalGet(id) if self.locals.get(id).and_then(|l| self.slot_type(ctx, l.slot).ok()).is_some_and(|ty| present_type(ctx, ty).deref(ctx).is::<JsonType>()))
-            }))
-            || (parts.iter().any(|part| !part.defines_key())
-                && parts
-                    .iter()
-                    .all(|part| part.defines_key() || self.peek_record_type(ctx, part.value()).is_some()))
-        {
-            return self.record_object_spread(ctx, parts, None, expected_record);
         }
         let object = self.intrinsic(ctx, Intrinsic::JsonObject, vec![]);
-        if let Some(source) = initial {
-            self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
-        }
-        for part in remaining {
-            let value = part.value();
+        let json = object.get_type(ctx);
+        for part in parts {
+            let raw = self.expression_with(ctx, part.value(), Some(json))?;
+            if !part.defines_key() && matches!(kind(ctx, raw), Ok(Kind::Exception)) {
+                continue;
+            }
+            let value = self.fit(ctx, raw, json)?;
             if let Some(key) = hir_compat::static_property(part) {
                 let key = self.string(ctx, key);
-                let value = self.json_value(ctx, value)?;
                 self.intrinsic_void(ctx, Intrinsic::JsonSet, vec![object, key, value]);
             } else {
-                let source = self.expression(ctx, value)?;
-                if matches!(kind(ctx, source), Ok(Kind::Exception)) {
-                    continue;
-                }
-                let source = self.json_operand(ctx, source)?.ok_or_else(|| Diagnostic::unsupported(
-                    "object spread is supported over typed records or JSON values with static keys",
-                ))?;
-                self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, source]);
+                self.intrinsic_void(ctx, Intrinsic::JsonAssign, vec![object, value]);
             }
         }
         Ok(object)
@@ -276,28 +253,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 return Ok(self.emit_value(ctx, |ctx| perry_mir::NativeJsonOp::new(ctx, value)));
             }
             _ => bail_unsupported!("unsupported Error cause type"),
-        };
-        Ok(self.intrinsic(ctx, intrinsic, vec![value]))
-    }
-
-    /// A member value of a JSON object literal: a JSON value, or a number, string, boolean
-    /// or `null` converted to one.
-    fn json_value(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
-        if matches!(expr, Expr::Null) {
-            return Ok(self.intrinsic(ctx, Intrinsic::JsonNull, vec![]));
-        }
-        let value = self.expression(ctx, expr)?;
-        if let Some(json) = self.json_operand(ctx, value)? {
-            return Ok(json);
-        }
-        let intrinsic = match kind(ctx, value)? {
-            Kind::Number => Intrinsic::JsonFromNumber,
-            Kind::String => Intrinsic::JsonFromString,
-            Kind::Boolean => Intrinsic::JsonFromBool,
-            _ => bail_unsupported!(
-                "members of a spread object literal are JSON values, numbers, strings, \
-                 booleans or null so far"
-            ),
         };
         Ok(self.intrinsic(ctx, intrinsic, vec![value]))
     }

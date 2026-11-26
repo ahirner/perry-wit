@@ -246,8 +246,8 @@ macro_rules! registry {
         }
 
         impl<'s> Call<'s> {
-            pub(crate) fn result_rule(&self) -> MethodResult {
-                match self { $($(Self::$variant(..) => Method::$variant.result_rule(),)*)* }
+            pub(crate) fn method(&self) -> Method {
+                match self { $($(Self::$variant(..) => Method::$variant,)*)* }
             }
 
             pub(crate) fn parse(receiver: Receiver, name: &str, args: &'s [Expr]) -> Result<Option<Self>> {
@@ -275,6 +275,30 @@ macro_rules! registry {
 mod registry;
 crate::method_catalog!(registry);
 impl<'s> Call<'s> {
+    pub(crate) fn array_callback(
+        expr: &'s Expr,
+    ) -> Option<(&'s Expr, Method, &'s Expr, Option<&'s Expr>)> {
+        let (CallReceiver::Expression(array), call) = Self::expression(expr)? else {
+            return None;
+        };
+        let method = call.method();
+        let (callback, initial) = match call {
+            Self::ArrayMap(cb)
+            | Self::ArrayFilter(cb)
+            | Self::ArrayFlatMap(cb)
+            | Self::ArrayFind(cb)
+            | Self::ArrayFindIndex(cb)
+            | Self::ArraySome(cb)
+            | Self::ArrayEvery(cb)
+            | Self::ArrayForEach(cb)
+            | Self::ArraySort(Some(cb))
+            | Self::ArrayToSorted(Some(cb)) => (cb, None),
+            Self::ArrayReduce(cb, initial) | Self::ArrayReduceRight(cb, initial) => (cb, initial),
+            _ => return None,
+        };
+        Some((array, method, callback, initial))
+    }
+
     pub(crate) fn expression(expr: &'s Expr) -> Option<(CallReceiver<'s>, Self)> {
         match expr {
             Expr::SetAdd { set_id, value } => {
@@ -333,7 +357,7 @@ impl<'s> Call<'s> {
                 DateSetUtcMilliseconds | DateSetMilliseconds => DateSetMilliseconds,
             }
             array_cb {
-                ArrayMap, ArrayFilter, ArrayFlatMap, ArrayFind, ArrayFindIndex, ArraySome, ArrayEvery,
+                ArrayMap, ArrayFilter, ArrayFlatMap, ArrayFind, ArrayFindIndex, ArraySome, ArrayEvery, ArrayForEach,
             }
             map_key { MapGet, MapHas, MapDelete, }
             set_val { SetHas, SetDelete, }
@@ -363,6 +387,8 @@ impl<'s> Call<'s> {
                 Expr::ArrayToReversed { array } => (array, Self::ArrayToReversed()),
                 Expr::ArrayWith { array, index, value } => (array, Self::ArrayWith(index, value)),
                 Expr::ArrayAt { array, index } => (array, Self::ArrayAt(Some(index))),
+                Expr::ArrayReduce { array, callback, initial } => (array, Self::ArrayReduce(callback, initial.as_deref())),
+                Expr::ArrayReduceRight { array, callback, initial } => (array, Self::ArrayReduceRight(callback, initial.as_deref())),
                 Expr::ArraySort { array, comparator } => (
                     array,
                     Self::ArraySort((!matches!(**comparator, Expr::Undefined)).then_some(comparator)),

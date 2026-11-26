@@ -1,14 +1,7 @@
 //! Source schemas to the existing MIR representation contracts.
 use super::*;
+use crate::engine::types::WitView;
 use crate::engine::types::{FuncIdentity, Idx, func_tag};
-
-pub(super) fn integer_mir_carrier(ctx: &Context, width: u32) -> TypeHandle {
-    if width == 64 {
-        perry_mir::BigIntType::get(ctx).into()
-    } else {
-        FP64Type::get(ctx).into()
-    }
-}
 
 impl Shapes<'_> {
     pub(in crate::lower) fn source_binding(&self, ty: &HirType) -> Result<BindingType> {
@@ -23,15 +16,20 @@ impl Shapes<'_, Preparing<'_>> {
         ctx: &Context,
         entry: &crate::wit::Foreign,
     ) -> Result<TypeHandle> {
-        match entry {
-            crate::wit::Foreign::Type(value) => value.mir_type(ctx, &mut self.records, false),
-            crate::wit::Foreign::Input(value) => value.mir_type(ctx, &mut self.records, true),
-            crate::wit::Foreign::Function(_) => {
-                bail_diag!(
-                    codes::TYPE_MISMATCH,
-                    "foreign function cannot be used as a value type"
-                )
-            }
+        let (value, input) = match entry {
+            crate::wit::Foreign::Type(value) => (*value, false),
+            crate::wit::Foreign::Input(value) => (*value, true),
+            crate::wit::Foreign::Function(_) => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "foreign function cannot be used as a value type"
+            ),
+        };
+        let ty = self.types.source.wit_type(ctx, value, WitView::Boundary);
+        let carrier = self.resolved_binding(ctx, ty)?.carrier;
+        if input {
+            self.input_type(ctx, carrier)
+        } else {
+            Ok(carrier)
         }
     }
 }

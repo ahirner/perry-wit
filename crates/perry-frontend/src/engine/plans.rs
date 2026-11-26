@@ -8,29 +8,36 @@ use crate::source::{BuiltinConstructor, ConstructorSites};
 use perry_hir::{ir::Expr, types::FuncId};
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) struct ExprIdx(usize);
 
 #[derive(Default)]
-pub(super) struct Expressions(HashMap<*const Expr, (ExprIdx, Option<BuiltinConstructor>)>);
+pub(super) struct Expressions {
+    sites: HashMap<*const Expr, (ExprIdx, Option<BuiltinConstructor>)>,
+    pub(super) declared: HashMap<ExprIdx, SiteResolution>,
+}
 
 impl Expressions {
     pub(super) fn register(&mut self, expr: &Expr, sites: &impl ConstructorSites) -> ExprIdx {
-        let next = ExprIdx(self.0.len());
-        self.0
+        let next = ExprIdx(self.sites.len());
+        self.sites
             .entry(std::ptr::from_ref(expr))
             .or_insert_with(|| (next, sites.constructor(expr)))
             .0
     }
 
+    pub(super) fn declared(&self, expr: &Expr) -> Option<SiteResolution> {
+        self.declared.get(&self.index(expr)?).copied()
+    }
+
     pub(super) fn index(&self, expr: &Expr) -> Option<ExprIdx> {
-        self.0.get(&std::ptr::from_ref(expr)).map(|row| row.0)
+        self.sites.get(&std::ptr::from_ref(expr)).map(|row| row.0)
     }
 }
 
 impl ConstructorSites for Expressions {
     fn constructor(&self, expr: &Expr) -> Option<BuiltinConstructor> {
-        self.0.get(&std::ptr::from_ref(expr))?.1
+        self.sites.get(&std::ptr::from_ref(expr))?.1
     }
 }
 
@@ -100,11 +107,15 @@ impl Decisions {
                     .sites(inst.template)
                     .iter()
                     .zip(entries)
-                    .filter_map(|(source, entry)| {
-                        (entry.erased
-                            || entry.coercion.is_some()
-                            || !matches!(entry.resolution, None | Some(SiteResolution::Cell(_))))
-                        .then_some((source.index, entry))
+                    .filter_map(|(source, mut entry)| {
+                        if matches!(
+                            entry.resolution,
+                            Some(SiteResolution::Cell(_) | SiteResolution::Closure(_))
+                        ) {
+                            entry.resolution = None;
+                        }
+                        (entry.erased || entry.coercion.is_some() || entry.resolution.is_some())
+                            .then_some((source.index, entry))
                     });
             pending.entry(owner).or_default().sites = sites.extend(resolved);
         }
@@ -130,8 +141,15 @@ impl Decisions {
     }
 
     pub(super) fn site(&self, owner: BodyOwner, expr: &Expr) -> Option<SiteEntry> {
-        let body = lookup(&self.bodies, owner)?;
-        lookup(&self.sites[body.sites], self.expressions.index(expr)?).copied()
+        let index = self.expressions.index(expr)?;
+        let mut entry = lookup(&self.bodies, owner)
+            .and_then(|b| lookup(&self.sites[b.sites], index))
+            .copied()
+            .unwrap_or_default();
+        entry.resolution = entry
+            .resolution
+            .or_else(|| self.expressions.declared.get(&index).copied());
+        Some(entry)
     }
     pub(super) fn storage(&self, owner: BodyOwner, id: LocalIdx) -> Option<super::Storage> {
         lookup(&self.locals[lookup(&self.bodies, owner)?.locals], id).copied()

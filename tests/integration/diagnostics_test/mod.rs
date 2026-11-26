@@ -444,6 +444,7 @@ fn unsupported_forms_have_exact_diagnostics() {
         (iteration("new URLSearchParams()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported".into()),
         ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), "case.ts:1:40: error[unsupported-construct]: String.prototype.replaceAll called with a non-global RegExp argument".into()),
         ("class A {} class B extends A {} export function run(): number { return 0; }".into(), "error[unsupported-construct]: class B extends A: class inheritance is not supported yet".into()),
+        ("export function run(change: boolean): string { let pattern = /a/; if (change) pattern = /(a)/; return 'a'.replace(pattern, () => 'x'); }".into(), "case.ts:1:103: error[unsupported-construct]: replacement callbacks require statically known capture arity".into()),
         (regex("/a/g"), "case.ts:1:55: error[unsupported-construct]: Regex search supports only the u and s flags".into()),
         (regex("/\\u{61}/"), format!("{REGEX_CONST}Braced Unicode regex escapes require the u flag")),
         (regex("/(?=a)/"), format!("{REGEX_CONST}Regex lookaround and inline flags are unsupported")),

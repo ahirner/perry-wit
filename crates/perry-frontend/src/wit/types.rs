@@ -67,16 +67,7 @@ pub(super) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
             }
         }
     }
-    for (key, ty) in [
-        ("u8", Type::U8),
-        ("s8", Type::S8),
-        ("u16", Type::U16),
-        ("s16", Type::S16),
-        ("u32", Type::U32),
-        ("s32", Type::S32),
-        ("u64", Type::U64),
-        ("s64", Type::S64),
-    ] {
+    for (key, ty, _) in super::INTEGERS {
         types
             .entry(key.into())
             .or_insert(Foreign::Type(WitValue { resolve, ty }));

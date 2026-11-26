@@ -9,6 +9,36 @@ pub(crate) fn is_array_insertion(method: &str) -> bool {
     matches!(method, "push" | "push_single" | "unshift")
 }
 
+pub(crate) fn class_receiver(object: &Expr) -> Option<&str> {
+    match object {
+        Expr::ClassRef(name) | Expr::ExternFuncRef { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
+pub(crate) fn member(callee: &Expr) -> Option<(&Expr, Option<&str>)> {
+    match callee {
+        Expr::PropertyGet {
+            object, property, ..
+        } => Some((object, Some(property))),
+        Expr::IndexGet { object, .. } => Some((object, None)),
+        _ => None,
+    }
+}
+
+pub(crate) fn call_arguments(expr: &Expr) -> Option<(&[Expr], u32)> {
+    match expr {
+        Expr::New {
+            args, byte_offset, ..
+        }
+        | Expr::Call {
+            args, byte_offset, ..
+        } => Some((args, *byte_offset)),
+        Expr::StaticMethodCall { args, .. } => Some((args, 0)),
+        _ => None,
+    }
+}
+
 pub(crate) enum RuntimeCall<'a> {
     Unresolved(&'a str),
     CheckInitialized {

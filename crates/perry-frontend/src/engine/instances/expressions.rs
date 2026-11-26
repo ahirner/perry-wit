@@ -3,7 +3,7 @@ use super::*;
 use crate::engine::solve::{SiteResolution, ValueCoercion};
 use crate::engine::{CaptureOperand, EnvironmentField};
 
-impl<'h> InstancePlanner<'h, '_> {
+impl<'h> InstancePlanner<'h, '_, '_> {
     pub(super) fn prepare_instance(&mut self, instance: InstanceId) -> Result<()> {
         let template = self.solved.instances[instance].template;
         for binding in self.index.bindings(template) {
@@ -44,6 +44,7 @@ impl<'h> InstancePlanner<'h, '_> {
         match site.resolution {
             Some(
                 SiteResolution::BranchResult(ty)
+                | SiteResolution::ObjectSpread(ty)
                 | SiteResolution::TypedArray(ty)
                 | SiteResolution::CollectionNew(ty),
             ) => self.prepare_layouts(ty)?,
@@ -70,21 +71,9 @@ impl<'h> InstancePlanner<'h, '_> {
             }
             _ => {}
         }
-        if let Expr::Closure { func_id, .. } = expr
-            && let Some(tid) = self.index.template_of_func(*func_id)
-            && self.is_env_template(tid)
+        if let Some(SiteResolution::Closure(ident)) = site.resolution
+            && self.is_env_template(ident.template)
         {
-            let capture_owner = if self.index.template_captures(tid).is_empty() {
-                CaptureOwner::None
-            } else if self.solved.collapsed_closures.contains(tid.index()) {
-                CaptureOwner::Template(self.solved.instances[instance].template)
-            } else {
-                CaptureOwner::Instance(instance)
-            };
-            let ident = FuncIdentity {
-                template: tid,
-                capture_owner,
-            };
             let env = self.environment(ident)?;
             let operands = self
                 .plans
@@ -102,7 +91,7 @@ impl<'h> InstancePlanner<'h, '_> {
                         CaptureOperand::Cell(local)
                     } else {
                         self.capture_operand(
-                            capture_owner,
+                            ident.capture_owner,
                             CaptureOwner::Instance(instance),
                             local,
                             ty,
@@ -111,7 +100,7 @@ impl<'h> InstancePlanner<'h, '_> {
                 })
                 .collect();
             self.plans.closure_values.insert(
-                (owner, *func_id),
+                (owner, self.index.view(ident.template).func_id),
                 crate::engine::ClosureValue {
                     identity: ident,
                     operands,

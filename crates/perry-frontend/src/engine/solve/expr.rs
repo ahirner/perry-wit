@@ -55,7 +55,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         );
         self.index
             .class_by_name_id(cn)
-            .and_then(|cid| ClassInfo::find(&self.index.class(cid).static_field_locs, fn_))
+            .and_then(|cid| self.index.class(cid).static_field(fn_))
             .map_or(Ty::OPEN, |loc| self.read_loc(loc, inst_id))
     }
 
@@ -101,6 +101,16 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if let Some(constructor) = self.index.expressions.collection(expr) {
             return self.eval_collection_constructor(s, expr, constructor);
+        }
+        if let Some(SiteResolution::MemberCall(MemberTarget::Resource(id))) =
+            self.index.expressions.declared(expr)
+            && let Some((args, _)) = hir_compat::call_arguments(expr)
+        {
+            let types = self.eval_args(s, args)?;
+            if types.contains(&Ty::BOTTOM) && matches!(expr, Expr::StaticMethodCall { .. }) {
+                return Ok(Ty::BOTTOM);
+            }
+            return Ok(self.resource_result(id));
         }
         if let Some(cb_ty) = self.try_eval_builtin_callback(s, expr)? {
             return Ok(cb_ty);
@@ -187,7 +197,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let ty = self.eval_expr(s, object)?;
                 if ty == Ty::BOTTOM
                     || matches!(self.types.kind(ty), TyKind::ClassInst(id)
-                    if self.index.class(self.class_insts[id].class).declaration.id == *class_id)
+                    if self.class_declaration(id).id == *class_id)
                 {
                     return Ok(ty);
                 }
@@ -239,40 +249,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let Some(template) = self.index.template_of_func(*func_id) else {
                     return Ok(Ty::OPEN);
                 };
-                let capture_owner = if self.index.template_captures(template).is_empty() {
-                    CaptureOwner::None
-                } else if let Some(owner_inst) = self.instances.get(s.inst) {
-                    let owner_tid = owner_inst.template;
-                    let owner_args = owner_inst.args;
-                    let self_nested = self.collapsed_closures.contains(template.index())
-                        || self
-                            .types
-                            .contains_func_template(owner_args, template, None)
-                        || self
-                            .index
-                            .template_captures(template)
-                            .iter()
-                            .any(|&cap_id| {
-                                self.index
-                                    .local_idx(cap_id)
-                                    .and_then(|lidx| self.read_local_value(s.inst, lidx))
-                                    .is_some_and(|ty| {
-                                        self.types.contains_func_template(
-                                            ty,
-                                            template,
-                                            Some(CaptureOwner::Instance(s.inst)),
-                                        )
-                                    })
-                            });
-                    if self_nested {
-                        self.collapse_closure(template, owner_tid);
-                        CaptureOwner::Template(owner_tid)
-                    } else {
-                        CaptureOwner::Instance(s.inst)
-                    }
-                } else {
-                    CaptureOwner::Instance(s.inst)
-                };
+                let identity = self.closure_identity(s.inst, template);
+                self.record_site(s.inst, expr, SiteResolution::Closure(identity));
                 if self.is_escaping_env(template, s.inst) {
                     for &cap_id in self.index.template_captures(template) {
                         if let Some(lidx) = self.index.local_idx(cap_id)
@@ -282,10 +260,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     }
                 }
-                Ok(self.types.func(FuncIdentity {
-                    template,
-                    capture_owner,
-                }))
+                Ok(self.types.func(identity))
             }
             Expr::Binary { op, left, right } => {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
@@ -477,7 +452,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::Object(fields) => {
                 self.eval_object_fields(s, fields.iter().map(|(n, v)| (n.as_str(), v)))
             }
-            Expr::ObjectSpread { parts } => self.eval_object_spread(s, parts),
+            Expr::ObjectSpread { parts } => {
+                let ty = self.eval_object_spread(s, parts)?;
+                self.record_site(s.inst, expr, SiteResolution::ObjectSpread(ty));
+                Ok(ty)
+            }
             Expr::ObjectRest {
                 object,
                 exclude_keys,
@@ -618,7 +597,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(loc) = self
                     .index
                     .class_by_name_id(cn)
-                    .and_then(|cid| ClassInfo::find(&self.index.class(cid).static_field_locs, fn_))
+                    .and_then(|cid| self.index.class(cid).static_field(fn_))
                 {
                     let norm = self
                         .types
@@ -667,10 +646,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::Call {
                 callee,
                 args,
-                type_args,
                 byte_offset,
                 ..
-            } => self.eval_call(s, expr, callee, args, type_args, *byte_offset),
+            } => self.eval_call(s, expr, callee, args, *byte_offset),
             Expr::CallSpread { callee, args, .. } => self.eval_call_spread(s, expr, callee, args),
             Expr::NativeMethodCall {
                 module,
@@ -873,7 +851,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     };
                     self.eval_children(s, expr, evaluated)?;
-                    return Ok(self.apply_resolved_method(s.inst, ty, call.result_rule()));
+                    return Ok(self.apply_resolved_method(s.inst, ty, call.method().result_rule()));
                 }
                 self.eval_children(s, expr, None)?;
                 Ok(builtins::leaf_expr_type(self.ctx, self.types, expr))

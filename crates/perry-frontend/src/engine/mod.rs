@@ -80,6 +80,7 @@ pub(crate) enum Reaction {
 }
 
 pub(crate) enum NativeBody {
+    Resource(crate::hir_compat::Target<perry_hir::types::FuncId>),
     Dispatch {
         receiver: bool,
         arms: Vec<DispatchArm>,
@@ -162,7 +163,8 @@ pub(crate) struct Specialization<'s> {
     pub(crate) literal_classes: crate::source::LiteralClasses<'s>,
     pub(crate) annotations: boundary::Annotations,
     pub(crate) lexical: boundary::LexicalFunctions<'s>,
-    pub(crate) strings: crate::source::StringConstants<'s>,
+    pub(crate) receiver_members: crate::wit::ReceiverMembers<'s>,
+    pub(crate) regexes: crate::source::RegexSites<'s>,
     pub(crate) bodies: crate::source::InstanceBodies<'s>,
     pub(crate) sparse_arrays: bool,
     pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
@@ -170,14 +172,8 @@ pub(crate) struct Specialization<'s> {
     pub(crate) capture_free: bitset::BitSet,
     pub(crate) escaping_env_templates: bitset::BitSet,
     pub(crate) instances: InstancePlans,
-}
-
-enum InstantiationOrigin {
-    Instance(types::InstanceId),
-    Dispatch {
-        function: perry_hir::types::FuncId,
-        offset: u32,
-    },
+    pub(crate) resources:
+        std::collections::BTreeMap<u32, crate::hir_compat::ResourceClass<types::ClassInstId>>,
 }
 
 pub(crate) fn lower_module(
@@ -186,67 +182,61 @@ pub(crate) fn lower_module(
     world: &crate::wit::WorldTypes<'_>,
 ) -> Result<crate::LoweredProgram> {
     let mut types = TypeTable::new();
+    let decls = crate::shapes::Declarations::new(
+        &source.declarations.interfaces,
+        &source.declarations.type_aliases,
+        &source.declarations.imports,
+        &source.bodies.classes,
+        world,
+    );
     let mut index = ModuleIndex::build(
         ctx,
         &source.bodies,
         &source.declarations,
         &source.locations,
         &source.closure_display_names,
-        &source.constructors,
+        (&source.constructors, &decls),
         &mut types,
     );
-    let mut solved = solve::solve(ctx, &source, &index, world, &mut types)?;
-    let mut origins = Vec::new();
+    let mut solved = solve::solve(ctx, &source, &index, &decls, &mut types)?;
     let mut records = perry_mir::RecordLayouts::default();
     let (bodies, mut instances, decisions) = instances::build(
         &source.bodies,
         &source.declarations,
-        &source.locations,
+        &mut source.locations,
         &index,
         &types,
         &solved,
-        &mut origins,
         (ctx, &mut records),
     )?;
     instances.decisions = plans::Decisions::from_solver(&mut index, &mut solved, decisions);
-    for origin in origins {
-        match origin {
-            InstantiationOrigin::Instance(id) => {
-                let inst = &solved.instances[id];
-                let caller = inst
-                    .caller
-                    .map(|id| &solved.instances[id])
-                    .filter(|caller| caller.template != types::TemplateId::INIT);
-                source.locations.record_instantiation(
-                    inst.emitted_name.clone(),
-                    index.view(inst.template).raw_name(),
-                    inst.call_byte_offset,
-                    caller.map(|c| c.emitted_name.clone()),
-                );
-            }
-            InstantiationOrigin::Dispatch { function, offset } => {
-                source.locations.record_instantiation(
-                    format!("__dispatch_{function}"),
-                    "dispatch".into(),
-                    offset,
-                    None,
-                );
-            }
-        }
-    }
     instances.local_ids = index.local_to_idx;
     instances.local_flags = index.locals.map(|local| local.flags);
-    let strings = index.strings;
     let capture_free = index.capture_free_templates;
-    for (witness, instance) in source.witnesses.iter_mut().zip(&solved.witness_instances) {
-        witness.target = instance.map(|id| solved.instances[id].emitted_func_id);
-    }
     let specialization = Specialization {
+        resources: source
+            .exports
+            .resources
+            .into_iter()
+            .map(|(id, resource)| {
+                let class = *solved.resource_instances.get(&id).ok_or_else(|| {
+                    perry_wit_diagnostics::internal!("missing resource specialization")
+                })?;
+                Ok((
+                    id,
+                    crate::hir_compat::ResourceClass {
+                        class,
+                        binding: resource.binding,
+                    },
+                ))
+            })
+            .collect::<Result<_>>()?,
         iteration: index.iteration,
         literal_classes: index.literal_classes,
         annotations: index.annotations,
         lexical: index.functions,
-        strings,
+        regexes: index.regexes,
+        receiver_members: index.receiver_members,
         bodies,
         sparse_arrays: source.sparse_arrays || solved.deletes_array_elements,
         locations: solved.locations,
@@ -258,18 +248,12 @@ pub(crate) fn lower_module(
     crate::lower::program::build_module(
         ctx,
         &source.declarations,
-        world,
+        decls,
         &mut source.locations,
-        &source.witnesses,
+        &source.exports.functions,
         &specialization,
         (types, records),
     )
-}
-
-impl Specialization<'_> {
-    pub(crate) fn regexp_operand(&self, expr: &perry_hir::ir::Expr) -> Option<String> {
-        self.strings.regexp_operand(expr, &self.instances.local_ids)
-    }
 }
 
 impl InstancePlans {
@@ -313,12 +297,16 @@ impl InstancePlans {
         }
     }
 
-    pub(crate) fn module_binding(&self, id: perry_hir::types::LocalId) -> bool {
+    pub(crate) fn binding_has_any(
+        &self,
+        id: perry_hir::types::LocalId,
+        flag: types::LocalFlags,
+    ) -> bool {
         self.local_ids
             .get(id as usize)
             .copied()
             .flatten()
-            .is_some_and(|idx| self.local_flags[idx].contains(types::LocalFlags::MODULE))
+            .is_some_and(|idx| self.local_flags[idx].intersects(flag))
     }
 
     pub(crate) fn site(&self, owner: BodyOwner, expr: &perry_hir::ir::Expr) -> solve::SiteEntry {
@@ -329,7 +317,7 @@ impl InstancePlans {
 #[cfg(test)]
 mod tests {
     use super::bitset::BitSet;
-    use super::types::{FuncIdentity, ObjectProp, TemplateId, Ty, TypeTable};
+    use super::types::{FuncIdentity, TemplateId, Ty, TypeTable};
     use crate::Absence;
     use perry_hir::types::Type as HirType;
     use pliron::context::Context;
@@ -393,15 +381,10 @@ mod tests {
         });
         assert_ne!(f1, f2);
 
-        let (n_a, n_b) = (table.intern_name("a"), table.intern_name("b"));
-        let prop = |name, ty| ObjectProp {
-            name,
-            ty,
-            optional: false,
-            readonly: false,
-        };
-        let o1 = table.object(&[prop(n_b, Ty::STRING), prop(n_a, Ty::NUMBER)], None);
-        let o2 = table.object(&[prop(n_a, Ty::NUMBER), prop(n_b, Ty::STRING)], None);
+        let a = table.property("a", Ty::NUMBER, false);
+        let b = table.property("b", Ty::STRING, false);
+        let o1 = table.object(&[b, a], None);
+        let o2 = table.object(&[a, b], None);
         assert_ne!(o1, o2);
 
         let hir_u = HirType::Union(vec![HirType::String, HirType::Number, HirType::Void]);

@@ -286,44 +286,4 @@ impl<'s> FunctionBuilder<'s, '_> {
             NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
         })
     }
-
-    pub(super) fn peek_record_type(
-        &self,
-        ctx: &Context,
-        expr: &Expr,
-    ) -> Option<TypedHandle<RecordType>> {
-        let record = match expr {
-            Expr::LocalGet(id) => {
-                let local = self.locals.get(id)?;
-                let ty = self.slot_type(ctx, local.slot).ok()?;
-                let inner = present_type(ctx, ty);
-                perry_mir::typed::<RecordType>(ctx, inner)?
-            }
-            Expr::PropertyGet {
-                object, property, ..
-            } => {
-                let rec = self.peek_record_type(ctx, object)?;
-                let (_, field_ty) = rec.deref(ctx).field(property)?;
-                let inner = present_type(ctx, field_ty);
-                perry_mir::typed::<RecordType>(ctx, inner)?
-            }
-            Expr::Call { .. } => {
-                if let Some(id) = self
-                    .shapes
-                    .specialization
-                    .instances
-                    .call_target(self.local_owner, expr)
-                    && let Some(sig) = self.signatures.get(&id)
-                    && let Some(ret) = sig.result
-                {
-                    let inner = present_type(ctx, ret.carrier);
-                    perry_mir::typed::<RecordType>(ctx, inner)?
-                } else {
-                    return None;
-                }
-            }
-            _ => return None,
-        };
-        (record.deref(ctx).kind() == RecordKind::Object).then_some(record)
-    }
 }

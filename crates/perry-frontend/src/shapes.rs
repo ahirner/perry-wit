@@ -13,7 +13,11 @@ pub(crate) struct Declarations<'h> {
     pub(crate) type_aliases: HashMap<&'h str, (usize, &'h perry_hir::ir::TypeAlias)>,
     pub(crate) classes: HashMap<&'h str, (usize, ClassShape<'h>)>,
     pub(crate) world: &'h crate::wit::WorldTypes<'h>,
-    pub(crate) integer_imports: HashMap<&'h str, (u32, Signedness)>,
+    pub(crate) resource_signatures: crate::engine::types::IdxVec<
+        crate::wit::MemberId,
+        Option<&'h crate::wit::ImportSignature<'h>>,
+    >,
+    integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub(crate) imported_types: HashMap<&'h str, &'h crate::wit::Foreign<'h>>,
     pub(crate) foreign_functions: HashMap<&'h str, (&'h str, &'h crate::wit::ImportSignature<'h>)>,
 }
@@ -23,7 +27,7 @@ impl<'h> Declarations<'h> {
         interfaces: &'h [perry_hir::ir::Interface],
         type_aliases: &'h [perry_hir::ir::TypeAlias],
         imports: &'h [perry_hir::ir::Import],
-        classes: impl Iterator<Item = ClassShape<'h>>,
+        classes: &'h [perry_hir::ir::Class],
         world: &'h crate::wit::WorldTypes<'h>,
     ) -> Self {
         let foreign = world.foreign();
@@ -36,11 +40,6 @@ impl<'h> Declarations<'h> {
             .iter()
             .enumerate()
             .map(|(idx, alias)| (alias.name.as_str(), (idx, alias)))
-            .collect();
-        let classes = classes
-            .enumerate()
-            .filter(|(_, c)| !crate::hir_compat::is_object_literal(c.name()))
-            .map(|(index, c)| (c.name(), (index, c)))
             .collect();
         let mut integer_imports = HashMap::new();
         let mut imported_types = HashMap::new();
@@ -55,16 +54,16 @@ impl<'h> Declarations<'h> {
                     continue;
                 };
                 if import.source == "perry:types"
-                    && let Some(spec) = perry_integer_spec(imported)
+                    && let Some(&(_, _, spec)) = crate::wit::INTEGERS
+                        .iter()
+                        .find(|(name, _, _)| name == imported)
                 {
                     integer_imports.insert(local.as_str(), spec);
                     continue;
                 }
                 let binding = format!("{source}#{imported}");
-                if let Some((key, crate::wit::Foreign::Function(signature))) =
-                    foreign.get_key_value(&binding)
-                {
-                    foreign_functions.insert(local.as_str(), (key.as_str(), signature));
+                if let Some(function) = world.function(&binding) {
+                    foreign_functions.insert(local.as_str(), function);
                 }
                 if let Some(entry) = [binding.as_str(), imported.as_str()]
                     .into_iter()
@@ -78,12 +77,27 @@ impl<'h> Declarations<'h> {
         Self {
             interfaces,
             type_aliases,
-            classes,
+            classes: HashMap::new(),
             world,
+            resource_signatures: world.members.map(|member| {
+                world
+                    .function(&member.binding)
+                    .map(|(_, signature)| signature)
+            }),
             integer_imports,
             imported_types,
             foreign_functions,
         }
+        .with_classes(classes.iter().map(ClassShape::Source))
+    }
+
+    pub(crate) fn with_classes(mut self, classes: impl Iterator<Item = ClassShape<'h>>) -> Self {
+        self.classes = classes
+            .enumerate()
+            .filter(|(_, c)| !crate::hir_compat::is_object_literal(c.name()))
+            .map(|(index, c)| (c.name(), (index, c)))
+            .collect();
+        self
     }
 
     pub(crate) fn is_user_type(&self, name: &str) -> bool {
@@ -92,60 +106,46 @@ impl<'h> Declarations<'h> {
             || self.classes.contains_key(name)
     }
 
-    pub(crate) fn integer_spec(&self, name: &str) -> Option<(u32, Signedness)> {
+    pub(crate) fn integer_spec<'a>(
+        &'a self,
+        ctx: &Context,
+        mut name: &'a str,
+    ) -> Option<(u32, Signedness)> {
         let mut seen = HashSet::new();
-        self.integer_spec_by_name(name, &mut seen)
+        while self.is_user_type(name) {
+            let (_, alias) = self.type_aliases.get(name)?;
+            let HirType::Named(target) = &alias.ty else {
+                return None;
+            };
+            if !alias.type_params.is_empty() || !seen.insert(name) {
+                return None;
+            }
+            name = target;
+        }
+        if let Some(&domain) = self.integer_imports.get(name) {
+            return Some(domain);
+        }
+        let domain = match self.foreign_entry(name)? {
+            crate::wit::Foreign::Type(value) | crate::wit::Foreign::Input(value) => {
+                value.integer()?
+            }
+            _ => return None,
+        };
+        (self.imported_types.contains_key(name)
+            || perry_mir::builtin_value_type(ctx, name).is_none())
+        .then_some(domain)
     }
 
-    fn integer_spec_by_name<'a>(
-        &'a self,
-        name: &'a str,
-        seen: &mut HashSet<&'a str>,
-    ) -> Option<(u32, Signedness)> {
-        if !seen.insert(name) {
-            return None;
-        }
-        if !self.is_user_type(name) {
-            if let Some(&spec) = self.integer_imports.get(name) {
-                return Some(spec);
-            }
-            if let Some(entry) = self
-                .imported_types
-                .get(name)
-                .copied()
-                .or_else(|| self.world.foreign().get(name))
-            {
-                return match entry {
-                    crate::wit::Foreign::Type(value) | crate::wit::Foreign::Input(value) => {
-                        value.integer()
-                    }
-                    _ => None,
-                };
-            }
-        }
-        if let Some((_, alias)) = self
-            .type_aliases
+    fn foreign_entry(&self, name: &str) -> Option<&crate::wit::Foreign<'h>> {
+        self.imported_types
             .get(name)
             .copied()
-            .filter(|(_, a)| a.type_params.is_empty())
-            && let HirType::Named(target) = &alias.ty
-        {
-            return self.integer_spec_by_name(target, seen);
-        }
-        None
+            .or_else(|| self.world.foreign().get(name))
     }
 
     pub(crate) fn foreign_type(&self, name: &str) -> Option<crate::wit::WitValue<'h>> {
-        if self.is_user_type(name) {
-            return None;
-        }
-        match self
-            .imported_types
-            .get(name)
-            .copied()
-            .or_else(|| self.world.foreign().get(name))?
-        {
-            crate::wit::Foreign::Type(value) => Some(*value),
+        match self.foreign_entry(name)? {
+            crate::wit::Foreign::Type(value) if !self.is_user_type(name) => Some(*value),
             _ => None,
         }
     }
@@ -163,18 +163,4 @@ impl<'h> Declarations<'h> {
         }
         Some(resource)
     }
-}
-
-pub(crate) fn perry_integer_spec(name: &str) -> Option<(u32, Signedness)> {
-    Some(match name {
-        "u8" => (8, Signedness::Unsigned),
-        "s8" => (8, Signedness::Signed),
-        "u16" => (16, Signedness::Unsigned),
-        "s16" => (16, Signedness::Signed),
-        "u32" => (32, Signedness::Unsigned),
-        "s32" => (32, Signedness::Signed),
-        "u64" => (64, Signedness::Unsigned),
-        "s64" => (64, Signedness::Signed),
-        _ => return None,
-    })
 }

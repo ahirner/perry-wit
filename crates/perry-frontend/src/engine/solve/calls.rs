@@ -1,6 +1,6 @@
 //! Call, method and constructor resolution.
 use super::*;
-use crate::wit::MemberKind;
+use crate::engine::types::WitView;
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_args(&mut self, s: &mut EvalState<'h>, args: &'h [Expr]) -> Result<Vec<Ty>> {
@@ -36,12 +36,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .is_zero_sized_func(ty, &self.index.capture_free_templates);
             self.site_mut(s.inst, expr)?.erased = erased;
             let ty = self.types.normalize_for_storage(self.ctx, self.decls, ty);
-            props.push(ObjectProp {
-                name: self.types.intern_name(name),
-                ty,
-                optional: false,
-                readonly: false,
-            });
+            props.push(self.types.property(name, ty, false));
         }
         if props.iter().any(|p| p.ty == Ty::BOTTOM) {
             return Ok(Ty::BOTTOM);
@@ -62,16 +57,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn resource_operation(
-        &mut self,
-        owner: u32,
-        kind: MemberKind,
-        name: &str,
-    ) -> Option<Ty> {
-        let member = self.decls.world.member(owner, kind, name)?;
-        Some(member.result.map_or(Ty::VOID, |value| {
-            self.types.wit_type(self.ctx, value, false)
-        }))
+    pub(super) fn resource_result(&mut self, member: crate::wit::MemberId) -> Ty {
+        self.decls.world.members[member]
+            .result
+            .map_or(Ty::VOID, |value| {
+                self.types.wit_type(self.ctx, value, WitView::Reference)
+            })
     }
 
     pub(super) fn eval_static_method_call(
@@ -87,15 +78,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         if arg_tys.contains(&Ty::BOTTOM) {
             return Ok(Ty::BOTTOM);
         }
-        let (cn, mn) = (
-            self.types.intern_name(class_name),
-            self.types
-                .intern_name(hir_compat::method(method_name).name()),
-        );
-        if let Some(tid) = self
-            .index
-            .class_by_name_id(cn)
-            .and_then(|cid| ClassInfo::find(&self.index.class(cid).static_methods, mn))
+        let class = self.types.intern_name(class_name);
+        if let Some(cid) = self.index.class_by_name_id(class)
+            && let Some(tid) = self.index.method_template(
+                &self.index.class(cid).declaration.static_methods,
+                hir_compat::method(method_name).name(),
+            )
         {
             let (_, ret) = self.dispatch_call_site(
                 s.inst,
@@ -105,11 +93,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 false,
             )?;
             return Ok(ret);
-        }
-        if let Some(owner) = self.decls.resource(class_name)
-            && let Some(ty) = self.resource_operation(owner, MemberKind::Static, method_name)
-        {
-            return Ok(ty);
         }
         Ok(Ty::OPEN)
     }
@@ -127,7 +110,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let target = self.request_instance(req)?;
         let res = if let Some(args) = method_arguments {
             self.record_class_arguments(inst_id, args, arg_types)?;
-            SiteResolution::MethodCall(target)
+            SiteResolution::MemberCall(MemberTarget::Class(target))
         } else {
             SiteResolution::Call {
                 target: CallTarget::Direct {
@@ -193,39 +176,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
-            let tp_span = self.class_type_params[cid];
-            let class_args = if !type_args.is_empty() {
-                self.eval_type_args(s.inst, type_args)
-            } else if !self.type_param_pool[tp_span].is_empty() {
-                let mut bindings = Vec::new();
-                if let Some(ctor_tid) = self.index.class(cid).ctor {
-                    let ctor_view = self.index.view(ctor_tid);
-                    self.unify_params(ctor_view.params, &arg_tys, tp_span, &mut bindings);
-                }
-                self.type_param_pool[tp_span]
-                    .iter()
-                    .map(|tp| {
-                        bindings
-                            .iter()
-                            .find(|(k, _)| k == tp)
-                            .map_or(Ty::OPEN, |(_, v)| *v)
-                    })
-                    .collect()
-            } else if self.index.class_has_implicit_params.contains(cid.index()) {
-                arg_tys.clone()
-            } else {
-                Vec::new()
-            };
+            let explicit = self.eval_type_args(s.inst, type_args);
             let class_inst =
-                self.request_class_inst(cid, &class_args, byte_offset, Some(s.inst))?;
+                self.construct_class(cid, &arg_tys, explicit, byte_offset, Some(s.inst))?;
             self.record_class_arguments(s.inst, args, &arg_tys)?;
             self.record_site(s.inst, expr, SiteResolution::ClassNew(class_inst));
             return Ok(self.types.class_inst(class_inst));
-        }
-        if let Some(owner) = self.decls.resource(class_name)
-            && let Some(ty) = self.resource_operation(owner, MemberKind::Constructor, "")
-        {
-            return Ok(ty);
         }
         if arg_tys.iter().any(|&a| self.types.has_func(a)) {
             return Err(self.hir.locations.annotate_call(
@@ -242,31 +198,48 @@ impl<'h, 'a> Solver<'h, 'a> {
         })
     }
 
+    pub(super) fn construct_class(
+        &mut self,
+        cid: ClassId,
+        arg_tys: &[Ty],
+        explicit: Vec<Ty>,
+        byte_offset: u32,
+        caller: Option<InstanceId>,
+    ) -> Result<ClassInstId> {
+        let tp_span = self.class_type_params[cid];
+        let class_args = if !explicit.is_empty() {
+            explicit
+        } else if !self.type_param_pool[tp_span].is_empty() {
+            let mut bindings = Vec::new();
+            if let Some(ctor_tid) = self.index.class(cid).ctor {
+                let ctor_view = self.index.view(ctor_tid);
+                self.unify_params(ctor_view.params, arg_tys, tp_span, &mut bindings);
+            }
+            self.type_param_pool[tp_span]
+                .iter()
+                .map(|tp| {
+                    bindings
+                        .iter()
+                        .find(|(k, _)| k == tp)
+                        .map_or(Ty::OPEN, |(_, v)| *v)
+                })
+                .collect()
+        } else if self.index.class_has_implicit_params.contains(cid.index()) {
+            arg_tys.to_vec()
+        } else {
+            Vec::new()
+        };
+        self.request_class_inst(cid, &class_args, byte_offset, caller)
+    }
+
     pub(super) fn eval_call(
         &mut self,
         s: &mut EvalState<'h>,
         expr: &'h Expr,
         callee: &'h Expr,
         args: &'h [Expr],
-        type_args: &'h [HirType],
         byte_offset: u32,
     ) -> Result<Ty> {
-        if let Expr::IndexGet { object, .. } = callee
-            && let Expr::Call { byte_end, .. } = expr
-            && self.hir.locations.calls_dispose(byte_offset, *byte_end)
-        {
-            let ty = self.eval_expr(s, object)?;
-            if ty == Ty::BOTTOM {
-                return Ok(Ty::BOTTOM);
-            }
-            if let TyKind::Named(id) = self.types.kind(ty)
-                && let Some(owner) = self.decls.resource(id.get(self.ctx))
-                && let Some(result) = self.resource_operation(owner, MemberKind::Dispose, "")
-            {
-                self.eval_args(s, args)?;
-                return Ok(result);
-            }
-        }
         if matches!(callee, Expr::ExternFuncRef { name, .. } if name == "structuredClone") {
             return match args.first() {
                 Some(a) => self.eval_expr(s, a),
@@ -318,8 +291,22 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
             let arg_tys = self.eval_args(s, args)?;
+            if matches!(
+                named,
+                Some(("fs/promises" | "node:fs/promises", "readFile"))
+            ) {
+                let text = hir_compat::read_file_text(args.get(1), &self.index.literal_classes)
+                    .map_err(|e| self.annotate_expr_error(s, e, byte_offset))?;
+                self.record_site(s.inst, expr, SiteResolution::ReadFile { text });
+                let inner = if text {
+                    Ty::STRING
+                } else {
+                    self.types.named(self.ctx, "Uint8Array")
+                };
+                return Ok(self.types.promise(inner));
+            }
             if let Some((source, imported)) = named
-                && let Some(res) = self.eval_builtin_import_call(source, imported, args, &arg_tys)
+                && let Some(res) = self.eval_builtin_import_call(source, imported, &arg_tys)
             {
                 return Ok(res);
             }
@@ -335,9 +322,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ));
             }
             if let Some((_, sig)) = self.decls.foreign_functions.get(name.as_str()) {
-                let ret = sig
-                    .result
-                    .map_or(Ty::VOID, |ty| self.types.wit_type(self.ctx, ty, false));
+                let ret = sig.result.map_or(Ty::VOID, |ty| {
+                    self.types.wit_type(self.ctx, ty, WitView::Reference)
+                });
                 return Ok(
                     if sig.is_async && !matches!(self.types.kind(ret), TyKind::Promise(_)) {
                         self.types.promise(ret)
@@ -348,20 +335,60 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             return Ok(self.types.intern_hir(self.ctx, return_type, true));
         }
-        if let Expr::PropertyGet {
-            object, property, ..
-        } = callee
-        {
-            return self.eval_method_call(s, expr, object, property, args, byte_offset);
+        if let Some((object, property)) = self.index.receiver_members.method(callee) {
+            if let Some(property) = property {
+                return self.eval_method_call(s, expr, object, property, args, byte_offset);
+            }
+            let ty = self.eval_expr(s, object)?;
+            if ty == Ty::BOTTOM {
+                return Ok(ty);
+            }
+            if let TyKind::Named(name) = self.types.kind(ty)
+                && let Some(owner) = self.decls.resource(name.get(self.ctx))
+                && let Some(member) = self.index.receiver_members.get(object, owner)
+            {
+                self.eval_args(s, args)?;
+                self.record_site(
+                    s.inst,
+                    expr,
+                    SiteResolution::MemberCall(MemberTarget::Resource(member)),
+                );
+                return Ok(Ty::VOID);
+            }
         }
 
         let callee_ty = self.eval_expr(s, callee)?;
         let arg_tys = self.eval_args(s, args)?;
+        self.eval_callable(s, expr, callee_ty, None, &arg_tys)
+    }
+
+    pub(super) fn eval_callable(
+        &mut self,
+        s: &mut EvalState<'h>,
+        expr: &'h Expr,
+        callee_ty: Ty,
+        receiver: Option<Ty>,
+        arg_tys: &[Ty],
+    ) -> Result<Ty> {
+        let (args, type_args, byte_offset) = match expr {
+            Expr::Call {
+                args,
+                type_args,
+                byte_offset,
+                ..
+            } => (Some(args.as_slice()), type_args, *byte_offset),
+            Expr::CallSpread {
+                type_args,
+                byte_offset,
+                ..
+            } => (None, type_args, *byte_offset),
+            _ => return Err(Diagnostic::internal("call site requires a call expression")),
+        };
         if callee_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
             return Ok(Ty::BOTTOM);
         }
         if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let argument_types = self.types.tuple(&arg_tys);
+            let argument_types = self.types.tuple(arg_tys);
             self.record_site(
                 s.inst,
                 expr,
@@ -378,8 +405,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 expr,
                 callee_ty,
                 &idents,
-                None,
-                &arg_tys,
+                receiver,
+                arg_tys,
                 byte_offset,
             );
         }
@@ -398,25 +425,27 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             return Ok(Ty::OPEN);
         };
-        for &a in &arg_tys {
+        for &a in arg_tys {
             self.invalidate_conservative_cell(a);
         }
         let target_view = self.index.view(ident.template);
         let is_promise_handle =
-            self.apply_promise_handle_call(s, ident, &arg_tys, Some(args), byte_offset)?;
+            self.apply_promise_handle_call(s, ident, arg_tys, args, byte_offset)?;
 
-        if args.iter().any(|a| {
-            matches!(
-                a,
-                Expr::Closure {
-                    captures_this: true,
-                    ..
-                } | Expr::Closure {
-                    captures_new_target: true,
-                    ..
-                }
-            )
-        }) {
+        if receiver.is_none()
+            && args.into_iter().flatten().any(|a| {
+                matches!(
+                    a,
+                    Expr::Closure {
+                        captures_this: true,
+                        ..
+                    } | Expr::Closure {
+                        captures_new_target: true,
+                        ..
+                    }
+                )
+            })
+        {
             return Err(self.hir.locations.annotate_call(
                 Diagnostic::unsupported(
                     "a callback that captures this or new.target requires its original receiver",
@@ -424,25 +453,32 @@ impl<'h, 'a> Solver<'h, 'a> {
                 byte_offset,
             ));
         }
-        if !is_promise_handle
+        if args.is_some()
+            && receiver.is_none()
+            && !is_promise_handle
             && !target_view.params.iter().any(|p| p.is_rest)
             && arg_tys.len() > target_view.params.len()
         {
             self.check_escaping_unannotated_func(ident.template, None)?;
         }
-        self.check_callback_params(s.inst, target_view, &arg_tys, byte_offset)?;
+        self.check_callback_params(s.inst, target_view, arg_tys, byte_offset)?;
 
         let explicit_targs = self.eval_type_args(s.inst, type_args);
         let pass_env = self.is_escaping_env(ident.template, s.inst);
         let call_arg_tys = if is_promise_handle {
             arg_tys.get(..1).unwrap_or(&[])
         } else {
-            &arg_tys
+            arg_tys
         };
         let (target_inst, ret) = self.dispatch_call_site(
             s.inst,
             expr,
             InstanceReq::new(ident.template, call_arg_tys, Some(s.inst))
+                .receiver(
+                    receiver
+                        .filter(|_| target_view.uses_this)
+                        .map(Receiver::Object),
+                )
                 .owner(ident.capture_owner)
                 .type_args(&explicit_targs)
                 .at(byte_offset),
@@ -460,65 +496,47 @@ impl<'h, 'a> Solver<'h, 'a> {
         callee: &'h Expr,
         args: &'h [perry_hir::ir::CallArg],
     ) -> Result<Ty> {
-        if let Expr::PropertyGet {
-            object, property, ..
+        let (callee_ty, receiver, builtin_result) = if let Expr::PropertyGet {
+            object,
+            property,
+            byte_offset,
+            ..
         } = callee
         {
-            let obj_ty = self.eval_expr(s, object)?;
-            for arg in args {
-                let (perry_hir::ir::CallArg::Expr(e) | perry_hir::ir::CallArg::Spread(e)) = arg;
-                self.eval_expr(s, e)?;
-            }
-            return Ok(match hir_compat::method(property).name() {
-                "concat" | "filter" | "sort" | "toSorted" => obj_ty,
+            let ty = self.eval_expr(s, object)?;
+            let (ty, _) = self.types.strip_nullish(ty);
+            let name = hir_compat::method(property).name();
+            let callable = self.method_property(s, ty, name, *byte_offset)?;
+            let fallback = match name {
+                "concat" | "filter" | "sort" | "toSorted" => ty,
                 "max" | "min" => Ty::NUMBER,
                 _ => Ty::OPEN,
-            });
-        }
-        let callee_ty = self.eval_expr(s, callee)?;
-        let mut expanded = Vec::with_capacity(args.len());
-        let mut has_bottom = callee_ty == Ty::BOTTOM;
-        for arg in args {
-            let (e, is_spread) = match arg {
-                perry_hir::ir::CallArg::Expr(e) => (e, false),
-                perry_hir::ir::CallArg::Spread(e) => (e, true),
             };
-            let ty = self.eval_expr(s, e)?;
-            if ty == Ty::BOTTOM {
-                has_bottom = true;
-                continue;
-            }
-            if is_spread {
-                let (stripped, _) = self.types.strip_nullish(ty);
-                match self.types.kind(stripped) {
+            (callable, Some(ty), fallback)
+        } else {
+            (Some(self.eval_expr(s, callee)?), None, Ty::OPEN)
+        };
+        let mut expanded = Vec::with_capacity(args.len());
+        for (expr, spread) in crate::source::Arguments::Spread(args) {
+            let ty = self.eval_expr(s, expr)?;
+            if spread && ty != Ty::BOTTOM {
+                let (ty, _) = self.types.strip_nullish(ty);
+                match self.types.kind(ty) {
                     TyKind::Tuple(span) => expanded.extend_from_slice(self.types.ty_slice(span)),
                     _ => expanded.push(
-                        builtins::iterated_element(self.ctx, self.types, stripped)
-                            .unwrap_or(Ty::OPEN),
+                        builtins::iterated_element(self.ctx, self.types, ty).unwrap_or(Ty::OPEN),
                     ),
                 }
             } else {
                 expanded.push(ty);
             }
         }
-        if has_bottom {
-            return Ok(Ty::BOTTOM);
+        match callee_ty {
+            Some(ty) if receiver.is_none() || self.types.has_func(ty) => {
+                self.eval_callable(s, expr, ty, receiver, &expanded)
+            }
+            _ => Ok(builtin_result),
         }
-        let TyKind::Func(ident) = self.types.kind(callee_ty) else {
-            return Ok(Ty::OPEN);
-        };
-        for &a in &expanded {
-            self.invalidate_conservative_cell(a);
-        }
-        let pass_env = self.is_escaping_env(ident.template, s.inst);
-        let (_, ret) = self.dispatch_call_site(
-            s.inst,
-            expr,
-            InstanceReq::new(ident.template, &expanded, Some(s.inst)).owner(ident.capture_owner),
-            None,
-            pass_env,
-        )?;
-        Ok(ret)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -630,7 +648,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         source: &str,
         imported: &str,
-        args: &[Expr],
         arg_tys: &[Ty],
     ) -> Option<Ty> {
         match (source, imported) {
@@ -639,18 +656,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                     Some(Ty::BOTTOM) => Some(Ty::BOTTOM),
                     other => Some(self.types.promise(other.unwrap_or(Ty::VOID))),
                 }
-            }
-            ("fs/promises" | "node:fs/promises", "readFile") => {
-                let enc = args.get(1).is_some_and(|a| {
-                    matches!(a, Expr::String(_))
-                        || matches!(a, Expr::Object(p) if p.iter().any(|(k, _)| k == "encoding"))
-                });
-                let inner = if enc {
-                    Ty::STRING
-                } else {
-                    self.types.named(self.ctx, "Uint8Array")
-                };
-                Some(self.types.promise(inner))
             }
             ("fs/promises" | "node:fs/promises", "stat") => {
                 let s = self.types.named(self.ctx, "Stats");

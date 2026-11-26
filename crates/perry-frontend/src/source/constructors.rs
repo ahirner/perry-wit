@@ -13,6 +13,15 @@ pub(crate) enum CollectionKind {
     Set,
 }
 
+impl CollectionKind {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Map => "Map",
+            Self::Set => "Set",
+        }
+    }
+}
+
 pub(crate) struct Constructor<'a> {
     pub(crate) kind: CollectionKind,
     pub(crate) types: &'a [Type],

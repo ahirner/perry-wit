@@ -16,10 +16,6 @@ pub(crate) fn has_source_offset(offset: u32) -> bool {
     offset != 0
 }
 
-pub(crate) fn mark_non_null(value: Expr) -> Expr {
-    Expr::Sequence(vec![Expr::String(NON_NULL.into()), value])
-}
-
 pub(crate) fn function_label(name: &str) -> &str {
     let name = display_name(name);
     if name.is_empty() || name.starts_with("callback_") {
@@ -92,7 +88,8 @@ struct SourceFile<'s> {
 pub(crate) struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
-    calls: HashMap<u32, (Span, Option<Span>)>,
+    calls: HashMap<u32, Span>,
+    disposals: HashSet<(u32, u32)>,
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
@@ -373,16 +370,13 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn calls_dispose(&self, start: u32, end: u32) -> bool {
-        self.calls
-            .get(&start)
-            .and_then(|(_, dispose)| *dispose)
-            .is_some_and(|span| span.hi.0 == end)
+        self.disposals.contains(&(start, end))
     }
 
     pub(crate) fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.calls
             .get(&byte_offset)
-            .and_then(|(span, _)| self.span(*span))
+            .and_then(|span| self.span(*span))
             .or_else(|| self.offset_span(byte_offset, 1))
     }
 
@@ -474,12 +468,7 @@ impl<'s> Locations<'s> {
             }
             fn visit_call_expr(&mut self, call: &ast::CallExpr) {
                 if call.span.lo.0 != 0 {
-                    let entry = self
-                        .locations
-                        .calls
-                        .entry(call.span.lo.0)
-                        .or_insert((call.span, None));
-                    entry.0 = call.span;
+                    self.locations.calls.insert(call.span.lo.0, call.span);
                     if let ast::Callee::Expr(callee) = &call.callee
                         && let ast::Expr::Member(member) = callee.unwrap_parens()
                         && let ast::MemberProp::Computed(prop) = &member.prop
@@ -487,7 +476,9 @@ impl<'s> Locations<'s> {
                         && matches!(&*symbol.obj, ast::Expr::Ident(id) if id.sym == "Symbol" && id.ctxt == self.unresolved)
                         && matches!(&symbol.prop,ast::MemberProp::Ident(id) if id.sym=="dispose")
                     {
-                        entry.1 = Some(call.span);
+                        self.locations
+                            .disposals
+                            .insert((call.span.lo.0, call.span.hi.0));
                     }
                 }
                 call.visit_children_with(self);
@@ -500,9 +491,7 @@ impl<'s> Locations<'s> {
                 if new_expr.span.lo.0 != 0 {
                     self.locations
                         .calls
-                        .entry(new_expr.span.lo.0)
-                        .or_insert((new_expr.span, None))
-                        .0 = new_expr.span;
+                        .insert(new_expr.span.lo.0, new_expr.span);
                 }
                 new_expr.visit_children_with(self);
             }

@@ -61,7 +61,19 @@ interface Cell { value:number }
 interface Holder { items:Cell[] }
 function mutate(items:Cell[]) { items[0].value=9;return 3; }
 function mutateNumbers(a:number[]) { a[0]=9;return [3]; }
+let order="";
+function take(a:number, ...words:string[]) { return a + ":" + words.join(","); }
+function select() { order += "C"; return take; }
+function argumentsTuple():[number,string,string] { order += "A"; return [1,"b","c"]; }
+function capture(n:number) { return (a:number,b:string) => n+a+b.length; }
+function choose(flag:boolean) { return flag ? (a:number,b:string)=>a+b.length : (a:number,b:string)=>a-b.length; }
+function surplus() { order += "S"; return 8; }
 export function run() {
+ const captured = capture(10);
+ const pair:[number,string]=[1,"xx"];
+ const member={n:5,call:function(a:number,b:string){return this.n+a+b.length;}};
+ if(member.call(...pair)!==8 || choose(false)(...pair)!==-1 || choose(true)(...pair)!==3)return 14;
+ if(select()(...argumentsTuple())!=="1:b,c" || captured(...pair,surplus())!==13 || order!=="CAS")return 13;
  const a:number[]=[1,2];
  const alias=a;
  const spread=[...a,...mutateNumbers(a),10];

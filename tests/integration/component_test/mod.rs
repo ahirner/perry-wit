@@ -44,6 +44,29 @@ fn interface_object_witness_resolves_its_member_lexically() -> Result<()> {
 }
 
 #[test]
+fn wit_rooted_class_calls_specialize_methods_and_accessors() -> Result<()> {
+    let mut guest = Instance::compile(
+        "package test:members; world boundary { export run:func(n:u32)->u32; }",
+        "class Box {
+            constructor(value) { this.stored = value; }
+            get value() { return this.stored; }
+            set value(v) { this.stored = v; }
+            read() { return this.value; }
+            static read(box, v) { box.value = v; return box.read(); }
+        }
+        class Double {
+            stored = 0;
+            get value() { return this.stored; }
+            set value(v) { this.stored = 2 * v; }
+            read() { return this.value; }
+        }
+        const text = Box.read(new Box(''), 'abcd');
+        export function run(n) { return text.length + Box.read(new Box(0), n) + Box.read(new Double(), n); }",
+    )?;
+    guest.check("run", (7u32,), &25u32)
+}
+
+#[test]
 fn witness_instances_preserve_function_identity_and_internal_results() -> Result<()> {
     let mut guest = Instance::compile(
         "package test:witnesses; world boundary {
@@ -726,6 +749,8 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
             record point { x: f64, label: string }
             variant value { empty, number(f64), text(string), point(point), bytes(list<u8>) }
             record packet { values: list<value>, optional: option<value> }
+            variant only { wide(tuple<u64, s64>) }
+            export single: func(v: option<only>) -> option<only>;
             variant narrow { small(f32), word(u32) }
             variant outer { narrow(narrow), wide(f64), empty }
             export joined: func(value: outer) -> outer;
@@ -739,7 +764,8 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
     let mut component = Instance::compile(
         WIT,
         r#"
-        import type { Outer, Packet, Value, WitInput } from './types/world';
+        import type { Only, Outer, Packet, Value, WitInput } from './types/world';
+        export function single(v: Only | null) { return v; }
         export function joined(value: Outer) { return value; }
         export function echo(values: Value[]) { return values; }
         export function inspect(value: Packet) { return value; }
@@ -761,6 +787,9 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
         }
         "#,
     )?;
+    for value in [None, Some(Only::Wide((u64::MAX, i64::MIN)))] {
+        component.check("single", (&value,), &value)?;
+    }
     let values = vec![
         Value::Empty,
         Value::Number(42.5),

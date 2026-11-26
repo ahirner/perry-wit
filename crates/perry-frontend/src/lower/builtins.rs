@@ -10,37 +10,29 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         object: &'s Expr,
-        method: &str,
+        property: Option<&str>,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        let method = hir_compat::method(method);
-        if let Expr::ExternFuncRef { name, .. } = object
-            && let Some(owner) = self.shapes.decls.resource(name)
-            && let Some(member) =
-                self.shapes
-                    .decls
-                    .world
-                    .member(owner, crate::wit::MemberKind::Static, method.name())
+        let method = property.map(hir_compat::method);
+        if let Some(method) = method
+            && let Expr::ClassRef(class_name) = object
         {
-            return self.resource_call(ctx, member, None, args);
-        }
-        if let Expr::ClassRef(class_name) = object {
             return self.class_static_method_call(ctx, class_name, method.name(), args);
         }
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        if let Some(resource) =
-            perry_mir::typed::<perry_mir::ResourceType>(ctx, receiver.get_type(ctx))
-        {
-            let owner = resource.deref(ctx).key();
-            if let Some(member) = self.shapes.decls.world.member(
-                owner,
-                crate::wit::MemberKind::Instance,
-                method.name(),
-            ) {
-                return self.resource_call(ctx, member, Some(receiver), args);
-            }
+        let resource = perry_mir::typed::<perry_mir::ResourceType>(ctx, receiver.get_type(ctx));
+        if let Some(member) = resource.and_then(|ty| {
+            self.shapes
+                .specialization
+                .receiver_members
+                .get(object, ty.deref(ctx).key())
+        }) {
+            return self.resource_call(ctx, member, Some(receiver), args);
         }
+        let method = method.ok_or_else(|| {
+            unsupported!("computed method or element calls are not supported yet")
+        })?;
         if let Some(class_name) = self.shapes.class_of_type(ctx, receiver.get_type(ctx))
             && let Some((owner_class, func)) = self.shapes.class_method(class_name, method.name())
         {
@@ -76,7 +68,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let search_val = self.defined(ctx, search_val)?;
             if self.is_callback(replacement) {
                 return self
-                    .replace_callback(ctx, receiver, search_val, replacement, all)
+                    .replace_callback(ctx, receiver, (search, search_val), replacement, all)
                     .map(Some);
             }
             let repl_val = self.string_operand(ctx, replacement)?;
@@ -264,46 +256,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             result = self.intrinsic(ctx, intrinsic, vec![result, value]);
         }
         Ok(result)
-    }
-
-    pub(super) fn fold_math_spread(
-        &mut self,
-        ctx: &mut Context,
-        intrinsic: Intrinsic,
-        acc_slot: Value,
-        array: &'s Expr,
-    ) -> Result<()> {
-        let arr = self.expression(ctx, array)?;
-        let arr = self.defined(ctx, arr)?;
-        ensure_unsupported!(
-            kind(ctx, arr)? == Kind::Array,
-            "Math.max/min spread requires an array"
-        );
-        let len = self.array_length(ctx, arr);
-        let zero = self.number(ctx, 0.0);
-        self.index_loop(ctx, "math_spread", zero, len, |b, ctx, idx, _, _| {
-            let item = b.array_value(ctx, arr, idx)?;
-            let val = b.arithmetic(ctx, item);
-            let cur = b.load(ctx, acc_slot)?;
-            let next = b.intrinsic(ctx, intrinsic, vec![cur, val]);
-            b.store(ctx, acc_slot, next);
-            Ok(())
-        })
-    }
-
-    /// `Math.min(...array)` or `Math.max(...array)`.
-    pub(super) fn math_extremum_spread(
-        &mut self,
-        ctx: &mut Context,
-        intrinsic: Intrinsic,
-        empty: f64,
-        array: &'s Expr,
-    ) -> Result<Value> {
-        let init = self.number(ctx, empty);
-        let acc_slot = self.entry_slot(ctx, FP64Type::get(ctx).into());
-        self.store(ctx, acc_slot, init);
-        self.fold_math_spread(ctx, intrinsic, acc_slot, array)?;
-        self.load(ctx, acc_slot)
     }
 
     pub(super) fn data_view(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {

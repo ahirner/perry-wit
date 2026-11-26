@@ -134,67 +134,48 @@ impl<'h, 'a> Solver<'h, 'a> {
             ))));
         }
 
-        let (object, method_name, args): (&'h Expr, &str, &'h [Expr]) = match expr {
-            Expr::ArrayMap { array, callback } => (array, "map", std::slice::from_ref(callback)),
-            Expr::ArrayFlatMap { array, callback } => {
-                (array, "flatMap", std::slice::from_ref(callback))
-            }
-            Expr::ArrayFilter { array, callback } => {
-                (array, "filter", std::slice::from_ref(callback))
-            }
-            Expr::ArraySome { array, callback } => (array, "some", std::slice::from_ref(callback)),
-            Expr::ArrayEvery { array, callback } => {
-                (array, "every", std::slice::from_ref(callback))
-            }
-            Expr::ArrayFind { array, callback } => (array, "find", std::slice::from_ref(callback)),
-            Expr::ArrayFindIndex { array, callback } => {
-                (array, "findIndex", std::slice::from_ref(callback))
-            }
-            Expr::ArraySort { array, comparator } => {
-                (array, "sort", std::slice::from_ref(comparator))
-            }
-            Expr::ArrayToSorted {
-                array,
-                comparator: Some(c),
-                ..
-            } => (array, "toSorted", std::slice::from_ref(c)),
-            Expr::Call { callee, args, .. }
-                if let Expr::PropertyGet {
+        let (raw_obj, method, first_arg, second_arg) =
+            if let Some((array, method, cb, init)) = crate::methods::Call::array_callback(expr) {
+                (self.eval_expr(s, array)?, method, cb, init)
+            } else if let Expr::Call { callee, args, .. } = expr
+                && let Expr::PropertyGet {
                     object, property, ..
-                } = callee.as_ref() =>
+                } = callee.as_ref()
+                && let Some(first) = args.first()
             {
-                (object, hir_compat::method(property).name(), args.as_slice())
-            }
-            _ => return Ok(None),
-        };
-        let raw_obj = self.eval_expr(s, object)?;
+                let name = hir_compat::method(property);
+                let raw_obj = self.eval_expr(s, object)?;
+                if raw_obj == Ty::BOTTOM {
+                    return Ok(Some(Err(Ty::BOTTOM)));
+                }
+                let (raw_stripped, _) = self.types.strip_nullish(raw_obj);
+                if name.name() == "forEach"
+                    && let TyKind::Generic { base, args: gargs } = self.types.kind(raw_stripped)
+                {
+                    let inputs = match (base.get(self.ctx).as_str(), self.types.ty_slice(gargs)) {
+                        ("Map" | "ReadonlyMap", [k, v]) => vec![*v, *k, raw_stripped],
+                        ("Set" | "ReadonlySet", [v]) => vec![*v, *v, raw_stripped],
+                        _ => return Ok(None),
+                    };
+                    return Ok(Some(Ok(CallbackSite::new(
+                        first,
+                        inputs,
+                        MethodResult::Void,
+                        raw_obj,
+                    ))));
+                }
+                let Some(method) = builtins::receiver_of(self.ctx, self.types, raw_stripped)
+                    .and_then(|r| Method::lookup(r, name.name()))
+                else {
+                    return Ok(None);
+                };
+                (raw_obj, method, first, args.get(1))
+            } else {
+                return Ok(None);
+            };
         if raw_obj == Ty::BOTTOM {
             return Ok(Some(Err(Ty::BOTTOM)));
         }
-        let (raw_stripped, _) = self.types.strip_nullish(raw_obj);
-
-        if method_name == "forEach"
-            && let TyKind::Generic { base, args: gargs } = self.types.kind(raw_stripped)
-            && let Some(cb) = args.first()
-        {
-            let inputs = match (base.get(self.ctx).as_str(), self.types.ty_slice(gargs)) {
-                ("Map" | "ReadonlyMap", [k, v]) => vec![*v, *k, raw_stripped],
-                ("Set" | "ReadonlySet", [v]) => vec![*v, *v, raw_stripped],
-                _ => return Ok(None),
-            };
-            return Ok(Some(Ok(CallbackSite::new(
-                cb,
-                inputs,
-                MethodResult::Void,
-                raw_obj,
-            ))));
-        }
-
-        let Some(method) = builtins::receiver_of(self.ctx, self.types, raw_stripped)
-            .and_then(|r| Method::lookup(r, method_name))
-        else {
-            return Ok(None);
-        };
         let Some(cb_kind) = method.callback() else {
             return Ok(None);
         };
@@ -203,12 +184,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Some(Err(Ty::BOTTOM)));
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
-        let Some((first_arg, tail)) = args.split_first() else {
-            return Ok(None);
-        };
-
         if matches!(cb_kind, Cb::Replacement) {
-            let Some(cb) = tail.first() else {
+            let Some(cb) = second_arg else {
                 return Ok(None);
             };
             let cb_ty = self.eval_expr(s, cb)?;
@@ -219,7 +196,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(None);
             }
             let mut inputs = vec![Ty::STRING];
-            let captures = self.index.replacement_captures(first_arg);
+            let captures = match first_arg {
+                Expr::String(_) => Some((0, false)),
+                _ => self.index.regexes.get(first_arg).map(|r| r.captures),
+            };
             if let Some((count, named)) = captures {
                 let opt = self.types.with_absences(Ty::STRING, Absence::Undefined);
                 inputs.extend(std::iter::repeat_n(opt, count));
@@ -243,7 +223,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(None);
         };
         let (inputs, init_ty) = if matches!(cb_kind, Cb::Fold) {
-            let acc = match tail.first() {
+            let acc = match second_arg {
                 Some(init) => self.eval_expr(s, init)?,
                 None => elem,
             };
@@ -318,19 +298,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let Some(template) = self.index.template_of_func(*func_id) else {
                 return Ok(None);
             };
-            let capture_owner = if self.index.template_captures(template).is_empty() {
-                CaptureOwner::None
-            } else if self.collapsed_closures.contains(template.index())
-                && let Some(owner_tid) = self.instances.get(s.inst).map(|i| i.template)
-            {
-                CaptureOwner::Template(owner_tid)
-            } else {
-                CaptureOwner::Instance(s.inst)
-            };
-            FuncIdentity {
-                template,
-                capture_owner,
-            }
+            self.closure_identity(s.inst, template)
         } else {
             let cb_val = self.eval_expr(s, callback)?;
             if cb_val == Ty::BOTTOM {

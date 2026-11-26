@@ -194,7 +194,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn write_local_value(&mut self, s: &mut EvalState<'h>, local: LocalIdx, value: Ty) {
-        if let Some(cloc) = self.collapsed_local_locs[local] {
+        if let Some(cloc) = self.capture_locs.collapsed[local] {
             self.write_loc(cloc, value);
         }
         if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
@@ -224,23 +224,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         inst_id: InstanceId,
         local: LocalIdx,
     ) -> Option<LocId> {
-        let info = self.index.locals[local];
-        if info.flags.contains(LocalFlags::MODULE) {
-            return info.module_loc();
-        }
-        let mut cursor = CaptureOwner::Instance(inst_id);
-        loop {
-            match cursor {
-                CaptureOwner::Instance(cur) => {
-                    if let Some(slot) = self.inst_locals[cur].iter().find(|s| s.local == local) {
-                        return Some(slot.loc);
-                    }
-                    cursor = self.instances[cur].capture_owner;
-                }
-                CaptureOwner::Template(_) => return self.collapsed_local_locs[local],
-                CaptureOwner::None => return None,
-            }
-        }
+        self.capture_locs.get(
+            self.index,
+            &self.instances,
+            CaptureOwner::Instance(inst_id),
+            local,
+        )
     }
 
     pub(super) fn ensure_instance_local(
@@ -252,11 +241,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(loc) = self.index.locals[local].module_loc() {
             return loc;
         }
-        if let Some(slot) = self.inst_locals[inst_id].iter().find(|s| s.local == local) {
+        if let Some(slot) = self.capture_locs.slots[inst_id]
+            .iter()
+            .find(|s| s.local == local)
+        {
             return slot.loc;
         }
         let loc = self.alloc_loc(initial);
-        self.inst_locals[inst_id].push(InstanceLocalSlot { local, loc });
+        self.capture_locs.slots[inst_id].push(InstanceLocalSlot { local, loc });
         loc
     }
 
@@ -617,13 +609,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.mark_written(s.inst, lidx);
                         return Ok(());
                     }
-                    let init_ty = if let Some(&class) = self.resource_registries.get(id) {
-                        let value = self.instantiate_annotated_class(class, 0, Some(s.inst))?;
-                        self.types.generic(
-                            shapes::TypeName::new(self.ctx, "Map".into()),
-                            &[Ty::NUMBER, value],
-                        )
-                    } else if matches!(init_expr, Expr::MapNew)
+                    let init_ty = if matches!(init_expr, Expr::MapNew)
                         && matches!(self.types.kind(declared), TyKind::Generic { .. })
                         && !self.types.is_open(declared)
                     {
@@ -842,13 +828,6 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn finish(self, init_inst: InstanceId) -> Solved {
         let live_instances = self.compute_live_instances();
 
-        let inst_local_tys = self.inst_locals.map(|slots| {
-            slots
-                .iter()
-                .map(|sl| (self.index.locals[sl.local].id, self.locations[sl.loc]))
-                .collect()
-        });
-
         let mut class_static_field_tys = self
             .index
             .classes
@@ -891,6 +870,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         Solved {
             witness_instances: self.witness_instances,
+            resource_instances: self.resource_instances,
             init_inst,
             instances: self.instances,
             class_insts: self.class_insts,
@@ -899,15 +879,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             field_locs: self.field_locs,
             dispatch_arms: self.dispatch_arms,
             helpers: self.helpers,
-            inst_local_tys,
+            capture_locs: self.capture_locs,
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,
-            inst_captures: self.inst_captures,
             live_instances,
             escaping_env_templates: self.escaping_env_templates,
-            collapsed_closures: self.collapsed_closures,
+
             boxed_locals: self.boxed_locals,
-            collapsed_local_locs: self.collapsed_local_locs,
+
             class_static_field_tys,
             class_inst_members,
             class_static_methods,
