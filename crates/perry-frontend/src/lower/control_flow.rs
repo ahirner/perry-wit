@@ -82,7 +82,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
         }
         self.jump(ctx, default);
-        self.controls.push(Control::Switch {
+        self.frame.controls.push(Control::Switch {
             label,
             break_to: done,
         });
@@ -105,7 +105,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.jump(ctx, blocks.get(index + 1).copied().unwrap_or(done));
         }
         self.variant_guards.truncate(guards);
-        self.controls.pop();
+        self.frame.controls.pop();
         self.switch_to(done);
         Ok(())
     }
@@ -115,7 +115,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     /// Leave with exception `status`: to the innermost handler, or out of the function. Ends
     /// the current block.
     pub(super) fn propagate(&mut self, ctx: &mut Context, status: Value) {
-        match self.handlers.last().copied() {
+        match self.handler {
             Some(handler) => {
                 self.store(ctx, handler.status, status);
                 self.emit(ctx, |ctx| BrOp::new(ctx, handler.block, vec![]));
@@ -128,31 +128,31 @@ impl<'s> FunctionBuilder<'s, '_> {
 
     /// Run the bodies of the `finally` blocks that a jump out of them leaves, innermost first,
     /// with only the handlers outside each `try` active.
-    pub(super) fn run_finallies(
-        &mut self,
-        ctx: &mut Context,
-        leaving: impl Fn(&Finally) -> bool,
-    ) -> Result<()> {
-        let pending: Vec<(usize, Finally<'s>)> = self
-            .finallies
+    pub(super) fn run_finallies(&mut self, ctx: &mut Context, depth: usize) -> Result<()> {
+        let cleanup = self
+            .frame
+            .controls
             .iter()
-            .copied()
             .enumerate()
-            .filter(|(_, f)| leaving(f))
-            .collect();
-        for (index, finally) in pending.into_iter().rev() {
-            // Lower the body with this `finally` and everything inside it inactive.
-            let handlers = self.handlers.split_off(finally.handlers);
-            let finallies = self.finallies.split_off(index);
-            let lowered = self.statements(ctx, finally.body);
-            self.handlers.extend(handlers);
-            self.finallies.extend(finallies);
-            lowered?;
-            if self.terminated(ctx) {
-                break;
+            .skip(depth)
+            .rev()
+            .find_map(|(i, control)| match *control {
+                Control::Finally { body, handler } => Some((i, body, handler)),
+                _ => None,
+            });
+        let Some((index, body, handler)) = cleanup else {
+            return Ok(());
+        };
+        let inner = self.frame.controls.split_off(index);
+        let result = self.with_handler(ctx, handler, None, |b, ctx| {
+            b.statements(ctx, body)?;
+            if !b.terminated(ctx) {
+                b.run_finallies(ctx, depth)?;
             }
-        }
-        Ok(())
+            Ok(())
+        });
+        self.frame.controls.extend(inner);
+        result
     }
 
     /// `try { body } catch (param) { handler } finally { cleanup }`.
@@ -166,11 +166,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         let i32 = IntegerType::get(ctx, 32, Signedness::Signless).into();
         let status = self.entry_slot(ctx, i32);
         let join = self.new_block(ctx, "join");
-        let outer = Finally {
-            body: finally.unwrap_or_default(),
-            handlers: self.handlers.len(),
-            controls: self.controls.len(),
-        };
         // The exceptional path of `finally`: run it, then throw the exception again.
         let rethrow_block = finally.map(|_| self.new_block(ctx, "finally"));
         let catch_block = catch.map(|_| self.new_block(ctx, "catch"));
@@ -178,24 +173,18 @@ impl<'s> FunctionBuilder<'s, '_> {
             .or(rethrow_block)
             .ok_or_else(|| Diagnostic::internal("try without catch or finally"))?;
 
-        if finally.is_some() {
-            self.finallies.push(outer);
-        }
-        self.handlers.push(Handler {
-            block: first,
-            status,
-        });
-        // The handlers start from any point of the body, before the narrowings that follow it,
-        // and the join is reached from the handlers as well as the body.
         let guards = self.variant_guards.depth();
-        let lowered = self.statements(ctx, body);
-        self.handlers.pop();
-        if finally.is_some() {
-            self.finallies.pop();
-        }
-        lowered?;
+        self.with_handler(
+            ctx,
+            Some(Handler {
+                block: first,
+                status,
+            }),
+            finally,
+            |b, ctx| b.statements(ctx, body),
+        )?;
         if !self.terminated(ctx) {
-            self.statements(ctx, outer.body)?;
+            self.statements(ctx, finally.unwrap_or_default())?;
             self.jump(ctx, join);
         }
         self.variant_guards.truncate(guards);
@@ -208,21 +197,14 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.variant_guards.assign(*id);
                 self.locals.insert(*id, binding);
             }
-            if let Some(rethrow) = rethrow_block {
-                self.finallies.push(outer);
-                self.handlers.push(Handler {
-                    block: rethrow,
-                    status,
-                });
-            }
-            let lowered = self.statements(ctx, &clause.body);
-            if rethrow_block.is_some() {
-                self.handlers.pop();
-                self.finallies.pop();
-            }
-            lowered?;
+            let handler = rethrow_block
+                .map(|block| Handler { block, status })
+                .or(self.handler);
+            self.with_handler(ctx, handler, finally, |b, ctx| {
+                b.statements(ctx, &clause.body)
+            })?;
             if !self.terminated(ctx) {
-                self.statements(ctx, outer.body)?;
+                self.statements(ctx, finally.unwrap_or_default())?;
                 self.jump(ctx, join);
             }
             self.variant_guards.truncate(guards);
@@ -231,7 +213,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Some(block) = rethrow_block {
             self.switch_to(block);
             let exception = self.catch_exception(ctx, status)?;
-            self.statements(ctx, outer.body)?;
+            self.statements(ctx, finally.unwrap_or_default())?;
             if !self.terminated(ctx) {
                 let again = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, exception));
                 self.propagate(ctx, again);
@@ -264,7 +246,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let stay = self.new_block(ctx, "handle");
         self.branch(ctx, exiting, leave, stay);
         self.switch_to(leave);
-        if self.handlers.is_empty() {
+        if self.handler.is_none() {
             self.emit(ctx, |ctx| {
                 let rethrow = RethrowOp::new(ctx, status);
                 perry_mir::set_exit_only(ctx, &rethrow);
@@ -303,13 +285,13 @@ impl<'s> FunctionBuilder<'s, '_> {
             update,
             None,
             |b, ctx, next, done| {
-                b.controls.push(Control::Loop {
+                b.frame.controls.push(Control::Loop {
                     label,
                     continue_to: next,
                     break_to: done,
                 });
                 let lowered = b.statements(ctx, body);
-                b.controls.pop();
+                b.frame.controls.pop();
                 lowered
             },
         );
@@ -352,13 +334,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         let result = self.iterate(ctx, input, |b, ctx, item, _, next, done| {
             let local = b.initialized_local(ctx, item);
             b.locals.insert(element, local);
-            b.controls.push(Control::Loop {
+            b.frame.controls.push(Control::Loop {
                 label,
                 continue_to: next,
                 break_to: done,
             });
             let result = b.statements(ctx, body);
-            b.controls.pop();
+            b.frame.controls.pop();
             result
         });
         self.variant_guards.truncate(guards);

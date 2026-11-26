@@ -13,6 +13,7 @@ mod control_flow;
 mod dates;
 mod expressions;
 mod foreign;
+mod frame;
 mod functions;
 use functions::{Callee, Functions};
 mod host;
@@ -79,8 +80,9 @@ use pliron::{
 use shapes::{BindingType, Shapes, identifier};
 use std::collections::{HashMap, HashSet};
 
-use builder::{Control, EXIT_STATUS, Finally, FunctionBuilder, Handler, LocalBinding};
+use builder::{EXIT_STATUS, FunctionBuilder, LocalBinding};
 use coerce::{Kind, is_integer64, kind, void_type};
+use frame::{Control, Handler, Jump};
 use program::{Builtin, Signature};
 
 /// The function `wasi:cli/run` binds to: the top-level statements of a module without exported

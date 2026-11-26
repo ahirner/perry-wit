@@ -1,6 +1,7 @@
 //! Timer allocation, cancellation, and asynchronous callback execution.
 use super::*;
 use crate::engine::{TimerKind, solve::CallTarget};
+use crate::lower::calls::CallArguments::Values;
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn start_timer(
@@ -110,18 +111,19 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.switch_to(active);
         }
         let handler = self.catch_handler(ctx, "timer_cancelled");
-        self.handlers.push(handler);
-        let signal = self.record_field(ctx, timer, "ctrl")?;
-        let undef = self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, FP64Type::get(ctx).into()));
-        let pending = self.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, undef, Some(signal)));
-        let op = AwaitOp::new(ctx, pending).to_diag(ctx)?;
-        self.append_value(ctx, &op);
-        self.handlers.pop();
+        self.with_handler(ctx, Some(handler), None, |b, ctx| {
+            let signal = b.record_field(ctx, timer, "ctrl")?;
+            let undef = b.emit_value(ctx, |ctx| UndefinedOp::new(ctx, FP64Type::get(ctx).into()));
+            let pending = b.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, undef, Some(signal)));
+            let op = AwaitOp::new(ctx, pending).to_diag(ctx)?;
+            b.append_value(ctx, &op);
+            Ok(())
+        })?;
         let run = self.new_block(ctx, "timer_callback");
         let cancelled = self.record_field(ctx, timer, "cancelled")?;
         self.branch(ctx, cancelled, done, run);
         self.switch_to(run);
-        self.invoke_callback(ctx, callback, callback_value, Some(timer), args)?;
+        callback.invoke(self, ctx, callback_value, Some(timer), Values(args))?;
         self.jump(
             ctx,
             if kind == TimerKind::Interval {

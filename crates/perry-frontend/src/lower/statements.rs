@@ -2,10 +2,7 @@
 use super::*;
 use crate::engine::types::LocalFlags;
 use crate::engine::{CellInit, Storage};
-use crate::lower::{
-    builder::Jump,
-    control_flow::{LoopCondition, LoopUpdate},
-};
+use crate::lower::control_flow::{LoopCondition, LoopUpdate};
 use crate::source::ConstructorSites;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -69,9 +66,9 @@ impl<'s> FunctionBuilder<'s, '_> {
                     element.rest
                 }
                 None => {
-                    let prev_rest_keys = self.rest_excluded_keys;
+                    let prev_rest_keys = self.frame.rest_excluded_keys;
                     if matches!(first, Stmt::Let { .. }) {
-                        self.rest_excluded_keys = tail
+                        self.frame.rest_excluded_keys = tail
                             .iter()
                             .take_while(|s| matches!(s, Stmt::Let { .. }))
                             .find_map(|s| match s {
@@ -89,7 +86,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                             Stmt::Let { id, .. } => self.shapes.annotate_local(error, *id),
                             _ => error,
                         });
-                    self.rest_excluded_keys = prev_rest_keys;
+                    self.frame.rest_excluded_keys = prev_rest_keys;
                     res?;
                     tail
                 }
@@ -141,7 +138,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 }
                 let init = init.as_ref();
                 if self.shapes.specialization.iteration.is_cursor(*id) {
-                    self.cursors.reset(*id);
+                    self.frame.cursors.reset(*id);
                 }
                 let storage = self.local_storage(*id);
                 if matches!(
@@ -163,7 +160,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.effect(ctx, expr)?;
             }
             Stmt::Return(value) => {
-                let erased = matches!(self.local_owner, BodyOwner::Function(id) if self.signatures.source(id)
+                let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.source(id)
                     .and_then(|f| f.signature.as_ref()).is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
                     if let Some(expr) = value
@@ -175,8 +172,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 } else {
                     value.as_ref()
                 };
-                if !self.inline_returns.is_empty() {
-                    return self.inline_return(ctx, value);
+                if let Some(frame) = self.frame.return_to {
+                    return self.inline_return(ctx, frame, value);
                 }
                 // An async function adopts a returned promise (and its result type) after
                 // the finalizers ran.
@@ -202,7 +199,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     },
                     None => (self.implicit_results(ctx), None),
                 };
-                self.run_finallies(ctx, |_| true)?;
+                self.run_finallies(ctx, 0)?;
                 if self.terminated(ctx) {
                     self.after_terminator(ctx);
                     return Ok(());
@@ -210,11 +207,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                 if let Some((promise, expected)) = adopted {
                     // Returning a promise runs finalizers before adoption; its later rejection
                     // does not enter a catch surrounding the return expression.
-                    let handlers = std::mem::take(&mut self.handlers);
-                    let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
-                    let value = self.append_value(ctx, &await_);
-                    values.push(self.fit(ctx, value, expected)?);
-                    self.handlers = handlers;
+                    let value = self.with_handler(ctx, None, None, |b, ctx| {
+                        let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
+                        let value = b.append_value(ctx, &await_);
+                        b.fit(ctx, value, expected)
+                    })?;
+                    values.push(value);
                 }
                 ensure_diag!(
                     values
@@ -320,26 +318,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                     Stmt::Break => (Jump::Break, None),
                     _ => (Jump::Continue, None),
                 };
-                let (index, target) = self
-                    .controls
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(index, control)| {
-                        control.target(jump, label).map(|target| (index, target))
-                    })
-                    .ok_or_else(|| match label {
-                        Some(label) => diag!(
-                            codes::PARSE_ERROR,
-                            "{} {label} has no enclosing target",
-                            match jump {
-                                Jump::Break => "break",
-                                Jump::Continue => "continue",
-                            }
-                        ),
-                        None => diag!(codes::PARSE_ERROR, "break/continue has no enclosing target"),
-                    })?;
-                self.run_finallies(ctx, |f| f.controls > index)?;
+                let (depth, target) = self.frame.jump_target(jump, label)?;
+                self.run_finallies(ctx, depth)?;
                 self.jump(ctx, target);
                 self.after_terminator(ctx);
             }
@@ -354,7 +334,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     self.statement(ctx, body, Some(label), loop_cells)?;
                 } else {
                     let exit = self.new_block(ctx, "labeled_exit");
-                    self.controls.push(Control::Labeled {
+                    self.frame.controls.push(Control::Labeled {
                         label: label.as_str(),
                         break_to: exit,
                     });
@@ -362,7 +342,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     let guards = self.variant_guards.depth();
                     let res = self.statements(ctx, std::slice::from_ref(body));
                     self.variant_guards.truncate(guards);
-                    self.controls.pop();
+                    self.frame.controls.pop();
                     res?;
                     self.jump(ctx, exit);
                     self.switch_to(exit);
@@ -421,7 +401,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.shapes
             .specialization
             .instances
-            .storage(self.local_owner, id)
+            .storage(self.frame.owner, id)
     }
 
     fn declared_local(
@@ -498,11 +478,11 @@ impl<'s> FunctionBuilder<'s, '_> {
             let plans = &self.shapes.specialization.instances;
             let function = match expr {
                 Expr::Closure { func_id, .. } => Some(*func_id),
-                _ => plans.reference(self.local_owner, expr),
+                _ => plans.reference(self.frame.owner, expr),
             };
             if function
-                .is_some_and(|id| !plans.closure_values.contains_key(&(self.local_owner, id)))
-                && plans.site(self.local_owner, expr).conversion().is_none()
+                .is_some_and(|id| !plans.closure_values.contains_key(&(self.frame.owner, id)))
+                && plans.site(self.frame.owner, expr).conversion().is_none()
             {
                 return Ok(());
             }

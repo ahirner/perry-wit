@@ -595,13 +595,19 @@ impl<'h> ModuleIndex<'h> {
         match expr {
             Expr::Call { args, .. }
             | Expr::StaticMethodCall { args, .. }
+            | Expr::NativeMethodCall { args, .. }
             | Expr::New { args, .. } => {
                 Self::record_site_expr(scan, owner, expr);
                 for arg in args {
                     Self::record_site_expr(scan, owner, arg);
                 }
             }
-            Expr::ArraySpread(_) => Self::record_site_expr(scan, owner, expr),
+            Expr::ArraySpread(_) | Expr::CallSpread { .. } => {
+                Self::record_site_expr(scan, owner, expr);
+                walk_expr_children(expr, &mut |value| {
+                    Self::record_site_expr(scan, owner, value)
+                });
+            }
             Expr::Array(elems, _) => {
                 Self::record_site_expr(scan, owner, expr);
                 for elem in elems {
@@ -636,7 +642,7 @@ impl<'h> ModuleIndex<'h> {
                 }
             }
             Expr::ObjectSpread { .. }
-            | Expr::CallSpread { .. }
+            | Expr::ArrayFrom(..)
             | Expr::NewDynamic { .. }
             | Expr::MapNew
             | Expr::MapNewFromArray(_)

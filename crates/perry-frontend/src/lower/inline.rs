@@ -9,6 +9,7 @@ pub(super) enum InlineResult {
     Declared(TypeHandle),
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct ReturnFrame {
     done: Ptr<BasicBlock>,
     /// The result slot; `None` for a void body, whose returned values are evaluated for effects.
@@ -16,36 +17,13 @@ pub(super) struct ReturnFrame {
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
-    pub(super) fn with_inline_scope<T>(
-        &mut self,
-        ctx: &mut Context,
-        owner: FuncId,
-        this_slot: Option<Value>,
-        lower: impl FnOnce(&mut Self, &mut Context) -> Result<T>,
-    ) -> Result<T> {
-        let locals = self.locals.scope();
-        let saved_owner = std::mem::replace(&mut self.local_owner, BodyOwner::Function(owner));
-        let saved_this = std::mem::replace(&mut self.this_slot, this_slot);
-        let guards = self.variant_guards.depth();
-        let finallies = std::mem::take(&mut self.finallies);
-        let controls = std::mem::take(&mut self.controls);
-        let result = lower(self, ctx);
-        self.locals.restore(locals);
-        self.this_slot = saved_this;
-        self.local_owner = saved_owner;
-        self.variant_guards.truncate(guards);
-        self.finallies = finallies;
-        self.controls = controls;
-        result
-    }
-
     pub(super) fn invalidate_inline_writes(
         &mut self,
         body: &'s [Stmt],
         exprs: impl IntoIterator<Item = &'s Expr>,
     ) {
         self.variant_guards.assign_projected(
-            self.local_owner,
+            self.frame.owner,
             body,
             exprs,
             |id| {
@@ -76,15 +54,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             InlineResult::Declared(ty) => Some(self.entry_slot(ctx, ty)),
             InlineResult::Void => None,
         };
-        self.inline_returns.push(ReturnFrame { done, slot });
-        // An inline callback runs once per element.
+        let frame = ReturnFrame { done, slot };
+        self.frame.return_to = Some(frame);
         self.invalidate_inline_writes(body, []);
-        let result = self.statements(ctx, body);
-        let frame = self
-            .inline_returns
-            .pop()
-            .ok_or_else(|| Diagnostic::internal("inline return frame"))?;
-        result?;
+        self.statements(ctx, body)?;
         if self.reachable(ctx, self.block) {
             self.store_inline_result(ctx, &frame, None)?;
             self.jump(ctx, done);
@@ -98,19 +71,12 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn inline_return(
         &mut self,
         ctx: &mut Context,
+        frame: ReturnFrame,
         expression: Option<&'s Expr>,
     ) -> Result<()> {
-        let Some(frame) = self.inline_returns.pop() else {
-            bail_internal!("return outside an inline function")
-        };
-        // The frame is off the stack only while the result is stored: a `finally` body run
-        // below may itself `return` from this frame.
-        let stored = self.store_inline_result(ctx, &frame, expression);
-        let done = frame.done;
-        self.inline_returns.push(frame);
-        stored?;
-        self.run_finallies(ctx, |_| true)?;
-        self.jump(ctx, done);
+        self.store_inline_result(ctx, &frame, expression)?;
+        self.run_finallies(ctx, 0)?;
+        self.jump(ctx, frame.done);
         self.after_terminator(ctx);
         Ok(())
     }

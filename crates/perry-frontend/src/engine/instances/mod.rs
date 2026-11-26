@@ -83,7 +83,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
     fn is_resolved(&self, ty: Ty) -> bool {
         !self.types.is_open_with(
             ty,
-            self.solved.locations.as_slice(),
+            |loc| (loc, self.solved.locations[loc]),
             &self.solved.dict_reads,
         )
     }

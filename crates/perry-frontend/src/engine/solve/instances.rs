@@ -94,12 +94,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                     })?;
                     let params = self.types.tuple(&params);
                     let result = match (result, target) {
-                        (Some(ty), _) if self.exported_resource(ty).is_some() => self.alloc_loc(ty),
+                        (Some(ty), _) if self.exported_resource(ty).is_some() => {
+                            self.locations.alloc(ty)
+                        }
                         (
                             Some(_),
                             Target::Function(id) | Target::Method(_, id) | Target::Static(_, id),
                         ) => self.instances[id].return_loc,
-                        _ => self.alloc_loc(Ty::VOID),
+                        _ => self.locations.alloc(Ty::VOID),
                     };
                     ExportRoot::Adapter {
                         target,
@@ -267,9 +269,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         let view = self.index.view(template);
         let is_monomorphic_plain = matches!(view.kind, TemplateKind::Function)
             && view.type_params.is_empty()
-            && !args
-                .iter()
-                .any(|&t| matches!(self.types.kind(t), TyKind::Func(_)))
+            && !args.iter().any(|&t| {
+                matches!(self.types.kind(t), TyKind::Func(_)) || self.arrays.contains(self.types, t)
+            })
             && view.params.iter().all(|p| {
                 !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
                     && !p.is_rest
@@ -301,7 +303,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         } else {
             args
         };
-        let args_key = self.types.tuple(args);
+        let inputs = self.types.tuple(args);
+        let args_key = self.arrays.argument_key(self.types, inputs);
         let targs_key = self.types.tuple(explicit_type_args);
         let list_result =
             if self.index.returns_empty_list.contains(template.index()) && !view.explicit_return {
@@ -332,9 +335,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             } else {
                 None
             };
+        let receiver_key = receiver.map(|receiver| match receiver {
+            Receiver::Object(ty) => Receiver::Object(self.arrays.argument_key(self.types, ty)),
+            Receiver::Class(class) => Receiver::Class(class),
+        });
         let key: InstanceKey = (
             template,
-            receiver,
+            receiver_key,
             capture_owner,
             args_key,
             targs_key,
@@ -342,6 +349,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             invocation == Invocation::Lexical,
         );
         if let Some(&id) = self.instance_index.get(&key) {
+            self.share_array_layouts(inputs, self.instances[id].args);
+            if let (Some(Receiver::Object(actual)), Some(Receiver::Object(original))) =
+                (receiver, self.instances[id].receiver)
+            {
+                self.share_array_layouts(actual, original);
+            }
             self.instances[id].is_witness |= witness.is_some();
             if invocation == Invocation::Inline {
                 self.instances[id].invocation = invocation;
@@ -428,7 +441,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let incoming = args.get(p_idx).copied().unwrap_or(Ty::VOID);
                 if incoming == Ty::OPEN || incoming == Ty::BOTTOM {
                     declared
-                } else if matches!(self.types.kind(incoming), TyKind::Func(_)) {
+                } else if matches!(self.types.kind(incoming), TyKind::Func(_))
+                    || self.arrays.contains(self.types, incoming)
+                {
                     incoming
                 } else if param.default.is_some() {
                     if !self.types.is_open(declared) {
@@ -445,7 +460,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     incoming
                 }
             };
-            let loc = self.alloc_loc(bound_ty);
+            let loc = self.locations.alloc(bound_ty);
             param_loc_buf.push(loc);
             if let Some(local) = self.index.local_idx(param.id) {
                 local_slots.push(InstanceLocalSlot { local, loc });
@@ -456,7 +471,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         for &cap_local in self.index.template_captured_locals(template) {
             if !local_slots.iter().any(|s| s.local == cap_local) {
-                let loc = self.alloc_loc(Ty::BOTTOM);
+                let loc = self.locations.alloc(Ty::BOTTOM);
                 local_slots.push(InstanceLocalSlot {
                     local: cap_local,
                     loc,
@@ -474,11 +489,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             })
             .flatten();
         let return_loc = if view.is_async && explicit_return.is_none() {
-            let inner_loc = self.alloc_loc(Ty::BOTTOM);
+            let inner_loc = self.locations.alloc(Ty::BOTTOM);
             let cell = self.types.cell(inner_loc, CellKind::Promise);
-            self.alloc_loc(cell)
+            self.locations.alloc(cell)
         } else {
-            self.alloc_loc(explicit_return.unwrap_or(Ty::BOTTOM))
+            self.locations.alloc(explicit_return.unwrap_or(Ty::BOTTOM))
         };
 
         let keep_original = first_instance && (witness.is_some() || is_monomorphic_plain);
@@ -520,7 +535,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             template,
             receiver,
             capture_owner,
-            args: args_key,
+            args: inputs,
             explicit_type_args: targs_key,
             return_loc,
             partial_record_result: None,
@@ -545,7 +560,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .map(|site| SiteEntry {
                 resolution: site.handles.map(|(resolve_tid, reject_tid)| {
                     SiteResolution::PromiseNew {
-                        value_loc: self.alloc_loc(Ty::BOTTOM),
+                        value_loc: self.locations.alloc(Ty::BOTTOM),
                         resolve_tid,
                         reject_tid,
                         executor: None,
@@ -555,7 +570,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             })
             .collect();
         self.inst_sites.push(sites);
-        self.inst_reads.push(Vec::new());
+        self.subscriptions.inputs.push(Vec::new());
         self.enqueue(inst_id);
         Ok(inst_id)
     }
@@ -604,9 +619,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         for skip_open in [true, false] {
             for (param, &arg_ty) in params.iter().zip(args) {
                 if skip_open
-                    && self
-                        .types
-                        .is_open_with(arg_ty, self.locations.as_slice(), &self.dict_reads)
+                    && self.types.is_open_with(
+                        arg_ty,
+                        |loc| self.locations.resolve(loc),
+                        &self.dict_reads,
+                    )
                 {
                     continue;
                 }
@@ -672,9 +689,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         byte_offset: u32,
         caller: Option<InstanceId>,
     ) -> Result<ClassInstId> {
-        let args_key = self.types.tuple(args);
+        let inputs = self.types.tuple(args);
+        let args_key = self.arrays.argument_key(self.types, inputs);
         let key = (class, args_key);
         if let Some(&id) = self.class_index.get(&key) {
+            self.share_array_layouts(inputs, self.class_insts[id].args);
             return Ok(id);
         }
         let cinfo = self.index.class(class);
@@ -698,9 +717,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             );
             let ty = self.types.substitute(ty, &bindings);
             let declared = !is_func_ty && !self.types.is_open(ty);
-            let loc = self.alloc_loc(if declared { ty } else { Ty::BOTTOM });
+            let loc = self.locations.alloc(if declared { ty } else { Ty::BOTTOM });
             if declared {
-                self.declared_locs.insert(loc.index());
+                self.locations.declare(loc, ty);
             }
             field_loc_buf.push(loc);
         }
@@ -715,7 +734,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let cinst_id = self.class_insts.push(ClassInst {
             ty: self.types.named(self.ctx, &emitted_name),
             class,
-            args: args_key,
+            args: inputs,
             field_locs,
             field_init: None,
             ctor_inst: None,

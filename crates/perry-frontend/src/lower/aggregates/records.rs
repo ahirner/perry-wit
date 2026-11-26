@@ -307,22 +307,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                         self.narrow_value(ctx, || Some(crate::narrowing::Path::local(id)), value)?
                     }
                     CaptureOperand::Cell(id) => self.load(ctx, self.local(id)?)?,
-                    CaptureOperand::Function {
-                        identity,
-                        environment,
-                    } => {
-                        let payload = environment
-                            .map(|id| {
-                                let value = self.load_local(ctx, id)?;
-                                let env = self.shapes.environment_record(identity)?.into();
-                                self.callable_field(ctx, value, "val", env)
-                            })
-                            .transpose()?;
-                        self.function_value(ctx, identity, payload, Some(ty))?
-                    }
-                    CaptureOperand::Widen { local, from, to } => {
-                        let value = self.load_local(ctx, local)?;
-                        self.widen_function(ctx, value, from, to)?
+                    CaptureOperand::Coerce(id, conversion) => {
+                        conversion.emit(self, ctx, Some(ty), |b, ctx, _| b.load_local(ctx, id))?
                     }
                 };
                 values.push(self.fit(ctx, value, ty)?);

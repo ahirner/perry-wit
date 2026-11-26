@@ -170,7 +170,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             (Kind::Record, field) => match FieldGetOp::new(ctx, value, field.to_string()) {
                 Ok(op) => self.field_read(ctx, &op)?,
-                Err(_) if self.rest_excluded_keys.iter().any(|k| k == field) => {
+                Err(_) if self.frame.rest_excluded_keys.iter().any(|k| k == field) => {
                     self.absent_literal(ctx, false, None)?
                 }
                 Err(_) => bail_diag!(
@@ -241,7 +241,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.collection_view_element_at(ctx, array, idx)
             }
             Kind::Record => {
-                let field = match (index, self.cursors.index(index)) {
+                let field = match (index, self.frame.cursors.index(index)) {
                     (Expr::String(name), _) => name.clone(),
                     (Expr::Number(n), _) if n.fract() == 0.0 && *n >= 0.0 => {
                         format!("_{}", *n as u64)

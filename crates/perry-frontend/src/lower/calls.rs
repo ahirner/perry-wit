@@ -1,11 +1,71 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
-use crate::engine::types::Ty;
+use crate::engine::{solve::CallTarget, types::Ty};
 use crate::lower::{builder::LocalBinding, hir_compat::RuntimeCall};
 
 enum SpreadInput {
     Tuple(Value, usize),
     Items(Value),
+}
+
+pub(super) enum CallArguments<'s, 'v> {
+    Expressions(Arguments<'s>, Ty),
+    Values(&'v [Value]),
+}
+
+impl CallTarget {
+    pub(super) fn invoke<'s>(
+        self,
+        b: &mut FunctionBuilder<'s, '_>,
+        ctx: &mut Context,
+        value: Option<Value>,
+        receiver: Option<Value>,
+        args: CallArguments<'s, '_>,
+    ) -> Result<Option<Value>> {
+        let Some(id) = b
+            .shapes
+            .specialization
+            .instances
+            .emitted_callee(self)
+            .transpose()?
+        else {
+            if let CallArguments::Expressions(args, _) = args {
+                for (arg, spread) in args {
+                    if spread {
+                        b.call_spread_input(ctx, arg, None)?;
+                    } else {
+                        b.discard_function_operand(ctx, arg)?;
+                    }
+                }
+                return Ok(Some(b.raise_non_callable(ctx)));
+            }
+            b.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
+            return Ok(None);
+        };
+        let callee = match (self, value) {
+            (Self::Direct { pass_env: true, .. }, Some(value)) => {
+                let wrapper = b.defined(ctx, value)?;
+                Some(b.record_field(ctx, wrapper, "val")?)
+            }
+            (Self::Dispatch { .. }, Some(value)) => Some(value),
+            _ if self.needs_value() => bail_internal!("missing callable operand"),
+            _ => None,
+        };
+        let receiver = if self.needs_receiver() {
+            Some(receiver.ok_or_else(|| internal!("missing call receiver"))?)
+        } else {
+            None
+        };
+        let prefix = callee.into_iter().chain(receiver);
+        match args {
+            CallArguments::Expressions(args, types) => {
+                b.invoke_arguments(ctx, b.signature(id)?, prefix, args, Some(types))
+            }
+            CallArguments::Values(args) => {
+                b.call_values(ctx, id, prefix.chain(args.iter().copied()))
+            }
+        }
+    }
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -99,7 +159,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 return self.bind_parameter(ctx, source, Some(value), binding, param.is_never);
             }
             program::Parameter::Receiver => {
-                self.this_slot = Some(self.initialized_local(ctx, value).slot);
+                self.frame.this_slot = Some(self.initialized_local(ctx, value).slot);
             }
             program::Parameter::Environment(identity) => {
                 let layouts = &self.shapes.specialization.instances.environments;
@@ -150,30 +210,16 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn invoke_site(
         &mut self,
         ctx: &mut Context,
-        target: crate::engine::solve::CallTarget,
+        target: CallTarget,
         argument_types: Ty,
         callee: &'s Expr,
         args: Arguments<'s>,
     ) -> Result<Option<Value>> {
-        let Some(function) = self
-            .shapes
-            .specialization
-            .instances
-            .emitted_callee(target)
-            .transpose()?
-        else {
-            self.discard_function_operand(ctx, callee)?;
-            for (arg, spread) in args {
-                if spread {
-                    self.call_spread_input(ctx, arg, None)?;
-                } else {
-                    self.discard_function_operand(ctx, arg)?;
-                }
-            }
-            return Ok(Some(self.raise_non_callable(ctx)));
-        };
-        let signature = self.signature(function)?;
         let (receiver, callable) = match callee {
+            _ if target == CallTarget::ThrowTypeError => {
+                self.discard_function_operand(ctx, callee)?;
+                (None, None)
+            }
             Expr::PropertyGet {
                 object,
                 property,
@@ -200,13 +246,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             _ => (None, Some(self.expression(ctx, callee)?)),
         };
-        let callable = self.bound_callee(ctx, target, callable)?;
-        self.invoke_arguments(
+        target.invoke(
+            self,
             ctx,
-            signature,
-            callable.into_iter().chain(receiver),
-            args,
-            Some(argument_types),
+            callable,
+            receiver,
+            CallArguments::Expressions(args, argument_types),
         )
     }
 
@@ -668,9 +713,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier)));
         }
         if let Some((owner, default)) = param.default() {
-            let saved = std::mem::replace(&mut self.local_owner, BodyOwner::Function(owner));
+            let saved = std::mem::replace(&mut self.frame.owner, BodyOwner::Function(owner));
             let value = self.expression_with(ctx, default, Some(carrier));
-            self.local_owner = saved;
+            self.frame.owner = saved;
             return self.fit(ctx, value?, carrier);
         }
         bail_diag!(codes::TYPE_MISMATCH, "missing required argument")
@@ -702,18 +747,19 @@ impl<'s> FunctionBuilder<'s, '_> {
                 function.name
             );
             self.inline_functions.push(function.id);
-            let result = self.with_inline_scope(ctx, function.id, self.this_slot, |this, ctx| {
-                for (param, value) in signature.params.iter().zip(values) {
-                    this.bind_argument(ctx, param, value)?;
-                }
-                let result = signature
-                    .result
-                    .map_or(crate::lower::inline::InlineResult::Void, |ty| {
-                        crate::lower::inline::InlineResult::Declared(ty.carrier)
-                    });
-                let slot = this.inline_body(ctx, function.body, result)?;
-                slot.map(|slot| this.load(ctx, slot)).transpose()
-            });
+            let result =
+                self.with_inline_scope(ctx, function.id, self.frame.this_slot, |this, ctx| {
+                    for (param, value) in signature.params.iter().zip(values) {
+                        this.bind_argument(ctx, param, value)?;
+                    }
+                    let result = signature
+                        .result
+                        .map_or(crate::lower::inline::InlineResult::Void, |ty| {
+                            crate::lower::inline::InlineResult::Declared(ty.carrier)
+                        });
+                    let slot = this.inline_body(ctx, function.body, result)?;
+                    slot.map(|slot| this.load(ctx, slot)).transpose()
+                });
             self.inline_functions.pop();
             return result;
         }

@@ -3,6 +3,30 @@ use super::*;
 use crate::methods::MethodResult;
 
 impl<'h, 'a> Solver<'h, 'a> {
+    pub(super) fn method_result(
+        &mut self,
+        inst: InstanceId,
+        rule: MethodResult,
+        mut call: MethodResultArgs<'_>,
+    ) -> Ty {
+        if rule == MethodResult::Receiver && self.arrays.contains(self.types, call.receiver) {
+            return call.receiver;
+        }
+        if !matches!(
+            rule,
+            MethodResult::Number
+                | MethodResult::Boolean
+                | MethodResult::String
+                | MethodResult::Void
+        ) {
+            call.receiver = self.resolve_cell_read(inst, call.receiver);
+        }
+        if call.receiver == Ty::BOTTOM {
+            return Ty::BOTTOM;
+        }
+        builtins::apply_method_result(self.ctx, self.types, rule, call)
+    }
+
     pub(super) fn method_property(
         &mut self,
         s: &mut EvalState<'h>,
@@ -170,6 +194,15 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         let arg_tys = self.eval_args(s, args)?;
 
+        if name == "concat"
+            && self.type_may_be_array(stripped)
+            && self.arrays.contains(self.types, stripped)
+        {
+            for (value, &ty) in args.iter().zip(&arg_tys) {
+                self.push_argument(s.inst, stripped, value, ty, self.type_may_be_array(ty));
+            }
+            return Ok(stripped);
+        }
         if name == "set"
             && arg_tys.get(1).is_some_and(|&ty| self.types.has_func(ty))
             && builtins::receiver_of(self.ctx, self.types, stripped)
@@ -181,12 +214,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 byte_offset,
             ));
         }
-        if matches!(name, "push" | "unshift") {
-            let pushed_cell = self.push_into_cells(stripped, &arg_tys);
-            self.coerce_array_write(s.inst, stripped, args, &arg_tys);
-            if pushed_cell {
-                return Ok(Ty::NUMBER);
-            }
+        if matches!(name, "push" | "unshift") && self.push_values(s.inst, stripped, args, &arg_tys)
+        {
+            return Ok(Ty::NUMBER);
         }
 
         if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, byte_offset)?
@@ -220,26 +250,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(rule) =
             builtins::lookup_method_result(self.ctx, self.types, stripped, name, false)
         {
-            let resolved_recv = if !matches!(
-                rule,
-                MethodResult::Number
-                    | MethodResult::Boolean
-                    | MethodResult::String
-                    | MethodResult::Void
-            ) {
-                self.resolve_cell_read(s.inst, obj_ty)
-            } else {
-                obj_ty
-            };
-            if resolved_recv == Ty::BOTTOM {
-                return Ok(Ty::BOTTOM);
-            }
-            return Ok(builtins::apply_method_result(
-                self.ctx,
-                self.types,
+            return Ok(self.method_result(
+                s.inst,
                 rule,
                 MethodResultArgs {
-                    receiver: resolved_recv,
+                    receiver: obj_ty,
                     arg0: arg_tys.first().copied(),
                     arg0_expr: args.first(),
                     callback_result: None,

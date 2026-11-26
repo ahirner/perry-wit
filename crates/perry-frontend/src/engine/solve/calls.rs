@@ -506,6 +506,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             let ty = self.eval_expr(s, object)?;
             let (ty, _) = self.types.strip_nullish(ty);
             let name = hir_compat::method(property).name();
+            if name == "push" && self.type_may_be_array(ty) {
+                for (value, spread) in crate::source::Arguments::Spread(args) {
+                    let value_ty = self.eval_expr(s, value)?;
+                    self.push_argument(s.inst, ty, value, value_ty, spread);
+                }
+                return Ok(Ty::NUMBER);
+            }
             let callable = self.method_property(s, ty, name, *byte_offset)?;
             let fallback = match name {
                 "concat" | "filter" | "sort" | "toSorted" => ty,
@@ -521,6 +528,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let ty = self.eval_expr(s, expr)?;
             if spread && ty != Ty::BOTTOM {
                 let (ty, _) = self.types.strip_nullish(ty);
+                let ty = self.resolve_cell_read(s.inst, ty);
                 match self.types.kind(ty) {
                     TyKind::Tuple(span) => expanded.extend_from_slice(self.types.ty_slice(span)),
                     _ => expanded.push(

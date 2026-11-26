@@ -17,11 +17,21 @@ struct TyMeta {
     depth: u8,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum TypeKey {
+    Kind(TyKind),
+    /// The ordinal distinguishes aliases in a specialization key. Only the element determines the layout.
+    ArrayParameter {
+        element: Ty,
+        ordinal: usize,
+    },
+}
+
 #[derive(Default)]
 pub(crate) struct TypeTable {
     kinds: IdxVec<Ty, TyKind>,
     meta: IdxVec<Ty, TyMeta>,
-    kind_index: HashMap<TyKind, Ty>,
+    kind_index: HashMap<TypeKey, Ty>,
     members_index: HashMap<Box<[Ty]>, TySpan>,
     props_index: HashMap<Box<[ObjectProp]>, PropSpan>,
     ty_pool: Pool<TySpan, Ty>,
@@ -54,8 +64,7 @@ impl TypeTable {
             TyKind::Symbol,
             TyKind::Timer,
         ] {
-            let id = table.push_kind(kind);
-            table.kind_index.insert(kind, id);
+            table.intern_kind(kind);
         }
         table
     }
@@ -139,11 +148,18 @@ impl TypeTable {
     }
 
     fn intern_kind(&mut self, kind: TyKind) -> Ty {
-        if let Some(&ty) = self.kind_index.get(&kind) {
+        self.intern(TypeKey::Kind(kind))
+    }
+
+    fn intern(&mut self, key: TypeKey) -> Ty {
+        if let Some(&ty) = self.kind_index.get(&key) {
             return ty;
         }
-        let ty = self.push_kind(kind);
-        self.kind_index.insert(kind, ty);
+        let ty = self.push_kind(match key {
+            TypeKey::Kind(kind) => kind,
+            TypeKey::ArrayParameter { element, .. } => TyKind::Array(element),
+        });
+        self.kind_index.insert(key, ty);
         ty
     }
     pub(crate) fn named(&mut self, ctx: &Context, name: &str) -> Ty {
@@ -154,6 +170,9 @@ impl TypeTable {
     }
     pub(crate) fn array(&mut self, element: Ty) -> Ty {
         self.intern_kind(TyKind::Array(element))
+    }
+    pub(super) fn array_parameter(&mut self, element: Ty, ordinal: usize) -> Ty {
+        self.intern(TypeKey::ArrayParameter { element, ordinal })
     }
     pub(crate) fn cell(&mut self, loc: LocId, kind: CellKind) -> Ty {
         self.intern_kind(TyKind::Cell { loc, kind })
@@ -438,7 +457,7 @@ impl TypeTable {
         res
     }
 
-    fn any_child(&self, ty: Ty, f: &mut impl FnMut(Ty) -> bool) -> bool {
+    pub(super) fn any_child(&self, ty: Ty, f: &mut impl FnMut(Ty) -> bool) -> bool {
         match self.kind(ty) {
             TyKind::Array(inner) | TyKind::Promise(inner) => f(inner),
             TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
@@ -458,7 +477,7 @@ impl TypeTable {
     fn any_with_cells(
         &self,
         ty: Ty,
-        locations: &[Ty],
+        resolve: &impl Fn(LocId) -> (LocId, Ty),
         visiting: &mut Vec<LocId>,
         seen: &mut BitSet,
         on_cell: &impl Fn(LocId, CellKind, Ty) -> Option<bool>,
@@ -469,9 +488,7 @@ impl TypeTable {
             return true;
         }
         if let TyKind::Cell { loc, kind: ck } = kind {
-            let Some(&elem) = locations.get(loc.index()) else {
-                return on_cell(loc, ck, Ty::OPEN).unwrap_or(true);
-            };
+            let (loc, elem) = resolve(loc);
             if let Some(res) = on_cell(loc, ck, elem) {
                 return res;
             }
@@ -479,7 +496,7 @@ impl TypeTable {
                 return on_leaf(TyKind::Open);
             }
             visiting.push(loc);
-            let hit = self.any_with_cells(elem, locations, visiting, seen, on_cell, on_leaf);
+            let hit = self.any_with_cells(elem, resolve, visiting, seen, on_cell, on_leaf);
             visiting.pop();
             return hit;
         }
@@ -487,14 +504,19 @@ impl TypeTable {
             return false;
         }
         self.any_child(ty, &mut |c| {
-            self.any_with_cells(c, locations, visiting, seen, on_cell, on_leaf)
+            self.any_with_cells(c, resolve, visiting, seen, on_cell, on_leaf)
         })
     }
 
-    pub(crate) fn is_open_with(&self, ty: Ty, locations: &[Ty], dict_reads: &BitSet) -> bool {
+    pub(crate) fn is_open_with(
+        &self,
+        ty: Ty,
+        resolve: impl Fn(LocId) -> (LocId, Ty),
+        dict_reads: &BitSet,
+    ) -> bool {
         self.any_with_cells(
             ty,
-            locations,
+            &resolve,
             &mut Vec::new(),
             &mut BitSet::default(),
             &|loc, ck, elem| match ck {
@@ -520,10 +542,15 @@ impl TypeTable {
         }
     }
 
-    pub(crate) fn contains_cell(&self, ty: Ty, target: LocId, locations: &[Ty]) -> bool {
+    pub(crate) fn contains_cell(
+        &self,
+        ty: Ty,
+        target: LocId,
+        resolve: impl Fn(LocId) -> (LocId, Ty),
+    ) -> bool {
         self.any_with_cells(
             ty,
-            locations,
+            &resolve,
             &mut Vec::new(),
             &mut BitSet::default(),
             &|loc, _, _| (loc == target).then_some(true),
@@ -699,15 +726,18 @@ impl TypeTable {
         (out.len() >= 2 || (allow_nullish_single && has_nullish && out.len() == 1)).then_some(out)
     }
 
+    pub(super) fn alternatives<'t>(&'t self, ty: &'t Ty) -> &'t [Ty] {
+        match self.kind(*ty) {
+            TyKind::Union(span) => self.ty_slice(span),
+            _ => std::slice::from_ref(ty),
+        }
+    }
+
     pub(crate) fn func_members<'t>(
         &'t self,
         ty: &'t Ty,
     ) -> impl Iterator<Item = FuncIdentity> + Clone + 't {
-        let members = match self.kind(*ty) {
-            TyKind::Union(span) => self.ty_slice(span),
-            _ => std::slice::from_ref(ty),
-        };
-        members
+        self.alternatives(ty)
             .iter()
             .filter_map(|&member| match self.kind(member) {
                 TyKind::Func(identity) => Some(identity),
@@ -759,11 +789,24 @@ impl TypeTable {
         if bindings.is_empty() {
             return ty;
         }
-        match self.kind(ty) {
+        self.rewrite(ty, &mut |types, ty| match types.kind(ty) {
             TyKind::TypeVar(name) | TyKind::Named(name) => bindings
                 .iter()
                 .find(|(p, _)| *p == name)
-                .map_or(ty, |&(_, bound)| bound),
+                .map(|&(_, bound)| bound),
+            _ => None,
+        })
+    }
+
+    pub(super) fn rewrite(
+        &mut self,
+        ty: Ty,
+        replace: &mut impl FnMut(&mut TypeTable, Ty) -> Option<Ty>,
+    ) -> Ty {
+        if let Some(bound) = replace(self, ty) {
+            return bound;
+        }
+        match self.kind(ty) {
             TyKind::Signature {
                 params,
                 result,
@@ -772,10 +815,10 @@ impl TypeTable {
             } => {
                 let mut params = self.object_slice(params).to_vec();
                 for p in &mut params {
-                    p.ty = self.substitute(p.ty, bindings);
+                    p.ty = self.rewrite(p.ty, replace);
                 }
                 let params = self.intern_properties(&params);
-                let result = self.substitute(result, bindings);
+                let result = self.rewrite(result, replace);
                 self.intern_kind(TyKind::Signature {
                     params,
                     result,
@@ -784,26 +827,19 @@ impl TypeTable {
                 })
             }
             TyKind::Array(i) => {
-                let n = self.substitute(i, bindings);
+                let n = self.rewrite(i, replace);
                 if n == i { ty } else { self.array(n) }
             }
             TyKind::Promise(i) => {
-                let n = self.substitute(i, bindings);
+                let n = self.rewrite(i, replace);
                 if n == i { ty } else { self.promise(n) }
             }
             kind @ (TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. }) => {
-                let mut changed = false;
-                let out: Vec<Ty> = self
-                    .ty_slice(s)
-                    .to_vec()
-                    .into_iter()
-                    .map(|i| {
-                        let n = self.substitute(i, bindings);
-                        changed |= n != i;
-                        n
-                    })
-                    .collect();
-                if !changed {
+                let mut out = self.ty_slice(s).to_vec();
+                for item in &mut out {
+                    *item = self.rewrite(*item, replace);
+                }
+                if out == self.ty_slice(s) {
                     return ty;
                 }
                 match kind {
@@ -815,18 +851,11 @@ impl TypeTable {
             }
             TyKind::Object { props, index } => {
                 let mut items = self.object_slice(props).to_vec();
-                let mut changed = false;
                 for p in &mut items {
-                    let n = self.substitute(p.ty, bindings);
-                    changed |= n != p.ty;
-                    p.ty = n;
+                    p.ty = self.rewrite(p.ty, replace);
                 }
-                let next_idx = index.map(|i| {
-                    let n = self.substitute(i, bindings);
-                    changed |= n != i;
-                    n
-                });
-                if changed {
+                let next_idx = index.map(|i| self.rewrite(i, replace));
+                if items != self.object_slice(props) || next_idx != index {
                     self.object(&items, next_idx)
                 } else {
                     ty

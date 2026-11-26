@@ -3,16 +3,7 @@ use super::*;
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn evaluate_instance(&mut self, inst_id: InstanceId) -> Result<()> {
-        self.evaluating_inst = Some(inst_id);
-        self.current_reads.clear();
-        self.current_read_list.clear();
-        let res = self.evaluate_instance_inner(inst_id);
-        self.evaluating_inst = None;
-        self.commit_reads(inst_id);
-        res
-    }
-
-    fn evaluate_instance_inner(&mut self, inst_id: InstanceId) -> Result<()> {
+        self.subscriptions.forget(inst_id);
         let inst = &self.instances[inst_id];
         let is_witness = inst.is_witness;
         let (template, receiver, return_loc, has_explicit_return, param_locs_span, args_ty) = (
@@ -55,7 +46,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     } else if !self.types.is_open_with(
                         norm,
-                        self.locations.as_slice(),
+                        |loc| self.locations.resolve(loc),
                         &self.dict_reads,
                     ) || self.types.is_open(self.locations[ploc])
                     {
@@ -100,7 +91,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if self.types.is_open(self.locations[loc])
                         && !matches!(self.types.kind(self.locations[loc]), TyKind::Cell { .. })
                     {
-                        let element = self.alloc_loc(Ty::BOTTOM);
+                        let element = self.locations.alloc(Ty::BOTTOM);
                         let cell = self.types.cell(element, CellKind::Array);
                         self.write_loc(loc, cell);
                     }
@@ -214,7 +205,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             .local_loc_in_instance(s.inst, local)
             .unwrap_or_else(|| self.ensure_instance_local(s.inst, local, Ty::BOTTOM));
         self.write_loc(loc, value);
-        if self.self_nested_locs.contains(loc.index()) {
+        if self
+            .locations
+            .self_nested
+            .contains(self.locations.root(loc).index())
+        {
             self.self_nested_locals.insert(local.index());
         }
     }
@@ -247,7 +242,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         {
             return slot.loc;
         }
-        let loc = self.alloc_loc(initial);
+        let loc = self.locations.alloc(initial);
         self.capture_locs.slots[inst_id].push(InstanceLocalSlot { local, loc });
         loc
     }
@@ -265,11 +260,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         if val_ty == Ty::BOTTOM {
             return;
         }
+        let root = self.locations.root(elem_loc);
         let self_nested = self
             .types
-            .contains_cell(val_ty, elem_loc, self.locations.as_slice());
+            .contains_cell(val_ty, root, |loc| self.locations.resolve(loc));
         if self_nested {
-            self.self_nested_locs.insert(elem_loc.index());
+            self.locations.self_nested.insert(root.index());
         }
         let next = if self_nested || self.types.has_nested_unresolved(val_ty, false) {
             Ty::OPEN
@@ -280,7 +276,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.write_loc(elem_loc, next);
     }
 
-    pub(super) fn push_into_cells(&mut self, stripped: Ty, vals: &[Ty]) -> bool {
+    pub(super) fn push_values(
+        &mut self,
+        inst: InstanceId,
+        target: Ty,
+        values: &[Expr],
+        types: &[Ty],
+    ) -> bool {
+        let pushed = self.push_into_cells(target, types);
+        self.coerce_array_write(inst, target, values, types);
+        pushed
+    }
+
+    fn push_into_cells(&mut self, stripped: Ty, vals: &[Ty]) -> bool {
         match self.types.kind(stripped) {
             TyKind::Cell { loc, kind } => {
                 if kind.is_array() {
@@ -311,18 +319,45 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn write_cell_indexed(&mut self, obj_def: Ty, idx_ty: Ty, val_ty: Ty) {
-        if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
-            let ok = if kind.is_array() {
-                matches!(idx_ty, Ty::NUMBER | Ty::INT32)
-            } else {
-                idx_ty == Ty::STRING
-            };
-            if ok {
-                self.write_cell(loc, val_ty);
-            } else if idx_ty != Ty::BOTTOM {
-                self.write_loc(loc, Ty::OPEN);
+    pub(super) fn push_argument(
+        &mut self,
+        inst: InstanceId,
+        target: Ty,
+        value: &Expr,
+        ty: Ty,
+        spread: bool,
+    ) {
+        if spread {
+            self.share_element_layouts(&[target, ty]);
+            let source = self.resolve_cell_read(inst, ty);
+            if let Some(element) = builtins::iterated_element(self.ctx, self.types, source) {
+                self.push_into_cells(target, &[element]);
             }
+        } else {
+            self.push_values(inst, target, std::slice::from_ref(value), &[ty]);
+        }
+    }
+
+    pub(super) fn write_cell_indexed(&mut self, obj_def: Ty, idx_ty: Ty, val_ty: Ty) {
+        match self.types.kind(obj_def) {
+            TyKind::Union(span) => {
+                for member in self.types.ty_slice(span).to_vec() {
+                    self.write_cell_indexed(member, idx_ty, val_ty);
+                }
+            }
+            TyKind::Cell { loc, kind } => {
+                let ok = if kind.is_array() {
+                    matches!(idx_ty, Ty::NUMBER | Ty::INT32)
+                } else {
+                    idx_ty == Ty::STRING
+                };
+                if ok {
+                    self.write_cell(loc, val_ty);
+                } else if idx_ty != Ty::BOTTOM {
+                    self.write_loc(loc, Ty::OPEN);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -341,11 +376,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.types.is_open(expected) {
             return;
         }
-        if self.locations[loc] != expected {
-            self.locations[loc] = expected;
-            self.dirty_locs.insert(loc.index());
-        }
-        self.declared_locs.insert(loc.index());
+        self.locations.declare(loc, expected);
     }
 
     pub(super) fn resolve_promise_cells(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
@@ -445,7 +476,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     return ty;
                 }
-                let members: Vec<Ty> = members.to_vec();
+                let members = members.to_vec();
+                self.share_element_layouts(&members);
                 let mut joined = Ty::BOTTOM;
                 for m in members {
                     let r = self.resolve_cell_read(inst_id, m);
@@ -700,7 +732,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     let dst = self
                         .instances
                         .get(s.inst)
-                        .and_then(|i| self.locations.get(i.return_loc).copied())
+                        .map(|i| self.locations[i.return_loc])
                         .map_or(s.returned, |r| self.types.join(r, s.returned));
                     self.record_coercion(s.inst, e, norm, dst);
                 }
@@ -868,13 +900,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
+        let (locations, self_nested_locs) = self.locations.finish();
         Solved {
             witness_instances: self.witness_instances,
             resource_instances: self.resource_instances,
             init_inst,
             instances: self.instances,
             class_insts: self.class_insts,
-            locations: self.locations,
+            locations,
             param_locs: self.param_locs,
             field_locs: self.field_locs,
             dispatch_arms: self.dispatch_arms,
@@ -891,7 +924,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             class_inst_members,
             class_static_methods,
             dict_reads: self.dict_reads,
-            self_nested_locs: self.self_nested_locs,
+            self_nested_locs,
             self_nested_locals: self.self_nested_locals,
             deletes_array_elements: self.deletes_array_elements,
         }

@@ -222,6 +222,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(elem) = builtins::iterated_element(self.ctx, self.types, stripped) else {
             return Ok(None);
         };
+        let input_array = if self.arrays.contains(self.types, raw_obj) {
+            raw_obj
+        } else {
+            stripped
+        };
         let (inputs, init_ty) = if matches!(cb_kind, Cb::Fold) {
             let acc = match second_arg {
                 Some(init) => self.eval_expr(s, init)?,
@@ -230,9 +235,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             if acc == Ty::BOTTOM {
                 return Ok(Some(Err(Ty::BOTTOM)));
             }
-            (vec![acc, elem, Ty::NUMBER, stripped], Some(acc))
+            (vec![acc, elem, Ty::NUMBER, input_array], Some(acc))
         } else {
-            (self.array_cb_inputs(cb_kind, stripped, elem), None)
+            (self.array_cb_inputs(cb_kind, input_array, elem), None)
         };
         Ok(Some(Ok(CallbackSite {
             callback: first_arg,
@@ -242,7 +247,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 MethodResultArgs {
                     arg0: init_ty,
                     sparse_arrays: self.hir.sparse_arrays,
-                    ..MethodResultArgs::receiver_only(obj_ty)
+                    ..MethodResultArgs::receiver_only(raw_obj)
                 },
             ),
         })))
@@ -267,9 +272,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(None);
         };
         Ok(Some(match site.result {
-            CallbackResult::Method(rule, args) => builtins::apply_method_result(
-                self.ctx,
-                self.types,
+            CallbackResult::Method(rule, args) => self.method_result(
+                s.inst,
                 rule,
                 MethodResultArgs {
                     callback_result: Some(result),

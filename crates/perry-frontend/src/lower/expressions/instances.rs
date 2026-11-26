@@ -1,6 +1,6 @@
 //! Lower a solved operation at its lexical expression.
 use super::*;
-use crate::engine::solve::{FuncCoercion, SiteResolution, ValueCoercion};
+use crate::engine::solve::{FuncCoercion, SiteResolution};
 use crate::engine::types::Ty;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -8,15 +8,15 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.shapes
             .specialization
             .instances
-            .site(self.local_owner, expr)
+            .site(self.frame.owner, expr)
             .erased
     }
     pub(in crate::lower) fn is_callback(&self, expr: &Expr) -> bool {
         let plans = &self.shapes.specialization.instances;
         matches!(expr, Expr::Closure { .. })
-            || plans.reference(self.local_owner, expr).is_some()
+            || plans.reference(self.frame.owner, expr).is_some()
             || matches!(
-                plans.site(self.local_owner, expr).coercion,
+                plans.site(self.frame.owner, expr).coercion,
                 Some(FuncCoercion::Callback { .. })
             )
     }
@@ -28,56 +28,19 @@ impl<'s> FunctionBuilder<'s, '_> {
         required: bool,
     ) -> Result<Option<Value>> {
         let plans = &self.shapes.specialization.instances;
-        let site = plans.site(self.local_owner, expr);
-        let conversion = site.conversion();
-        let discard = matches!(
-            conversion,
-            Some(ValueCoercion::Zero | ValueCoercion::Tag(..))
-        );
-        let input = match conversion {
-            Some(ValueCoercion::Widen { from, .. }) => self.shapes.callable_type(from)?,
-            Some(_) => None,
-            None => expected,
+        let site = plans.site(self.frame.owner, expr);
+        let Some(conversion) = site.conversion() else {
+            return self.instance_value(ctx, expr, expected, site.resolution, required);
         };
-        let raw = if discard && crate::source::is_pure_func_expr(expr) {
-            None
-        } else {
-            self.instance_value(
-                ctx,
-                expr,
-                input,
-                site.resolution,
-                !discard && (required || conversion.is_some()),
-            )?
-        };
-        let value = match conversion {
-            None => return Ok(raw),
-            Some(ValueCoercion::Zero) => self.number(ctx, 0.0),
-            Some(ValueCoercion::Tag(id, target)) => {
-                let target = expected
-                    .map(Ok)
-                    .unwrap_or_else(|| self.shapes.resolved_binding(target).map(|b| b.carrier))?;
-                self.function_value(ctx, id, None, Some(target))?
-            }
-            Some(ValueCoercion::BoxEnv(id, target)) => {
-                let target = expected
-                    .map(Ok)
-                    .unwrap_or_else(|| self.shapes.resolved_binding(target).map(|b| b.carrier))?;
-                let wrapper = raw.ok_or_else(|| internal!("missing closure environment"))?;
-                let env = self.shapes.environment_record(id)?.into();
-                let payload = self.callable_field(ctx, wrapper, "val", env)?;
-                self.function_value(ctx, id, Some(payload), Some(target))?
-            }
-            Some(ValueCoercion::Widen { from, to }) => {
-                let value = raw.ok_or_else(|| internal!("missing function to widen"))?;
-                let value = match input {
-                    Some(ty) => self.fit(ctx, value, ty)?,
-                    None => value,
-                };
-                self.widen_function(ctx, value, from, to)?
-            }
-        };
-        Ok(Some(value))
+        if !conversion.reads_operand() && !crate::source::is_pure_func_expr(expr) {
+            self.instance_value(ctx, expr, None, site.resolution, false)?;
+        }
+        conversion
+            .emit(self, ctx, expected, |b, ctx, input| {
+                b.instance_value(ctx, expr, input, site.resolution, true)?
+                    .ok_or_else(|| internal!("missing function operand"))
+            })
+            .map(Some)
     }
     fn instance_value(
         &mut self,
@@ -91,14 +54,14 @@ impl<'s> FunctionBuilder<'s, '_> {
         let reference = match site {
             Some(SiteResolution::Callback { target }) => Some(plans.function(target)),
             _ => match expr {
-                Expr::LocalGet(id) => plans.parameter_function(self.local_owner, *id),
+                Expr::LocalGet(id) => plans.parameter_function(self.frame.owner, *id),
                 _ => None,
             },
         };
         if let Some(id) = reference {
             let plan = plans
                 .closure_values
-                .get(&(self.local_owner, id))
+                .get(&(self.frame.owner, id))
                 .ok_or_else(|| unsupported!("this expression form is not supported yet"))?;
             return self.closure_value(ctx, plan, expected).map(Some);
         }
@@ -276,15 +239,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 } else {
                     Ok(None)
                 };
-            }
-            (ZeroSizedArray, Expr::Array(items, _)) => {
-                let mut values = Vec::with_capacity(items.len());
-                for item in items {
-                    self.discard_function_operand(ctx, item)?;
-                    values.push(self.number(ctx, 0.0));
-                }
-                let ty = FP64Type::get(ctx).into();
-                self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, ty, values))
             }
             (FoldBool(value), Expr::Compare { left, right, .. }) => {
                 self.discard_function_operand(ctx, left)?;

@@ -6,10 +6,6 @@ pub(crate) struct BitSet {
 }
 
 impl BitSet {
-    pub(crate) fn clear(&mut self) {
-        self.words.fill(0);
-    }
-
     pub(crate) fn insert(&mut self, bit: usize) -> bool {
         let word_idx = bit / 64;
         let mask = 1u64 << (bit % 64);
@@ -40,10 +36,6 @@ impl BitSet {
             .is_some_and(|word| (*word & (1u64 << (bit % 64))) != 0)
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.words.iter().all(|&w| w == 0)
-    }
-
     pub(crate) fn union_with(&mut self, other: &Self) -> bool {
         if other.words.len() > self.words.len() {
             self.words.resize(other.words.len(), 0);
@@ -57,33 +49,5 @@ impl BitSet {
             }
         }
         changed
-    }
-
-    pub(crate) fn iter(&self) -> BitSetIter<'_> {
-        BitSetIter {
-            words: &self.words,
-            word_idx: 0,
-            current: self.words.first().copied().unwrap_or(0),
-        }
-    }
-}
-
-pub(crate) struct BitSetIter<'a> {
-    words: &'a [u64],
-    word_idx: usize,
-    current: u64,
-}
-
-impl Iterator for BitSetIter<'_> {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<usize> {
-        while self.current == 0 {
-            self.word_idx += 1;
-            self.current = *self.words.get(self.word_idx)?;
-        }
-        let tz = self.current.trailing_zeros() as usize;
-        self.current &= self.current.wrapping_sub(1);
-        Some(self.word_idx * 64 + tz)
     }
 }

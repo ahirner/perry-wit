@@ -47,7 +47,15 @@ async fn inference_engine_specializes_generics_classes_cells_and_fixed_points() 
     }
     chain.push_str("console.log(f300(0));\n");
 
+    let mut copies =
+        String::from("function inc(x){return x+1;} function twice(x){return 2*x;} const a0=[inc];");
+    for i in 1..=1030 {
+        writeln!(copies, "const a{i}=Array.from(a{});", i - 1)?;
+    }
+    copies.push_str("a1030.push(twice); console.log(a0.length, a0[0](4), a1030[1](4));");
+
     let cases: &[(&str, &str, &str)] = &[
+        ("late_write_through_array_copy_chain", &copies, "1 5 8\n"),
         (
             "static_generic_and_implicit_classes",
             r#"
@@ -247,6 +255,43 @@ console.log(
             "a,b,c 4 6 8 2,3 6 6 10 2 6,8\n",
         ),
         (
+            "callable_array_writes_through_aliases_and_parameters",
+            r#"
+function inc(x: number) { return x + 1; }
+function twice(x: number) { return x * 2; }
+function scale(n: number) { return (x: number) => x * n; }
+function append(fs: ((x: number) => number)[], f) { fs.push(f); }
+function forward(fs, f) { append(fs, f); }
+function identity(fs) { return fs; }
+function replace(fs, f) { fs[0] = f; }
+function replaceEither(flag, a, b, f) { (flag ? a : b)[0] = f; }
+const a = [inc], b = [inc];
+const alias = a;
+forward(alias, twice);
+forward(identity(b), twice);
+const triple = scale(3);
+append(a, triple);
+replace(identity(b), triple);
+console.log(a[0](4), alias[1](4), a[2](4), b[0](4), b[1](4));
+console.log(a.length, b.length, a[2] === b[0], b[0] === scale(3));
+replaceEither(false, a, b, twice);
+const copy = [...a];
+copy.push(...[twice]);
+const from = Array.from(copy);
+from[0] = twice;
+console.log(a[0](4), b[0](4), copy[3](4), from[0](4), a.length);
+const other = [twice];
+replaceEither(false, a, other, triple);
+console.log(other[0](4), a[0](4));
+const src = [inc];
+const filtered = src.slice().filter(() => true);
+filtered.push(twice);
+const joined = src.concat([triple]).toReversed();
+console.log(filtered[1](4), joined[0](4), joined[1](4), src.length);
+"#,
+            "5 8 12 12 8\n3 2 true false\n5 8 8 8 3\n12 5\n8 12 5 1\n",
+        ),
+        (
             "escaping_closures_environments_boxed_captures_and_equality",
             r#"
 function scale(k) {
@@ -420,8 +465,8 @@ console.log(
             "recursive_env_classes_identity_widening_and_class_field_init",
             r#"
 function wrap(f, k) { return () => f() + k; }
-function build(n) {
-  let g = () => 0;
+function build(n, base) {
+  let g = base;
   for (let i = 1; i <= n; i++) g = wrap(g, i);
   return g;
 }
@@ -459,9 +504,16 @@ const plainWide = {
   p60: 60, p61: 61, p62: 62, p63: 63, p64: 64, p65: 65, p66: 66, p67: 67, p68: 68, p69: 69,
 };
 const [e, o] = parity();
+const zero = () => 0;
+function counter(n) { return () => ++n; }
+const next = counter(10);
+const left = build(2, next);
+const right = build(2, next);
+const saved = [left, right, next];
+console.log(saved[0] === left, left === right, [1, 2].map(left).join(","), next(), right(), saved[0]());
 console.log(
-  build(3)(),
-  build(4)(),
+  build(3, zero)(),
+  build(4, zero)(),
   upTo(5)(0),
   e(4),
   o(4),
@@ -474,7 +526,7 @@ console.log(
   [() => 11, () => 22][1](),
 );
 "#,
-            "6 10 5 true false false 11:2 20 1 3 69 22\n",
+            "true false 14,15 13 17 18\n6 10 5 true false false 11:2 20 1 3 69 22\n",
         ),
         (
             "promise_operand_order_and_finally_rejection",

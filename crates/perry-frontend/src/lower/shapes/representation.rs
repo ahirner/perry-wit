@@ -35,6 +35,16 @@ impl Shapes<'_, Preparing<'_>> {
 }
 
 impl<T> Shapes<'_, T> {
+    pub(in crate::lower) fn function_record(
+        &mut self,
+        ctx: &Context,
+        payload: Option<TypeHandle>,
+    ) -> Result<TypedHandle<RecordType>> {
+        let mut fields = vec![("tag".into(), StringType::get(ctx).into())];
+        fields.extend(payload.map(|ty| ("val".into(), ty)));
+        self.mir_record(ctx, fields)
+    }
+
     pub(in crate::lower) fn callable_environment(
         &self,
         function: FuncIdentity,
@@ -76,13 +86,7 @@ impl Shapes<'_, Preparing<'_>> {
         }
         let present = match cases.as_slice() {
             [] => return Ok(None),
-            [(_, payload)] => {
-                let mut fields = vec![("tag".into(), StringType::get(ctx).into())];
-                if let Some(payload) = payload {
-                    fields.push(("val".into(), *payload));
-                }
-                self.mir_record(ctx, fields)?.into()
-            }
+            [(_, payload)] => self.function_record(ctx, *payload)?.into(),
             _ => perry_mir::VariantType::get(ctx, cases).into(),
         };
         self.callables.insert(ty.index());

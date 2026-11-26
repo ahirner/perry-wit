@@ -1,5 +1,6 @@
 use super::*;
 use crate::lower::callable::Callback;
+use crate::lower::calls::CallArguments::Values;
 use crate::lower::inline::InlineResult;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -53,7 +54,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     };
                     inputs.push(value);
                 }
-                let result = self.invoke_callback(ctx, call, Some(callee), None, &inputs)?;
+                let result = call.invoke(self, ctx, Some(callee), None, Values(&inputs))?;
                 return match (result, expected) {
                     (Some(value), Some(InlineResult::Declared(ty))) => self.fit(ctx, value, ty),
                     (Some(value), _) => Ok(value),
@@ -133,7 +134,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .source_closure_result(return_type)?
                 .map_or(InlineResult::Void, InlineResult::Declared),
         };
-        let slot = self.with_inline_scope(ctx, func_id, self.this_slot, |this, ctx| {
+        let slot = self.with_inline_scope(ctx, func_id, self.frame.this_slot, |this, ctx| {
             for (index, (param, projected)) in params.enumerate() {
                 let (binding, is_never) = match projected {
                     Some(binding) => binding,

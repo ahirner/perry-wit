@@ -1,6 +1,7 @@
 //! Guest promise creation, settlement, and reaction handlers.
 use super::*;
 use crate::engine::{Reaction, solve::CallTarget, types::Ty};
+use crate::lower::calls::CallArguments::Values;
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn settle_body(
@@ -84,9 +85,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             inputs.push(self.function_value(ctx, handle, Some(capture), None)?);
         }
         let handler = self.catch_handler(ctx, "executor_threw");
-        self.handlers.push(handler);
-        self.invoke_callback(ctx, executor, value, None, &inputs)?;
-        self.handlers.pop();
+        self.with_handler(ctx, Some(handler), None, |b, ctx| {
+            executor.invoke(b, ctx, value, None, Values(&inputs))
+        })?;
         let done = self.new_block(ctx, "executor_done");
         self.jump(ctx, done);
         self.switch_to(handler.block);
@@ -148,7 +149,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         value: Option<Value>,
     ) -> Result<()> {
         let skip = self.if_callable(ctx, value)?;
-        if let Some(result) = self.invoke_callback(ctx, call, value, None, &[])? {
+        if let Some(result) = call.invoke(self, ctx, value, None, Values(&[]))? {
             self.adopt(ctx, result)?;
         }
         if let Some(skip) = skip {
@@ -186,12 +187,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             .flatten();
         let handler = (rejected.is_some() || matches!(reaction, Reaction::Finally(_)))
             .then(|| self.catch_handler(ctx, "promise_rejected"));
-        self.handlers.extend(handler);
-        let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
-        let settled = self.append_value(ctx, &op);
-        if handler.is_some() {
-            self.handlers.pop();
-        }
+        let settled = self.with_handler(ctx, handler.or(self.handler), None, |b, ctx| {
+            let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
+            Ok(b.append_value(ctx, &op))
+        })?;
         match *reaction {
             Reaction::Finally(callback) => {
                 self.finalizer(ctx, callback, f)?;
@@ -202,7 +201,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 ..
             } => {
                 let skip = self.if_callable(ctx, f)?;
-                let result = self.invoke_callback(ctx, callback, f, None, &[settled])?;
+                let result = callback.invoke(self, ctx, f, None, Values(&[settled]))?;
                 self.return_callback(ctx, result, discard)?;
                 if let Some(skip) = skip {
                     self.switch_to(skip);
@@ -223,7 +222,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.finalizer(ctx, callback, f)?;
             } else if let Some(callback) = rejected {
                 let skip = self.if_callable(ctx, g)?;
-                let result = self.invoke_callback(ctx, callback, g, None, &[reason])?;
+                let result = callback.invoke(self, ctx, g, None, Values(&[reason]))?;
                 self.return_callback(ctx, result, discard)?;
                 let Some(skip) = skip else { return Ok(()) };
                 self.switch_to(skip);

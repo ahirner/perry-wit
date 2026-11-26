@@ -1,6 +1,6 @@
 //! MIR representations and operations for finite sets of function identities.
 use super::*;
-use crate::engine::solve::CallTarget;
+use crate::engine::solve::{CallTarget, ValueCoercion};
 use crate::engine::types::{FuncIdentity, Ty, func_tag};
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
@@ -14,6 +14,47 @@ pub(in crate::lower) enum Callback<'s> {
         params: &'s [Ty],
         callee: Value,
     },
+}
+
+impl ValueCoercion {
+    pub(super) fn emit<'s, 'm>(
+        self,
+        b: &mut FunctionBuilder<'s, 'm>,
+        ctx: &mut Context,
+        expected: Option<TypeHandle>,
+        read: impl FnOnce(
+            &mut FunctionBuilder<'s, 'm>,
+            &mut Context,
+            Option<TypeHandle>,
+        ) -> Result<Value>,
+    ) -> Result<Value> {
+        match self {
+            Self::Zero => Ok(b.number(ctx, 0.0)),
+            Self::Tag(id, to) | Self::BoxEnv(id, to) => {
+                let payload = if self.reads_operand() {
+                    let value = read(b, ctx, None)?;
+                    let env = b.shapes.environment_record(id)?.into();
+                    Some(b.callable_field(ctx, value, "val", env)?)
+                } else {
+                    None
+                };
+                let target = match expected {
+                    Some(ty) => ty,
+                    None => b.shapes.resolved_binding(to)?.carrier,
+                };
+                b.function_value(ctx, id, payload, Some(target))
+            }
+            Self::Widen { from, to } => {
+                let input = b.shapes.callable_type(from)?;
+                let value = read(b, ctx, input)?;
+                let value = match input {
+                    Some(ty) => b.fit(ctx, value, ty)?,
+                    None => value,
+                };
+                b.widen_function(ctx, value, from, to)
+            }
+        }
+    }
 }
 
 impl CallTarget {
@@ -37,7 +78,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Callback<'s>> {
         let plans = &self.shapes.specialization.instances;
         if let Some(crate::engine::solve::FuncCoercion::Callback { target, inputs }) =
-            plans.site(self.local_owner, expr).coercion
+            plans.site(self.frame.owner, expr).coercion
         {
             return Ok(Callback::Bound {
                 call: target,
@@ -45,7 +86,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 callee: self.expression(ctx, expr)?,
             });
         }
-        if let Some(id) = plans.reference(self.local_owner, expr) {
+        if let Some(id) = plans.reference(self.frame.owner, expr) {
             if self
                 .signatures
                 .source(id)
@@ -64,57 +105,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             return Ok(Callback::Function(id));
         }
         Ok(Callback::Source(expr))
-    }
-
-    pub(super) fn invoke_callback(
-        &mut self,
-        ctx: &mut Context,
-        call: CallTarget,
-        value: Option<Value>,
-        receiver: Option<Value>,
-        args: &[Value],
-    ) -> Result<Option<Value>> {
-        let Some(target) = self
-            .shapes
-            .specialization
-            .instances
-            .emitted_callee(call)
-            .transpose()?
-        else {
-            self.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
-            return Ok(None);
-        };
-        let bound = self.bound_callee(ctx, call, value)?;
-        let receiver = if call.needs_receiver() {
-            Some(receiver.ok_or_else(|| internal!("missing callback receiver"))?)
-        } else {
-            None
-        };
-        self.call_values(
-            ctx,
-            target,
-            bound
-                .into_iter()
-                .chain(receiver)
-                .chain(args.iter().copied()),
-        )
-    }
-
-    pub(super) fn bound_callee(
-        &mut self,
-        ctx: &mut Context,
-        call: CallTarget,
-        value: Option<Value>,
-    ) -> Result<Option<Value>> {
-        if !call.needs_value() {
-            return Ok(None);
-        }
-        let value = value.ok_or_else(|| internal!("missing callable operand"))?;
-        if matches!(call, CallTarget::Direct { pass_env: true, .. }) {
-            let wrapper = self.defined(ctx, value)?;
-            return self.record_field(ctx, wrapper, "val").map(Some);
-        }
-        Ok(Some(value))
     }
 
     pub(super) fn call_values(
@@ -264,7 +254,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(self.finish_result(ctx, done, no))
     }
 
-    pub(super) fn widen_function(
+    fn widen_function(
         &mut self,
         ctx: &mut Context,
         value: Value,
@@ -306,13 +296,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .callable_environment(identity)
                 .map(|ty| self.callable_field(ctx, value, "val", ty))
                 .transpose()?;
-            let target = present_type(ctx, result);
-            let widened = if let Some(record) = perry_mir::typed::<RecordType>(ctx, target) {
-                let fields = std::iter::once(tag).chain(payload).collect();
-                self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, fields))
-            } else {
-                self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, target, &case, payload))
-            };
+            let widened = self.function_value(ctx, identity, payload, Some(result))?;
             let widened = self.fit(ctx, widened, result)?;
             self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![widened]));
             if let Some(next) = next {
@@ -357,13 +341,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             };
             return Ok(self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, target, &tag, payload)));
         }
-        let mut fields = vec![("tag".into(), StringType::get(ctx).into())];
-        let mut values = vec![self.string(ctx, &tag)];
-        if let Some(value) = payload {
-            fields.push(("val".into(), value.get_type(ctx)));
-            values.push(value);
-        }
-        let record = self.shapes.mir_record(ctx, fields)?;
+        let record = self
+            .shapes
+            .function_record(ctx, payload.map(|v| v.get_type(ctx)))?;
+        let values = std::iter::once(self.string(ctx, &tag))
+            .chain(payload)
+            .collect();
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)))
     }
 

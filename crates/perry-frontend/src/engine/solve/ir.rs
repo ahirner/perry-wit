@@ -1,17 +1,17 @@
 //! Solved inference tables, call-site resolutions, and synthesized helper specs.
 use super::super::bitset::BitSet;
 use super::super::types::{
-    CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity, HelperId,
-    IdxVec, InstanceId, LocId, ParamLocSpan, Pool, TemplateId, Ty,
+    CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity, HelperId, Idx,
+    IdxVec, InstanceId, LocId, ParamLocSpan, Pool, TemplateId, Ty, TyKind, TypeTable,
 };
 use crate::hir_compat;
 use perry_wit_diagnostics::{Diagnostic, Result};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum Receiver {
+pub(crate) enum Receiver<T = Ty> {
     Class(ClassInstId),
-    Object(Ty),
+    Object(T),
 }
 
 impl Receiver {
@@ -147,6 +147,39 @@ pub(crate) enum ValueCoercion {
     Widen { from: Ty, to: Ty },
 }
 
+impl ValueCoercion {
+    pub(crate) fn into_union(
+        types: &TypeTable,
+        from: Ty,
+        to: Ty,
+        capture_free: &BitSet,
+        escaping: &BitSet,
+    ) -> Option<Self> {
+        if from == to || !types.is_tagged_func_union(to, capture_free, escaping) {
+            return None;
+        }
+        match types.kind(from) {
+            TyKind::Func(id) if types.is_zero_sized_func(from, capture_free) => {
+                Some(Self::Tag(id, to))
+            }
+            TyKind::Func(id) if escaping.contains(id.template.index()) => {
+                Some(Self::BoxEnv(id, to))
+            }
+            TyKind::Union(_)
+                if types.is_tagged_func_union(from, capture_free, escaping)
+                    && types.func_members(&from).ne(types.func_members(&to)) =>
+            {
+                Some(Self::Widen { from, to })
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn reads_operand(self) -> bool {
+        matches!(self, Self::BoxEnv(..) | Self::Widen { .. })
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PromiseExecutor {
     pub(crate) call: CallTarget,
@@ -186,7 +219,6 @@ pub(crate) enum SiteResolution {
     Closure(FuncIdentity),
     BranchResult(Ty),
     ObjectSpread(Ty),
-    ZeroSizedArray,
     TypedArray(Ty),
     ZeroSizedFieldSet,
     CollectionNew(Ty),

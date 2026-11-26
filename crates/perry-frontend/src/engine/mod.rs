@@ -131,15 +131,7 @@ impl EnvironmentField {
 pub(crate) enum CaptureOperand {
     Local(perry_hir::types::LocalId),
     Cell(perry_hir::types::LocalId),
-    Function {
-        identity: types::FuncIdentity,
-        environment: Option<perry_hir::types::LocalId>,
-    },
-    Widen {
-        local: perry_hir::types::LocalId,
-        from: types::Ty,
-        to: types::Ty,
-    },
+    Coerce(perry_hir::types::LocalId, solve::ValueCoercion),
 }
 
 pub(crate) struct ClosureValue {
@@ -324,19 +316,16 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn bitset_operations_and_iteration() {
+    fn bitset_insert_remove_and_union_across_words() {
         let mut a = BitSet::default();
-        assert!(a.is_empty());
+        assert!(!a.contains(0));
         assert!(a.insert(0));
         assert!(!a.insert(0));
         assert!(a.insert(63));
         assert!(a.insert(64));
         assert!(a.insert(129));
-        assert_eq!(a.iter().count(), 4);
         assert!(a.contains(64));
         assert!(!a.contains(65));
-        let bits: Vec<usize> = a.iter().collect();
-        assert_eq!(bits, vec![0, 63, 64, 129]);
 
         assert!(a.remove(63));
         assert!(!a.remove(63));
@@ -345,7 +334,9 @@ mod tests {
         b.insert(129);
         assert!(a.union_with(&b));
         assert!(!a.union_with(&b));
-        assert_eq!(a.iter().collect::<Vec<_>>(), vec![0, 5, 64, 129]);
+        for bit in 0..=130 {
+            assert_eq!(a.contains(bit), [0, 5, 64, 129].contains(&bit));
+        }
     }
 
     #[test]

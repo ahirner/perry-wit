@@ -58,7 +58,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let cloc = match self.capture_locs.collapsed[lidx] {
                 Some(loc) => loc,
                 None => {
-                    let loc = self.alloc_loc(Ty::BOTTOM);
+                    let loc = self.locations.alloc(Ty::BOTTOM);
                     self.capture_locs.collapsed[lidx] = Some(loc);
                     loc
                 }
@@ -103,15 +103,27 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.read_loc(loc, reader) != Ty::BOTTOM
     }
 
-    pub(super) fn is_tagged_func_union_in(&mut self, ty: Ty, reader: InstanceId) -> bool {
-        if let TyKind::Union(span) = self.types.kind(ty) {
-            let members: Vec<Ty> = self.types.ty_slice(span).to_vec();
-            for m in members {
-                if let TyKind::Func(ident) = self.types.kind(m) {
-                    let _ = self.is_escaping_env(ident.template, reader);
+    fn track_function_escapes(&mut self, ty: Ty, reader: InstanceId) {
+        match self.types.kind(ty) {
+            TyKind::Func(id) => {
+                self.is_escaping_env(id.template, reader);
+            }
+            TyKind::Union(span) => {
+                for member in self.types.ty_slice(span).to_vec() {
+                    if let TyKind::Func(id) = self.types.kind(member) {
+                        self.is_escaping_env(id.template, reader);
+                    }
                 }
             }
+            _ => {}
         }
+    }
+
+    pub(super) fn is_tagged_func_union_in(&mut self, ty: Ty, reader: InstanceId) -> bool {
+        if !matches!(self.types.kind(ty), TyKind::Union(_)) {
+            return false;
+        }
+        self.track_function_escapes(ty, reader);
         self.types.is_tagged_func_union(
             ty,
             &self.index.capture_free_templates,
@@ -191,12 +203,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &at in arg_tys {
             self.mark_escaping_env(inst_id, at);
         }
-        let elem_ty = match self.types.kind(arr_def) {
-            TyKind::Cell { loc, kind } if kind.is_array() => Some(self.read_loc(loc, inst_id)),
-            TyKind::Array(elem) => Some(elem),
-            _ => None,
+        let array = self.resolve_cell_read(inst_id, arr_def);
+        let TyKind::Array(elem_ty) = self.types.kind(array) else {
+            return;
         };
-        let Some(elem_ty) = elem_ty else { return };
         if self
             .types
             .is_zero_sized_func(elem_ty, &self.index.capture_free_templates)
@@ -218,10 +228,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         src_ty: Ty,
         dst_ty: Ty,
     ) {
-        if src_ty == Ty::BOTTOM || dst_ty == Ty::BOTTOM {
-            return;
-        }
-        if !self.is_tagged_func_union_in(dst_ty, inst_id) {
+        if src_ty == Ty::BOTTOM || !matches!(self.types.kind(dst_ty), TyKind::Union(_)) {
             return;
         }
         let inner = match expr {
@@ -233,39 +240,16 @@ impl<'h, 'a> Solver<'h, 'a> {
         if matches!(inner, Expr::Conditional { .. } | Expr::Logical { .. }) {
             return;
         }
-        if self
-            .types
-            .is_zero_sized_func(src_ty, &self.index.capture_free_templates)
-            && let TyKind::Func(ident) = self.types.kind(src_ty)
-        {
-            self.record_site_coercion(
-                inst_id,
-                expr,
-                FuncCoercion::Value(ValueCoercion::Tag(ident, dst_ty)),
-            );
-            return;
-        }
-        if let TyKind::Func(ident) = self.types.kind(src_ty)
-            && self.is_escaping_env(ident.template, inst_id)
-        {
-            self.record_site_coercion(
-                inst_id,
-                expr,
-                FuncCoercion::Value(ValueCoercion::BoxEnv(ident, dst_ty)),
-            );
-            return;
-        }
-        if self.is_tagged_func_union_in(src_ty, inst_id)
-            && self.types.strip_nullish(src_ty).0 != self.types.strip_nullish(dst_ty).0
-        {
-            self.record_site_coercion(
-                inst_id,
-                expr,
-                FuncCoercion::Value(ValueCoercion::Widen {
-                    from: src_ty,
-                    to: dst_ty,
-                }),
-            );
+        self.track_function_escapes(dst_ty, inst_id);
+        self.track_function_escapes(src_ty, inst_id);
+        if let Some(conversion) = ValueCoercion::into_union(
+            self.types,
+            src_ty,
+            dst_ty,
+            &self.index.capture_free_templates,
+            &self.escaping_env_templates,
+        ) {
+            self.record_site_coercion(inst_id, expr, FuncCoercion::Value(conversion));
         }
     }
 

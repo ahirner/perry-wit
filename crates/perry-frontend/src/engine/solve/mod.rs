@@ -1,5 +1,6 @@
 //! Worklist monomorphization and storage-join solver over dense indices.
 use crate::source::SourceModule;
+mod array_layouts;
 mod callbacks;
 mod calls;
 mod escape;
@@ -7,6 +8,7 @@ mod eval;
 mod expr;
 mod instances;
 mod ir;
+mod locations;
 mod members;
 mod methods;
 mod promises;
@@ -23,8 +25,10 @@ use crate::{
     narrowing::{DefinedGuard, Guards},
     shapes::{self, Declarations},
 };
+use array_layouts::{ArgumentKey, ArrayLayouts};
 use eval::first_type_var_name;
 pub(crate) use ir::*;
+use locations::{Locations, Subscriptions};
 use perry_hir::{
     ir::{CompareOp, Expr, LogicalOp, Stmt},
     types::{LocalId, Type as HirType},
@@ -37,9 +41,9 @@ const INSTANCE_BUDGET: u16 = 256;
 
 type InstanceKey = (
     TemplateId,
-    Option<Receiver>,
+    Option<Receiver<ArgumentKey>>,
     CaptureOwner,
-    Ty,
+    ArgumentKey,
     Ty,
     Option<Ty>,
     bool,
@@ -173,7 +177,7 @@ pub(crate) fn solve<'h>(
 ) -> Result<Solved> {
     let mut solver = Solver::new(ctx, hir, index, decls, types);
     let init_inst = solver.seed_roots()?;
-    solver.run_worklist(init_inst)?;
+    solver.run_worklist()?;
     solver.verify_fixed_point()?;
     solver.verify_contracts()?;
     Ok(solver.finish(init_inst))
@@ -187,19 +191,10 @@ struct Solver<'h, 'a> {
 
     decls: &'a Declarations<'a>,
     types: &'a mut TypeTable,
-    locations: IdxVec<LocId, Ty>,
-    /// Locations whose type an annotation fixes: writes are checked by lowering, never joined.
-    declared_locs: BitSet,
-    dirty_locs: BitSet,
-    inst_reads: IdxVec<InstanceId, Vec<LocId>>,
-    reader_ends: IdxVec<LocId, usize>,
-    reader_instances: Vec<InstanceId>,
-    csr_dirty: bool,
-    evaluating_inst: Option<InstanceId>,
-    current_reads: BitSet,
-    current_read_list: Vec<LocId>,
+    locations: Locations,
+    arrays: ArrayLayouts,
+    subscriptions: Subscriptions,
     worklist: Vec<InstanceId>,
-    worklist_head: usize,
     queued: BitSet,
     instances: IdxVec<InstanceId, Instance>,
     witness_instances: Vec<Option<ExportRoot>>,
@@ -222,11 +217,10 @@ struct Solver<'h, 'a> {
 
     boxed_locals: BitSet,
     dict_reads: BitSet,
-    self_nested_locs: BitSet,
     self_nested_locals: BitSet,
     static_field_locs: Vec<(ClassId, usize, LocId)>,
     class_insts: IdxVec<ClassInstId, ClassInst>,
-    class_index: HashMap<(ClassId, Ty), ClassInstId>,
+    class_index: HashMap<(ClassId, ArgumentKey), ClassInstId>,
     type_param_pool: Pool<TypeParamSpan, shapes::TypeName>,
     template_type_params: IdxVec<TemplateId, TypeParamSpan>,
     class_type_params: IdxVec<ClassId, TypeParamSpan>,
@@ -280,11 +274,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         decls: &'a Declarations<'a>,
         types: &'a mut TypeTable,
     ) -> Self {
-        let mut locations = index.location_types.clone();
-        if locations.is_empty() {
-            locations.push(Ty::VOID);
+        let mut values = index.location_types.clone();
+        if values.is_empty() {
+            values.push(Ty::VOID);
         }
-        let template_escape_locs = index.views.map(|_| locations.push(Ty::BOTTOM));
+        let template_escape_locs = index.views.map(|_| values.push(Ty::BOTTOM));
         let static_field_locs = index
             .classes
             .iter_enumerated()
@@ -319,18 +313,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             index,
             decls,
             types,
-            reader_ends: locations.filled(0),
-            locations,
-            declared_locs: BitSet::default(),
-            dirty_locs: BitSet::default(),
-            inst_reads: IdxVec::default(),
-            reader_instances: Vec::new(),
-            csr_dirty: true,
-            evaluating_inst: None,
-            current_reads: BitSet::default(),
-            current_read_list: Vec::new(),
+            locations: Locations::new(values),
+            arrays: Default::default(),
+            subscriptions: Subscriptions::default(),
             worklist: Vec::new(),
-            worklist_head: 0,
             queued: BitSet::default(),
             instances: IdxVec::default(),
             witness_instances: Vec::with_capacity(hir.exports.functions.len()),
@@ -356,7 +342,6 @@ impl<'h, 'a> Solver<'h, 'a> {
 
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
-            self_nested_locs: BitSet::default(),
             self_nested_locals: BitSet::default(),
             static_field_locs,
             class_insts: IdxVec::default(),
@@ -371,11 +356,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn alloc_loc(&mut self, initial: Ty) -> LocId {
-        self.reader_ends.push(self.reader_instances.len());
-        self.locations.push(initial)
-    }
-
     fn expr_cell_loc(&mut self, inst: InstanceId, expr: &Expr) -> Result<LocId> {
         let entry = self
             .index
@@ -386,8 +366,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             Some(
                 SiteResolution::Cell(loc) | SiteResolution::PromiseReaction { result: loc, .. },
             ) => Ok(loc),
+            Some(SiteResolution::TypedArray(ty))
+                if let TyKind::Cell { loc, .. } = self.types.kind(ty) =>
+            {
+                Ok(loc)
+            }
             _ => {
-                let loc = self.alloc_loc(Ty::BOTTOM);
+                let loc = self.locations.alloc(Ty::BOTTOM);
                 self.record_site(inst, expr, SiteResolution::Cell(loc));
                 Ok(loc)
             }
@@ -400,47 +385,13 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn read_loc(&mut self, loc: LocId, reader: InstanceId) -> Ty {
-        if self.evaluating_inst == Some(reader) {
-            if self.current_reads.insert(loc.index()) {
-                self.current_read_list.push(loc);
-            }
-        } else {
-            let reads = &mut self.inst_reads[reader];
-            if let Err(pos) = reads.binary_search(&loc) {
-                reads.insert(pos, loc);
-                self.csr_dirty = true;
-            }
-        }
-        self.locations[loc]
+        let (loc, ty) = self.locations.resolve(loc);
+        self.subscriptions.read(reader, loc);
+        ty
     }
 
-    pub(super) fn commit_reads(&mut self, inst_id: InstanceId) {
-        self.current_read_list.sort_unstable();
-        let prev = &mut self.inst_reads[inst_id];
-        if *prev != self.current_read_list {
-            prev.clear();
-            prev.extend_from_slice(&self.current_read_list);
-            self.csr_dirty = true;
-        }
-    }
-
-    fn write_loc(&mut self, loc: LocId, value: Ty) -> bool {
-        if self.declared_locs.contains(loc.index()) {
-            return false;
-        }
-        let Some(&old) = self.locations.get(loc) else {
-            return false;
-        };
-        let (next, self_nested) = self.types.join_bounded(old, value);
-        if self_nested {
-            self.self_nested_locs.insert(loc.index());
-        }
-        if next == old {
-            return false;
-        }
-        self.locations[loc] = next;
-        self.dirty_locs.insert(loc.index());
-        true
+    fn write_loc(&mut self, loc: LocId, value: Ty) {
+        self.locations.write(self.types, loc, value);
     }
 
     fn is_non_site_root(&self, inst_id: InstanceId) -> bool {
@@ -552,11 +503,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 bump_count(&mut self.template_counts, inst.template);
             } else if self.inst_superseded.insert(idx) {
                 self.inst_sites[id].fill(SiteEntry::default());
-                let reads = &mut self.inst_reads[id];
-                if !reads.is_empty() {
-                    reads.clear();
-                    self.csr_dirty = true;
-                }
+                self.subscriptions.forget(id);
             }
         }
     }
@@ -567,35 +514,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn rebuild_csr(&mut self, init: InstanceId) -> Result<()> {
-        self.reader_ends.as_mut_slice().fill(0);
-        for reads in self.inst_reads.iter() {
-            for &loc in reads {
-                self.reader_ends[loc] += 1;
-            }
-        }
-        let mut total = 0;
-        for count in self.reader_ends.as_mut_slice() {
-            total += std::mem::replace(count, total);
-        }
-        self.reader_instances.resize(total, init);
-        for (reader, reads) in self.inst_reads.iter_enumerated() {
-            for &loc in reads {
-                let end = &mut self.reader_ends[loc];
-                let slot = self.reader_instances.get_mut(*end).ok_or_else(|| {
-                    Diagnostic::internal("location reader exceeds the allocated range")
-                })?;
-                *slot = reader;
-                *end += 1;
-            }
-        }
-        self.csr_dirty = false;
-        Ok(())
-    }
-
-    fn run_worklist(&mut self, init: InstanceId) -> Result<()> {
+    fn run_worklist(&mut self) -> Result<()> {
+        let mut wave = Vec::new();
         let mut waves = 0usize;
-        loop {
+        while !self.worklist.is_empty() {
             let wave_limit = 1024usize.max(self.instances.len().saturating_mul(8));
             if waves >= wave_limit {
                 return Err(Diagnostic::internal(
@@ -603,55 +525,25 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ));
             }
             waves += 1;
-            let wave_end = self.worklist.len();
-            while self.worklist_head < wave_end {
-                let Some(&inst_id) = self.worklist.get(self.worklist_head) else {
-                    break;
-                };
-                self.worklist_head += 1;
+            std::mem::swap(&mut wave, &mut self.worklist);
+            for inst_id in wave.drain(..) {
                 self.queued.remove(inst_id.index());
                 if !self.inst_superseded.contains(inst_id.index()) {
                     self.evaluate_instance(inst_id)?;
                 }
             }
-            if self.dirty_locs.is_empty() && self.worklist_head >= self.worklist.len() {
-                return Ok(());
-            }
-            if self.worklist_head > 0 {
-                self.worklist.drain(..self.worklist_head);
-                self.worklist_head = 0;
-            }
-            if !self.dirty_locs.is_empty() {
-                if self.csr_dirty {
-                    self.rebuild_csr(init)?;
-                }
-                for loc in self.dirty_locs.iter() {
-                    let range = match self.reader_ends.as_slice().get(..=loc) {
-                        Some([.., start, end]) => *start..*end,
-                        Some([end]) => 0..*end,
-                        _ => {
-                            return Err(Diagnostic::internal(
-                                "missing reader offset for dirty location",
-                            ));
-                        }
-                    };
-                    let readers = self.reader_instances.get(range).ok_or_else(|| {
-                        Diagnostic::internal("invalid reader range for dirty location")
-                    })?;
-                    for &r in readers {
-                        if !self.inst_superseded.contains(r.index())
-                            && self.queued.insert(r.index())
-                        {
-                            self.worklist.push(r);
-                        }
+            for &loc in &self.locations.dirty {
+                for &reader in self.subscriptions.readers(loc) {
+                    if !self.inst_superseded.contains(reader.index())
+                        && self.queued.insert(reader.index())
+                    {
+                        self.worklist.push(reader);
                     }
                 }
-                self.dirty_locs.clear();
             }
-            if self.worklist.is_empty() {
-                return Ok(());
-            }
+            self.locations.dirty.clear();
         }
+        Ok(())
     }
 
     fn verify_fixed_point(&mut self) -> Result<()> {
@@ -665,11 +557,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             .filter_map(|(id, _)| live.contains(id.index()).then_some(id))
             .collect();
         let prev_inst_count = self.instances.len();
-        let prev_locs = self.locations.as_slice().to_vec();
+        let prev_loc_count = self.locations.len();
         let prev_frames = self.inst_frame_locals.clone();
         let prev_escaping = self.escaping_env_templates.clone();
         let prev_collapsed = self.collapsed_closures.clone();
-        self.dirty_locs.clear();
+        self.locations.dirty.clear();
         for id in live_ids {
             self.evaluate_instance(id)?;
         }
@@ -688,9 +580,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 "fixed-point check spawned a new instance",
             ));
         }
-        if self.locations.as_slice() != prev_locs.as_slice() {
+        if self.locations.len() != prev_loc_count {
             return Err(Diagnostic::internal(
-                "fixed-point check mutated a storage location",
+                "fixed-point check allocated a storage location",
             ));
         }
         if self.inst_frame_locals != prev_frames {
@@ -698,7 +590,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 "fixed-point check mutated a local frame slot",
             ));
         }
-        if !self.dirty_locs.is_empty() {
+        if !self.locations.dirty.is_empty() {
             return Err(Diagnostic::internal(
                 "fixed-point check dirtied a storage location",
             ));

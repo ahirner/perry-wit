@@ -162,6 +162,42 @@ export function finiteNesting() {
     )
 }
 
+#[test]
+fn inline_cleanup_uses_its_lexical_loop_and_callers_catch() -> anyhow::Result<()> {
+    assert_numbers(
+        r#"
+let trace = 0;
+class Worker {
+    offset = 2;
+    read(n: number): number {
+        for (let outer = 0; outer < 1; outer++) {
+            try {
+                for (let inner = 0; inner < 1; inner++) return 99;
+            } finally { trace = trace * 10 + 1; break; }
+        }
+        if (n === 2) throw new Error("stop");
+        return this.offset + n;
+    }
+}
+export function run(n: number): number {
+    trace = 0;
+    const worker = new Worker();
+    try {
+        const values = [n].map(v => {
+            try { return worker.read(v); } finally { trace = trace * 10 + 2; }
+        });
+        trace = trace * 10 + values[0];
+    } catch (error) {
+        if (error.message !== "stop") return -1;
+        trace = trace * 10 + 5;
+    } finally { trace = trace * 10 + 6; }
+    return trace;
+}
+"#,
+        &[("run", &[1.0], 1236.0), ("run", &[2.0], 1256.0)],
+    )
+}
+
 /// Parameter properties are not erasable TypeScript, so Node runs no oracle for them.
 #[test]
 fn parameter_properties_declare_and_assign_fields() {

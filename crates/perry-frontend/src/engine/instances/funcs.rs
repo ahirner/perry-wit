@@ -158,35 +158,15 @@ impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
         use crate::engine::CaptureOperand;
         if matches!(owner, CaptureOwner::Template(_))
             && let Some(from) = self.local_ty_in_owner(source, local)
-            && !matches!(from, Ty::BOTTOM | Ty::OPEN)
-            && from != to
-            && self.types.is_tagged_func_union(
+            && let Some(conversion) = crate::engine::solve::ValueCoercion::into_union(
+                self.types,
+                from,
                 to,
                 &self.index.capture_free_templates,
                 &self.solved.escaping_env_templates,
             )
         {
-            if let TyKind::Func(identity) = self.types.kind(from) {
-                if self.is_zero_sized_func(from) {
-                    return CaptureOperand::Function {
-                        identity,
-                        environment: None,
-                    };
-                }
-                if self.is_env_template(identity.template) {
-                    return CaptureOperand::Function {
-                        identity,
-                        environment: Some(local),
-                    };
-                }
-            }
-            if self.types.is_tagged_func_union(
-                from,
-                &self.index.capture_free_templates,
-                &self.solved.escaping_env_templates,
-            ) {
-                return CaptureOperand::Widen { local, from, to };
-            }
+            return CaptureOperand::Coerce(local, conversion);
         }
         CaptureOperand::Local(local)
     }

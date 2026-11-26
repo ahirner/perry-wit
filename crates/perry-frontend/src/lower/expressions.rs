@@ -124,7 +124,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .specialization
                     .instances
                     .closure_values
-                    .get(&(self.local_owner, *id)) =>
+                    .get(&(self.frame.owner, *id)) =>
             {
                 self.closure_value(ctx, closure, expected)?
             }
@@ -168,7 +168,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .local_set(ctx, *id, value)
                 .map_err(|error| self.shapes.annotate_local(error, *id))?,
             Expr::Update { id, op, prefix } => {
-                self.cursors.advance(*id);
+                self.frame.cursors.advance(*id);
                 self.update(ctx, *id, op, *prefix)
                     .map_err(|error| self.shapes.annotate_local(error, *id))?
             }

@@ -372,7 +372,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         } = self.types.kind(stripped)
         {
             if self.dict_reads.insert(loc.index()) {
-                self.dirty_locs.insert(loc.index());
+                self.locations.dirty.insert(loc);
             }
             obj_ty = self.resolve_cell_read(s.inst, obj_ty);
         }

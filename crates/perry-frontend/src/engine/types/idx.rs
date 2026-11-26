@@ -96,9 +96,6 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
             .enumerate()
             .map(|(i, v)| (I::from_usize(i), v))
     }
-    pub(crate) fn as_slice(&self) -> &[T] {
-        &self.data
-    }
 }
 
 impl<I: Idx, T> std::ops::Index<I> for IdxVec<I, T> {

@@ -1,5 +1,6 @@
 //! Expression, property, collection-constructor, and object-spread evaluation.
 use super::*;
+use crate::methods::MethodResult;
 use crate::source::ConstructorSites;
 
 impl<'h, 'a> Solver<'h, 'a> {
@@ -57,25 +58,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             .class_by_name_id(cn)
             .and_then(|cid| self.index.class(cid).static_field(fn_))
             .map_or(Ty::OPEN, |loc| self.read_loc(loc, inst_id))
-    }
-
-    fn apply_resolved_method(
-        &mut self,
-        inst_id: InstanceId,
-        recv: Ty,
-        rule: crate::methods::MethodResult,
-    ) -> Ty {
-        let recv = self.resolve_cell_read(inst_id, recv);
-        if recv == Ty::BOTTOM {
-            Ty::BOTTOM
-        } else {
-            builtins::apply_method_result(
-                self.ctx,
-                self.types,
-                rule,
-                MethodResultArgs::receiver_only(recv),
-            )
-        }
     }
 
     pub(super) fn eval_expr(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<Ty> {
@@ -382,26 +364,23 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .copied()
                     .fold(Ty::BOTTOM, |acc, t| self.types.join(acc, t));
                 self.check_escaping_func(s.inst, joined, 0, s.current_span)?;
-                let arr_ty = self.types.array(joined);
-                if self
-                    .types
-                    .is_zero_sized_func(joined, &self.index.capture_free_templates)
-                {
-                    self.record_site(s.inst, expr, SiteResolution::ZeroSizedArray);
-                } else if self.is_tagged_func_union_in(joined, s.inst) {
-                    for (elem, &et) in elements.iter().zip(&elem_tys) {
-                        self.record_coercion(s.inst, elem, et, joined);
-                    }
-                    self.record_site(s.inst, expr, SiteResolution::TypedArray(arr_ty));
+                if self.types.has_func(joined) {
+                    let array = self.callable_array(s.inst, expr, joined)?;
+                    self.coerce_array_write(s.inst, array, elements, &elem_tys);
+                    return Ok(array);
                 }
-                Ok(arr_ty)
+                Ok(self.types.array(joined))
             }
             Expr::ArraySpread(items) => {
                 let (mut joined, mut has_bottom) = (Ty::BOTTOM, false);
+                let mut functions = Vec::new();
                 for item in items {
                     let t = match item {
                         perry_hir::ir::ArrayElement::Expr(e) => {
                             let v = self.eval_expr(s, e)?;
+                            if self.types.has_func(v) {
+                                functions.push((e, v, false));
+                            }
                             has_bottom |= v == Ty::BOTTOM;
                             v
                         }
@@ -412,14 +391,18 @@ impl<'h, 'a> Solver<'h, 'a> {
                             Ty::NEVER
                         }
                         perry_hir::ir::ArrayElement::Spread(e) => {
-                            let src = self.eval_expr(s, e)?;
-                            let src = self.resolve_cell_read(s.inst, src);
+                            let input = self.eval_expr(s, e)?;
+                            let src = self.resolve_cell_read(s.inst, input);
                             if src == Ty::BOTTOM {
                                 has_bottom = true;
                                 Ty::BOTTOM
                             } else {
-                                builtins::iterated_element(self.ctx, self.types, src)
-                                    .unwrap_or(Ty::OPEN)
+                                let element = builtins::iterated_element(self.ctx, self.types, src)
+                                    .unwrap_or(Ty::OPEN);
+                                if self.types.has_func(element) {
+                                    functions.push((e, input, true));
+                                }
+                                element
                             }
                         }
                     };
@@ -432,13 +415,20 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if inner == Ty::VOID && abs.is_some_and(Absence::admits_null) {
                     joined = self.types.with_absences(Ty::NUMBER, abs);
                 }
+                if self.types.has_func(joined) {
+                    let array = self.callable_array(s.inst, expr, joined)?;
+                    for (value, ty, spread) in functions {
+                        self.push_argument(s.inst, array, value, ty, spread);
+                    }
+                    return Ok(array);
+                }
                 let array = self.types.array(joined);
                 self.record_site(s.inst, expr, SiteResolution::TypedArray(array));
                 Ok(array)
             }
             Expr::ArrayFrom(source, _) => {
-                let src = self.eval_expr(s, source)?;
-                let src = self.resolve_cell_read(s.inst, src);
+                let input = self.eval_expr(s, source)?;
+                let src = self.resolve_cell_read(s.inst, input);
                 if src == Ty::BOTTOM {
                     return Ok(Ty::BOTTOM);
                 }
@@ -446,8 +436,17 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     return Ok(self.types.array(Ty::OPEN));
                 }
-                Ok(builtins::iterated_element(self.ctx, self.types, src)
-                    .map_or(Ty::OPEN, |e| self.types.array(e)))
+                Ok(
+                    match builtins::iterated_element(self.ctx, self.types, src) {
+                        Some(element) if self.types.has_func(element) => {
+                            let array = self.callable_array(s.inst, expr, element)?;
+                            self.share_element_layouts(&[array, input]);
+                            array
+                        }
+                        Some(element) => self.types.array(element),
+                        None => Ty::OPEN,
+                    },
+                )
             }
             Expr::Object(fields) => {
                 self.eval_object_fields(s, fields.iter().map(|(n, v)| (n.as_str(), v)))
@@ -519,7 +518,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let idx_ty = self.eval_expr(s, index)?;
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
                     if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
-                        self.dirty_locs.insert(loc.index());
+                        self.locations.dirty.insert(loc);
                     }
                     if idx_ty != Ty::BOTTOM
                         && !(if kind.is_array() {
@@ -678,7 +677,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     let (stripped, _) = self.types.strip_nullish(obj_ty);
                     if hir_compat::is_array_insertion(method)
-                        && self.push_into_cells(stripped, &arg_tys)
+                        && self.push_values(s.inst, stripped, args, &arg_tys)
                     {
                         return Ok(Ty::NUMBER);
                     }
@@ -696,9 +695,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                             )
                         });
                     if let Some(rule) = rule {
-                        return Ok(builtins::apply_method_result(
-                            self.ctx,
-                            self.types,
+                        return Ok(self.method_result(
+                            s.inst,
                             rule,
                             MethodResultArgs {
                                 receiver: obj_ty,
@@ -771,7 +769,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             Expr::ArrayShift(id) => {
                 let arr = self.eval_local_get(s, *id)?;
-                Ok(self.apply_resolved_method(s.inst, arr, crate::methods::MethodResult::Element))
+                Ok(self.method_result(
+                    s.inst,
+                    MethodResult::Element,
+                    MethodResultArgs::receiver_only(arr),
+                ))
             }
             Expr::TypeOf(operand) => {
                 let op_ty = self.eval_expr(s, operand)?;
@@ -802,6 +804,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             Expr::ArrayPush {
                 array_id, value, ..
+            }
+            | Expr::ArrayPushSpread {
+                array_id,
+                source: value,
             } => {
                 let val_ty = self.eval_expr(s, value)?;
                 if let Some(arr_ty) = self
@@ -810,12 +816,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                     .and_then(|l| self.read_local_value(s.inst, l))
                 {
                     let def = self.types.strip_nullish(arr_ty).0;
-                    self.push_into_cells(def, &[val_ty]);
-                    self.coerce_array_write(
+                    self.push_argument(
                         s.inst,
                         def,
-                        std::slice::from_ref(value.as_ref()),
-                        &[val_ty],
+                        value,
+                        val_ty,
+                        matches!(expr, Expr::ArrayPushSpread { .. }),
                     );
                 }
                 Ok(Ty::NUMBER)
@@ -851,7 +857,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     };
                     self.eval_children(s, expr, evaluated)?;
-                    return Ok(self.apply_resolved_method(s.inst, ty, call.method().result_rule()));
+                    return Ok(self.method_result(
+                        s.inst,
+                        call.method().result_rule(),
+                        MethodResultArgs::receiver_only(ty),
+                    ));
                 }
                 self.eval_children(s, expr, None)?;
                 Ok(builtins::leaf_expr_type(self.ctx, self.types, expr))

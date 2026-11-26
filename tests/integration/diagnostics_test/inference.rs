@@ -231,6 +231,14 @@ fn generic_specialization_budget_is_per_function() -> anyhow::Result<()> {
     source.push_str("return total; }");
     api::compile_core(&program_with("budget.ts", &source, &[]))?;
 
+    let repeated = "{ const fs = [inc]; total += count(fs,fs) + ({size,fs}).size(); }".repeat(257);
+    let source = format!(
+        "function inc(n) {{return n+1;}} function count(a,b) {{return a.length + b.length;}}
+         function size() {{return this.fs.length;}}
+         export function run():number {{let total=0; {repeated} return total;}}"
+    );
+    api::compile_core(&program_with("callable-arrays.ts", &source, &[]))?;
+
     // The first recursive call changes the key; the second reuses it.
     api::compile_core(&program_with(
         "finite.ts",
@@ -238,12 +246,14 @@ fn generic_specialization_budget_is_per_function() -> anyhow::Result<()> {
         &[],
     ))?;
     let mut finite = String::from(
-        "function count<T>(v:T):number {return 1;} export function run():number {let n=0;",
+        "function count<T>(v:T):number {return 1;} function inc(n){return n+1;}
+         export function run():number {let n=0;",
     );
-    for id in 0..257 {
+    for id in 0..255 {
         writeln!(finite, "n += count({{field{id}: 1}});")?;
     }
-    finite.push_str("return n;}");
+    // The same record shape has two alias patterns, bringing the instance count to 257.
+    finite.push_str("const a=[inc], b=[inc]; return n + count({x:a,y:a}) + count({x:a,y:b});}");
     for (source, function, grows) in [
         (finite.as_str(), "count", false),
         (

@@ -286,9 +286,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             .instance_class(class)
             .and_then(|c| c.initializer)
             .map_or(BodyOwner::Initializer, BodyOwner::Function);
-        let saved = std::mem::replace(&mut self.local_owner, owner);
+        let saved = std::mem::replace(&mut self.frame.owner, owner);
         let result = self.expression_with(ctx, expr, Some(ty));
-        self.local_owner = saved;
+        self.frame.owner = saved;
         result
     }
 
@@ -300,7 +300,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         this_slot: Value,
         initializers: &[(&'s str, TypeHandle, Option<&'s Expr>)],
     ) -> Result<()> {
-        let saved_this = self.this_slot.replace(this_slot);
+        let saved_this = self.frame.this_slot.replace(this_slot);
         let res = self.with_class_expansion(
             ctx,
             ClassExpansion::Fields(class),
@@ -320,12 +320,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Ok(())
             },
         );
-        self.this_slot = saved_this;
+        self.frame.this_slot = saved_this;
         res
     }
 
     pub(super) fn class_this(&mut self, ctx: &mut Context) -> Result<Value> {
-        let slot = self.this_slot.ok_or_else(|| {
+        let slot = self.frame.this_slot.ok_or_else(|| {
             Diagnostic::unsupported(
                 "'this' is only supported inside class constructors, methods, and accessors",
             )
@@ -334,7 +334,8 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     pub(super) fn is_proven_this_class(&self, ctx: &Context, class_name: &str) -> bool {
-        self.this_slot
+        self.frame
+            .this_slot
             .and_then(|slot| self.slot_type(ctx, slot).ok())
             .and_then(|ty| self.shapes.class_of_type(ctx, ty))
             == Some(class_name)

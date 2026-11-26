@@ -3,70 +3,6 @@ use super::*;
 use perry_mir::{IntrinsicOp, LocalOp, StringConstOp};
 use pliron::builtin::attributes::FPDoubleAttr;
 
-pub(super) enum Control<'s> {
-    Loop {
-        label: Option<&'s str>,
-        continue_to: Ptr<BasicBlock>,
-        break_to: Ptr<BasicBlock>,
-    },
-    Switch {
-        label: Option<&'s str>,
-        break_to: Ptr<BasicBlock>,
-    },
-    Labeled {
-        label: &'s str,
-        break_to: Ptr<BasicBlock>,
-    },
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum Jump {
-    Break,
-    Continue,
-}
-
-impl Control<'_> {
-    pub(super) fn target(&self, jump: Jump, label: Option<&str>) -> Option<Ptr<BasicBlock>> {
-        let (own_label, break_to, continue_to) = match self {
-            Self::Loop {
-                label,
-                break_to,
-                continue_to,
-            } => (*label, *break_to, Some(*continue_to)),
-            Self::Switch { label, break_to } => (*label, *break_to, None),
-            Self::Labeled { label, break_to } => (Some(*label), *break_to, None),
-        };
-        if let Some(label) = label {
-            if own_label != Some(label) {
-                return None;
-            }
-        } else if matches!(self, Self::Labeled { .. }) {
-            return None;
-        }
-        match jump {
-            Jump::Break => Some(break_to),
-            Jump::Continue => continue_to,
-        }
-    }
-}
-
-/// The innermost enclosing `catch` or exceptional `finally` path: throwing ops store their
-/// status in `status` and branch to `block`.
-#[derive(Clone, Copy)]
-pub(super) struct Handler {
-    pub(super) block: Ptr<BasicBlock>,
-    pub(super) status: Value,
-}
-
-/// An enclosing `finally`, run inline before `return`, `break` and `continue` leave it.
-#[derive(Clone, Copy)]
-pub(super) struct Finally<'s> {
-    pub(super) body: &'s [Stmt],
-    /// `handlers.len()` and `controls.len()` outside the `try`.
-    pub(super) handlers: usize,
-    pub(super) controls: usize,
-}
-
 /// Status of `process.exit` (`ErrorKind::Exit`): handlers pass it on.
 pub(super) const EXIT_STATUS: u64 = 5;
 
@@ -117,18 +53,14 @@ pub(super) struct FunctionBuilder<'s, 'm> {
     entry: Ptr<BasicBlock>,
     pub(super) ins: IRInserter<DummyListener>,
     pub(super) block: Ptr<BasicBlock>,
-    pub(super) local_owner: BodyOwner,
+    pub(super) frame: frame::Frame<'s>,
+    pub(super) handler: Option<Handler>,
     pub(super) locals: bindings::Bindings<LocalBinding>,
+    pub(super) variant_guards: crate::narrowing::Guards<'s>,
     pub(super) never_values: HashSet<Value>,
     pub(super) global_slots: HashSet<Value>,
-    pub(super) cursors: hir_compat::CursorPositions,
-    pub(super) variant_guards: crate::narrowing::Guards<'s>,
-    pub(super) controls: Vec<Control<'s>>,
     pub(super) inline_functions: Vec<FuncId>,
-    pub(super) inline_returns: Vec<inline::ReturnFrame>,
     pub(super) class_expansions: Vec<crate::lower::classes::ClassExpansion<'s>>,
-    pub(super) handlers: Vec<Handler>,
-    pub(super) finallies: Vec<Finally<'s>>,
     pub(super) signatures: &'s Functions<'s>,
     pub(super) shapes: &'m mut Shapes<'s>,
     /// Imported built-ins by local name.
@@ -136,8 +68,6 @@ pub(super) struct FunctionBuilder<'s, 'm> {
     pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
-    pub(super) rest_excluded_keys: &'s [String],
-    pub(super) this_slot: Option<Value>,
 }
 
 impl<'s, 'm> FunctionBuilder<'s, 'm> {
@@ -200,7 +130,7 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
         }
         let statements = match body {
             Body::Statements(owner, statements) => {
-                builder.local_owner = owner;
+                builder.frame.owner = owner;
                 statements
             }
             Body::Native(body) => {
@@ -280,26 +210,20 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             entry,
             ins: IRInserter::new_at_block_end(entry),
             block: entry,
-            local_owner: BodyOwner::Initializer,
-            locals: bindings::Bindings::default(),
+            frame: frame::Frame::new(BodyOwner::Initializer, None),
+            handler: None,
+            locals: Default::default(),
+            variant_guards: Default::default(),
             never_values: HashSet::new(),
             global_slots: HashSet::new(),
-            cursors: Default::default(),
-            variant_guards: crate::narrowing::Guards::default(),
-            controls: Vec::new(),
             inline_functions: Vec::new(),
-            inline_returns: Vec::new(),
             class_expansions: Vec::new(),
-            handlers: Vec::new(),
-            finallies: Vec::new(),
             signatures,
             shapes,
             builtins,
             result,
             is_async,
             labels: 0,
-            rest_excluded_keys: &[],
-            this_slot: None,
         }
     }
 }
@@ -361,7 +285,7 @@ impl<'s> FunctionBuilder<'s, '_> {
 
     /// Inside a `try`, route the exception of an op that may throw to the handler.
     pub(super) fn guard(&mut self, ctx: &mut Context, op: Ptr<Operation>) {
-        let Some(handler) = self.handlers.last().copied() else {
+        let Some(handler) = self.handler else {
             return;
         };
         let throws = may_throw(ctx, op) && Operation::get_op::<RethrowOp>(op, ctx).is_none();

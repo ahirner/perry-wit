@@ -1,6 +1,6 @@
 //! Instance facts attached to their original expression sites.
 use super::*;
-use crate::engine::solve::{SiteResolution, ValueCoercion};
+use crate::engine::solve::SiteResolution;
 use crate::engine::{CaptureOperand, EnvironmentField};
 
 impl<'h> InstancePlanner<'h, '_, '_> {
@@ -34,8 +34,8 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                     self.prepare_layouts(ty)?;
                 }
             }
-            Some(FuncCoercion::Value(ValueCoercion::Zero | ValueCoercion::Tag(..)))
-                if is_pure_func_expr(expr) =>
+            Some(FuncCoercion::Value(conversion))
+                if !conversion.reads_operand() && is_pure_func_expr(expr) =>
             {
                 return Ok(());
             }
