@@ -11,13 +11,6 @@ import tomlkit
 from semver import Version
 
 
-def replace_field(contents, pattern, value):
-    updated, count = re.subn(pattern, lambda match: match[1] + value + match[2], contents)
-    if count != 1:
-        raise ValueError(f"expected one match for {pattern!r}, found {count}")
-    return updated
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", type=Version.parse)
@@ -46,24 +39,33 @@ def main():
     npm_manifest["version"] = version
     npm_lock["packages"]["packages/perry-wit"]["version"] = version
     lock_contents = json.dumps(npm_lock, indent=2, ensure_ascii=False) + "\n"
+
+    wit = Path("wit/compiler/world.wit")
+    wit_contents, count = re.subn(
+        r"(?m)^package perry:compiler@[^;\s]+;$", f"package perry:compiler@{version};", wit.read_text()
+    )
+    if count != 1:
+        parser.error(f"expected one perry:compiler package declaration in {wit}, found {count}")
+
+    flake = Path("flake.nix")
+    flake_contents = flake.read_text()
+    current_hash = subprocess.check_output(["nix", "eval", "--raw", ".#npm-package.npmDeps.outputHash"], text=True)
+    hash_literal = json.dumps(current_hash)
+    if flake_contents.count(hash_literal) != 1:
+        parser.error(f"expected one literal for the evaluated npm dependency hash {current_hash} in {flake}")
+
     with tempfile.TemporaryDirectory() as temp:
         lock = Path(temp) / "package-lock.json"
         lock.write_text(lock_contents)
         npm_hash = subprocess.check_output(["prefetch-npm-deps", lock], text=True).strip()
 
-    wit = Path("wit/compiler/world.wit")
-    flake = Path("flake.nix")
-    js_deps_hash = (
-        r'(?ms)(^ *jsDeps = pkgs\.fetchNpmDeps \{.*?'
-        r'^ *hash = ")sha256-[^"]+(";)'
-    )
     updates = {
         manifest_path: tomlkit.dumps(manifest),
         cargo_lock_path: tomlkit.dumps(cargo_lock),
         sdk: json.dumps(npm_manifest, indent=2, ensure_ascii=False) + "\n",
         npm_lock_path: lock_contents,
-        wit: replace_field(wit.read_text(), r"(?m)^(package perry:compiler@)[^;\s]+(;)$", version),
-        flake: replace_field(flake.read_text(), js_deps_hash, npm_hash),
+        wit: wit_contents,
+        flake: flake_contents.replace(hash_literal, json.dumps(npm_hash)),
     }
     for path, contents in updates.items():
         if path.read_text() != contents:
