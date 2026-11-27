@@ -472,6 +472,16 @@
           }}/bin/build-site";
         };
 
+        apps.bump-version = {
+          type = "app";
+          meta.description = "Update the compiler, WIT and npm release versions";
+          program = "${pkgs.writeShellApplication {
+            name = "bump-version";
+            runtimeInputs = [ pkgs.prefetch-npm-deps (pkgs.python3.withPackages (p: [ p.semver p.tomlkit ])) ];
+            text = ''exec python3 ${./scripts/bump-version.py} "$@"'';
+          }}/bin/bump-version";
+        };
+
         apps.bench-perry = {
           type = "app";
           meta.description = "Compare locked upstream Perry benchmarks in Node and Wasmtime";

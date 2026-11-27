@@ -82,6 +82,17 @@ Compare Node and Wasmtime on Perry's official benchmark suite from the revision 
 nix run .#bench-perry
 ```
 
+### Release PRs
+
+To prepare 0.2.3, push the current `main` to a branch named `release/0.2.3`.
+
+```sh
+git fetch origin main
+git push origin origin/main:refs/heads/release/0.2.3
+```
+
+GitHub Actions commits the bump to that branch and opens a PR against `main`. To generate the same changes locally, run `nix run .#bump-version -- 0.2.3` from the repository root. After merging the PR, push the matching `v0.2.3` tag on the merge commit to publish the release.
+
 ## Contributing
 
 Human and AI contributors are welcome: “Act always so as to increase the number of choices” — [Heinz von Foerster](https://de.wikipedia.org/wiki/Heinz_von_Foerster).
