@@ -1,8 +1,7 @@
 //! Exception cause nodes, native reference reflection, and dynamic JSON equality/display.
 use super::{
-    address, append, array_index, json_number, new_node, node, numeric_node, set_word,
-    std_json_from_number, std_json_from_scalar, std_json_from_string, std_json_to_string,
-    string_bytes, word,
+    address, json_number, new_node, node, numeric_node, set_word, std_json_from_number,
+    std_json_from_scalar, std_json_from_string, std_json_to_string, string_bytes, word,
 };
 use crate::runtime::from_static;
 use perry_rt_sys::{
@@ -268,73 +267,5 @@ pub(super) fn box_slot(bits: u64, tag: i32, desc: *mut u8, view: bool) -> *mut u
             descriptor::EXCEPTION => std_json_from_exception(node(bits as u32)),
             _ => core::ptr::null_mut(),
         }
-    }
-}
-
-pub(super) fn native_property(value: *mut u8, name: &[u8]) -> *mut u8 {
-    unsafe {
-        let (origin, desc) = (node(word(value, 8)), node(word(value, 12)));
-        match word(desc, 0) {
-            descriptor::RECORD | descriptor::JSON_TUPLE => (0..word(desc, 4))
-                .find(|&index| crate::runtime::bytes(super::view::field_key(desc, index)) == name)
-                .map_or(core::ptr::null_mut(), |index| {
-                    super::view::field(origin, desc, index, false)
-                }),
-            descriptor::ARRAY | descriptor::JSON_DICTIONARY => {
-                let length = word(origin, 0);
-                if name == b"length" {
-                    return std_json_from_number(f64::from(length));
-                }
-                array_index(name)
-                    .filter(|&index| index < length)
-                    .map_or(core::ptr::null_mut(), |index| {
-                        super::view::array_slot(origin, desc, index, false)
-                    })
-            }
-            _ => core::ptr::null_mut(),
-        }
-    }
-}
-
-pub(super) fn native_snapshot(value: *mut u8) -> *mut u8 {
-    unsafe {
-        let (origin, desc) = (node(word(value, 8)), node(word(value, 12)));
-        let is_array = matches!(
-            word(desc, 0),
-            descriptor::ARRAY | descriptor::JSON_DICTIONARY
-        );
-        let result = new_node(if is_array { ARRAY } else { OBJECT });
-        let count = if is_array {
-            word(origin, 0)
-        } else {
-            word(desc, 4)
-        };
-        // Holes and omitted record fields become `ABSENT`, unlike present `undefined` values.
-        for index in 0..count {
-            if is_array {
-                let item = if super::view::array_present(origin, index) {
-                    super::view::array_slot(origin, desc, index, false)
-                } else {
-                    new_node(ABSENT)
-                };
-                append(result, item, core::ptr::null_mut());
-            } else {
-                let key = super::view::field_key(desc, index);
-                let mut item = super::view::field(origin, desc, index, false);
-                if item.is_null()
-                    && word(desc, 0) == descriptor::RECORD
-                    && !super::order::field_present(
-                        origin,
-                        count,
-                        index,
-                        crate::runtime::bytes(key),
-                    )
-                {
-                    item = new_node(ABSENT);
-                }
-                append(result, item, std_json_from_string(key));
-            }
-        }
-        result
     }
 }

@@ -735,7 +735,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             (self.eval_local_get(s, id)?, None)
                         }
                     };
-                    if let Some((first, second)) = call.array_callback()
+                    if let Some((first, second)) = call.callback_operands()
                         && let Some(result) =
                             self.eval_callback_method(s, expr, ty, call.method(), first, second)?
                     {

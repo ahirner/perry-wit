@@ -1,5 +1,6 @@
 //! Dense-array methods lowered inline: callbacks of `map`/`filter`, and `indexOf`/`includes`.
 use super::*;
+use crate::collections::Yield::{Item, Pair};
 use crate::lower::control_flow::{ArrayOutput, Holes, Input, Span};
 use perry_mir::ArrayAtOp;
 

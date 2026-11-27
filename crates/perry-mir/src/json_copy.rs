@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pliron::builtin::ops::FuncOp;
 use pliron::context::{Context, Ptr};
@@ -11,7 +11,7 @@ use pliron::op::Op;
 use pliron::operation::Operation;
 use pliron::pass::{AnalysisManager, PassResult};
 use pliron::result::Result;
-use pliron::r#type::{TypeHandle, Typed};
+use pliron::r#type::{TypeHandle, Typed, TypedHandle};
 use pliron::value::Value;
 
 use crate::JsonSchema;
@@ -20,7 +20,7 @@ use crate::calls::CallOp;
 use crate::control::{BrOp, CondBrOp};
 use crate::intrinsics::{Intrinsic, JsonStringifyOp, intrinsic_of};
 use crate::optional::{UnwrapOp, absence, present_type};
-use crate::types::VariantType;
+use crate::types::RecordType;
 
 /// MIR pass that recognizes `JSON.parse<T>(JSON.stringify(value))` and rewrites
 /// provably compatible schemas into a schema-driven deep-copy and normalization helper.
@@ -223,21 +223,17 @@ fn can_rewrite_parse_stringify(
         return false;
     }
 
-    let consumer_res = site.consumer_op.deref(ctx).get_result(0);
-    let reaches_stringify = value_reaches_stringify(ctx, consumer_res);
-    if reaches_stringify && schemas_add_fields(ctx, target_ty, source_ty, &mut SchemaPairs::new()) {
+    let Some(plan) = JsonCopyPlan::get(ctx, source_ty, target_ty) else {
         return false;
-    }
-    if (reaches_stringify || schemas_add_fields(ctx, source_ty, target_ty, &mut SchemaPairs::new()))
-        && facts.may_have_json_residue(ctx, &func, site.source_value)
+    };
+    let consumer = site.consumer_op.deref(ctx).get_result(0);
+    let stringify = value_reaches_stringify(ctx, consumer);
+    if stringify && plan.drops_fields
+        || (stringify || plan.adds_fields)
+            && facts.may_have_json_residue(ctx, &func, site.source_value)
     {
         return false;
     }
-
-    if !JsonSchema::supports_native_copy(ctx, source_ty, target_ty) {
-        return false;
-    }
-
     !facts.may_prevent_json_copy_between(ctx, &func, site)
 }
 
@@ -300,227 +296,181 @@ fn value_reaches_stringify(ctx: &Context, root: Value) -> bool {
     false
 }
 
-/// Pairs of source and target types already visited by a schema comparison. Recursive schemas
-/// revisit a pair: an `any` comparison answers `false` there and an `all` one `true`, since the
-/// first visit decides the pair (coinductively for `all`).
-type SchemaPairs = HashSet<(TypeHandle, TypeHandle)>;
+type TypePair = (TypeHandle, TypeHandle);
 
-/// Check whether converting `source_ty` to `target_ty` adds a field absent from the source.
-/// Swapping the arguments tests whether the conversion drops a source field, and any tuple-ness
-/// mismatch is already rejected by [schemas_compatible].
-fn schemas_add_fields(
-    ctx: &Context,
-    source_ty: TypeHandle,
-    target_ty: TypeHandle,
-    seen: &mut SchemaPairs,
-) -> bool {
-    if !seen.insert((source_ty, target_ty)) {
-        return false;
-    }
-    let s_inner = present_type(ctx, source_ty);
-    let t_inner = present_type(ctx, target_ty);
-    if s_inner == t_inner {
-        return false;
-    }
-    let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
-    if let (Some(JsonSchema::Record(s_rec)), Some(JsonSchema::Record(t_rec))) = schemas {
-        let (s_rec, t_rec) = (s_rec.deref(ctx), t_rec.deref(ctx));
-        let (Ok(s_fields), Ok(t_fields)) = (s_rec.fields(), t_rec.fields()) else {
-            return true;
-        };
-        if s_rec.is_tuple() {
-            return s_fields
-                .iter()
-                .zip(t_fields.iter())
-                .any(|((_, se), (_, te))| schemas_add_fields(ctx, *se, *te, seen));
-        }
-        // A missing field answers `true` whichever matched fields are compared first.
-        return t_fields.iter().any(|(t_name, t_fty)| {
-            s_fields
-                .iter()
-                .find(|(s_name, _)| s_name == t_name)
-                .is_none_or(|(_, s_fty)| schemas_add_fields(ctx, *s_fty, *t_fty, seen))
-        });
-    }
-    if let (Some(source), Some(target)) = (
-        schemas.0.and_then(JsonSchema::storage_element),
-        schemas.1.and_then(JsonSchema::storage_element),
-    ) {
-        return schemas_add_fields(ctx, source, target, seen);
-    }
-    false
+pub enum CopySlot {
+    Payload(TypePair),
+    Field(TypePair, TypedHandle<RecordType>, usize),
 }
 
-impl JsonSchema {
-    /// Native layouts accepted before and after numeric fact specialization.
-    pub fn supports_native_copy(ctx: &Context, source: TypeHandle, target: TypeHandle) -> bool {
-        schemas_compatible(ctx, source, target, &mut SchemaPairs::new())
+impl CopySlot {
+    pub fn types(&self) -> TypePair {
+        match *self {
+            Self::Payload(pair) | Self::Field(pair, ..) => pair,
+        }
     }
 }
 
-/// Whether a typed copy from `source_ty` to `target_ty` matches a JSON round trip.
-fn schemas_compatible(
-    ctx: &Context,
-    source_ty: TypeHandle,
-    target_ty: TypeHandle,
-    seen: &mut SchemaPairs,
-) -> bool {
-    if !seen.insert((source_ty, target_ty)) {
-        return true;
+#[derive(Default)]
+pub struct JsonCopyPlan {
+    slots: HashMap<TypePair, Vec<Option<CopySlot>>>,
+    adds_fields: bool,
+    drops_fields: bool,
+}
+
+impl JsonCopyPlan {
+    /// Cache successful plans. An opaque record can acquire its definition later.
+    pub fn get(ctx: &Context, source: TypeHandle, target: TypeHandle) -> Option<&Self> {
+        let key = (source, target);
+        let cell = &crate::CachedFact::intern(ctx, key).get(ctx).value;
+        if let Some(plan) = cell.get() {
+            return Some(plan);
+        }
+        let mut plan = Self::default();
+        plan.visit(ctx, key)?;
+        Some(cell.get_or_init(|| plan))
     }
 
-    match (absence(ctx, source_ty), absence(ctx, target_ty)) {
-        (Some(Absence::Both), _) | (_, Some(Absence::Both)) => return false,
-        (Some(Absence::Undefined), Some(Absence::Undefined)) => {
-            return schemas_compatible(
-                ctx,
-                present_type(ctx, source_ty),
-                present_type(ctx, target_ty),
-                seen,
-            );
-        }
-        (Some(Absence::Undefined), _) => {
-            return schemas_compatible(ctx, present_type(ctx, source_ty), target_ty, seen);
-        }
-        (_, Some(Absence::Undefined)) => {
-            return schemas_compatible(ctx, source_ty, present_type(ctx, target_ty), seen);
-        }
-        (Some(Absence::Null), t) if t != Some(Absence::Null) => return false,
-        _ => {}
+    pub fn slots(&self, types: TypePair) -> Option<&[Option<CopySlot>]> {
+        self.slots.get(&types).map(Vec::as_slice)
     }
 
-    let s_inner = present_type(ctx, source_ty);
-    let t_inner = present_type(ctx, target_ty);
-
-    if absence(ctx, s_inner).is_some() || absence(ctx, t_inner).is_some() {
-        return false;
-    }
-
-    let schemas = (JsonSchema::of(ctx, s_inner), JsonSchema::of(ctx, t_inner));
-    if let (Some(JsonSchema::Record(s_rec)), Some(JsonSchema::Record(t_rec))) = schemas {
-        let (s_rec, t_rec) = (s_rec.deref(ctx), t_rec.deref(ctx));
-        if s_rec.kind() != t_rec.kind() {
-            return false;
+    fn visit(&mut self, ctx: &Context, pair @ (source, target): TypePair) -> Option<()> {
+        if self.slots.contains_key(&pair) {
+            return Some(());
         }
-        let (Ok(s_fields), Ok(t_fields)) = (s_rec.fields(), t_rec.fields()) else {
-            return false;
+        self.slots.insert(pair, Vec::new());
+        let strip_undefined = |mut ty| {
+            while let Some((inner, Absence::Undefined)) = crate::optional_parts(ctx, ty) {
+                ty = inner;
+            }
+            ty
         };
-        if s_rec.is_tuple() {
-            if s_fields.len() != t_fields.len() {
-                return false;
-            }
-            return s_fields
-                .iter()
-                .zip(t_fields.iter())
-                .all(|((_, se), (_, te))| schemas_compatible(ctx, *se, *te, seen));
-        }
-        if !t_fields.iter().all(|(t_name, t_fty)| {
-            if let Some((_, s_fty)) = s_fields.iter().find(|(s_name, _)| s_name == t_name) {
-                schemas_compatible(ctx, *s_fty, *t_fty, seen)
-            } else {
-                absence(ctx, *t_fty) == Some(Absence::Undefined)
-                    && schemas_compatible(ctx, *t_fty, *t_fty, seen)
-            }
-        }) {
-            return false;
-        }
-        return s_fields.iter().all(|(s_name, s_fty)| {
-            if t_fields.iter().any(|(t_name, _)| t_name == s_name) {
-                true
-            } else {
-                schemas_compatible(ctx, *s_fty, *s_fty, seen)
-            }
-        });
-    }
-
-    match schemas {
-        (Some(JsonSchema::Array(source)), Some(JsonSchema::Array(target))) => {
-            schemas_compatible(ctx, source, target, seen)
-        }
-        (
-            Some(JsonSchema::Dictionary {
-                key: sk, value: sv, ..
-            }),
-            Some(JsonSchema::Dictionary {
-                key: tk, value: tv, ..
-            }),
-        ) => {
-            // Stringification drops undefined dictionary members, changing the entry count.
-            !absence(ctx, sv).is_some_and(|a| a.admits_undefined())
-                && schemas_compatible(ctx, sk, tk, seen)
-                && schemas_compatible(ctx, sv, tv, seen)
-        }
-        (Some(JsonSchema::Variant(source)), Some(JsonSchema::Variant(target)))
-            if source == target =>
+        let (source, target) = (strip_undefined(source), strip_undefined(target));
+        let source_absence = absence(ctx, source);
+        let target_absence = absence(ctx, target);
+        if source_absence == Some(Absence::Both)
+            || target_absence == Some(Absence::Both)
+            || source_absence == Some(Absence::Null) && target_absence != source_absence
         {
-            let variant = source.deref(ctx);
-            variant_is_unambiguous(ctx, &variant)
-                && variant.cases().iter().all(|(_, payload)| {
-                    payload.is_none_or(|ty| {
-                        !present_type(ctx, ty).deref(ctx).is::<crate::NumericType>()
-                            && schemas_compatible(ctx, ty, ty, seen)
-                    })
-                })
+            return None;
         }
-        _ => {
-            let numeric_source = s_inner.deref(ctx).is::<crate::NumericType>()
-                || matches!(
-                    schemas.0,
-                    Some(
-                        JsonSchema::Number
-                            | JsonSchema::Integer {
-                                width: 8 | 16 | 32 | 64,
-                                ..
-                            }
-                    )
-                );
-            let number_target = t_inner.deref(ctx).is::<crate::NumericType>()
-                || matches!(schemas.1, Some(JsonSchema::Number));
-            (numeric_source && number_target)
-                || s_inner == t_inner && is_supported_scalar(ctx, s_inner)
-        }
-    }
-}
-
-fn is_supported_scalar(ctx: &Context, ty: TypeHandle) -> bool {
-    matches!(
-        JsonSchema::of(ctx, ty),
-        Some(
-            JsonSchema::Number
-                | JsonSchema::Integer {
-                    width: 8 | 16 | 32 | 64,
-                    ..
+        let (source, target) = (present_type(ctx, source), present_type(ctx, target));
+        let schemas = (JsonSchema::of(ctx, source), JsonSchema::of(ctx, target));
+        let mut slots = Vec::new();
+        match schemas {
+            (Some(JsonSchema::Record(from)), Some(JsonSchema::Record(to))) => {
+                let (src, dst) = (from.deref(ctx), to.deref(ctx));
+                let (source_fields, target_fields) = (src.fields().ok()?, dst.fields().ok()?);
+                if src.kind() != dst.kind()
+                    || src.is_tuple() && source_fields.len() != target_fields.len()
+                {
+                    return None;
                 }
-                | JsonSchema::Boolean
-                | JsonSchema::String
-        )
-    )
-}
-
-fn variant_is_unambiguous(ctx: &Context, var: &VariantType) -> bool {
-    for (i, (_, p1)) in var.cases().iter().enumerate() {
-        for (_, p2) in var.cases().iter().skip(i + 1) {
-            match (p1, p2) {
-                (None, None) => {}
-                (Some(t1), Some(t2)) => {
-                    if *t1 == *t2 {
-                        return false;
-                    }
-                    let schemas = (JsonSchema::of(ctx, *t1), JsonSchema::of(ctx, *t2));
-                    if matches!(
-                        schemas,
-                        (Some(JsonSchema::Record(_)), Some(JsonSchema::Record(_)))
-                    ) || (schemas.0.and_then(JsonSchema::storage_element).is_some()
-                        && schemas.1.and_then(JsonSchema::storage_element).is_some())
-                    {
-                        return false;
+                for (i, (name, ty)) in target_fields.iter().enumerate() {
+                    let field = if src.kind() == crate::RecordKind::Tuple {
+                        source_fields.get(i).map(|(_, ty)| (i, *ty))
+                    } else {
+                        src.field(name)
+                    };
+                    if let Some((index, source_ty)) = field {
+                        slots.push(Some(CopySlot::Field((source_ty, *ty), from, index)));
+                    } else {
+                        if absence(ctx, *ty) != Some(Absence::Undefined) {
+                            return None;
+                        }
+                        self.adds_fields = true;
+                        self.visit(ctx, (*ty, *ty))?;
+                        slots.push(None);
                     }
                 }
-                _ => {}
+                if !src.is_tuple() {
+                    for (name, ty) in source_fields {
+                        if dst.field(name).is_none() {
+                            self.drops_fields = true;
+                            self.visit(ctx, (*ty, *ty))?;
+                        }
+                    }
+                }
             }
+            (Some(JsonSchema::Array(s)), Some(JsonSchema::Array(t))) => {
+                slots.push(Some(CopySlot::Payload((s, t))))
+            }
+            (
+                Some(JsonSchema::Dictionary {
+                    entry: s, value, ..
+                }),
+                Some(JsonSchema::Dictionary { entry: t, .. }),
+            ) if !crate::admits_undefined(ctx, value) => {
+                slots.push(Some(CopySlot::Payload((s.into(), t.into()))))
+            }
+            (Some(JsonSchema::Variant(s)), Some(JsonSchema::Variant(t))) if s == t => {
+                let variant = s.deref(ctx);
+                let mut shapes = HashSet::new();
+                for (_, payload) in variant.cases() {
+                    let child = if let Some(ty) = *payload {
+                        if !shapes.insert(PayloadShape::of(ctx, ty))
+                            || present_type(ctx, ty).deref(ctx).is::<crate::NumericType>()
+                        {
+                            return None;
+                        }
+                        Some(CopySlot::Payload((ty, ty)))
+                    } else {
+                        None
+                    };
+                    slots.push(child);
+                }
+            }
+            _ if scalar_copy(ctx, source, target, schemas) => slots.push(None),
+            _ => return None,
+        }
+        for slot in slots.iter().flatten() {
+            self.visit(ctx, slot.types())?;
+        }
+        self.slots.insert(pair, slots);
+        Some(())
+    }
+}
+
+fn scalar_copy(
+    ctx: &Context,
+    source: TypeHandle,
+    target: TypeHandle,
+    schemas: (Option<JsonSchema>, Option<JsonSchema>),
+) -> bool {
+    let numeric = source.deref(ctx).is::<crate::NumericType>()
+        || matches!(
+            schemas.0,
+            Some(
+                JsonSchema::Number
+                    | JsonSchema::Integer {
+                        width: 8 | 16 | 32 | 64,
+                        ..
+                    }
+            )
+        );
+    numeric
+        && (target.deref(ctx).is::<crate::NumericType>()
+            || matches!(schemas.1, Some(JsonSchema::Number)))
+        || source == target
+            && (numeric || matches!(schemas.0, Some(JsonSchema::Boolean | JsonSchema::String)))
+}
+
+#[derive(Eq, PartialEq, Hash)]
+enum PayloadShape {
+    Record,
+    Sequence,
+    Value(TypeHandle),
+}
+
+impl PayloadShape {
+    fn of(ctx: &Context, ty: TypeHandle) -> Self {
+        match JsonSchema::of(ctx, ty) {
+            Some(JsonSchema::Record(_)) => Self::Record,
+            Some(JsonSchema::Array(_) | JsonSchema::Dictionary { .. }) => Self::Sequence,
+            _ => Self::Value(ty),
         }
     }
-    true
 }
 
 fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
@@ -547,7 +497,7 @@ fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ArrayType, OptionalType, RecordType};
+    use crate::types::{ArrayType, OptionalType};
     use pliron::builtin::types::FP64Type;
 
     #[test]
@@ -557,7 +507,10 @@ mod tests {
         let wide: TypeHandle = RecordType::get(
             ctx,
             pliron::ident!("Wide"),
-            Some(vec![("x".into(), number), ("y".into(), number)]),
+            Some(vec![
+                ("x".into(), number),
+                ("y".into(), OptionalType::get(ctx, number).into()),
+            ]),
         )?
         .into();
         let narrow: TypeHandle = RecordType::get(
@@ -579,9 +532,8 @@ mod tests {
             (wide_outer, narrow_outer, false, true),
             (narrow_outer, wide_outer, true, false),
         ] {
-            let pairs = || SchemaPairs::new();
-            assert_eq!(schemas_add_fields(ctx, source, target, &mut pairs()), adds);
-            assert_eq!(schemas_add_fields(ctx, target, source, &mut pairs()), drops);
+            let plan = JsonCopyPlan::get(ctx, source, target).unwrap();
+            assert_eq!((plan.adds_fields, plan.drops_fields), (adds, drops));
         }
         Ok(())
     }
@@ -598,12 +550,14 @@ mod tests {
         )?
         .into();
         let node: TypeHandle = RecordType::get(ctx, pliron::ident!("Node"), None)?.into();
+        assert!(JsonCopyPlan::get(ctx, node, node).is_none());
         let next = OptionalType::get(ctx, ArrayType::get(ctx, node).into()).into();
         RecordType::get(
             ctx,
             pliron::ident!("Node"),
             Some(vec![("next".into(), next)]),
         )?;
+        assert!(JsonCopyPlan::get(ctx, node, node).is_some());
         let leaves = ArrayType::get(ctx, leaf).into();
         for (ty, cyclic) in [(leaf, false), (leaves, false), (node, true), (next, true)] {
             assert_eq!(may_be_cyclic(ctx, ty, &mut Vec::new()), cyclic);

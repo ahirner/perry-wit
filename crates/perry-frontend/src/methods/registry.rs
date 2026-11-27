@@ -18,7 +18,7 @@ macro_rules! method_catalog {
                 ArrayFindLastIndex "findLastIndex" -> [Number] Always Method callback(AllIndices) [callback] => value(array_search(Search::Find(callback, FindResult::Index, Direction::Reverse))), "requires one static callback";
                 ArraySome "some" -> [Bool] Upstream Method callback(Elements) [callback] => value(array_search(Search::Quantifier(callback, Quantifier::Some))), "requires one static callback";
                 ArrayEvery "every" -> [Bool] Upstream Method callback(Elements) [callback] => value(array_search(Search::Quantifier(callback, Quantifier::Every))), "requires one static callback";
-                ArrayForEach "forEach" -> [] Always Method callback(Elements) [callback] => value(array_for_each(callback)), "requires one static callback";
+                ArrayForEach "forEach" -> [] Always Method callback(Elements) [callback] => value(for_each(callback, |array| Input::Array(array, Holes::Skip))), "requires one static callback";
                 ArraySort "sort" -> Receiver Upstream Method callback(Comparator) [comparator:optional] => value(array_sort(comparator, Mutation::InPlace)), "accepts at most one comparator callback";
                 ArrayToSorted "toSorted" -> Receiver Upstream Method callback(Comparator) [comparator:optional] => value(array_sort(comparator, Mutation::Copy)), "accepts at most one comparator callback";
                 ArrayReduce "reduce" -> Reduced Always Method callback(Fold) [callback, initial:optional] => value(array_reduce(callback, initial, Direction::Forward)), "requires a callback and optional initial value";
@@ -41,7 +41,7 @@ macro_rules! method_catalog {
                 MapHas "has" -> [Bool] Upstream Method [key] => keyed(Map, key, kv_has), "requires one key argument";
                 MapDelete "delete" -> [Bool] Upstream Method [key] => keyed(Map, key, kv_delete), "requires one key argument";
                 MapClear "clear" -> [] Upstream Method [] => value(collection_clear()), "takes no arguments";
-                MapForEach "forEach" -> [] Always Method callback(Collection) [callback] => value(collection_for_each(callback)), "requires one callback argument";
+                MapForEach "forEach" -> [] Always Method callback(Collection) [callback] => value(for_each(callback, Input::Collection)), "requires one callback argument";
             }
             Receiver::Collection($crate::source::CollectionKind::Set), "Set" {
                 SetAdd "add" -> Receiver Upstream Method [value] => keyed(Set, value, set_add), "requires one value argument";
@@ -55,7 +55,7 @@ macro_rules! method_catalog {
                 SetIsSupersetOf "isSupersetOf" -> [Bool] Always Method [other] => value(set_relation(other, SetRelation::Superset)), "requires one Set argument";
                 SetIsDisjointFrom "isDisjointFrom" -> [Bool] Always Method [other] => value(set_relation(other, SetRelation::Disjoint)), "requires one Set argument";
                 SetClear "clear" -> [] Upstream Method [] => value(collection_clear()), "takes no arguments";
-                SetForEach "forEach" -> [] Always Method callback(Collection) [callback] => value(collection_for_each(callback)), "requires one callback argument";
+                SetForEach "forEach" -> [] Always Method callback(Collection) [callback] => value(for_each(callback, Input::Collection)), "requires one callback argument";
             }
             Receiver::Value(Kind::String), "String" {
                 StringCharAt "charAt" Upstream Method [args:rest] => intrinsic(StringCharAt, args, [Number(0.0)], Value), "accepts method arguments";

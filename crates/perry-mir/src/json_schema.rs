@@ -23,7 +23,6 @@ pub enum JsonSchema {
     Array(TypeHandle),
     Dictionary {
         entry: TypedHandle<RecordType>,
-        key: TypeHandle,
         value: TypeHandle,
     },
     Variant(TypedHandle<VariantType>),
@@ -148,21 +147,16 @@ impl JsonSchema {
             Self::String
         } else if let Some(optional) = definition.downcast_ref::<OptionalType>() {
             Self::Optional(optional.value())
-        } else if let Some(record) = crate::typed::<RecordType>(ctx, ty)
-            && matches!(
-                record.deref(ctx).kind(),
-                RecordKind::Object | RecordKind::Tuple | RecordKind::DictionaryEntry
-            )
-        {
+        } else if let Some(record) = RecordType::data_record(ctx, ty) {
             Self::Record(record)
         } else if let Some(array) = definition.downcast_ref::<ArrayType>() {
             let element = array.element();
             match TypedHandle::<RecordType>::from_handle(element, ctx) {
                 Ok(record) if record.deref(ctx).kind() == RecordKind::DictionaryEntry => {
                     let fields = record.deref(ctx);
+                    fields.field("_0")?;
                     Self::Dictionary {
                         entry: record,
-                        key: fields.field("_0")?.1,
                         value: fields.field("_1")?.1,
                     }
                 }
@@ -173,15 +167,6 @@ impl JsonSchema {
         } else {
             Self::Variant(crate::typed::<VariantType>(ctx, ty)?)
         })
-    }
-
-    /// Dictionaries use an array of entries as native storage, despite encoding as objects.
-    pub(crate) fn storage_element(self) -> Option<TypeHandle> {
-        match self {
-            Self::Array(element) => Some(element),
-            Self::Dictionary { entry, .. } => Some(entry.into()),
-            _ => None,
-        }
     }
 
     /// Whether every reachable type can be built directly from the JSON lexer.

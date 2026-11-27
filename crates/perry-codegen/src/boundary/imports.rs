@@ -40,7 +40,7 @@ impl FunctionLowering<'_, '_> {
         }
         self.begin_resources(
             ctx,
-            import.params.iter().any(AbiType::has_resources),
+            import.params.iter().any(|field| field.ty.has_resources()),
             Some(mark),
         )?;
         self.canonical_borrows = true;
@@ -56,7 +56,7 @@ impl FunctionLowering<'_, '_> {
             };
             self.lower_abi(
                 ctx,
-                abi,
+                &abi.ty,
                 BoundaryValue::Native(mir.get_type(ctx), *value),
                 target,
             )?;
@@ -266,17 +266,17 @@ impl FunctionLowering<'_, '_> {
                 }
                 self.runtime_void(ctx, Runtime::CabiRelease, vec![data]);
             }
-            AbiKind::Record(fields) => {
-                for (_, field) in fields {
+            AbiKind::Record(record) => {
+                for (_, field) in &record.fields {
                     let at = field.offset;
-                    self.discard_canonical(ctx, field, area, offset + at)?;
+                    self.discard_canonical(ctx, &field.ty, area, offset + at)?;
                 }
             }
             AbiKind::Sum(sum) => {
                 let tag = self.load(ctx, sum.discriminant(), area, offset);
                 self.sum_switch(ctx, tag, sum.cases(), vec![], |b, ctx, _, (_, payload)| {
                     if let Some(payload) = payload {
-                        b.discard_canonical(ctx, payload, area, offset + payload.offset)?;
+                        b.discard_canonical(ctx, &payload.ty, area, offset + payload.offset)?;
                     }
                     Ok(vec![])
                 })?;

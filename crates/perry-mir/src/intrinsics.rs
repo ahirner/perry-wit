@@ -301,6 +301,6 @@ op_schema! {
     name = "perry.json_copy";
     format = "$0 ` : ` type($0)";
     constructors { pub new(source: Value, target: TypeHandle) => explicit(target); }
-    result(ctx, source: Value): impl OutputContract = Accepts(move |ctx: &Context, ty| crate::JsonSchema::supports_native_copy(ctx, source.get_type(ctx), ty));
+    result(ctx, source: Value): impl OutputContract = Accepts(move |ctx: &Context, ty| crate::JsonCopyPlan::get(ctx, source.get_type(ctx), ty).is_some());
     error = IntrinsicErr::Signature("json_copy".into());
 }

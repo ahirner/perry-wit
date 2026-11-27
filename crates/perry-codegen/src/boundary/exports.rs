@@ -31,7 +31,7 @@ pub(crate) fn export(
         export.params.len()
     );
     let completion =
-        if let Some(payloads) = export.result.as_ref().and_then(AbiType::result_payloads) {
+        if let Some(payloads) = export.result.as_deref().and_then(AbiType::result_payloads) {
             let layout = mir_results
                 .first()
                 .and_then(|&ty| perry_mir::typed::<RecordType>(ctx, ty))
@@ -156,7 +156,7 @@ pub(crate) fn export(
     b.return_resources(ctx);
     b.begin_resources(
         ctx,
-        export.result.as_ref().is_some_and(AbiType::has_resources),
+        export.result.as_deref().is_some_and(AbiType::has_resources),
         None,
     )?;
     let payload = mir_results
@@ -384,7 +384,7 @@ fn async_export(
         b.return_resources(ctx);
         b.begin_resources(
             ctx,
-            export.result.as_ref().is_some_and(AbiType::has_resources),
+            export.result.as_deref().is_some_and(AbiType::has_resources),
             None,
         )?;
         let mut flat = Vec::new();

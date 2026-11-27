@@ -76,13 +76,14 @@ impl Shapes<'_, Preparing<'_>> {
         let collection =
             CollectionKind::from_type_name(name).or_else(|| view.map(CollectionViewKind::source));
         if let Some(collection) = collection {
-            let [key, value] = collection.type_fields(arguments).ok_or_else(|| {
+            let entry = collection.entry(arguments).ok_or_else(|| {
                 let needed = match collection {
                     CollectionKind::Map => "key and value type arguments",
                     CollectionKind::Set => "one element type argument",
                 };
                 diag!(codes::TYPE_MISMATCH, "{name} needs {needed}")
             })?;
+            let [key, value] = entry.key_value();
             let key = carrier(self, &key)?;
             let entries = match collection {
                 CollectionKind::Map => EntryTypes::Map(key, carrier(self, &value)?),

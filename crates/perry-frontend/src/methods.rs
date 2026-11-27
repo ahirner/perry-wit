@@ -101,6 +101,13 @@ macro_rules! registry {
     };
     (@accepts_callback $name:ident, $pattern:pat, $kind:ident) => { matches!($name, $pattern) };
     (@accepts_callback $name:ident, $pattern:pat,) => { false };
+    (@pattern $variant:ident $arguments:tt) => { Self::$variant(..) };
+    (@pattern $variant:ident [$($arg:ident),*] $kind:ident) => { Self::$variant($($arg),*) };
+    (@operands $arguments:tt) => { None };
+    (@operands [$cb:ident] Comparator) => { $cb.map(|cb| (cb, None)) };
+    (@operands [$cb:ident, $init:ident] Fold) => { Some(($cb, $init)) };
+    (@operands [$search:ident, $cb:ident] Replacement) => { Some(($search, Some($cb))) };
+    (@operands [$cb:ident] $kind:ident) => { Some(($cb, None)) };
     (@callback $kind:ident) => { Some(Callback::$kind) };
     (@callback) => { None };
     ($( $family:pat, $class:literal {
@@ -156,6 +163,13 @@ macro_rules! registry {
         }
 
         impl<'s> Call<'s> {
+            pub(crate) fn callback_operands(&self) -> Option<(&'s Expr, Option<&'s Expr>)> {
+                match *self {
+                    $($(registry!(@pattern $variant [$($argument),*] $($callback)?) =>
+                        registry!(@operands [$($argument),*] $($callback)?),)*)*
+                }
+            }
+
             pub(crate) fn method(&self) -> Method {
                 match self { $($(Self::$variant(..) => Method::$variant,)*)* }
             }
@@ -186,23 +200,6 @@ mod statics;
 pub(crate) use statics::{StaticMethod, TemporalFactory};
 crate::method_catalog!(registry);
 impl<'s> Call<'s> {
-    pub(crate) fn array_callback(&self) -> Option<(&'s Expr, Option<&'s Expr>)> {
-        Some(match *self {
-            Self::ArrayMap(cb)
-            | Self::ArrayFilter(cb)
-            | Self::ArrayFlatMap(cb)
-            | Self::ArrayFind(cb)
-            | Self::ArrayFindIndex(cb)
-            | Self::ArraySome(cb)
-            | Self::ArrayEvery(cb)
-            | Self::ArrayForEach(cb)
-            | Self::ArraySort(Some(cb))
-            | Self::ArrayToSorted(Some(cb)) => (cb, None),
-            Self::ArrayReduce(cb, initial) | Self::ArrayReduceRight(cb, initial) => (cb, initial),
-            _ => return None,
-        })
-    }
-
     pub(crate) fn expression(expr: &'s Expr) -> Option<(CallReceiver<'s>, Self)> {
         match expr {
             Expr::SetAdd { set_id, value } => {

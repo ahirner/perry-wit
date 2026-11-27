@@ -1,6 +1,7 @@
 //! Contextual typing for built-in callbacks.
 use super::calls::CallOrigin;
 use super::*;
+use crate::collections::Yield::Pair;
 use crate::engine::boundary::TemplateView;
 use crate::methods::{Callback as Cb, Method, MethodResult, ReplacementArg};
 
@@ -50,7 +51,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(Some(Ty::BOTTOM));
             }
             return Ok(self
-                .contextual_callback(s, expr, key_fn, &[elem, Ty::NUMBER])?
+                .contextual_callback(s, expr, key_fn, &Pair(Ty::NUMBER, elem).indexed_args())?
                 .map(|key| {
                     if key == Ty::BOTTOM {
                         return Ty::BOTTOM;
@@ -92,7 +93,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 s,
                 expr,
                 map_fn,
-                &[elem, Ty::NUMBER],
+                &Pair(Ty::NUMBER, elem).indexed_args(),
                 MethodResult::Mapped,
                 MethodResultArgs::receiver_only(src),
             );
@@ -120,17 +121,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         let (stripped, _) = self.types.strip_nullish(obj_ty);
         let mut result_args = MethodResultArgs::receiver_only(raw_obj);
         let replacement: Vec<_>;
-        let (callback, inputs): (_, &[Ty]) = if matches!(cb_kind, Cb::Collection) {
+        let mut callback = first_arg;
+        let inputs: &[Ty] = if matches!(cb_kind, Cb::Collection) {
             let TyKind::Generic { base, args } = self.types.kind(stripped) else {
                 return Ok(None);
             };
-            let Some([key, value]) =
-                crate::source::CollectionKind::from_type_name(base.get(self.ctx))
-                    .and_then(|kind| kind.type_fields(self.types.ty_slice(args)))
+            let Some(entry) = crate::source::CollectionKind::from_type_name(base.get(self.ctx))
+                .and_then(|kind| kind.entry(self.types.ty_slice(args)))
             else {
                 return Ok(None);
             };
-            (first_arg, &[value, key, stripped][..])
+            &entry.callback_args(stripped)
         } else if matches!(cb_kind, Cb::Replacement) {
             let Some(cb) = second_arg else {
                 return Ok(None);
@@ -157,7 +158,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             } else {
                 vec![Ty::STRING]
             };
-            (cb, replacement.as_slice())
+            callback = cb;
+            &replacement
         } else {
             if matches!(cb_kind, Cb::Comparator) && matches!(first_arg, Expr::Undefined) {
                 return Ok(None);
@@ -176,21 +178,18 @@ impl<'h, 'a> Solver<'h, 'a> {
                     Some(init) => self.eval_expr(s, init)?,
                     None => elem,
                 };
-                if acc == Ty::BOTTOM {
-                    return Ok(Some(Ty::BOTTOM));
-                }
                 result_args.arg0 = Some(acc);
-                (first_arg, &[acc, elem, Ty::NUMBER, input_array][..])
+                &Pair(Ty::NUMBER, elem).reducer_args(input_array, acc)
             } else if matches!(cb_kind, Cb::Comparator) {
                 let elem = self.types.exclude_absences(elem, Absence::Undefined);
-                (first_arg, &[elem, elem][..])
+                &[elem, elem]
             } else {
                 let elem = if matches!(cb_kind, Cb::AllIndices) {
                     self.types.with_absences(elem, Absence::Undefined)
                 } else {
                     elem
                 };
-                (first_arg, &[elem, Ty::NUMBER, input_array][..])
+                &Pair(Ty::NUMBER, elem).callback_args(input_array)
             }
         };
         self.eval_method_callback(s, expr, callback, inputs, method.result_rule(), result_args)

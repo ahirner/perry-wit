@@ -5,7 +5,7 @@
 //! support explicit tags and checked completion-style returns and throws. Async exports use
 //! stackless P3 callbacks, and async imports retain a canonical transfer until the host settles it.
 use crate::{
-    aggregates::{RecordField, RecordLayout},
+    aggregates::{RecordField, RecordLayout, RecordLayouts},
     function::FunctionLowering,
     host::{EffectHost, Foreign, ValueHost},
     module::ModuleState,
@@ -17,8 +17,8 @@ use perry_abi::layout::{array as layout, string as strings};
 use perry_contract::types::{Integer, Scalar};
 use perry_mir::{ArrayType, RecordType};
 use perry_wit_diagnostics::{
-    Diagnostic, Result, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag,
-    ensure_internal, internal,
+    Result, bail_diag, bail_internal, bail_unsupported, codes, diag, ensure_diag, ensure_internal,
+    internal,
 };
 use pliron::{
     builtin::{
@@ -36,6 +36,7 @@ use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
     ops::{CallOp, set_export},
 };
+use std::{rc::Rc, sync::Arc};
 use wit_parser::abi::{WasmSignature, WasmType};
 
 mod canonical;
@@ -60,6 +61,11 @@ pub struct AbiType {
     pub kind: AbiKind,
     pub flat: Option<Box<[WasmType]>>,
     pub size: u32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AbiField {
+    pub ty: Arc<AbiType>,
     pub offset: u32,
 }
 
@@ -67,9 +73,9 @@ pub struct AbiType {
 pub enum AbiKind {
     Scalar(Scalar),
     String,
-    List(Box<AbiType>),
+    List(Arc<AbiType>),
     /// Fields in WIT order, named as the TypeScript record fields.
-    Record(Vec<(String, AbiType)>),
+    Record(AbiRecord),
     Sum(SumLayout),
     /// `stream<u8>`: the readable end's handle, a `ReadableStream<Uint8Array>` in TypeScript.
     ByteStream,
@@ -77,6 +83,61 @@ pub enum AbiKind {
         key: u32,
         owned: bool,
     },
+}
+
+#[derive(Clone, Debug)]
+pub struct AbiRecord {
+    wit: wit_parser::Type,
+    fields: Vec<(String, AbiField)>,
+}
+
+impl AbiKind {
+    pub fn record(wit: wit_parser::Type, fields: impl Iterator<Item = (String, AbiField)>) -> Self {
+        Self::Record(AbiRecord {
+            wit,
+            fields: fields.collect(),
+        })
+    }
+}
+
+// Equal structural signatures can share numeric constraints across named WIT types.
+impl PartialEq for AbiRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields == other.fields
+    }
+}
+
+impl RecordLayouts {
+    fn boundary_record(&mut self, ctx: &Context, mir_ty: TypeHandle) -> Result<Rc<RecordLayout>> {
+        let Some(record) = RecordType::data_record(ctx, mir_ty) else {
+            bail_diag!(
+                codes::CONTRACT_MISMATCH,
+                "WIT record needs a TypeScript object type"
+            )
+        };
+        self.get(ctx, record)
+    }
+
+    fn bind_record(
+        &mut self,
+        ctx: &Context,
+        mir: TypeHandle,
+        record: &AbiRecord,
+    ) -> Result<(Rc<RecordLayout>, Rc<[RecordField]>)> {
+        use std::collections::hash_map::Entry;
+        let layout = self.boundary_record(ctx, mir)?;
+        let slots = match self.wit_slots.entry((layout.record, record.wit)) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(
+                record
+                    .fields
+                    .iter()
+                    .map(|(name, _)| layout.field(ctx, name))
+                    .collect::<Result<_>>()?,
+            ),
+        };
+        Ok((layout, slots.clone()))
+    }
 }
 
 /// A statically typed host import from the selected WIT world.
@@ -102,9 +163,9 @@ pub struct Import {
     pub binding: String,
     pub module: String,
     pub name: String,
-    pub params: Vec<AbiType>,
+    pub params: Vec<AbiField>,
     pub indirect_size: Option<u32>,
-    pub result: Option<AbiType>,
+    pub result: Option<Arc<AbiType>>,
     pub asynchronous: bool,
 }
 
@@ -138,9 +199,9 @@ pub struct Export {
     pub signature: WasmSignature,
     /// The MIR function implementing it.
     pub function: String,
-    pub params: Vec<AbiType>,
+    pub params: Vec<AbiField>,
     pub indirect_size: Option<u32>,
-    pub result: Option<AbiType>,
+    pub result: Option<Arc<AbiType>>,
     pub kind: ExportKind,
 }
 
@@ -156,7 +217,7 @@ impl Export {
     }
 
     pub(crate) fn exception_result(&self) -> Option<&AbiType> {
-        let result = self.result.as_ref()?;
+        let result = self.result.as_deref()?;
         match self.kind {
             ExportKind::Async {
                 completion: AsyncCompletion::RejectionText(_),
@@ -389,15 +450,15 @@ impl FunctionLowering<'_, '_> {
                 let handle = source.read(self, ctx, MemKind::I32, 0)?;
                 self.lift_stream(ctx, mir_ty, handle)
             }
-            AbiKind::Record(fields) => {
-                let layout = self.boundary_record(ctx, mir_ty)?;
-                let mut values = Vec::with_capacity(fields.len());
-                for (name, field_ty) in fields {
-                    let at = field_ty.offset;
-                    let field = layout.field(ctx, name)?;
-                    let lift_mir = scalar_mir_type(ctx, field.ty);
-                    let value = self.lift_abi(ctx, field_ty, lift_mir, source.at(at))?;
-                    values.push((field, value));
+            AbiKind::Record(record) => {
+                let (layout, slots) = self.state.record_layouts.bind_record(ctx, mir_ty, record)?;
+                let mut values = Vec::with_capacity(slots.len());
+                for ((_, abi), &field) in record.fields.iter().zip(slots.iter()) {
+                    let mir = scalar_mir_type(ctx, field.ty);
+                    values.push((
+                        field,
+                        self.lift_abi(ctx, &abi.ty, mir, source.at(abi.offset))?,
+                    ));
                 }
                 self.build_record(ctx, &layout, values)
             }
@@ -466,30 +527,6 @@ impl FunctionLowering<'_, '_> {
         })?;
         self.store(ctx, MemKind::I32, array, layout::LEN, len);
         Ok(array)
-    }
-
-    fn boundary_record(
-        &mut self,
-        ctx: &Context,
-        mir_ty: TypeHandle,
-    ) -> Result<std::rc::Rc<RecordLayout>> {
-        let record = TypedHandle::<RecordType>::from_handle(mir_ty, ctx).map_err(|_| {
-            Diagnostic::new(
-                codes::CONTRACT_MISMATCH,
-                "WIT record needs a TypeScript object type",
-            )
-        })?;
-        ensure_diag!(
-            matches!(
-                record.deref(ctx).kind(),
-                perry_mir::RecordKind::Object
-                    | perry_mir::RecordKind::Tuple
-                    | perry_mir::RecordKind::DictionaryEntry
-            ),
-            codes::CONTRACT_MISMATCH,
-            "WIT record needs a TypeScript object type"
-        );
-        self.state.record_layouts.get(ctx, record)
     }
 
     /// Store fields in native slots and preserve their incoming insertion order.
@@ -666,18 +703,16 @@ impl FunctionLowering<'_, '_> {
                 target.write(self, ctx, MemKind::I32, 0, data);
                 target.write(self, ctx, MemKind::I32, 4, len);
             }
-            AbiKind::Record(fields) => {
+            AbiKind::Record(record) => {
                 let value = value.scalar()?;
-                let layout = self.boundary_record(ctx, mir_ty)?;
-                for (name, field_ty) in fields {
-                    let at = field_ty.offset;
-                    let field = layout.field(ctx, name)?;
+                let (_, slots) = self.state.record_layouts.bind_record(ctx, mir_ty, record)?;
+                for ((_, field_ty), field) in record.fields.iter().zip(slots.iter()) {
                     let value = self.load_slot_value(ctx, value, field.offset, field.ty)?;
                     self.lower_abi(
                         ctx,
-                        field_ty,
+                        &field_ty.ty,
                         BoundaryValue::Native(field.ty, value),
-                        target.at(at),
+                        target.at(field_ty.offset),
                     )?;
                 }
             }

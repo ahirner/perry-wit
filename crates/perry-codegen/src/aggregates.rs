@@ -22,7 +22,11 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
-use std::{cell::OnceCell, collections::hash_map::Entry, rc::Rc};
+use std::{
+    cell::OnceCell,
+    collections::{HashMap, hash_map::Entry},
+    rc::Rc,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) struct RecordField {
@@ -77,9 +81,10 @@ impl RecordLayout {
 }
 
 #[derive(Default)]
-pub(crate) struct RecordLayouts(
-    std::collections::HashMap<TypedHandle<RecordType>, Rc<RecordLayout>>,
-);
+pub(crate) struct RecordLayouts {
+    native: HashMap<TypedHandle<RecordType>, Rc<RecordLayout>>,
+    pub(super) wit_slots: HashMap<(TypedHandle<RecordType>, wit_parser::Type), Rc<[RecordField]>>,
+}
 
 impl RecordLayouts {
     pub(crate) fn get(
@@ -87,7 +92,7 @@ impl RecordLayouts {
         ctx: &Context,
         record: TypedHandle<RecordType>,
     ) -> Result<Rc<RecordLayout>> {
-        let entry = match self.0.entry(record) {
+        let entry = match self.native.entry(record) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let mut size = record::HEADER;

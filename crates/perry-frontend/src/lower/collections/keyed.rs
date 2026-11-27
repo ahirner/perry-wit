@@ -257,30 +257,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         })
     }
 
-    /// Lower `forEach`, passing `(value, key, collection)` with `key` equal to `value` on a `Set`.
-    pub(crate) fn collection_for_each(
-        &mut self,
-        ctx: &mut Context,
-        arr: Value,
-        callback: &'s Expr,
-    ) -> Result<Value> {
-        let callback = self.prepare_callback(ctx, callback)?;
-        let is_set = self
-            .shapes
-            .boxed_collection(ctx, arr.get_type(ctx), CollectionKind::Set)
-            .is_some();
-        self.iterate(ctx, Input::Collection(arr), |b, ctx, entry, _, _, _| {
-            let (k, v) = if is_set {
-                (entry, entry)
-            } else {
-                b.entry_fields(ctx, entry)?
-            };
-            b.effect_callback(ctx, callback, &[v, k, arr])
-        })?;
-        let ty = void_type(ctx);
-        Ok(self.emit_value(UndefinedOp::with_type(ctx, ty), ctx))
-    }
-
     pub(crate) fn set_add(
         &mut self,
         ctx: &mut Context,
@@ -343,6 +319,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         elem_ty: TypeHandle,
     ) -> Result<()> {
         self.iterate(ctx, Input::Collection(source), |b, ctx, val, _, next, _| {
+            let val = val.into_value(b, ctx)?;
             if let SetSelection::PresentIn(set) | SetSelection::AbsentFrom(set) = selection {
                 let present = b.kv_has(ctx, set, val, elem_ty)?;
                 let keep = if matches!(selection, SetSelection::AbsentFrom(_)) {
@@ -407,7 +384,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         let declared =
             expected.and_then(|ty| self.shapes.boxed_collection(ctx, ty, CollectionKind::Map));
         self.iterate(ctx, Input::Collection(items), |b, ctx, elem, idx, _, _| {
-            let raw_key = b.array_callback(ctx, callback, &[elem, idx])?;
+            let elem = elem.into_value(b, ctx)?;
+            let raw_key =
+                b.array_callback(ctx, callback, &Yield::Pair(idx, elem).indexed_args())?;
             let layout = match declared {
                 Some(map) => map,
                 None => b

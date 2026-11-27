@@ -440,7 +440,7 @@ fn bind_exports(
     if exports.iter().any(|e| {
         e.params
             .iter()
-            .any(|p| matches!(p.kind, boundary::AbiKind::ByteStream))
+            .any(|p| matches!(p.ty.kind, boundary::AbiKind::ByteStream))
     }) {
         state.uses_streams = true;
     }

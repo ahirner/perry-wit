@@ -2,14 +2,13 @@
 use super::abi::Layouts;
 use perry_codegen::boundary::Import;
 use perry_frontend::wit::WorldTypes;
-use wit_parser::{Resolve, WorldId};
+use wit_parser::WorldId;
 
 pub(super) fn bindings<'r>(
-    layouts: &Layouts,
-    resolve: &'r Resolve,
+    layouts: &mut Layouts<'r>,
     world: WorldId,
 ) -> (WorldTypes<'r>, Vec<Import>) {
-    WorldTypes::with_imports(resolve, Some(world), |module, binding, function| {
+    WorldTypes::with_imports(layouts.resolve, Some(world), |module, binding, function| {
         let result = function
             .result
             .map(|ty| layouts.value(ty))

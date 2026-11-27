@@ -19,7 +19,6 @@ mod view;
 mod writer;
 
 use perry_rt_sys::number::Number;
-use reflection::native_property;
 pub(crate) use reflection::{std_json_display, std_json_strict_equal};
 
 use crate::runtime::{TYPE_ERROR, adopt, from_static, raise, scalars_length};
@@ -118,8 +117,7 @@ fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
     }
     unsafe {
         match word(value, 0) {
-            NATIVE => return native_property(value, name),
-            VIEW => return view::property(value, name),
+            NATIVE | VIEW => return view::property(value, name),
             EXCEPTION => {
                 let error = node(word(value, 8));
                 return match name {

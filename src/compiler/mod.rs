@@ -126,8 +126,8 @@ pub(crate) fn compile_sources(
         return http::compile(source, identity, modules, resolve, world, options);
     }
     let ctx = &mut Context::new();
-    let layouts = abi::Layouts::new(resolve)?;
-    let (mut foreign, mut bindings) = imports::bindings(&layouts, resolve, world);
+    let mut layouts = abi::Layouts::new(resolve)?;
+    let (mut foreign, mut bindings) = imports::bindings(&mut layouts, world);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
     let perry_frontend::LoweredProgram {
         module: mir,
@@ -140,7 +140,7 @@ pub(crate) fn compile_sources(
         &foreign,
         Some((resolve, world)),
     )?;
-    let mut exports = bind::exports(&layouts, ctx, targets, resolve)?;
+    let mut exports = bind::exports(&mut layouts, ctx, targets)?;
     let mut analyses = optimize(ctx, &mir, options.limits)?;
     bind::finalize_exports(ctx, &mir, &mut exports)?;
     emit_component(

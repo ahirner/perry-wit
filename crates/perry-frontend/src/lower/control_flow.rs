@@ -316,6 +316,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let guards = self.variant_guards.depth();
         self.invalidate_inline_writes(body, []);
         let result = self.iterate(ctx, input, |b, ctx, item, _, next, done| {
+            let item = item.into_value(b, ctx)?;
             let local = b.initialized_local(ctx, item);
             b.locals.insert(element, local);
             b.frame.controls.push(Control::Loop {

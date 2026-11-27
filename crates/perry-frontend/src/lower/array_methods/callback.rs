@@ -17,17 +17,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
     }
 
-    /// Apply a callback whose result the caller discards, as `forEach` does.
-    pub(in crate::lower) fn effect_callback(
-        &mut self,
-        ctx: &mut Context,
-        callback: Callback<'s>,
-        arguments: &[Value],
-    ) -> Result<()> {
-        self.invoke_callback(ctx, callback, arguments, Some(InlineResult::Void))
-            .map(|_| ())
-    }
-
     /// Apply `callback` to `arguments`. An inline closure stores the `expected` result, or else
     /// the result type the frontend inferred for it.
     pub(in crate::lower) fn invoke_callback(

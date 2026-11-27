@@ -1,10 +1,10 @@
-use crate::{function::FunctionLowering, repr::optional_inner, runtime::Runtime};
-use perry_mir::{ArrayType, JsonSchema, PlironResultExt as _, RecordType};
-use perry_wit_diagnostics::Result;
+use crate::{function::FunctionLowering, runtime::Runtime};
+use perry_mir::{CopySlot, JsonCopyPlan};
+use perry_wit_diagnostics::{Result, internal};
 use pliron::{
     context::Context,
     operation::Operation,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
     value::Value,
 };
 use pliron_wasm::attrs::MemKind;
@@ -33,7 +33,10 @@ impl FunctionLowering<'_, '_> {
         };
         let schema = self.layout_descriptor(ctx, ty)?;
         let (bits, failed, tag) = if copy {
-            let plan = self.json_copy_plan(ctx, operand.get_type(ctx), ty)?;
+            let pair = (operand.get_type(ctx), ty);
+            let layout = JsonCopyPlan::get(ctx, pair.0, pair.1)
+                .ok_or_else(|| internal!("incompatible JSON copy types"))?;
+            let plan = self.json_copy_plan(ctx, layout, pair)?;
             let plan = self.i32_const(ctx, plan as i32);
             let (bits, tag) = self.json_carrier_bits(ctx, operand.get_type(ctx), source);
             let position = self.i32_const(ctx, 0);
@@ -106,54 +109,43 @@ impl FunctionLowering<'_, '_> {
         )
     }
 
-    pub(super) fn json_copy_plan(
+    fn json_copy_plan(
         &mut self,
         ctx: &Context,
-        source: TypeHandle,
-        target: TypeHandle,
+        layout: &JsonCopyPlan,
+        pair: (TypeHandle, TypeHandle),
     ) -> Result<u32> {
-        if let Some(&plan) = self.state.json_copy_plans.get(&(source, target)) {
+        if let Some(&plan) = self.state.json_copy_plans.get(&pair) {
             return Ok(plan);
         }
-        let target_desc = self.layout_descriptor(ctx, target)?;
-        let source_desc = self.layout_descriptor(ctx, source)?;
-        let source_inner = optional_inner(ctx, source).unwrap_or(source);
-        let target_inner = optional_inner(ctx, target).unwrap_or(target);
-        let count = match JsonSchema::of(ctx, target_inner) {
-            Some(JsonSchema::Record(record)) => record.deref(ctx).fields().to_diag(ctx)?.len(),
-            Some(JsonSchema::Variant(variant)) => variant.deref(ctx).cases().len(),
-            _ => 1,
-        };
-        let plan = self.state.data.append(4, &vec![0; 8 + 8 * count]);
-        self.state.json_copy_plans.insert((source, target), plan);
-        let mut words = Vec::with_capacity(2 + 2 * count);
-        words.extend([target_desc, source_desc]);
-        if let Some(target) = perry_mir::typed::<RecordType>(ctx, target_inner) {
-            let source = TypedHandle::<RecordType>::from_handle(source_inner, ctx).to_diag(ctx)?;
-            let source = self.state.record_layouts.get(ctx, source)?;
-            for (name, ty) in target.deref(ctx).fields().to_diag(ctx)? {
-                if let Some(field) = source.fields.get(name) {
-                    words.extend([self.json_copy_plan(ctx, field.ty, *ty)?, field.offset]);
-                } else {
-                    words.extend([0, 0]);
-                }
-            }
-        } else if let Some(target) = perry_mir::typed::<ArrayType>(ctx, target_inner) {
-            let source = TypedHandle::<ArrayType>::from_handle(source_inner, ctx).to_diag(ctx)?;
-            words.push(self.json_copy_plan(
-                ctx,
-                source.deref(ctx).element(),
-                target.deref(ctx).element(),
-            )?);
-        } else if let Some(JsonSchema::Variant(variant)) = JsonSchema::of(ctx, target_inner) {
-            for (_, ty) in variant.deref(ctx).cases() {
-                words.extend([
-                    ty.map(|ty| self.json_copy_plan(ctx, ty, ty))
-                        .transpose()?
-                        .unwrap_or(0),
-                    0,
-                ]);
-            }
+        let slots = layout
+            .slots(pair)
+            .ok_or_else(|| internal!("missing JSON copy layout"))?;
+        let target = self.layout_descriptor(ctx, pair.1)?;
+        let source = self.layout_descriptor(ctx, pair.0)?;
+        let plan = self.state.data.append(4, &vec![0; 8 + 8 * slots.len()]);
+        self.state.json_copy_plans.insert(pair, plan);
+        let mut words = vec![target, source];
+        for slot in slots {
+            let entry = if let Some(slot) = slot {
+                let offset = match *slot {
+                    CopySlot::Field(_, record, index) => {
+                        self.state
+                            .record_layouts
+                            .get(ctx, record)?
+                            .fields
+                            .get_index(index)
+                            .ok_or_else(|| internal!("missing JSON copy source field"))?
+                            .1
+                            .offset
+                    }
+                    CopySlot::Payload(_) => 0,
+                };
+                [self.json_copy_plan(ctx, layout, slot.types())?, offset]
+            } else {
+                [0, 0]
+            };
+            words.extend(entry);
         }
         self.write_data_words(plan, words);
         Ok(plan)

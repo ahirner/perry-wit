@@ -25,7 +25,7 @@ impl FunctionLowering<'_, '_> {
         let mut args = Vec::with_capacity(export.params.len());
         for (i, (ty, &mir)) in export.params.iter().zip(mir).enumerate() {
             args.push(
-                self.lift_abi(ctx, ty, mir, source.at(ty.offset))
+                self.lift_abi(ctx, &ty.ty, mir, source.at(ty.offset))
                     .map_err(|e| e.with_fallback_span(export.annotation(i)))?,
             );
         }

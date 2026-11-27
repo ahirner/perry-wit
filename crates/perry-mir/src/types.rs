@@ -207,6 +207,16 @@ impl RecordType {
         &self.name
     }
 
+    /// An object, tuple, or dictionary entry whose fields represent user data.
+    pub fn data_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<Self>> {
+        typed::<Self>(ctx, ty).filter(|r| {
+            matches!(
+                r.deref(ctx).kind,
+                RecordKind::Object | RecordKind::Tuple | RecordKind::DictionaryEntry
+            )
+        })
+    }
+
     pub fn is_tuple(&self) -> bool {
         self.kind != RecordKind::Object
     }

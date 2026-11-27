@@ -375,3 +375,32 @@ fn group_by_emits_one_key_search_per_input_item() {
     assert_eq!(loops.num_loops(), 2);
     assert_eq!(loops.top_level_loops().count(), 1);
 }
+
+#[test]
+fn map_iteration_materializes_only_observable_pairs() -> perry_wit_diagnostics::Result<()> {
+    use pliron::operation::Operation;
+    for (body, pairs) in [
+        ("entries.forEach(observe);", 0),
+        (
+            "for (const pair of entries) { observe(pair[1], pair[0]); }",
+            1,
+        ),
+    ] {
+        let ctx = &mut Context::new();
+        let source = format!(
+            "function observe(v:number, k:number) {{ if (v===k) throw new Error('same'); }}
+            export function run(entries:Map<number,number>) {{ {body} }}"
+        );
+        let module = lower_without_foreign(ctx, &source, "pairs.ts")?;
+        let allocations = perry_mir::functions(module.get_operation(), ctx)
+            .into_iter()
+            .flat_map(|f| perry_mir::operations(ctx, &f))
+            .filter(|&op| {
+                Operation::is_op::<perry_mir::AllocOp>(op, ctx)
+                    && op.deref(ctx).get_num_operands() == 2
+            });
+        // Both loops need a three-field cursor. Only the for-of body receives a pair.
+        assert_eq!(allocations.count(), pairs, "{body}");
+    }
+    Ok(())
+}

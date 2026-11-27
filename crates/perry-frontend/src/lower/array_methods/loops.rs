@@ -119,20 +119,29 @@ impl<'s> FunctionBuilder<'s, '_> {
         let op = ArrayAtOp::new(ctx, array, at).to_diag(ctx)?;
         Ok(self.emit_value(op, ctx))
     }
-    pub(crate) fn array_for_each(
+    pub(crate) fn for_each(
         &mut self,
         ctx: &mut Context,
-        arr: Value,
+        receiver: Value,
         callback: &'s Expr,
+        input: fn(Value) -> Input,
     ) -> Result<Value> {
-        let arr = self.defined(ctx, arr)?;
-        self.array_element(ctx, arr)?;
+        let receiver = self.defined(ctx, receiver)?;
+        let input = input(receiver);
+        let indexed = matches!(input, Input::Array(..));
         let callback = self.prepare_callback(ctx, callback)?;
-        self.iterate(
-            ctx,
-            Input::Array(arr, Holes::Skip),
-            |b, ctx, item, idx, _, _| b.effect_callback(ctx, callback, &[item, idx, arr]),
-        )?;
+        self.iterate(ctx, input, |b, ctx, entry, index, _, _| {
+            let entry = match entry {
+                Item(value) if indexed => Pair(index, value),
+                entry => entry,
+            };
+            b.invoke_callback(
+                ctx,
+                callback,
+                &entry.callback_args(receiver),
+                Some(crate::lower::inline::InlineResult::Void),
+            )
+        })?;
         let ty = void_type(ctx);
         Ok(self.emit_value(UndefinedOp::with_type(ctx, ty), ctx))
     }

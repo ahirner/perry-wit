@@ -23,10 +23,10 @@ impl AbiType {
         match &self.kind {
             AbiKind::Resource { .. } => true,
             AbiKind::List(value) => value.has_resources(),
-            AbiKind::Record(fields) => fields.iter().any(|(_, ty)| ty.has_resources()),
+            AbiKind::Record(record) => record.fields.iter().any(|(_, ty)| ty.ty.has_resources()),
             AbiKind::Sum(sum) => sum
                 .cases()
-                .any(|(_, ty)| ty.is_some_and(Self::has_resources)),
+                .any(|(_, ty)| ty.is_some_and(|field| field.ty.has_resources())),
             _ => false,
         }
     }

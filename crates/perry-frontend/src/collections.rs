@@ -19,10 +19,10 @@ impl CollectionKind {
         }
     }
 
-    pub(crate) fn type_fields<T: Copy>(self, args: &[T]) -> Option<[T; 2]> {
+    pub(crate) fn entry<T: Copy>(self, args: &[T]) -> Option<Yield<T>> {
         match (self, args) {
-            (Self::Map, &[k, v]) => Some([k, v]),
-            (Self::Set, &[v]) => Some([v; 2]),
+            (Self::Map, &[k, v]) => Some(Yield::Pair(k, v)),
+            (Self::Set, &[v]) => Some(Yield::Item(v)),
             _ => None,
         }
     }
@@ -51,6 +51,27 @@ impl<T> Yield<T> {
             Self::Item(value) => item(value),
             Self::Pair(a, b) => pair([a, b]),
         }
+    }
+}
+
+impl<T: Copy> Yield<T> {
+    pub(crate) fn key_value(self) -> [T; 2] {
+        self.materialize(|value| [value; 2], std::convert::identity)
+    }
+
+    pub(crate) fn indexed_args(self) -> [T; 2] {
+        let [key, value] = self.key_value();
+        [value, key]
+    }
+
+    pub(crate) fn callback_args(self, receiver: T) -> [T; 3] {
+        let [value, key] = self.indexed_args();
+        [value, key, receiver]
+    }
+
+    pub(crate) fn reducer_args(self, receiver: T, accumulator: T) -> [T; 4] {
+        let [value, key, receiver] = self.callback_args(receiver);
+        [accumulator, value, key, receiver]
     }
 }
 

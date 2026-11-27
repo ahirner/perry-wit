@@ -34,6 +34,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             ctx,
             Input::Array(array, Holes::Dense),
             |b, ctx, item, step, _, _| {
+                let item = item.into_value(b, ctx)?;
                 let elem_str = if optional_value(ctx, item.get_type(ctx)).is_some() {
                     b.match_optional(
                         ctx,

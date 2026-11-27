@@ -21,7 +21,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             ctx,
             Input::Array(array, holes),
             |b, ctx, item, current, next| {
-                let mapped = b.array_callback(ctx, callback, &[item, current, array])?;
+                let mapped =
+                    b.array_callback(ctx, callback, &Pair(current, item).callback_args(array))?;
                 Ok(match transform {
                     Transform::Map => ArrayOutput::Item(mapped),
                     Transform::FlatMap => {
@@ -208,8 +209,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Holes::Skip,
             ),
             |b, ctx, item, current, _, _| {
+                let item = item.into_value(b, ctx)?;
                 let acc = b.load(ctx, acc_slot)?;
-                let next_acc = b.array_callback(ctx, callback, &[acc, item, current, array])?;
+                let next_acc =
+                    b.array_callback(ctx, callback, &Pair(current, item).reducer_args(array, acc))?;
                 let fitted = b.fit(ctx, next_acc, acc_ty)?;
                 b.store(ctx, acc_slot, fitted);
                 Ok(())
@@ -400,7 +403,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.collect_items(ctx, input, |b, ctx, item, _, _| {
             let item = if let Some((callback, index)) = mapper {
                 let ordinal = b.load(ctx, index)?;
-                let mapped = b.array_callback(ctx, callback, &[item, ordinal])?;
+                let mapped =
+                    b.array_callback(ctx, callback, &Pair(ordinal, item).indexed_args())?;
                 let one = b.number(ctx, 1.0);
                 let advanced = b.binary(ctx, BinaryKind::Add, ordinal, one);
                 b.store(ctx, index, advanced);

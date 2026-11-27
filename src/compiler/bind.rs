@@ -55,7 +55,7 @@ fn constrain_numbers(
     let mut constrained = false;
     for (index, (source, abi)) in args
         .iter_mut()
-        .zip(&export.params)
+        .zip(export.params.iter().map(|field| &field.ty))
         .chain(results.iter_mut().zip(export.result.iter()))
         .enumerate()
     {
@@ -92,12 +92,12 @@ fn constrain_numbers(
 }
 
 pub(super) fn exports(
-    layouts: &Layouts,
+    layouts: &mut Layouts,
     ctx: &mut Context,
     targets: Vec<perry_frontend::ExportTarget>,
-    resolve: &Resolve,
 ) -> Result<Vec<Export>> {
     use perry_frontend::ExportTarget;
+    let resolve = layouts.resolve;
     let mut bound = Vec::with_capacity(targets.len());
     for target in targets {
         let (mir_function, entry, annotations, source_name, command) = match target {
@@ -113,7 +113,7 @@ pub(super) fn exports(
                         retptr: false,
                     },
                     function: function.get_symbol_name(ctx).into(),
-                    params: vec![layouts.value(Type::U32)?],
+                    params: vec![layouts.field(Type::U32, 0)?],
                     indirect_size: None,
                     result: None,
                     kind: ExportKind::Sync,
@@ -295,12 +295,12 @@ mod tests {
     fn exported_declarations_survive_reordering() -> anyhow::Result<()> {
         let mut resolve = Resolve::default();
         let package = resolve.push_source("api.wit",
-            "package test:order; world api { export left: func(x: u32) -> u32; export right: func() -> string; }")?;
+            "package test:order; world api { record point { n: u32, label: string } export left: func(x: point, y: point) -> point; export right: func() -> string; }")?;
         let world = resolve.select_world(&[package], Some("api"))?;
         let ctx = &mut Context::new();
         let program = perry_frontend::lower_world(
             ctx,
-            "export function left(x: number) { return x; } export function right() { return 'r'; }",
+            "export function left(x: {n:number,label:string}, y: {n:number,label:string}) { return x; } export function right() { return 'r'; }",
             "order.ts",
             &Default::default(),
             &perry_frontend::wit::WorldTypes::new(&resolve, Some(world)),
@@ -308,14 +308,19 @@ mod tests {
         )?;
         let mut targets = program.exports;
         targets.reverse();
-        let bound = exports(&Layouts::new(&resolve)?, ctx, targets, &resolve)?;
+        let bound = exports(&mut Layouts::new(&resolve)?, ctx, targets)?;
         assert_eq!(
             bound
                 .iter()
                 .map(|e| (e.core_name.as_str(), e.params.len()))
                 .collect::<Vec<_>>(),
-            [("right", 0), ("left", 1)]
+            [("right", 0), ("left", 2)]
         );
+        let left = &bound[1];
+        let (x, y) = (&left.params[0], &left.params[1]);
+        assert_eq!((x.offset, y.offset), (0, 12));
+        assert!(std::sync::Arc::ptr_eq(&x.ty, &y.ty));
+        assert!(std::sync::Arc::ptr_eq(&x.ty, left.result.as_ref().unwrap()));
         Ok(())
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::collections::Yield;
 use crate::lower::array_methods::Direction;
 use crate::lower::builder::insert_before_terminator;
 
@@ -53,7 +54,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         body: impl FnOnce(
             &mut Self,
             &mut Context,
-            Value,
+            Yield<Value>,
             Value,
             Ptr<BasicBlock>,
             Ptr<BasicBlock>,
@@ -135,14 +136,15 @@ impl<'s> FunctionBuilder<'s, '_> {
                         b.intrinsic(ctx, Intrinsic::StringIndex, vec![value, current])
                     }
                     Input::Collection(value) => {
-                        b.visit_collection_entry(ctx, value, current, cursor, next)?
+                        let entry = b.visit_collection_entry(ctx, value, current, cursor, next)?;
+                        return body(b, ctx, entry, current, next, done);
                     }
                     Input::UndefinedCount(_) => {
                         let ty = void_type(ctx);
                         b.emit_value(UndefinedOp::with_type(ctx, ty), ctx)
                     }
                 };
-                body(b, ctx, item, current, next, done)
+                body(b, ctx, Yield::Item(item), current, next, done)
             },
         )
     }
@@ -157,6 +159,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         found: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<Value>,
     ) -> Result<Value> {
         let result = self.iterate(ctx, input, |b, ctx, item, index, next, _| {
+            let item = item.into_value(b, ctx)?;
             let matched = matches(b, ctx, item, index)?;
             let hit = b.new_block(ctx, "search_hit");
             b.branch(ctx, matched, hit, next);
@@ -192,6 +195,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             _ => None,
         };
         self.iterate(ctx, input, |b, ctx, value, index, next, _| {
+            let value = value.into_value(b, ctx)?;
             let output = item(b, ctx, value, index, next)?;
             let element = match output {
                 ArrayOutput::Item(value) => value.get_type(ctx),

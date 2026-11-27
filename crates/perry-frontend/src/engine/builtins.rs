@@ -83,7 +83,7 @@ pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> 
             let view = CollectionViewKind::from_type_name(name).or_else(|| {
                 CollectionKind::from_type_name(name).map(CollectionKind::default_view)
             })?;
-            let fields = view.source().type_fields(arguments)?;
+            let fields = view.source().entry(arguments)?.key_value();
             Some(
                 view.project(fields)
                     .materialize(std::convert::identity, |fields| types.tuple(&fields)),

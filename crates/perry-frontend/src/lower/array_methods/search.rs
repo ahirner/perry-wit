@@ -131,7 +131,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                         }
                     }
                     Predicate::Callback(callback) => {
-                        let value = b.array_callback(ctx, callback, &[item, current, array])?;
+                        let value = b.array_callback(
+                            ctx,
+                            callback,
+                            &Pair(current, item).callback_args(array),
+                        )?;
                         b.truthy(ctx, value)?
                     }
                 };

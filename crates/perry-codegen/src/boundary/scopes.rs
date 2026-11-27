@@ -27,6 +27,7 @@ impl Scope {
         let marshalling = export
             .params
             .iter()
+            .map(|field| &field.ty)
             .chain(&export.result)
             .any(|ty| !ty.is_scalar());
         if marshalling || export.indirect_size.is_some() || export.is_async() {

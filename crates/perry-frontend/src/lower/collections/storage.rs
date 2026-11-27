@@ -200,18 +200,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         let entries = self.storage_field(ctx, source, Field::BoxEntries)?;
         let entry = self.element_at(ctx, entries, idx)?;
-        self.project_entry(ctx, layout.view, entry)
-    }
-
-    fn project_entry(
-        &mut self,
-        ctx: &mut Context,
-        view: CollectionViewKind,
-        entry: Value,
-    ) -> Result<Value> {
-        view.fields()
+        layout
+            .view
+            .fields()
             .try_map(|field| self.storage_field(ctx, entry, field))?
-            .materialize(Ok, |[key, value]| self.pair(ctx, key, value))
+            .into_value(self, ctx)
     }
 
     pub(in crate::lower) fn visit_collection_entry(
@@ -221,7 +214,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         index: Value,
         cursor: Option<LiveCursor>,
         next: Ptr<BasicBlock>,
-    ) -> Result<Value> {
+    ) -> Result<Yield<Value>> {
         let (entries, kind) = if let Some(cursor) = cursor {
             (
                 self.storage_field(ctx, cursor.box_val, Field::BoxEntries)?,
@@ -232,7 +225,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let Some(kind) =
                 perry_mir::typed(ctx, element).and_then(|r| CollectionKind::of_entry(ctx, r))
             else {
-                return self.array_value(ctx, source, index);
+                return self.array_value(ctx, source, index).map(Yield::Item);
             };
             (source, kind)
         };
@@ -247,27 +240,26 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.branch(ctx, live, visit, next);
         self.switch_to(visit);
         match cursor {
-            Some(cursor) => self.project_entry(ctx, cursor.view, entry),
-            None => Ok(entry),
+            Some(cursor) => cursor
+                .view
+                .fields()
+                .try_map(|field| self.storage_field(ctx, entry, field)),
+            None => Ok(Yield::Item(entry)),
         }
     }
 
     /// The key (`_0`) and value (`_1`) of a key-value entry or pair.
-    pub(crate) fn entry_fields(
-        &mut self,
-        ctx: &mut Context,
-        entry: Value,
-    ) -> Result<(Value, Value)> {
+    pub(super) fn entry_fields(&mut self, ctx: &mut Context, entry: Value) -> Result<[Value; 2]> {
         if entry.get_type(ctx).deref(ctx).is::<ArrayType>() {
             let zero = self.number(ctx, 0.0);
             let one = self.number(ctx, 1.0);
             let k = self.element_at(ctx, entry, zero)?;
             let v = self.element_at(ctx, entry, one)?;
-            return Ok((k, v));
+            return Ok([k, v]);
         }
         let k = self.storage_field(ctx, entry, Field::Key)?;
         let v = self.storage_field(ctx, entry, Field::MapValue)?;
-        Ok((k, v))
+        Ok([k, v])
     }
 
     /// A fresh `[first, second]` tuple.

@@ -97,6 +97,35 @@ where
     seen
 }
 
+/// An immutable fact computed on demand for an interned key in this MIR context.
+struct CachedFact<K, V> {
+    key: K,
+    value: std::sync::OnceLock<V>,
+}
+
+impl<K: PartialEq, V> PartialEq for CachedFact<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+impl<K: Eq, V> Eq for CachedFact<K, V> {}
+impl<K: Hash, V> Hash for CachedFact<K, V> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+    }
+}
+impl<K: Eq + Hash + Send + 'static, V: Send + Sync + 'static> CachedFact<K, V> {
+    fn intern(ctx: &Context, key: K) -> pliron::uniqued_any::Uniqued<Self> {
+        pliron::uniqued_any::Uniqued::new(
+            ctx,
+            Self {
+                key,
+                value: Default::default(),
+            },
+        )
+    }
+}
+
 pub use aggregates::{function_values, functions, operations, reachable_functions};
 pub use attrs::{Absence, BinaryKind, CompareKind, ErrorKind, FieldOrder, NumericConstant, Tier};
 pub use calls::{
@@ -130,6 +159,7 @@ pub use intrinsics::{
     PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp, PromiseResolvedOp, PromiseSettleOp,
     SettleKind, SettledField, SettledFieldOp, may_throw,
 };
+pub use json_copy::{CopySlot, JsonCopyPlan};
 pub use json_schema::JsonSchema;
 pub use liveness::{LiveSet, LiveValues};
 pub use locals::{LoadOp, LocalOp, StoreOp, UndefOp};

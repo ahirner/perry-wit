@@ -200,11 +200,11 @@ fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
 #[test]
 fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
     boundary!(
-        "package test:indirect; world boundary {record input {a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:option<string>,n:u64} export run:func(value:input)->string;}"
+        "package test:indirect; world boundary {record input {n:u64,i:option<string>,h:string,g:string,f:string,e:string,d:string,c:string,b:string,a:string} export run:func(value:input)->string; export echo:func(value:input)->input;}"
     );
     let mut component = Instance::compile(
         WIT,
-        "import type { Input } from './types/world'; export function run(value:Input) {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);}",
+        "import type { Input } from './types/world'; export function run(value:Input) {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);} export function echo(value:Input) {return value;}",
     )?;
     let value = Input {
         a: "a".into(),
@@ -218,6 +218,7 @@ fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
         i: Some("🙂".into()),
         n: u64::MAX,
     };
+    component.check("echo", (&value,), &value)?;
     let expected = "abcdefgh🙂18446744073709551615".to_owned();
     for _ in 0..1000 {
         component.check("run", (&value,), &expected)?;
@@ -246,7 +247,7 @@ boundary!(
     r#"
 package test:boundary;
 world boundary {
-  record point { x: f64, y-coord: f64 }
+  record point { y-coord: f64, x: f64 }
   record summary { count: u32, total: f64, label: string, positive: list<bool> }
   export scale: func(p: point, factor: f64) -> point;
   export describe: func(name: string, values: list<f64>) -> summary;

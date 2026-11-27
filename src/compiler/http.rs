@@ -126,25 +126,25 @@ pub(crate) fn compile(
     let result = handle
         .result
         .ok_or_else(|| Diagnostic::internal("handle returns a result"))?;
-    let layouts = super::abi::Layouts::new(&resolve)?;
+    let mut layouts = super::abi::Layouts::new(&resolve)?;
     let mut result = layouts.value(result)?;
-    let AbiKind::Sum(SumLayout::Result([Some(ok), _])) = &mut result.kind else {
+    let AbiKind::Sum(SumLayout::Result([Some(ok), _])) =
+        &mut std::sync::Arc::make_mut(&mut result).kind
+    else {
         bail_internal!("HTTP handler must return a result with a response");
     };
     // The HTTP runtime has already transferred the response and returns its canonical handle.
-    if !matches!(ok.kind, AbiKind::Resource { owned: true, .. }) {
+    if !matches!(ok.ty.kind, AbiKind::Resource { owned: true, .. }) {
         bail_internal!("HTTP handler must return an owned response");
     }
-    ok.kind = AbiKind::Scalar(perry_contract::types::Scalar::Integer(
-        perry_contract::types::Integer::U32,
-    ));
+    ok.ty = layouts.value(Type::U32)?;
     let exports = vec![Export {
         source_name: None,
         annotations: Vec::new(),
         core_name: format!("{name}#handle"),
         function: "__perryHttpHandle".into(),
         signature: layouts.signature(handle, false),
-        params: vec![layouts.value(Type::U32)?],
+        params: vec![layouts.field(Type::U32, 0)?],
         indirect_size: None,
         result: Some(result),
         kind: ExportKind::Async {

@@ -111,7 +111,7 @@ export function canonicalKeys() {
  const map=new Map<number,number>([[-0,1],[2,2]]);
  map.set(-0,3);
  let trace='';
- map.forEach((value,key)=>{trace+=String(1/key)+':'+String(value)+';';});
+ map.forEach((value,key,receiver)=>{if(receiver!==map)throw new Error('map receiver');trace+=String(1/key)+':'+String(value)+';';});
  if(map.size!==2 || trace!=='Infinity:3;0.5:2;')return 1;
  const updates=new Map<number,number>([[0,1]]);
  updates.set(-0,2);
@@ -122,7 +122,7 @@ export function canonicalKeys() {
  const set=new Set<number>([-0,2]);
  set.add(-0);
  trace='';
- set.forEach((value,key)=>{trace+=String(1/value)+':'+String(1/key)+';';});
+ set.forEach((value,key,receiver)=>{if(receiver!==set)throw new Error('set receiver');trace+=String(1/value)+':'+String(1/key)+';';});
  if(set.size!==2 || trace!=='Infinity:Infinity;0.5:0.5;')return 4;
  const inserted=new Set<number>();
  inserted.add(-0);

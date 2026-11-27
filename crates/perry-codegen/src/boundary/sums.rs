@@ -3,23 +3,23 @@ use super::*;
 use perry_mir::{absence, optional_value, present_type};
 use perry_wit_diagnostics::Diagnostic;
 
-type AbiCase = (String, Option<AbiType>);
+type AbiCase = (String, Option<AbiField>);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SumLayout {
-    Option(Box<AbiType>),
-    Result([Option<Box<AbiType>>; 2]),
+    Option(AbiField),
+    Result([Option<AbiField>; 2]),
     Enum(wit_parser::Int, Box<[String]>),
     Variant(wit_parser::Int, Box<[AbiCase]>),
 }
 
 impl SumLayout {
-    pub(super) fn cases(&self) -> impl Iterator<Item = (&str, Option<&AbiType>)> {
+    pub(super) fn cases(&self) -> impl Iterator<Item = (&str, Option<&AbiField>)> {
         (0..).map_while(move |index| match (self, index) {
             (Self::Option(_), 0) => Some(("none", None)),
-            (Self::Option(ty), 1) => Some(("some", Some(ty.as_ref()))),
-            (Self::Result([ok, _]), 0) => Some(("ok", ok.as_deref())),
-            (Self::Result([_, err]), 1) => Some(("err", err.as_deref())),
+            (Self::Option(ty), 1) => Some(("some", Some(ty))),
+            (Self::Result([ok, _]), 0) => Some(("ok", ok.as_ref())),
+            (Self::Result([_, err]), 1) => Some(("err", err.as_ref())),
             (Self::Enum(_, names), i) => names.get(i).map(|name| (name.as_str(), None)),
             (Self::Variant(_, cases), i) => {
                 cases.get(i).map(|(name, ty)| (name.as_str(), ty.as_ref()))
@@ -45,14 +45,15 @@ impl SumLayout {
 
 impl AbiType {
     fn is_error_record(&self) -> bool {
-        let AbiKind::Record(fields) = &self.kind else {
+        let AbiKind::Record(record) = &self.kind else {
             return false;
         };
+        let fields = &record.fields;
         fields.len() == 2
             && ["name", "message"].iter().all(|name| {
                 fields
                     .iter()
-                    .any(|(field, ty)| field == name && ty.kind == AbiKind::String)
+                    .any(|(field, ty)| field == name && ty.ty.kind == AbiKind::String)
             })
     }
 
@@ -60,7 +61,11 @@ impl AbiType {
         let AbiKind::Sum(SumLayout::Result(cases)) = &self.kind else {
             return None;
         };
-        Some(cases.each_ref().map(Option::as_deref))
+        Some(
+            cases
+                .each_ref()
+                .map(|case| case.as_ref().map(|field| field.ty.as_ref())),
+        )
     }
 
     pub(crate) fn accepts_exception(&self) -> bool {
@@ -278,9 +283,10 @@ impl FunctionLowering<'_, '_> {
                 NativeSum::Enum
             }
             SumLayout::Result(_) if mir.deref(ctx).is::<RecordType>() => NativeSum::Result(
-                TaggedResult::of(ctx, self.boundary_record(ctx, mir)?).ok_or_else(|| {
-                    diag!(codes::CONTRACT_MISMATCH, "result ok field must be boolean")
-                })?,
+                TaggedResult::of(ctx, self.state.record_layouts.boundary_record(ctx, mir)?)
+                    .ok_or_else(|| {
+                        diag!(codes::CONTRACT_MISMATCH, "result ok field must be boolean")
+                    })?,
             ),
             SumLayout::Variant(..) | SumLayout::Result(_) => {
                 NativeSum::Variant(perry_mir::typed(ctx, mir).ok_or_else(|| {
@@ -389,11 +395,11 @@ impl FunctionLowering<'_, '_> {
             vec![result],
             |b, ctx, case, (name, abi)| {
                 let payload = if let Some(abi) = abi {
-                    let payload_mir = sum.payload(ctx, case, name, abi)?.mir;
+                    let payload_mir = sum.payload(ctx, case, name, &abi.ty)?.mir;
                     let lift_mir = scalar_mir_type(ctx, payload_mir);
                     let value = match flat {
                         Some(values) => {
-                            let layout = abi.direct()?;
+                            let layout = abi.ty.direct()?;
                             slots.clear();
                             slots.extend_from_slice(
                                 values
@@ -401,9 +407,14 @@ impl FunctionLowering<'_, '_> {
                                     .ok_or_else(|| internal!("too few joined flat values"))?,
                             );
                             b.coerce_slots(ctx, &mut slots, layout)?;
-                            b.lift_abi(ctx, abi, lift_mir, Canonical::Flat(&mut slots.as_slice()))?
+                            b.lift_abi(
+                                ctx,
+                                &abi.ty,
+                                lift_mir,
+                                Canonical::Flat(&mut slots.as_slice()),
+                            )?
                         }
-                        None => b.lift_abi(ctx, abi, lift_mir, source.at(abi.offset))?,
+                        None => b.lift_abi(ctx, &abi.ty, lift_mir, source.at(abi.offset))?,
                     };
                     Some((payload_mir, value))
                 } else {
@@ -498,7 +509,7 @@ impl FunctionLowering<'_, '_> {
         let write_case = |b: &mut Self,
                           ctx: &mut Context,
                           case,
-                          (name, payload_abi): (&str, Option<&AbiType>)| {
+                          (name, payload_abi): (&str, Option<&AbiField>)| {
             let mut out = Vec::new();
             let mut destination = match target {
                 Canonical::Memory(address, offset) => Canonical::Memory(address, offset),
@@ -517,14 +528,14 @@ impl FunctionLowering<'_, '_> {
                         "WIT result payload requires a return value"
                     ),
                     BoundaryValue::Native(ref sum, value) => {
-                        let payload = sum.payload(ctx, case, name, payload_abi)?;
+                        let payload = sum.payload(ctx, case, name, &payload_abi.ty)?;
                         let (mir, value) = b.read_native_payload(ctx, payload, value)?;
                         BoundaryValue::Native(mir, value)
                     }
                 };
                 b.lower_abi(
                     ctx,
-                    payload_abi,
+                    &payload_abi.ty,
                     payload,
                     destination.at(payload_abi.offset),
                 )?;

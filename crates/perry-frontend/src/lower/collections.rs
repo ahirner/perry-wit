@@ -246,6 +246,12 @@ fn record_uniform_field_type(ctx: &Context, rec: TypedHandle<RecordType>) -> Opt
     )
 }
 
+impl Yield<Value> {
+    pub(super) fn into_value(self, b: &mut FunctionBuilder, ctx: &mut Context) -> Result<Value> {
+        self.materialize(Ok, |[key, value]| b.pair(ctx, key, value))
+    }
+}
+
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn new_collection(
         &mut self,
@@ -302,6 +308,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             CollectionKind::Map => self.populate_from_entries(ctx, input, out),
             CollectionKind::Set => {
                 self.iterate(ctx, Input::Collection(input), |b, ctx, item, _, _, _| {
+                    let item = item.into_value(b, ctx)?;
                     b.set_add(ctx, out, item, layout.fields[0])
                 })?;
                 Ok(out)
@@ -393,14 +400,14 @@ impl<'s> FunctionBuilder<'s, '_> {
             Input::Array(receiver, Holes::Dense)
         };
         self.collect_items(ctx, input, |b, ctx, item, index, _| {
-            let (key, value) = if keyed.is_some() {
+            let [key, value] = if keyed.is_some() {
                 b.entry_fields(ctx, item)?
             } else {
-                (index, item)
+                [index, item]
             };
             method
                 .project([key, value])
-                .materialize(Ok, |[k, v]| b.pair(ctx, k, v))
+                .into_value(b, ctx)
                 .map(ArrayOutput::Item)
         })
     }
@@ -412,9 +419,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         target: Value,
     ) -> Result<Value> {
         self.iterate(ctx, Input::Collection(entries), |b, ctx, entry, _, _, _| {
-            let (k, v) = b.entry_fields(ctx, entry)?;
-            b.kv_set(ctx, target, k, v)?;
-            Ok(())
+            let [k, v] = entry.materialize(|value| b.entry_fields(ctx, value), Ok)?;
+            b.kv_set(ctx, target, k, v)
         })?;
         Ok(target)
     }

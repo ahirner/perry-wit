@@ -2,6 +2,7 @@
 use super::*;
 use crate::lower::array_methods::{Direction, FindResult, Mutation, Quantifier, Search, Transform};
 use crate::lower::collections::{IteratorMethod, SetOperation, SetRelation, dict_entry_types};
+use crate::lower::control_flow::{Holes, Input};
 use perry_mir::DatePart;
 
 mod intrinsic;
