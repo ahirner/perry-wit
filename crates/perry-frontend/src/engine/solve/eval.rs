@@ -420,7 +420,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_stmts(&mut self, s: &mut EvalState<'h>, stmts: &'h [Stmt]) -> Result<()> {
         let depth = s.guards.depth();
         let mut remaining = stmts;
-        while let Some((stmt, rest)) = remaining.split_first() {
+        while let Some((stmt, mut rest)) = remaining.split_first() {
             let inferred = match stmt {
                 Stmt::Let {
                     id,
@@ -431,8 +431,16 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     Some((*id, self.eval_expr(s, value)?))
                 }
-                _ if let Some((element, _)) = self.index.locals.element(remaining) => {
+                _ if let Some((element, tail)) = self.index.locals.element(remaining) => {
+                    rest = tail;
+                    self.eval_expr(s, element.condition)?;
+                    if let hir_compat::Availability::Test(test) = element.available {
+                        self.eval_expr(s, test)?;
+                    }
                     let ty = self.eval_expr(s, element.value)?;
+                    if let Some(advance) = element.advance {
+                        self.eval_expr(s, advance)?;
+                    }
                     let ty = match element.available {
                         hir_compat::Availability::Known(true) => ty,
                         hir_compat::Availability::Known(false) => Ty::VOID,
@@ -472,6 +480,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
                 let declared = local.declared;
                 let declared = if !is_inferred {
+                    let declared =
+                        self.index
+                            .substitute(self.types, declared, &self.type_bindings[s.inst]);
                     self.instantiate_annotated_class(declared, 0, Some(s.inst))?
                 } else {
                     declared

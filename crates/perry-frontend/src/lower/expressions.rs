@@ -623,16 +623,17 @@ impl<'s> FunctionBuilder<'s, '_> {
         expr: &'s Expr,
         solved: TypeHandle,
     ) -> Result<Value> {
-        let context = matches!(
-            expr,
+        let context = match expr {
             Expr::Null
-                | Expr::Undefined
-                | Expr::Array(..)
-                | Expr::ArraySpread(_)
-                | Expr::Object(_)
-                | Expr::ObjectSpread { .. }
-                | Expr::Sequence(_)
-        );
+            | Expr::Undefined
+            | Expr::Array(..)
+            | Expr::ArraySpread(_)
+            | Expr::Object(_)
+            | Expr::ObjectSpread { .. }
+            | Expr::Sequence(_) => true,
+            Expr::New { .. } => self.object_literal_pairs(expr).is_some(),
+            _ => false,
+        };
         self.expression_with(ctx, expr, context.then_some(solved))
     }
 

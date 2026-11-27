@@ -135,7 +135,14 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             (BranchResult(ty) | TypedArray(ty), _) => {
                 let ty = match expected {
-                    Some(ty) if crate::lower::value_unions::is_value_union(ctx, ty) => ty,
+                    Some(ty)
+                        if matches!(
+                            Kind::of(ctx, present_type(ctx, ty)),
+                            Some(Kind::Record | Kind::Variant | Kind::ValueUnion)
+                        ) =>
+                    {
+                        ty
+                    }
                     _ => self.shapes.resolved_binding(ty)?.carrier,
                 };
                 return self.source_operand(ctx, expr, Some(ty), required);

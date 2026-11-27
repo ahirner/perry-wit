@@ -11,13 +11,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         if field == "searchParams" {
             return Ok(self.intrinsic(ctx, Intrinsic::UrlSearchParams, vec![value]));
         }
-        let index = [
-            "href", "protocol", "pathname", "username", "password", "hash", "search", "host",
-            "hostname", "port", "origin",
-        ]
-        .iter()
-        .position(|&name| name == field)
-        .ok_or_else(|| unsupported!("unsupported URL field {field}"))?;
+        let index = crate::methods::URL_STRING_FIELDS
+            .iter()
+            .position(|&name| name == field)
+            .ok_or_else(|| unsupported!("unsupported URL field {field}"))?;
         let index = self.number(ctx, index as f64);
         Ok(self.intrinsic(ctx, Intrinsic::UrlGet, vec![value, index]))
     }

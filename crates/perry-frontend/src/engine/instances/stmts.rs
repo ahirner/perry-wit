@@ -26,6 +26,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 if self.is_resolved(t)
                     && (is_inferred
                         || matches!(local.declared, Ty::OPEN | Ty::DYNAMIC)
+                        || self.types.has_type_parameter(local.declared)
                         || matches!(
                             self.types.kind(local.declared),
                             TyKind::Array(Ty::OPEN | Ty::DYNAMIC)

@@ -572,8 +572,16 @@ pub(crate) fn property_type(
                 }
             }
             dict_value_ty(ctx, decls, types, stripped).or_else(|| {
-                receiver_of(ctx, decls, types, stripped)
-                    .and_then(|r| Method::lookup(r, property))
+                let receiver = receiver_of(ctx, decls, types, stripped)?;
+                if receiver == Receiver::Value(Kind::Url) {
+                    if property == "searchParams" {
+                        return Some(native_ty(ctx, types, Kind::SearchParams));
+                    }
+                    if crate::methods::URL_STRING_FIELDS.contains(&property) {
+                        return Some(Ty::STRING);
+                    }
+                }
+                Method::lookup(receiver, property)
                     .filter(|m| m.is_property())
                     .map(|m| {
                         apply_method_result(
