@@ -561,7 +561,7 @@ impl FunctionLowering<'_, '_> {
             values.len(),
             layout.record.deref(ctx).name()
         );
-        let object = self.record_storage(ctx, layout);
+        let object = self.record_storage(ctx, layout)?;
         let order: Vec<_> = values.iter().map(|(field, _)| field.index).collect();
         let order = self.record_order(field_count, Some(&order));
         self.record_header(ctx, object, order);

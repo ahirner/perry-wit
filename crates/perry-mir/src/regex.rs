@@ -15,18 +15,38 @@ use pliron::{
     result::Result,
 };
 
-use crate::CachedFact;
 use perry_wit_diagnostics::{Diagnostic, codes, diag};
 use pliron::uniqued_any::Uniqued;
 use regex_syntax::hir::Hir;
+use std::{
+    hash::{Hash, Hasher},
+    sync::OnceLock,
+};
 
 #[format("$0 `, ` $1")]
 #[derive(PartialEq, Eq, Hash)]
 struct Spelling(StringAttr, StringAttr);
 
+struct Literal {
+    spelling: Spelling,
+    parsed: OnceLock<perry_wit_diagnostics::Result<ParsedRegex>>,
+}
+
+impl PartialEq for Literal {
+    fn eq(&self, other: &Self) -> bool {
+        self.spelling == other.spelling
+    }
+}
+impl Eq for Literal {}
+impl Hash for Literal {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.spelling.hash(state);
+    }
+}
+
 #[pliron_attr(name = "perry.regex_literal", verifier = "succ")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RegexLiteral(Uniqued<CachedFact<Spelling, perry_wit_diagnostics::Result<ParsedRegex>>>);
+pub struct RegexLiteral(Uniqued<Literal>);
 
 impl Printable for RegexLiteral {
     fn fmt(
@@ -35,7 +55,7 @@ impl Printable for RegexLiteral {
         state: &State,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        self.0.get(ctx).key.fmt(ctx, state, f)
+        self.0.get(ctx).spelling.fmt(ctx, state, f)
     }
 }
 
@@ -103,18 +123,24 @@ impl RegexLiteral {
     }
 
     fn from_spelling(ctx: &Context, spelling: Spelling) -> Self {
-        Self(CachedFact::intern(ctx, spelling))
+        Self(Uniqued::new(
+            ctx,
+            Literal {
+                spelling,
+                parsed: OnceLock::new(),
+            },
+        ))
     }
 
     pub fn global(self, ctx: &Context) -> bool {
-        self.0.get(ctx).key.1.as_str().contains('g')
+        self.0.get(ctx).spelling.1.as_str().contains('g')
     }
 
     pub fn parsed(self, ctx: &Context) -> perry_wit_diagnostics::Result<&ParsedRegex> {
-        let cached = self.0.get(ctx);
-        cached
-            .value
-            .get_or_init(|| syntax::parse(cached.key.0.as_str(), cached.key.1.as_str()))
+        let literal = self.0.get(ctx);
+        literal
+            .parsed
+            .get_or_init(|| syntax::parse(literal.spelling.0.as_str(), literal.spelling.1.as_str()))
             .as_ref()
             .map_err(Clone::clone)
     }

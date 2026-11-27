@@ -1,6 +1,7 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
 use crate::{
     function::FunctionLowering,
+    module::StaticTable,
     repr::{Repr, i32_type, repr},
     runtime::Runtime,
 };
@@ -500,14 +501,17 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         layout: &crate::aggregates::RecordLayout,
-    ) -> Value {
+    ) -> Result<Value> {
         let size = self.i32_const(ctx, layout.size as i32);
         if !self.state.collectible {
-            return self.alloc(ctx, size);
+            return Ok(self.alloc(ctx, size));
         }
-        let shape = layout.pointer_shape(ctx, &mut self.state.data, self.state.retains_json);
+        let shape = self.state.static_table(
+            ctx,
+            StaticTable::PointerShape(layout.record, self.state.retains_json),
+        )?;
         let shape = self.i32_const(ctx, shape as i32);
-        self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
+        Ok(self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]))
     }
 
     pub(super) fn new_array(

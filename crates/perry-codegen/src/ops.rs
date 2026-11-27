@@ -2,7 +2,7 @@
 //! scalar, constant, global, control-flow, call and promise operations.
 use crate::{
     function::FunctionLowering,
-    regex,
+    module::StaticTable,
     repr::{Repr, i32_type, optional_inner, repr, slot_kind},
     runtime::Runtime,
 };
@@ -88,15 +88,9 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if let Some(constant) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx) {
-            let key = constant.literal(ctx);
-            let address = if let Some(&address) = self.state.data.regexes.get(&key) {
-                address
-            } else {
-                let table = regex::compile(&mut self.state.data, ctx, key)?;
-                let address = self.state.data.append(4, &table);
-                self.state.data.regexes.insert(key, address);
-                address
-            };
+            let address = self
+                .state
+                .static_table(ctx, StaticTable::Regex(constant.literal(ctx)))?;
             let value = self.i32_const(ctx, address as i32);
             self.define(ctx, op, value);
             return Ok(());

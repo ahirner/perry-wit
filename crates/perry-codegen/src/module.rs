@@ -11,7 +11,7 @@ use crate::{
     repr::{Repr, i32_type, repr, slot_kind, wasm_type},
     runtime::Runtime,
 };
-use perry_mir::{PlironResultExt as _, is_exported};
+use perry_mir::{PlironResultExt as _, RecordType, RegexLiteral, is_exported};
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, codes, diag, ensure_unsupported};
 use pliron::{
     builtin::{
@@ -27,7 +27,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    r#type::TypeHandle,
+    r#type::{TypeHandle, TypedHandle},
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
@@ -46,13 +46,20 @@ pub(crate) enum Initializer {
     Async(u32),
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub(super) enum StaticTable {
+    Regex(RegexLiteral),
+    FieldNames(TypedHandle<RecordType>),
+    PointerShape(TypedHandle<RecordType>, bool),
+}
+
 /// Static data placed at [DATA_BASE].
 #[derive(Default)]
 pub(crate) struct Data {
     pub(crate) bytes: Vec<u8>,
     strings: HashMap<String, u32>,
     constants: HashMap<(usize, Vec<u8>), u32>,
-    pub(crate) regexes: HashMap<perry_mir::RegexLiteral, u32>,
+    tables: HashMap<StaticTable, u32>,
 }
 
 impl Data {
@@ -181,6 +188,36 @@ pub(crate) struct ModuleState<'e> {
 }
 
 impl ModuleState<'_> {
+    pub(super) fn static_table(&mut self, ctx: &Context, table: StaticTable) -> Result<u32> {
+        if let Some(&address) = self.data.tables.get(&table) {
+            return Ok(address);
+        }
+        let address = match table {
+            StaticTable::Regex(literal) => {
+                let bytes = crate::regex::compile(&mut self.data, ctx, literal)?;
+                self.data.append(4, &bytes)
+            }
+            StaticTable::FieldNames(record) => {
+                let layout = self.record_layouts.get(ctx, record)?;
+                self.data
+                    .field_names(layout.fields.keys().map(String::as_str))
+            }
+            StaticTable::PointerShape(record, retains_json) => {
+                let layout = self.record_layouts.get(ctx, record)?;
+                let offsets: Vec<_> = layout
+                    .fields
+                    .values()
+                    .filter(|field| repr(ctx, field.ty).is_ok_and(|kind| kind == Repr::Ref))
+                    .map(|field| field.offset)
+                    .chain(retains_json.then_some(perry_abi::layout::record::JSON))
+                    .collect();
+                self.data.pointer_shape(&offsets)
+            }
+        };
+        self.data.tables.insert(table, address);
+        Ok(address)
+    }
+
     pub(crate) fn may_throw(&self, function: &Identifier) -> bool {
         self.program_facts
             .effects(function)

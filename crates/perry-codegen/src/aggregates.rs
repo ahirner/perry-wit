@@ -22,10 +22,7 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
-use std::{
-    cell::OnceCell,
-    collections::{HashMap, HashSet},
-};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy)]
 pub(crate) struct RecordField {
@@ -38,36 +35,9 @@ pub(crate) struct RecordLayout {
     pub(crate) record: TypedHandle<RecordType>,
     pub(crate) fields: IndexMap<String, RecordField>,
     pub(crate) size: u32,
-    pointer_shapes: [OnceCell<u32>; 2],
-    json_names: OnceCell<u32>,
 }
 
 impl RecordLayout {
-    pub(crate) fn pointer_shape(
-        &self,
-        ctx: &Context,
-        data: &mut crate::module::Data,
-        retains_json: bool,
-    ) -> u32 {
-        *self.pointer_shapes[usize::from(retains_json)].get_or_init(|| {
-            let offsets: Vec<_> = self
-                .fields
-                .values()
-                .filter(|field| repr(ctx, field.ty).is_ok_and(|kind| kind == Repr::Ref))
-                .map(|field| field.offset)
-                .chain(retains_json.then_some(record::JSON))
-                .collect();
-            data.pointer_shape(&offsets)
-        })
-    }
-
-    pub(super) fn json_fields(&self, data: &mut crate::module::Data) -> (u32, usize) {
-        let names = self
-            .json_names
-            .get_or_init(|| data.field_names(self.fields.keys().map(String::as_str)));
-        (*names, self.fields.len())
-    }
-
     pub(crate) fn field(&self, ctx: &Context, name: &str) -> Result<RecordField> {
         self.fields.get(name).copied().ok_or_else(|| {
             diag!(
@@ -135,8 +105,6 @@ impl RecordLayouts {
                     record,
                     fields,
                     size,
-                    pointer_shapes: Default::default(),
-                    json_names: OnceCell::new(),
                 },
             );
         }
@@ -317,7 +285,7 @@ impl FunctionLowering<'_, '_> {
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
-                self.record_storage(ctx, layout)
+                self.record_storage(ctx, layout)?
             };
             let order = {
                 let order = allocation.get_attr_perry_field_order(ctx);

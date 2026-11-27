@@ -34,7 +34,10 @@ impl FunctionLowering<'_, '_> {
         let schema = self.layout_descriptor(ctx, ty)?;
         let (bits, failed, tag) = if copy {
             let pair = (operand.get_type(ctx), ty);
-            let layout = JsonCopyPlan::get(ctx, pair.0, pair.1)
+            let layout = self
+                .state
+                .program_facts
+                .json_copy_plan(ctx, pair)
                 .ok_or_else(|| internal!("incompatible JSON copy types"))?;
             let plan = self.json_copy_plan(ctx, layout, pair)?;
             let plan = self.i32_const(ctx, plan as i32);

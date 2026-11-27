@@ -29,14 +29,18 @@ pub(crate) fn normalize_json_copy(
     ctx: &mut Context,
     analyses: &mut AnalysisManager,
 ) -> Result<PassResult> {
-    let facts = analyses.get_analysis::<crate::facts::ProgramFacts>(root, ctx)?;
+    let mut facts = analyses.get_analysis_mut::<crate::ProgramFacts>(root, ctx)?;
+    let mut plans = std::mem::take(&mut facts.json_copies);
     let mut rewrites = 0u64;
     let mut missed = 0u64;
 
-    for func in crate::aggregates::functions(root, ctx) {
-        for site in find_parse_stringify_sites(func, ctx) {
-            let source_ty = site.source_value.get_type(ctx);
-            if can_rewrite_parse_stringify(ctx, &facts, func, &site, source_ty, site.target_ty) {
+    for func in crate::functions(root, ctx) {
+        let sites: Vec<_> = crate::operations(ctx, &func)
+            .into_iter()
+            .filter_map(|op| parse_stringify_site(ctx, op))
+            .collect();
+        for site in sites {
+            if can_rewrite_parse_stringify(ctx, &facts, func, &site, &mut plans) {
                 rewrite_site(ctx, &site);
                 rewrites += 1;
             } else {
@@ -45,6 +49,7 @@ pub(crate) fn normalize_json_copy(
         }
     }
 
+    plans.publish(ctx)?;
     if rewrites > 0 || missed > 0 {
         let mut stats = crate::pipeline::optimization_statistics(root, ctx);
         stats.parse_stringify_rewrites += rewrites;
@@ -114,13 +119,6 @@ fn may_be_cyclic(ctx: &Context, ty: TypeHandle, path: &mut Vec<TypeHandle>) -> b
         .is_none_or(|mut children| children.any(|child| may_be_cyclic(ctx, child, path)));
     path.pop();
     cyclic
-}
-
-fn find_parse_stringify_sites(func: FuncOp, ctx: &Context) -> Vec<ParseStringifySite> {
-    crate::aggregates::operations(ctx, &func)
-        .into_iter()
-        .filter_map(|op| parse_stringify_site(ctx, op))
-        .collect()
 }
 
 /// The site `op` consumes, when it decodes `JSON.parse(JSON.stringify(value))`: a decoder of
@@ -208,8 +206,7 @@ fn can_rewrite_parse_stringify(
     facts: &crate::facts::ProgramFacts,
     func: FuncOp,
     site: &ParseStringifySite,
-    source_ty: TypeHandle,
-    target_ty: TypeHandle,
+    plans: &mut JsonCopyPlans,
 ) -> bool {
     if [
         Some(site.stringify_op),
@@ -223,7 +220,8 @@ fn can_rewrite_parse_stringify(
         return false;
     }
 
-    let Some(plan) = JsonCopyPlan::get(ctx, source_ty, target_ty) else {
+    let pair = (site.source_value.get_type(ctx), site.target_ty);
+    let Some(plan) = plans.resolve(ctx, pair) else {
         return false;
     };
     let consumer = site.consumer_op.deref(ctx).get_result(0);
@@ -311,6 +309,76 @@ impl CopySlot {
     }
 }
 
+pliron::dict_key!(COPY_PLANS, "perry_json_copy_plans");
+
+/// Type-pair plans shared by the module analysis and the context-only op verifier.
+#[derive(Default)]
+pub(crate) struct JsonCopyPlans(HashMap<TypePair, JsonCopyPlan>);
+
+impl JsonCopyPlans {
+    pub(crate) fn get<'a>(&'a self, ctx: &'a Context, pair: TypePair) -> Option<&'a JsonCopyPlan> {
+        Self::published(ctx, pair).or_else(|| self.0.get(&pair))
+    }
+
+    fn published(ctx: &Context, pair: TypePair) -> Option<&JsonCopyPlan> {
+        let index = *ctx.aux_data_map.get(&COPY_PLANS)?;
+        ctx.aux_data
+            .get(index)?
+            .downcast_ref::<Self>()?
+            .0
+            .get(&pair)
+    }
+
+    fn publish(self, ctx: &mut Context) -> Result<()> {
+        if !self.0.is_empty() {
+            if let Some(&index) = ctx.aux_data_map.get(&COPY_PLANS) {
+                let Some(plans) = ctx
+                    .aux_data
+                    .get_mut(index)
+                    .and_then(|value| value.downcast_mut::<Self>())
+                else {
+                    return pliron::input_err_noloc!(perry_wit_diagnostics::Diagnostic::internal(
+                        "invalid JSON copy analysis"
+                    ));
+                };
+                plans.0.extend(self.0);
+            } else {
+                let index = ctx.aux_data.insert(Box::new(self));
+                ctx.aux_data_map.insert(COPY_PLANS.clone(), index);
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve<'a>(&'a mut self, ctx: &'a Context, pair: TypePair) -> Option<&'a JsonCopyPlan> {
+        use std::collections::hash_map::Entry;
+        if let Some(plan) = Self::published(ctx, pair) {
+            return Some(plan);
+        }
+        Some(match self.0.entry(pair) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(JsonCopyPlan::analyze(ctx, pair)?),
+        })
+    }
+
+    pub(crate) fn require(&mut self, ctx: &Context, op: Ptr<Operation>) -> Result<()> {
+        let copy = op.deref(ctx);
+        if is_unary(ctx, op) {
+            let pair = (
+                copy.get_operand(0).get_type(ctx),
+                copy.get_result(0).get_type(ctx),
+            );
+            if self.resolve(ctx, pair).is_some() {
+                return Ok(());
+            }
+        }
+        pliron::verify_err!(
+            copy.loc().clone(),
+            crate::intrinsics::IntrinsicErr::Signature("json_copy".into())
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct JsonCopyPlan {
     slots: HashMap<TypePair, Vec<Option<CopySlot>>>,
@@ -319,16 +387,14 @@ pub struct JsonCopyPlan {
 }
 
 impl JsonCopyPlan {
-    /// Cache successful plans. An opaque record can acquire its definition later.
-    pub fn get(ctx: &Context, source: TypeHandle, target: TypeHandle) -> Option<&Self> {
-        let key = (source, target);
-        let cell = &crate::CachedFact::intern(ctx, key).get(ctx).value;
-        if let Some(plan) = cell.get() {
-            return Some(plan);
-        }
+    pub(crate) fn compatible(ctx: &Context, pair: TypePair) -> bool {
+        JsonCopyPlans::published(ctx, pair).is_some() || Self::analyze(ctx, pair).is_some()
+    }
+
+    fn analyze(ctx: &Context, pair: TypePair) -> Option<Self> {
         let mut plan = Self::default();
-        plan.visit(ctx, key)?;
-        Some(cell.get_or_init(|| plan))
+        plan.visit(ctx, pair)?;
+        Some(plan)
     }
 
     pub fn slots(&self, types: TypePair) -> Option<&[Option<CopySlot>]> {
@@ -532,7 +598,7 @@ mod tests {
             (wide_outer, narrow_outer, false, true),
             (narrow_outer, wide_outer, true, false),
         ] {
-            let plan = JsonCopyPlan::get(ctx, source, target).unwrap();
+            let plan = JsonCopyPlan::analyze(ctx, (source, target)).unwrap();
             assert_eq!((plan.adds_fields, plan.drops_fields), (adds, drops));
         }
         Ok(())
@@ -550,14 +616,14 @@ mod tests {
         )?
         .into();
         let node: TypeHandle = RecordType::get(ctx, pliron::ident!("Node"), None)?.into();
-        assert!(JsonCopyPlan::get(ctx, node, node).is_none());
+        assert!(!JsonCopyPlan::compatible(ctx, (node, node)));
         let next = OptionalType::get(ctx, ArrayType::get(ctx, node).into()).into();
         RecordType::get(
             ctx,
             pliron::ident!("Node"),
             Some(vec![("next".into(), next)]),
         )?;
-        assert!(JsonCopyPlan::get(ctx, node, node).is_some());
+        assert!(JsonCopyPlan::compatible(ctx, (node, node)));
         let leaves = ArrayType::get(ctx, leaf).into();
         for (ty, cyclic) in [(leaf, false), (leaves, false), (node, true), (next, true)] {
             assert_eq!(may_be_cyclic(ctx, ty, &mut Vec::new()), cyclic);

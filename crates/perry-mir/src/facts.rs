@@ -4,6 +4,7 @@
 //! representation facts forward and required widths backward, including recursive calls.
 //! Rewriting runs after the analysis converges, fixing semantic wrap points before
 //! SCCP, inlining and other algebraic transformations.
+use crate::json_copy::JsonCopyPlans;
 use crate::{calls::AwaitOp, scalar::NumericCastOp, semantics::OperationKind, types::PromiseType};
 use pliron::{
     builtin::{
@@ -201,7 +202,12 @@ struct Body {
 }
 
 impl Body {
-    fn new(ctx: &Context, function: FuncOp, effects: crate::effects::LocalEffects) -> Result<Self> {
+    fn new(
+        ctx: &Context,
+        function: FuncOp,
+        effects: crate::effects::LocalEffects,
+        json_copies: &mut JsonCopyPlans,
+    ) -> Result<Self> {
         let fn_ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?;
         let mut constraints = Vec::new();
         let mut dependents: HashMap<Value, Vec<usize>> = HashMap::new();
@@ -212,6 +218,9 @@ impl Body {
         for op in crate::aggregates::operations(ctx, &function) {
             let index = constraints.len();
             let kind = OperationKind::classify(ctx, op);
+            if kind == OperationKind::JsonDecode && Operation::is_op::<crate::JsonCopyOp>(op, ctx) {
+                json_copies.require(ctx, op)?;
+            }
             constraints.push(Constraint::Op { op, kind });
             if kind == OperationKind::Return {
                 returns.push(op);
@@ -372,6 +381,7 @@ impl State {
 /// Cached analysis result for an unchanged module. Domain propagation implements Perry
 /// semantics on top of pliron scheduling, cloning, verification, and invalidation infrastructure.
 pub struct ProgramFacts {
+    pub(crate) json_copies: JsonCopyPlans,
     bodies: HashMap<Identifier, Body>,
     keys: Vec<Key>,
     states: Vec<State>,
@@ -393,6 +403,14 @@ pub struct ProgramFacts {
 struct MissingEffects(Identifier);
 
 impl ProgramFacts {
+    pub fn json_copy_plan<'a>(
+        &'a self,
+        ctx: &'a Context,
+        pair: (TypeHandle, TypeHandle),
+    ) -> Option<&'a crate::JsonCopyPlan> {
+        self.json_copies.get(ctx, pair)
+    }
+
     fn generic_context(&self, name: &Identifier) -> Option<usize> {
         let function = self.bodies.get(name)?.function.get_operation();
         self.generic.get(&function).copied()
@@ -711,6 +729,7 @@ impl Analysis for ProgramFacts {
             .unwrap_or_default();
         let functions = crate::aggregates::functions(root, ctx);
         let effects = crate::effects::prepare(ctx, &functions)?;
+        let mut json_copies = JsonCopyPlans::default();
         let mut solver = Solver {
             limits,
             analysis: Self {
@@ -720,10 +739,11 @@ impl Analysis for ProgramFacts {
                     .map(|(&function, effects)| {
                         Ok((
                             function.get_symbol_name(ctx),
-                            Body::new(ctx, function, effects)?,
+                            Body::new(ctx, function, effects, &mut json_copies)?,
                         ))
                     })
                     .collect::<Result<_>>()?,
+                json_copies,
                 keys: Vec::new(),
                 states: Vec::new(),
                 roots: Vec::new(),

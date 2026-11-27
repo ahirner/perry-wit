@@ -2,6 +2,7 @@
 mod decode;
 use crate::{
     function::FunctionLowering,
+    module::StaticTable,
     repr::{Carriers, optional_inner, slot_size},
     runtime::Runtime,
 };
@@ -60,7 +61,11 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<(u32, usize)> {
         let record = TypedHandle::<RecordType>::from_handle(ty, ctx).to_diag(ctx)?;
         let layout = self.state.record_layouts.get(ctx, record)?;
-        Ok(layout.json_fields(&mut self.state.data))
+        Ok((
+            self.state
+                .static_table(ctx, StaticTable::FieldNames(record))?,
+            layout.fields.len(),
+        ))
     }
 
     pub(crate) fn layout_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
@@ -126,8 +131,12 @@ impl FunctionLowering<'_, '_> {
                     numeric.push((number, slot.index as usize));
                 }
             }
-            let shape = layout.pointer_shape(ctx, &mut self.state.data, true);
-            let (table, _) = layout.json_fields(&mut self.state.data);
+            let shape = self
+                .state
+                .static_table(ctx, StaticTable::PointerShape(layout.record, true))?;
+            let table = self
+                .state
+                .static_table(ctx, StaticTable::FieldNames(layout.record))?;
             words.extend([layout.size, shape, table, required]);
             numeric.sort_unstable();
             let mut next = vec![u32::MAX; count];
