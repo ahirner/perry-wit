@@ -310,12 +310,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                     return Ok(Ty::BOTTOM);
                 }
                 let stripped = self.types.strip_nullish(init_ty).0;
-                if let TyKind::Array(elem) = self.types.kind(stripped)
-                    && let TyKind::Tuple(span) = self.types.kind(elem)
-                    && let [k, v] = self.types.ty_slice(span)
-                {
-                    let (k, v) = (*k, *v);
-                    return Ok(self.types.generic(base, &[k, v]));
+                if let TyKind::Array(elem) = self.types.kind(stripped) {
+                    let pair = match self.types.kind(elem) {
+                        TyKind::Array(value) => Some([value, value]),
+                        TyKind::Tuple(span) => self.types.ty_slice(span).try_into().ok(),
+                        _ => None,
+                    };
+                    if let Some(pair) = pair {
+                        return Ok(self.types.generic(base, &pair));
+                    }
                 }
             } else {
                 let init_ty = self.eval_expr(s, init)?;
@@ -427,6 +430,12 @@ impl<'h, 'a> Solver<'h, 'a> {
             obj_ty = self.resolve_cell_read(s.inst, obj_ty);
         }
         let stripped = self.types.strip_nullish(obj_ty).0;
+        if property == "val"
+            && let Some(path) = crate::narrowing::path(object)
+            && let Some(payload) = self.guarded_payload(s, &path, stripped)
+        {
+            return Ok(payload);
+        }
         let class = self.resolve_class_inst(s.inst, stripped, byte_offset)?;
         Ok(self
             .member_type(s.inst, site, stripped, property, class)?
@@ -439,6 +448,37 @@ impl<'h, 'a> Solver<'h, 'a> {
                     Ty::OPEN
                 }
             }))
+    }
+
+    fn guarded_payload(
+        &mut self,
+        s: &EvalState<'h>,
+        path: &crate::narrowing::Path<'h>,
+        receiver: Ty,
+    ) -> Option<Ty> {
+        let guards = s.guards.tags(path, crate::narrowing::Discriminant::Tag);
+        guards.clone().next()?;
+        let shape = crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+            .structure(receiver)?;
+        let TyKind::Union(span) = self.types.kind(shape) else {
+            return None;
+        };
+        let mut payload = Ty::BOTTOM;
+        for member in self.types.ty_slice(span).to_vec() {
+            let tag = builtins::property_type(self.ctx, self.decls, self.types, member, "tag")?;
+            let TyKind::Literal(tag) = self.types.kind(tag) else {
+                return None;
+            };
+            if guards
+                .clone()
+                .all(|(case, equal)| (case == tag.get(self.ctx)) == equal)
+            {
+                let ty = builtins::property_type(self.ctx, self.decls, self.types, member, "val")
+                    .unwrap_or(Ty::VOID);
+                payload = self.types.join(payload, ty);
+            }
+        }
+        (payload != Ty::BOTTOM).then_some(payload)
     }
 
     pub(super) fn member_type(
@@ -481,8 +521,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let TyKind::Object { props, .. } = self.types.kind(stripped) {
             return Some(self.types.object_slice(props).to_vec());
         }
-        let props = crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
-            .record(stripped, 0)?;
+        let shape = crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+            .structure(stripped)?;
+        let props = self.types.closed_record(shape)?;
         let mut props = self.types.object_slice(props).to_vec();
         for p in &mut props {
             if p.optional {

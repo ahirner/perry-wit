@@ -360,6 +360,35 @@ fn persistent_aliases_share_one_layout_across_specialized_exports() -> Result<()
 }
 
 #[test]
+fn named_list_callbacks_preserve_wit_record_fields() -> Result<()> {
+    boundary!(
+        r#"package test:tracks;
+world boundary {
+  record track { title: string, artist: string }
+  type playlist = list<track>;
+  export describe: func(tracks: playlist, rename: bool) -> string;
+}"#
+    );
+    let source = r#"
+import type { Playlist } from './types/world';
+export function describe(tracks: Playlist, rename: boolean): string {
+  const first = tracks.find(track => track.title.length > 0);
+  if (first === undefined) return "";
+  const result = rename ? { ...first, title: "remix" } : first;
+  return result.title + "/" + result.artist;
+}"#;
+    let mut component = Instance::compile(WIT, source)?;
+    let tracks = vec![Track {
+        title: "dawn".into(),
+        artist: "quartet".into(),
+    }];
+    for (rename, expected) in [(false, "dawn/quartet"), (true, "remix/quartet")] {
+        component.check("describe", (&tracks, rename), &expected.to_owned())?;
+    }
+    component.check("describe", (Vec::<Track>::new(), false), &String::new())
+}
+
+#[test]
 fn exact_integer_transport_in_nested_results_and_options() -> Result<()> {
     boundary!(
         r#"package test:integers;

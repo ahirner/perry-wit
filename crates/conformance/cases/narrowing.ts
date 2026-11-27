@@ -275,3 +275,9 @@ function copyWordResult(word: string): Attempt<string> {
   return attempt.ok ? { ok: true, value: attempt.value } : { ok: false, error: attempt.error };
 }
 console.log(JSON.stringify(copyWordResult("ink")), JSON.stringify(copyWordResult("")));
+
+type Tone = { tag: "steady"; val: boolean } | { tag: "notes"; val: number[] };
+function audible(tone: Tone): boolean {
+  return tone.tag === "steady" ? tone.val : tone.val.every(note => note > 0);
+}
+console.log("payload-branch", audible({ tag: "steady", val: false }), audible({ tag: "notes", val: [3, 5] }));

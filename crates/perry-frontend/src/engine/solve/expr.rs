@@ -17,6 +17,30 @@ impl<'h, 'a> Solver<'h, 'a> {
             .map_or(Ty::OPEN, |loc| self.read_loc(loc, reader))
     }
 
+    fn contextual_branch(&mut self, expr: &Expr, inferred: Ty, other: Ty) -> Ty {
+        let (present, _) = self.types.strip_nullish(other);
+        if matches!(self.types.kind(inferred), TyKind::Object { .. })
+            && self.types.kind(present).nominal().is_some()
+            && crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+                .structure(present)
+                == Some(inferred)
+        {
+            return present;
+        }
+        if let Expr::Array(elements, _) = expr
+            && elements.is_empty()
+            && let TyKind::Cell {
+                loc,
+                kind: CellKind::Array,
+            } = self.types.kind(inferred)
+            && let TyKind::Array(element) = self.types.kind(present)
+        {
+            self.write_cell(loc, element);
+            return present;
+        }
+        inferred
+    }
+
     pub(super) fn eval_expr(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<Ty> {
         if let Some(record) = self.index.locals.expression(expr) {
             return match record {
@@ -262,6 +286,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 let r = self.eval_expr(s, right)?;
                 s.guards.truncate(depth);
+                let r = match op {
+                    LogicalOp::Coalesce | LogicalOp::Or => self.contextual_branch(right, r, l),
+                    LogicalOp::And => r,
+                };
                 let res = builtins::logical_result(self.types, *op, l, r);
                 self.check_escaping_func(s.inst, res, 0, s.current_span)?;
                 self.record_site(s.inst, expr, SiteResolution::BranchResult(res));
@@ -289,6 +317,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     else_ty = self.types.exclude_absences(else_ty, Absence::Undefined);
                 }
                 s.guards.join(branch, then_writes, true, true);
+                then_ty = self.contextual_branch(then_expr, then_ty, else_ty);
+                else_ty = self.contextual_branch(else_expr, else_ty, then_ty);
                 let joined = self.types.join(then_ty, else_ty);
                 self.check_escaping_func(s.inst, joined, 0, s.current_span)?;
                 self.record_site(s.inst, expr, SiteResolution::BranchResult(joined));

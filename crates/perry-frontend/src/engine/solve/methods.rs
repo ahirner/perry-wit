@@ -119,6 +119,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
         let obj_ty = self.eval_expr(s, object)?;
+        let (present, abs) = self.types.strip_nullish(obj_ty);
+        let obj_ty = if self.types.kind(present).nominal().is_some()
+            && let Some(array) =
+                crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+                    .structure(present)
+            && matches!(self.types.kind(array), TyKind::Array(_))
+        {
+            self.types.with_absences(array, abs)
+        } else {
+            obj_ty
+        };
         if obj_ty == Ty::BOTTOM {
             self.call_argument_types(s, call.args)?;
             return Ok(Ty::BOTTOM);

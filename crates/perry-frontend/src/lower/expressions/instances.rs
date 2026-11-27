@@ -138,7 +138,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     Some(ty)
                         if matches!(
                             Kind::of(ctx, present_type(ctx, ty)),
-                            Some(Kind::Record | Kind::Variant | Kind::ValueUnion)
+                            Some(Kind::Record | Kind::Variant | Kind::ValueUnion | Kind::Array)
                         ) =>
                     {
                         ty

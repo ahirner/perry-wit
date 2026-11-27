@@ -354,3 +354,8 @@ function spellSymbols(symbols: { key: string; spelling: string }[]): string[] {
   return spellings;
 }
 console.log(JSON.stringify(spellSymbols([{ key: "x", spelling: "ab" }, { key: "y", spelling: "c" }])));
+
+function revisions(keys: string[], saved: Map<string, string>): { prior: string | null; next: string }[] {
+  return keys.map(key => ({ prior: saved.get(key) ?? null, next: key }));
+}
+console.log("nullable-history", JSON.stringify(revisions(["d", "e"], new Map([["d", "D"]]))));

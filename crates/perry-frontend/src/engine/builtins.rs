@@ -652,10 +652,7 @@ pub(crate) fn logical_result(types: &mut TypeTable, op: LogicalOp, left: Ty, rig
         LogicalOp::Coalesce => match l_abs {
             None => left,
             Some(_) if l_in == Ty::VOID => right,
-            Some(_) => {
-                let j = types.join(l_in, r_in);
-                types.with_absences(j, r_abs)
-            }
+            Some(_) => types.join(l_in, right),
         },
         LogicalOp::Or => {
             let j = types.join(l_in, r_in);

@@ -744,6 +744,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn assume(&self, s: &mut EvalState<'h>, condition: &'h Expr, truth: bool) {
         s.guards.exclude_absences(condition, truth);
+        s.guards.condition(condition, truth);
         self.invalidate_writes(s, &[], [condition]);
     }
 
