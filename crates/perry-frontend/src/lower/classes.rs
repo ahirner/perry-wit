@@ -45,15 +45,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                 }
                 self.fit(ctx, *value, ty)?
             } else {
-                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
+                self.emit_value(OmittedOp::with_type(ctx, ty), ctx)
             };
             operands.push(value);
         }
-        let instance = self.emit_value(ctx, |ctx| {
-            let alloc = AllocOp::new(ctx, rec, operands);
-            alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(order));
-            alloc
-        });
+        let instance = self.emit_value(AllocOp::ordered(ctx, rec, operands, order), ctx);
         if arguments.is_none() {
             self.frame.this_slot = Some(self.initialized_local(ctx, instance).slot);
             self.frame.owner = class
@@ -64,7 +60,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     let init = match &field.init {
                         Some(expr) => expressions::Assigned::Expression(expr),
                         None => expressions::Assigned::Value(
-                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
+                            self.emit_value(UndefinedOp::with_type(ctx, ty), ctx),
                         ),
                     };
                     expressions::Member::Field(instance, &field.name, index, ty)

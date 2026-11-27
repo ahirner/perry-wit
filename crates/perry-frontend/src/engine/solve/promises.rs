@@ -174,8 +174,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some((executor, _)) =
             self.resolve_callback_call(s, exec_ty, None, &[resolve_ty, reject_ty], byte_offset)?
         {
-            let (pass_resolve, pass_reject) = match executor {
-                CallTarget::Direct { target, .. } => {
+            let (pass_resolve, pass_reject) = match executor.callee() {
+                Some(FunctionTarget::Direct(target) | FunctionTarget::Closure(target)) => {
                     let view = self.index.view(self.instances[target].template);
                     let arity = if view.params.iter().any(|p| p.is_rest) {
                         2
@@ -184,8 +184,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     };
                     (arity >= 1, arity >= 2)
                 }
-                CallTarget::Dispatch { .. } => (true, true),
-                CallTarget::ThrowTypeError => (false, false),
+                Some(FunctionTarget::Dispatcher(_)) => (true, true),
+                None => (false, false),
             };
             let entry = self.inst_sites[s.inst]
                 .get_mut(&site)

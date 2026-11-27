@@ -1,4 +1,4 @@
-use super::{Integer, Interval, Presence, ProgramFacts, Range, arithmetic_range};
+use super::{Integer, Interval, MirInteger, Presence, ProgramFacts, Range, arithmetic_range};
 use crate::{
     attrs::CompareKind,
     control::CondBrOp,
@@ -508,4 +508,54 @@ fn incoming(ctx: &Context, block: Ptr<BasicBlock>, argument: usize) -> Option<Ve
         }
     }
     Some(incoming)
+}
+
+/// Join properties of definitions reachable before slot promotion.
+pub(crate) fn join_origins<T>(
+    ctx: &Context,
+    value: Value,
+    leaf: impl Fn(Ptr<Operation>) -> Option<T>,
+    join: impl Fn(T, T) -> Option<T>,
+) -> Option<T> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![value];
+    let mut common = None;
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        if let Some(block) = value.defining_block() {
+            let edges = incoming(ctx, block, value.find_index(ctx))?;
+            if edges.is_empty() {
+                return None;
+            }
+            pending.extend(edges.into_iter().map(|(_, _, _, operand)| operand));
+            continue;
+        }
+        let op = value.defining_op()?;
+        if let Some(source) = passed_through(ctx, value) {
+            pending.push(source);
+        } else if let Some(wrap) = Operation::get_op::<crate::WrapOp>(op, ctx) {
+            pending.push(wrap.get_operand(ctx));
+        } else if let Some(load) = Operation::get_op::<crate::LoadOp>(op, ctx) {
+            let slot = load.slot(ctx);
+            for use_ in slot.uses(ctx) {
+                let user = use_.user_op();
+                if Operation::get_op::<crate::LoadOp>(user, ctx).is_none() {
+                    let store = Operation::get_op::<crate::StoreOp>(user, ctx)?;
+                    if store.slot(ctx) != slot {
+                        return None;
+                    }
+                    pending.push(store.value(ctx));
+                }
+            }
+        } else {
+            let fact = leaf(op)?;
+            common = Some(match common {
+                Some(previous) => join(previous, fact)?,
+                None => fact,
+            });
+        }
+    }
+    common
 }

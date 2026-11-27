@@ -131,7 +131,6 @@ pub(crate) struct Specialization<'s> {
     function_templates: Vec<Option<types::TemplateId>>,
     pub(crate) writes: crate::narrowing::WriteEffects,
     pub(crate) receiver_members: crate::wit::ReceiverMembers<'s>,
-    pub(crate) regexes: crate::source::RegexSites<'s>,
     pub(crate) bodies: crate::source::InstanceBodies<'s>,
     pub(crate) sparse_arrays: bool,
     pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
@@ -224,7 +223,6 @@ pub(crate) fn lower_module<'r>(
         annotations: index.annotations,
         function_templates: index.functions,
         writes: solved.writes,
-        regexes: index.regexes,
         receiver_members: index.receiver_members,
         bodies,
         sparse_arrays: source.sparse_arrays || solved.deletes_array_elements,
@@ -257,12 +255,12 @@ impl InstancePlans {
 
     pub(crate) fn emitted_callee(
         &self,
-        call: solve::CallTarget,
-    ) -> Option<Result<perry_hir::types::FuncId>> {
-        match call {
-            solve::CallTarget::Direct { target, .. } => Some(Ok(self.function(target))),
-            solve::CallTarget::Dispatch { helper, .. } => Some(self.helper(helper)),
-            solve::CallTarget::ThrowTypeError => None,
+        function: solve::FunctionTarget,
+    ) -> Result<perry_hir::types::FuncId> {
+        use solve::FunctionTarget::*;
+        match function {
+            Direct(id) | Closure(id) => Ok(self.function(id)),
+            Dispatcher(id) => self.helper(id),
         }
     }
 

@@ -30,16 +30,33 @@ impl<'h, 'a> Solver<'h, 'a> {
                 hir_compat::RecordExpr::Close => Ok(Ty::VOID),
             };
         }
-        if let Some(args) = self.index.expressions.regexp(expr) {
-            for arg in args.operands() {
+        let declared = self.index.expressions.declared(expr);
+        if let Some(SiteResolution::Regex(literal)) = declared {
+            for arg in self
+                .index
+                .expressions
+                .regexp(expr)
+                .into_iter()
+                .flat_map(|args| args.operands())
+            {
                 self.eval_expr(s, arg)?;
             }
-            return Ok(self.types.named(self.ctx, "RegExp"));
+            let shape = literal
+                .map(|literal| literal.get(self.ctx).shape())
+                .transpose()
+                .map_err(|error| {
+                    let template = self.index.view(self.instances[s.inst].template);
+                    let locations = &self.hir.locations;
+                    let error = error.with_fallback_span(locations.function_span(&template.name));
+                    attach_inst_chain(&self.instances, self.index, locations, error, s.inst)
+                })?
+                .unwrap_or_default();
+            return Ok(self.types.regex(shape));
         }
         if let Some(constructor) = self.index.expressions.collection(expr) {
             return self.eval_collection_constructor(s, expr, constructor);
         }
-        if let Some(decision) = self.index.expressions.declared(expr)
+        if let Some(decision) = declared
             && let Some((args, _)) = hir_compat::call_arguments(expr)
         {
             match decision {
@@ -143,6 +160,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 .flags
                                 .intersects(LocalFlags::DEFERRED_OR_NULLISH))
                             || self.types.is_open(existing)
+                            || matches!(self.types.kind(existing), TyKind::Regex(_))
                         {
                             self.check_escaping_func(
                                 s.inst,

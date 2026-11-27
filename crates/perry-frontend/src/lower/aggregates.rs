@@ -58,7 +58,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let index = self.index(ctx, index)?;
         let value = self.expression_with(ctx, value, Some(element))?;
         let value = self.fit(ctx, value, element)?;
-        self.emit(ctx, |ctx| ArraySetOp::new(ctx, array, index, value));
+        self.emit(ArraySetOp::new(ctx, array, index, value), ctx);
         Ok(value)
     }
 
@@ -79,7 +79,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .0
             .clone();
         let op = FieldGetOp::new(ctx, value, name).to_diag(ctx)?;
-        self.field_read(ctx, &op)
+        self.field_read(ctx, op)
     }
 
     pub(super) fn record_field(
@@ -89,7 +89,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         name: &str,
     ) -> Result<Value> {
         let op = FieldGetOp::new(ctx, value, name.to_owned()).to_diag(ctx)?;
-        self.field_read(ctx, &op)
+        self.field_read(ctx, op)
     }
 
     pub(super) fn set_field(
@@ -111,19 +111,17 @@ impl<'s> FunctionBuilder<'s, '_> {
             return Member::Accessor(record, id).write(self, ctx, Assigned::Expression(value));
         }
         let record = if crate::lower::value_unions::is_value_union(ctx, record.get_type(ctx)) {
-            let payload = perry_mir::variant_cases(ctx, record.get_type(ctx))
+            let payload = perry_mir::VariantType::of(ctx, record.get_type(ctx))
                 .to_diag(ctx)?
-                .into_iter()
-                .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
+                .case("object")
+                .flatten()
                 .ok_or_else(|| {
                     diag!(
                         codes::TYPE_MISMATCH,
                         "property write requires a record alternative"
                     )
                 })?;
-            self.emit_value(ctx, |ctx| {
-                perry_mir::VariantPayloadOp::new(ctx, record, payload)
-            })
+            self.emit_value(perry_mir::VariantPayloadOp::new(ctx, record, payload), ctx)
         } else {
             record
         };
@@ -207,7 +205,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     let record = self
                         .shapes
                         .positional_record(ctx, RecordKind::Tuple, fields)?;
-                    return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
+                    return Ok(self.emit_value(AllocOp::new(ctx, record, values), ctx));
                 }
                 states.map_or(inner, |states| {
                     perry_mir::OptionalType::get_with(ctx, inner, states).into()
@@ -222,7 +220,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .into_iter()
             .map(|v| self.fit(ctx, v, element))
             .collect::<Result<_>>()?;
-        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, values)))
+        Ok(self.emit_value(ArrayNewOp::new(ctx, element, values), ctx))
     }
 
     /// Lower `array.push(…values)`, evaluating and coercing every argument to the element type
@@ -242,16 +240,17 @@ impl<'s> FunctionBuilder<'s, '_> {
             })
             .collect::<Result<Vec<_>>>()?;
         for value in values {
-            self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+            self.emit(ArrayPushOp::new(ctx, array, value), ctx);
         }
         Ok(self.array_length(ctx, array))
     }
 
     /// `array.length` as a number.
     pub(super) fn array_length(&mut self, ctx: &mut Context, array: Value) -> Value {
-        let length = self.emit_value(ctx, |ctx| ArrayLenOp::new(ctx, array));
-        self.emit_value(ctx, |ctx| {
-            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-        })
+        let length = self.emit_value(ArrayLenOp::new(ctx, array), ctx);
+        self.emit_value(
+            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into()),
+            ctx,
+        )
     }
 }

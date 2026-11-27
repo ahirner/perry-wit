@@ -228,6 +228,23 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(self.types.class_inst(instance))
     }
 
+    pub(super) fn regex_annotation(&self, ty: Ty) -> bool {
+        matches!(
+            builtins::receiver_of(self.ctx, self.decls, self.types, ty),
+            Some(crate::methods::Receiver::Value(crate::methods::Kind::Regex))
+        )
+    }
+
+    fn specialized_argument(&self, ty: Ty, declared: Option<Ty>) -> bool {
+        match self.types.kind(ty) {
+            TyKind::Func(_) => true,
+            TyKind::Regex(_) => {
+                declared.is_none_or(|d| self.types.is_open(d) || self.regex_annotation(d))
+            }
+            _ => self.arrays.contains(self.types, ty),
+        }
+    }
+
     pub(super) fn request_instance(&mut self, req: InstanceReq<'_>) -> Result<InstanceId> {
         let InstanceReq {
             witness,
@@ -248,9 +265,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         };
         let is_monomorphic_plain = matches!(view.kind, TemplateKind::Function)
             && view.type_params.is_empty()
-            && !args.iter().any(|&t| {
-                matches!(self.types.kind(t), TyKind::Func(_)) || self.arrays.contains(self.types, t)
-            })
+            && !args.iter().any(|&ty| self.specialized_argument(ty, None))
             && view.params.iter().all(|p| {
                 !matches!(p.ty, HirType::Any | HirType::Unknown | HirType::Function(_))
                     && !p.is_rest
@@ -426,9 +441,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let incoming = args.get(p_idx).copied().unwrap_or(Ty::VOID);
                 if incoming == Ty::OPEN || incoming == Ty::BOTTOM {
                     declared
-                } else if matches!(self.types.kind(incoming), TyKind::Func(_))
-                    || self.arrays.contains(self.types, incoming)
-                {
+                } else if self.specialized_argument(incoming, Some(declared)) {
                     incoming
                 } else if param.default.is_some() {
                     if !self.types.is_open(declared) {

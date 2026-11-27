@@ -204,7 +204,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     // does not enter a catch surrounding the return expression.
                     let value = self.with_handler(ctx, None, None, |b, ctx| {
                         let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
-                        let value = b.append_value(ctx, &await_);
+                        let value = b.emit_value(await_, ctx);
                         b.fit(ctx, value, expected)
                     })?;
                     values.push(value);
@@ -217,7 +217,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     codes::TYPE_MISMATCH,
                     "return value type differs from the declared result"
                 );
-                self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
+                self.emit(ReturnOp::new(ctx, values), ctx);
                 self.after_terminator(ctx);
             }
             Stmt::If {
@@ -374,7 +374,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             ),
             "only Error objects, numbers, bigints, booleans and strings can be thrown"
         );
-        let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, value));
+        let status = self.emit_value(RaiseOp::new(ctx, value), ctx);
         self.propagate(ctx, status);
         self.after_terminator(ctx);
         Ok(())
@@ -455,7 +455,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 },
             };
             let value = self.fit(ctx, value, payload)?;
-            let value = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![value]));
+            let value = self.emit_value(AllocOp::new(ctx, record, vec![value]), ctx);
             let ty = record.into();
             let layout =
                 LocalBinding::slot(ty, BindingType::plain(ty), false).captured(payload, deferred);
@@ -565,7 +565,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let value = self.fit_binding(ctx, value, binding)?;
             self.store(ctx, slot, value);
         } else if is_never || deferred.is_some() {
-            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, storage));
+            let undef = self.emit_value(UndefinedOp::with_type(ctx, storage), ctx);
             self.store(ctx, slot, undef);
         }
         Ok(())

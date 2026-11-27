@@ -1,6 +1,5 @@
 use super::*;
 use crate::lower::callable::Callback;
-use crate::lower::calls::CallArguments::Values;
 use crate::lower::inline::InlineResult;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -39,19 +38,21 @@ impl<'s> FunctionBuilder<'s, '_> {
         expected: Option<InlineResult>,
     ) -> Result<Option<Value>> {
         let value = match callback {
-            Callback::Bound { call, callee } => {
-                call.invoke(self, ctx, Some(callee), None, Values(arguments))?
-            }
-            Callback::Function(signature) => {
+            Callback::Function(signature, bound) => {
                 ensure_unsupported!(
-                    !signature.is_async && signature.parameters().1.is_none(),
+                    bound.is_some() || !signature.is_async && signature.parameters().1.is_none(),
                     "array callbacks require synchronous functions without rest parameters"
                 );
+                let prefix = match bound {
+                    Some((target, value)) => target.operand(self, ctx, Some(value))?,
+                    None => None,
+                };
+                let supplied = signature.supplied_values(usize::from(prefix.is_some()), arguments);
                 self.invoke_arguments(
                     ctx,
                     signature,
-                    signature.supplied_values(0, arguments),
-                    Arguments::Plain(&[]),
+                    prefix.into_iter().chain(supplied),
+                    [],
                     expected,
                 )?
             }
@@ -67,26 +68,24 @@ impl<'s> FunctionBuilder<'s, '_> {
                         .source_closure_result(decl.return_type)?
                         .map_or(InlineResult::Void, InlineResult::Declared),
                 };
-                let slot =
-                    self.with_inline_scope(ctx, decl.func_id, self.frame.this_slot, |b, ctx| {
-                        for (index, param) in decl.params.iter().enumerate() {
-                            let ty = b.shapes.specialization.annotations.get(&param.ty)?;
-                            let (binding, is_never) = b
-                                .shapes
-                                .native_param(crate::engine::NativeParam::Value(ty))?;
-                            let value = arguments.get(index).copied();
-                            ensure_diag!(
-                                value.is_some()
-                                    || param.default.is_some()
-                                    || admits_undefined(ctx, binding.carrier),
-                                codes::TYPE_MISMATCH,
-                                "missing required callback argument"
-                            );
-                            b.bind_parameter(ctx, param, value, binding, is_never)?;
-                        }
-                        b.inline_body(ctx, decl.body, result)
-                    })?;
-                slot.map(|s| self.load(ctx, s)).transpose()?
+                self.with_inline_scope(ctx, decl.func_id, self.frame.this_slot, |b, ctx| {
+                    for (index, param) in decl.params.iter().enumerate() {
+                        let ty = b.shapes.specialization.annotations.get(&param.ty)?;
+                        let (binding, is_never) = b
+                            .shapes
+                            .native_param(crate::engine::NativeParam::Value(ty))?;
+                        let value = arguments.get(index).copied();
+                        ensure_diag!(
+                            value.is_some()
+                                || param.default.is_some()
+                                || admits_undefined(ctx, binding.carrier),
+                            codes::TYPE_MISMATCH,
+                            "missing required callback argument"
+                        );
+                        b.bind_parameter(ctx, param, value, binding, is_never)?;
+                    }
+                    b.inline_body(ctx, decl.body, result)
+                })?
             }
         };
         match (value, expected) {

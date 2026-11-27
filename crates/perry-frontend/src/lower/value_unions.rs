@@ -35,34 +35,28 @@ impl<'s> FunctionBuilder<'s, '_> {
             return action(self, ctx, value);
         }
         let cases = perry_mir::variant_cases(ctx, value.get_type(ctx)).to_diag(ctx)?;
-        let tag = self.emit_value(ctx, |ctx| VariantTagOp::new(ctx, value));
-        let output = self.entry_slot(ctx, result);
-        let done = self.new_block(ctx, "union_join");
+        let tag = self.emit_value(VariantTagOp::new(ctx, value), ctx);
+        let done = self.result_block(ctx, result);
         for (index, (name, payload)) in cases.iter().enumerate() {
             let payload =
                 payload.ok_or_else(|| Diagnostic::internal("value union without a payload"))?;
             let next = if index + 1 < cases.len() {
                 let expected = self.string(ctx, name);
                 let matches = self.compare(ctx, CompareKind::Eq, tag, expected);
-                let active = self.new_block(ctx, "union_case");
-                let next = self.new_block(ctx, "union_next");
-                self.branch(ctx, matches, active, next);
-                self.switch_to(active);
-                Some(next)
+                Some(self.enter_case(ctx, matches))
             } else {
                 None
             };
-            let payload = self.emit_value(ctx, |ctx| VariantPayloadOp::new(ctx, value, payload));
+            let payload = self.emit_value(VariantPayloadOp::new(ctx, value, payload), ctx);
             let value = action(self, ctx, payload)?;
             let value = self.fit(ctx, value, result)?;
-            self.store(ctx, output, value);
-            self.jump(ctx, done);
+            self.emit(BrOp::new(ctx, done, vec![value]), ctx);
             if let Some(next) = next {
                 self.switch_to(next);
             }
         }
         self.switch_to(done);
-        self.load(ctx, output)
+        Ok(done.deref(ctx).get_argument(0))
     }
 
     pub(super) fn value_primitive(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
@@ -124,7 +118,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .is_some_and(|record| record.field(field).is_some());
             if has_field {
                 let op = FieldGetOp::new(ctx, payload, field.to_owned()).to_diag(ctx)?;
-                b.field_read(ctx, &op)
+                b.field_read(ctx, op)
             } else if payload.get_type(ctx).deref(ctx).is::<StringType>() && field == "length" {
                 Ok(b.string_length(ctx, payload))
             } else if payload.get_type(ctx).deref(ctx).is::<BytesType>() && field == "length" {

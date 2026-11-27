@@ -31,8 +31,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             Some(ty) => self.fit(ctx, value, ty)?,
             None => value,
         };
-        self.emit(ctx, |ctx| PromiseSettleOp::new(ctx, kind, promise, value));
-        self.emit(ctx, |ctx| ReturnOp::new(ctx, Vec::new()));
+        self.emit(PromiseSettleOp::new(ctx, kind, promise, value), ctx);
+        self.emit(ReturnOp::new(ctx, Vec::new()), ctx);
         Ok(())
     }
 
@@ -80,24 +80,24 @@ impl<'s> FunctionBuilder<'s, '_> {
                 settled
             })?
             .carrier;
-        let promise = self.emit_value(ctx, |ctx| PromisePendingOp::new(ctx, settled));
+        let promise = self.emit_value(PromisePendingOp::new(ctx, settled), ctx);
         let mut inputs = Vec::new();
         for handle in handles.into_iter().flatten() {
             let record = self.shapes.environment(handle)?.record;
-            let capture = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![promise]));
+            let capture = self.emit_value(AllocOp::new(ctx, record, vec![promise]), ctx);
             inputs.push(self.function_value(ctx, handle, Some(capture), None)?);
         }
-        let handler = self.catch_handler(ctx, "executor_threw");
+        let handler = self.catch_handler(ctx);
         self.with_handler(ctx, Some(handler), None, |b, ctx| {
             executor.invoke(b, ctx, value, None, Values(&inputs))
         })?;
         let done = self.new_block(ctx, "executor_done");
         self.jump(ctx, done);
-        self.switch_to(handler.block);
-        let reason = self.catch_exception(ctx, handler.status)?;
-        self.emit(ctx, |ctx| {
-            PromiseSettleOp::new(ctx, perry_mir::SettleKind::Reject, promise, reason)
-        });
+        let reason = self.catch_exception(ctx, handler);
+        self.emit(
+            PromiseSettleOp::new(ctx, perry_mir::SettleKind::Reject, promise, reason),
+            ctx,
+        );
         self.jump(ctx, done);
         self.switch_to(done);
         Ok(promise)
@@ -116,14 +116,14 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             _ => self.implicit_results(ctx),
         };
-        self.emit(ctx, |ctx| ReturnOp::new(ctx, values));
+        self.emit(ReturnOp::new(ctx, values), ctx);
         Ok(())
     }
 
     pub(super) fn as_promise_value(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         let ty = value.get_type(ctx);
         let Some(promise) = perry_mir::typed::<PromiseType>(ctx, present_type(ctx, ty)) else {
-            return Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)));
+            return Ok(self.emit_value(PromiseResolvedOp::new(ctx, value), ctx));
         };
         let Some(states) = absence(ctx, ty) else {
             return Ok(value);
@@ -132,7 +132,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let target = PromiseType::get(ctx, settled).into();
         let absent = |b: &mut Self, ctx: &mut Context, null| {
             let item = b.absent_literal(ctx, null, Some(settled))?;
-            Ok(b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, item)))
+            Ok(b.emit_value(PromiseResolvedOp::new(ctx, item), ctx))
         };
         self.match_optional(
             ctx,
@@ -147,7 +147,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     fn adopt(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
             let op = AwaitOp::new(ctx, value).to_diag(ctx)?;
-            Ok(self.append_value(ctx, &op))
+            Ok(self.emit_value(op, ctx))
         } else {
             Ok(value)
         }
@@ -207,11 +207,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             .map(|cb| cb.take_operand(&mut args))
             .transpose()?
             .flatten();
-        let handler = (rejected.is_some() || finalizer.is_some())
-            .then(|| self.catch_handler(ctx, "promise_rejected"));
+        let handler = (rejected.is_some() || finalizer.is_some()).then(|| self.catch_handler(ctx));
         let settled = self.with_handler(ctx, handler.or(self.handler), None, |b, ctx| {
             let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
-            Ok(b.append_value(ctx, &op))
+            Ok(b.emit_value(op, ctx))
         })?;
         if let Some(callback) = finalizer {
             self.finalizer(ctx, callback, f)?;
@@ -233,8 +232,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.return_callback(ctx, Some(settled), discard)?;
         }
         if let Some(handler) = handler {
-            self.switch_to(handler.block);
-            let reason = self.catch_exception(ctx, handler.status)?;
+            let reason = self.catch_exception(ctx, handler);
             if let Some(callback) = finalizer {
                 self.finalizer(ctx, callback, f)?;
             } else if let Some(callback) = rejected {
@@ -244,7 +242,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let Some(skip) = skip else { return Ok(()) };
                 self.switch_to(skip);
             }
-            let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, reason));
+            let status = self.emit_value(RaiseOp::new(ctx, reason), ctx);
             self.propagate(ctx, status);
         }
         Ok(())

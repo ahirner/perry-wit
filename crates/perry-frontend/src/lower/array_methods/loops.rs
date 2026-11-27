@@ -13,7 +13,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let dense = |b: &mut Self, ctx: &mut Context| {
             Ok(if copy {
-                b.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![array]))
+                b.emit_value(ConcatOp::from_sources(ctx, vec![array]), ctx)
             } else {
                 array
             })
@@ -22,7 +22,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             return dense(self, ctx);
         }
         let element = self.array_element(ctx, array)?;
-        let is_dense = self.emit_value(ctx, |ctx| perry_mir::ArrayIsDenseOp::new(ctx, array));
+        let is_dense = self.emit_value(perry_mir::ArrayIsDenseOp::new(ctx, array), ctx);
         self.choose(ctx, array.get_type(ctx), is_dense, dense, |b, ctx| {
             b.collect_items(ctx, Input::Array(array, holes), |b, ctx, item, _, _| {
                 Ok(ArrayOutput::Item(b.hole_as_element(ctx, item, element)?))
@@ -80,10 +80,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.switch_to(write);
         let element = self.array_element(ctx, target)?;
         let value = self.fit(ctx, value, element)?;
-        self.emit(ctx, |ctx| ArraySetOp::new(ctx, target, index, value));
+        self.emit(ArraySetOp::new(ctx, target, index, value), ctx);
         self.jump(ctx, done);
         self.switch_to(hole);
-        self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, target, index));
+        self.emit(perry_mir::ArrayHoleOp::new(ctx, target, index), ctx);
         self.jump(ctx, done);
         self.switch_to(done);
         Ok(())
@@ -98,7 +98,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             return self.element_at(ctx, array, index);
         }
         let op = ArrayGetOp::new(ctx, array, index).to_diag(ctx)?;
-        Ok(self.append_value(ctx, &op))
+        Ok(self.emit_value(op, ctx))
     }
 
     /// `array[index]` for an `f64` index the caller proved present and in bounds.
@@ -108,15 +108,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         array: Value,
         index: Value,
     ) -> Result<Value> {
-        let at = self.emit_value(ctx, |ctx| {
+        let at = self.emit_value(
             NumericCastOp::new(
                 ctx,
                 index,
                 IntegerType::get(ctx, 32, Signedness::Signless).into(),
-            )
-        });
+            ),
+            ctx,
+        );
         let op = ArrayAtOp::new(ctx, array, at).to_diag(ctx)?;
-        Ok(self.append_value(ctx, &op))
+        Ok(self.emit_value(op, ctx))
     }
     pub(crate) fn array_for_each(
         &mut self,
@@ -133,7 +134,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             |b, ctx, item, idx, _, _| b.effect_callback(ctx, callback, &[item, idx, arr]),
         )?;
         let ty = void_type(ctx);
-        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
+        Ok(self.emit_value(UndefinedOp::with_type(ctx, ty), ctx))
     }
     pub(crate) fn retain_array(
         &mut self,
@@ -153,15 +154,15 @@ impl<'s> FunctionBuilder<'s, '_> {
             b.branch(ctx, keep, retained, next);
             b.switch_to(retained);
             let position = b.load(ctx, write)?;
-            b.emit(ctx, |ctx| ArraySetOp::new(ctx, array, position, item));
+            b.emit(ArraySetOp::new(ctx, array, position, item), ctx);
             let advanced = b.binary(ctx, BinaryKind::Add, position, one);
             b.store(ctx, write, advanced);
             Ok(())
         })?;
         let retained = self.load(ctx, write)?;
         let integer = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        let length = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, retained, integer));
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, array, length));
+        let length = self.emit_value(NumericCastOp::new(ctx, retained, integer), ctx);
+        self.emit(ArrayTruncateOp::new(ctx, array, length), ctx);
         Ok(self.compare(ctx, CompareKind::Lt, retained, limit))
     }
 }

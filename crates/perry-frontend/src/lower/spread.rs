@@ -45,7 +45,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let val = self.defined(ctx, val)?;
             return Ok(self.string_characters(ctx, val));
         }
-        if crate::lower::collections::Collection::of(ctx, val_ty).is_some() {
+        if self.shapes.collection(ctx, val_ty).is_some() {
             let val = self.defined(ctx, val)?;
             return self.collect_items(ctx, Input::Collection(val), |_, _, item, _, _| {
                 Ok(ArrayOutput::Item(item))
@@ -68,7 +68,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let value = self.expression(ctx, arg)?;
             operands.push(self.concat_segment(ctx, value, element)?);
         }
-        Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, operands)))
+        Ok(self.emit_value(ConcatOp::from_sources(ctx, operands), ctx))
     }
 
     fn concat_segment(
@@ -88,10 +88,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 move |b: &mut Self, ctx: &mut Context| {
                     let item = match states {
                         Some(s) if null && s.admits_null() => {
-                            b.emit_value(ctx, |ctx| NullOp::new(ctx, element))
+                            b.emit_value(NullOp::new(ctx, element), ctx)
                         }
                         Some(s) if !null && s.admits_undefined() => {
-                            b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, element))
+                            b.emit_value(UndefinedOp::with_type(ctx, element), ctx)
                         }
                         // The element type excludes it, so `defined` throws `TypeError`.
                         _ => {
@@ -99,7 +99,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                             return b.fit(ctx, array, target);
                         }
                     };
-                    Ok(b.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![item])))
+                    Ok(b.emit_value(ArrayNewOp::new(ctx, element, vec![item]), ctx))
                 }
             };
             self.match_optional(
@@ -112,7 +112,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             )
         } else {
             let value = self.fit(ctx, value, element)?;
-            Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value])))
+            Ok(self.emit_value(ArrayNewOp::new(ctx, element, vec![value]), ctx))
         }
     }
 
@@ -138,21 +138,21 @@ impl<'s> FunctionBuilder<'s, '_> {
                 perry_hir::ArrayElement::Spread(expr) => (expr, true),
                 perry_hir::ArrayElement::Hole => {
                     let array = *result.get_or_insert_with(|| {
-                        self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]))
+                        self.emit_value(ArrayNewOp::new(ctx, element, vec![]), ctx)
                     });
                     let end = self.array_length(ctx, array);
-                    self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, array, end));
+                    self.emit(perry_mir::ArrayHoleOp::new(ctx, array, end), ctx);
                     continue;
                 }
             };
             let segment = match self.array_argument(ctx, element, arg)? {
                 ArrayOutput::Items(items) => items,
                 ArrayOutput::Item(value) => {
-                    self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value]))
+                    self.emit_value(ArrayNewOp::new(ctx, element, vec![value]), ctx)
                 }
             };
             let sources = result.into_iter().chain([segment]).collect();
-            result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
+            result = Some(self.emit_value(ConcatOp::from_sources(ctx, sources), ctx));
         }
         result.ok_or_else(|| {
             diag!(
@@ -205,12 +205,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             "push requires a dense array receiver"
         );
         let element = self.array_element(ctx, receiver)?;
-        let values = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+        let values = self.emit_value(ArrayNewOp::new(ctx, element, vec![]), ctx);
         for arg in Arguments::Spread(args) {
             self.array_argument(ctx, element, arg)?
                 .append_to(self, ctx, values);
         }
-        self.emit(ctx, |ctx| ArrayExtendOp::new(ctx, receiver, values));
+        self.emit(ArrayExtendOp::new(ctx, receiver, values), ctx);
         Ok(self.array_length(ctx, receiver))
     }
 
@@ -296,13 +296,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let element = self.array_element(ctx, receiver)?;
         let array = ArrayType::get(ctx, element).into();
-        let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, array, vec![receiver]));
+        let sources = self.emit_value(ArrayNewOp::new(ctx, array, vec![receiver]), ctx);
         self.for_each_spread_arg(ctx, Arguments::Spread(args), element, |b, ctx, value| {
             let segment = b.concat_segment(ctx, value, element)?;
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
+            b.emit(ArrayPushOp::new(ctx, sources, segment), ctx);
             Ok(())
         })?;
-        Ok(self.emit_value(ctx, |ctx| ConcatSegmentsOp::new(ctx, sources)))
+        Ok(self.emit_value(ConcatSegmentsOp::new(ctx, sources), ctx))
     }
 
     pub(super) fn array_argument(

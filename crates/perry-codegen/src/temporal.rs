@@ -50,10 +50,7 @@ impl FunctionLowering<'_, '_> {
         let thirty_two = self.i64_const(ctx, 32);
         let status = self.num(ctx, NumOpcode::I64ShrU, vec![packed, thirty_two]);
         let status = self.num(ctx, NumOpcode::I32WrapI64, vec![status]);
-        let failed = self.new_block(ctx, vec![]);
-        let done = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, status, (failed, vec![]), (done, vec![]));
-        self.block = failed;
+        let done = self.enter_if(ctx, status);
         let message = self.state.data.string(message);
         let message = self.i64_const(ctx, u64::from(message));
         let kind = self.i32_const(ctx, perry_abi::layout::exception::RANGE_ERROR as i32);

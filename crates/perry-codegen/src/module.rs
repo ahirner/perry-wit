@@ -51,7 +51,7 @@ pub(crate) enum Initializer {
 pub(crate) struct Data {
     pub(crate) bytes: Vec<u8>,
     strings: HashMap<String, u32>,
-    pub(crate) regexes: HashMap<(String, String), u32>,
+    pub(crate) regexes: HashMap<pliron::uniqued_any::Uniqued<perry_mir::RegexLiteral>, u32>,
 }
 
 impl Data {

@@ -19,6 +19,7 @@ mod collectible;
 pub mod exception;
 pub mod host;
 mod instance;
+mod numeric;
 #[cfg(not(target_arch = "wasm32"))]
 pub use instance::native::RuntimeInstance;
 pub mod io;
@@ -83,12 +84,6 @@ pub(crate) fn byte_size(elements: u32, stride: u32, overhead: u32) -> u32 {
 #[inline(always)]
 pub(crate) fn sequence_length(left: u32, right: u32) -> u32 {
     left.checked_add(right).expect("sequence length overflow")
-}
-
-/// ECMAScript `%` on numbers: the IEEE remainder truncated toward zero (C `fmod`).
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn perry_f64_rem(dividend: f64, divisor: f64) -> f64 {
-    libm::fmod(dividend, divisor)
 }
 
 #[cfg(test)]
@@ -289,8 +284,8 @@ mod tests {
                 assert_eq!(*header.add(1), 128);
             }
             perry_task_end();
-            assert_eq!(perry_f64_rem(7.5, 2.0), 1.5);
-            assert_eq!(perry_f64_rem(-7.5, 2.0), -1.5);
+            assert_eq!(numeric::perry_f64_rem(7.5, 2.0), 1.5);
+            assert_eq!(numeric::perry_f64_rem(-7.5, 2.0), -1.5);
         });
     }
 }

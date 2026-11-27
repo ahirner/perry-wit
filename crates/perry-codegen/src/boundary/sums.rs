@@ -92,11 +92,23 @@ struct NativePayload {
     slot: Option<(u32, TypeHandle)>,
 }
 
+pub(super) struct TaggedResult {
+    pub(super) layout: std::rc::Rc<RecordLayout>,
+    tag: RecordField,
+}
+
+impl TaggedResult {
+    pub(super) fn of(ctx: &Context, layout: std::rc::Rc<RecordLayout>) -> Option<Self> {
+        let tag = *layout.fields.get(perry_mir::RESULT_TAG)?;
+        (repr(ctx, tag.ty).ok()? == Repr::Bool).then_some(Self { tag, layout })
+    }
+}
+
 enum NativeSum {
     Optional { mir: TypeHandle, inner: TypeHandle },
     Enum,
     Variant(TypedHandle<perry_mir::VariantType>),
-    Result(std::rc::Rc<RecordLayout>),
+    Result(TaggedResult),
 }
 
 impl NativeSum {
@@ -110,12 +122,9 @@ impl NativeSum {
         let (mir, slot) = match self {
             Self::Optional { inner, .. } => (*inner, None),
             Self::Result(layout) => {
-                let field = layout
-                    .result_fields()?
-                    .payloads
+                let field = perry_mir::RESULT_PAYLOADS
                     .get(case)
-                    .copied()
-                    .flatten()
+                    .and_then(|key| layout.layout.fields.get(*key))
                     .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "result payload is missing"))?;
                 let mir = if matches!(abi.kind, AbiKind::Option(_)) {
                     field.ty
@@ -125,13 +134,10 @@ impl NativeSum {
                 (mir, Some((field.offset, field.ty)))
             }
             Self::Variant(variant) => {
-                let field = variant
-                    .deref(ctx)
-                    .cases()
-                    .iter()
-                    .find(|(tag, _)| tag == name)
-                    .and_then(|(_, payload)| *payload)
-                    .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "variant payload is missing"))?;
+                let field =
+                    variant.deref(ctx).case(name).flatten().ok_or_else(|| {
+                        diag!(codes::CONTRACT_MISMATCH, "variant payload is missing")
+                    })?;
                 (field, Some((perry_abi::layout::variant::VALUE, field)))
             }
             Self::Enum => bail_internal!("enum has no payload"),
@@ -267,9 +273,11 @@ impl FunctionLowering<'_, '_> {
                 );
                 NativeSum::Enum
             }
-            AbiKind::Result { .. } if mir.deref(ctx).is::<RecordType>() => {
-                NativeSum::Result(self.boundary_record(ctx, mir)?)
-            }
+            AbiKind::Result { .. } if mir.deref(ctx).is::<RecordType>() => NativeSum::Result(
+                TaggedResult::of(ctx, self.boundary_record(ctx, mir)?).ok_or_else(|| {
+                    diag!(codes::CONTRACT_MISMATCH, "result ok field must be boolean")
+                })?,
+            ),
             AbiKind::Variant(..) | AbiKind::Result { .. } => {
                 NativeSum::Variant(perry_mir::typed(ctx, mir).ok_or_else(|| {
                     diag!(
@@ -305,19 +313,13 @@ impl FunctionLowering<'_, '_> {
                     None => self.undefined(ctx, mir),
                 }
             }
-            NativeSum::Result(layout) => {
-                let fields = layout.result_fields()?;
+            NativeSum::Result(fields) => {
+                let layout = &fields.layout;
                 let mut values = Vec::with_capacity(layout.fields.len());
                 for (name, field) in &layout.fields {
                     let value = if field.index == fields.tag.index {
                         self.i32_const(ctx, i32::from(case == 0))
-                    } else if fields
-                        .payloads
-                        .get(case)
-                        .copied()
-                        .flatten()
-                        .is_some_and(|p| p.index == field.index)
-                    {
+                    } else if perry_mir::RESULT_PAYLOADS.get(case) == Some(&name.as_str()) {
                         payload
                             .ok_or_else(|| {
                                 diag!(
@@ -459,7 +461,7 @@ impl FunctionLowering<'_, '_> {
                 self.num(ctx, NumOpcode::I32Eqz, vec![absent])
             }
             NativeSum::Result(layout) => {
-                let field = layout.result_fields()?.tag;
+                let field = layout.tag;
                 let ok = self.load(ctx, MemKind::I32, value.scalar()?, field.offset);
                 self.num(ctx, NumOpcode::I32Eqz, vec![ok])
             }

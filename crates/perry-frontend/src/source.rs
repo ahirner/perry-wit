@@ -9,6 +9,7 @@ mod names;
 mod parser;
 mod program;
 mod strings;
+pub(crate) use constructors::RegExpArguments;
 pub(crate) use names::{FreshNames, MODULE_PREFIX, is_reserved_binding, module_binding_name};
 pub(crate) use parser::parse;
 use perry_parser::swc_ecma_ast as ast;
@@ -18,7 +19,7 @@ pub(crate) use program::{
     InstanceFunction, ModuleDeclarations, SourceCall, SourceModule, StaticField, authored_body,
 };
 use std::collections::{HashMap, HashSet};
-pub(crate) use strings::{RegexInputs, RegexSites};
+pub(crate) use strings::ConstantStrings;
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 

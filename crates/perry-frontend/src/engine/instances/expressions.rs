@@ -50,7 +50,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                     }
                     _ => {}
                 }
-                if site.erased || site.coercion.is_some() || site.resolution.is_some() {
+                if site.erased || site.operand.is_some() || site.resolution.is_some() {
                     rows.push((index, site));
                 }
             }

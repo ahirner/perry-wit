@@ -50,7 +50,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn bigint_view(&mut self, ctx: &mut Context, value: Value) -> Value {
         if is_integer64(ctx, value.get_type(ctx)) {
             let bigint = BigIntType::get(ctx).into();
-            self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, bigint))
+            self.emit_value(NumericCastOp::new(ctx, value, bigint), ctx)
         } else {
             value
         }
@@ -70,9 +70,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             return value;
         };
         if inner.deref(ctx).is::<pliron::builtin::types::FP64Type>() {
-            self.emit_value(ctx, |ctx| ToNumberOp::new(ctx, value))
+            self.emit_value(ToNumberOp::new(ctx, value), ctx)
         } else if inner.deref(ctx).is::<StringType>() {
-            self.emit_value(ctx, |ctx| ToStringOp::new(ctx, value))
+            self.emit_value(ToStringOp::new(ctx, value), ctx)
         } else {
             value
         }
@@ -84,7 +84,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             return Ok(value);
         }
         let op = UnwrapOp::new(ctx, value).to_diag(ctx)?;
-        Ok(self.append_value(ctx, &op))
+        Ok(self.emit_value(op, ctx))
     }
 
     /// [`Self::defined`] for a property receiver; MIR rejects one that may still be `null`.
@@ -100,7 +100,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let locations = &self.shapes.locations;
         let op =
             UnwrapOp::receiver(ctx, value, || locations.member_span(byte_offset)).to_diag(ctx)?;
-        Ok(self.append_value(ctx, &op))
+        Ok(self.emit_value(op, ctx))
     }
 
     /// Dispatch an optional value, unwrapping only on its present branch.
@@ -113,9 +113,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         null: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
         present: impl FnOnce(&mut Self, &mut Context, Value) -> Result<Value>,
     ) -> Result<Value> {
-        let is_undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+        let is_undefined = self.emit_value(IsUndefinedOp::new(ctx, value), ctx);
         self.choose(ctx, target, is_undefined, undefined, |b, ctx| {
-            let is_null = b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+            let is_null = b.emit_value(IsNullOp::new(ctx, value), ctx);
             b.choose(ctx, target, is_null, null, |b, ctx| {
                 let defined = b.defined(ctx, value)?;
                 present(b, ctx, defined)
@@ -131,12 +131,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             Some((inner, perry_mir::Absence::Both)) => {
                 let target =
                     perry_mir::OptionalType::get_with(ctx, inner, perry_mir::Absence::Null).into();
-                let is_null = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value));
+                let is_null = self.emit_value(IsNullOp::new(ctx, value), ctx);
                 self.choose(
                     ctx,
                     target,
                     is_null,
-                    |b, ctx| Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, target))),
+                    |b, ctx| Ok(b.emit_value(NullOp::new(ctx, target), ctx)),
                     |b, ctx| {
                         let defined = b.defined(ctx, value)?;
                         b.fit(ctx, defined, target)
@@ -152,7 +152,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         if self.is_optional(ctx, value) {
             value
         } else {
-            self.emit_value(ctx, |ctx| WrapOp::new(ctx, value))
+            self.emit_value(WrapOp::new(ctx, value), ctx)
         }
     }
 
@@ -181,7 +181,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 target,
                 |b, ctx| {
                     if states.admits_undefined() {
-                        Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target)))
+                        Ok(b.emit_value(UndefinedOp::with_type(ctx, target), ctx))
                     } else {
                         let value = b.defined(ctx, value)?;
                         b.fit(ctx, value, target)
@@ -189,7 +189,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 },
                 |b, ctx| {
                     if states.admits_null() {
-                        Ok(b.emit_value(ctx, |ctx| NullOp::new(ctx, target)))
+                        Ok(b.emit_value(NullOp::new(ctx, target), ctx))
                     } else {
                         let value = b.defined(ctx, value)?;
                         b.fit(ctx, value, target)
@@ -202,10 +202,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             && crate::lower::value_unions::is_value_union(ctx, wanted)
             && let Some(tag) = perry_mir::value_tag(ctx, ty)
         {
-            let payload = perry_mir::variant_cases(ctx, wanted)
+            let payload = perry_mir::VariantType::of(ctx, wanted)
                 .to_diag(ctx)?
-                .into_iter()
-                .find_map(|(name, payload)| (name == tag).then_some(payload).flatten())
+                .case(tag)
+                .flatten()
                 .ok_or_else(|| {
                     Diagnostic::new(codes::TYPE_MISMATCH, "value is outside the finite union")
                 })?;
@@ -215,22 +215,23 @@ impl<'s> FunctionBuilder<'s, '_> {
                 "record alternatives must preserve their layout and identity"
             );
             let value = self.fit(ctx, value, payload)?;
-            let boxed = self.emit_value(ctx, |ctx| {
-                perry_mir::VariantNewOp::new(ctx, wanted, tag, Some(value))
-            });
+            let boxed = self.emit_value(
+                perry_mir::VariantNewOp::new(ctx, wanted, tag, Some(value)),
+                ctx,
+            );
             return self.fit(ctx, boxed, target);
         }
         if !crate::lower::value_unions::is_value_union(ctx, wanted)
             && crate::lower::value_unions::is_value_union(ctx, ty)
-            && perry_mir::variant_cases(ctx, present_type(ctx, ty))
+            && perry_mir::VariantType::of(ctx, present_type(ctx, ty))
                 .to_diag(ctx)?
+                .cases()
                 .iter()
                 .any(|(_, payload)| *payload == Some(wanted))
         {
             let value = self.defined(ctx, value)?;
-            let payload = self.emit_value(ctx, |ctx| {
-                perry_mir::VariantPayloadOp::new(ctx, value, wanted)
-            });
+            let payload =
+                self.emit_value(perry_mir::VariantPayloadOp::new(ctx, value, wanted), ctx);
             return self.fit(ctx, payload, target);
         }
         if target.deref(ctx).is::<perry_mir::ByteInputType>() {
@@ -272,7 +273,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             || (is_integer64(ctx, thrown) && wanted.deref(ctx).is::<BigIntType>())
         {
             let defined = self.defined(ctx, value)?;
-            let casted = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, defined, wanted));
+            let casted = self.emit_value(NumericCastOp::new(ctx, defined, wanted), ctx);
             return self.fit(ctx, casted, target);
         }
         if ty == target {
@@ -282,27 +283,25 @@ impl<'s> FunctionBuilder<'s, '_> {
         {
             Ok(json)
         } else if wanted.deref(ctx).is::<JsonType>() && !thrown.deref(ctx).is::<JsonType>() {
-            let boxed = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
+            let boxed = self.emit_value(perry_mir::JsonBoxOp::new(ctx, value), ctx);
             self.fit(ctx, boxed, target)
         } else if optional_value(ctx, target) == Some(ty) {
-            Ok(self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, target)))
+            Ok(self.emit_value(WrapOp::with_type(ctx, value, target), ctx))
         } else if optional_value(ctx, target).is_some()
             && optional_value(ctx, target) == optional_value(ctx, ty)
         {
-            Ok(self.emit_value(ctx, |ctx| OptionalCastOp::new(ctx, value, target)))
+            Ok(self.emit_value(OptionalCastOp::new(ctx, value, target), ctx))
         } else if optional_value(ctx, ty) == Some(target) {
             self.defined(ctx, value)
         } else if perry_mir::can_widen(ctx, ty, target) {
-            Ok(self.emit_value(ctx, |ctx| {
-                perry_mir::AggregateViewOp::new(ctx, value, target)
-            }))
+            Ok(self.emit_value(perry_mir::AggregateViewOp::new(ctx, value, target), ctx))
         } else {
             // A value that never materializes takes any type.
             if self.never_values.contains(&value) {
                 return Ok(if admits_undefined(ctx, target) {
-                    self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, target))
+                    self.emit_value(UndefinedOp::with_type(ctx, target), ctx)
                 } else {
-                    self.emit_value(ctx, |ctx| UndefOp::new(ctx, target))
+                    self.emit_value(UndefOp::new(ctx, target), ctx)
                 });
             }
             let source = present_type(ctx, ty);
@@ -314,8 +313,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             {
                 return self.project_record(ctx, value, ty == source, dst_rec, target);
             }
-            let actual = describe_type(ctx, ty);
-            let expected = describe_type(ctx, target);
+            let actual = self.shapes.describe_type(ctx, ty);
+            let expected = self.shapes.describe_type(ctx, target);
             bail_diag!(
                 codes::TYPE_MISMATCH,
                 "value type {actual} differs from the expected type {expected}"
@@ -399,7 +398,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         if let Some(inner) = optional_value(ctx, value.get_type(ctx)) {
             if inner.deref(ctx).is::<StringType>() {
-                return Ok(self.emit_value(ctx, |ctx| ToStringOp::new(ctx, value)));
+                return Ok(self.emit_value(ToStringOp::new(ctx, value), ctx));
             }
             let ty = StringType::get(ctx).into();
             return self.match_optional(
@@ -461,7 +460,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let name = match kind(ctx, value)? {
             Kind::ValueUnion => {
-                return Ok(self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, value)));
+                return Ok(self.emit_value(perry_mir::VariantTagOp::new(ctx, value), ctx));
             }
             Kind::BigInt => "bigint",
             Kind::Number => "number",
@@ -502,23 +501,28 @@ pub(super) fn void_type(ctx: &Context) -> TypeHandle {
     perry_mir::OptionalType::get(ctx, number).into()
 }
 
-fn describe_type(ctx: &Context, ty: TypeHandle) -> String {
-    if let Some((k, v, _)) = crate::lower::collections::map_entry_types(ctx, ty) {
-        format!("Map<{}, {}>", describe_type(ctx, k), describe_type(ctx, v))
-    } else if matches!(
-        crate::lower::collections::Collection::of(ctx, ty),
-        Some(crate::lower::collections::Collection::Box(
-            crate::source::CollectionKind::Set
-        ))
-    ) {
-        "Set".into()
-    } else if let Some((k, v, _)) = crate::lower::collections::dict_entry_types(ctx, ty) {
-        format!(
-            "Record<{}, {}>",
-            describe_type(ctx, k),
-            describe_type(ctx, v)
-        )
-    } else {
-        ty.disp(ctx).to_string()
+impl Shapes<'_> {
+    fn describe_type(&self, ctx: &Context, ty: TypeHandle) -> String {
+        if let Some(map) = self.boxed_collection(ctx, ty, crate::source::CollectionKind::Map) {
+            let [k, v] = map.fields;
+            format!(
+                "Map<{}, {}>",
+                self.describe_type(ctx, k),
+                self.describe_type(ctx, v)
+            )
+        } else if self
+            .boxed_collection(ctx, ty, crate::source::CollectionKind::Set)
+            .is_some()
+        {
+            "Set".into()
+        } else if let Some((k, v, _)) = super::collections::dict_entry_types(ctx, ty) {
+            format!(
+                "Record<{}, {}>",
+                self.describe_type(ctx, k),
+                self.describe_type(ctx, v)
+            )
+        } else {
+            ty.disp(ctx).to_string()
+        }
     }
 }

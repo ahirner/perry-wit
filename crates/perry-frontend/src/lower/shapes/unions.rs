@@ -1,15 +1,9 @@
 //! Optional, scalar, and discriminated union layouts shared by declarations and solver types.
 use super::*;
-use crate::engine::types::{LocId, Ty, TyKind};
+use crate::engine::types::{LocId, Ty, TyKind, VariantCase};
 use crate::shapes::generics::Resolver;
 
 impl Shapes<'_, Preparing<'_>> {
-    fn literal<'a>(&self, ctx: &'a Context, ty: Ty) -> Option<&'a str> {
-        match self.types.source.kind(ty) {
-            TyKind::Literal(value) => Some(value.get(ctx).as_str()),
-            _ => None,
-        }
-    }
     fn runtime_properties(&self, props: PropertiesId) -> impl Iterator<Item = (&str, Ty)> {
         let types = &self.types.source;
         types
@@ -42,7 +36,11 @@ impl Shapes<'_, Preparing<'_>> {
                 "an absence-only union needs a declared value type"
             ),
             ([one], Some(_)) => self.project_type(ctx, *one, visiting)?.carrier,
-            (members, _) if members.iter().all(|ty| self.literal(ctx, *ty).is_some()) => {
+            (members, _)
+                if members
+                    .iter()
+                    .all(|ty| matches!(self.types.source.kind(*ty), TyKind::Literal(_))) =>
+            {
                 StringType::get(ctx).into()
             }
             (members, _) => self.union_layout(ctx, members, visiting)?,
@@ -52,7 +50,7 @@ impl Shapes<'_, Preparing<'_>> {
         }))
     }
 
-    pub(super) fn union_layout(
+    fn union_layout(
         &mut self,
         ctx: &Context,
         members: &[Ty],
@@ -136,7 +134,16 @@ impl Shapes<'_, Preparing<'_>> {
         {
             return self.result(ctx, &records, visiting);
         }
-        self.variant(ctx, &records, visiting)
+        let mut cases = indexmap::IndexMap::with_capacity(records.len());
+        for props in records {
+            let (tag, payload) = self.variant_case(props)?;
+            ensure_diag!(
+                cases.insert(tag, payload).is_none(),
+                codes::TYPE_MISMATCH,
+                "variant tags must be distinct"
+            );
+        }
+        self.variant_layout(ctx, cases, visiting)
     }
 
     /// Build the record representation for an SDK `Result`, keeping disjoint payload slots that admit `undefined` when inactive.
@@ -175,69 +182,54 @@ impl Shapes<'_, Preparing<'_>> {
                 );
             }
         }
-        let mut fields = vec![(
-            RESULT_TAG.into(),
-            IntegerType::get(ctx, 1, Signedness::Signless).into(),
-        )];
-        for (name, arg) in RESULT_PAYLOADS.into_iter().zip(payloads) {
-            if let Some(prop_ty) = arg {
-                let ty = self.project_type(ctx, prop_ty, visiting)?.carrier;
-                fields.push((name.to_string(), OptionalType::get(ctx, ty).into()));
-            }
-        }
-        Ok(self.mir_record(ctx, fields)?.into())
+        let record = self.types.source.result_record(payloads);
+        Ok(self.project_type(ctx, record, visiting)?.carrier)
     }
 
-    fn variant(
+    fn variant_case(&self, props: PropertiesId) -> Result<VariantCase> {
+        let mut tag = None;
+        let mut payload = None;
+        let mut extra = false;
+        for (name, ty) in self.runtime_properties(props) {
+            match name {
+                "tag" => {
+                    if let TyKind::Literal(name) = self.types.source.kind(ty) {
+                        tag = Some(name);
+                    }
+                }
+                "val" => payload = Some(ty),
+                _ => extra = true,
+            }
+        }
+        let tag = tag.ok_or_else(|| {
+            diag!(
+                codes::UNSUPPORTED_TYPE,
+                "union members need a literal `tag`"
+            )
+        })?;
+        ensure_diag!(
+            !extra,
+            codes::UNSUPPORTED_TYPE,
+            "union members have `tag` and `val` only"
+        );
+        Ok((tag, payload))
+    }
+
+    pub(super) fn variant_layout(
         &mut self,
         ctx: &Context,
-        members: &[PropertiesId],
+        cases: impl IntoIterator<Item = VariantCase>,
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
-        let mut cases = Vec::with_capacity(members.len());
-        for &props in members {
-            let mut tag = None;
-            let mut val_arg = None;
-            let mut invalid = false;
-            for (name, ty) in self.runtime_properties(props) {
-                match name {
-                    "tag" => {
-                        let Some(lit) = self.literal(ctx, ty) else {
-                            bail_diag!(
-                                codes::UNSUPPORTED_TYPE,
-                                "union members need a literal `tag`"
-                            );
-                        };
-                        tag = Some(lit.to_owned());
-                    }
-                    "val" => val_arg = Some(ty),
-                    _ => invalid = true,
-                }
-            }
-            let tag = tag.ok_or_else(|| {
-                Diagnostic::new(
-                    codes::UNSUPPORTED_TYPE,
-                    "union members need a literal `tag`",
-                )
-            })?;
-            ensure_diag!(
-                !invalid,
-                codes::UNSUPPORTED_TYPE,
-                "union members have `tag` and `val` only"
-            );
-            ensure_diag!(
-                !cases.iter().any(|(name, _)| name == &tag),
-                codes::TYPE_MISMATCH,
-                "variant tags must be distinct"
-            );
-            let payload = val_arg
-                .map(|prop_ty| {
-                    self.project_type(ctx, prop_ty, visiting)
-                        .map(|binding| binding.carrier)
-                })
-                .transpose()?;
-            cases.push((tag, payload));
-        }
+        let cases = cases
+            .into_iter()
+            .map(|(tag, payload)| {
+                let ty = payload
+                    .map(|ty| self.project_type(ctx, ty, visiting).map(|b| b.carrier))
+                    .transpose()?;
+                Ok((tag.get(ctx).clone(), ty))
+            })
+            .collect::<Result<_>>()?;
         Ok(perry_mir::VariantType::get(ctx, cases).into())
     }
 }

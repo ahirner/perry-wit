@@ -220,7 +220,6 @@ pub(crate) struct ModuleIndex<'h> {
     pub(super) literal_classes: crate::source::LiteralClasses<'h>,
     pub(crate) locals: IdxVec<LocalIdx, LocalInfo>,
     pub(crate) receiver_members: crate::wit::ReceiverMembers<'h>,
-    pub(crate) regexes: crate::source::RegexSites<'h>,
     pub(super) local_to_idx: Vec<Option<LocalIdx>>,
     pub(crate) capture_free_templates: BitSet,
     pub(crate) returns_empty_list: BitSet,
@@ -468,9 +467,9 @@ impl<'h> ModuleIndex<'h> {
                         if matches!(init, Expr::Null | Expr::Undefined) {
                             self.locals[local].flags.insert(LocalFlags::NULLISH_INIT);
                         }
-                        let regex = matches!(init, Expr::RegExp { .. })
-                            || scan.constructors.regexp(init).is_some();
-                        scan.regexes.bind(*id, init, regex, !mutable);
+                        if !mutable {
+                            scan.strings.bind(*id, init);
+                        }
                         self.scan_expr(scan, init, owner, in_loop);
                     }
                     scan.defined_locals.insert(*id as usize);
@@ -679,8 +678,13 @@ impl<'h> ModuleIndex<'h> {
                 .declared
                 .insert(site, SiteResolution::ResourceCall(id));
         }
-        if matches!(expr, Expr::RegExp { .. }) || self.expressions.regexp(expr).is_some() {
-            scan.regexes.sites.push(expr);
+        if let Expr::RegExp { pattern, flags } = expr {
+            let literal = perry_mir::RegexLiteral::intern(scan.ctx, pattern.clone(), flags.clone());
+            self.expressions
+                .declared
+                .insert(site, SiteResolution::Regex(Some(literal)));
+        } else if let Some(args) = self.expressions.regexp(expr) {
+            scan.regex_constructors.push((site, args));
         }
         match expr {
             Expr::Call { .. }
@@ -821,7 +825,8 @@ struct ScanCtx<'h, 'a> {
     constructors: &'a crate::source::Constructors,
     decls: &'a crate::shapes::Declarations<'h>,
     locations: &'a hir_compat::Locations<'a>,
-    regexes: crate::source::RegexInputs<'h>,
+    strings: crate::source::ConstantStrings<'h>,
+    regex_constructors: Vec<(ExprIdx, crate::source::RegExpArguments<'h>)>,
     ctx: &'a Context,
     declarations: &'h crate::source::ModuleDeclarations,
     closure_names: &'h HashMap<FuncId, String>,

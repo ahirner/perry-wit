@@ -352,3 +352,26 @@ fn class_members_can_call_their_own_mir_function() {
         lower_without_foreign(&mut Context::new(), &source, "classes.ts").unwrap();
     }
 }
+
+#[test]
+fn group_by_emits_one_key_search_per_input_item() {
+    use pliron::{
+        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
+        graph::{dominance::compute_dominator_tree, loop_tree::compute_loop_tree},
+    };
+    let ctx = &mut Context::new();
+    let module = lower_without_foreign(
+        ctx,
+        "export function grouped(xs: number[]): number { return Map.groupBy(xs, x => x).size; }",
+        "grouped.ts",
+    )
+    .unwrap();
+    let group = perry_mir::functions(module.get_operation(), ctx)
+        .into_iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == "grouped")
+        .unwrap();
+    let region = group.get_region(ctx);
+    let loops = compute_loop_tree(ctx, &region, &compute_dominator_tree(ctx, &region));
+    assert_eq!(loops.num_loops(), 2);
+    assert_eq!(loops.top_level_loops().count(), 1);
+}

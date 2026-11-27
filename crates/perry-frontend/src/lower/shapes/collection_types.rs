@@ -1,23 +1,38 @@
 //! MIR records of `Map`, `Set`, their live views, dictionaries and pairs.
 use super::*;
-use crate::lower::collections::{CollectionKind, CollectionViewKind, EntryTypes};
+use crate::lower::collections::{CollectionKind, CollectionLayout, CollectionViewKind, EntryTypes};
 
 impl<T> Shapes<'_, T> {
-    pub(in crate::lower) fn entry_type(
+    pub(in crate::lower) fn collection_type(
         &mut self,
         ctx: &Context,
         types: EntryTypes,
-    ) -> Result<TypedHandle<RecordType>> {
+    ) -> Result<CollectionLayout> {
         let live = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let sequence = FP64Type::get(ctx).into();
-        match types {
-            EntryTypes::Map(key, value) => {
-                self.positional_record(ctx, RecordKind::MapEntry, [key, value, live, sequence])
-            }
-            EntryTypes::Set(element) => {
-                self.positional_record(ctx, RecordKind::SetEntry, [element, live, sequence])
-            }
-        }
+        let number = FP64Type::get(ctx).into();
+        let (kind, fields, entry) = match types {
+            EntryTypes::Map(key, value) => (
+                CollectionKind::Map,
+                [key, value],
+                self.positional_record(ctx, RecordKind::MapEntry, [key, value, live, number])?,
+            ),
+            EntryTypes::Set(item) => (
+                CollectionKind::Set,
+                [item; 2],
+                self.positional_record(ctx, RecordKind::SetEntry, [item, live, number])?,
+            ),
+        };
+        let entries = ArrayType::get(ctx, entry.into()).into();
+        let boxed =
+            self.positional_record(ctx, kind.box_kind(), [entries, number, number, number])?;
+        let layout = CollectionLayout {
+            view: kind.default_view(),
+            boxed,
+            entry,
+            fields,
+        };
+        self.collections.insert(boxed.into(), layout);
+        Ok(layout)
     }
 
     /// The `{ _0: index, _1: min_seq, _2: epoch }` cursor of a live iterator.
@@ -26,40 +41,21 @@ impl<T> Shapes<'_, T> {
         self.positional_record(ctx, RecordKind::Tuple, [f64_ty; 3])
     }
 
-    /// A `kind` box over `entry` records: `{ _0: entries, _1: live count, _2: next_seq, _3: epoch }`.
-    pub(crate) fn collection_box_type(
+    pub(in crate::lower) fn collection_view_type(
         &mut self,
         ctx: &Context,
-        entry: TypedHandle<RecordType>,
-        kind: CollectionKind,
-    ) -> Result<TypedHandle<RecordType>> {
-        let entries_arr = ArrayType::get(ctx, entry.into()).into();
-        let f64_ty: TypeHandle = FP64Type::get(ctx).into();
-        self.positional_record(ctx, kind.box_kind(), [entries_arr, f64_ty, f64_ty, f64_ty])
-    }
-
-    /// A live `view` `{ _0: box, _1: cursor }` over a box of type `box_ty`.
-    pub(crate) fn collection_view_type(
-        &mut self,
-        ctx: &Context,
-        box_ty: TypeHandle,
+        layout: CollectionLayout,
         view: CollectionViewKind,
     ) -> Result<TypedHandle<RecordType>> {
-        let cursor_rec = self.cursor_tuple_type(ctx)?;
-        self.positional_record(ctx, view.record_kind(), [box_ty, cursor_rec.into()])
-    }
-
-    pub(in crate::lower) fn collection_type(
-        &mut self,
-        ctx: &Context,
-        types: EntryTypes,
-    ) -> Result<TypedHandle<RecordType>> {
-        let entry = self.entry_type(ctx, types)?;
-        let kind = match types {
-            EntryTypes::Map(..) => CollectionKind::Map,
-            EntryTypes::Set(_) => CollectionKind::Set,
-        };
-        self.collection_box_type(ctx, entry, kind)
+        let cursor = self.cursor_tuple_type(ctx)?;
+        let record = self.positional_record(
+            ctx,
+            view.record_kind(),
+            [layout.boxed.into(), cursor.into()],
+        )?;
+        self.collections
+            .insert(record.into(), CollectionLayout { view, ..layout });
+        Ok(record)
     }
 }
 
@@ -94,8 +90,8 @@ impl Shapes<'_, Preparing<'_>> {
             };
             let storage = self.collection_type(ctx, entries)?;
             return Ok(Some(match view {
-                Some(view) => self.collection_view_type(ctx, storage.into(), view)?.into(),
-                None => storage.into(),
+                Some(view) => self.collection_view_type(ctx, storage, view)?.into(),
+                None => storage.boxed.into(),
             }));
         }
         Ok(Some(match (name, arguments) {

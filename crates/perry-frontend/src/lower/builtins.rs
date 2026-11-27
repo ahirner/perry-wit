@@ -1,7 +1,7 @@
 //! Built-in globals and methods of primitive values: `Math`, `JSON`, errors, strings,
 //! bytes, text coding and `console`.
 use super::*;
-use crate::lower::methods::{Call, Receiver};
+use crate::lower::methods::Call;
 mod regex;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -12,6 +12,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         object: &'s Expr,
         property: Option<&str>,
         args: &'s [Expr],
+        byte_offset: Option<u32>,
     ) -> Result<Option<Value>> {
         let method = property.map(hir_compat::method);
         if let Some(method) = method
@@ -44,8 +45,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             );
         }
         let method = method.name();
-        if let Some(call) = Call::member(Receiver::of(ctx, receiver)?, method, Some(args))? {
-            return call.lower(self, ctx, receiver);
+        if let Some(call) = Call::member(
+            self.shapes.method_receiver(ctx, receiver)?,
+            method,
+            Some(args),
+        )? {
+            return call.lower(self, ctx, receiver, byte_offset);
         }
         bail_unsupported!(
             "method {method} is not supported on {} yet",
@@ -60,10 +65,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         method: crate::methods::Method,
         name: &str,
         args: &'s [Expr],
+        byte_offset: Option<u32>,
     ) -> Result<Option<Value>> {
         let value = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, value)?;
-        method.bind(name, args)?.lower(self, ctx, receiver)
+        method
+            .bind(name, args)?
+            .lower(self, ctx, receiver, byte_offset)
     }
 
     pub(super) fn replace_string(
@@ -94,7 +102,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     self.call_intrinsic(ctx, intrinsic, vec![receiver, search_val, repl_val])
                 }
                 Kind::Regex => {
-                    if all && !Self::regex_global(ctx, search_val)? {
+                    if all && !regex::global_flag(self.search_shape(ctx, search, search_val))? {
                         bail_unsupported!(
                             "String.prototype.replaceAll called with a non-global RegExp argument"
                         );
@@ -114,14 +122,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         })
     }
 
-    pub(super) fn regex_test(&mut self, ctx: &mut Context, regex: Value, text: Value) -> Value {
-        let index = self.intrinsic(ctx, Intrinsic::RegexSearch, vec![text, regex]);
-        let zero = self.number(ctx, 0.0);
-        self.emit_value(ctx, |ctx| {
-            MirCompare::new(ctx, CompareKind::Ge, index, zero)
-        })
-    }
-
     /// Construct an Error with a supported scalar or reference cause.
     pub(super) fn error_with_cause(
         &mut self,
@@ -131,7 +131,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         cause: &'s Expr,
     ) -> Result<Value> {
         let message = self.string_operand(ctx, message)?;
-        let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message));
+        let error = self.emit_value(ErrorNewOp::new(ctx, kind, message), ctx);
         let cause = self.expression(ctx, cause)?;
         let cause = self.error_cause(ctx, cause)?;
         self.intrinsic_void(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
@@ -158,17 +158,14 @@ impl<'s> FunctionBuilder<'s, '_> {
         let cause = match kind(ctx, options)? {
             Kind::Record => FieldGetOp::new(ctx, options, "cause".into())
                 .ok()
-                .map(|op| {
-                    self.append(ctx, &op);
-                    op.get_result(ctx)
-                }),
+                .map(|op| self.emit_value(op, ctx)),
             Kind::Json => {
                 let field = self.string(ctx, "cause");
                 Some(self.intrinsic(ctx, Intrinsic::JsonMember, vec![options, field]))
             }
             _ => None,
         };
-        let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, error_class, message));
+        let error = self.emit_value(ErrorNewOp::new(ctx, error_class, message), ctx);
         if let Some(cause) = cause {
             let cause = self.error_cause(ctx, cause)?;
             self.intrinsic_void(ctx, Intrinsic::ExceptionSetCause, vec![error, cause]);
@@ -209,7 +206,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let code = self.i32(ctx, code);
                 self.intrinsic(ctx, Intrinsic::JsonExceptionIs, vec![value, code])
             }
-            Kind::Exception => self.emit_value(ctx, |ctx| ExceptionIsOp::new(ctx, error, value)),
+            Kind::Exception => self.emit_value(ExceptionIsOp::new(ctx, error, value), ctx),
             _ => self.boolean(ctx, false),
         })
     }
@@ -256,7 +253,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let value = self.expression_with(ctx, expr, Some(optional))?;
                 self.fit(ctx, value, optional)?
             }
-            None => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, optional)),
+            None => self.emit_value(UndefinedOp::with_type(ctx, optional), ctx),
         };
         for extra in rest.iter().skip(2) {
             self.effect(ctx, extra)?;
@@ -357,8 +354,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 None => text,
                 Some(line) => {
                     let space = self.string(ctx, " ");
-                    let spaced = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, line, space));
-                    self.emit_value(ctx, |ctx| ConcatOp::new(ctx, spaced, text))
+                    let spaced = self.emit_value(ConcatOp::new(ctx, line, space), ctx);
+                    self.emit_value(ConcatOp::new(ctx, spaced, text), ctx)
                 }
             });
         }

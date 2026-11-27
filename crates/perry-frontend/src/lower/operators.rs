@@ -2,13 +2,6 @@
 use super::*;
 use crate::lower::coerce::result_carrier;
 
-/// Short-circuit truthiness operators `&&` and `||`. Nullish coalescing (`??`) lowers separately.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ShortCircuit {
-    And,
-    Or,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Equality {
     SameValue,
@@ -99,9 +92,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let value = self.defined(ctx, value)?;
         let f64_ty = FP64Type::get(ctx).into();
         if crate::lower::value_unions::is_value_union(ctx, value.get_type(ctx)) {
-            return Ok(self.emit_value(ctx, |ctx| {
-                perry_mir::VariantPayloadOp::new(ctx, value, f64_ty)
-            }));
+            return Ok(self.emit_value(perry_mir::VariantPayloadOp::new(ctx, value, f64_ty), ctx));
         }
         self.fit(ctx, value, f64_ty)
     }
@@ -163,7 +154,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         if matches!(op, BinaryOp::Add) && (string(lhs) || string(rhs)) {
             let lhs = self.display(ctx, lhs)?;
             let rhs = self.display(ctx, rhs)?;
-            return Ok(self.emit_value(ctx, |ctx| ConcatOp::new(ctx, lhs, rhs)));
+            return Ok(self.emit_value(ConcatOp::new(ctx, lhs, rhs), ctx));
         }
         let boolean_number = |b: &mut Self, ctx: &mut Context, value: Value| -> Result<Value> {
             if Kind::of(ctx, value.get_type(ctx)) == Some(Kind::Boolean) {
@@ -435,11 +426,9 @@ impl<'s> FunctionBuilder<'s, '_> {
                 vec![json.unwrap_or(value)],
             ),
             None if b.is_optional(ctx, value) && null => {
-                b.emit_value(ctx, |ctx| IsNullOp::new(ctx, value))
+                b.emit_value(IsNullOp::new(ctx, value), ctx)
             }
-            None if b.is_optional(ctx, value) => {
-                b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value))
-            }
+            None if b.is_optional(ctx, value) => b.emit_value(IsUndefinedOp::new(ctx, value), ctx),
             None => b.boolean(ctx, false),
         };
         if let Some(null) = null_only {
@@ -485,76 +474,47 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let solved = expected
             .ok_or_else(|| Diagnostic::internal("emitter omitted the logical result type"))?;
-        let op = match op {
-            LogicalOp::And => ShortCircuit::And,
-            LogicalOp::Or => ShortCircuit::Or,
-            LogicalOp::Coalesce => return self.coalesce(ctx, left, right, solved),
-        };
-        let lhs = self.branch_operand(ctx, left, solved)?;
-        let cond = self.truthy(ctx, lhs)?;
-        let truthy_block = self.new_block(ctx, "logical_truthy");
-        let falsy_block = self.new_block(ctx, "logical_falsy");
-        self.branch(ctx, cond, truthy_block, falsy_block);
-
-        let (short_block, rhs_block) = match op {
-            ShortCircuit::Or => (truthy_block, falsy_block),
-            ShortCircuit::And => (falsy_block, truthy_block),
-        };
-        self.switch_to(short_block);
-        let lhs = if op == ShortCircuit::Or {
-            self.defined(ctx, lhs)?
+        let (lhs, test) = if matches!(op, LogicalOp::Coalesce) {
+            if matches!(left, Expr::Null | Expr::Undefined) {
+                return self.branch_operand(ctx, right, solved);
+            }
+            let lhs = self.expression(ctx, left)?;
+            if !self.is_optional(ctx, lhs) && kind(ctx, lhs)? != Kind::Json {
+                return self.fit(ctx, lhs, solved);
+            }
+            (lhs, self.is_nullish(ctx, lhs)?)
         } else {
-            lhs
+            let lhs = self.branch_operand(ctx, left, solved)?;
+            (lhs, self.truthy(ctx, lhs)?)
         };
-        let short_end = self.block;
-        self.switch_to(rhs_block);
-        let mark = self.variant_guards.depth();
-        self.variant_guards.condition(left, op == ShortCircuit::And);
-        let rhs = self.branch_operand(ctx, right, solved);
-        self.variant_guards.truncate(mark);
-        let rhs = rhs?;
-        let rhs_end = self.block;
-        let result_ty = match op {
-            ShortCircuit::Or => result_carrier(ctx, solved, &[rhs]),
-            ShortCircuit::And => result_carrier(ctx, solved, &[lhs, rhs]),
+        let short = |b: &mut Self, ctx: &mut Context| {
+            if matches!(op, LogicalOp::And) {
+                Ok(lhs)
+            } else {
+                b.defined(ctx, lhs)
+            }
         };
-        let [value] =
-            self.merge_branches(ctx, [result_ty], [(short_end, [lhs]), (rhs_end, [rhs])])?;
-        Ok(value)
-    }
-
-    /// `left ?? right`: evaluates `right` only when `left` is `null` or `undefined`.
-    fn coalesce(
-        &mut self,
-        ctx: &mut Context,
-        left: &'s Expr,
-        right: &'s Expr,
-        solved: TypeHandle,
-    ) -> Result<Value> {
-        if matches!(left, Expr::Null | Expr::Undefined) {
-            return self.branch_operand(ctx, right, solved);
+        let rhs = |b: &mut Self, ctx: &mut Context| {
+            let depth = b.variant_guards.depth();
+            if !matches!(op, LogicalOp::Coalesce) {
+                b.variant_guards
+                    .condition(left, matches!(op, LogicalOp::And));
+            }
+            let value = b.branch_operand(ctx, right, solved);
+            b.variant_guards.truncate(depth);
+            value
+        };
+        match op {
+            LogicalOp::Or => self.choose_with(ctx, test, short, rhs, |ctx, [_, r]| {
+                result_carrier(ctx, solved, &[r])
+            }),
+            LogicalOp::Coalesce => self.choose_with(ctx, test, rhs, short, |ctx, [r, _]| {
+                result_carrier(ctx, solved, &[r])
+            }),
+            LogicalOp::And => self.choose_with(ctx, test, rhs, short, |ctx, values| {
+                result_carrier(ctx, solved, &values)
+            }),
         }
-        let lhs = self.expression(ctx, left)?;
-        if !self.is_optional(ctx, lhs) && kind(ctx, lhs)? != Kind::Json {
-            return self.fit(ctx, lhs, solved);
-        }
-        let nullish = self.is_nullish(ctx, lhs)?;
-        let present = self.new_block(ctx, "coalesce_present");
-        let fallback = self.new_block(ctx, "coalesce_fallback");
-        self.branch(ctx, nullish, fallback, present);
-        self.switch_to(present);
-        let defined_lhs = self.defined(ctx, lhs)?;
-        let present_end = self.block;
-        self.switch_to(fallback);
-        let rhs = self.branch_operand(ctx, right, solved)?;
-        let fallback_end = self.block;
-        let result_ty = result_carrier(ctx, solved, &[rhs]);
-        let [value] = self.merge_branches(
-            ctx,
-            [result_ty],
-            [(present_end, [defined_lhs]), (fallback_end, [rhs])],
-        )?;
-        Ok(value)
     }
 
     /// `!x`, `-x`, `+x` and `~x`.
@@ -659,7 +619,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         match kind(ctx, value)? {
             Kind::Boolean => Ok(value),
             Kind::String => {
-                let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, value));
+                let length = self.emit_value(StringLenOp::new(ctx, value), ctx);
                 let zero = self.i32(ctx, 0);
                 Ok(self.compare(ctx, CompareKind::Ne, length, zero))
             }

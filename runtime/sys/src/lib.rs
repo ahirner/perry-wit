@@ -29,7 +29,6 @@ mod imports {
     );
     crate::wasm_imports!("__perry_helper" => perry_runtime::string;
         fn perry_string_adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8;
-        fn perry_string_offset(string: *mut u8, position: u32) -> u32;
         fn perry_string_view(string: *mut u8, from: u32, to: u32) -> *mut u8;
     );
     crate::wasm_imports!("__perry_helper" => perry_runtime::exception;
@@ -235,11 +234,6 @@ pub unsafe fn adopt_counted(data: *mut u8, len: u32, scalars: u32) -> *mut u8 {
 }
 
 /// # Safety
-/// `string` is a live string allocation and `position` is a scalar index.
-pub unsafe fn string_offset(string: *mut u8, position: u32) -> u32 {
-    unsafe { imports::perry_string_offset(string, position) }
-}
-/// # Safety
 /// `from..to` names valid UTF-8 boundaries within `string`.
 pub unsafe fn string_view(string: *mut u8, from: u32, to: u32) -> *mut u8 {
     unsafe { imports::perry_string_view(string, from, to) }
@@ -411,15 +405,13 @@ pub fn array_storage_typed(len: usize, references: bool) -> (*mut u8, &'static m
     unsafe {
         let len = u32::try_from(len).expect("array length overflow");
         let array = imports::perry_array_new_typed(len, u32::from(references));
-        let data = *(array.add(ARRAY_DATA as usize) as *const *mut u64);
-        *(array as *mut u32) = len;
+        let header = &mut *array.cast::<layout::array::Header>();
+        header.len = len;
+        // Task-region storage may be recycled. Initialize the elements before borrowing them.
+        core::ptr::write_bytes(header.data, 0, len as usize);
         (
             array,
-            if len == 0 {
-                &mut []
-            } else {
-                core::slice::from_raw_parts_mut(data, len as usize)
-            },
+            core::slice::from_raw_parts_mut(header.data, len as usize),
         )
     }
 }

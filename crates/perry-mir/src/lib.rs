@@ -139,7 +139,7 @@ pub use optional::{
 };
 pub use perry_abi::layout::time::{DatePart, DurationPart, Overflow, Unit as CalendarUnit};
 pub use pipeline::{canonicalize, optimization_statistics};
-pub use regex::RegexConstOp;
+pub use regex::{RegexConstOp, RegexLiteral, RegexShape};
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
 pub use types::*;
 pub use variants::{

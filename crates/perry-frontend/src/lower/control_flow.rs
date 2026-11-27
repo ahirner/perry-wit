@@ -125,11 +125,10 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn propagate(&mut self, ctx: &mut Context, status: Value) {
         match self.handler {
             Some(handler) => {
-                self.store(ctx, handler.status, status);
-                self.emit(ctx, |ctx| BrOp::new(ctx, handler.block, vec![]));
+                self.emit(BrOp::new(ctx, handler, vec![status]), ctx);
             }
             None => {
-                self.emit(ctx, |ctx| RethrowOp::new(ctx, status));
+                self.emit(RethrowOp::new(ctx, status), ctx);
             }
         }
     }
@@ -171,26 +170,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         catch: Option<&'s perry_hir::ir::CatchClause>,
         finally: Option<&'s [Stmt]>,
     ) -> Result<()> {
-        let i32 = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        let status = self.entry_slot(ctx, i32);
         let join = self.new_block(ctx, "join");
         // The exceptional path of `finally`: run it, then throw the exception again.
-        let rethrow_block = finally.map(|_| self.new_block(ctx, "finally"));
-        let catch_block = catch.map(|_| self.new_block(ctx, "catch"));
+        let rethrow_block = finally.map(|_| self.catch_handler(ctx));
+        let catch_block = catch.map(|_| self.catch_handler(ctx));
         let first = catch_block
             .or(rethrow_block)
             .ok_or_else(|| Diagnostic::internal("try without catch or finally"))?;
 
         let guards = self.variant_guards.depth();
-        self.with_handler(
-            ctx,
-            Some(Handler {
-                block: first,
-                status,
-            }),
-            finally,
-            |b, ctx| b.statements(ctx, body),
-        )?;
+        self.with_handler(ctx, Some(first), finally, |b, ctx| b.statements(ctx, body))?;
         if !self.terminated(ctx) {
             self.statements(ctx, finally.unwrap_or_default())?;
             self.jump(ctx, join);
@@ -198,16 +187,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.variant_guards.truncate(guards);
 
         if let (Some(clause), Some(block)) = (catch, catch_block) {
-            self.switch_to(block);
-            let exception = self.catch_exception(ctx, status)?;
+            let exception = self.catch_exception(ctx, block);
             if let Some((id, _)) = &clause.param {
                 let binding = self.initialized_local(ctx, exception);
                 self.variant_guards.assign(*id);
                 self.locals.insert(*id, binding);
             }
-            let handler = rethrow_block
-                .map(|block| Handler { block, status })
-                .or(self.handler);
+            let handler = rethrow_block.or(self.handler);
             self.with_handler(ctx, handler, finally, |b, ctx| {
                 b.statements(ctx, &clause.body)
             })?;
@@ -219,11 +205,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
 
         if let Some(block) = rethrow_block {
-            self.switch_to(block);
-            let exception = self.catch_exception(ctx, status)?;
+            let exception = self.catch_exception(ctx, block);
             self.statements(ctx, finally.unwrap_or_default())?;
             if !self.terminated(ctx) {
-                let again = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, exception));
+                let again = self.emit_value(RaiseOp::new(ctx, exception), ctx);
                 self.propagate(ctx, again);
             }
             self.variant_guards.truncate(guards);
@@ -232,18 +217,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(())
     }
 
-    pub(super) fn catch_handler(&mut self, ctx: &mut Context, label: &str) -> Handler {
+    pub(super) fn catch_handler(&self, ctx: &mut Context) -> Handler {
         let ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        Handler {
-            block: self.new_block(ctx, label),
-            status: self.entry_slot(ctx, ty),
-        }
+        self.result_block(ctx, ty)
     }
 
-    pub(super) fn catch_exception(&mut self, ctx: &mut Context, slot: Value) -> Result<Value> {
-        let caught = self.load(ctx, slot)?;
+    pub(super) fn catch_exception(&mut self, ctx: &mut Context, handler: Handler) -> Value {
+        self.switch_to(handler);
+        let caught = handler.deref(ctx).get_argument(0);
         self.pass_exit(ctx, caught);
-        Ok(self.emit_value(ctx, |ctx| CatchOp::new(ctx, caught)))
+        self.emit_value(CatchOp::new(ctx, caught), ctx)
     }
 
     /// `process.exit` unwinds through handlers without running them.
@@ -255,11 +238,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.branch(ctx, exiting, leave, stay);
         self.switch_to(leave);
         if self.handler.is_none() {
-            self.emit(ctx, |ctx| {
-                let rethrow = RethrowOp::new(ctx, status);
-                perry_mir::set_exit_only(ctx, &rethrow);
-                rethrow
-            });
+            let rethrow = RethrowOp::new(ctx, status);
+            perry_mir::set_exit_only(ctx, &rethrow);
+            self.emit(rethrow, ctx);
         } else {
             self.propagate(ctx, status);
         }
@@ -325,10 +306,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let input = match kind(ctx, value)? {
             Kind::Array => Input::LiveArray(value),
             Kind::String => Input::String(value),
-            Kind::Record
-                if crate::lower::collections::Collection::of(ctx, value.get_type(ctx))
-                    .is_some() =>
-            {
+            Kind::Record if self.shapes.collection(ctx, value.get_type(ctx)).is_some() => {
                 Input::Collection(value)
             }
             _ => bail_unsupported!(
@@ -407,7 +385,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let record = perry_mir::typed::<RecordType>(ctx, old.get_type(ctx))
                 .ok_or_else(|| Diagnostic::internal("loop cell has no record layout"))?;
             let value = self.record_field(ctx, old, "v")?;
-            let fresh = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![value]));
+            let fresh = self.emit_value(AllocOp::new(ctx, record, vec![value]), ctx);
             self.store(ctx, slot, fresh);
         }
         if let Some(update) = update.expression {

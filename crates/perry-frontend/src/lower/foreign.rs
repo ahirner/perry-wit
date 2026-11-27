@@ -157,7 +157,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 && perry_mir::accepts_import_input(ctx, actual, inner)
             {
                 let wrapped = perry_mir::OptionalType::get_with(ctx, actual, states).into();
-                self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, wrapped))
+                self.emit_value(WrapOp::with_type(ctx, value, wrapped), ctx)
             } else {
                 self.fit(ctx, value, ty)?
             };
@@ -179,7 +179,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let params = values.iter().map(|v| v.get_type(ctx)).collect();
             let wrapper = foreign::wrapper(ctx, self.shapes, binding, params, payload)?;
             let op = AsyncCallOp::new(ctx, wrapper, values, payload);
-            return Ok(Some(self.append_value(ctx, &op)));
+            return Ok(Some(self.emit_value(op, ctx)));
         }
         let op = perry_mir::ForeignOp::new(
             ctx,
@@ -188,7 +188,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             values,
             result.into_iter().collect(),
         );
-        self.append(ctx, &op);
+        let op = self.emit(op, ctx);
         let raw = op.get_operation().deref(ctx).results().next();
         if let (Some((wit, result)), Some(value)) = (resource_result, raw) {
             return self.resource_result(ctx, value, wit, result);
@@ -205,7 +205,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         wit: crate::wit::WitValue<'_>,
         result: &wit_parser::Result_,
     ) -> Result<Option<Value>> {
-        let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, raw));
+        let tag = self.emit_value(perry_mir::VariantTagOp::new(ctx, raw), ctx);
         let err_tag = self.string(ctx, "err");
         let failed = self.compare(ctx, CompareKind::Eq, tag, err_tag);
         let success = self.enter_case(ctx, failed);
@@ -213,16 +213,14 @@ impl<'s> FunctionBuilder<'s, '_> {
             let carrier = b
                 .shapes
                 .wit_carrier(crate::wit::WitValue { ty, ..wit }, WitView::Boundary)?;
-            Ok(b.emit_value(ctx, |ctx| {
-                perry_mir::VariantPayloadOp::new(ctx, raw, carrier)
-            }))
+            Ok(b.emit_value(perry_mir::VariantPayloadOp::new(ctx, raw, carrier), ctx))
         };
         if let Some(ty) = result.err {
             let error = payload(self, ctx, ty)?;
             let error = if let Some(wit_parser::TypeDefKind::Variant(variant)) =
                 perry_contract::type_kind(wit.resolve, ty)
             {
-                let tag = self.emit_value(ctx, |ctx| perry_mir::VariantTagOp::new(ctx, error));
+                let tag = self.emit_value(perry_mir::VariantTagOp::new(ctx, error), ctx);
                 for case in &variant.cases {
                     let Some(owner) = case
                         .ty
@@ -241,16 +239,16 @@ impl<'s> FunctionBuilder<'s, '_> {
                     let matches = self.compare(ctx, CompareKind::Eq, tag, expected);
                     let next = self.enter_case(ctx, matches);
                     let resource = perry_mir::ResourceType::get(ctx, owner.index() as u32).into();
-                    let handle = self.emit_value(ctx, |ctx| {
-                        perry_mir::VariantPayloadOp::new(ctx, error, resource)
-                    });
-                    self.emit(ctx, |ctx| {
-                        ForeignOp::new(ctx, Phase::Call, binding, vec![handle], vec![])
-                    });
+                    let handle = self
+                        .emit_value(perry_mir::VariantPayloadOp::new(ctx, error, resource), ctx);
+                    self.emit(
+                        ForeignOp::new(ctx, Phase::Call, binding, vec![handle], vec![]),
+                        ctx,
+                    );
                     self.jump(ctx, next);
                     self.switch_to(next);
                 }
-                self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::Any, tag))
+                self.emit_value(ErrorNewOp::new(ctx, ErrorKind::Any, tag), ctx)
             } else {
                 error
             };

@@ -1455,6 +1455,7 @@ dependencies = [
  "pliron",
  "pliron-control",
  "regex",
+ "regex-syntax",
  "thiserror",
 ]
 

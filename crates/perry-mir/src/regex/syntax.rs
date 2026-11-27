@@ -1,11 +1,16 @@
 //! Maps the supported ECMAScript literal syntax to Rust regex syntax.
 
-use perry_wit_diagnostics::{Diagnostic, Result, bail_diag, codes, ensure_diag};
+use super::{Captures, ParsedRegex, RegexLiteral};
+use perry_wit_diagnostics::{Diagnostic, Result, bail_diag, codes, diag, ensure_diag};
+use regex_syntax::{
+    ast::{self, Ast, GroupKind},
+    hir::translate::Translator,
+};
 
 const SPACE: &str =
     r"\x09-\x0D\x20\u{A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}";
 
-pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
+pub(super) fn parse(pattern: &str, flags: &str) -> Result<ParsedRegex> {
     let mut seen = 0u8;
     for flag in flags.chars() {
         let bit = match flag {
@@ -29,7 +34,7 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
     if seen & 8 != 0 {
         output.push_str("(?i)");
     }
-    let mut chars = pattern.chars().peekable();
+    let mut chars = pattern.chars();
     let mut in_class = false;
     while let Some(character) = chars.next() {
         match character {
@@ -39,12 +44,12 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
                     codes::UNSUPPORTED_REGEX,
                     "Nested regex character classes are unsupported"
                 );
-                if chars.peek() == Some(&']') {
+                if chars.as_str().starts_with(']') {
                     chars.next();
                     output.push_str(r"[^\s\S]");
                     continue;
                 }
-                if chars.clone().take(2).eq(['^', ']']) {
+                if chars.as_str().starts_with("^]") {
                     chars.next();
                     chars.next();
                     output.push_str(r"[\s\S]");
@@ -57,23 +62,29 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
                 in_class = false;
                 output.push(']');
             }
-            '&' | '-' | '~' if in_class && chars.peek() == Some(&character) => {
+            '&' | '-' | '~' if in_class && chars.as_str().starts_with(character) => {
                 bail_diag!(
                     codes::UNSUPPORTED_REGEX,
                     "Regex character-class set operators are unsupported"
                 )
             }
-            '(' if !in_class && chars.peek() == Some(&'?') => {
-                chars.next();
-                match chars.next() {
-                    Some(':') => output.push_str("(?:"),
-                    Some('<') if !matches!(chars.peek(), Some('=' | '!')) => {
-                        output.push_str("(?<");
-                    }
-                    _ => bail_diag!(
+            '(' if !in_class && chars.as_str().starts_with('?') => {
+                output.push('(');
+                let prefix = chars.as_str();
+                if let Some(name) = prefix
+                    .strip_prefix("?<")
+                    .filter(|s| !s.starts_with(['=', '!']))
+                {
+                    let (header, rest) =
+                        name.split_at(name.find('>').map_or(name.len(), |end| end + 1));
+                    output.push_str("?<");
+                    output.push_str(header);
+                    chars = rest.chars();
+                } else if !prefix.starts_with("?:") {
+                    bail_diag!(
                         codes::UNSUPPORTED_REGEX,
                         "Regex lookaround and inline flags are unsupported"
-                    ),
+                    );
                 }
             }
             '.' if !in_class => output.push_str(if flags.contains('s') {
@@ -104,44 +115,35 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
                     'B' if !in_class => output.push_str(r"(?-u:\B)"),
                     '0' => {
                         ensure_diag!(
-                            !chars.peek().is_some_and(char::is_ascii_digit),
+                            !chars
+                                .as_str()
+                                .as_bytes()
+                                .first()
+                                .is_some_and(u8::is_ascii_digit),
                             codes::UNSUPPORTED_REGEX,
                             "Regex octal escapes are unsupported"
                         );
                         output.push_str(r"\x00");
                     }
                     'u' => {
-                        let braced = chars.peek() == Some(&'{');
-                        ensure_diag!(
-                            !braced || flags.contains('u'),
-                            codes::UNSUPPORTED_REGEX,
-                            "Braced Unicode regex escapes require the u flag"
-                        );
-                        let mut code = if braced {
-                            chars.next();
-                            let mut hex = String::new();
-                            loop {
-                                let digit = chars.next().ok_or_else(|| {
-                                    Diagnostic::new(
-                                        codes::UNSUPPORTED_REGEX,
-                                        "Unfinished regex Unicode escape",
-                                    )
-                                })?;
-                                if digit == '}' {
-                                    break;
-                                }
-                                hex.push(digit);
-                            }
-                            u32::from_str_radix(&hex, 16).map_err(|_| {
-                                Diagnostic::new(
-                                    codes::UNSUPPORTED_REGEX,
-                                    "Invalid regex Unicode escape",
-                                )
+                        let braced = chars.as_str().strip_prefix('{');
+                        let mut code = if let Some(digits) = braced {
+                            ensure_diag!(
+                                flags.contains('u'),
+                                codes::UNSUPPORTED_REGEX,
+                                "Braced Unicode regex escapes require the u flag"
+                            );
+                            let (hex, rest) = digits.split_once('}').ok_or_else(|| {
+                                diag!(codes::UNSUPPORTED_REGEX, "Unfinished regex Unicode escape")
+                            })?;
+                            chars = rest.chars();
+                            u32::from_str_radix(hex, 16).map_err(|_| {
+                                diag!(codes::UNSUPPORTED_REGEX, "Invalid regex Unicode escape")
                             })?
                         } else {
                             read_hex(&mut chars, 4)?
                         };
-                        if !braced && (0xD800..=0xDBFF).contains(&code) {
+                        if braced.is_none() && (0xD800..=0xDBFF).contains(&code) {
                             ensure_diag!(
                                 chars.next() == Some('\\') && chars.next() == Some('u'),
                                 codes::UNSUPPORTED_REGEX,
@@ -180,7 +182,42 @@ pub(super) fn normalize(pattern: &str, flags: &str) -> Result<String> {
             _ => output.push(character),
         }
     }
-    Ok(output)
+    let ast = ast::parse::Parser::new()
+        .parse(&output)
+        .map_err(|err| RegexLiteral::build_error(&err))?;
+    let captures = ast::visit(&ast, Captures::default())?;
+    let hir = Translator::new()
+        .translate(&output, &ast)
+        .map_err(|err| RegexLiteral::build_error(&err))?;
+    Ok(ParsedRegex { hir, captures })
+}
+
+impl ast::Visitor for Captures {
+    type Output = Self;
+    type Err = Diagnostic;
+
+    fn visit_pre(&mut self, ast: &Ast) -> Result<()> {
+        if let Ast::Group(group) = ast
+            && let Some(slot) = group.capture_index()
+        {
+            self.count = self.count.max(slot);
+            if let GroupKind::CaptureName { name, .. } = &group.kind {
+                self.names.push((slot as usize, name.name.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Self> {
+        let limit = perry_abi::layout::regex::MAX_CAPTURES;
+        ensure_diag!(
+            self.count as usize <= limit,
+            codes::UNSUPPORTED_REGEX,
+            "Regex has {} capture groups; at most {limit} are supported",
+            self.count
+        );
+        Ok(self)
+    }
 }
 
 fn read_hex(chars: &mut impl Iterator<Item = char>, count: usize) -> Result<u32> {

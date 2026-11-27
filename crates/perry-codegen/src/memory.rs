@@ -199,10 +199,7 @@ impl FunctionLowering<'_, '_> {
         let Some(status) = self.initialization_status(ctx) else {
             return;
         };
-        let failed = self.new_block(ctx, vec![]);
-        let ready = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, status, (failed, vec![]), (ready, vec![]));
-        self.block = failed;
+        let ready = self.enter_if(ctx, status);
         self.task_free(ctx);
         self.trap(ctx);
         self.block = ready;
@@ -247,9 +244,7 @@ impl FunctionLowering<'_, '_> {
         let cycle = self.runtime(ctx, Runtime::ExceptionNew, vec![kind, tag, message]);
         self.br(ctx, raised, vec![cycle]);
         self.block = existing;
-        self.br(ctx, raised, vec![exception]);
-        self.block = raised;
-        let exception = raised.deref(ctx).get_argument(0);
+        let exception = self.join_value(ctx, raised, exception);
         let status = self.runtime(ctx, Runtime::ExceptionRaise, vec![exception]);
         self.br(ctx, done, vec![status]);
         self.block = start;
@@ -274,9 +269,7 @@ impl FunctionLowering<'_, '_> {
             self.block = initialized;
         }
         self.store(ctx, MemKind::I32, cell, 0, two);
-        self.br(ctx, done, vec![zero]);
-        self.block = done;
-        Some(done.deref(ctx).get_argument(0))
+        Some(self.join_value(ctx, done, zero))
     }
 
     /// Start asynchronous initialization once and share its fulfillment or rejection.
@@ -298,9 +291,7 @@ impl FunctionLowering<'_, '_> {
         self.insert(ctx, call);
         let promise = call.deref(ctx).get_result(0);
         self.store(ctx, MemKind::I32, cell, 0, promise);
-        self.br(ctx, done, vec![promise]);
-        self.block = done;
-        Ok(done.deref(ctx).get_argument(0))
+        Ok(self.join_value(ctx, done, promise))
     }
 
     fn root_stack(&mut self, ctx: &mut Context) -> Value {
@@ -459,11 +450,7 @@ impl FunctionLowering<'_, '_> {
             && (perry_mir::allocation(ctx, op) == perry_mir::Allocation::Atomic || atomic_call);
         let resume = atomic.then(|| {
             let due = self.runtime(ctx, Runtime::GcDue, vec![]);
-            let collect = self.new_block(ctx, vec![]);
-            let resume = self.new_block(ctx, vec![]);
-            self.cond_br(ctx, due, (collect, vec![]), (resume, vec![]));
-            self.block = collect;
-            resume
+            self.enter_if(ctx, due)
         });
         let mark = (!values.is_empty()).then(|| self.publish_roots(ctx, &values));
         self.runtime_void(ctx, Runtime::GcCheck, vec![]);

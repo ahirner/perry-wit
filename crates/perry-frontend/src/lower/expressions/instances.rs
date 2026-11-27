@@ -2,6 +2,7 @@
 use super::*;
 use crate::engine::solve::{SiteEntry, SiteResolution};
 use crate::engine::types::Ty;
+use crate::source::ConstructorSites;
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(in crate::lower) fn site(&self, expr: &Expr) -> SiteEntry {
@@ -117,6 +118,20 @@ impl<'s> FunctionBuilder<'s, '_> {
         use SiteResolution::*;
         let plans = &self.shapes.specialization.instances;
         let result = match (site, expr) {
+            (Regex(literal), _) => {
+                let literal = literal.ok_or_else(|| {
+                    unsupported!("RegExp construction is unsupported; use a bounded regex literal")
+                })?;
+                for arg in plans
+                    .regexp(expr)
+                    .into_iter()
+                    .flat_map(|args| args.operands())
+                {
+                    self.effect(ctx, arg)?;
+                }
+                literal.get(ctx).parsed()?;
+                self.emit_value(perry_mir::RegexConstOp::from_literal(ctx, literal), ctx)
+            }
             (Environment(value), _) => self.closure_value(ctx, value, expected)?,
             (ObjectSpread(ty), Expr::ObjectSpread { parts }) => {
                 self.object_spread(ctx, parts, expected, Some(ty))?
@@ -212,7 +227,14 @@ impl<'s> FunctionBuilder<'s, '_> {
                 hir_compat::member(callee) =>
             {
                 return self
-                    .builtin_call(ctx, receiver, method, hir_compat::method(name).name(), args)
+                    .builtin_call(
+                        ctx,
+                        receiver,
+                        method,
+                        hir_compat::method(name).name(),
+                        args,
+                        Some(*byte_offset),
+                    )
                     .map_err(|e| self.shapes.annotate_call(e, *byte_offset));
             }
             (
@@ -224,7 +246,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     ..
                 },
             ) => {
-                return self.builtin_call(ctx, receiver, selected, method, args);
+                return self.builtin_call(ctx, receiver, selected, method, args, None);
             }
             (
                 Static(method),

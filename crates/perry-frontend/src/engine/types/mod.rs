@@ -37,6 +37,7 @@ pub(crate) struct TypeTable {
     kind_index: HashMap<TypeKey, Ty>,
     members: indexmap::IndexSet<Box<[Ty]>>,
     properties: indexmap::IndexSet<Box<[ObjectProp]>>,
+    cases: indexmap::IndexSet<Box<[VariantCase]>>,
     names: indexmap::IndexSet<Box<str>>,
     scratch: Vec<Ty>,
     pub(crate) applications: HashMap<shapes::generics::InstanceKey, shapes::generics::Application>,
@@ -105,6 +106,9 @@ impl TypeTable {
             _ => &[],
         }
     }
+    pub(crate) fn variant_cases(&self, id: CasesId) -> &[VariantCase] {
+        id.get(&self.cases)
+    }
     pub(crate) fn object_slice(&self, span: PropertiesId) -> &[ObjectProp] {
         span.get(&self.properties)
     }
@@ -133,6 +137,9 @@ impl TypeTable {
     }
     pub(crate) fn named(&mut self, ctx: &Context, name: &str) -> Ty {
         self.intern_kind(TyKind::Named(shapes::TypeName::new(ctx, name.into())))
+    }
+    pub(crate) fn regex(&mut self, shape: perry_mir::RegexShape) -> Ty {
+        self.intern_kind(TyKind::Regex(shape))
     }
     pub(crate) fn literal(&mut self, ctx: &Context, value: &str) -> Ty {
         self.intern_kind(TyKind::Literal(shapes::TypeName::new(ctx, value.into())))
@@ -210,6 +217,18 @@ impl TypeTable {
         } else if flat.contains(&Ty::DYNAMIC) {
             Ty::DYNAMIC
         } else {
+            let mut regex: Option<perry_mir::RegexShape> = None;
+            flat.retain(|&ty| {
+                if let TyKind::Regex(shape) = self.kind(ty) {
+                    regex = Some(regex.map_or(shape, |prior| prior.join(shape)));
+                    false
+                } else {
+                    true
+                }
+            });
+            if let Some(shape) = regex {
+                flat.push(self.regex(shape));
+            }
             flat.sort_unstable();
             flat.dedup();
             self.intern_sorted_union(flat)
@@ -435,20 +454,24 @@ impl TypeTable {
     pub(crate) fn children(&self, kind: TyKind) -> impl Iterator<Item = Ty> {
         let (items, properties, last) = match kind {
             TyKind::Array(inner) | TyKind::Promise(inner) => (&[][..], &[][..], Some(inner)),
-            TyKind::Tuple(s)
-            | TyKind::Variant(s)
-            | TyKind::Union(s)
-            | TyKind::Generic { args: s, .. } => (self.ty_slice(s), &[][..], None),
+            TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
+                (self.ty_slice(s), &[][..], None)
+            }
             TyKind::Signature { params, result, .. } => {
                 (&[][..], self.object_slice(params), Some(result))
             }
             TyKind::Object { props, index } => (&[][..], self.object_slice(props), index),
             _ => (&[][..], &[][..], None),
         };
+        let cases = match kind {
+            TyKind::Variant(id) => self.variant_cases(id),
+            _ => &[],
+        };
         items
             .iter()
             .copied()
             .chain(properties.iter().map(|p| p.ty))
+            .chain(cases.iter().filter_map(|(_, ty)| *ty))
             .chain(last)
     }
 

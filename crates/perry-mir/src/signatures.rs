@@ -82,8 +82,11 @@ type_kinds! {
     NullString = OptionalType::get_with(ctx, Ty::String.get(ctx), crate::attrs::Absence::Null).into();
     OptNumber = OptionalType::get(ctx, Ty::Number.get(ctx)).into(),
         accepts optional_of(ctx, ty, Ty::Number);
+    /// Array receiver whose extended regex match header is proven by ProgramFacts.
+    MatchArray = Ty::OptStringArray.get(ctx),
+        accepts ty.deref(ctx).is::<ArrayType>();
+    NullOptStringArray = OptionalType::get_with(ctx, Ty::MatchArray.get(ctx), crate::attrs::Absence::Null).into();
     OptStringArray = ArrayType::get(ctx, Ty::OptString.get(ctx)).into();
-    NullOptStringArray = OptionalType::get_with(ctx, Ty::OptStringArray.get(ctx), crate::attrs::Absence::Null).into();
     StringArray = ArrayType::get(ctx, Ty::String.get(ctx)).into();
     NumberArray = ArrayType::get(ctx, Ty::Number.get(ctx)).into(),
         accepts ty.deref(ctx).downcast_ref::<ArrayType>()

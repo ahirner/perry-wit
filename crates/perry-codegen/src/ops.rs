@@ -88,11 +88,11 @@ impl FunctionLowering<'_, '_> {
             return Ok(());
         }
         if let Some(constant) = Operation::get_op::<perry_mir::RegexConstOp>(op, ctx) {
-            let key = (constant.pattern(ctx), constant.flags(ctx));
+            let key = constant.literal(ctx);
             let address = if let Some(&address) = self.state.data.regexes.get(&key) {
                 address
             } else {
-                let table = regex::compile(&key.0, &key.1)?;
+                let table = regex::compile(key.get(ctx))?;
                 let address = self.state.data.append(4, &table);
                 self.state.data.regexes.insert(key, address);
                 address
@@ -246,9 +246,7 @@ impl FunctionLowering<'_, '_> {
                     self.runtime(ctx, Runtime::StringCompare, operands)
                 };
                 let order = if let Some(join) = join {
-                    self.br(ctx, join, vec![order]);
-                    self.block = join;
-                    join.deref(ctx).get_argument(0)
+                    self.join_value(ctx, join, order)
                 } else {
                     order
                 };

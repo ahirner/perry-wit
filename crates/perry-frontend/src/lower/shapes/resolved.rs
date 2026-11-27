@@ -154,10 +154,11 @@ impl Shapes<'_, Preparing<'_>> {
                     timer
                 }
             }
+            TyKind::Regex(_) => perry_mir::RegexType::get(ctx).into(),
             TyKind::WitCarrier(carrier) => carrier,
             TyKind::Variant(span) => {
-                let arms = self.types.source.ty_slice(span).to_vec();
-                self.union_layout(ctx, &arms, visiting)?
+                let cases = self.types.source.variant_cases(span).to_vec();
+                self.variant_layout(ctx, cases, visiting)?
             }
             TyKind::Symbol => {
                 bail_diag!(codes::UNSUPPORTED_TYPE, "type Symbol is not supported yet")

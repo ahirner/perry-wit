@@ -1,19 +1,12 @@
 //! Return frames for inline callbacks and class callables.
 use super::*;
 
-/// The result an inline body stores. The frontend types every inline callable's result, so
+/// The result of an inlined call. The frontend types every inline callable's result, so
 /// lowering never infers one from the returned values.
 #[derive(Clone, Copy)]
 pub(super) enum InlineResult {
     Void,
     Declared(TypeHandle),
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct ReturnFrame {
-    done: Ptr<BasicBlock>,
-    /// The result slot; `None` for a void body, whose returned values are evaluated for effects.
-    slot: Option<Value>,
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -40,62 +33,57 @@ impl<'s> FunctionBuilder<'s, '_> {
         body: &'s [Stmt],
         result_type: InlineResult,
     ) -> Result<Option<Value>> {
-        let done = self.new_block(ctx, "inline_done");
-        let slot = match result_type {
-            InlineResult::Declared(ty) => Some(self.entry_slot(ctx, ty)),
-            InlineResult::Void => None,
+        let done = match result_type {
+            InlineResult::Declared(ty) => self.result_block(ctx, ty),
+            InlineResult::Void => self.new_block(ctx, "inline_done"),
         };
-        let frame = ReturnFrame { done, slot };
-        self.frame.return_to = Some(frame);
+        self.frame.return_to = Some(done);
         self.invalidate_inline_writes(body, []);
         self.statements(ctx, body)?;
         if self.reachable(ctx, self.block) {
-            self.store_inline_result(ctx, &frame, None)?;
-            self.jump(ctx, done);
+            let value = self.inline_result(ctx, done, None)?;
+            self.emit(BrOp::new(ctx, done, value.into_iter().collect()), ctx);
         }
         self.switch_to(done);
-        Ok(slot)
+        Ok(done.deref(ctx).arguments().next())
     }
 
-    /// `return` inside the innermost inline function: store the result and leave for its `done`
-    /// block through the function's own `finally` bodies.
     pub(super) fn inline_return(
         &mut self,
         ctx: &mut Context,
-        frame: ReturnFrame,
+        done: Ptr<BasicBlock>,
         expression: Option<&'s Expr>,
     ) -> Result<()> {
-        self.store_inline_result(ctx, &frame, expression)?;
+        let value = self.inline_result(ctx, done, expression)?;
         self.run_finallies(ctx, 0)?;
-        self.jump(ctx, frame.done);
+        if !self.terminated(ctx) {
+            self.emit(BrOp::new(ctx, done, value.into_iter().collect()), ctx);
+        }
         self.after_terminator(ctx);
         Ok(())
     }
 
-    /// Store a returned value in the body's result slot. A void body evaluates it for effects.
-    fn store_inline_result(
+    fn inline_result(
         &mut self,
         ctx: &mut Context,
-        frame: &ReturnFrame,
+        done: Ptr<BasicBlock>,
         expression: Option<&'s Expr>,
-    ) -> Result<()> {
-        let Some(slot) = frame.slot else {
+    ) -> Result<Option<Value>> {
+        let Some(result) = done.deref(ctx).arguments().next() else {
             if let Some(expr) = expression {
                 self.effect(ctx, expr)?;
             }
-            return Ok(());
+            return Ok(None);
         };
-        let ty = self.slot_type(ctx, slot)?;
+        let ty = result.get_type(ctx);
         let value = match expression
             .map(|expr| self.optional_operand(ctx, expr, Some(ty)))
             .transpose()?
             .flatten()
         {
             Some(value) => value,
-            None => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
+            None => self.emit_value(UndefinedOp::with_type(ctx, ty), ctx),
         };
-        let value = self.fit(ctx, value, ty)?;
-        self.store(ctx, slot, value);
-        Ok(())
+        self.fit(ctx, value, ty).map(Some)
     }
 }

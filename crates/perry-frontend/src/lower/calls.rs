@@ -1,6 +1,6 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
-use crate::engine::solve::CallTarget;
+use crate::engine::solve::{CallTarget, FunctionTarget};
 use crate::lower::{builder::LocalBinding, hir_compat::RuntimeCall, inline::InlineResult};
 
 enum SpreadInput {
@@ -22,13 +22,7 @@ impl CallTarget {
         receiver: Option<Value>,
         args: CallArguments<'s, '_>,
     ) -> Result<Option<Value>> {
-        let Some(id) = b
-            .shapes
-            .specialization
-            .instances
-            .emitted_callee(self)
-            .transpose()?
-        else {
+        let Some(function) = self.callee() else {
             if let CallArguments::Expressions(args) = args {
                 for (arg, spread) in args {
                     if spread {
@@ -42,15 +36,8 @@ impl CallTarget {
             b.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
             return Ok(None);
         };
-        let callee = match (self, value) {
-            (Self::Direct { pass_env: true, .. }, Some(value)) => {
-                let wrapper = b.defined(ctx, value)?;
-                Some(b.record_field(ctx, wrapper, "val")?)
-            }
-            (Self::Dispatch { .. }, Some(value)) => Some(value),
-            _ if self.needs_value() => bail_internal!("missing callable operand"),
-            _ => None,
-        };
+        let signature = b.signature(b.shapes.specialization.instances.emitted_callee(function)?)?;
+        let callee = function.operand(b, ctx, value)?;
         let receiver = if self.needs_receiver() {
             Some(receiver.ok_or_else(|| internal!("missing call receiver"))?)
         } else {
@@ -59,14 +46,31 @@ impl CallTarget {
         let prefix = callee.into_iter().chain(receiver);
         match args {
             CallArguments::Expressions(args) => {
-                b.invoke_arguments(ctx, b.signature(id)?, prefix, args, None)
+                b.invoke_arguments(ctx, signature, prefix, args, None)
             }
             CallArguments::Values(args) => {
-                let supplied = b
-                    .signature(id)?
-                    .supplied_values(prefix.clone().count(), args);
-                b.call_values(ctx, id, prefix.chain(supplied))
+                let supplied = signature.supplied_values(prefix.clone().count(), args);
+                b.invoke_arguments(ctx, signature, prefix.chain(supplied), [], None)
             }
+        }
+    }
+}
+
+impl FunctionTarget {
+    pub(super) fn operand(
+        self,
+        b: &mut FunctionBuilder<'_, '_>,
+        ctx: &mut Context,
+        value: Option<Value>,
+    ) -> Result<Option<Value>> {
+        match (self, value) {
+            (Self::Direct(_), _) => Ok(None),
+            (Self::Dispatcher(_), Some(value)) => Ok(Some(value)),
+            (Self::Closure(_), Some(value)) => {
+                let wrapper = b.defined(ctx, value)?;
+                b.record_field(ctx, wrapper, "val").map(Some)
+            }
+            _ => bail_internal!("missing callable operand"),
         }
     }
 }
@@ -97,7 +101,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             (Some(value), Some(default))
                 if has_default && admits_undefined(ctx, value.get_type(ctx)) =>
             {
-                let absent = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                let absent = self.emit_value(IsUndefinedOp::new(ctx, value), ctx);
                 let use_default = self.new_block(ctx, "default_then");
                 let use_argument = self.new_block(ctx, "default_else");
                 let done = self.new_block(ctx, "default_join");
@@ -113,9 +117,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             (Some(value), _) => value,
             (None, Some(default)) => self.expression_with(ctx, default, Some(binding.carrier))?,
-            (None, None) => {
-                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, binding.carrier))
-            }
+            (None, None) => self.emit_value(UndefinedOp::with_type(ctx, binding.carrier), ctx),
         };
         if !self.terminated(ctx) {
             let value = if has_default {
@@ -137,7 +139,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let (record, payload) = self.shapes.box_layout(ctx, ty, false)?;
             let value = self.load(ctx, slot)?;
             let value = self.fit(ctx, value, payload)?;
-            let value = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![value]));
+            let value = self.emit_value(AllocOp::new(ctx, record, vec![value]), ctx);
             let binding = self.initialized_local(ctx, value);
             self.locals
                 .insert(param.id, binding.captured(payload, false));
@@ -302,13 +304,14 @@ impl<'s> FunctionBuilder<'s, '_> {
                         );
                         if let Some(element) = rest_element {
                             let array = *rest_array.get_or_insert_with(|| {
-                                self.emit_value(ctx, |ctx| {
-                                    ArrayNewOp::new(ctx, element, std::mem::take(&mut rest_values))
-                                })
+                                self.emit_value(
+                                    ArrayNewOp::new(ctx, element, std::mem::take(&mut rest_values)),
+                                    ctx,
+                                )
                             });
                             let ty = array.get_type(ctx);
                             let source = self.fit(ctx, source, ty)?;
-                            self.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, source));
+                            self.emit(perry_mir::ArrayExtendOp::new(ctx, array, source), ctx);
                         }
                         argument_index += 1;
                         continue;
@@ -342,7 +345,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     let value = self.fit(ctx, value, element).map_err(note)?;
                     match rest_array {
                         Some(array) => {
-                            self.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+                            self.emit(ArrayPushOp::new(ctx, array, value), ctx);
                         }
                         None => rest_values.push(value),
                     }
@@ -357,7 +360,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         if let Some(element) = rest_element {
             values.push(rest_array.unwrap_or_else(|| {
-                self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, rest_values))
+                self.emit_value(ArrayNewOp::new(ctx, element, rest_values), ctx)
             }));
         }
         Ok(values)
@@ -453,7 +456,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         if let Some((object, property)) = self.shapes.specialization.receiver_members.method(callee)
         {
-            return self.method(ctx, object, property, args);
+            return self.method(ctx, object, property, args, Some(byte_offset));
         }
         if hir_compat::is_import_initializer(callee) {
             // Module initialization of a named built-in import (`Writable`): nothing to run.
@@ -475,7 +478,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                         Some(value) => value,
                         None => {
                             let number = FP64Type::get(ctx).into();
-                            self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
+                            self.emit_value(UndefinedOp::new(ctx, number), ctx)
                         }
                     }));
                 }
@@ -575,7 +578,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let carrier = param.binding.carrier;
         if admits_undefined(ctx, carrier) {
-            return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier)));
+            return Ok(self.emit_value(UndefinedOp::with_type(ctx, carrier), ctx));
         }
         if let Some((owner, default)) = param.default() {
             let saved = std::mem::replace(&mut self.frame.owner, BodyOwner::Function(owner));
@@ -594,7 +597,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let carrier = param.binding.carrier;
         if param.is_never && value.get_type(ctx) != carrier {
-            return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier)));
+            return Ok(self.emit_value(UndefinedOp::with_type(ctx, carrier), ctx));
         }
         self.fit(ctx, value, carrier)
     }
@@ -623,12 +626,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                             .result
                             .map_or(InlineResult::Void, |ty| InlineResult::Declared(ty.carrier))
                     });
-                    let slot = this.inline_body(
+                    this.inline_body(
                         ctx,
                         this.shapes.specialization.templates[function.template].body,
                         result,
-                    )?;
-                    slot.map(|slot| this.load(ctx, slot)).transpose()
+                    )
                 });
             self.inline_functions.pop();
             return result;
@@ -638,9 +640,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .result
                 .ok_or_else(|| Diagnostic::internal("async function must settle one result"))?;
             self.invalidate_global_guards();
-            return Ok(Some(self.emit_value(ctx, |ctx| {
-                AsyncCallOp::new(ctx, signature.name.clone(), values, result.carrier)
-            })));
+            return Ok(Some(self.emit_value(
+                AsyncCallOp::new(ctx, signature.name.clone(), values, result.carrier),
+                ctx,
+            )));
         }
         let op = CallOp::new(
             ctx,
@@ -648,7 +651,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             values,
             signature.carrier_results(),
         );
-        self.append(ctx, &op);
+        let op = self.emit(op, ctx);
         self.invalidate_global_guards();
         let Some(result_ty) = signature.result else {
             return Ok(None);
@@ -679,7 +682,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let ty = val.get_type(ctx);
         if perry_mir::typed::<ArrayType>(ctx, ty).is_some() {
-            return Ok(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![val])));
+            return Ok(self.emit_value(ConcatOp::from_sources(ctx, vec![val]), ctx));
         }
         if let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty) {
             let fields = rec
@@ -691,29 +694,26 @@ impl<'s> FunctionBuilder<'s, '_> {
             for (field_name, field_ty) in fields {
                 let can_omit = admits_undefined(ctx, field_ty);
                 let op = FieldGetOp::new(ctx, val, field_name.clone()).to_diag(ctx)?;
-                let raw = self.field_read(ctx, &op)?;
+                let raw = self.field_read(ctx, op)?;
                 let cloned = self.clone_structured_value(ctx, raw)?;
                 let cloned_ty = cloned.get_type(ctx);
                 let field_val = if can_omit && admits_undefined(ctx, cloned_ty) {
                     let op = FieldPresentOp::new(ctx, val, field_name).to_diag(ctx)?;
-                    let is_present = self.emit_value(ctx, |_| op);
+                    let is_present = self.emit_value(op, ctx);
                     self.choose(
                         ctx,
                         cloned_ty,
                         is_present,
                         |_, _| Ok(cloned),
-                        |b, ctx| Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, cloned_ty))),
+                        |b, ctx| Ok(b.emit_value(OmittedOp::with_type(ctx, cloned_ty), ctx)),
                     )?
                 } else {
                     cloned
                 };
                 field_vals.push(field_val);
             }
-            let allocated = self.emit_value(ctx, |ctx| {
-                let alloc = AllocOp::new(ctx, rec, field_vals);
-                alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(Vec::new()));
-                alloc
-            });
+            let allocated =
+                self.emit_value(AllocOp::ordered(ctx, rec, field_vals, Vec::new()), ctx);
             self.intrinsic_void(ctx, Intrinsic::JsonSpread, vec![allocated, val]);
             return Ok(allocated);
         }
@@ -735,9 +735,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Ok(self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![]))
             }
             Resolve if args.is_empty() => {
-                let undef =
-                    self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, FP64Type::get(ctx).into()));
-                Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, undef)))
+                let undef = self.emit_value(UndefinedOp::new(ctx, FP64Type::get(ctx).into()), ctx);
+                Ok(self.emit_value(PromiseResolvedOp::new(ctx, undef), ctx))
             }
             Resolve | Reject => {
                 let [value] = args else {
@@ -753,7 +752,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     self.as_promise_value(ctx, value)
                 } else {
                     let settled = void_type(ctx);
-                    Ok(self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, value, settled)))
+                    Ok(self.emit_value(PromiseRejectedOp::new(ctx, value, settled), ctx))
                 }
             }
             Combine(combinator) => {
@@ -778,7 +777,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let op = PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_else(|| {
                     unsupported!("Promise combinators take an array of promises of one type")
                 })?;
-                Ok(self.append_value(ctx, &op))
+                Ok(self.emit_value(op, ctx))
             }
             Unsupported(id) => Err(Diagnostic::unsupported(
                 self.shapes.types.source.name_str(id).to_owned(),
@@ -830,18 +829,18 @@ impl<'s> FunctionBuilder<'s, '_> {
             let value = match input {
                 CombinatorInput::Lowered(value) => value,
                 CombinatorInput::Reject(reason) => {
-                    self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, reason, settled))
+                    self.emit_value(PromiseRejectedOp::new(ctx, reason, settled), ctx)
                 }
             };
             let value = if value.get_type(ctx) == promise {
                 value
             } else {
                 let value = self.fit(ctx, value, settled)?;
-                self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value))
+                self.emit_value(PromiseResolvedOp::new(ctx, value), ctx)
             };
             values.push(value);
         }
-        Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, promise, values)))
+        Ok(self.emit_value(ArrayNewOp::new(ctx, promise, values), ctx))
     }
 }
 

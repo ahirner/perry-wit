@@ -31,25 +31,13 @@ pub(crate) struct RecordField {
     pub(crate) ty: TypeHandle,
 }
 
-pub(crate) struct ResultFields {
-    pub(crate) tag: RecordField,
-    pub(crate) payloads: [Option<RecordField>; 2],
-}
-
 pub(crate) struct RecordLayout {
     pub(crate) record: TypedHandle<RecordType>,
     pub(crate) fields: IndexMap<String, RecordField>,
     pub(crate) size: u32,
-    pub(crate) result: Option<Box<ResultFields>>,
 }
 
 impl RecordLayout {
-    pub(crate) fn result_fields(&self) -> Result<&ResultFields> {
-        self.result
-            .as_deref()
-            .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "result ok field must be boolean"))
-    }
-
     pub(crate) fn field(&self, ctx: &Context, name: &str) -> Result<RecordField> {
         self.fields.get(name).copied().ok_or_else(|| {
             diag!(
@@ -90,19 +78,8 @@ impl RecordLayouts {
                     );
                     size += slot_size(ctx, *ty);
                 }
-                let result = fields
-                    .get(perry_mir::RESULT_TAG)
-                    .filter(|tag| repr(ctx, tag.ty).is_ok_and(|r| r == Repr::Bool))
-                    .map(|&tag| {
-                        Box::new(ResultFields {
-                            tag,
-                            payloads: perry_mir::RESULT_PAYLOADS
-                                .map(|name| fields.get(name).copied()),
-                        })
-                    });
                 entry.insert(Rc::new(RecordLayout {
                     record,
-                    result,
                     fields,
                     size,
                 }))
@@ -662,10 +639,7 @@ impl FunctionLowering<'_, '_> {
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
-        let grow = self.new_block(ctx, vec![]);
-        let write = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, full, (grow, vec![]), (write, vec![]));
-        self.block = grow;
+        let write = self.enter_if(ctx, full);
         let elem_kind = Self::array_element_kind(ctx, element)?;
         if self.state.collectible {
             let references = self.i32_const(ctx, elem_kind as i32);

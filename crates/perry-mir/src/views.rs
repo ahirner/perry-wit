@@ -48,13 +48,11 @@ impl Relation {
         let (a, b) = (source.deref(ctx), target.deref(ctx));
         if self == Self::Widen && a.is::<crate::ValueUnionType>() && b.is::<crate::ValueUnionType>()
         {
-            let (Ok(a), Ok(b)) = (
-                crate::variant_cases(ctx, source),
-                crate::variant_cases(ctx, target),
-            ) else {
+            let (Ok(a), Ok(b)) = (VariantType::of(ctx, source), VariantType::of(ctx, target))
+            else {
                 return false;
             };
-            return a.iter().all(|case| b.contains(case));
+            return a.cases().iter().all(|(tag, ty)| b.case(tag) == Some(*ty));
         }
         if b.is::<ByteInputType>() {
             return a.is::<BytesType>() || (self == Self::Import && a.is::<crate::StringType>());
@@ -110,12 +108,10 @@ impl Relation {
                 _ => false,
             };
             return match self {
-                Self::Widen => a.cases().iter().all(|(name, from)| {
-                    b.cases()
-                        .iter()
-                        .find(|(other, _)| name == other)
-                        .is_some_and(|(_, to)| payloads(*from, *to))
-                }),
+                Self::Widen => a
+                    .cases()
+                    .iter()
+                    .all(|(name, from)| b.case(name).is_some_and(|to| payloads(*from, to))),
                 Self::Import => {
                     a.cases().len() == b.cases().len()
                         && a.cases()

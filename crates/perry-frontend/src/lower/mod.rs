@@ -68,7 +68,6 @@ use pliron::{
         inserter::{IRInserter, Inserter},
         listener::DummyListener,
     },
-    linked_list::ContainsLinkedList,
     op::Op,
     operation::Operation,
     r#type::{TypeHandle, Typed, TypedHandle},

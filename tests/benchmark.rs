@@ -814,6 +814,18 @@ async fn optimization_fixtures() -> Result<Vec<Row>> {
         &[Val::F64(4.0f64.to_bits())],
         Val::F64(12.0f64.to_bits()),
     )?);
+    let regex = component(
+        "export function run(n: number) { return 'x'.repeat(n).match(/x/g)?.length ?? 0; }",
+        "package test:regex; world test { export run: func(n: u32) -> u32; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "1,024 adjacent global regex matches",
+        &regex,
+        "run",
+        &[Val::I32(1024)],
+        Val::I32(1024),
+    )?);
     let asynchronous = component(
         include_str!("fixtures/optimization/async.ts"),
         "package test:optimization; world test { import wasi:cli/stderr@0.3.0; export run: async func(n: f64) -> f64; }",

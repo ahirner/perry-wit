@@ -132,11 +132,11 @@ macro_rules! method_catalog {
                 StringReplace "replace" -> [String] Always Method callback(Replacement) [search, replacement] => optional(replace_string(search, replacement, false)), "requires a search pattern and replacement string";
                 StringReplaceAll "replaceAll" -> [String] Always Method callback(Replacement) [search, replacement] => optional(replace_string(search, replacement, true)), "requires a search pattern and replacement string";
                 StringMatch "match" -> [NullOptStringArray] Always Method [regex] => optional(string_match(regex)), "requires one literal regex";
-                StringSearch "search" -> [Number] Upstream Method [regex] => optional(string_search(regex)), "requires one literal regex";
+                StringSearch "search" -> [Number] Upstream Method [regex] => located(string_search(regex)), "requires one literal regex";
                 StringToString "toString" -> [String] Upstream Method [args:rest] => receiver(args), "accepts method arguments";
             }
             Receiver::Value(Kind::Regex), "method" {
-                RegexTest "test" -> [Bool] Upstream Method [text] => value(regex_test_text(text)), "requires one string";
+                RegexTest "test" -> [Bool] Upstream Method [text] => located(regex_test_text(text)), "requires one string";
                 RegexExec "exec" -> [NullOptStringArray] Always Method [text] => optional(regex_exec(text)), "requires one string";
             }
             Receiver::Value(Kind::Encoder | Kind::Decoder), "TextCodec" {

@@ -10,8 +10,8 @@
 //! bounded task allocations retain their storage until task completion.
 use crate::region::perry_alloc;
 
+use crate::layout::array::Header as Array;
 pub(crate) use crate::layout::array::*;
-const MIN_CAPACITY: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
 const _: () = {
@@ -21,26 +21,6 @@ const _: () = {
     assert!(core::mem::offset_of!(Array, data) == DATA as usize);
     assert!(core::mem::offset_of!(Array, holes) == HOLES as usize);
 };
-
-#[repr(C)]
-struct Array {
-    len: u32,
-    cap: u32,
-    data: *mut u64,
-    holes: *mut u8,
-}
-
-impl Array {
-    /// An empty array over `cap` slots at `data`, with length zero.
-    fn empty(cap: u32, data: *mut u64) -> Self {
-        Self {
-            len: 0,
-            cap,
-            data,
-            holes: core::ptr::null_mut(),
-        }
-    }
-}
 
 trait ElementStorage {
     fn bytes(self, cap: u32) -> u32;
@@ -219,7 +199,12 @@ fn allocate<const COLLECTIBLE: bool>(capacity: u32, elements: Elements) -> *mut 
                 perry_alloc(elements.bytes(cap)) as *mut u64,
             )
         };
-        array.write(Array::empty(cap, data));
+        array.write(Array {
+            len: 0,
+            cap,
+            data,
+            holes: core::ptr::null_mut(),
+        });
         array as *mut u8
     }
 }

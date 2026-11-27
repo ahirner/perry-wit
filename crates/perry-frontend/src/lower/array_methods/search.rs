@@ -99,7 +99,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         let miss = match outcome {
             Outcome::Index => self.number(ctx, -1.0),
-            Outcome::Item => self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, optional)),
+            Outcome::Item => self.emit_value(UndefinedOp::with_type(ctx, optional), ctx),
             Outcome::Boolean(hit) => self.boolean(ctx, !hit),
         };
         let result_type = miss.get_type(ctx);
@@ -114,7 +114,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 },
                 holes,
             ),
-            miss,
+            |_, _| Ok(miss),
             |b, ctx, item, current| {
                 let matched = match predicate {
                     Predicate::Equal(needle, same_value_zero) => {

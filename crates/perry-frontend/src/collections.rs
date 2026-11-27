@@ -117,9 +117,6 @@ macro_rules! collection_views {
             pub(crate) fn record_kind(self) -> RecordKind {
                 match self { $(Self::$view => RecordKind::$view,)+ }
             }
-            pub(crate) fn from_record(kind: RecordKind) -> Option<Self> {
-                match kind { $(RecordKind::$view => Some(Self::$view),)+ _ => None }
-            }
         }
     };
 

@@ -53,6 +53,9 @@ export function argumentOrder() {
  if(reverseTotal!==16 || reverse!=='2:3;1:2;0:1;' || right.length!==4)return 5;
  const empty:number[]=[];
  if(empty.reduce((acc,n)=>acc+n,append(empty,7,1))!==8)return 6;
+ const extra=left.length;
+ const collect=(acc:number[],n:number)=>{acc.push(n+extra);return acc;};
+ if([1,2].reduce(collect,[]).join(',')!=='5,6')return 7;
  return 0;
 }
 

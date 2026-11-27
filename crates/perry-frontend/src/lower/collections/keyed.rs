@@ -29,10 +29,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         let ty = key.get_type(ctx);
         let numeric = match Kind::of(ctx, present_type(ctx, ty)) {
             Some(Kind::Number) => true,
-            Some(Kind::ValueUnion) => perry_mir::variant_cases(ctx, present_type(ctx, ty))
+            Some(Kind::ValueUnion) => perry_mir::VariantType::of(ctx, present_type(ctx, ty))
                 .to_diag(ctx)?
-                .iter()
-                .any(|(tag, _)| tag == "number"),
+                .case("number")
+                .is_some(),
             _ => false,
         };
         if !numeric {
@@ -50,7 +50,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         entries: Value,
         key: Value,
-        miss: Value,
+        miss: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
         hit: impl FnOnce(&mut Self, &mut Context, Value) -> Result<Value>,
     ) -> Result<Value> {
         self.find_item(
@@ -82,11 +82,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
         let opt_v_ty = admitting(ctx, v_ty, perry_mir::Absence::Undefined);
-        let miss = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_v_ty));
-        self.lookup_entry(ctx, arr, key, miss, |b, ctx, entry| {
-            let value = b.storage_field(ctx, entry, Field::MapValue)?;
-            b.fit(ctx, value, opt_v_ty)
-        })
+        self.lookup_entry(
+            ctx,
+            arr,
+            key,
+            |b, ctx| Ok(b.emit_value(UndefinedOp::with_type(ctx, opt_v_ty), ctx)),
+            |b, ctx, entry| {
+                let value = b.storage_field(ctx, entry, Field::MapValue)?;
+                b.fit(ctx, value, opt_v_ty)
+            },
+        )
     }
 
     /// The private handle table only inserts fresh keys. Its insertion sequence survives deletions.
@@ -99,7 +104,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         let sequence = self.record_field(ctx, table, StorageField::BoxSequence.name())?;
         let one = self.number(ctx, 1.0);
         let rep = self.binary(ctx, BinaryKind::Add, sequence, one);
-        let (_, ty, _) = map_entry_types(ctx, table.get_type(ctx))
+        let (_, ty) = self
+            .shapes
+            .key_value_types(ctx, table.get_type(ctx))
             .ok_or_else(|| internal!("invalid resource table"))?;
         let value = self.fit(ctx, instance, ty)?;
         let entries = self.collection_entries_array(ctx, table)?;
@@ -115,47 +122,60 @@ impl<'s> FunctionBuilder<'s, '_> {
         key: Value,
         val: Value,
     ) -> Result<Value> {
-        let (k_ty, v_ty, _) = kv_entry_types(ctx, coll.get_type(ctx)).ok_or_else(|| {
-            Diagnostic::new(
-                codes::TYPE_MISMATCH,
-                "key-value insertion requires a Map, dictionary or entry array",
-            )
-        })?;
-        let arr = self.collection_entries_array(ctx, coll)?;
-        let box_opt = self
-            .collection_storage(ctx, coll)?
-            .map(|(_, storage)| storage);
+        let (k_ty, v_ty) = self
+            .shapes
+            .key_value_types(ctx, coll.get_type(ctx))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    codes::TYPE_MISMATCH,
+                    "key-value insertion requires a Map, dictionary or entry array",
+                )
+            })?;
         let key = self.fit(ctx, key, k_ty)?;
-        let key = self.canonicalize_collection_key(ctx, key)?;
         let val = self.fit(ctx, val, v_ty)?;
-        let miss = self.boolean(ctx, false);
-        let was_found = self.lookup_entry(ctx, arr, key, miss, |b, ctx, entry| {
-            b.set_storage_field(ctx, entry, Field::Key, key);
-            b.set_storage_field(ctx, entry, Field::MapValue, val);
-            Ok(b.boolean(ctx, true))
-        })?;
-        self.append_unless(ctx, "kv_set", was_found, arr, box_opt, &[key, val])?;
-        Ok(coll)
+        self.insert_or_update(
+            ctx,
+            coll,
+            key,
+            |_, _, key| Ok([key, val]),
+            |b, ctx, entry| {
+                b.set_storage_field(ctx, entry, Field::MapValue, val);
+                Ok(())
+            },
+        )
     }
 
-    /// Append an absent key, adding liveness and sequence fields for boxed collections.
-    fn append_unless(
+    fn insert_or_update<const N: usize>(
         &mut self,
         ctx: &mut Context,
-        label: &str,
-        present: Value,
-        entries: Value,
-        owner: Option<Value>,
-        payload: &[Value],
-    ) -> Result<()> {
-        let append_bb = self.new_block(ctx, &format!("{label}_append"));
-        let after_bb = self.new_block(ctx, &format!("{label}_after"));
-        self.branch(ctx, present, after_bb, append_bb);
-        self.switch_to(append_bb);
-        self.append_entry(ctx, entries, owner, payload)?;
-        self.jump(ctx, after_bb);
-        self.switch_to(after_bb);
-        Ok(())
+        coll: Value,
+        key: Value,
+        vacant: impl FnOnce(&mut Self, &mut Context, Value) -> Result<[Value; N]>,
+        occupied: impl FnOnce(&mut Self, &mut Context, Value) -> Result<()>,
+    ) -> Result<Value> {
+        let (entries, owner) = match self.collection_storage(ctx, coll)? {
+            Some((_, owner)) => (
+                self.storage_field(ctx, owner, Field::BoxEntries)?,
+                Some(owner),
+            ),
+            None => (coll, None),
+        };
+        let key = self.canonicalize_collection_key(ctx, key)?;
+        self.lookup_entry(
+            ctx,
+            entries,
+            key,
+            |b, ctx| {
+                let fields = vacant(b, ctx, key)?;
+                b.append_entry(ctx, entries, owner, &fields)?;
+                Ok(coll)
+            },
+            |b, ctx, entry| {
+                occupied(b, ctx, entry)?;
+                Ok(coll)
+            },
+        )?;
+        Ok(coll)
     }
 
     fn append_entry(
@@ -175,8 +195,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.update_counter(ctx, box_val, Field::BoxSequence, BinaryKind::Add)?;
             fields.push(sequence);
         }
-        let entry = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, fields));
-        self.emit(ctx, |ctx| ArrayPushOp::new(ctx, entries, entry));
+        let entry = self.emit_value(AllocOp::new(ctx, record, fields), ctx);
+        self.emit(ArrayPushOp::new(ctx, entries, entry), ctx);
         if let Some(box_val) = owner {
             self.update_counter(ctx, box_val, Field::BoxLength, BinaryKind::Add)?;
         }
@@ -193,16 +213,11 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
-        self.contains_entry(ctx, arr, key)
-    }
-
-    fn contains_entry(&mut self, ctx: &mut Context, entries: Value, key: Value) -> Result<Value> {
-        let miss = self.boolean(ctx, false);
         self.lookup_entry(
             ctx,
-            entries,
+            arr,
             key,
-            miss,
+            |b, ctx| Ok(b.boolean(ctx, false)),
             |b, ctx, _| Ok(b.boolean(ctx, true)),
         )
     }
@@ -216,13 +231,19 @@ impl<'s> FunctionBuilder<'s, '_> {
         k_ty: TypeHandle,
     ) -> Result<Value> {
         let key = self.fit(ctx, key, k_ty)?;
-        if let Some(Collection::Box(kind)) = Collection::of(ctx, coll.get_type(ctx)) {
+        if let Some(layout) = self.shapes.collection_box(ctx, coll.get_type(ctx)) {
+            let kind = layout.view.source();
             let entries = self.storage_field(ctx, coll, Field::BoxEntries)?;
-            let miss = self.boolean(ctx, false);
-            return self.lookup_entry(ctx, entries, key, miss, |b, ctx, entry| {
-                b.delete_entry(ctx, coll, entries, entry, kind)?;
-                Ok(b.boolean(ctx, true))
-            });
+            return self.lookup_entry(
+                ctx,
+                entries,
+                key,
+                |b, ctx| Ok(b.boolean(ctx, false)),
+                |b, ctx, entry| {
+                    b.delete_entry(ctx, coll, entries, entry, kind)?;
+                    Ok(b.boolean(ctx, true))
+                },
+            );
         }
         self.retain_array(ctx, coll, |b, ctx, entry| {
             let candidate = b.storage_field(ctx, entry, Field::Key)?;
@@ -244,10 +265,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         callback: &'s Expr,
     ) -> Result<Value> {
         let callback = self.prepare_callback(ctx, callback)?;
-        let is_set = matches!(
-            Collection::of(ctx, arr.get_type(ctx)),
-            Some(Collection::Box(CollectionKind::Set))
-        );
+        let is_set = self
+            .shapes
+            .boxed_collection(ctx, arr.get_type(ctx), CollectionKind::Set)
+            .is_some();
         self.iterate(ctx, Input::Collection(arr), |b, ctx, entry, _, _, _| {
             let (k, v) = if is_set {
                 (entry, entry)
@@ -257,7 +278,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             b.effect_callback(ctx, callback, &[v, k, arr])
         })?;
         let ty = void_type(ctx);
-        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
+        Ok(self.emit_value(UndefinedOp::with_type(ctx, ty), ctx))
     }
 
     pub(crate) fn set_add(
@@ -267,55 +288,38 @@ impl<'s> FunctionBuilder<'s, '_> {
         val: Value,
         elem_ty: TypeHandle,
     ) -> Result<Value> {
-        let arr = self.collection_entries_array(ctx, coll)?;
-        let val = self.fit(ctx, val, elem_ty)?;
-        let val = self.canonicalize_collection_key(ctx, val)?;
-        let present = self.contains_entry(ctx, arr, val)?;
-        self.append_unless(ctx, "set_add", present, arr, Some(coll), &[val])?;
-        Ok(coll)
+        let key = self.fit(ctx, val, elem_ty)?;
+        self.insert_or_update(ctx, coll, key, |_, _, key| Ok([key]), |_, _, _| Ok(()))
     }
 
-    pub(crate) fn set_binary_op(
+    pub(crate) fn set_operation(
         &mut self,
         ctx: &mut Context,
         receiver: Value,
         other_expr: &'s Expr,
-        elem_ty: TypeHandle,
         operation: SetOperation,
     ) -> Result<Value> {
         let other = self.expression(ctx, other_expr)?;
         let other = self.defined(ctx, other)?;
-        let out = self.empty_collection(ctx, CollectionKind::Set, Some(receiver.get_type(ctx)))?;
+        let layout = self.set_layout(ctx, receiver)?;
+        let elem_ty = layout.fields[0];
+        let out = self.alloc_collection_box(ctx, layout);
         let (first, second) = match operation {
             SetOperation::Difference => (SetSelection::AbsentFrom(other), None),
             SetOperation::Intersection => {
                 let receiver_size = self.collection_size(ctx, receiver)?;
                 let other_size = self.collection_size(ctx, other)?;
                 let receiver_first = self.compare(ctx, CompareKind::Le, receiver_size, other_size);
+                let intersection = |b: &mut Self, ctx: &mut Context, source, other| {
+                    b.copy_set_entries(ctx, source, SetSelection::PresentIn(other), out, elem_ty)?;
+                    Ok(out)
+                };
                 return self.choose(
                     ctx,
                     out.get_type(ctx),
                     receiver_first,
-                    |b, ctx| {
-                        b.copy_set_entries(
-                            ctx,
-                            receiver,
-                            SetSelection::PresentIn(other),
-                            out,
-                            elem_ty,
-                        )?;
-                        Ok(out)
-                    },
-                    |b, ctx| {
-                        b.copy_set_entries(
-                            ctx,
-                            other,
-                            SetSelection::PresentIn(receiver),
-                            out,
-                            elem_ty,
-                        )?;
-                        Ok(out)
-                    },
+                    |b, ctx| intersection(b, ctx, receiver, other),
+                    |b, ctx| intersection(b, ctx, other, receiver),
                 );
             }
             SetOperation::Union => (SetSelection::All, Some((other, SetSelection::All))),
@@ -355,17 +359,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         })
     }
 
-    pub(crate) fn set_relation_op(
+    pub(crate) fn set_relation(
         &mut self,
         ctx: &mut Context,
         receiver: Value,
         other_expr: &'s Expr,
-        elem_ty: TypeHandle,
         relation: SetRelation,
     ) -> Result<Value> {
         let other = self.expression(ctx, other_expr)?;
         let other = self.defined(ctx, other)?;
-        let all_match = self.boolean(ctx, true);
+        let elem_ty = self.set_layout(ctx, receiver)?.fields[0];
         let (iter_set, check_set, negate) = match relation {
             SetRelation::Subset => (receiver, other, false),
             SetRelation::Superset => (other, receiver, false),
@@ -374,7 +377,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.find_item(
             ctx,
             Input::Collection(iter_set),
-            all_match,
+            |b, ctx| Ok(b.boolean(ctx, true)),
             |b, ctx, val, _| {
                 let has = b.kv_has(ctx, check_set, val, elem_ty)?;
                 Ok(if negate { has } else { b.not(ctx, has) })
@@ -401,45 +404,41 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.jump(ctx, alloc_bb);
         self.switch_to(loop_start_bb);
 
+        let declared =
+            expected.and_then(|ty| self.shapes.boxed_collection(ctx, ty, CollectionKind::Map));
         self.iterate(ctx, Input::Collection(items), |b, ctx, elem, idx, _, _| {
             let raw_key = b.array_callback(ctx, callback, &[elem, idx])?;
-            let k_ty = expected
-                .and_then(|exp| map_entry_types(ctx, exp).map(|(k, _, _)| k))
-                .unwrap_or_else(|| raw_key.get_type(ctx));
+            let layout = match declared {
+                Some(map) => map,
+                None => b
+                    .shapes
+                    .collection_type(ctx, EntryTypes::Map(raw_key.get_type(ctx), group_arr_ty))?,
+            };
+            let k_ty = layout.fields[0];
             let key = b.fit(ctx, raw_key, k_ty)?;
-            let tuple_rec =
-                match expected.and_then(|exp| map_entry_types(ctx, exp).map(|(_, _, r)| r)) {
-                    Some(r) => r,
-                    None => b
-                        .shapes
-                        .entry_type(ctx, EntryTypes::Map(k_ty, group_arr_ty))?,
-                };
-
             let body_bb = b.block;
             b.switch_to(alloc_bb);
-            let out_map = b.alloc_collection_box(ctx, tuple_rec, CollectionKind::Map)?;
+            let out_map = b.alloc_collection_box(ctx, layout);
             b.jump(ctx, loop_start_bb);
             b.switch_to(body_bb);
 
-            let existing_opt = b.kv_get(ctx, out_map, key, k_ty, group_arr_ty)?;
-            let is_undef = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, existing_opt));
-            let new_bb = b.new_block(ctx, "groupby_new");
-            let push_bb = b.new_block(ctx, "groupby_push");
-            let done_bb = b.new_block(ctx, "groupby_done");
-            b.branch(ctx, is_undef, new_bb, push_bb);
-
-            b.switch_to(new_bb);
-            let fresh_arr = b.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![elem]));
-            b.kv_set(ctx, out_map, key, fresh_arr)?;
-            b.jump(ctx, done_bb);
-
-            b.switch_to(push_bb);
-            let existing_arr = b.defined(ctx, existing_opt)?;
-            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, existing_arr, elem));
-            b.jump(ctx, done_bb);
-
-            b.switch_to(done_bb);
-            Ok(out_map)
+            b.insert_or_update(
+                ctx,
+                out_map,
+                key,
+                |b, ctx, key| {
+                    let group = b.emit_value(ArrayNewOp::new(ctx, elem_ty, vec![elem]), ctx);
+                    Ok([key, b.fit(ctx, group, layout.fields[1])?])
+                },
+                |b, ctx, entry| {
+                    let group = b.storage_field(ctx, entry, Field::MapValue)?;
+                    let group = b.defined(ctx, group)?;
+                    let item_type = b.array_element(ctx, group)?;
+                    let item = b.fit(ctx, elem, item_type)?;
+                    b.emit(ArrayPushOp::new(ctx, group, item), ctx);
+                    Ok(())
+                },
+            )
         })
     }
 }

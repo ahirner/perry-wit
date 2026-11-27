@@ -36,10 +36,10 @@ impl ArrayOutput {
     ) {
         match self {
             Self::Item(value) => {
-                builder.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+                builder.emit(ArrayPushOp::new(ctx, array, value), ctx);
             }
             Self::Items(items) => {
-                builder.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, items));
+                builder.emit(perry_mir::ArrayExtendOp::new(ctx, array, items), ctx);
             }
         }
     }
@@ -89,27 +89,17 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let mut current = b.load(ctx, index)?;
                 let item = match input {
                     Input::Array(value, holes) | Input::Slice(value, _, holes) => {
-                        if let Input::Slice(
-                            _,
-                            Span {
-                                limit,
-                                direction: Direction::Reverse,
-                                ..
-                            },
-                            _,
-                        ) = input
-                        {
-                            let one = b.number(ctx, 1.0);
-                            let last = b.binary(ctx, BinaryKind::Sub, limit, one);
-                            current = b.binary(ctx, BinaryKind::Sub, last, current);
+                        if let Input::Slice(_, ref span, _) = input {
+                            current = span.direction.index(b, ctx, span.limit, current);
                         }
                         match holes {
                             Holes::Dense => b.array_value(ctx, value, current)?,
                             Holes::Skip | Holes::Visit(_) | Holes::Preserve(_) => {
                                 let present = if b.shapes.specialization.sparse_arrays {
-                                    b.emit_value(ctx, |ctx| {
-                                        perry_mir::ArrayPresentOp::new(ctx, value, current)
-                                    })
+                                    b.emit_value(
+                                        perry_mir::ArrayPresentOp::new(ctx, value, current),
+                                        ctx,
+                                    )
                                 } else {
                                     let length = b.array_length(ctx, value);
                                     b.compare(ctx, CompareKind::Lt, current, length)
@@ -124,9 +114,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                                             b.fit(ctx, item, ty)
                                         },
                                         |b, ctx| {
-                                            Ok(b.emit_value(ctx, |ctx| {
-                                                UndefinedOp::with_type(ctx, ty)
-                                            }))
+                                            Ok(b.emit_value(UndefinedOp::with_type(ctx, ty), ctx))
                                         },
                                     )?
                                 } else {
@@ -151,7 +139,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                     Input::UndefinedCount(_) => {
                         let ty = void_type(ctx);
-                        b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+                        b.emit_value(UndefinedOp::with_type(ctx, ty), ctx)
                     }
                 };
                 body(b, ctx, item, current, next, done)
@@ -164,23 +152,22 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         input: Input,
-        miss: Value,
+        miss: impl FnOnce(&mut Self, &mut Context) -> Result<Value>,
         matches: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<Value>,
         found: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<Value>,
     ) -> Result<Value> {
-        let result = self.entry_slot(ctx, miss.get_type(ctx));
-        self.store(ctx, result, miss);
-        self.iterate(ctx, input, |b, ctx, item, index, next, done| {
+        let result = self.iterate(ctx, input, |b, ctx, item, index, next, _| {
             let matched = matches(b, ctx, item, index)?;
             let hit = b.new_block(ctx, "search_hit");
             b.branch(ctx, matched, hit, next);
             b.switch_to(hit);
             let value = found(b, ctx, item, index)?;
-            b.store(ctx, result, value);
-            b.jump(ctx, done);
-            Ok(())
+            let result = b.result_block(ctx, value.get_type(ctx));
+            b.emit(BrOp::new(ctx, result, vec![value]), ctx);
+            Ok(result)
         })?;
-        self.load(ctx, result)
+        let fallback = miss(self, ctx)?;
+        Ok(self.finish_result(ctx, result, fallback))
     }
 
     pub(in crate::lower) fn preserve_holes(&mut self, ctx: &mut Context) -> Holes {
@@ -217,9 +204,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let present = b.block;
                 b.switch_to(hole);
                 let position = b.array_length(ctx, result);
-                b.emit(ctx, |ctx| {
-                    perry_mir::ArrayHoleOp::new(ctx, result, position)
-                });
+                b.emit(perry_mir::ArrayHoleOp::new(ctx, result, position), ctx);
                 b.jump(ctx, next);
                 b.switch_to(present);
             }

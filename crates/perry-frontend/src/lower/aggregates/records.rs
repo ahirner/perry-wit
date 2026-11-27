@@ -127,7 +127,7 @@ impl<'a> RecordAssembly<'a> {
             }
             RecordInput::Field(source, mode) => {
                 let op = FieldGetOp::new(ctx, source, name.to_string()).to_diag(ctx)?;
-                let value = b.field_read(ctx, &op)?;
+                let value = b.field_read(ctx, op)?;
                 let presence = admits_undefined(ctx, value.get_type(ctx)).then_some((source, mode));
                 (value, presence, presence.is_some())
             }
@@ -147,9 +147,9 @@ impl<'a> RecordAssembly<'a> {
         let value = if let Some((source, _)) = source.filter(|_| previous.is_some() || optional) {
             let present = if optional {
                 let op = FieldPresentOp::new(ctx, source, name.to_string()).to_diag(ctx)?;
-                b.emit_value(ctx, |_| op)
+                b.emit_value(op, ctx)
             } else {
-                let undefined = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, loaded));
+                let undefined = b.emit_value(IsUndefinedOp::new(ctx, loaded), ctx);
                 b.not(ctx, undefined)
             };
             b.choose(
@@ -166,7 +166,7 @@ impl<'a> RecordAssembly<'a> {
                 },
                 |b, ctx| match previous {
                     Some(value) => b.fit(ctx, value, target),
-                    None => Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, target))),
+                    None => Ok(b.emit_value(OmittedOp::with_type(ctx, target), ctx)),
                 },
             )
         } else {
@@ -255,15 +255,11 @@ impl<'a> RecordAssembly<'a> {
                             record.deref(ctx).fields().to_diag(ctx)?[index].0
                         );
                     }
-                    Ok(b.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty)))
+                    Ok(b.emit_value(OmittedOp::with_type(ctx, ty), ctx))
                 }
             })
             .collect::<Result<_>>()?;
-        let value = b.emit_value(ctx, |ctx| {
-            let allocation = AllocOp::new(ctx, record, values);
-            allocation.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(order));
-            allocation
-        });
+        let value = b.emit_value(AllocOp::ordered(ctx, record, values, order), ctx);
         for source in sources {
             let (intrinsic, operand) = match source {
                 RecordSource::Spread(source) => (Intrinsic::JsonSpread, source),
@@ -325,12 +321,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             };
             values.push(self.fit(ctx, value, ty)?);
         }
-        let env = self.emit_value(ctx, |ctx| {
-            let order = perry_mir::FieldOrder((0..values.len() as u32).collect());
-            let alloc = AllocOp::new(ctx, record, values);
-            alloc.set_attr_perry_field_order(ctx, order);
-            alloc
-        });
+        let order = (0..values.len() as u32).collect();
+        let env = self.emit_value(AllocOp::ordered(ctx, record, values, order), ctx);
         self.function_value(ctx, closure.identity, Some(env), expected)
     }
 
@@ -345,10 +337,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         let expected = if let Some(ty) =
             expected.filter(|ty| ty.deref(ctx).is::<perry_mir::ValueUnionType>())
         {
-            perry_mir::variant_cases(ctx, ty)
+            perry_mir::VariantType::of(ctx, ty)
                 .to_diag(ctx)?
-                .into_iter()
-                .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
+                .case("object")
+                .flatten()
         } else {
             expected
         };

@@ -283,9 +283,7 @@ impl FunctionLowering<'_, '_> {
                 self.cond_br(ctx, rep, (done, vec![handle]), (lookup, vec![]));
                 self.block = lookup;
                 let representation = self.resource_value(ctx, key, "rep", handle);
-                self.br(ctx, done, vec![representation]);
-                self.block = done;
-                let value = done.deref(ctx).get_argument(0);
+                let value = self.join_value(ctx, done, representation);
                 let value = self.num(ctx, NumOpcode::F64ConvertI32U, vec![value]);
                 self.define(ctx, op, value);
             }

@@ -45,10 +45,7 @@ impl FunctionLowering<'_, '_> {
                 let tag = self.state.data.string(tag);
                 let tag = self.i32_const(ctx, tag as i32);
                 let matches = self.num(ctx, NumOpcode::I32Eq, vec![tag_a, tag]);
-                let active = self.new_block(ctx, vec![]);
-                let next = self.new_block(ctx, vec![]);
-                self.cond_br(ctx, matches, (active, vec![]), (next, vec![]));
-                self.block = active;
+                let next = self.enter_if(ctx, matches);
                 Some(next)
             } else {
                 None

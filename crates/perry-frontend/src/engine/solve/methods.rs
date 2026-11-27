@@ -63,6 +63,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         builtins::apply_method_result(self.ctx, self.types, rule, call)
     }
 
+    pub(super) fn search_pattern(&mut self, instance: InstanceId, expr: &Expr, ty: Ty) -> TyKind {
+        let (present, _) = self.types.strip_nullish(ty);
+        let kind = self.types.kind(present);
+        if let TyKind::Regex(shape) = kind {
+            self.record_operand_use(instance, expr, OperandUse::RegexSearch(shape));
+        }
+        kind
+    }
+
     pub(super) fn eval_method_call(
         &mut self,
         s: &mut EvalState<'h>,
@@ -230,9 +239,17 @@ impl<'h, 'a> Solver<'h, 'a> {
             });
         };
         if let Some(builtin) = builtin {
+            let result = if let (Builtin::Method(Method::StringSplit), [separator], [ty]) =
+                (builtin, args, arg_tys.as_slice())
+                && let TyKind::Regex(shape) = self.search_pattern(s.inst, separator, *ty)
+            {
+                MethodResult::Signature(shape.split().result_kinds())
+            } else {
+                builtin.result()
+            };
             return Ok(self.method_result(
                 s.inst,
-                builtin.result(),
+                result,
                 MethodResultArgs::call(obj_ty, args, &arg_tys, self.hir.sparse_arrays),
             ));
         }

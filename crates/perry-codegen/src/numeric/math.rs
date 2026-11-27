@@ -1,7 +1,7 @@
 //! Scalar and tagged Math share operation selection and integer interpretation.
 use super::integer;
+use crate::runtime::Runtime;
 use crate::{function::FunctionLowering, repr::Carriers};
-use perry_abi::layout::numeric::{FLOAT, SIGNED, UNSIGNED};
 use perry_mir::{CompareKind, Intrinsic};
 use perry_wit_diagnostics::Result;
 use pliron::{
@@ -112,14 +112,20 @@ impl FunctionLowering<'_, '_> {
             Carriers::Numeric { tag, payload } => {
                 if extremum {
                     let rhs = op.deref(ctx).get_operand(1);
-                    let rhs = self.mapped_value(ctx, rhs)?.numeric()?;
-                    let (tag, payload) = self.numeric_extremum(
+                    let (rt, rp) = self.mapped_value(ctx, rhs)?.numeric()?;
+                    let min = self.i32_const(ctx, i32::from(intrinsic == Intrinsic::MathMin));
+                    return Ok(Some(self.tagged_call(
                         ctx,
-                        (tag, payload),
-                        rhs,
-                        intrinsic == Intrinsic::MathMin,
-                    );
-                    return Ok(Some(Carriers::Numeric { tag, payload }));
+                        Runtime::NumberExtremum,
+                        vec![tag, payload, rt, rp, min],
+                    )));
+                }
+                if intrinsic == Intrinsic::MathAbs {
+                    return Ok(Some(self.tagged_call(
+                        ctx,
+                        Runtime::NumberAbs,
+                        vec![tag, payload],
+                    )));
                 }
                 let float = self.num(ctx, NumOpcode::F64ReinterpretI64, vec![payload]);
                 (float, Some((tag, payload)))
@@ -139,25 +145,11 @@ impl FunctionLowering<'_, '_> {
         let Some((tag, payload)) = tagged else {
             return Ok(Some(Carriers::Scalar(float)));
         };
-        let (integer_tag, integer_payload) = if intrinsic == Intrinsic::MathAbs {
-            let negative = self.numeric_negative(ctx, tag, payload);
-            let magnitude = self.apply_integer_sign(ctx, payload, negative);
-            let signed_tag = self.i32_const(ctx, SIGNED);
-            let unsigned_tag = self.i32_const(ctx, UNSIGNED);
-            let zero = self.i64_const(ctx, 0);
-            let overflow = self.num(ctx, NumOpcode::I64LtS, vec![magnitude, zero]);
-            let positive_tag = self.select(ctx, overflow, unsigned_tag, signed_tag);
-            let one = self.i32_const(ctx, 1);
-            let signed = self.num(ctx, NumOpcode::I32And, vec![tag, one]);
-            (self.select(ctx, signed, positive_tag, tag), magnitude)
-        } else {
-            (tag, payload)
-        };
         let float_bits = self.num(ctx, NumOpcode::I64ReinterpretF64, vec![float]);
         let is_float = self.num(ctx, NumOpcode::I32Eqz, vec![tag]);
         Ok(Some(Carriers::Numeric {
-            tag: self.select(ctx, is_float, tag, integer_tag),
-            payload: self.select(ctx, is_float, float_bits, integer_payload),
+            tag,
+            payload: self.select(ctx, is_float, float_bits, payload),
         }))
     }
 
@@ -171,48 +163,5 @@ impl FunctionLowering<'_, '_> {
         let next = self.num(ctx, NumOpcode::F64Add, vec![floor, one]);
         let rounded = self.select(ctx, up, next, floor);
         self.num(ctx, NumOpcode::F64Copysign, vec![rounded, value])
-    }
-
-    /// Compute `Math.min` (`min`) or `Math.max` of two operands, propagating `NaN` from either operand.
-    fn numeric_extremum(
-        &mut self,
-        ctx: &mut Context,
-        (lt, lp): (Value, Value),
-        (rt, rp): (Value, Value),
-        min: bool,
-    ) -> (Value, Value) {
-        let order = self.numeric_order(ctx, (lt, lp), (rt, rp));
-        let zero = self.i32_const(ctx, 0);
-        let two = self.i32_const(ctx, 2);
-        let any_nan = self.num(ctx, NumOpcode::I32Eq, vec![order, two]);
-        let ordered = self.num(
-            ctx,
-            if min {
-                NumOpcode::I32LtS
-            } else {
-                NumOpcode::I32GtS
-            },
-            vec![order, zero],
-        );
-        // Equal values choose the negative zero for min and positive zero for max.
-        let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
-        let negative_zero = self.i64_const(ctx, (-0.0f64).to_bits());
-        let left_negative_zero = self.num(ctx, NumOpcode::I64Eq, vec![lp, negative_zero]);
-        let left_float = self.num(ctx, NumOpcode::I32Eqz, vec![lt]);
-        let left_negative_zero =
-            self.num(ctx, NumOpcode::I32And, vec![left_negative_zero, left_float]);
-        let tie_left = if min {
-            left_negative_zero
-        } else {
-            self.num(ctx, NumOpcode::I32Eqz, vec![left_negative_zero])
-        };
-        let pick_left = self.select(ctx, equal, tie_left, ordered);
-        let float_tag = self.i32_const(ctx, FLOAT);
-        let chosen_tag = self.select(ctx, pick_left, lt, rt);
-        let chosen_payload = self.select(ctx, pick_left, lp, rp);
-        let nan_bits = self.i64_const(ctx, f64::NAN.to_bits());
-        let res_tag = self.select(ctx, any_nan, float_tag, chosen_tag);
-        let res_payload = self.select(ctx, any_nan, nan_bits, chosen_payload);
-        (res_tag, res_payload)
     }
 }

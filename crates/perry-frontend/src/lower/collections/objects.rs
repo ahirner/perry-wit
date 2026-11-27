@@ -11,8 +11,8 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let ty = val.get_type(ctx);
         if optional_value(ctx, ty).is_some() && admits_undefined(ctx, ty) {
-            let is_undef = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, val));
-            let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
+            let is_undef = self.emit_value(IsUndefinedOp::new(ctx, val), ctx);
+            let undef = self.emit_value(UndefinedOp::with_type(ctx, ty), ctx);
             return self.choose(ctx, ty, is_undef, |_, _| Ok(undef), |_, _| Ok(val));
         }
         Ok(val)
@@ -26,7 +26,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         v_ty: TypeHandle,
         tuple_rec: TypedHandle<RecordType>,
     ) -> Result<Value> {
-        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, tuple_rec.into(), vec![]));
+        let dict = self.emit_value(ArrayNewOp::new(ctx, tuple_rec.into(), vec![]), ctx);
         for &(name, val_expr) in fields {
             if self.erased_operand(val_expr) {
                 self.discard_function_operand(ctx, val_expr)?;
@@ -76,10 +76,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         let uniform_ty = record_uniform_field_type(ctx, rec_handle).ok_or_else(|| Diagnostic::unsupported("dynamic indexing on a closed record requires all fields to share the same type, or use Record<string, V>"))?;
         let opt_ty =
             crate::lower::coerce::admitting(ctx, uniform_ty, perry_mir::Absence::Undefined);
-        let init = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty));
+        let init = self.emit_value(UndefinedOp::with_type(ctx, opt_ty), ctx);
         self.match_record_key(ctx, rec_handle, key, init, |b, ctx, name, _| {
             let op = FieldGetOp::new(ctx, rec, name).to_diag(ctx)?;
-            let field_val = b.append_value(ctx, &op);
+            let field_val = b.emit_value(op, ctx);
             let normalized = b.normalize_optional_read(ctx, field_val)?;
             b.fit(ctx, normalized, opt_ty)
         })
@@ -155,7 +155,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 } else {
                     let entry = pair.map(|pair| (pair, self.string(ctx, key)));
                     let op = FieldGetOp::new(ctx, obj, name).to_diag(ctx)?;
-                    let value = self.append_value(ctx, &op);
+                    let value = self.emit_value(op, ctx);
                     let value = if admits_undefined(ctx, field_ty) {
                         self.normalize_optional_read(ctx, value)?
                     } else {
@@ -163,16 +163,16 @@ impl<'s> FunctionBuilder<'s, '_> {
                     };
                     let value = self.fit(ctx, value, elem_ty)?;
                     if let Some((pair, key)) = entry {
-                        self.emit_value(ctx, |ctx| AllocOp::new(ctx, pair, vec![key, value]))
+                        self.emit_value(AllocOp::new(ctx, pair, vec![key, value]), ctx)
                     } else {
                         value
                     }
                 };
                 values.push(value);
             }
-            let out = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, output_ty, values));
+            let out = self.emit_value(ArrayNewOp::new(ctx, output_ty, values), ctx);
             if !tuple {
-                self.emit(ctx, |ctx| perry_mir::RecordOrderOp::new(ctx, obj, out));
+                self.emit(perry_mir::RecordOrderOp::new(ctx, obj, out), ctx);
             }
             return Ok(out);
         }
@@ -199,8 +199,10 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let entries_val = self.expression_with(ctx, entries_expr, expected)?;
         let entries_val = self.defined(ctx, entries_val)?;
-        let (k_ty, v_ty) = iterable_kv_types(ctx, entries_val.get_type(ctx))
-            .or_else(|| expected.and_then(|e| iterable_kv_types(ctx, e)))
+        let (k_ty, v_ty) = self
+            .shapes
+            .iterable_kv_types(ctx, entries_val.get_type(ctx))
+            .or_else(|| expected.and_then(|e| self.shapes.iterable_kv_types(ctx, e)))
             .ok_or_else(|| {
                 Diagnostic::new(
                     codes::TYPE_MISMATCH,
@@ -214,7 +216,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .positional_record(ctx, RecordKind::DictionaryEntry, [k_ty, v_ty])?
             }
         };
-        let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
+        let dict = self.emit_value(ArrayNewOp::new(ctx, dict_tuple.into(), vec![]), ctx);
         self.populate_from_entries(ctx, entries_val, dict)
     }
 
@@ -230,10 +232,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let ty = val.get_type(ctx);
         let inner = present_type(ctx, ty);
-        let is_plain_array = inner.deref(ctx).is::<ArrayType>()
-            && map_entry_types(ctx, inner).is_none()
-            && dict_entry_types(ctx, inner).is_none()
-            && set_entry_type(ctx, inner).is_none();
+        let is_plain_array =
+            inner.deref(ctx).is::<ArrayType>() && dict_entry_types(ctx, inner).is_none();
         if ty.deref(ctx).is::<OptionalType>() {
             if !is_plain_array {
                 return Ok(self.boolean(ctx, false));
@@ -280,7 +280,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             return self.match_record_key(ctx, rec, k, init, |b, ctx, name, field_ty| {
                 if admits_undefined(ctx, field_ty) {
                     let op = FieldPresentOp::new(ctx, obj, name).to_diag(ctx)?;
-                    Ok(b.append_value(ctx, &op))
+                    Ok(b.emit_value(op, ctx))
                 } else {
                     Ok(b.boolean(ctx, true))
                 }
@@ -340,7 +340,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let done = self.new_block(ctx, "deleted_element");
             self.branch(ctx, present, delete, done);
             self.switch_to(delete);
-            self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, obj, index));
+            self.emit(perry_mir::ArrayHoleOp::new(ctx, obj, index), ctx);
             self.jump(ctx, done);
             self.switch_to(done);
             return Ok(self.boolean(ctx, true));
@@ -353,10 +353,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             if let Some(field_ty) = field_ty
                 && admits_undefined(ctx, field_ty)
             {
-                let omitted = self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, field_ty));
-                self.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, obj, property.clone(), omitted)
-                });
+                let omitted = self.emit_value(OmittedOp::with_type(ctx, field_ty), ctx);
+                self.emit(FieldSetOp::new(ctx, obj, property.clone(), omitted), ctx);
                 return Ok(self.boolean(ctx, true));
             }
         }
@@ -392,8 +390,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Some(self.compare(ctx, CompareKind::Eq, name, canonical)),
             )
         };
-        let mut present =
-            self.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
+        let mut present = self.emit_value(perry_mir::ArrayPresentOp::new(ctx, array, index), ctx);
         if let Some(canonical) = canonical {
             let predicate = present.get_type(ctx);
             present = self.choose(

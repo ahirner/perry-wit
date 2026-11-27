@@ -135,21 +135,24 @@ impl<'h, 'a> Solver<'h, 'a> {
             let Some(cb) = second_arg else {
                 return Ok(None);
             };
+            let search = self.eval_expr(s, first_arg)?;
+            let search = self.search_pattern(s.inst, first_arg, search);
             let cb_ty = self.eval_expr(s, cb)?;
-            if cb_ty == Ty::BOTTOM {
+            if search == TyKind::Bottom || cb_ty == Ty::BOTTOM {
                 return Ok(Some(Ty::BOTTOM));
             }
             if !matches!(self.types.kind(cb_ty), TyKind::Func(_)) {
                 return Ok(None);
             }
             replacement.push(Ty::STRING);
-            let captures = match first_arg {
-                Expr::String(_) => Some((0, false)),
-                _ => self.index.regexes.get(first_arg).map(|r| r.captures),
+            let captures = match search {
+                TyKind::String | TyKind::Literal(_) => Some((0, false)),
+                TyKind::Regex(shape) => shape.captures,
+                _ => None,
             };
             if let Some((count, named)) = captures {
                 let opt = self.types.with_absences(Ty::STRING, Absence::Undefined);
-                replacement.extend(std::iter::repeat_n(opt, count));
+                replacement.extend(std::iter::repeat_n(opt, count as usize));
                 replacement.extend([Ty::NUMBER, Ty::STRING]);
                 if named {
                     replacement.push(self.types.object(&[], Some(opt)));
@@ -302,7 +305,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         identities: &[FuncIdentity],
         inputs: &[Ty],
         site: DispatchSite<'h>,
-    ) -> Result<(CallTarget, Ty)> {
+    ) -> Result<(HelperId, bool, Ty)> {
         let (receiver, origin, mut width) = match site {
             DispatchSite::Call(receiver, CallOrigin::Source(call)) => (
                 receiver,
@@ -337,7 +340,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             },
             origin.offset(),
         );
-        Ok((CallTarget::Dispatch { helper, needs_recv }, result))
+        Ok((helper, needs_recv, result))
     }
 
     fn contextual_callback(
@@ -359,9 +362,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(Some(value));
             }
             if let Some(idents) = self.types.func_dispatch_members(value, false) {
-                let (target, ret) =
+                let (helper, _, ret) =
                     self.callback_dispatcher(s, value, &idents, inputs, DispatchSite::Builtin)?;
-                self.record_site_coercion(s.inst, callback, FuncCoercion::Callback(target));
+                self.record_operand_use(
+                    s.inst,
+                    callback,
+                    OperandUse::Callback(FunctionTarget::Dispatcher(helper)),
+                );
                 return Ok(Some(ret));
             }
             let TyKind::Func(ident) = self.types.kind(value) else {
@@ -388,14 +395,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let target = self.request_instance(request)?;
         if pass_env {
-            self.record_site_coercion(
+            self.record_operand_use(
                 s.inst,
                 callback,
-                FuncCoercion::Callback(CallTarget::Direct {
-                    target,
-                    pass_env,
-                    pass_receiver: false,
-                }),
+                OperandUse::Callback(FunctionTarget::Closure(target)),
             );
         } else {
             self.record_site(s.inst, callback, SiteResolution::Callback { target });

@@ -32,13 +32,14 @@ pub(crate) mod paths;
 mod rewrite;
 mod transfer;
 use domains::{
-    Fact, Integer, Interval, Range, ResultDomain, arithmetic_range, comparison_domain,
+    Fact, Integer, Interval, MirInteger, Range, ResultDomain, arithmetic_range, comparison_domain,
     constant_range, integer_arithmetic, literal,
 };
 #[cfg(test)]
 pub(crate) use rewrite::verify_lossless_module;
 pub(crate) use rewrite::{specialize, verify_lossless_operations};
 mod value;
+pub(crate) use value::RegexOrigin;
 use value::{Demand, Presence, Representation, ValueFacts, ValueState};
 mod outcomes;
 use outcomes::Outcomes;
@@ -443,6 +444,11 @@ impl ProgramFacts {
             .map_or(Range::Unknown, |facts| facts.range)
     }
 
+    pub(crate) fn regex_origin(&self, ctx: &Context, value: Value) -> RegexOrigin {
+        self.value_facts(ctx, value)
+            .map_or(RegexOrigin::Other, |facts| facts.regex)
+    }
+
     fn presence(&self, ctx: &Context, value: Value) -> Presence {
         self.value_facts(ctx, value).map_or_else(
             || Presence::declared(ctx, value.get_type(ctx)),
@@ -635,6 +641,7 @@ impl Solver {
                 ),
             );
             if body.external {
+                facts.regex = RegexOrigin::Other;
                 facts.outcome = Outcomes::unknown(ctx, parameter.get_type(ctx));
             }
             facts.presence = Presence::declared(ctx, parameter.get_type(ctx));

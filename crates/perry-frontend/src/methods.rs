@@ -299,33 +299,3 @@ impl<'s> Call<'s> {
         Some((CallReceiver::Expression(receiver), call))
     }
 }
-
-/// Positional captures and the optional groups argument in a replacement callback.
-pub(crate) fn regex_captures(pattern: &str) -> (usize, bool) {
-    let mut chars = pattern.chars().peekable();
-    let mut in_class = false;
-    let mut count = 0;
-    let mut named = false;
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => {
-                chars.next();
-            }
-            '[' => in_class = true,
-            ']' => in_class = false,
-            '(' if !in_class => {
-                if chars.peek() != Some(&'?') {
-                    count += 1;
-                } else {
-                    chars.next();
-                    if chars.next() == Some('<') && !matches!(chars.peek(), Some('=' | '!')) {
-                        count += 1;
-                        named = true;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    (count, named)
-}

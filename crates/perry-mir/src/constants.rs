@@ -233,7 +233,7 @@ impl ConstFoldInterface for CompareOp {
                 lhs.downcast_ref::<crate::attrs::NumericConstant>(),
                 rhs.downcast_ref::<crate::attrs::NumericConstant>(),
             ) {
-                lhs.order(*rhs)
+                lhs.number().order(rhs.number())
             } else {
                 let (lhs, rhs) = (
                     lhs.downcast_ref::<IntegerAttr>()?,
@@ -253,14 +253,8 @@ impl ConstFoldInterface for CompareOp {
                     Greater
                 })
             };
-            let result = match self.kind(ctx) {
-                CompareKind::Lt => ordering == Some(Less),
-                CompareKind::Le => matches!(ordering, Some(Less | Equal)),
-                CompareKind::Gt => ordering == Some(Greater),
-                CompareKind::Ge => matches!(ordering, Some(Greater | Equal)),
-                CompareKind::Eq => ordering == Some(Equal),
-                CompareKind::Ne => ordering != Some(Equal),
-            };
+            let relation = perry_abi::number::Relation::order_mask(ordering);
+            let result = self.kind(ctx).accepted_relations() & relation != 0;
             Some(boolean(ctx, result))
         })();
         vec![folded]

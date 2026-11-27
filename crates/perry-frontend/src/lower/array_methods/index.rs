@@ -53,11 +53,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                     gt_zero,
                     |b, ctx| {
                         let prev = b.load(ctx, acc_slot)?;
-                        Ok(b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prev, sep)))
+                        Ok(b.emit_value(ConcatOp::new(ctx, prev, sep), ctx))
                     },
                     |b, ctx| b.load(ctx, acc_slot),
                 )?;
-                let next_str = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, prefix, elem_str));
+                let next_str = b.emit_value(ConcatOp::new(ctx, prefix, elem_str), ctx);
                 b.store(ctx, acc_slot, next_str);
                 Ok(())
             },
@@ -113,7 +113,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let norm_end = match end {
             None => len,
             Some(end) if self.is_optional(ctx, end) => {
-                let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, end));
+                let undefined = self.emit_value(IsUndefinedOp::new(ctx, end), ctx);
                 self.choose(
                     ctx,
                     len.get_type(ctx),
@@ -200,7 +200,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let item = b.array_value(ctx, array, resolved_idx)?;
                 b.fit(ctx, item, opt_ty)
             },
-            |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
+            |b, ctx| Ok(b.emit_value(UndefinedOp::with_type(ctx, opt_ty), ctx)),
         )
     }
 
@@ -221,11 +221,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let last_idx = b.binary(ctx, BinaryKind::Sub, len, one);
                 let item = b.array_value(ctx, array, last_idx)?;
                 let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-                let new_len = b.emit_value(ctx, |ctx| NumericCastOp::new(ctx, last_idx, u32_ty));
-                b.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, array, new_len));
+                let new_len = b.emit_value(NumericCastOp::new(ctx, last_idx, u32_ty), ctx);
+                b.emit(ArrayTruncateOp::new(ctx, array, new_len), ctx);
                 b.fit(ctx, item, opt_ty)
             },
-            |b, ctx| Ok(b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_ty))),
+            |b, ctx| Ok(b.emit_value(UndefinedOp::with_type(ctx, opt_ty), ctx)),
         )
     }
 
@@ -255,7 +255,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         );
         self.switch_to(ok_b);
         let cloned = self.without_holes(ctx, array, Holes::Dense, true)?;
-        self.emit(ctx, |ctx| ArraySetOp::new(ctx, cloned, resolved_idx, val));
+        self.emit(ArraySetOp::new(ctx, cloned, resolved_idx, val), ctx);
         Ok(cloned)
     }
 }

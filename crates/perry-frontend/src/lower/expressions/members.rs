@@ -1,6 +1,6 @@
 //! Member access: `object.property`, `object[index]` and `++object.field`.
 use super::*;
-use crate::lower::collections::{Collection, dict_entry_types};
+use crate::lower::collections::dict_entry_types;
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Member<'p> {
@@ -54,7 +54,7 @@ impl<'p> Member<'p> {
         match self {
             Self::Field(object, name, _, ty) => {
                 let get = FieldGetOp::with_type(ctx, object, name.to_owned(), ty).to_diag(ctx)?;
-                b.field_read(ctx, &get)
+                b.field_read(ctx, get)
             }
             Self::Accessor(object, get) => b
                 .call_values(ctx, get, std::iter::once(object))?
@@ -95,7 +95,7 @@ impl<'p> Member<'p> {
                 } else {
                     FieldSetOp::new
                 };
-                b.emit(ctx, |ctx| set(ctx, object, name.to_owned(), value));
+                b.emit(set(ctx, object, name.to_owned(), value), ctx);
                 Ok(Some(b.bigint_view(ctx, value)))
             }
         }
@@ -139,10 +139,11 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     pub(crate) fn string_length(&mut self, ctx: &mut Context, string: Value) -> Value {
-        let length = self.emit_value(ctx, |ctx| StringLenOp::new(ctx, string));
-        self.emit_value(ctx, |ctx| {
-            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into())
-        })
+        let length = self.emit_value(StringLenOp::new(ctx, string), ctx);
+        self.emit_value(
+            NumericCastOp::new(ctx, length, FP64Type::get(ctx).into()),
+            ctx,
+        )
     }
 
     /// `object.property`, by the kind of `object`.
@@ -190,16 +191,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.kv_get(ctx, value, key, k_ty, v_ty)?
             }
             (Kind::Array, "groups" | "index" | "input") => {
-                ensure_unsupported!(
-                    Self::regex_result(ctx, value),
-                    "regex result metadata requires an exec result or a non-global match result"
-                );
                 let intrinsic = match property {
                     "groups" => Intrinsic::RegexGroups,
                     "index" => Intrinsic::RegexIndex,
                     _ => Intrinsic::RegexInput,
                 };
-                self.intrinsic(ctx, intrinsic, vec![value])
+                let span = self.shapes.locations.member_span(byte_offset);
+                self.located_intrinsic(ctx, intrinsic, vec![value], span)
             }
             (Kind::Array, "length") => self.array_length(ctx, value),
             (Kind::Array, "size") => self.collection_size(ctx, value)?,
@@ -220,15 +218,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 };
                 let op = SettledFieldOp::new(ctx, field, value)
                     .ok_or_else(|| Diagnostic::internal("expected a settled result"))?;
-                self.append_value(ctx, &op)
+                self.emit_value(op, ctx)
             }
             (Kind::Variant, field) => self.variant_member(ctx, object, value, field)?,
-            (Kind::Record, "size")
-                if matches!(Collection::of(ctx, ty), Some(Collection::Box(_))) =>
-            {
+            (Kind::Record, "size") if self.shapes.collection_box(ctx, ty).is_some() => {
                 self.collection_size(ctx, value)?
             }
-            (Kind::Record, "length") if Collection::of(ctx, ty).is_some() => {
+            (Kind::Record, "length") if self.shapes.collection(ctx, ty).is_some() => {
                 self.collection_backing_length(ctx, value)?
             }
             (Kind::Record, "length")
@@ -251,9 +247,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                     property,
                     None,
                 )? {
-                    call.lower(self, ctx, value)?.ok_or_else(|| {
-                        Diagnostic::new(codes::TYPE_MISMATCH, "properties produce a value")
-                    })?
+                    call.lower(self, ctx, value, Some(byte_offset))?
+                        .ok_or_else(|| {
+                            Diagnostic::new(codes::TYPE_MISMATCH, "properties produce a value")
+                        })?
                 } else {
                     bail_unsupported!(
                         "property {property} is not supported on {} yet",
@@ -265,8 +262,8 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     /// The value of a record field read: `undefined` normalized, 64-bit integers as bigint.
-    pub(crate) fn field_read(&mut self, ctx: &mut Context, op: &FieldGetOp) -> Result<Value> {
-        let loaded = self.append_value(ctx, op);
+    pub(crate) fn field_read(&mut self, ctx: &mut Context, op: FieldGetOp) -> Result<Value> {
+        let loaded = self.emit_value(op, ctx);
         let loaded = self.normalize_optional_read(ctx, loaded)?;
         Ok(self.bigint_view(ctx, loaded))
     }
@@ -297,7 +294,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 };
                 Ok(self.intrinsic(ctx, intrinsic, vec![array, index]))
             }
-            Kind::Record if Collection::of(ctx, ty).is_some() => {
+            Kind::Record if self.shapes.collection(ctx, ty).is_some() => {
                 let idx = self.number_operand(ctx, index)?;
                 self.collection_view_element_at(ctx, array, idx)
             }
@@ -318,7 +315,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 };
                 let op = FieldGetOp::new(ctx, array, field.clone())
                     .map_err(|_| diag!(codes::TYPE_MISMATCH, "record has no field {field}"))?;
-                self.field_read(ctx, &op)
+                self.field_read(ctx, op)
             }
             Kind::Array => {
                 if let Some((k_ty, v_ty, _)) = dict_entry_types(ctx, ty) {
@@ -327,7 +324,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 }
                 let index = self.index(ctx, index)?;
                 let op = ArrayGetOp::new(ctx, array, index).to_diag(ctx)?;
-                let val = self.append_value(ctx, &op);
+                let val = self.emit_value(op, ctx);
                 Ok(val)
             }
             _ => bail_unsupported!("indexing is only supported on arrays so far"),

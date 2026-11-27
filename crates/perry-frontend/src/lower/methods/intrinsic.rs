@@ -80,7 +80,7 @@ impl IntrinsicCall {
             Return::Value => value,
             Return::Undefined => {
                 let number = FP64Type::get(ctx).into();
-                Some(builder.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number)))
+                Some(builder.emit_value(UndefinedOp::new(ctx, number), ctx))
             }
             Return::Receiver => Some(receiver),
             Return::Found => {

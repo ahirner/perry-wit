@@ -1,9 +1,7 @@
 //! MIR lowering of the frontend method catalog.
 use super::*;
 use crate::lower::array_methods::{Direction, FindResult, Mutation, Quantifier, Search, Transform};
-use crate::lower::collections::{
-    IteratorMethod, SetOperation, SetRelation, dict_entry_types, kv_entry_types, set_entry_type,
-};
+use crate::lower::collections::{IteratorMethod, SetOperation, SetRelation, dict_entry_types};
 use perry_mir::DatePart;
 
 mod intrinsic;
@@ -14,14 +12,12 @@ use intrinsic::{
 
 pub(super) use crate::methods::{Call, CallReceiver, Receiver};
 
-impl Receiver {
-    pub(super) fn of(ctx: &Context, value: Value) -> Result<Self> {
-        Ok(
-            match super::collections::Collection::of(ctx, value.get_type(ctx)) {
-                Some(super::collections::Collection::Box(kind)) => Self::Collection(kind),
-                _ => Self::Value(kind(ctx, value)?),
-            },
-        )
+impl Shapes<'_> {
+    pub(super) fn method_receiver(&self, ctx: &Context, value: Value) -> Result<Receiver> {
+        Ok(match self.collection_box(ctx, value.get_type(ctx)) {
+            Some(layout) => Receiver::Collection(layout.view.source()),
+            None => Receiver::Value(kind(ctx, value)?),
+        })
     }
 }
 /// Implements `Call::lower` from the lowering column of `crate::method_catalog`.
@@ -34,36 +30,39 @@ macro_rules! lower_calls {
     } )*) => {
         impl<'s> Call<'s> {
             pub(super) fn lower(
-                self, b: &mut FunctionBuilder<'s, '_>, ctx: &mut Context, receiver: Value,
+                self, b: &mut FunctionBuilder<'s, '_>, ctx: &mut Context, receiver: Value, byte_offset: Option<u32>,
             ) -> Result<Option<Value>> {
                 match self { $($(
-                    Call::$variant($($argument),*) => lower_calls!(@invoke (b, ctx, receiver) $action $recipe),
+                    Call::$variant($($argument),*) => lower_calls!(@invoke (b, ctx, receiver, byte_offset) $action $recipe),
                 )*)* }
             }
         }
     };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) value ($method:ident($($arg:expr),*))) => {
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident, $offset:ident) value ($method:ident($($arg:expr),*))) => {
         $b.$method($ctx, $receiver $(, $arg)*).map(Some)
     };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) keyed ($family:ident, $key:ident, $method:ident)) => {{
-        let ty = lower_calls!(@key_type $family, $ctx, $receiver);
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident, $offset:ident) keyed ($family:ident, $key:ident, $method:ident)) => {{
+        let ty = lower_calls!(@key_type $family, $b, $ctx, $receiver);
         let key = $b.expression_with($ctx, $key, Some(ty))?;
         $b.$method($ctx, $receiver, key, ty).map(Some)
     }};
-    (@key_type Map, $ctx:ident, $receiver:ident) => { map_types($ctx, $receiver)?.0 };
-    (@key_type Set, $ctx:ident, $receiver:ident) => { set_element($ctx, $receiver)? };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) optional ($method:ident($($arg:expr),*))) => {
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident, $offset:ident) located ($method:ident($arg:expr))) => {
+        $b.$method($ctx, $receiver, $arg, $offset).map(Some)
+    };
+    (@key_type Map, $b:ident, $ctx:ident, $receiver:ident) => { $b.map_types($ctx, $receiver)?.0 };
+    (@key_type Set, $b:ident, $ctx:ident, $receiver:ident) => { $b.set_layout($ctx, $receiver)?.fields[0] };
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident, $offset:ident) optional ($method:ident($($arg:expr),*))) => {
         $b.$method($ctx, $receiver $(, $arg)*)
     };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) intrinsic ($intrinsic:ident)) => {
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident, $offset:ident) intrinsic ($intrinsic:ident)) => {
         Ok($b.call_intrinsic($ctx, Intrinsic::$intrinsic, vec![$receiver]))
     };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident)
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident, $offset:ident)
         intrinsic ($intrinsic:ident, $args:expr, [$($argument:expr),*], $result:ident)) => {
         IntrinsicCall { intrinsic: Intrinsic::$intrinsic, arguments: &[$($argument),*], result: Return::$result }
             .lower($b, $ctx, $receiver, $args)
     };
-    (@invoke ($b:ident, $ctx:ident, $receiver:ident) receiver ($args:expr)) => {{
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident, $offset:ident) receiver ($args:expr)) => {{
         for arg in $args {
             $b.expression($ctx, arg)?;
         }
@@ -73,20 +72,23 @@ macro_rules! lower_calls {
 
 crate::method_catalog!(lower_calls);
 
-fn map_types(ctx: &Context, map: Value) -> Result<(TypeHandle, TypeHandle)> {
-    let (key, value, _) = kv_entry_types(ctx, map.get_type(ctx))
-        .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "method receiver must be a Map"))?;
-    Ok((key, value))
-}
-
-fn set_element(ctx: &Context, set: Value) -> Result<TypeHandle> {
-    let (element, _) = set_entry_type(ctx, set.get_type(ctx))
-        .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "method receiver must be a Set"))?;
-    Ok(element)
-}
-
-/// Catalog recipes that combine several builder operations.
 impl<'s> FunctionBuilder<'s, '_> {
+    fn map_types(&self, ctx: &Context, map: Value) -> Result<(TypeHandle, TypeHandle)> {
+        self.shapes
+            .key_value_types(ctx, map.get_type(ctx))
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "method receiver must be a Map"))
+    }
+
+    pub(super) fn set_layout(
+        &self,
+        ctx: &Context,
+        set: Value,
+    ) -> Result<super::collections::CollectionLayout> {
+        self.shapes
+            .boxed_collection(ctx, set.get_type(ctx), crate::source::CollectionKind::Set)
+            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "method receiver must be a Set"))
+    }
+
     fn iterator_method(
         &mut self,
         ctx: &mut Context,
@@ -101,7 +103,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     fn map_get(&mut self, ctx: &mut Context, map: Value, key: &'s Expr) -> Result<Value> {
-        let (key_type, value_type) = map_types(ctx, map)?;
+        let (key_type, value_type) = self.map_types(ctx, map)?;
         let key = self.expression_with(ctx, key, Some(key_type))?;
         self.kv_get(ctx, map, key, key_type, value_type)
     }
@@ -113,32 +115,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         key: &'s Expr,
         value: &'s Expr,
     ) -> Result<Value> {
-        let (key_type, value_type) = map_types(ctx, map)?;
+        let (key_type, value_type) = self.map_types(ctx, map)?;
         let key = self.expression_with(ctx, key, Some(key_type))?;
         let value = self.expression_with(ctx, value, Some(value_type))?;
         self.kv_set(ctx, map, key, value)
-    }
-
-    fn set_operation(
-        &mut self,
-        ctx: &mut Context,
-        set: Value,
-        other: &'s Expr,
-        operation: SetOperation,
-    ) -> Result<Value> {
-        let element = set_element(ctx, set)?;
-        self.set_binary_op(ctx, set, other, element, operation)
-    }
-
-    fn set_relation(
-        &mut self,
-        ctx: &mut Context,
-        set: Value,
-        other: &'s Expr,
-        relation: SetRelation,
-    ) -> Result<Value> {
-        let element = set_element(ctx, set)?;
-        self.set_relation_op(ctx, set, other, element, relation)
     }
 
     fn utf8_encoding(&mut self, ctx: &mut Context, _codec: Value) -> Result<Value> {
@@ -150,7 +130,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     fn exception_message(&mut self, ctx: &mut Context, error: Value) -> Result<Value> {
-        Ok(self.emit_value(ctx, |ctx| ExceptionMessageOp::new(ctx, error)))
+        Ok(self.emit_value(ExceptionMessageOp::new(ctx, error), ctx))
     }
 
     fn encode(&mut self, ctx: &mut Context, _encoder: Value, args: &'s [Expr]) -> Result<Value> {
@@ -177,7 +157,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         self.fold_arguments(ctx, args, text, |b, ctx, previous, item| {
             let text = b.display(ctx, item)?;
-            Ok(b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, text)))
+            Ok(b.emit_value(ConcatOp::new(ctx, previous, text), ctx))
         })
     }
 
@@ -203,13 +183,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         text: Value,
-        separator: &'s Expr,
+        source: &'s Expr,
     ) -> Result<Option<Value>> {
-        let separator = self.expression(ctx, separator)?;
+        let separator = self.expression(ctx, source)?;
         let separator = self.defined(ctx, separator)?;
         let intrinsic = match kind(ctx, separator)? {
             Kind::String => Intrinsic::StringSplit,
-            Kind::Regex => Intrinsic::RegexSplit,
+            Kind::Regex => self.search_shape(ctx, source, separator).split(),
             _ => bail_unsupported!("string.split requires a string or literal regex separator"),
         };
         Ok(self.call_intrinsic(ctx, intrinsic, vec![text, separator]))
@@ -230,13 +210,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         text: Value,
         regex: &'s Expr,
-    ) -> Result<Option<Value>> {
+        offset: Option<u32>,
+    ) -> Result<Value> {
         let regex = self.typed_operand(ctx, regex, Kind::Regex, "a literal regex")?;
-        ensure_unsupported!(
-            !FunctionBuilder::regex_global(ctx, regex)?,
-            "Regex search supports only the u and s flags"
-        );
-        Ok(self.call_intrinsic(ctx, Intrinsic::RegexSearch, vec![text, regex]))
+        Ok(self.regex_search(ctx, text, regex, offset))
     }
 
     fn regex_test_text(
@@ -244,13 +221,23 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         regex: Value,
         text: &'s Expr,
+        offset: Option<u32>,
     ) -> Result<Value> {
-        ensure_unsupported!(
-            !FunctionBuilder::regex_global(ctx, regex)?,
-            "Regex search supports only the u and s flags"
-        );
         let text = self.string_operand(ctx, text)?;
-        Ok(self.regex_test(ctx, regex, text))
+        let index = self.regex_search(ctx, text, regex, offset);
+        let zero = self.number(ctx, 0.0);
+        Ok(self.compare(ctx, CompareKind::Ge, index, zero))
+    }
+
+    fn regex_search(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        regex: Value,
+        offset: Option<u32>,
+    ) -> Value {
+        let span = offset.and_then(|offset| self.shapes.locations.call_span(offset));
+        self.located_intrinsic(ctx, Intrinsic::RegexSearch, vec![text, regex], span)
     }
 
     fn regex_exec(
@@ -274,7 +261,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let value = self.string_operand(ctx, value)?;
         self.intrinsic_void(ctx, Intrinsic::UrlAppend, vec![params, name, value]);
         let ty = void_type(ctx);
-        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
+        Ok(self.emit_value(UndefinedOp::with_type(ctx, ty), ctx))
     }
 
     fn abort_controller(&mut self, ctx: &mut Context, controller: Value) -> Result<Option<Value>> {

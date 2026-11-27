@@ -112,32 +112,45 @@ pub(crate) enum ReactionKind {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum FunctionTarget {
+    Direct(InstanceId),
+    Closure(InstanceId),
+    Dispatcher(HelperId),
+}
+
+impl FunctionTarget {
+    pub(super) fn call(self, receiver: bool) -> CallTarget {
+        if receiver {
+            CallTarget::Method(self)
+        } else {
+            CallTarget::Function(self)
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum CallTarget {
-    Direct {
-        target: InstanceId,
-        pass_env: bool,
-        pass_receiver: bool,
-    },
-    Dispatch {
-        helper: HelperId,
-        needs_recv: bool,
-    },
+    Function(FunctionTarget),
+    Method(FunctionTarget),
     ThrowTypeError,
 }
 
 impl CallTarget {
-    pub(crate) fn needs_receiver(self) -> bool {
+    pub(crate) fn callee(self) -> Option<FunctionTarget> {
         match self {
-            Self::Direct { pass_receiver, .. } => pass_receiver,
-            Self::Dispatch { needs_recv, .. } => needs_recv,
-            Self::ThrowTypeError => false,
+            Self::Function(f) | Self::Method(f) => Some(f),
+            Self::ThrowTypeError => None,
         }
+    }
+
+    pub(crate) fn needs_receiver(self) -> bool {
+        matches!(self, Self::Method(_))
     }
 
     pub(crate) fn needs_value(self) -> bool {
         matches!(
-            self,
-            Self::Direct { pass_env: true, .. } | Self::Dispatch { .. }
+            self.callee(),
+            Some(FunctionTarget::Closure(_) | FunctionTarget::Dispatcher(_))
         )
     }
 }
@@ -194,9 +207,10 @@ pub(crate) enum HelperSpec {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FuncCoercion {
+pub(crate) enum OperandUse {
+    RegexSearch(perry_mir::RegexShape),
     Value(ValueCoercion),
-    Callback(CallTarget),
+    Callback(FunctionTarget),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -265,6 +279,7 @@ pub(crate) enum SiteResolution {
     ResourceCall(crate::wit::MemberId),
     Static(crate::methods::StaticMethod),
     Builtin(crate::methods::Method),
+    Regex(Option<pliron::uniqued_any::Uniqued<perry_mir::RegexLiteral>>),
     ReadMember(InstanceId),
     WriteMember(InstanceId),
     UpdateMember {
@@ -309,7 +324,7 @@ pub(crate) enum SiteResolution {
 pub(crate) struct SiteEntry {
     pub(crate) erased: bool,
     pub(crate) resolution: Option<SiteResolution>,
-    pub(crate) coercion: Option<FuncCoercion>,
+    pub(crate) operand: Option<OperandUse>,
 }
 
 pub(crate) type InstanceSites = std::collections::BTreeMap<ExprIdx, SiteEntry>;
@@ -323,8 +338,8 @@ impl SiteEntry {
     }
 
     pub(crate) fn conversion(self) -> Option<ValueCoercion> {
-        match self.coercion {
-            Some(FuncCoercion::Value(value)) => Some(value),
+        match self.operand {
+            Some(OperandUse::Value(value)) => Some(value),
             _ => None,
         }
     }

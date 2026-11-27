@@ -12,7 +12,11 @@ impl<'s> FunctionBuilder<'s, '_> {
             .get(&owner)
             .ok_or_else(|| internal!("missing resource class"))
     }
-    fn resource_table(&mut self, ctx: &mut Context, owner: u32) -> Result<(Value, TypeHandle)> {
+    fn resource_table(
+        &mut self,
+        ctx: &mut Context,
+        owner: u32,
+    ) -> Result<(Value, super::collections::CollectionLayout)> {
         let id = self.guest_class(owner)?.class;
         let value = self
             .shapes
@@ -23,25 +27,24 @@ impl<'s> FunctionBuilder<'s, '_> {
             super::collections::EntryTypes::Map(FP64Type::get(ctx).into(), value),
         )?;
         Ok((
-            self.named_global_slot(ctx, format!("resource_instances_{owner}"), map.into())?,
-            value,
+            self.named_global_slot(ctx, format!("resource_instances_{owner}"), map.boxed.into())?,
+            map,
         ))
     }
 
     pub(super) fn initialize_resources(&mut self, ctx: &mut Context) -> Result<()> {
         for &owner in self.shapes.specialization.resources.keys() {
-            let (slot, _) = self.resource_table(ctx, owner)?;
-            let ty = self.slot_type(ctx, slot)?;
-            let table = self.empty_collection(ctx, crate::source::CollectionKind::Map, Some(ty))?;
+            let (slot, layout) = self.resource_table(ctx, owner)?;
+            let table = self.alloc_collection_box(ctx, layout);
             self.store(ctx, slot, table);
         }
         Ok(())
     }
 
     fn resource_instance(&mut self, ctx: &mut Context, owner: u32, rep: Value) -> Result<Value> {
-        let (slot, ty) = self.resource_table(ctx, owner)?;
+        let (slot, layout) = self.resource_table(ctx, owner)?;
         let table = self.load(ctx, slot)?;
-        let value = self.kv_get(ctx, table, rep, FP64Type::get(ctx).into(), ty)?;
+        let value = self.kv_get(ctx, table, rep, layout.fields[0], layout.fields[1])?;
         self.defined(ctx, value)
     }
 
@@ -54,7 +57,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Value {
         let op =
             perry_mir::ForeignOp::new(ctx, perry_mir::Phase::Call, name, vec![value], vec![result]);
-        self.append(ctx, &op);
+        let op = self.emit(op, ctx);
         op.get_operation().deref(ctx).get_result(0)
     }
 
@@ -123,7 +126,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 "resource export must return a value"
             ),
         };
-        self.emit(ctx, |ctx| ReturnOp::new(ctx, value.into_iter().collect()));
+        self.emit(ReturnOp::new(ctx, value.into_iter().collect()), ctx);
         Ok(())
     }
 }

@@ -16,6 +16,16 @@ pub(crate) enum WitView {
 }
 
 impl TypeTable {
+    pub(crate) fn result_record(&mut self, payloads: [Option<Ty>; 2]) -> Ty {
+        let mut fields = vec![self.property(perry_mir::RESULT_TAG, Ty::BOOLEAN, false)];
+        for (name, payload) in perry_mir::RESULT_PAYLOADS.into_iter().zip(payloads) {
+            if let Some(ty) = payload {
+                fields.push(self.property(name, ty, true));
+            }
+        }
+        self.object(&fields, None)
+    }
+
     pub(crate) fn wit_input(&mut self, ctx: &Context, ty: Ty) -> Ty {
         let (present, absent) = self.strip_nullish(ty);
         match self.kind(present) {
@@ -152,6 +162,14 @@ impl TypeTable {
                         .collect();
                     table.union(&tags)
                 }
+                Contract::Variant(_, cases) if view == WitView::Boundary => {
+                    let cases: Vec<_> = cases
+                        .into_iter()
+                        .map(|(tag, payload)| (shapes::TypeName::new(ctx, tag.into()), payload))
+                        .collect();
+                    let cases = CasesId::intern(&mut table.cases, &cases);
+                    table.intern_kind(TyKind::Variant(cases))
+                }
                 Contract::Variant(_, cases) => {
                     let cases: Vec<_> = cases
                         .into_iter()
@@ -160,12 +178,10 @@ impl TypeTable {
                             case(table, "tag", tag, "val", value)
                         })
                         .collect();
-                    if view == WitView::Boundary {
-                        let arms = TypeListId::intern(&mut table.members, &cases);
-                        table.intern_kind(TyKind::Variant(arms))
-                    } else {
-                        table.union(&cases)
-                    }
+                    table.union(&cases)
+                }
+                Contract::Result { ok, err } if view == WitView::Boundary => {
+                    table.result_record([ok, err])
                 }
                 Contract::Result { ok, err } => {
                     use perry_mir::{RESULT_PAYLOADS, RESULT_TAG};

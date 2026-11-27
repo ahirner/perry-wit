@@ -32,6 +32,7 @@ pub(crate) fn receiver_of(
         {
             Some(Receiver::Value(Kind::Array))
         }
+        TyKind::Regex(_) => Some(Receiver::Value(Kind::Regex)),
         TyKind::String => Some(Receiver::Value(Kind::String)),
         TyKind::Number | TyKind::Int32 => Some(Receiver::Value(Kind::Number)),
         TyKind::Integer(domain) => Some(Receiver::Value(if domain.deref(ctx).width() == 64 {

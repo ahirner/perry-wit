@@ -1,33 +1,16 @@
 use super::*;
-use crate::engine::types::LocalFlags;
 
 impl<'s> FunctionBuilder<'s, '_> {
-    pub(crate) fn regex_global(ctx: &Context, regex: Value) -> Result<bool> {
-        static_regex(ctx, regex, |op| op.flags(ctx).contains('g')).ok_or_else(|| {
-            unsupported!(
-                "regex flags must be statically known; use a regex literal or a local assigned only literals with the same g flag"
-            )
-        })
-    }
-
-    pub(crate) fn regex_result(ctx: &Context, value: Value) -> bool {
-        origin(ctx, value, &mut Vec::new(), &|op| {
-            if Operation::get_op::<NullOp>(op, ctx).is_some()
-                || Operation::get_op::<UndefinedOp>(op, ctx).is_some()
-            {
-                return Some(());
-            }
-            let call = Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx)?;
-            match call.intrinsic(ctx) {
-                Intrinsic::RegexExec | Intrinsic::RegexExecFrom => Some(()),
-                Intrinsic::RegexMatch => Self::regex_global(ctx, op.deref(ctx).get_operand(1))
-                    .ok()
-                    .filter(|global| !global)
-                    .map(|_| ()),
-                _ => None,
-            }
-        })
-        .is_ok_and(|res| res.is_some())
+    pub(in crate::lower) fn search_shape(
+        &self,
+        ctx: &Context,
+        source: &Expr,
+        search: Value,
+    ) -> perry_mir::RegexShape {
+        match self.site(source).operand {
+            Some(crate::engine::solve::OperandUse::RegexSearch(shape)) => shape,
+            _ => perry_mir::RegexShape::of(ctx, search),
+        }
     }
 
     pub(super) fn replace_callback(
@@ -44,85 +27,44 @@ impl<'s> FunctionBuilder<'s, '_> {
             "string replacement requires a string or literal regex pattern"
         );
         let (global, captures, named) = if regex {
-            let facts = self.shapes.specialization;
-            let known = facts.regexes.get(source).filter(|_| !matches!(source, Expr::LocalGet(id) if facts.instances.binding_flags(*id).intersects(LocalFlags::WRITTEN)));
-            let global = known.map_or_else(
-                || Self::regex_global(ctx, search),
-                |r| Ok(r.flags.contains('g')),
-            )?;
+            let shape = self.search_shape(ctx, source, search);
+            let global = global_flag(shape)?;
             ensure_unsupported!(
                 !all || global,
                 "String.prototype.replaceAll called with a non-global RegExp argument"
             );
-            let (captures, named) = known
-                .map(|r| r.captures)
-                .or_else(|| {
-                    static_regex(ctx, search, |op| {
-                        crate::methods::regex_captures(&op.pattern(ctx))
-                    })
-                })
-                .ok_or_else(|| {
-                    Diagnostic::unsupported(
-                        "replacement callbacks require statically known capture arity",
-                    )
-                })?;
-            (global, captures, named)
+            let (captures, named) = shape.captures.ok_or_else(|| {
+                unsupported!("replacement callbacks require statically known capture arity")
+            })?;
+            (global, captures as usize, named)
         } else {
             (all, 0, false)
         };
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
         let empty = self.string(ctx, "");
-        let cursor = self.entry_slot(ctx, zero.get_type(ctx));
-        let end = self.entry_slot(ctx, zero.get_type(ctx));
-        let output = self.entry_slot(ctx, empty.get_type(ctx));
-        self.store(ctx, cursor, zero);
-        self.store(ctx, end, zero);
-        self.store(ctx, output, empty);
-        let head = self.new_block(ctx, "replacement_match");
-        let hit = self.new_block(ctx, "replacement_callback");
-        let done = self.new_block(ctx, "replacement_done");
-        self.jump(ctx, head);
+        let (number, string) = (zero.get_type(ctx), empty.get_type(ctx));
+        let (head, [from, end, output]) = self.block_with_args(ctx, [number, number, string]);
+        let (done, [suffix_start, result]) = self.block_with_args(ctx, [number, string]);
+        self.emit(BrOp::new(ctx, head, vec![zero, zero, empty]), ctx);
         self.switch_to(head);
-        let from = self.load(ctx, cursor)?;
-        let found = if regex {
-            self.intrinsic(ctx, Intrinsic::RegexExecFrom, vec![text, search, from])
+        let (found, offset, matched) = if regex {
+            let found = self.intrinsic(ctx, Intrinsic::RegexExecFrom, vec![text, search, from]);
+            let missing = self.emit_value(IsNullOp::new(ctx, found), ctx);
+            self.yield_if(ctx, done, missing, [end, output]);
+            let found = self.defined(ctx, found)?;
+            let offset = self.intrinsic(ctx, Intrinsic::RegexIndex, vec![found]);
+            let matched = self.element_at(ctx, found, zero)?;
+            (found, offset, self.defined(ctx, matched)?)
         } else {
-            self.intrinsic(ctx, Intrinsic::StringIndexOf, vec![text, search, from])
-        };
-        let matched = if regex {
-            let missing = self.emit_value(ctx, |ctx| IsNullOp::new(ctx, found));
-            self.branch(ctx, missing, done, hit);
-            None
-        } else {
-            // indexOf clamps out-of-range positions; an empty needle must stop after
-            // the final boundary instead of matching the end forever.
+            // indexOf clamps out-of-range positions, including the position after an empty match.
             let length = self.string_length(ctx, text);
             let exhausted = self.compare(ctx, CompareKind::Gt, from, length);
-            let check = self.new_block(ctx, "replacement_found");
-            self.branch(ctx, exhausted, done, check);
-            self.switch_to(check);
-            let missing = self.compare(ctx, CompareKind::Lt, found, zero);
-            self.branch(ctx, missing, done, hit);
-            Some(search)
-        };
-        self.switch_to(hit);
-        let found = if regex {
-            self.defined(ctx, found)?
-        } else {
-            found
-        };
-        let offset = if regex {
-            self.intrinsic(ctx, Intrinsic::RegexIndex, vec![found])
-        } else {
-            found
-        };
-        let matched = if let Some(matched) = matched {
-            matched
-        } else {
-            let op = ArrayGetOp::new(ctx, found, zero).to_diag(ctx)?;
-            let value = self.append_value(ctx, &op);
-            self.defined(ctx, value)?
+            self.yield_if(ctx, done, exhausted, [end, output]);
+            let index = self.intrinsic(ctx, Intrinsic::StringIndexOf, vec![text, search, from]);
+            let missing = self.compare(ctx, CompareKind::Lt, index, zero);
+            self.yield_if(ctx, done, missing, [end, output]);
+            (index, index, search)
         };
         let length = self.string_length(ctx, matched);
         let match_end = self.binary(ctx, BinaryKind::Add, offset, length);
@@ -130,8 +72,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         arguments.push(matched);
         for index in 1..=captures {
             let index = self.number(ctx, index as f64);
-            let op = ArrayGetOp::new(ctx, found, index).to_diag(ctx)?;
-            arguments.push(self.append_value(ctx, &op));
+            arguments.push(self.element_at(ctx, found, index)?);
         }
         arguments.extend([offset, text]);
         if named {
@@ -139,97 +80,29 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         let replacement = self.array_callback(ctx, callback, &arguments)?;
         let replacement = self.display(ctx, replacement)?;
-        let previous_end = self.load(ctx, end)?;
-        let prefix = self.intrinsic(
-            ctx,
-            Intrinsic::StringSlice,
-            vec![text, previous_end, offset],
-        );
-        let previous = self.load(ctx, output)?;
-        let joined = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, prefix));
-        let joined = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, joined, replacement));
-        self.store(ctx, output, joined);
-        self.store(ctx, end, match_end);
+        let prefix = self.intrinsic(ctx, Intrinsic::StringSlice, vec![text, end, offset]);
+        let joined = self.emit_value(ConcatOp::new(ctx, output, prefix), ctx);
+        let joined = self.emit_value(ConcatOp::new(ctx, joined, replacement), ctx);
         if global {
-            let next = if regex {
-                self.intrinsic(ctx, Intrinsic::RegexNext, vec![found])
-            } else {
-                let advance = self.intrinsic(ctx, Intrinsic::MathMax, vec![length, one]);
-                self.binary(ctx, BinaryKind::Add, offset, advance)
-            };
-            self.store(ctx, cursor, next);
-            self.jump(ctx, head);
+            let advance = self.intrinsic(ctx, Intrinsic::MathMax, vec![length, one]);
+            let next = self.binary(ctx, BinaryKind::Add, offset, advance);
+            self.emit(BrOp::new(ctx, head, vec![next, match_end, joined]), ctx);
         } else {
-            self.jump(ctx, done);
+            self.emit(BrOp::new(ctx, done, vec![match_end, joined]), ctx);
         }
         self.switch_to(done);
-        let previous_end = self.load(ctx, end)?;
         let infinity = self.number(ctx, f64::INFINITY);
         let suffix = self.intrinsic(
             ctx,
             Intrinsic::StringSlice,
-            vec![text, previous_end, infinity],
+            vec![text, suffix_start, infinity],
         );
-        let output = self.load(ctx, output)?;
-        Ok(self.emit_value(ctx, |ctx| ConcatOp::new(ctx, output, suffix)))
+        Ok(self.emit_value(ConcatOp::new(ctx, result, suffix), ctx))
     }
 }
 
-fn static_regex<T: PartialEq>(
-    ctx: &Context,
-    regex: Value,
-    property: impl Fn(perry_mir::RegexConstOp) -> T,
-) -> Option<T> {
-    origin(ctx, regex, &mut Vec::new(), &|op| {
-        Operation::get_op::<perry_mir::RegexConstOp>(op, ctx).map(&property)
-    })
-    .ok()
-    .flatten()
-}
-
-fn origin<T: PartialEq>(
-    ctx: &Context,
-    value: Value,
-    seen: &mut Vec<Value>,
-    leaf: &impl Fn(Ptr<Operation>) -> Option<T>,
-) -> Result<Option<T>, ()> {
-    let op = value.defining_op().ok_or(())?;
-    if Operation::get_op::<UnwrapOp>(op, ctx).is_some()
-        || Operation::get_op::<WrapOp>(op, ctx).is_some()
-        || Operation::get_op::<perry_mir::OptionalCastOp>(op, ctx).is_some()
-    {
-        return origin(ctx, op.deref(ctx).get_operand(0), seen, leaf);
-    }
-    if Operation::get_op::<LoadOp>(op, ctx).is_none() {
-        return leaf(op).map(Some).ok_or(());
-    }
-    let slot = op.deref(ctx).get_operand(0);
-    if seen.contains(&slot) {
-        return Ok(None);
-    }
-    seen.push(slot);
-    let mut merged = None;
-    let status = slot
-        .uses(ctx)
-        .iter()
-        .map(|u| u.user_op())
-        .try_for_each(|user| {
-            if Operation::get_op::<LoadOp>(user, ctx).is_some() {
-                return Ok(());
-            }
-            Operation::get_op::<StoreOp>(user, ctx).ok_or(())?;
-            let user = user.deref(ctx);
-            if user.get_operand(0) != slot {
-                return Err(());
-            }
-            if let Some(stored) = origin(ctx, user.get_operand(1), seen, leaf)? {
-                if merged.as_ref().is_some_and(|prev| *prev != stored) {
-                    return Err(());
-                }
-                merged = Some(stored);
-            }
-            Ok(())
-        });
-    seen.pop();
-    status.map(|()| merged)
+pub(super) fn global_flag(shape: perry_mir::RegexShape) -> Result<bool> {
+    shape
+        .global
+        .ok_or_else(|| Diagnostic::unsupported(perry_mir::RegexShape::UNKNOWN_FLAGS))
 }

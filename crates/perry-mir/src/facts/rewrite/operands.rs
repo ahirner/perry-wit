@@ -150,7 +150,7 @@ fn parsed_constant(
     } else if res_ty.deref(ctx).is::<crate::types::NumericType>() {
         match parsed {
             ConstParsedInt::Integer { bits, domain, .. } => {
-                if domain.signed {
+                if domain.signed() {
                     Box::new(crate::attrs::NumericConstant::Signed(bits as i64))
                 } else {
                     Box::new(crate::attrs::NumericConstant::Unsigned(bits))
@@ -161,7 +161,7 @@ fn parsed_constant(
     } else {
         let f = match parsed {
             ConstParsedInt::Integer { bits, domain, .. } => {
-                if domain.signed {
+                if domain.signed() {
                     (bits as i64) as f64
                 } else {
                     bits as f64
@@ -390,7 +390,7 @@ fn operand_types(
             let is_num = |t: TypeHandle| {
                 let inner = crate::optional::present_type(ctx, t);
                 inner.deref(ctx).is::<crate::types::NumericType>()
-                    || Integer::from_type(ctx, inner).is_some_and(|int| int.bits == 64)
+                    || Integer::from_type(ctx, inner).is_some_and(|int| int.bits() == 64)
             };
             if is_num(l_ty) || is_num(r_ty) {
                 let numeric = crate::types::NumericType::get(ctx).into();
@@ -487,7 +487,7 @@ fn coerce_operands(
                 .or_else(|| state.representation(orig_res))
             {
                 let common = val_int.common(req_int);
-                if val_int.signed && !common.signed {
+                if val_int.signed() && !common.signed() {
                     val_int.unconstrained()
                 } else {
                     common

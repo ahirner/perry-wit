@@ -140,7 +140,9 @@ macro_rules! interned_ids {
     )+};
 }
 
-interned_ids!(NameId => str, TypeListId => [Ty], PropertiesId => [ObjectProp]);
+pub(crate) type VariantCase = (shapes::TypeName, Option<Ty>);
+
+interned_ids!(NameId => str, TypeListId => [Ty], PropertiesId => [ObjectProp], CasesId => [VariantCase]);
 
 impl TemplateId {
     pub(crate) const INIT: Self = Self(0);
@@ -319,8 +321,9 @@ pub(crate) enum TyKind {
     Timer,
     Named(shapes::TypeName),
     Literal(shapes::TypeName),
+    Regex(perry_mir::RegexShape),
     WitCarrier(pliron::r#type::TypeHandle),
-    Variant(TypeListId),
+    Variant(CasesId),
     Signature {
         params: PropertiesId,
         result: Ty,

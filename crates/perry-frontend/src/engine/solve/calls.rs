@@ -93,12 +93,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .type_args(&explicit)
                 .at(call.offset),
         )?;
-        let res = SiteResolution::Call(CallTarget::Direct {
-            target,
-            pass_receiver: receiver.is_some(),
-            pass_env: false,
-        });
-        self.record_site(inst_id, call.site, res);
+        let call_target = FunctionTarget::Direct(target).call(receiver.is_some());
+        self.record_site(inst_id, call.site, SiteResolution::Call(call_target));
         let return_loc = self.instances[target].return_loc;
         Ok(self.read_loc(return_loc, inst_id))
     }
@@ -369,25 +365,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         let (target, result) = if matches!(callee, Ty::NEVER | Ty::NULL | Ty::VOID) {
             (CallTarget::ThrowTypeError, Ty::NEVER)
         } else if let Some(identities) = self.types.func_dispatch_members(callee, true) {
-            self.callback_dispatcher(
+            let (helper, receiver, result) = self.callback_dispatcher(
                 s,
                 callee,
                 &identities,
                 inputs,
                 callbacks::DispatchSite::Call(receiver, invocation),
-            )?
+            )?;
+            (FunctionTarget::Dispatcher(helper).call(receiver), result)
         } else if let TyKind::Func(identity) = self.types.kind(callee) {
             for &input in inputs {
                 self.invalidate_conservative_cell(input);
             }
             let (arm, result, _) =
                 self.select_call_arm(s, identity, receiver, inputs, invocation)?;
-            let target = CallTarget::Direct {
-                target: arm.target,
-                pass_receiver: arm.receiver,
-                pass_env: self.is_escaping_env(identity.template, s.inst),
+            let function = if self.is_escaping_env(identity.template, s.inst) {
+                FunctionTarget::Closure(arm.target)
+            } else {
+                FunctionTarget::Direct(arm.target)
             };
-            (target, result)
+            (function.call(arm.receiver), result)
         } else if self.types.is_open(callee) || callee == Ty::DYNAMIC {
             return Ok((Ty::OPEN, None));
         } else {

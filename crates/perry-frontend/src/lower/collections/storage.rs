@@ -27,28 +27,25 @@ impl LiveCursor {
         coll: Value,
         index: Value,
     ) -> Result<Option<Self>> {
-        let (view, box_val, cursor, owner) = match Collection::of(ctx, coll.get_type(ctx)) {
-            Some(Collection::View(view)) => (
-                view,
-                b.storage_field(ctx, coll, Field::ViewBox)?,
-                b.storage_field(ctx, coll, Field::ViewCursor)?,
-                CursorOwner::View,
-            ),
-            Some(Collection::Box(kind)) => {
+        let Some((layout, box_val)) = b.collection_storage(ctx, coll)? else {
+            return Ok(None);
+        };
+        let owner = if box_val == coll {
+            CursorOwner::Loop
+        } else {
+            CursorOwner::View
+        };
+        let cursor = match owner {
+            CursorOwner::View => b.storage_field(ctx, coll, Field::ViewCursor)?,
+            CursorOwner::Loop => {
                 let start = b.load(ctx, index)?;
-                (
-                    kind.default_view(),
-                    coll,
-                    b.new_collection_cursor(ctx, coll, start)?,
-                    CursorOwner::Loop,
-                )
+                b.new_collection_cursor(ctx, box_val, start)?
             }
-            None => return Ok(None),
         };
         let live = Self {
             box_val,
             cursor,
-            view,
+            view: layout.view,
             owner,
         };
         if matches!(owner, CursorOwner::View) {
@@ -110,7 +107,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         field: Field,
     ) -> Result<Value> {
         let op = FieldGetOp::new(ctx, record, field.name().to_owned()).to_diag(ctx)?;
-        Ok(self.append_value(ctx, &op))
+        Ok(self.emit_value(op, ctx))
     }
 
     pub(super) fn set_storage_field(
@@ -120,24 +117,23 @@ impl<'s> FunctionBuilder<'s, '_> {
         field: Field,
         value: Value,
     ) {
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, record, field.name().to_owned(), value)
-        });
+        self.emit(
+            FieldSetOp::new(ctx, record, field.name().to_owned(), value),
+            ctx,
+        );
     }
 
-    /// A new, empty `kind` box over `entry` records.
-    pub(super) fn alloc_collection_box(
+    pub(in crate::lower) fn alloc_collection_box(
         &mut self,
         ctx: &mut Context,
-        entry: TypedHandle<RecordType>,
-        kind: CollectionKind,
-    ) -> Result<Value> {
-        let box_rec = self.shapes.collection_box_type(ctx, entry, kind)?;
-        let entries = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, entry.into(), vec![]));
+        layout: CollectionLayout,
+    ) -> Value {
+        let entries = self.emit_value(ArrayNewOp::new(ctx, layout.entry.into(), vec![]), ctx);
         let zero = self.number(ctx, 0.0);
-        Ok(self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, box_rec, vec![entries, zero, zero, zero])
-        }))
+        self.emit_value(
+            AllocOp::new(ctx, layout.boxed, vec![entries, zero, zero, zero]),
+            ctx,
+        )
     }
 
     /// A `view` over `box_val` with its own cursor at the first entry.
@@ -145,30 +141,29 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         box_val: Value,
+        layout: CollectionLayout,
         view: CollectionViewKind,
     ) -> Result<Value> {
         let zero = self.number(ctx, 0.0);
         let cursor = self.new_collection_cursor(ctx, box_val, zero)?;
-        let view_rec = self
-            .shapes
-            .collection_view_type(ctx, box_val.get_type(ctx), view)?;
-        Ok(self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, view_rec, vec![box_val, cursor])
-        }))
+        let view_rec = self.shapes.collection_view_type(ctx, layout, view)?;
+        Ok(self.emit_value(AllocOp::new(ctx, view_rec, vec![box_val, cursor]), ctx))
     }
 
     pub(super) fn collection_storage(
         &mut self,
         ctx: &mut Context,
         val: Value,
-    ) -> Result<Option<(CollectionViewKind, Value)>> {
-        Ok(match Collection::of(ctx, val.get_type(ctx)) {
-            Some(Collection::Box(kind)) => Some((kind.default_view(), val)),
-            Some(Collection::View(view)) => {
-                Some((view, self.storage_field(ctx, val, Field::ViewBox)?))
-            }
-            None => None,
-        })
+    ) -> Result<Option<(CollectionLayout, Value)>> {
+        let Some(layout) = self.shapes.collection(ctx, val.get_type(ctx)) else {
+            return Ok(None);
+        };
+        let owner = if TypeHandle::from(layout.boxed) == present_type(ctx, val.get_type(ctx)) {
+            val
+        } else {
+            self.storage_field(ctx, val, Field::ViewBox)?
+        };
+        Ok(Some((layout, owner)))
     }
 
     /// Return the entries array of a collection or view, or the array itself for plain arrays.
@@ -200,12 +195,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         val: Value,
         idx: Value,
     ) -> Result<Value> {
-        let Some((view, source)) = self.collection_storage(ctx, val)? else {
+        let Some((layout, source)) = self.collection_storage(ctx, val)? else {
             return self.array_value(ctx, val, idx);
         };
         let entries = self.storage_field(ctx, source, Field::BoxEntries)?;
         let entry = self.element_at(ctx, entries, idx)?;
-        self.project_entry(ctx, view, entry)
+        self.project_entry(ctx, layout.view, entry)
     }
 
     fn project_entry(
@@ -281,7 +276,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let tuple_rec =
             self.shapes
                 .positional_record(ctx, RecordKind::Tuple, [first_ty, second_ty])?;
-        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![first, second])))
+        Ok(self.emit_value(AllocOp::new(ctx, tuple_rec, vec![first, second]), ctx))
     }
 
     pub(super) fn update_counter(
@@ -307,9 +302,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let zero = self.number(ctx, 0.0);
         let epoch = self.storage_field(ctx, box_val, Field::BoxEpoch)?;
         let cursor_rec = self.shapes.cursor_tuple_type(ctx)?;
-        Ok(self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, cursor_rec, vec![idx, zero, epoch])
-        }))
+        Ok(self.emit_value(AllocOp::new(ctx, cursor_rec, vec![idx, zero, epoch]), ctx))
     }
 
     fn sync_collection_cursor(
@@ -337,30 +330,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         let min_seq = self.storage_field(ctx, cursor, Field::CursorSequence)?;
         let entries = self.storage_field(ctx, box_val, Field::BoxEntries)?;
         let len = self.array_length(ctx, entries);
-        let zero = self.number(ctx, 0.0);
-        let one = self.number(ctx, 1.0);
-        let new_idx_slot = self.entry_slot(ctx, zero.get_type(ctx));
-        self.store(ctx, new_idx_slot, zero);
-        self.index_loop(
+        let new_idx = self.find_item(
             ctx,
-            "sync_cursor_scan",
-            zero,
-            len,
-            |b, ctx, i, next, scan_done| {
-                let e = b.element_at(ctx, entries, i)?;
-                let e_seq = b.storage_field(ctx, e, Field::Sequence(kind))?;
-                let reached = b.compare(ctx, CompareKind::Ge, e_seq, min_seq);
-                let step_bb = b.new_block(ctx, "sync_cursor_step");
-                b.branch(ctx, reached, scan_done, step_bb);
-
-                b.switch_to(step_bb);
-                let next_i = b.binary(ctx, BinaryKind::Add, i, one);
-                b.store(ctx, new_idx_slot, next_i);
-                b.jump(ctx, next);
-                Ok(())
+            Input::Array(entries, Holes::Skip),
+            |_, _| Ok(len),
+            |b, ctx, entry, _| {
+                let seq = b.storage_field(ctx, entry, Field::Sequence(kind))?;
+                Ok(b.compare(ctx, CompareKind::Ge, seq, min_seq))
             },
+            |_, _, _, index| Ok(index),
         )?;
-        let new_idx = self.load(ctx, new_idx_slot)?;
         self.set_storage_field(ctx, cursor, Field::CursorIndex, new_idx);
         self.set_storage_field(ctx, cursor, Field::CursorEpoch, box_epoch);
         self.jump(ctx, done_bb);
@@ -384,16 +363,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         if let Some(states) = absence(ctx, ty) {
             if !states.admits_undefined() {
-                return Some(self.emit_value(ctx, |ctx| NullOp::new(ctx, ty)));
+                return Some(self.emit_value(NullOp::new(ctx, ty), ctx));
             }
-            return Some(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)));
+            return Some(self.emit_value(UndefinedOp::with_type(ctx, ty), ctx));
         }
         if ty.deref(ctx).is::<StringType>() {
             return Some(self.string(ctx, ""));
         }
         if let Some(arr_ty) = perry_mir::typed::<ArrayType>(ctx, ty) {
             let elem_ty = arr_ty.deref(ctx).element();
-            return Some(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![])));
+            return Some(self.emit_value(ArrayNewOp::new(ctx, elem_ty, vec![]), ctx));
         }
         None
     }
@@ -421,8 +400,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.branch(ctx, is_empty, empty_bb, check_compact_bb);
 
         self.switch_to(empty_bb);
-        let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
+        let zero_u32 = self.emit_value(NumericCastOp::new(ctx, zero, u32_ty), ctx);
+        self.emit(ArrayTruncateOp::new(ctx, entries, zero_u32), ctx);
         self.update_counter(ctx, box_val, Field::BoxEpoch, BinaryKind::Add)?;
         self.jump(ctx, done_bb);
 
@@ -486,11 +465,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         let entries = self.storage_field(ctx, box_val, Field::BoxEntries)?;
         let zero = self.number(ctx, 0.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
-        let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
-        self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
+        let zero_u32 = self.emit_value(NumericCastOp::new(ctx, zero, u32_ty), ctx);
+        self.emit(ArrayTruncateOp::new(ctx, entries, zero_u32), ctx);
         self.set_storage_field(ctx, box_val, Field::BoxLength, zero);
         self.update_counter(ctx, box_val, Field::BoxEpoch, BinaryKind::Add)?;
         let ty = void_type(ctx);
-        Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
+        Ok(self.emit_value(UndefinedOp::with_type(ctx, ty), ctx))
     }
 }

@@ -89,7 +89,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             return Ok(value);
         }
         let value = self.defined(ctx, value)?;
-        Ok(self.emit_value(ctx, |ctx| VariantPayloadOp::new(ctx, value, result)))
+        Ok(self.emit_value(VariantPayloadOp::new(ctx, value, result), ctx))
     }
 
     pub(super) fn variant_member(
@@ -100,7 +100,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         field: &str,
     ) -> Result<Value> {
         if field == "tag" {
-            return Ok(self.emit_value(ctx, |ctx| VariantTagOp::new(ctx, value)));
+            return Ok(self.emit_value(VariantTagOp::new(ctx, value), ctx));
         }
         ensure_diag!(
             field == "val",
@@ -145,7 +145,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Some(ty) => ty,
             None => void_type(ctx),
         };
-        Ok(self.emit_value(ctx, |ctx| VariantPayloadOp::new(ctx, value, result)))
+        Ok(self.emit_value(VariantPayloadOp::new(ctx, value, result), ctx))
     }
 
     pub(super) fn variant_literal(
@@ -169,18 +169,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             bail_unsupported!("variant construction needs a literal tag");
         };
         let variant = TypedHandle::<VariantType>::from_handle(ty, ctx).to_diag(ctx)?;
-        let payload = variant
-            .deref(ctx)
-            .cases()
-            .iter()
-            .find(|(name, _)| name == tag)
-            .map(|(_, payload)| *payload)
-            .ok_or_else(|| {
-                Diagnostic::new(
-                    codes::TYPE_MISMATCH,
-                    "literal tag is not a case of this variant",
-                )
-            })?;
+        let payload = variant.deref(ctx).case(tag).ok_or_else(|| {
+            Diagnostic::new(
+                codes::TYPE_MISMATCH,
+                "literal tag is not a case of this variant",
+            )
+        })?;
         let mut value = None;
         for &(name, arg) in fields {
             if self.erased_operand(arg) {
@@ -201,6 +195,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             codes::TYPE_MISMATCH,
             "variant val must match its active case"
         );
-        Ok(self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, ty, tag, value)))
+        Ok(self.emit_value(VariantNewOp::new(ctx, ty, tag, value), ctx))
     }
 }

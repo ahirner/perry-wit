@@ -30,7 +30,8 @@ impl<'h> ModuleIndex<'h> {
             constructors,
             decls,
             locations,
-            regexes: Default::default(),
+            strings: Default::default(),
+            regex_constructors: Vec::new(),
             ctx,
             declarations,
             closure_names,
@@ -138,7 +139,11 @@ impl<'h> ModuleIndex<'h> {
             }
         }
 
-        idx.regexes = scan.regexes.finish(&idx.expressions);
+        for (site, args) in scan.regex_constructors {
+            idx.expressions
+                .declared
+                .insert(site, SiteResolution::Regex(scan.strings.regexp(ctx, args)));
+        }
         scan.bindings.sort_by_key(|(owner, _)| *owner);
         for group in scan.bindings.chunk_by(|a, b| a.0 == b.0) {
             if let Some((owner, _)) = group.first() {

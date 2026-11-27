@@ -485,7 +485,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 } else {
                     declared
                 };
-                let needs_context = is_inferred || self.types.is_open(declared);
+                let regex = !is_inferred && self.regex_annotation(declared);
+                let needs_context =
+                    is_inferred || self.types.is_open(declared) || regex && init.is_some();
                 if !needs_context {
                     self.write_local_value(s, lidx, declared)?;
                 }
@@ -550,6 +552,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     } else if !is_i64_cast && needs_context {
                         let is_kind = |t, k| matches!(self.types.kind(t), TyKind::Named(id) if crate::methods::Kind::builtin(id.get(self.ctx)) == Some(k));
                         let keep_declared = (init_ty == Ty::DYNAMIC
+                            || regex && !matches!(self.types.kind(init_ty), TyKind::Regex(_))
                             || (is_kind(declared, crate::methods::Kind::Reader)
                                 && !is_kind(init_ty, crate::methods::Kind::ByobReader)))
                             && !self.types.is_open(declared);

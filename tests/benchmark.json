@@ -24,8 +24,8 @@
   },
   {
     "workload": "io (64 KiB)",
-    "bytes": 47266,
-    "core_bytes": 40737,
+    "bytes": 47282,
+    "core_bytes": 40753,
     "defined_functions": 122,
     "helper_functions": 111,
     "optimization": {
@@ -76,7 +76,7 @@
     "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 340,
+      "constraint_visits": 331,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -99,7 +99,7 @@
     "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 340,
+      "constraint_visits": 331,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -697,6 +697,28 @@
     },
     "initialization_fuel": 250,
     "invocation_fuel": 2327,
+    "initial_memory": 65536,
+    "memory": 65536
+  },
+  {
+    "workload": "1,024 adjacent global regex matches",
+    "bytes": 16294,
+    "core_bytes": 16203,
+    "defined_functions": 52,
+    "helper_functions": 49,
+    "optimization": {
+      "cleanup_rounds": 3,
+      "constraint_visits": 193,
+      "numeric_contexts": 2,
+      "parse_stringify_missed": 0,
+      "parse_stringify_rewrites": 0,
+      "range_widenings": 0,
+      "specializations": 1,
+      "summarized_contexts": 0,
+      "summarized_heap_sets": 0
+    },
+    "initialization_fuel": 2510,
+    "invocation_fuel": 1005144,
     "initial_memory": 65536,
     "memory": 65536
   },

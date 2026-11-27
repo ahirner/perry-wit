@@ -386,9 +386,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         mut instance: impl FnMut(InstanceId),
         mut helper: impl FnMut(HelperId),
     ) {
-        let mut callback = |target| match target {
-            CallTarget::Direct { target, .. } => instance(target),
-            CallTarget::Dispatch { helper: id, .. } => {
+        let mut function = |target| match target {
+            FunctionTarget::Direct(target) | FunctionTarget::Closure(target) => instance(target),
+            FunctionTarget::Dispatcher(id) => {
                 helper(id);
                 if let HelperSpec::Dispatcher { arms, .. } = self.helpers[id].spec {
                     for arm in &self.dispatch_arms[arms] {
@@ -396,11 +396,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
             }
-            CallTarget::ThrowTypeError => {}
         };
-        if let Some(FuncCoercion::Callback(target)) = entry.coercion {
-            callback(target);
+        if let Some(OperandUse::Callback(target)) = entry.operand {
+            function(target);
         }
+        let mut callback = |target: CallTarget| target.callee().into_iter().for_each(&mut function);
         let Some(resolution) = entry.resolution else {
             return;
         };

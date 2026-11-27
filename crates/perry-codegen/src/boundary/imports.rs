@@ -220,10 +220,7 @@ impl FunctionLowering<'_, '_> {
         self.cond_br(ctx, transfer, (dispose, vec![]), (done, vec![]));
         self.block = dispose;
         let returned = self.load(ctx, MemKind::I32, transfer, transfer::RETURNED);
-        let result = self.new_block(ctx, vec![]);
-        let clear = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, returned, (result, vec![]), (clear, vec![]));
-        self.block = result;
+        let clear = self.enter_if(ctx, returned);
         let kind = self.load(ctx, MemKind::I32, transfer, transfer::KIND);
         let area = self.load(ctx, MemKind::I32, transfer, transfer::AREA);
         for index in 0..self.state.foreign_transfers.len() {

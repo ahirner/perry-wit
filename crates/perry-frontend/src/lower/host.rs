@@ -29,7 +29,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             None => {
                 let number = FP64Type::get(ctx).into();
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
+                self.emit_value(UndefinedOp::new(ctx, number), ctx)
             }
         };
         // `{ signal }`: the only option (`ref` has no meaning in a component).
@@ -45,7 +45,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Some(self.typed_operand(ctx, signal, Kind::Abort, "an AbortSignal")?)
             }
         };
-        Ok(self.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, value, signal)))
+        Ok(self.emit_value(TimerOp::new(ctx, delay, value, signal), ctx))
     }
 
     /// `new Headers(init?)`, `new Response(body?, init?)`, `new Request(url, init?)`.
@@ -187,10 +187,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<(Value, bool)> {
         let bytes: TypeHandle = BytesType::get(ctx).into();
         let Some(body) = body.filter(|b| !matches!(b, Expr::Undefined | Expr::Null)) else {
-            return Ok((
-                self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, bytes)),
-                false,
-            ));
+            return Ok((self.emit_value(UndefinedOp::new(ctx, bytes), ctx), false));
         };
         let value = self.expression(ctx, body)?;
         let value = self.defined(ctx, value)?;
@@ -226,11 +223,11 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
-        crate::methods::Method::lookup(crate::methods::Receiver::of(ctx, receiver)?, method)
+        crate::methods::Method::lookup(self.shapes.method_receiver(ctx, receiver)?, method)
             .filter(|m| !m.is_property() || args.is_empty())
             .ok_or_else(|| unsupported!("{method} is not supported on this receiver"))?
             .bind(method, args)?
-            .lower(self, ctx, receiver)?
+            .lower(self, ctx, receiver, None)?
             .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "web members produce a value"))
     }
 

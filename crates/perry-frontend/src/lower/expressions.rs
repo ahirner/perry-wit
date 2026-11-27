@@ -2,7 +2,6 @@
 use super::*;
 use crate::lower::methods::Call;
 use crate::lower::{builtins::BytesCreation, json::JSON_CALLBACKS};
-use crate::source::ConstructorSites;
 
 mod instances;
 mod members;
@@ -38,7 +37,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Some(value) = hir_compat::non_null_assertion(expr) {
             let value = self.expression_with(ctx, value, expected)?;
             return Ok(Some(if self.is_optional(ctx, value) {
-                self.emit_value(ctx, |ctx| OptionalCastOp::assert_present(ctx, value))
+                self.emit_value(OptionalCastOp::assert_present(ctx, value), ctx)
             } else {
                 value
             }));
@@ -66,22 +65,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             .map(Some);
         }
-        if let Some(args) = self.shapes.specialization.instances.regexp(expr) {
-            let regex = self
-                .shapes
-                .specialization
-                .regexes
-                .get(expr)
-                .ok_or_else(|| {
-                    unsupported!("RegExp construction is unsupported; use a bounded regex literal")
-                })?;
-            for arg in args.operands() {
-                self.effect(ctx, arg)?;
-            }
-            return Ok(Some(self.emit_value(ctx, |ctx| {
-                perry_mir::RegexConstOp::new(ctx, &regex.pattern, &regex.flags)
-            })));
-        }
         if let Some(value) = self.date_expression(ctx, expr)? {
             return Ok(Some(value));
         }
@@ -103,7 +86,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .map_err(|error| self.shapes.annotate_local(error, id))?,
             };
             let receiver = self.defined(ctx, receiver)?;
-            return match call.lower(self, ctx, receiver)? {
+            return match call.lower(self, ctx, receiver, None)? {
                 Some(value) => self
                     .narrow_value(ctx, || crate::narrowing::path(expr), value)
                     .map(Some),
@@ -134,9 +117,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::PrivateGuard {
                 kind: 0, object, ..
             } => self.expression_with(ctx, object, expected)?,
-            Expr::RegExp { pattern, flags } => {
-                self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
-            }
             Expr::ObjectSpread { parts } => self.object_spread(ctx, parts, expected, None)?,
             Expr::ObjectRest {
                 object,
@@ -212,7 +192,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                     None => self.number(ctx, 0.0),
                 };
-                let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
+                let status = self.emit_value(ExitOp::new(ctx, code), ctx);
                 self.propagate(ctx, status);
                 self.after_terminator(ctx);
                 return Ok(None);
@@ -348,7 +328,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     Some(message) => self.string_operand(ctx, message)?,
                     None => self.string(ctx, ""),
                 };
-                self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, ErrorKind::Any, message))
+                self.emit_value(ErrorNewOp::new(ctx, ErrorKind::Any, message), ctx)
             }
             Expr::TypeErrorNew(message)
             | Expr::RangeErrorNew(message)
@@ -361,7 +341,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     _ => ErrorKind::SyntaxError,
                 };
                 let message = self.string_operand(ctx, message)?;
-                self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message))
+                self.emit_value(ErrorNewOp::new(ctx, kind, message), ctx)
             }
             // Literal causes keep their authored value through the shared cause conversion.
             Expr::ErrorNewWithCause { message, cause } => {
@@ -515,7 +495,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .map_err(|_| Diagnostic::unsupported("bigint literal too large"))?;
         let ty = IntegerType::get(ctx, width, Signedness::Unsigned);
         let magnitude = IntegerAttr::new(ty, value);
-        Ok(self.emit_value(ctx, |ctx| perry_mir::BigIntConstOp::new(ctx, magnitude)))
+        Ok(self.emit_value(perry_mir::BigIntConstOp::new(ctx, magnitude), ctx))
     }
 
     /// Emit an absent literal in an optional or unknown type, defaulting to an optional number when unconstrained.
@@ -559,9 +539,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             if null { "null" } else { "undefined" }
         );
         Ok(if null {
-            self.emit_value(ctx, |ctx| NullOp::new(ctx, ty))
+            self.emit_value(NullOp::new(ctx, ty), ctx)
         } else {
-            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
+            self.emit_value(UndefinedOp::with_type(ctx, ty), ctx)
         })
     }
 
@@ -664,30 +644,28 @@ impl<'s> FunctionBuilder<'s, '_> {
         let solved = expected
             .ok_or_else(|| Diagnostic::internal("emitter omitted the conditional result type"))?;
         let test = self.condition(ctx, condition)?;
-        let then = self.new_block(ctx, "then");
-        let otherwise = self.new_block(ctx, "else");
-        self.branch(ctx, test, then, otherwise);
         let guard = crate::narrowing::DefinedGuard::of(condition);
-        let mut arm = |ctx: &mut Context, block, truth, expr, opposite: &Expr| -> Result<_> {
-            self.switch_to(block);
-            let depth = self.variant_guards.depth();
-            self.variant_guards.condition(condition, truth);
-            let value = self.branch_operand(ctx, expr, solved);
-            self.variant_guards.truncate(depth);
-            let mut value = value?;
+        let arm = |b: &mut Self, ctx: &mut Context, truth, expr, opposite: &Expr| {
+            let depth = b.variant_guards.depth();
+            b.variant_guards.condition(condition, truth);
+            let value = b.branch_operand(ctx, expr, solved);
+            b.variant_guards.truncate(depth);
+            let value = value?;
             if guard.as_ref().is_some_and(|g| g.proves(truth, expr))
                 && !matches!(opposite, Expr::Undefined)
             {
-                value = self.strip_undefined(ctx, value)?;
+                b.strip_undefined(ctx, value)
+            } else {
+                Ok(value)
             }
-            Ok((self.block, [value]))
         };
-        let (left_end, [left]) = arm(ctx, then, true, then_expr, else_expr)?;
-        let (right_end, [right]) = arm(ctx, otherwise, false, else_expr, then_expr)?;
-        let carrier = crate::lower::coerce::result_carrier(ctx, solved, &[left, right]);
-        let [value] =
-            self.merge_branches(ctx, [carrier], [(left_end, [left]), (right_end, [right])])?;
-        Ok(value)
+        self.choose_with(
+            ctx,
+            test,
+            |b, ctx| arm(b, ctx, true, then_expr, else_expr),
+            |b, ctx| arm(b, ctx, false, else_expr, then_expr),
+            |ctx, values| crate::lower::coerce::result_carrier(ctx, solved, &values),
+        )
     }
 
     /// `await promise` in an async function.
@@ -705,6 +683,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         );
         let promise = self.as_promise_value(ctx, promise)?;
         let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
-        Ok(self.append_value(ctx, &op))
+        Ok(self.emit_value(op, ctx))
     }
 }

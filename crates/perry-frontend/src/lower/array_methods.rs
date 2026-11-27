@@ -14,6 +14,24 @@ pub(super) enum Direction {
     Forward,
     Reverse,
 }
+impl Direction {
+    pub(super) fn index(
+        self,
+        b: &mut FunctionBuilder,
+        ctx: &mut Context,
+        len: Value,
+        step: Value,
+    ) -> Value {
+        match self {
+            Self::Forward => step,
+            Self::Reverse => {
+                let one = b.number(ctx, 1.0);
+                let last = b.binary(ctx, BinaryKind::Sub, len, one);
+                b.binary(ctx, BinaryKind::Sub, last, step)
+            }
+        }
+    }
+}
 #[derive(Clone, Copy)]
 pub(super) enum FindResult {
     Value,

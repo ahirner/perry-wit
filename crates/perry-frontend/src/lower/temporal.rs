@@ -85,8 +85,8 @@ enum FieldValue<'s> {
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn raise_error(&mut self, ctx: &mut Context, kind: ErrorKind, msg: &str) {
         let message = self.string(ctx, msg);
-        let error = self.emit_value(ctx, |ctx| ErrorNewOp::new(ctx, kind, message));
-        let status = self.emit_value(ctx, |ctx| RaiseOp::new(ctx, error));
+        let error = self.emit_value(ErrorNewOp::new(ctx, kind, message), ctx);
+        let status = self.emit_value(RaiseOp::new(ctx, error), ctx);
         self.propagate(ctx, status);
         self.after_terminator(ctx);
     }
@@ -149,7 +149,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 for (slot, &(name, _)) in fields.iter_mut().zip(names) {
                     if record.deref(ctx).field(name).is_some() {
                         let op = FieldGetOp::new(ctx, value, name.into()).to_diag(ctx)?;
-                        *slot = Some(FieldValue::Loaded(self.field_read(ctx, &op)?));
+                        *slot = Some(FieldValue::Loaded(self.field_read(ctx, op)?));
                     }
                 }
             }
@@ -191,7 +191,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             if self.is_optional(ctx, value)
                 && (option || default_time || !literal && matches!(schema, Fields::Duration(_)))
             {
-                let undefined = self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value));
+                let undefined = self.emit_value(IsUndefinedOp::new(ctx, value), ctx);
                 let default = if let Some((_, names)) = choices.first() {
                     self.string(
                         ctx,
@@ -572,9 +572,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 ("years".into(), f64_ty),
             ],
         )?;
-        Ok(self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, record, vec![blank, days, months, sign, weeks, years])
-        }))
+        Ok(self.emit_value(
+            AllocOp::new(ctx, record, vec![blank, days, months, sign, weeks, years]),
+            ctx,
+        ))
     }
 
     pub(super) fn temporal_add(

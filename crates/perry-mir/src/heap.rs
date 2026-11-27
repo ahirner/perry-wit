@@ -60,6 +60,19 @@ fn record<'a>(
     }
 }
 
+impl AllocOp {
+    pub fn ordered(
+        ctx: &mut Context,
+        record: TypedHandle<RecordType>,
+        fields: Vec<Value>,
+        order: Vec<u32>,
+    ) -> Self {
+        let alloc = Self::new(ctx, record, fields);
+        alloc.set_attr_perry_field_order(ctx, FieldOrder(order));
+        alloc
+    }
+}
+
 op_schema! {
     /// Allocate a record whose fields are initialized from the operands in declaration order.
     pub AllocOp(..operands) -> fallible;

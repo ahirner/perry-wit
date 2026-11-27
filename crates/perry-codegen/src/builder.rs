@@ -185,6 +185,17 @@ impl FunctionLowering<'_, '_> {
         self.insert(ctx, op);
     }
 
+    pub(super) fn join_value(
+        &mut self,
+        ctx: &mut Context,
+        join: Ptr<BasicBlock>,
+        value: Value,
+    ) -> Value {
+        self.br(ctx, join, vec![value]);
+        self.block = join;
+        join.deref(ctx).get_argument(0)
+    }
+
     /// `br_table`: `targets[index]`, else `default` (blocks without arguments).
     pub(crate) fn br_table(
         &mut self,

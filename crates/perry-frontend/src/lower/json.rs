@@ -17,9 +17,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             && int_ty.deref(ctx).width() == 64
         {
             let int_handle: TypeHandle = int_ty.into();
-            value = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, value, int_handle));
+            value = self.emit_value(NumericCastOp::new(ctx, value, int_handle), ctx);
         }
-        Ok(self.emit_value(ctx, |ctx| JsonStringifyOp::new(ctx, value)))
+        Ok(self.emit_value(JsonStringifyOp::new(ctx, value), ctx))
     }
 
     pub(super) fn stringify_replaced(
@@ -32,7 +32,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             return self.stringify(ctx, expr);
         }
         let value = self.expression(ctx, expr)?;
-        let value = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value));
+        let value = self.emit_value(perry_mir::JsonBoxOp::new(ctx, value), ctx);
         let callback = self.optional_callback(ctx, replacer)?;
         let keys = if callback.is_some() {
             self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![])
@@ -40,7 +40,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let expected = matches!(replacer, Expr::Array(items, _) if items.is_empty())
                 .then(|| ArrayType::get(ctx, StringType::get(ctx).into()).into());
             let keys = self.expression_with(ctx, replacer, expected)?;
-            self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, keys))
+            self.emit_value(perry_mir::JsonBoxOp::new(ctx, keys), ctx)
         };
         let traversal = self.intrinsic(ctx, Intrinsic::JsonReplacerBegin, vec![value, keys]);
         let body = self.new_block(ctx, "json_replacer");
@@ -60,7 +60,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Some(crate::lower::inline::InlineResult::Declared(json)),
             )?;
             match value {
-                Some(value) => self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value)),
+                Some(value) => self.emit_value(perry_mir::JsonBoxOp::new(ctx, value), ctx),
                 None => self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]),
             }
         } else {
@@ -86,7 +86,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             JsonSchema::supports_descriptor(ctx, target),
             "unsupported JSON schema"
         );
-        Ok(self.emit_value(ctx, |ctx| perry_mir::JsonDecodeOp::new(ctx, input, target)))
+        Ok(self.emit_value(perry_mir::JsonDecodeOp::new(ctx, input, target), ctx))
     }
 
     /// Unsupported cursor targets retain the JSON value for later coercion.
@@ -122,7 +122,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             );
         }
         if kind(ctx, scalar)? == Kind::BigInt {
-            let scalar = self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, scalar));
+            let scalar = self.emit_value(perry_mir::JsonBoxOp::new(ctx, scalar), ctx);
             return Ok(self.intrinsic(ctx, Intrinsic::JsonStrictEqual, vec![json, scalar]));
         }
         if kind(ctx, scalar)? == Kind::Exception {
@@ -251,7 +251,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Kind::Boolean => Intrinsic::JsonFromBool,
             Kind::Exception => Intrinsic::JsonFromException,
             Kind::Record | Kind::Array => {
-                return Ok(self.emit_value(ctx, |ctx| perry_mir::NativeJsonOp::new(ctx, value)));
+                return Ok(self.emit_value(perry_mir::NativeJsonOp::new(ctx, value), ctx));
             }
             _ => bail_unsupported!("unsupported Error cause type"),
         };

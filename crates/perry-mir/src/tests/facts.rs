@@ -9,6 +9,28 @@ fn returned(ctx: &Context, function: &FuncOp, index: usize) -> Value {
 }
 
 #[test]
+fn string_only_split_rejects_an_optimized_away_capture() -> Result<()> {
+    let ctx = &mut Context::new();
+    let body = r#"
+        text = perry.string_const "x" : perry.string;
+        re = perry.regex_const "(y){0}x", "" : perry.regex;
+        parts = perry.intrinsic RegexSplitStrings (text, re) : perry.array <perry.string>;
+    "#;
+    let module = parse(ctx, &single_block(body));
+    verify_operation(module, ctx)?;
+    let error = crate::receivers::prove_receivers(module, ctx, &mut AnalysisManager::default())
+        .err()
+        .expect("capturing split accepted as string[]");
+    assert!(
+        error
+            .disp(ctx)
+            .to_string()
+            .contains("without capture groups")
+    );
+    Ok(())
+}
+
+#[test]
 fn program_facts_share_queries_and_scale_with_call_sites() -> Result<()> {
     let mut visits = Vec::new();
     for calls in [32, 128] {

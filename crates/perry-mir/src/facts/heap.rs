@@ -412,6 +412,7 @@ impl Solver {
                 Range::of(integer),
             );
             facts.outcome = Outcomes::unknown(ctx, ty);
+            facts.regex = super::RegexOrigin::Other;
             facts.presence = Presence::declared(ctx, ty);
             self.update_slot(ctx, cell, facts);
             if aggregate(ctx, ty) {

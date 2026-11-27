@@ -372,7 +372,7 @@ impl crate::engine::InstancePlans {
         if let Some(crate::engine::solve::SiteResolution::Call(target)) =
             self.site(owner, expr).resolution
         {
-            return self.emitted_callee(target)?.ok();
+            return self.emitted_callee(target.callee()?).ok();
         }
         match expr {
             Expr::Call { callee, .. } | Expr::CallSpread { callee, .. } => {

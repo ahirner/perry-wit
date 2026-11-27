@@ -1,6 +1,6 @@
 //! Representation rewriting after ProgramFacts has converged.
 use super::{
-    ArgumentDomain, Constraint, Integer, ProgramFacts, SPECIALIZATION, WIT_SIGNATURE,
+    ArgumentDomain, Constraint, Integer, MirInteger, ProgramFacts, SPECIALIZATION, WIT_SIGNATURE,
     comparison_domain, literal,
 };
 use crate::{
@@ -413,7 +413,7 @@ pub(crate) fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) ->
 fn is_lossless_type(ctx: &Context, ty: TypeHandle) -> bool {
     let inner = crate::optional::present_type(ctx, ty);
     inner.deref(ctx).is::<crate::types::NumericType>()
-        || Integer::from_type(ctx, inner).is_some_and(|d| d.bits == 64)
+        || Integer::from_type(ctx, inner).is_some_and(|d| d.bits() == 64)
 }
 
 fn verify_lossless_function_ops(ctx: &Context, function: FuncOp) -> Result<()> {
@@ -489,7 +489,7 @@ fn verify_lossless_context(
             .args
             .get(pos)
             .and_then(|a| a.integer())
-            .is_some_and(|d| d.bits == 64);
+            .is_some_and(|d| d.bits() == 64);
         if wide && is_fp64_carrier(ctx, arg_ty) {
             return fail(format!("64-bit parameter {pos} has f64 carrier"));
         }
@@ -548,7 +548,9 @@ fn verify_lossless_context(
             }
             let actual_ty = mapped.get_type(ctx);
             if can_specialize_value(ctx, state, orig_val)
-                && state.representation(orig_val).is_some_and(|d| d.bits == 64)
+                && state
+                    .representation(orig_val)
+                    .is_some_and(|d| d.bits() == 64)
                 && !orig_val.get_type(ctx).deref(ctx).is::<PromiseType>()
                 && is_fp64_carrier(ctx, actual_ty)
             {

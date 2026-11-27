@@ -5,7 +5,7 @@ pub(super) struct Frame<'s> {
     pub(super) owner: BodyOwner,
     pub(super) this_slot: Option<Value>,
     pub(super) controls: Vec<Control<'s>>,
-    pub(super) return_to: Option<inline::ReturnFrame>,
+    pub(super) return_to: Option<Ptr<BasicBlock>>,
     pub(super) cursors: hir_compat::CursorPositions,
     pub(super) rest_excluded_keys: &'s [String],
 }
@@ -143,10 +143,5 @@ impl Control<'_> {
     }
 }
 
-/// The innermost enclosing `catch` or exceptional `finally` path: throwing ops store their
-/// status in `status` and branch to `block`.
-#[derive(Clone, Copy)]
-pub(super) struct Handler {
-    pub(super) block: Ptr<BasicBlock>,
-    pub(super) status: Value,
-}
+/// The exceptional edge carries the thrown status into this block.
+pub(super) type Handler = Ptr<BasicBlock>;

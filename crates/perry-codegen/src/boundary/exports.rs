@@ -42,11 +42,14 @@ pub(crate) fn export(
                 .map(|record| state.record_layouts.get(ctx, record))
                 .transpose()?;
             !layout
-                .as_ref()
-                .and_then(|layout| layout.result.as_deref())
-                .is_some_and(|fields| {
-                    let [value, error] = fields.payloads;
-                    (ok.is_none() || value.is_some()) && (err.is_none() || error.is_some())
+                .and_then(|layout| sums::TaggedResult::of(ctx, layout))
+                .is_some_and(|result| {
+                    perry_mir::RESULT_PAYLOADS
+                        .into_iter()
+                        .zip([ok, err])
+                        .all(|(name, payload)| {
+                            payload.is_none() || result.layout.fields.contains_key(name)
+                        })
                 })
         } else {
             false
@@ -471,9 +474,7 @@ fn async_export(
         let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
         let mut promise = b.result(ctx, ramp.get_operation());
         if let Some(joined) = joined {
-            b.br(ctx, joined, vec![promise]);
-            b.block = joined;
-            promise = joined.deref(ctx).get_argument(0);
+            promise = b.join_value(ctx, joined, promise);
         }
         b.runtime_void(ctx, Runtime::TaskSetResult, vec![promise]);
         let call = CallOp::new(ctx, finish_name.clone(), vec![], vec![i32]);

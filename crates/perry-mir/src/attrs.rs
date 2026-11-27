@@ -83,6 +83,20 @@ pub enum CompareKind {
     Ne,
 }
 
+impl CompareKind {
+    pub fn accepted_relations(self) -> i32 {
+        use perry_abi::number::Relation::*;
+        match self {
+            Self::Lt => Less as i32,
+            Self::Le => Less as i32 | Equal as i32,
+            Self::Gt => Greater as i32,
+            Self::Ge => Greater as i32 | Equal as i32,
+            Self::Eq => Equal as i32 | SameAbsence as i32,
+            Self::Ne => Less as i32 | Greater as i32 | Unordered as i32,
+        }
+    }
+}
+
 /// Memory tier of an allocation site.
 ///
 /// Ordered by escape: `Scalar < Frame < Task < Instance`. `Unassigned` is the builder's
@@ -200,70 +214,6 @@ impl NumericConstant {
             IntegerType::get(ctx, 64, signedness),
             APInt::from_u64(bits, bw(64)),
         ))
-    }
-
-    pub(crate) fn order(self, other: Self) -> Option<std::cmp::Ordering> {
-        use std::cmp::Ordering::{Greater, Less};
-        match (self, other) {
-            (Self::Signed(a), Self::Signed(b)) => Some(a.cmp(&b)),
-            (Self::Unsigned(a), Self::Unsigned(b)) => Some(a.cmp(&b)),
-            (Self::Signed(a), Self::Unsigned(b)) => {
-                Some(if a < 0 { Less } else { (a as u64).cmp(&b) })
-            }
-            (Self::Unsigned(a), Self::Signed(b)) => {
-                Some(if b < 0 { Greater } else { a.cmp(&(b as u64)) })
-            }
-            (Self::Float(a), Self::Float(b)) => f64::from_bits(a).partial_cmp(&f64::from_bits(b)),
-            (Self::Signed(integer), Self::Float(bits)) => {
-                Self::order_integer_float(integer < 0, integer.unsigned_abs(), f64::from_bits(bits))
-            }
-            (Self::Unsigned(integer), Self::Float(bits)) => {
-                Self::order_integer_float(false, integer, f64::from_bits(bits))
-            }
-            (Self::Float(bits), other) => other
-                .order(Self::Float(bits))
-                .map(std::cmp::Ordering::reverse),
-        }
-    }
-
-    fn order_integer_float(
-        negative: bool,
-        magnitude: u64,
-        float: f64,
-    ) -> Option<std::cmp::Ordering> {
-        use std::cmp::Ordering::{Equal, Greater, Less};
-        if float.is_nan() {
-            return None;
-        }
-        if float == f64::INFINITY {
-            return Some(Less);
-        }
-        if float == f64::NEG_INFINITY {
-            return Some(Greater);
-        }
-        if magnitude == 0 {
-            return (0.0f64).partial_cmp(&float);
-        }
-        if negative != float.is_sign_negative() || float == 0.0 {
-            return Some(if negative { Less } else { Greater });
-        }
-        let abs = float.abs();
-        if abs < 1.0 {
-            return Some(if negative { Less } else { Greater });
-        }
-        if abs >= 18446744073709551616.0 {
-            return Some(if negative { Greater } else { Less });
-        }
-        let truncated = abs.trunc() as u64;
-        let magnitude_order = match magnitude.cmp(&truncated) {
-            Equal if abs.fract() != 0.0 => Less,
-            ordering => ordering,
-        };
-        Some(if negative {
-            magnitude_order.reverse()
-        } else {
-            magnitude_order
-        })
     }
 }
 

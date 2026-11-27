@@ -26,9 +26,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let cancelled = self.boolean(ctx, false);
         let record = perry_mir::typed::<RecordType>(ctx, handle.binding.carrier)
             .ok_or_else(|| internal!("expected timer record"))?;
-        let timer = self.emit_value(ctx, |ctx| {
-            AllocOp::new(ctx, record, vec![cancelled, controller])
-        });
+        let timer = self.emit_value(AllocOp::new(ctx, record, vec![cancelled, controller]), ctx);
         operands.insert(0, timer);
         self.emit_signature_call(ctx, signature, operands, None)?;
         Ok(timer)
@@ -49,11 +47,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         let timer = self.defined(ctx, operand)?;
         let timer = self.fit(ctx, timer, ty)?;
         let cancelled = self.boolean(ctx, true);
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, timer, "cancelled".into(), cancelled)
-        });
+        self.emit(
+            FieldSetOp::new(ctx, timer, "cancelled".into(), cancelled),
+            ctx,
+        );
         let field = FieldGetOp::new(ctx, timer, "ctrl".into()).to_diag(ctx)?;
-        let controller = self.append_value(ctx, &field);
+        let controller = self.emit_value(field, ctx);
         self.intrinsic_void(ctx, Intrinsic::AbortAbort, vec![controller]);
         self.jump(ctx, done);
         self.switch_to(done);
@@ -90,13 +89,13 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.branch(ctx, cancelled, done, active);
             self.switch_to(active);
         }
-        let handler = self.catch_handler(ctx, "timer_cancelled");
+        let handler = self.catch_handler(ctx);
         self.with_handler(ctx, Some(handler), None, |b, ctx| {
             let signal = b.record_field(ctx, timer, "ctrl")?;
-            let undef = b.emit_value(ctx, |ctx| UndefinedOp::new(ctx, FP64Type::get(ctx).into()));
-            let pending = b.emit_value(ctx, |ctx| TimerOp::new(ctx, delay, undef, Some(signal)));
+            let undef = b.emit_value(UndefinedOp::new(ctx, FP64Type::get(ctx).into()), ctx);
+            let pending = b.emit_value(TimerOp::new(ctx, delay, undef, Some(signal)), ctx);
             let op = AwaitOp::new(ctx, pending).to_diag(ctx)?;
-            b.append_value(ctx, &op);
+            b.emit_value(op, ctx);
             Ok(())
         })?;
         let run = self.new_block(ctx, "timer_callback");
@@ -105,12 +104,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.switch_to(run);
         callback.invoke(self, ctx, callback_value, Some(timer), Values(args))?;
         self.jump(ctx, if schedule.repeats { wait } else { done });
-        self.switch_to(handler.block);
-        self.catch_exception(ctx, handler.status)?;
+        self.catch_exception(ctx, handler);
         self.jump(ctx, done);
         self.switch_to(done);
         let result = self.implicit_results(ctx);
-        self.emit(ctx, |ctx| ReturnOp::new(ctx, result));
+        self.emit(ReturnOp::new(ctx, result), ctx);
         Ok(())
     }
 }

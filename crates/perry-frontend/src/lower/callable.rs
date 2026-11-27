@@ -1,14 +1,32 @@
 //! MIR representations and operations for finite sets of function identities.
 use super::*;
-use crate::engine::solve::{CallTarget, ValueCoercion};
+use crate::engine::solve::{CallTarget, FunctionTarget, ValueCoercion};
 use crate::engine::types::{FuncIdentity, Ty, func_tag};
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Callback<'s> {
     Source(&'s crate::engine::boundary::TemplateView<'s>),
-    Function(&'s Signature<'s>),
-    Bound { call: CallTarget, callee: Value },
+    Function(&'s Signature<'s>, Option<(FunctionTarget, Value)>),
+}
+
+impl Callback<'_> {
+    pub(super) fn first_parameter(self, shapes: &Shapes<'_>) -> Option<TypeHandle> {
+        match self {
+            Self::Function(signature, bound) => {
+                let prefix = usize::from(bound.is_some());
+                signature
+                    .params
+                    .get(prefix)
+                    .filter(|p| p.position == prefix)
+                    .map(|p| p.base.carrier)
+            }
+            Self::Source(decl) => shapes
+                .source_binding(&decl.params.first()?.ty)
+                .ok()
+                .map(|ty| ty.carrier),
+        }
+    }
 }
 
 impl ValueCoercion {
@@ -83,13 +101,16 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Option<Callback<'s>>> {
         let site = self.site(expr);
         let callback =
-            if let Some(crate::engine::solve::FuncCoercion::Callback(target)) = site.coercion {
-                Callback::Bound {
-                    call: target,
-                    callee: self
-                        .instance_value(ctx, expr, None, site.resolution, true)?
-                        .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))?,
-                }
+            if let Some(crate::engine::solve::OperandUse::Callback(target)) = site.operand {
+                let callee = self
+                    .instance_value(ctx, expr, None, site.resolution, true)?
+                    .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))?;
+                let id = self
+                    .shapes
+                    .specialization
+                    .instances
+                    .emitted_callee(target)?;
+                Callback::Function(self.signature(id)?, Some((target, callee)))
             } else {
                 let id = self
                     .shapes
@@ -102,7 +123,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     });
                 let Some(id) = id else { return Ok(None) };
                 if let Some(signature) = self.signatures.get(&id) {
-                    Callback::Function(signature)
+                    Callback::Function(signature, None)
                 } else if let Some((declaration, _)) = self.shapes.specialization.closure(id) {
                     Callback::Source(declaration)
                 } else {
@@ -185,7 +206,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn raise_non_callable(&mut self, ctx: &mut Context) -> Value {
         self.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
         let ty = void_type(ctx);
-        let never = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty));
+        let never = self.emit_value(UndefinedOp::with_type(ctx, ty), ctx);
         self.never_values.insert(never);
         never
     }
@@ -202,7 +223,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         for (null, label) in [(true, "object"), (false, "undefined")] {
             if let Some(test) = self.sentinel_test(ctx, value, null) {
                 let label = self.string(ctx, label);
-                self.yield_if(ctx, done, test, label);
+                self.yield_if(ctx, done, test, [label]);
             }
         }
         let label = self.string(ctx, "function");
@@ -224,10 +245,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             let left_absent = self.sentinel_test(ctx, left, null);
             let right_absent = self.sentinel_test(ctx, right, null);
             if let Some(test) = left_absent {
-                self.yield_if(ctx, done, test, right_absent.unwrap_or(no));
+                self.yield_if(ctx, done, test, [right_absent.unwrap_or(no)]);
             }
             if let Some(test) = right_absent {
-                self.yield_if(ctx, done, test, no);
+                self.yield_if(ctx, done, test, [no]);
             }
         }
         let types = self.shapes.types.source;
@@ -242,7 +263,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let left_tag = self.callable_field(ctx, left, "tag", string)?;
             let right_tag = self.callable_field(ctx, right, "tag", string)?;
             let differ = self.compare(ctx, CompareKind::Ne, left_tag, right_tag);
-            self.yield_if(ctx, done, differ, no);
+            self.yield_if(ctx, done, differ, [no]);
             for identity in shared {
                 let wanted = self.string(ctx, &func_tag(identity));
                 let test = self.compare(ctx, CompareKind::Eq, left_tag, wanted);
@@ -254,7 +275,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 } else {
                     self.boolean(ctx, true)
                 };
-                self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![equal]));
+                self.emit(BrOp::new(ctx, done, vec![equal]), ctx);
                 self.switch_to(next);
             }
         }
@@ -276,7 +297,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         for null in [true, false] {
             if let Some(test) = self.sentinel_test(ctx, value, null) {
                 let absent = self.absent_literal(ctx, null, Some(result))?;
-                self.yield_if(ctx, done, test, absent);
+                self.yield_if(ctx, done, test, [absent]);
             }
         }
         let value = self.defined(ctx, value)?;
@@ -305,7 +326,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .transpose()?;
             let widened = self.function_value(ctx, identity, payload, Some(result))?;
             let widened = self.fit(ctx, widened, result)?;
-            self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![widened]));
+            self.emit(BrOp::new(ctx, done, vec![widened]), ctx);
             if let Some(next) = next {
                 self.switch_to(next);
             }
@@ -336,17 +357,14 @@ impl<'s> FunctionBuilder<'s, '_> {
         {
             let expected_payload = variant
                 .deref(ctx)
-                .cases()
-                .iter()
-                .find(|(name, _)| name == &tag)
-                .map(|(_, ty)| *ty)
+                .case(&tag)
                 .ok_or_else(|| internal!("function {tag} is absent from its dispatch type"))?;
             let payload = match (payload, expected_payload) {
                 (Some(value), Some(ty)) => Some(self.fit(ctx, value, ty)?),
                 (None, None) => None,
                 _ => bail_internal!("mismatched environment for function {tag}"),
             };
-            return Ok(self.emit_value(ctx, |ctx| VariantNewOp::new(ctx, target, &tag, payload)));
+            return Ok(self.emit_value(VariantNewOp::new(ctx, target, &tag, payload), ctx));
         }
         let record = self
             .shapes
@@ -354,7 +372,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let values = std::iter::once(self.string(ctx, &tag))
             .chain(payload)
             .collect();
-        Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)))
+        Ok(self.emit_value(AllocOp::new(ctx, record, values), ctx))
     }
 
     pub(super) fn matches_function(
@@ -370,7 +388,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let done = self.result_block(ctx, absent.get_type(ctx));
         for null in [true, false] {
             if let Some(test) = self.sentinel_test(ctx, value, null) {
-                self.yield_if(ctx, done, test, absent);
+                self.yield_if(ctx, done, test, [absent]);
             }
         }
         let value = self.defined(ctx, value)?;
@@ -386,9 +404,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             tag,
             wanted,
         );
-        self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![comparison]));
-        self.switch_to(done);
-        Ok(done.deref(ctx).get_argument(0))
+        Ok(self.finish_result(ctx, done, comparison))
     }
 
     pub(super) fn callable_field(
@@ -401,11 +417,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         let value = self.defined(ctx, value)?;
         if value.get_type(ctx).deref(ctx).is::<RecordType>() {
             let op = FieldGetOp::new(ctx, value, name.to_owned()).to_diag(ctx)?;
-            Ok(self.append_value(ctx, &op))
+            Ok(self.emit_value(op, ctx))
         } else if name == "tag" {
-            Ok(self.emit_value(ctx, |ctx| VariantTagOp::new(ctx, value)))
+            Ok(self.emit_value(VariantTagOp::new(ctx, value), ctx))
         } else {
-            Ok(self.emit_value(ctx, |ctx| VariantPayloadOp::new(ctx, value, field_ty)))
+            Ok(self.emit_value(VariantPayloadOp::new(ctx, value, field_ty), ctx))
         }
     }
 
@@ -414,31 +430,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         if null {
             state
                 .admits_null()
-                .then(|| self.emit_value(ctx, |ctx| IsNullOp::new(ctx, value)))
+                .then(|| self.emit_value(IsNullOp::new(ctx, value), ctx))
         } else {
             state
                 .admits_undefined()
-                .then(|| self.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, value)))
+                .then(|| self.emit_value(IsUndefinedOp::new(ctx, value), ctx))
         }
-    }
-
-    fn result_block(&self, ctx: &mut Context, ty: TypeHandle) -> Ptr<BasicBlock> {
-        let block = BasicBlock::new(ctx, None, vec![ty]);
-        block.insert_at_back(self.region, ctx);
-        block
-    }
-
-    fn yield_if(&mut self, ctx: &mut Context, done: Ptr<BasicBlock>, test: Value, answer: Value) {
-        let next = self.new_block(ctx, "next");
-        self.emit(ctx, |ctx| {
-            CondBrOp::new(ctx, test, done, vec![answer], next, vec![])
-        });
-        self.switch_to(next);
-    }
-
-    fn finish_result(&mut self, ctx: &mut Context, done: Ptr<BasicBlock>, answer: Value) -> Value {
-        self.emit(ctx, |ctx| BrOp::new(ctx, done, vec![answer]));
-        self.switch_to(done);
-        done.deref(ctx).get_argument(0)
     }
 }

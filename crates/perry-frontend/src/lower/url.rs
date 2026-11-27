@@ -47,7 +47,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                     _ => {
                         let string = StringType::get(ctx).into();
-                        self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, string))
+                        self.emit_value(UndefinedOp::new(ctx, string), ctx)
                     }
                 };
                 Ok(self.call_intrinsic(ctx, Intrinsic::UrlNew, vec![input, base]))

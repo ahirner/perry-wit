@@ -130,16 +130,11 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn record_site_coercion(
-        &mut self,
-        inst_id: InstanceId,
-        expr: &Expr,
-        c: FuncCoercion,
-    ) {
+    pub(super) fn record_operand_use(&mut self, inst_id: InstanceId, expr: &Expr, c: OperandUse) {
         if let Some(site) = self.index.expressions.index(expr) {
-            self.inst_sites[inst_id].entry(site).or_default().coercion = Some(c);
+            self.inst_sites[inst_id].entry(site).or_default().operand = Some(c);
         } else {
-            debug_assert!(false, "unindexed coercion site");
+            debug_assert!(false, "unindexed operand");
         }
     }
 
@@ -170,7 +165,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .is_zero_sized_func(elem_ty, &self.index.capture_free_templates)
         {
             for a in args {
-                self.record_site_coercion(inst_id, a, FuncCoercion::Value(ValueCoercion::Zero));
+                self.record_operand_use(inst_id, a, OperandUse::Value(ValueCoercion::Zero));
             }
         } else if self.is_tagged_func_union_in(elem_ty, inst_id) {
             for (a, &at) in args.iter().zip(arg_tys) {
@@ -207,7 +202,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             &self.index.capture_free_templates,
             &self.facts.escaping,
         ) {
-            self.record_site_coercion(inst_id, expr, FuncCoercion::Value(conversion));
+            self.record_operand_use(inst_id, expr, OperandUse::Value(conversion));
         }
     }
 
