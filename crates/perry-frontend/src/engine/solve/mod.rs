@@ -1,5 +1,5 @@
 //! Worklist monomorphization and storage-join solver over dense indices.
-use crate::source::SourceModule;
+use crate::source::{Arguments, SourceCall, SourceModule};
 mod array_layouts;
 mod callbacks;
 mod calls;
@@ -13,13 +13,13 @@ mod members;
 mod methods;
 mod promises;
 mod writes;
-use super::bitset::BitSet;
+use super::BitSet;
 use super::boundary::{GenericOwner, LocalFlags, ModuleIndex, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
     ActivationSpan, CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan,
-    FuncIdentity, HelperId, Idx, IdxVec, InstanceId, LocId, LocalIdx, LocalStorage, ObjectProp,
-    Pool, TemplateId, Ty, TyKind, TypeTable,
+    FuncIdentity, HelperId, Idx, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp, Pool, TemplateId,
+    Ty, TyKind, TypeContext, TypeTable,
 };
 use crate::{
     Absence, hir_compat,
@@ -87,7 +87,7 @@ impl ModuleIndex<'_> {
 }
 
 struct InstanceReq<'a> {
-    witness: Option<&'a hir_compat::Witness<'a, hir_compat::Target<perry_hir::types::FuncId>>>,
+    witness: Option<&'a hir_compat::SourceWitness<'a>>,
     template: TemplateId,
     receiver: Option<Receiver>,
     capture_owner: CaptureOwner,
@@ -162,51 +162,16 @@ impl EvalState<'_> {
     }
 }
 
-pub(super) struct CaptureLocations {
-    pub(super) slots: Pool<ActivationSpan, LocId>,
-    collapsed: IdxVec<LocalIdx, Option<LocId>>,
-}
-
-impl CaptureLocations {
-    pub(super) fn get(
-        &self,
-        index: &ModuleIndex,
-        instances: &IdxVec<InstanceId, Instance>,
-        mut owner: CaptureOwner,
-        local: LocalIdx,
-    ) -> Option<LocId> {
-        let info = index.locals[local];
-        if let Some(loc) = info.module_loc() {
-            return Some(loc);
-        }
-        loop {
-            match owner {
-                CaptureOwner::Instance(id) => {
-                    if instances[id].template == info.owner
-                        && let LocalStorage::Activation(slot) = info.storage
-                    {
-                        return self.slots[instances[id].activation]
-                            .get(slot as usize)
-                            .copied();
-                    }
-                    owner = instances[id].capture_owner;
-                }
-                CaptureOwner::Template(_) => return self.collapsed[local],
-                CaptureOwner::None => return None,
-            }
-        }
-    }
-}
-
-pub(crate) fn solve<'h>(
+pub(crate) fn solve<'h, 'r: 'h>(
     ctx: &Context,
     hir: &'h SourceModule<'h>,
+    witnesses: Vec<hir_compat::SourceWitness<'r>>,
     index: &ModuleIndex<'h>,
     decls: &Declarations,
     types: &mut TypeTable,
-) -> Result<Solved> {
+) -> Result<(Solved, hir_compat::Witnesses<'r, ExportRoot>)> {
     let mut solver = Solver::new(ctx, hir, index, decls, types);
-    let init_inst = solver.seed_roots()?;
+    let (init_inst, exports) = solver.seed_roots(witnesses)?;
     solver.run_worklist()?;
     let live = solver.live_instances(|_| {});
     if !solver.instances.iter_enumerated().any(|(id, inst)| {
@@ -231,7 +196,7 @@ pub(crate) fn solve<'h>(
     }
     solver.verify_fixed_point()?;
     solver.verify_contracts()?;
-    Ok(solver.finish(init_inst))
+    Ok((solver.finish(init_inst), exports))
 }
 
 struct Solver<'h, 'a> {
@@ -248,7 +213,7 @@ struct Solver<'h, 'a> {
     worklist: Vec<InstanceId>,
     queued: BitSet,
     instances: IdxVec<InstanceId, Instance>,
-    witness_instances: Vec<Option<ExportRoot>>,
+    list_exports: HashMap<perry_hir::types::FuncId, Option<crate::wit::WitValue<'h>>>,
     instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: IdxVec<TemplateId, u16>,
     field_locs: Pool<FieldLocSpan, LocId>,
@@ -256,8 +221,7 @@ struct Solver<'h, 'a> {
     dispatch_arm_spans: Vec<DispatchArmSpan>,
     helpers: IdxVec<HelperId, HelperEntry>,
     helper_index: HashMap<HelperSpec, HelperId>,
-    capture_locs: CaptureLocations,
-    inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
+    collapsed_locals: IdxVec<LocalIdx, Option<LocId>>,
     inst_written: IdxVec<InstanceId, BitSet>,
     inst_sites: IdxVec<InstanceId, InstanceSites>,
     inst_superseded: BitSet,
@@ -265,7 +229,6 @@ struct Solver<'h, 'a> {
 
     boxed_locals: BitSet,
     dict_reads: BitSet,
-    self_nested_locals: BitSet,
     class_insts: IdxVec<ClassInstId, ClassInst>,
     class_index: HashMap<(ClassId, ArgumentKey), ClassInstId>,
     type_bindings: IdxVec<InstanceId, Box<[TypeScope]>>,
@@ -309,6 +272,12 @@ fn bump_count(counts: &mut IdxVec<TemplateId, u16>, template: TemplateId) {
     *count = count.saturating_add(1);
 }
 
+impl TypeContext for Solver<'_, '_> {
+    fn types(&mut self) -> &mut TypeTable {
+        self.types
+    }
+}
+
 impl<'h, 'a> Solver<'h, 'a> {
     fn new(
         ctx: &'a Context,
@@ -335,7 +304,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             worklist: Vec::new(),
             queued: BitSet::default(),
             instances: IdxVec::default(),
-            witness_instances: Vec::with_capacity(hir.exports.functions.len()),
+            list_exports: HashMap::new(),
             instance_index: HashMap::with_capacity(64),
             template_counts: index.views.filled(0),
             field_locs: Pool::default(),
@@ -343,11 +312,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             dispatch_arm_spans: Vec::new(),
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
-            capture_locs: CaptureLocations {
-                slots: Pool::default(),
-                collapsed: index.locals.filled(None),
-            },
-            inst_frame_locals: IdxVec::default(),
+            collapsed_locals: index.locals.filled(None),
             inst_written: IdxVec::default(),
             inst_sites: IdxVec::default(),
             inst_superseded: BitSet::default(),
@@ -355,7 +320,6 @@ impl<'h, 'a> Solver<'h, 'a> {
 
             boxed_locals: BitSet::default(),
             dict_reads: BitSet::default(),
-            self_nested_locals: BitSet::default(),
             class_insts: IdxVec::default(),
             class_index: HashMap::with_capacity(16),
             type_bindings: IdxVec::default(),
@@ -434,21 +398,21 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             CallTarget::ThrowTypeError => {}
         };
-        if let Some(FuncCoercion::Callback { target, .. }) = entry.coercion {
+        if let Some(FuncCoercion::Callback(target)) = entry.coercion {
             callback(target);
         }
         let Some(resolution) = entry.resolution else {
             return;
         };
         match resolution {
-            SiteResolution::Call { target, .. } => callback(target),
+            SiteResolution::Call(target) => callback(target),
             SiteResolution::ReadMember(target)
             | SiteResolution::WriteMember(target)
             | SiteResolution::Callback { target } => instance(target),
             SiteResolution::UpdateMember { get, set } => {
                 get.into_iter().chain(set).for_each(instance);
             }
-            SiteResolution::ClassNew(class_inst, _) => {
+            SiteResolution::ClassNew(class_inst) => {
                 let class = &self.class_insts[class_inst];
                 class
                     .field_init
@@ -464,7 +428,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             SiteResolution::PromiseReaction { helper: id, .. } => {
                 if let HelperSpec::PromiseReaction(reaction) = self.helpers[id].spec {
-                    for (call, _) in reaction.callbacks() {
+                    for (call, _) in reaction.arguments().into_iter().flatten() {
                         callback(call);
                     }
                 }
@@ -576,7 +540,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             .collect();
         let prev_inst_count = self.instances.len();
         let prev_loc_count = self.facts.len();
-        let prev_frames = self.inst_frame_locals.clone();
         let prev_collapsed = self.collapsed_closures.clone();
         self.facts.dirty.clear();
         for id in live_ids {
@@ -597,7 +560,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 "fixed-point check allocated a storage location",
             ));
         }
-        if self.inst_frame_locals != prev_frames {
+        if !self.worklist.is_empty() {
             return Err(Diagnostic::internal(
                 "fixed-point check mutated a local frame slot",
             ));
@@ -616,7 +579,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return span;
             }
         }
-        let span = self.dispatch_arms.extend_from_slice(arms);
+        let span = self.dispatch_arms.extend(arms.iter().copied());
         self.dispatch_arm_spans.push(span);
         span
     }

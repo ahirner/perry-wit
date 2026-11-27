@@ -101,51 +101,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(self.append_value(ctx, &op))
     }
 
-    pub(crate) fn collect_preserving_holes(
-        &mut self,
-        ctx: &mut Context,
-        array: Value,
-        start: Value,
-        limit: Value,
-        item: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<Value>,
-    ) -> Result<Value> {
-        let prepare = self.block;
-        self.index_loop(
-            ctx,
-            "preserve_holes",
-            start,
-            limit,
-            |b, ctx, index, _, _| {
-                let present =
-                    b.emit_value(ctx, |ctx| perry_mir::ArrayPresentOp::new(ctx, array, index));
-                let read = b.new_block(ctx, "present_element");
-                let hole = b.new_block(ctx, "missing_element");
-                let done = b.new_block(ctx, "collected_element");
-                b.branch(ctx, present, read, hole);
-                b.switch_to(read);
-                let value = b.element_at(ctx, array, index)?;
-                let value = item(b, ctx, value, index)?;
-                let allocation = ArrayNewOp::new(ctx, value.get_type(ctx), vec![]);
-                crate::lower::builder::insert_before_terminator(
-                    ctx,
-                    prepare,
-                    [allocation.get_operation()],
-                )?;
-                let result = allocation.get_result(ctx);
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, value));
-                b.jump(ctx, done);
-                b.switch_to(hole);
-                let position = b.array_length(ctx, result);
-                b.emit(ctx, |ctx| {
-                    perry_mir::ArrayHoleOp::new(ctx, result, position)
-                });
-                b.jump(ctx, done);
-                b.switch_to(done);
-                Ok(result)
-            },
-        )
-    }
-
     /// `array[index]` for an `f64` index the caller proved present and in bounds.
     pub(crate) fn element_at(
         &mut self,

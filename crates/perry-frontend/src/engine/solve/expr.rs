@@ -4,11 +4,10 @@ use crate::methods::MethodResult;
 use crate::source::ConstructorSites;
 
 impl<'h, 'a> Solver<'h, 'a> {
-    fn static_field_loc(&mut self, class: &str, field: &str) -> Option<LocId> {
-        let class = self.index.class_by_name_id(self.types.intern_name(class))?;
+    fn static_field_loc(&self, class: &str, field: &str) -> Option<LocId> {
         self.index
-            .class(class)
-            .static_field(self.types.intern_name(field))
+            .class(self.index.class_named(class)?)
+            .static_field(field)
     }
 
     pub(super) fn read_static_field(&mut self, reader: InstanceId, class: &str, field: &str) -> Ty {
@@ -40,19 +39,59 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(constructor) = self.index.expressions.collection(expr) {
             return self.eval_collection_constructor(s, expr, constructor);
         }
-        if let Some(SiteResolution::ResourceCall(id)) = self.index.expressions.declared(expr)
+        if let Some(decision) = self.index.expressions.declared(expr)
             && let Some((args, _)) = hir_compat::call_arguments(expr)
         {
-            let types = self.eval_args(s, args)?;
-            if types.contains(&Ty::BOTTOM) && matches!(expr, Expr::StaticMethodCall { .. }) {
-                return Ok(Ty::BOTTOM);
+            match decision {
+                SiteResolution::Static(method) => return self.eval_static_call(s, method, args),
+                SiteResolution::ResourceCall(id) => {
+                    let types = self.eval_args(s, args)?;
+                    return Ok(
+                        if types.contains(&Ty::BOTTOM)
+                            && matches!(expr, Expr::StaticMethodCall { .. })
+                        {
+                            Ty::BOTTOM
+                        } else {
+                            self.resource_result(id)
+                        },
+                    );
+                }
+                _ => {}
             }
-            return Ok(self.resource_result(id));
         }
-        if let Some(cb_ty) = self.try_eval_builtin_callback(s, expr)? {
+        if let Some(cb_ty) = self.try_eval_callback_intrinsic(s, expr)? {
             return Ok(cb_ty);
         }
 
+        if let Some(call) = SourceCall::of(expr) {
+            return self.eval_call(s, call);
+        }
+        if let Some((object, key)) = hir_compat::member(expr) {
+            return match key {
+                hir_compat::MemberKey::Named(name, offset) => {
+                    self.eval_property_get(s, expr, object, name, offset)
+                }
+                hir_compat::MemberKey::Computed(index, offset) => {
+                    let receiver = self.eval_expr(s, object)?;
+                    self.eval_index(s, expr, receiver, index, offset)
+                }
+            };
+        }
+        if let Some((object, key, value)) = hir_compat::member_assignment(expr) {
+            let receiver = self.eval_expr(s, object)?;
+            let receiver = self.types.strip_nullish(receiver).0;
+            let key_type = match key {
+                hir_compat::MemberKey::Named(..) => Ty::STRING,
+                hir_compat::MemberKey::Computed(index, _) => self.eval_expr(s, index)?,
+            };
+            let ty = self.eval_expr(s, value)?;
+            if let hir_compat::MemberKey::Named(name, offset) = key {
+                self.assign_property(s, expr, receiver, name, value, ty, offset)?;
+            }
+            self.write_cell_indexed(receiver, key_type, ty);
+            self.coerce_array_write(s.inst, receiver, std::slice::from_ref(value), &[ty]);
+            return Ok(ty);
+        }
         match expr {
             Expr::LocalGet(id) => self.eval_local_get(s, *id),
             Expr::LocalSet(id, value) => {
@@ -63,7 +102,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let val_ty = self.eval_expr(s, value)?;
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
-                        let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
+                        let is_inferred = !self.index.locals[lidx].flags.is_explicit();
                         let local_span = self.hir.declarations.locals.get(id).map(|sp| sp.span);
                         if matches!(self.types.kind(existing), TyKind::Func(_))
                             || self.is_tagged_func_union_in(existing, s.inst)
@@ -172,6 +211,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                 }
                 let identity = self.closure_identity(s.inst, template);
+                let ty = self.types.func(identity);
+                if self.index.view(template).captures_this && s.receiver.is_some() {
+                    self.mark_escaping_env(ty);
+                }
                 self.record_site(s.inst, expr, SiteResolution::Closure(identity));
                 if self.is_escaping_env(template, s.inst) {
                     for &cap_id in self.index.template_captures(template) {
@@ -182,7 +225,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     }
                 }
-                Ok(self.types.func(identity))
+                Ok(ty)
             }
             Expr::Binary { op, left, right } => {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
@@ -260,10 +303,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::Await(promise) => {
                 let ty = self.eval_expr(s, promise)?;
                 let ty = self.resolve_cell_read(s.inst, ty);
-                Ok(match self.types.kind(ty) {
-                    TyKind::Promise(i) => i,
-                    _ => ty,
-                })
+                Ok(self.awaited_type(s.inst, ty))
             }
             Expr::QueueMicrotask(_) | Expr::ProcessNextTick { .. } => {
                 let api = if matches!(expr, Expr::QueueMicrotask(_)) {
@@ -456,104 +496,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(Ty::NUMBER)
             }
-            Expr::PropertyGet {
-                object,
-                property,
-                byte_offset,
-                ..
-            } => self.eval_property_get(s, expr, object, property, *byte_offset),
-            Expr::PropertySet {
-                object,
-                property,
-                value,
-                byte_offset,
-                ..
-            } => {
-                let (obj_ty, val_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, value)?);
-                let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                self.assign_property(s, expr, obj_def, property, value, val_ty, *byte_offset)?;
-                if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
-                    if kind == CellKind::Dict {
-                        self.write_cell(loc, val_ty);
-                    } else {
-                        self.write_loc(loc, Ty::OPEN);
-                    }
-                }
-                Ok(val_ty)
-            }
-            Expr::IndexGet {
-                object,
-                index,
-                element_offset,
-                ..
-            } => {
-                let obj_ty = self.eval_expr(s, object)?;
-                let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                self.check_timer_member(obj_def, *element_offset)?;
-                let idx_ty = self.eval_expr(s, index)?;
-                if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
-                    if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
-                        self.facts.dirty.insert(Fact::Storage(loc));
-                    }
-                    if idx_ty != Ty::BOTTOM
-                        && !(if kind.is_array() {
-                            matches!(idx_ty, Ty::NUMBER | Ty::INT32)
-                        } else {
-                            idx_ty == Ty::STRING
-                        })
-                    {
-                        self.write_loc(loc, Ty::OPEN);
-                    }
-                }
-                let obj_ty = self.resolve_cell_read(s.inst, obj_ty);
-                if obj_ty == Ty::BOTTOM {
-                    return Ok(Ty::BOTTOM);
-                }
-                Ok(
-                    builtins::index_type(self.ctx, self.decls, self.types, obj_ty, index)
-                        .unwrap_or(Ty::OPEN),
-                )
-            }
-            Expr::IndexSet {
-                object,
-                index,
-                value,
-                ..
-            }
-            | Expr::PutValueSet {
-                target: object,
-                key: index,
-                value,
-                ..
-            } => {
-                let (obj_ty, idx_ty, val_ty) = (
-                    self.eval_expr(s, object)?,
-                    self.eval_expr(s, index)?,
-                    self.eval_expr(s, value)?,
-                );
-                let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                if let Expr::PutValueSet { byte_offset, .. } = expr
-                    && let Expr::String(field_name) = index.as_ref()
-                {
-                    self.assign_property(
-                        s,
-                        expr,
-                        obj_def,
-                        field_name,
-                        value,
-                        val_ty,
-                        *byte_offset,
-                    )?;
-                }
-                self.write_cell_indexed(obj_def, idx_ty, val_ty);
-                self.coerce_array_write(
-                    s.inst,
-                    obj_def,
-                    std::slice::from_ref(value.as_ref()),
-                    &[val_ty],
-                );
-                Ok(val_ty)
-            }
             Expr::StaticFieldGet {
                 class_name,
                 field_name,
@@ -572,12 +514,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(val_ty)
             }
-            Expr::StaticMethodCall {
-                class_name,
-                method_name,
-                args,
-                ..
-            } => self.eval_static_method_call(s, expr, class_name, method_name, args, 0),
             Expr::New {
                 class_name,
                 args,
@@ -593,29 +529,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             } => {
                 self.eval_expr(s, callee)?;
                 let arg_tys = self.eval_args(s, args)?;
-                if arg_tys.iter().any(|&a| self.types.has_func(a)) {
-                    let name = match callee.as_ref() {
-                        Expr::PropertyGet { property, .. } => property.as_str(),
-                        Expr::ExternFuncRef { name, .. } => name.as_str(),
-                        _ => "constructor",
-                    };
-                    return Err(self.annotate_expr_error(
-                        s,
-                        Diagnostic::unsupported(format!(
-                            "passing a callback to runtime '{name}' requires the runtime to call a guest function"
-                        )),
-                        *byte_offset,
-                    ));
-                }
+                let name = match callee.as_ref() {
+                    Expr::PropertyGet { property, .. } => property.as_str(),
+                    Expr::ExternFuncRef { name, .. } => name.as_str(),
+                    _ => "constructor",
+                };
+                self.check_host_arguments(s, name, &arg_tys, *byte_offset)?;
                 Ok(Ty::OPEN)
             }
-            Expr::Call {
-                callee,
-                args,
-                byte_offset,
-                ..
-            } => self.eval_call(s, expr, callee, args, *byte_offset),
-            Expr::CallSpread { callee, args, .. } => self.eval_call_spread(s, expr, callee, args),
             Expr::NativeMethodCall {
                 module,
                 object,
@@ -649,30 +570,16 @@ impl<'h, 'a> Solver<'h, 'a> {
                         return Ok(Ty::NUMBER);
                     }
                     if let Some(rule) =
-                        self.builtin_rule(s, expr, stripped, method, args.is_empty())
+                        self.resolve_builtin(s, expr, stripped, method, args.is_empty())
                     {
                         return Ok(self.method_result(
                             s.inst,
-                            rule,
-                            MethodResultArgs {
-                                receiver: obj_ty,
-                                arg0: arg_tys.first().copied(),
-                                arg0_expr: args.first(),
-                                callback_result: None,
-                                sparse_arrays: self.hir.sparse_arrays,
-                            },
+                            rule.result(),
+                            MethodResultArgs::call(obj_ty, args, &arg_tys, self.hir.sparse_arrays),
                         ));
                     }
                 }
-                if arg_tys.iter().any(|&a| self.types.has_func(a)) {
-                    return Err(self.annotate_expr_error(
-                        s,
-                        Diagnostic::unsupported(format!(
-                            "passing a callback to runtime '{method}' requires the runtime to call a guest function"
-                        )),
-                        0,
-                    ));
-                }
+                self.check_host_arguments(s, method, &arg_tys, 0)?;
                 Ok(Ty::OPEN)
             }
             Expr::ObjectValues(object) | Expr::ObjectEntries(object) => {
@@ -783,9 +690,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(Ty::NUMBER)
             }
             Expr::Delete(target) => {
-                if let Expr::IndexGet { object, .. } | Expr::PropertyGet { object, .. } =
-                    target.as_ref()
-                {
+                if let Some((object, _)) = hir_compat::member(target) {
                     let obj_ty = self.eval_expr(s, object)?;
                     if self.type_may_be_array(obj_ty) {
                         self.deletes_array_elements = true;
@@ -812,6 +717,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                             (self.eval_local_get(s, id)?, None)
                         }
                     };
+                    if let Some((first, second)) = call.array_callback()
+                        && let Some(result) =
+                            self.eval_callback_method(s, expr, ty, call.method(), first, second)?
+                    {
+                        return Ok(result);
+                    }
                     self.eval_children(s, expr, evaluated)?;
                     return Ok(self.method_result(
                         s.inst,

@@ -26,37 +26,21 @@ use pliron::{
     verify_err,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum CollectionErr {
+    #[error("{0} expects a perry.array")]
     NotArray(&'static str),
+    #[error("{0} element type differs from the array's element type")]
     Element(&'static str),
+    #[error("{0} index or length must be a signless i32")]
     Index(&'static str),
+    #[error("{0} index must be a number (f64) or a signless i32")]
     NumberIndex(&'static str),
+    #[error("{0} expects perry.string operands and result")]
     NotString(&'static str),
+    #[error("{0} requires compatible sequence operands and valid exclusive reuse candidates")]
     Sequence(&'static str),
 }
-
-impl core::fmt::Display for CollectionErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::NotArray(op) => write!(f, "{op} expects a perry.array"),
-            Self::Element(op) => {
-                write!(f, "{op} element type differs from the array's element type")
-            }
-            Self::Index(op) => write!(f, "{op} index or length must be a signless i32"),
-            Self::NumberIndex(op) => {
-                write!(f, "{op} index must be a number (f64) or a signless i32")
-            }
-            Self::NotString(op) => write!(f, "{op} expects perry.string operands and result"),
-            Self::Sequence(op) => write!(
-                f,
-                "{op} requires compatible sequence operands and valid exclusive reuse candidates"
-            ),
-        }
-    }
-}
-
-impl core::error::Error for CollectionErr {}
 
 fn element(ctx: &Context, array: Value, op: &'static str) -> Result<TypeHandle> {
     match TypedHandle::<ArrayType>::from_handle(array.get_type(ctx), ctx) {

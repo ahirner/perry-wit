@@ -54,7 +54,12 @@ impl FunctionLowering<'_, '_> {
                 Some(area) => Canonical::Memory(area, abi.offset),
                 None => Canonical::Flat(&mut args),
             };
-            self.lower_abi(ctx, abi, mir.get_type(ctx), *value, target)?;
+            self.lower_abi(
+                ctx,
+                abi,
+                BoundaryValue::Native(mir.get_type(ctx), *value),
+                target,
+            )?;
         }
         if let Some(area) = param_area {
             args.push(area);
@@ -151,12 +156,9 @@ impl FunctionLowering<'_, '_> {
                 let mir = op.deref(ctx).get_result(0).get_type(ctx);
                 let value = match area {
                     Some(area) => self.lift_abi(ctx, abi, mir, Canonical::Memory(area, 0))?,
-                    None => self.lift_abi(
-                        ctx,
-                        abi,
-                        mir,
-                        Canonical::Flat(&mut result.into_iter().collect()),
-                    )?,
+                    None => {
+                        self.lift_abi(ctx, abi, mir, Canonical::Flat(&mut result.as_slice()))?
+                    }
                 };
                 self.define(ctx, op, value);
             }
@@ -286,7 +288,7 @@ impl FunctionLowering<'_, '_> {
                 let handle = self.load(ctx, MemKind::I32, area, offset);
                 self.discard_resource(ctx, *key, handle);
             }
-            AbiKind::ByteStream | AbiKind::OkHandle { .. } => {
+            AbiKind::ByteStream => {
                 bail_unsupported!("resource-bearing async imports need an ownership binding")
             }
             _ => {}

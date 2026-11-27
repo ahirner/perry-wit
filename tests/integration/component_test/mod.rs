@@ -624,6 +624,7 @@ world boundary {
     record payload { text: list<u8>, parts: list<list<u8>> }
     export encode: func(text: string, bytes: list<u8>, text-first: bool) -> payload;
     export regular: func(bytes: list<u8>) -> payload;
+    export nested: func(text: string) -> list<u8>;
 }
 "#
     );
@@ -632,6 +633,9 @@ world boundary {
         r#"
 import type { Payload, PayloadInput, WitInput } from './types/world';
 interface Ordinary { text: Uint8Array; parts: Uint8Array[] }
+interface Link { data: Uint8Array; next?: Link }
+function head(link: WitInput<Link>): WitInput<Uint8Array> { return link.next ? link.next.data : link.data; }
+export function nested(text: string) { return text.length ? head({data: "root", next: {data: text}}) : head({data: "root"}); }
 function ordinary(value: Ordinary): WitInput<Payload> { return value; }
 export function regular(bytes: Uint8Array) {
     const record: Ordinary = {text: bytes, parts: [bytes]};
@@ -648,6 +652,8 @@ export function encode(text: string, bytes: Uint8Array, textFirst: boolean) {
 "#,
     )?;
     let bytes = |text: &str| text.as_bytes().to_vec();
+    component.check("nested", ("leaf",), &bytes("leaf"))?;
+    component.check("nested", ("",), &bytes("root"))?;
     component.check(
         "regular",
         ("é🙂".as_bytes(),),
@@ -974,7 +980,9 @@ fn static_modules_preserve_pattern_bindings_and_property_keys() -> Result<()> {
     let declarations = r#"
         let calls = 0;
         function mark(n: number): number { calls += 1; return n; }
-        const [first, , ...rest] = [mark(1), 2, 3, 4];
+        let items: (number | undefined)[] = [undefined, 2, 3, 4];
+        function reset(): number { items = [9]; return mark(1); }
+        const [first = reset(), , ...rest] = items;
         interface Row { zero: number; absent?: number; nest: { key: number } }
         const row: Row = { zero: 0, nest: { key: 4 } };
         const {zero = mark(9), absent = mark(8), nest: {key: renamed}} = row;

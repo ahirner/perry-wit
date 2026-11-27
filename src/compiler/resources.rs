@@ -1,10 +1,10 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
-use perry_contract::names::{canonical_type, to_camel_case, to_pascal_case};
+use perry_contract::interface_resources;
 use perry_frontend::wit::WorldTypes;
 use perry_wit_diagnostics::{Result, ensure_diag};
 use std::collections::BTreeMap;
-use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
+use wit_parser::{Resolve, WorldId};
 
 pub(super) fn definitions<'r>(
     resolve: &'r Resolve,
@@ -17,16 +17,10 @@ pub(super) fn definitions<'r>(
         (false, &resolve.worlds[world].imports),
         (true, &resolve.worlds[world].exports),
     ] {
-        for (key, item) in interfaces {
-            let WorldItem::Interface { id, .. } = item else {
-                continue;
-            };
+        for (key, id) in perry_contract::world_interfaces(interfaces) {
             let module = resolve.name_world_key(key);
-            for (name, id) in &resolve.interfaces[*id].types {
-                if !matches!(resolve.types[*id].kind, TypeDefKind::Resource) {
-                    continue;
-                }
-                let key = canonical_type(resolve, *id).index() as u32;
+            for (name, id) in interface_resources(resolve, id) {
+                let key = id.index() as u32;
                 ensure_diag!(
                     !definitions.contains_key(&key),
                     crate::codes::CONTRACT_MISMATCH,
@@ -37,37 +31,13 @@ pub(super) fn definitions<'r>(
                     ResourceDefinition {
                         key,
                         module: module.clone(),
-                        name: name.clone(),
+                        name: name.to_owned(),
                         exported,
                     },
                 );
-                let suffix = to_pascal_case(name);
-                let resource = Type::Id(*id);
-                let drop = (
-                    format!("drop{suffix}"),
-                    ResourceOperation::Drop,
-                    resource,
-                    None,
-                );
-                let exports = exported.then(|| {
-                    [
-                        (
-                            format!("new{suffix}"),
-                            ResourceOperation::New,
-                            Type::F64,
-                            Some(resource),
-                        ),
-                        (
-                            format!("{}Rep", to_camel_case(name)),
-                            ResourceOperation::Representation,
-                            resource,
-                            Some(Type::F64),
-                        ),
-                    ]
-                });
-                for (name, operation, param, result) in
-                    std::iter::once(drop).chain(exports.into_iter().flatten())
-                {
+                for &operation in ResourceOperation::for_interface(exported) {
+                    let (_, param, result) = operation.signature(id);
+                    let name = operation.name(name);
                     let binding =
                         types.import_function(resolve, &module, &name, [param], result, false);
                     bindings.retain(|old| old.binding != binding);

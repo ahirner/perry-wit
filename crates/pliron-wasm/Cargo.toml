@@ -10,6 +10,7 @@ categories = ["compilers", "wasm"]
 publish = false
 
 [dependencies]
+thiserror.workspace = true
 pliron.workspace = true
 pliron-control.workspace = true
 wasm-encoder.workspace = true

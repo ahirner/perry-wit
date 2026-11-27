@@ -299,6 +299,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .storage_binding(ctx, field.storage())?
                 .expected_type(ctx);
             let value = match field {
+                EnvironmentField::Receiver(_) => self.class_this(ctx)?,
                 EnvironmentField::Unit => self.number(ctx, 0.0),
                 EnvironmentField::Settler(_) => {
                     bail_internal!("promise settlement handle in a source closure")

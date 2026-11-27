@@ -1,6 +1,6 @@
 //! Lower a solved operation at its lexical expression.
 use super::*;
-use crate::engine::solve::{OperandUse, SiteEntry, SiteResolution};
+use crate::engine::solve::{SiteEntry, SiteResolution};
 use crate::engine::types::Ty;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -12,7 +12,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     pub(in crate::lower) fn erased_operand(&self, expr: &Expr) -> bool {
-        self.site(expr).operand == OperandUse::Erased
+        self.site(expr).erased
     }
 
     pub(in crate::lower) fn instance_operand(
@@ -26,8 +26,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         let Some(conversion) = site.conversion() else {
             return self.instance_value(ctx, expr, expected, site.resolution, required);
         };
-        if !conversion.reads_operand() && !crate::source::is_pure_func_expr(expr) {
-            self.instance_value(ctx, expr, None, site.resolution, false)?;
+        if !conversion.reads_operand() {
+            self.discard_function_operand(ctx, expr)?;
         }
         conversion
             .emit(self, ctx, expected, |b, ctx, input| {
@@ -65,6 +65,28 @@ impl<'s> FunctionBuilder<'s, '_> {
             Some(TypedArray(_)) if expected.is_some() => (None, None),
             Some(site) => return self.solved_value(ctx, expr, expected, site, required),
         };
+        if let Some((object, key)) = hir_compat::member(expr) {
+            if let (Expr::ClassRef(class), Some(property)) = (object, key.name()) {
+                return self
+                    .load_local(ctx, self.shapes.static_field(class, property)?)
+                    .map(Some);
+            }
+            let receiver = self
+                .expression(ctx, object)
+                .map_err(|e| self.shapes.annotate_member(e, key.offset()))?;
+            return self.read_member(ctx, object, receiver, key, get);
+        }
+        if let Some((object, key, value)) = hir_compat::member_assignment(expr) {
+            return match key {
+                hir_compat::MemberKey::Named(name, _) => {
+                    self.set_field(ctx, object, name, value, set)
+                }
+                hir_compat::MemberKey::Computed(index, _) => {
+                    self.set_index(ctx, object, index, value).map(Some)
+                }
+            }
+            .map_err(|e| self.shapes.annotate_member(e, key.offset()));
+        }
         let value = match expr {
             Expr::PropertyUpdate {
                 object,
@@ -73,41 +95,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 prefix,
                 ..
             } => self.property_update(ctx, object, property, op, *prefix, (get, set))?,
-            Expr::PropertyGet {
-                object,
-                property,
-                byte_offset,
-                ..
-            } => self
-                .property_get(ctx, object, property, *byte_offset, get)
-                .map_err(|error| self.shapes.annotate_member(error, *byte_offset))?,
-            Expr::PropertySet {
-                object,
-                property,
-                value,
-                ..
-            } => return self.set_field(ctx, object, property, value, set),
-            Expr::PutValueSet {
-                target,
-                key,
-                value,
-                element_offset,
-                ..
-            } => {
-                return match key.as_ref() {
-                    Expr::String(field) => self.set_field(ctx, target, field, value, set),
-                    index => self.set_index(ctx, target, index, value).map(Some),
-                }
-                .map_err(|error| self.shapes.annotate_member(error, *element_offset));
-            }
             Expr::StringCoerce(object) | Expr::TemplateStringCoerce(object)
                 if let Some(id) = get =>
             {
                 let object = self.expression(ctx, object)?;
                 Member::Accessor(self.defined(ctx, object)?, id).read(self, ctx)?
             }
-            _ if required => self.source_expression(ctx, expr, expected)?,
-            _ => return self.source_operand(ctx, expr, expected),
+            _ => return self.source_operand(ctx, expr, expected, required),
         };
         Ok(Some(value))
     }
@@ -132,45 +126,14 @@ impl<'s> FunctionBuilder<'s, '_> {
                     Some(ty) if crate::lower::value_unions::is_value_union(ctx, ty) => ty,
                     _ => self.shapes.resolved_binding(ty)?.carrier,
                 };
-                self.source_expression(ctx, expr, Some(ty))?
+                return self.source_operand(ctx, expr, Some(ty), required);
             }
-            (
-                Call {
-                    target,
-                    argument_types,
-                },
-                call,
-            ) => {
-                let (callee, args, offset) = match call {
-                    Expr::Call {
-                        callee,
-                        args,
-                        byte_offset,
-                        ..
-                    } => (callee, Arguments::Plain(args), *byte_offset),
-                    Expr::CallSpread {
-                        callee,
-                        args,
-                        byte_offset,
-                        ..
-                    } => (callee, Arguments::Spread(args), *byte_offset),
-                    Expr::StaticMethodCall { args, .. } => {
-                        return target.invoke(
-                            self,
-                            ctx,
-                            None,
-                            None,
-                            crate::lower::calls::CallArguments::Expressions(
-                                Arguments::Plain(args),
-                                argument_types,
-                            ),
-                        );
-                    }
-                    _ => bail_internal!("solved call requires a call expression"),
-                };
+            (Call(target), call) => {
+                let call = crate::source::SourceCall::of(call)
+                    .ok_or_else(|| internal!("solved call requires a call expression"))?;
                 return self
-                    .invoke_site(ctx, target, argument_types, callee, args)
-                    .map_err(|e| self.shapes.annotate_call(e, offset));
+                    .invoke_site(ctx, target, call)
+                    .map_err(|e| self.shapes.annotate_call(e, call.offset));
             }
             (
                 PromiseNew {
@@ -190,29 +153,25 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?,
             (CollectionNew(ty), _) => {
                 let ty = self.shapes.resolved_binding(ty)?.carrier;
-                self.source_expression(ctx, expr, Some(ty))?
+                return self.source_operand(ctx, expr, Some(ty), required);
             }
             (
-                PromiseReaction {
-                    helper,
-                    pass_first,
-                    pass_second,
-                    ..
-                },
+                PromiseReaction { helper, .. },
                 Expr::Call {
                     callee,
                     args,
                     byte_offset,
                     ..
                 },
-            ) => {
+            ) if let Some((receiver, _)) = hir_compat::member(callee) => {
+                let arguments = std::iter::once((receiver, false)).chain(Arguments::Plain(args));
                 return self
-                    .promise_reaction(
+                    .invoke_arguments(
                         ctx,
-                        plans.helper(helper)?,
-                        [pass_first, pass_second],
-                        callee,
-                        args,
+                        self.signature(plans.helper(helper)?)?,
+                        std::iter::empty(),
+                        arguments,
+                        None,
                     )
                     .map_err(|e| self.shapes.annotate_call(e, *byte_offset));
             }
@@ -249,7 +208,9 @@ impl<'s> FunctionBuilder<'s, '_> {
                     byte_offset,
                     ..
                 },
-            ) if let Some((receiver, Some(name))) = hir_compat::member(callee) => {
+            ) if let Some((receiver, hir_compat::MemberKey::Named(name, _))) =
+                hir_compat::member(callee) =>
+            {
                 return self
                     .builtin_call(ctx, receiver, method, hir_compat::method(name).name(), args)
                     .map_err(|e| self.shapes.annotate_call(e, *byte_offset));
@@ -265,12 +226,20 @@ impl<'s> FunctionBuilder<'s, '_> {
             ) => {
                 return self.builtin_call(ctx, receiver, selected, method, args);
             }
+            (
+                Static(method),
+                Expr::Call {
+                    args, byte_offset, ..
+                },
+            ) => self
+                .static_call(ctx, method, args)
+                .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?,
             (ResourceCall(id), _) => {
                 let (args, offset) = hir_compat::call_arguments(expr)
                     .ok_or_else(|| internal!("expected a member invocation"))?;
                 let receiver = if let Expr::Call { callee, .. } = expr
                     && let Some((object, property)) = hir_compat::member(callee)
-                    && (property.is_none() || hir_compat::class_receiver(object).is_none())
+                    && (property.name().is_none() || hir_compat::class_receiver(object).is_none())
                 {
                     let value = self.expression(ctx, object)?;
                     Some(self.defined(ctx, value)?)
@@ -282,13 +251,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .map_err(|error| self.shapes.annotate_call(error, offset));
             }
             (
-                ClassNew(id, arguments),
+                ClassNew(id),
                 Expr::New {
                     args, byte_offset, ..
                 },
             ) => {
                 let class = &self.shapes.specialization.bodies.classes[id];
-                self.class_new(ctx, class, args, Some(arguments))
+                self.class_new(ctx, class, args)
                     .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?
             }
             (

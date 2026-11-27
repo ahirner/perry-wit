@@ -23,13 +23,22 @@ impl<'s> ClassShape<'s> {
     pub(crate) fn fields(
         self,
     ) -> impl Iterator<Item = (&'s ClassField, Option<crate::engine::types::Ty>)> {
-        let (source, selected) = match self {
-            Self::Source(c) => (c.fields.as_slice(), &[][..]),
-            Self::Instance(c) => (&[][..], c.fields.as_slice()),
+        use crate::source::FieldOverride;
+        let (declaration, overrides) = match self {
+            Self::Source(c) => (c, &[][..]),
+            Self::Instance(c) => (c.declaration, c.field_overrides.as_slice()),
         };
-        source
+        let mut overrides = overrides.iter().peekable();
+        declaration
+            .fields
             .iter()
-            .map(|field| (field, None))
-            .chain(selected.iter().copied())
+            .enumerate()
+            .filter_map(move |(index, field)| {
+                match overrides.next_if(|(position, _)| *position == index) {
+                    None => Some((field, None)),
+                    Some((_, FieldOverride::Solved(ty))) => Some((field, Some(*ty))),
+                    Some((_, FieldOverride::Erased)) => None,
+                }
+            })
     }
 }

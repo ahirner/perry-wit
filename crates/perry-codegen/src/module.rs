@@ -27,7 +27,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    r#type::{TypeHandle, Typed},
+    r#type::TypeHandle,
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
@@ -249,11 +249,8 @@ pub(crate) fn lower(
             crate::analysis::function_ops(ctx, function)
                 .into_iter()
                 .any(|op| {
-                    if Operation::is_op::<perry_mir::FieldSetOp>(op, ctx)
-                        && perry_mir::field_order_may_change(
-                            ctx,
-                            op.deref(ctx).get_operand(1).get_type(ctx),
-                        )
+                    if Operation::get_op::<perry_mir::FieldSetOp>(op, ctx)
+                        .is_some_and(|set| set.updates_order(ctx))
                     {
                         return true;
                     }
@@ -461,10 +458,7 @@ fn bind_exports(
                 || initialization.is_some_and(|summary| summary.effects.host_work))
                 && (effects.unhandled_await
                     || initialization.is_some_and(|summary| summary.effects.unhandled_await)))
-            && !export
-                .result
-                .as_ref()
-                .is_some_and(boundary::AbiType::accepts_exception)
+            && export.exception_result().is_none()
         {
             state.reports_rejection = true;
         }
@@ -481,10 +475,7 @@ fn bind_exports(
         }
         if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
-            && !export
-                .result
-                .as_ref()
-                .is_some_and(boundary::AbiType::accepts_exception)
+            && export.exception_result().is_none()
         {
             if export.is_async() && !stderr {
                 return Err(diag!(

@@ -20,13 +20,6 @@ op_schema! {
     error = InvalidConstant;
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("literal regex requires pattern, flags and a regex result")]
 struct InvalidConstant;
-
-impl core::fmt::Display for InvalidConstant {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("literal regex requires pattern, flags and a regex result")
-    }
-}
-
-impl core::error::Error for InvalidConstant {}

@@ -96,19 +96,20 @@ fn missing_type_annotation() -> Diagnostic {
     .with_help("Add a concrete type annotation to this binding, parameter, or function return.")
 }
 
-pub enum ExportTarget {
+pub enum ExportTarget<'r> {
     Destructor(FuncOp, String),
     Function(
         FuncOp,
+        Option<perry_contract::WorldFunction<'r>>,
         Vec<Option<perry_wit_diagnostics::SourceSpan>>,
         Option<String>,
     ),
-    Command(FuncOp),
+    Command(FuncOp, perry_contract::WorldFunction<'r>),
 }
 
-pub struct LoweredProgram {
+pub struct LoweredProgram<'r> {
     pub module: ModuleOp,
-    pub exports: Vec<ExportTarget>,
+    pub exports: Vec<ExportTarget<'r>>,
 }
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 //! Binding WIT world exports to exported TypeScript functions.
 use super::abi::Layouts;
 use perry_codegen::boundary::{AbiKind, Export, ExportKind};
-use perry_contract::export_names::core_export_name;
 use perry_mir::PlironResultExt as _;
 use perry_wit_diagnostics::{Diagnostic, Result, diag};
 use pliron::{
@@ -97,56 +96,46 @@ pub(super) fn exports(
     ctx: &mut Context,
     targets: Vec<perry_frontend::ExportTarget>,
     resolve: &Resolve,
-    world_id: WorldId,
 ) -> Result<Vec<Export>> {
-    let world = &resolve.worlds[world_id];
-    let mut targets = targets.into_iter();
-    let mut bound = Vec::new();
-    for entry in perry_contract::world_functions(resolve, world.exports.iter()) {
-        let function = entry.function;
-        let target = targets
-            .next()
-            .ok_or_else(|| Diagnostic::internal("world export has no witness"))?;
-        let core_name = if entry.interface.is_some() {
-            core_export_name(resolve, entry.key, function)
-        } else {
-            function.name.clone()
-        };
-        let signature = layouts.signature(function, false);
-        let (mir_function, annotations, source_name) = match target {
-            perry_frontend::ExportTarget::Function(func, annotations, name) => {
-                (func, annotations, name)
-            }
-            perry_frontend::ExportTarget::Destructor(..) => {
-                return Err(Diagnostic::internal("expected function witness"));
-            }
-            perry_frontend::ExportTarget::Command(main) => {
-                bound.push((
-                    main,
-                    Export {
-                        source_name: None,
-                        annotations: Vec::new(),
-                        core_name,
-                        signature,
-                        function: perry_frontend::MAIN.to_string(),
-                        params: vec![],
-                        indirect_size: None,
-                        result: None,
-                        kind: ExportKind::Async {
-                            task_return: (
-                                format!("[export]{}", resolve.name_world_key(entry.key)),
-                                function.name.clone(),
-                            ),
-                            command: true,
-                        },
+    use perry_frontend::ExportTarget;
+    let mut bound = Vec::with_capacity(targets.len());
+    for target in targets {
+        let (mir_function, entry, annotations, source_name, command) = match target {
+            ExportTarget::Destructor(function, core_name) => {
+                let export = Export {
+                    source_name: None,
+                    annotations: Vec::new(),
+                    core_name,
+                    signature: wit_parser::abi::WasmSignature {
+                        params: vec![wit_parser::abi::WasmType::I32],
+                        results: vec![],
+                        indirect_params: false,
+                        retptr: false,
                     },
-                ));
+                    function: function.get_symbol_name(ctx).into(),
+                    params: vec![layouts.value(Type::U32)?],
+                    indirect_size: None,
+                    result: None,
+                    kind: ExportKind::Sync,
+                };
+                bound.push((function, export));
                 continue;
             }
+
+            ExportTarget::Function(function, Some(entry), annotations, name) => {
+                (function, entry, annotations, name, false)
+            }
+            ExportTarget::Command(function, entry) => (function, entry, Vec::new(), None, true),
+            ExportTarget::Function(_, None, ..) => {
+                return Err(Diagnostic::internal("source export has no WIT declaration"));
+            }
         };
+        let function = entry.function;
+        let core_name = entry.core_name(resolve);
+        let signature = layouts.signature(function, false);
         let implementation = mir_function.get_symbol_name(ctx).to_string();
         let expected_async = function.kind.is_async();
-        if perry_mir::is_async(ctx, &mir_function) != expected_async {
+        if !command && perry_mir::is_async(ctx, &mir_function) != expected_async {
             let implementation = source_name.as_deref().unwrap_or(&implementation);
             let help = if expected_async {
                 format!(
@@ -166,17 +155,29 @@ pub(super) fn exports(
             .with_optional_span(perry_mir::source_span(ctx, &mir_function))
             .with_help(help));
         }
-        let (params, indirect_size) = layouts.parameters(function, &signature)?;
-        let result = function.result.map(|ty| layouts.value(ty)).transpose()?;
-        // Async exports return through `task.return`, imported from `[export]<interface>`.
-        let kind = if expected_async {
-            let module = match entry.interface {
-                Some(_) => format!("[export]{}", resolve.name_world_key(entry.key)),
-                None => "[export]$root".to_string(),
+        let (params, indirect_size, result) = if command {
+            (Vec::new(), None, None)
+        } else {
+            let (params, indirect_size) = layouts.parameters(function, &signature)?;
+            (
+                params,
+                indirect_size,
+                function.result.map(|ty| layouts.value(ty)).transpose()?,
+            )
+        };
+        let kind = if expected_async || command {
+            let module = if command || entry.interface.is_some() {
+                format!("[export]{}", resolve.name_world_key(entry.key))
+            } else {
+                "[export]$root".to_owned()
             };
             ExportKind::Async {
                 task_return: (module, function.name.clone()),
-                command: false,
+                completion: if command {
+                    perry_codegen::boundary::AsyncCompletion::Command
+                } else {
+                    perry_codegen::boundary::AsyncCompletion::Function
+                },
             }
         } else {
             ExportKind::Sync
@@ -193,32 +194,6 @@ pub(super) fn exports(
                 indirect_size,
                 result,
                 kind,
-            },
-        ));
-    }
-    for target in targets {
-        let perry_frontend::ExportTarget::Destructor(function, core_name) = target else {
-            return Err(Diagnostic::internal(
-                "unexpected witness after world functions",
-            ));
-        };
-        bound.push((
-            function,
-            Export {
-                source_name: None,
-                annotations: Vec::new(),
-                core_name,
-                signature: wit_parser::abi::WasmSignature {
-                    params: vec![wit_parser::abi::WasmType::I32],
-                    results: vec![],
-                    indirect_params: false,
-                    retptr: false,
-                },
-                function: function.get_symbol_name(ctx).into(),
-                params: vec![layouts.value(Type::U32)?],
-                indirect_size: None,
-                result: None,
-                kind: ExportKind::Sync,
             },
         ));
     }
@@ -268,10 +243,7 @@ pub(super) fn finalize_exports(
 
 /// Names of the interfaces `world` imports.
 pub(super) fn imports(resolve: &Resolve, world_id: WorldId) -> Vec<String> {
-    resolve.worlds[world_id]
-        .imports
-        .iter()
-        .filter(|(_, item)| matches!(item, WorldItem::Interface { .. }))
+    perry_contract::world_interfaces(&resolve.worlds[world_id].imports)
         .map(|(key, _)| resolve.name_world_key(key))
         .collect()
 }
@@ -313,4 +285,37 @@ fn stream_functions<'a>(
             index: index as u32,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exported_declarations_survive_reordering() -> anyhow::Result<()> {
+        let mut resolve = Resolve::default();
+        let package = resolve.push_source("api.wit",
+            "package test:order; world api { export left: func(x: u32) -> u32; export right: func() -> string; }")?;
+        let world = resolve.select_world(&[package], Some("api"))?;
+        let ctx = &mut Context::new();
+        let program = perry_frontend::lower_world(
+            ctx,
+            "export function left(x: number) { return x; } export function right() { return 'r'; }",
+            "order.ts",
+            &Default::default(),
+            &perry_frontend::wit::WorldTypes::new(&resolve, Some(world)),
+            Some((&resolve, world)),
+        )?;
+        let mut targets = program.exports;
+        targets.reverse();
+        let bound = exports(&Layouts::new(&resolve)?, ctx, targets, &resolve)?;
+        assert_eq!(
+            bound
+                .iter()
+                .map(|e| (e.core_name.as_str(), e.params.len()))
+                .collect::<Vec<_>>(),
+            [("right", 0), ("left", 1)]
+        );
+        Ok(())
+    }
 }

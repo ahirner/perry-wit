@@ -16,14 +16,10 @@ pub(super) use crate::methods::{Call, CallReceiver, Receiver};
 
 impl Receiver {
     pub(super) fn of(ctx: &Context, value: Value) -> Result<Self> {
-        let ty = value.get_type(ctx);
         Ok(
-            if crate::lower::collections::map_entry_types(ctx, ty).is_some() {
-                Self::Map
-            } else if set_entry_type(ctx, ty).is_some() {
-                Self::Set
-            } else {
-                Self::Value(kind(ctx, value)?)
+            match super::collections::Collection::of(ctx, value.get_type(ctx)) {
+                Some(super::collections::Collection::Box(kind)) => Self::Collection(kind),
+                _ => Self::Value(kind(ctx, value)?),
             },
         )
     }
@@ -49,6 +45,13 @@ macro_rules! lower_calls {
     (@invoke ($b:ident, $ctx:ident, $receiver:ident) value ($method:ident($($arg:expr),*))) => {
         $b.$method($ctx, $receiver $(, $arg)*).map(Some)
     };
+    (@invoke ($b:ident, $ctx:ident, $receiver:ident) keyed ($family:ident, $key:ident, $method:ident)) => {{
+        let ty = lower_calls!(@key_type $family, $ctx, $receiver);
+        let key = $b.expression_with($ctx, $key, Some(ty))?;
+        $b.$method($ctx, $receiver, key, ty).map(Some)
+    }};
+    (@key_type Map, $ctx:ident, $receiver:ident) => { map_types($ctx, $receiver)?.0 };
+    (@key_type Set, $ctx:ident, $receiver:ident) => { set_element($ctx, $receiver)? };
     (@invoke ($b:ident, $ctx:ident, $receiver:ident) optional ($method:ident($($arg:expr),*))) => {
         $b.$method($ctx, $receiver $(, $arg)*)
     };
@@ -114,36 +117,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         let key = self.expression_with(ctx, key, Some(key_type))?;
         let value = self.expression_with(ctx, value, Some(value_type))?;
         self.kv_set(ctx, map, key, value)
-    }
-
-    fn map_has(&mut self, ctx: &mut Context, map: Value, key: &'s Expr) -> Result<Value> {
-        let (key_type, _) = map_types(ctx, map)?;
-        let key = self.expression_with(ctx, key, Some(key_type))?;
-        self.kv_has(ctx, map, key, key_type)
-    }
-
-    fn map_delete(&mut self, ctx: &mut Context, map: Value, key: &'s Expr) -> Result<Value> {
-        let (key_type, _) = map_types(ctx, map)?;
-        let key = self.expression_with(ctx, key, Some(key_type))?;
-        self.kv_delete(ctx, map, key, key_type)
-    }
-
-    fn set_insert(&mut self, ctx: &mut Context, set: Value, value: &'s Expr) -> Result<Value> {
-        let element = set_element(ctx, set)?;
-        let value = self.expression_with(ctx, value, Some(element))?;
-        self.set_add(ctx, set, value, element)
-    }
-
-    fn set_contains(&mut self, ctx: &mut Context, set: Value, value: &'s Expr) -> Result<Value> {
-        let element = set_element(ctx, set)?;
-        let value = self.expression_with(ctx, value, Some(element))?;
-        self.kv_has(ctx, set, value, element)
-    }
-
-    fn set_remove(&mut self, ctx: &mut Context, set: Value, value: &'s Expr) -> Result<Value> {
-        let element = set_element(ctx, set)?;
-        let value = self.expression_with(ctx, value, Some(element))?;
-        self.set_delete(ctx, set, value, element)
     }
 
     fn set_operation(

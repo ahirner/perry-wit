@@ -32,6 +32,7 @@ unreachable_pub = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(conformance_doc_bin)'] }
 
 [workspace.dependencies]
+thiserror = "2"
 anyhow = "1.0"
 bytes = "1"
 http = "1"

@@ -1,6 +1,7 @@
 //! Normalize array and string method calls into uniform AST call shapes before HIR lowering.
 use perry_parser::swc_ecma_ast as ast;
-use swc_common::{DUMMY_SP, SyntaxContext, util::take::Take};
+use swc_common::{DUMMY_SP, util::take::Take};
+use swc_ecma_utils::ExprFactory;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 pub(crate) enum Preservation {
@@ -23,105 +24,63 @@ impl Preservation {
     }
 }
 
-fn slice_call(obj: Box<ast::Expr>, start: usize) -> Box<ast::Expr> {
-    Box::new(ast::Expr::Call(ast::CallExpr {
-        span: DUMMY_SP,
-        ctxt: SyntaxContext::empty(),
-        callee: ast::Callee::Expr(Box::new(ast::Expr::Member(ast::MemberExpr {
-            span: DUMMY_SP,
-            obj,
-            prop: ast::MemberProp::Ident(ast::IdentName::new("slice".into(), DUMMY_SP)),
-        }))),
-        args: vec![ast::ExprOrSpread {
-            spread: None,
-            expr: Box::new(ast::Expr::Lit(ast::Lit::Num(ast::Number {
-                span: DUMMY_SP,
-                value: start as f64,
-                raw: None,
-            }))),
-        }],
-        type_args: None,
-    }))
-}
-
-/// Keep arguments together before HIR expands a variadic push into separate mutations.
-pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut crate::source::FreshNames) {
+/// Preserve call operands and array-rest bindings across Perry's HIR rewrites.
+pub(super) fn preserve_arguments(module: &mut ast::Module, analysis: &mut crate::source::Analysis) {
     struct Arguments<'n> {
-        names: &'n mut crate::source::FreshNames,
+        analysis: &'n mut crate::source::Analysis,
     }
     impl VisitMut for Arguments<'_> {
         fn visit_mut_var_decl(&mut self, var_decl: &mut ast::VarDecl) {
-            let mut new_decls = Vec::with_capacity(var_decl.decls.len());
-            for mut decl in std::mem::take(&mut var_decl.decls) {
-                let rest_pat = match (&mut decl.name, decl.init.is_some()) {
-                    (ast::Pat::Array(arr_pat), true)
-                        if matches!(arr_pat.elems.last(), Some(Some(ast::Pat::Rest(_)))) =>
-                    {
-                        match arr_pat.elems.pop().flatten() {
-                            Some(ast::Pat::Rest(rest)) => Some((arr_pat.elems.len(), rest)),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some((rest_index, rest_pat)) = rest_pat
-                    && let Some(init) = decl.init.take()
+            let mut declarations = Vec::with_capacity(var_decl.decls.len());
+            for mut decl in var_decl.decls.take() {
+                if let ast::Pat::Array(pattern) = &mut decl.name
+                    && let Some(init) = &mut decl.init
+                    && let Some(Some(ast::Pat::Rest(rest))) = pattern.elems.last_mut()
                 {
-                    let mut rest_name = *rest_pat.arg;
-                    if let ast::Pat::Ident(binding) = &mut rest_name
+                    let mut name = *rest.arg.take();
+                    if let ast::Pat::Ident(binding) = &mut name
                         && binding.type_ann.is_none()
                     {
-                        binding.type_ann = rest_pat.type_ann;
+                        binding.type_ann = rest.type_ann.take();
                     }
-                    if rest_index == 0 {
-                        new_decls.push(ast::VarDeclarator {
-                            span: decl.span,
-                            name: rest_name,
-                            init: Some(slice_call(init, 0)),
-                            definite: false,
-                        });
+                    pattern.elems.pop();
+                    let start = pattern.elems.len();
+                    let span = decl.span;
+                    let source = if start == 0 {
+                        init.take()
                     } else {
-                        let src_ident = match *init {
-                            ast::Expr::Ident(src_ident) => src_ident,
-                            other => {
-                                let temp_ident = ast::Ident::new(
-                                    self.names.prefix("arr_rest").into(),
-                                    DUMMY_SP,
-                                    SyntaxContext::empty(),
-                                );
-                                let type_ann = match &mut decl.name {
-                                    ast::Pat::Array(arr_pat) => arr_pat.type_ann.take(),
-                                    _ => None,
-                                };
-                                new_decls.push(ast::VarDeclarator {
-                                    span: DUMMY_SP,
-                                    name: ast::Pat::Ident(ast::BindingIdent {
-                                        id: temp_ident.clone(),
-                                        type_ann,
-                                    }),
-                                    init: Some(Box::new(other)),
-                                    definite: false,
-                                });
-                                temp_ident
-                            }
-                        };
-                        decl.init = Some(Box::new(ast::Expr::Ident(src_ident.clone())));
-                        new_decls.push(decl);
-                        new_decls.push(ast::VarDeclarator {
+                        // A default in the prefix can reassign even an identifier initializer.
+                        let temp = ast::Ident::new_no_ctxt(
+                            self.analysis.names.prefix("arr_rest").into(),
+                            DUMMY_SP,
+                        );
+                        declarations.push(ast::VarDeclarator {
                             span: DUMMY_SP,
-                            name: rest_name,
-                            init: Some(slice_call(
-                                Box::new(ast::Expr::Ident(src_ident)),
-                                rest_index,
-                            )),
+                            name: ast::BindingIdent {
+                                id: temp.clone(),
+                                type_ann: pattern.type_ann.take(),
+                            }
+                            .into(),
+                            init: Some(std::mem::replace(init, temp.clone().into())),
                             definite: false,
                         });
-                    }
+                        declarations.push(decl);
+                        temp.into()
+                    };
+                    let slice = source
+                        .make_member("slice".into())
+                        .as_call(DUMMY_SP, vec![(start as f64).as_arg()]);
+                    declarations.push(ast::VarDeclarator {
+                        span,
+                        name,
+                        init: Some(slice.into()),
+                        definite: false,
+                    });
                 } else {
-                    new_decls.push(decl);
+                    declarations.push(decl);
                 }
             }
-            var_decl.decls = new_decls;
+            var_decl.decls = declarations;
             var_decl.visit_mut_children_with(self);
         }
 
@@ -130,11 +89,13 @@ pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut crate::so
             if let ast::Callee::Expr(callee) = &mut call.callee
                 && let ast::Expr::Member(member) = &mut **callee
                 && let ast::MemberProp::Ident(method) = &mut member.prop
-                && crate::methods::Method::preserve_arguments(
-                    method.sym.as_ref(),
-                    call.args.len(),
-                    call.args.iter().any(|argument| argument.spread.is_some()),
-                )
+                && ((call.type_args.is_some()
+                    && matches!(member.obj.as_ref(), ast::Expr::Ident(id) if self.analysis.classes.contains(&id.to_id())))
+                    || crate::methods::Method::preserve_arguments(
+                        method.sym.as_ref(),
+                        call.args.len(),
+                        call.args.iter().any(|argument| argument.spread.is_some()),
+                    ))
             {
                 // A parenthesized member retains its receiver and arguments when Perry
                 // would otherwise replace the call with a fixed-arity builtin.
@@ -145,7 +106,7 @@ pub(super) fn preserve_arguments(module: &mut ast::Module, names: &mut crate::so
             }
         }
     }
-    module.visit_mut_with(&mut Arguments { names });
+    module.visit_mut_with(&mut Arguments { analysis });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

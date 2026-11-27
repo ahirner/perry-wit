@@ -7,6 +7,7 @@ pub mod types;
 use wit_parser::{Function, InterfaceId, Resolve, World, WorldItem, WorldKey};
 
 /// A function keeps its world key and optional interface owner when flattened.
+#[derive(Clone, Copy)]
 pub struct WorldFunction<'a> {
     pub key: &'a WorldKey,
     pub function: &'a Function,
@@ -25,6 +26,14 @@ impl WorldFunction<'_> {
                 let name = &resolve.packages[id].name;
                 name.namespace == "wasi" && name.name == "cli"
             })
+    }
+
+    pub fn core_name(&self, resolve: &Resolve) -> String {
+        if self.interface.is_some() {
+            export_names::core_export_name(resolve, self.key, self.function)
+        } else {
+            self.function.name.clone()
+        }
     }
 
     pub fn implementation_name(&self, resolve: &Resolve, world: &World) -> String {
@@ -60,6 +69,67 @@ pub fn world_functions<'a>(
                 interface,
             })
     })
+}
+
+/// Interfaces in world declaration order, including named inline interfaces.
+pub fn world_interfaces<'a>(
+    items: impl IntoIterator<Item = (&'a WorldKey, &'a WorldItem)>,
+) -> impl Iterator<Item = (&'a WorldKey, InterfaceId)> {
+    items.into_iter().filter_map(|(key, item)| match item {
+        WorldItem::Interface { id, .. } => Some((key, *id)),
+        _ => None,
+    })
+}
+
+/// Resource declarations owned by an interface, in WIT declaration order.
+pub fn interface_resources(
+    resolve: &Resolve,
+    id: InterfaceId,
+) -> impl Iterator<Item = (&str, wit_parser::TypeId)> {
+    resolve.interfaces[id]
+        .types
+        .iter()
+        .filter_map(|(name, &id)| {
+            matches!(resolve.types[id].kind, wit_parser::TypeDefKind::Resource)
+                .then_some((name.as_str(), id))
+        })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ResourceOperation {
+    Drop,
+    New,
+    Representation,
+}
+
+impl ResourceOperation {
+    pub fn for_interface(exported: bool) -> &'static [Self] {
+        if exported {
+            &[Self::Drop, Self::New, Self::Representation]
+        } else {
+            &[Self::Drop]
+        }
+    }
+
+    pub fn name(self, resource: &str) -> String {
+        match self {
+            Self::Drop => format!("drop{}", names::to_pascal_case(resource)),
+            Self::New => format!("new{}", names::to_pascal_case(resource)),
+            Self::Representation => format!("{}Rep", names::to_camel_case(resource)),
+        }
+    }
+
+    pub fn signature(
+        self,
+        resource: wit_parser::TypeId,
+    ) -> (&'static str, wit_parser::Type, Option<wit_parser::Type>) {
+        use wit_parser::Type::{F64, Id};
+        match self {
+            Self::Drop => ("value", Id(resource), None),
+            Self::New => ("representation", F64, Some(Id(resource))),
+            Self::Representation => ("value", Id(resource), Some(F64)),
+        }
+    }
 }
 
 pub fn type_kind(resolve: &Resolve, ty: wit_parser::Type) -> Option<&wit_parser::TypeDefKind> {

@@ -1,5 +1,6 @@
 //! Keyed operations of `Map`, `Set` and `Record<K, V>` dictionaries, and their iterators.
 
+use super::StorageField as Field;
 use super::*;
 use crate::lower::coerce::admitting;
 use crate::lower::control_flow::Input;
@@ -43,58 +44,30 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.choose(ctx, ty, is_zero, |_, _| Ok(zero), |_, _| Ok(key))
     }
 
-    /// Run `hit(index, entry)` on the first live entry of `entries` whose key is
-    /// SameValueZero-equal to `key`, then leave the scan.
-    fn on_live_match(
+    /// Return `miss` or the result of `hit` on the first live SameValueZero match.
+    fn lookup_entry(
         &mut self,
         ctx: &mut Context,
-        label: &str,
         entries: Value,
         key: Value,
-        hit: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<()>,
-    ) -> Result<()> {
-        self.iterate(
+        miss: Value,
+        hit: impl FnOnce(&mut Self, &mut Context, Value) -> Result<Value>,
+    ) -> Result<Value> {
+        self.find_item(
             ctx,
             Input::Collection(entries),
-            |b, ctx, entry, idx, next, done| {
-                let k_op = FieldGetOp::new(ctx, entry, "_0".to_string()).to_diag(ctx)?;
-                let cand_k = b.append_value(ctx, &k_op);
-                let matched = b.same_value(
+            miss,
+            |b, ctx, entry, _| {
+                let candidate = b.storage_field(ctx, entry, Field::Key)?;
+                b.same_value(
                     ctx,
-                    cand_k,
+                    candidate,
                     key,
                     crate::lower::operators::Equality::SameValueZero,
-                )?;
-                let hit_bb = b.new_block(ctx, &format!("{label}_hit"));
-                b.branch(ctx, matched, hit_bb, next);
-                b.switch_to(hit_bb);
-                hit(b, ctx, idx, entry)?;
-                b.jump(ctx, done);
-                Ok(())
+                )
             },
+            |b, ctx, entry, _| hit(b, ctx, entry),
         )
-    }
-
-    /// [Self::on_live_match], yielding whether an entry matched.
-    fn find_live_match(
-        &mut self,
-        ctx: &mut Context,
-        label: &str,
-        entries: Value,
-        key: Value,
-        hit: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<()>,
-    ) -> Result<Value> {
-        let bool_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let found_slot = self.entry_slot(ctx, bool_ty);
-        let false_val = self.boolean(ctx, false);
-        self.store(ctx, found_slot, false_val);
-        self.on_live_match(ctx, label, entries, key, |b, ctx, idx, entry| {
-            hit(b, ctx, idx, entry)?;
-            let true_val = b.boolean(ctx, true);
-            b.store(ctx, found_slot, true_val);
-            Ok(())
-        })?;
-        self.load(ctx, found_slot)
     }
 
     /// `get(key)` on a `Map` or dictionary: the value, or `undefined`.
@@ -110,16 +83,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         let key = self.fit(ctx, key, k_ty)?;
         let opt_v_ty = admitting(ctx, v_ty, perry_mir::Absence::Undefined);
         let miss = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, opt_v_ty));
-        let result = self.entry_slot(ctx, opt_v_ty);
-        self.store(ctx, result, miss);
-        self.on_live_match(ctx, "kv_get", arr, key, |b, ctx, _, entry| {
-            let v_op = FieldGetOp::new(ctx, entry, "_1".to_string()).to_diag(ctx)?;
-            let cand_v = b.append_value(ctx, &v_op);
-            let wrapped = b.fit(ctx, cand_v, opt_v_ty)?;
-            b.store(ctx, result, wrapped);
-            Ok(())
-        })?;
-        self.load(ctx, result)
+        self.lookup_entry(ctx, arr, key, miss, |b, ctx, entry| {
+            let value = b.storage_field(ctx, entry, Field::MapValue)?;
+            b.fit(ctx, value, opt_v_ty)
+        })
     }
 
     /// The private handle table only inserts fresh keys. Its insertion sequence survives deletions.
@@ -155,18 +122,17 @@ impl<'s> FunctionBuilder<'s, '_> {
             )
         })?;
         let arr = self.collection_entries_array(ctx, coll)?;
-        let box_opt = self.collection_underlying_box(ctx, coll)?;
+        let box_opt = self
+            .collection_storage(ctx, coll)?
+            .map(|(_, storage)| storage);
         let key = self.fit(ctx, key, k_ty)?;
         let key = self.canonicalize_collection_key(ctx, key)?;
         let val = self.fit(ctx, val, v_ty)?;
-        let was_found = self.find_live_match(ctx, "kv_set", arr, key, |b, ctx, _, entry| {
-            b.emit(ctx, |ctx| {
-                FieldSetOp::new(ctx, entry, "_0".to_string(), key)
-            });
-            b.emit(ctx, |ctx| {
-                FieldSetOp::new(ctx, entry, "_1".to_string(), val)
-            });
-            Ok(())
+        let miss = self.boolean(ctx, false);
+        let was_found = self.lookup_entry(ctx, arr, key, miss, |b, ctx, entry| {
+            b.set_storage_field(ctx, entry, Field::Key, key);
+            b.set_storage_field(ctx, entry, Field::MapValue, val);
+            Ok(b.boolean(ctx, true))
         })?;
         self.append_unless(ctx, "kv_set", was_found, arr, box_opt, &[key, val])?;
         Ok(coll)
@@ -205,12 +171,14 @@ impl<'s> FunctionBuilder<'s, '_> {
         fields.extend_from_slice(payload);
         if let Some(box_val) = owner {
             fields.push(self.boolean(ctx, true));
-            fields.push(self.next_collection_seq(ctx, box_val)?);
+            let (sequence, _) =
+                self.update_counter(ctx, box_val, Field::BoxSequence, BinaryKind::Add)?;
+            fields.push(sequence);
         }
         let entry = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, fields));
         self.emit(ctx, |ctx| ArrayPushOp::new(ctx, entries, entry));
         if let Some(box_val) = owner {
-            self.bump_live_count(ctx, box_val, BinaryKind::Add)?;
+            self.update_counter(ctx, box_val, Field::BoxLength, BinaryKind::Add)?;
         }
         Ok(())
     }
@@ -225,10 +193,21 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let key = self.fit(ctx, key, k_ty)?;
-        self.find_live_match(ctx, "kv_has", arr, key, |_, _, _, _| Ok(()))
+        self.contains_entry(ctx, arr, key)
     }
 
-    /// Lower `delete(key)`, tombstoning the entry on a `Map` or compacting in place on a dictionary.
+    fn contains_entry(&mut self, ctx: &mut Context, entries: Value, key: Value) -> Result<Value> {
+        let miss = self.boolean(ctx, false);
+        self.lookup_entry(
+            ctx,
+            entries,
+            key,
+            miss,
+            |b, ctx, _| Ok(b.boolean(ctx, true)),
+        )
+    }
+
+    /// Lower `delete(key)`, tombstoning the entry on a `Map` or `Set` or compacting in place on a dictionary.
     pub(crate) fn kv_delete(
         &mut self,
         ctx: &mut Context,
@@ -237,16 +216,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         k_ty: TypeHandle,
     ) -> Result<Value> {
         let key = self.fit(ctx, key, k_ty)?;
-        if let Some((_, v_ty, _)) = map_entry_types(ctx, coll.get_type(ctx)) {
-            let arr = self.collection_entries_array(ctx, coll)?;
-            return self.find_live_match(ctx, "map_delete", arr, key, |b, ctx, _, entry| {
-                let cleared = [("_0", k_ty), ("_1", v_ty)];
-                b.tombstone_entry(ctx, arr, entry, CollectionKind::Map, &cleared, coll)
+        if let Some(Collection::Box(kind)) = Collection::of(ctx, coll.get_type(ctx)) {
+            let entries = self.storage_field(ctx, coll, Field::BoxEntries)?;
+            let miss = self.boolean(ctx, false);
+            return self.lookup_entry(ctx, entries, key, miss, |b, ctx, entry| {
+                b.delete_entry(ctx, coll, entries, entry, kind)?;
+                Ok(b.boolean(ctx, true))
             });
         }
         self.retain_array(ctx, coll, |b, ctx, entry| {
-            let k_op = FieldGetOp::new(ctx, entry, "_0".to_string()).to_diag(ctx)?;
-            let candidate = b.append_value(ctx, &k_op);
+            let candidate = b.storage_field(ctx, entry, Field::Key)?;
             let matched = b.same_value(
                 ctx,
                 candidate,
@@ -291,30 +270,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let val = self.fit(ctx, val, elem_ty)?;
         let val = self.canonicalize_collection_key(ctx, val)?;
-        let present = self.find_live_match(ctx, "set_has", arr, val, |_, _, _, _| Ok(()))?;
+        let present = self.contains_entry(ctx, arr, val)?;
         self.append_unless(ctx, "set_add", present, arr, Some(coll), &[val])?;
         Ok(coll)
-    }
-
-    pub(crate) fn set_delete(
-        &mut self,
-        ctx: &mut Context,
-        coll: Value,
-        val: Value,
-        elem_ty: TypeHandle,
-    ) -> Result<Value> {
-        let arr = self.collection_entries_array(ctx, coll)?;
-        let val = self.fit(ctx, val, elem_ty)?;
-        self.find_live_match(ctx, "set_delete", arr, val, |b, ctx, _, entry| {
-            b.tombstone_entry(
-                ctx,
-                arr,
-                entry,
-                CollectionKind::Set,
-                &[("_0", elem_ty)],
-                coll,
-            )
-        })
     }
 
     pub(crate) fn set_binary_op(
@@ -407,31 +365,22 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let other = self.expression(ctx, other_expr)?;
         let other = self.defined(ctx, other)?;
-        let i1 = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let res_slot = self.entry_slot(ctx, i1);
-        let init_true = self.boolean(ctx, true);
-        self.store(ctx, res_slot, init_true);
+        let all_match = self.boolean(ctx, true);
         let (iter_set, check_set, negate) = match relation {
             SetRelation::Subset => (receiver, other, false),
             SetRelation::Superset => (other, receiver, false),
             SetRelation::Disjoint => (receiver, other, true),
         };
-        self.iterate(
+        self.find_item(
             ctx,
             Input::Collection(iter_set),
-            |b, ctx, val, _, next, done| {
+            all_match,
+            |b, ctx, val, _| {
                 let has = b.kv_has(ctx, check_set, val, elem_ty)?;
-                let bad = if negate { has } else { b.not(ctx, has) };
-                let fail_bb = b.new_block(ctx, "set_rel_fail");
-                b.branch(ctx, bad, fail_bb, next);
-                b.switch_to(fail_bb);
-                let f = b.boolean(ctx, false);
-                b.store(ctx, res_slot, f);
-                b.jump(ctx, done);
-                Ok(())
+                Ok(if negate { has } else { b.not(ctx, has) })
             },
-        )?;
-        self.load(ctx, res_slot)
+            |b, ctx, _, _| Ok(b.boolean(ctx, false)),
+        )
     }
 
     pub(super) fn map_group_by(

@@ -295,6 +295,7 @@ fn generic_property_reads_require_a_live_argument_guard() -> anyhow::Result<()> 
     use anyhow::Context;
     for body in [
         "return size(message);",
+        "return size('ok', message.length);",
         "if (message !== null) { message = null; return size(message); } return 0;",
         "if (message === null) { return 0; } else { message = null; } return size(message);",
         "const reset = (): void => { message = null; }; if (message !== null) { reset(); return size(message); } return 0;",

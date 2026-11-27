@@ -3,9 +3,10 @@ use super::types::{Ty, TyKind, TypeTable};
 use crate::engine::types::WitView;
 use crate::{
     Absence,
-    collections::IteratorMethod,
+    collections::{CollectionViewKind, IteratorMethod},
     methods::{Kind, Method, MethodResult, Receiver},
     shapes::{self, Declarations},
+    source::CollectionKind,
 };
 use perry_hir::ir::{BinaryOp, Expr, LogicalOp, UnaryOp};
 use pliron::context::Context;
@@ -23,12 +24,6 @@ pub(crate) fn receiver_of(
     types: &TypeTable,
     ty: Ty,
 ) -> Option<Receiver> {
-    let for_name = |name: &str| match name {
-        "Map" | "ReadonlyMap" => Some(Receiver::Map),
-        "Set" | "ReadonlySet" => Some(Receiver::Set),
-        "Stats" | "fs.Stats" => Some(Receiver::Value(Kind::Stats)),
-        other => Some(Receiver::Value(Kind::builtin(other)?)),
-    };
     match types.kind(ty) {
         _ if dense_array(types, ty) => Some(Receiver::Value(Kind::Array)),
         TyKind::Union(span)
@@ -51,7 +46,10 @@ pub(crate) fn receiver_of(
             if !decls.is_user_type(id.get(ctx))
                 && !decls.imported_types.contains_key(id.get(ctx).as_str()) =>
         {
-            for_name(id.get(ctx))
+            let name = id.get(ctx);
+            CollectionKind::from_type_name(name)
+                .map(Receiver::Collection)
+                .or_else(|| Kind::builtin(name).map(Receiver::Value))
         }
         _ => None,
     }
@@ -74,14 +72,21 @@ pub(crate) fn iterated_element(ctx: &Context, types: &mut TypeTable, ty: Ty) -> 
         TyKind::Named(id) if id.get(ctx) == "Uint8Array" => Some(Ty::NUMBER),
         TyKind::Generic { base, args } => {
             let name = base.get(ctx);
-            match (name.as_str(), types.ty_slice(args)) {
-                ("Set" | "ReadonlySet" | "SetValues" | "Array" | "ReadonlyArray", &[e]) => Some(e),
-                ("MapKeys", &[k, _]) => Some(k),
-                ("MapValues", &[_, v]) => Some(v),
-                ("Map" | "ReadonlyMap" | "MapEntries", &[k, v]) => Some(types.tuple(&[k, v])),
-                ("SetEntries", &[e]) => Some(types.tuple(&[e, e])),
-                _ => None,
+            let arguments = types.ty_slice(args);
+            if matches!(name.as_str(), "Array" | "ReadonlyArray") {
+                return match arguments {
+                    &[element] => Some(element),
+                    _ => None,
+                };
             }
+            let view = CollectionViewKind::from_type_name(name).or_else(|| {
+                CollectionKind::from_type_name(name).map(CollectionKind::default_view)
+            })?;
+            let fields = view.source().type_fields(arguments)?;
+            Some(
+                view.project(fields)
+                    .materialize(std::convert::identity, |fields| types.tuple(&fields)),
+            )
         }
         _ => None,
     }
@@ -96,24 +101,19 @@ pub(crate) fn iterator_view(
     let (source, _) = types.strip_nullish(source);
     match types.kind(source) {
         TyKind::Array(elem) => {
-            let out = match method {
-                IteratorMethod::Keys => Ty::NUMBER,
-                IteratorMethod::Values => elem,
-                IteratorMethod::Entries => types.tuple(&[Ty::NUMBER, elem]),
-            };
+            let out = method
+                .project([Ty::NUMBER, elem])
+                .materialize(std::convert::identity, |fields| types.tuple(&fields));
             Some(types.array(out))
         }
         TyKind::Generic { base, args } => {
-            let name = base.get(ctx);
-            let (view_name, kept_buf, kept_len) = match (name.as_str(), types.ty_slice(args)) {
-                ("Map" | "ReadonlyMap", &[k, v]) => (method.map_view().type_name(), [k, v], 2),
-                ("Set" | "ReadonlySet", &[e, ..]) => (method.set_view().type_name(), [e, e], 1),
-                _ => return None,
-            };
-            Some(types.generic(
-                shapes::TypeName::new(ctx, view_name.to_owned()),
-                &kept_buf[..kept_len],
-            ))
+            let kind = CollectionKind::from_type_name(base.get(ctx))?;
+            let name = shapes::TypeName::new(ctx, method.view(kind).type_name().into());
+            match (kind, types.ty_slice(args)) {
+                (CollectionKind::Map, &[k, v]) => Some(types.generic(name, &[k, v])),
+                (CollectionKind::Set, &[v, ..]) => Some(types.generic(name, &[v])),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -127,7 +127,16 @@ pub(crate) struct MethodResultArgs<'a> {
     pub(crate) callback_result: Option<Ty>,
     pub(crate) sparse_arrays: bool,
 }
-impl MethodResultArgs<'_> {
+impl<'a> MethodResultArgs<'a> {
+    pub(super) fn call(receiver: Ty, args: &'a [Expr], types: &[Ty], sparse_arrays: bool) -> Self {
+        Self {
+            arg0: types.first().copied(),
+            arg0_expr: args.first(),
+            sparse_arrays,
+            ..Self::receiver_only(receiver)
+        }
+    }
+
     pub(crate) fn receiver_only(receiver: Ty) -> Self {
         Self {
             receiver,
@@ -240,14 +249,8 @@ pub(crate) fn apply_method_result(
                 if byob { Kind::ByobReader } else { Kind::Reader },
             )
         }
-        MethodResult::IteratorKeys => {
-            iterator_view(ctx, types, receiver, IteratorMethod::Keys).unwrap_or(Ty::OPEN)
-        }
-        MethodResult::IteratorValues => {
-            iterator_view(ctx, types, receiver, IteratorMethod::Values).unwrap_or(Ty::OPEN)
-        }
-        MethodResult::IteratorEntries => {
-            iterator_view(ctx, types, receiver, IteratorMethod::Entries).unwrap_or(Ty::OPEN)
+        MethodResult::Iterator(method) => {
+            iterator_view(ctx, types, receiver, method).unwrap_or(Ty::OPEN)
         }
         MethodResult::Lookup => {
             let (stripped, _) = types.strip_nullish(receiver);
@@ -437,59 +440,29 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         return signature_result(ctx, types, op.result_kinds());
     }
     match expr {
-        Expr::Undefined | Expr::Void(_) => Ty::VOID,
-        Expr::Null => Ty::NULL,
-        Expr::Bool(_) | Expr::Compare { .. } | Expr::InstanceOf { .. } | Expr::In { .. } => {
-            Ty::BOOLEAN
-        }
-        Expr::Integer(_) | Expr::Number(_) | Expr::Update { .. } => Ty::NUMBER,
-        Expr::BigInt(_) => Ty::BIGINT,
-        Expr::String(_) | Expr::WtfString(_) | Expr::TypeOf(_) => Ty::STRING,
         Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) => Ty::DYNAMIC,
         Expr::JsonParseTyped { ty, .. } => {
             let p = types.intern_hir(ctx, ty, true);
             if p == Ty::OPEN { Ty::DYNAMIC } else { p }
         }
-        Expr::MathMin(_)
-        | Expr::MathMax(_)
-        | Expr::MathMinSpread(_)
-        | Expr::MathMaxSpread(_)
-        | Expr::NumberCoerce(_)
-        | Expr::ParseInt { .. }
-        | Expr::DateUtc(_)
-        | Expr::MapSize(_)
-        | Expr::SetSize(_)
-        | Expr::Uint8ArraySet { .. }
-        | Expr::PropertyUpdate { .. } => Ty::NUMBER,
-        Expr::ArrayIsArray(_) | Expr::ObjectIs(..) => Ty::BOOLEAN,
-        Expr::BigIntCoerce(_) => Ty::BIGINT,
-        Expr::StringCoerce(_)
-        | Expr::TemplateStringCoerce(_)
-        | Expr::StringFromCharCode(_)
-        | Expr::StringFromCharCodeSpread(_)
-        | Expr::PathJoin(..)
-        | Expr::PathResolve(_)
-        | Expr::TextDecoderEncoding(_)
-        | Expr::TextDecoderDecode { .. }
-        | Expr::UrlSetPathname { .. }
-        | Expr::JsonStringify(_)
-        | Expr::JsonStringifyFull(..) => Ty::STRING,
-        Expr::ForInKeys(_) | Expr::ObjectKeys(_) => types.array(Ty::STRING),
-        Expr::ProcessExit(_) => Ty::NEVER,
-        Expr::TextDecoderNew { .. } => types.named(ctx, "TextDecoder"),
-        Expr::ErrorNew(_) | Expr::ErrorNewWithCause { .. } | Expr::ErrorNewWithOptions { .. } => {
-            types.named(ctx, "Error")
+        Expr::Uint8ArraySet { .. } => Ty::NUMBER,
+        Expr::UrlSetPathname { .. } => Ty::STRING,
+        _ => {
+            use perry_hir::types::Type;
+            let ty = perry_hir::analysis::infer_expr_type(expr, &());
+            match &ty {
+                Type::Boolean
+                | Type::Number
+                | Type::BigInt
+                | Type::String
+                | Type::Null
+                | Type::Never
+                | Type::Void => types.intern_hir(ctx, &ty, false),
+                Type::Named(name) if Kind::builtin(name).is_some() => types.named(ctx, name),
+                Type::Array(element) if **element == Type::String => types.array(Ty::STRING),
+                _ => Ty::OPEN,
+            }
         }
-        Expr::TypeErrorNew(_) => types.named(ctx, "TypeError"),
-        Expr::RangeErrorNew(_) => types.named(ctx, "RangeError"),
-        Expr::ReferenceErrorNew(_) => types.named(ctx, "ReferenceError"),
-        Expr::SyntaxErrorNew(_) => types.named(ctx, "SyntaxError"),
-        Expr::Uint8ArrayFrom(_) | Expr::Uint8ArrayNew(_) => types.named(ctx, "Uint8Array"),
-        Expr::DateNew(_) => types.named(ctx, "Date"),
-        Expr::RegExp { .. } | Expr::RegExpDynamic { .. } => types.named(ctx, "RegExp"),
-        Expr::UrlNew { .. } => types.named(ctx, "URL"),
-        Expr::UrlSearchParamsNew(_) => types.named(ctx, "URLSearchParams"),
-        _ => Ty::OPEN,
     }
 }
 
@@ -551,11 +524,13 @@ pub(crate) fn property_type(
                 _ => None,
             };
             if let Some(args) = gargs {
-                if matches!(
-                    base_name.as_str(),
-                    "Map" | "ReadonlyMap" | "Set" | "ReadonlySet"
-                ) && property == "size"
+                if base_name == "WitInput"
+                    && let &[inner] = types.ty_slice(args)
                 {
+                    let field = property_type(ctx, decls, types, inner, property)?;
+                    return Some(types.wit_input(ctx, field));
+                }
+                if property == "size" && CollectionKind::from_type_name(base_name).is_some() {
                     return Some(Ty::NUMBER);
                 }
                 if base_name == SETTLED && !decls.is_user_type(base_name) {
@@ -639,11 +614,6 @@ pub(crate) fn index_type(
     index: &Expr,
 ) -> Option<Ty> {
     let (stripped, _) = types.strip_nullish(object);
-    if let Expr::String(key) = index
-        && let Some(ty) = property_type(ctx, decls, types, stripped, key)
-    {
-        return Some(ty);
-    }
     match types.kind(stripped) {
         TyKind::Dynamic => Some(Ty::DYNAMIC),
         TyKind::Array(elem) => Some(elem),
@@ -673,91 +643,6 @@ pub(crate) fn index_type(
             .or_else(|| dict_value_ty(ctx, decls, types, stripped)),
         _ => None,
     }
-}
-
-pub(crate) fn static_global_method(
-    ctx: &Context,
-    types: &mut TypeTable,
-    class: &str,
-    method: &str,
-    args: &[Expr],
-    arg_tys: &[Ty],
-) -> Option<Ty> {
-    match (class, method) {
-        ("performance", "now") => Some(Ty::NUMBER),
-        ("Promise", "allSettled" | "all" | "race") => {
-            let val = match (args, arg_tys) {
-                ([Expr::Array(elems, _)], [_]) if elems.is_empty() => Ty::VOID,
-                ([_], &[src]) => {
-                    if src == Ty::BOTTOM {
-                        return Some(Ty::BOTTOM);
-                    }
-                    let elem = iterated_element(ctx, types, src).unwrap_or(Ty::OPEN);
-                    let unwrap = |t: Ty, types: &TypeTable| match types.kind(t) {
-                        TyKind::Promise(i) => i,
-                        _ => t,
-                    };
-                    let unwrapped = match types.kind(elem) {
-                        TyKind::Union(span) => {
-                            let out: Vec<Ty> = types
-                                .ty_slice(span)
-                                .iter()
-                                .map(|&m| unwrap(m, types))
-                                .collect();
-                            types.union(&out)
-                        }
-                        _ => unwrap(elem, types),
-                    };
-                    if unwrapped == Ty::NEVER {
-                        Ty::VOID
-                    } else {
-                        unwrapped
-                    }
-                }
-                _ => Ty::OPEN,
-            };
-            let inner = match method {
-                "allSettled" => {
-                    let settled =
-                        types.generic(shapes::TypeName::new(ctx, SETTLED.to_owned()), &[val]);
-                    types.array(settled)
-                }
-                "all" => types.array(val),
-                _ => val,
-            };
-            Some(types.promise(inner))
-        }
-        ("Promise", "resolve") => {
-            let val = arg_tys.first().copied().unwrap_or(Ty::VOID);
-            Some(if matches!(types.kind(val), TyKind::Promise(_)) {
-                val
-            } else {
-                types.promise(val)
-            })
-        }
-        ("Promise", "reject") => Some(types.promise(Ty::NEVER)),
-        _ => None,
-    }
-}
-
-pub(crate) fn temporal_static_method(
-    ctx: &Context,
-    types: &mut TypeTable,
-    class: &str,
-    method: &str,
-) -> Option<Ty> {
-    Some(match (class, method) {
-        ("Instant", "from" | "fromEpochMilliseconds") | ("Now", "instant") => {
-            types.named(ctx, "Temporal.Instant")
-        }
-        ("PlainDate", "from") | ("Now", "plainDateISO") => types.named(ctx, "Temporal.PlainDate"),
-        ("PlainDate", "compare") => Ty::NUMBER,
-        ("PlainDateTime", "from") | ("Now", "plainDateTimeISO") => {
-            types.named(ctx, "Temporal.PlainDateTime")
-        }
-        ("Now", "timeZoneId") => Ty::STRING,
-        _ => return None,
-    })
 }
 
 pub(crate) fn logical_result(types: &mut TypeTable, op: LogicalOp, left: Ty, right: Ty) -> Ty {

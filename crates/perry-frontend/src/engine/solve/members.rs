@@ -351,6 +351,42 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
+    pub(super) fn eval_index(
+        &mut self,
+        s: &mut EvalState<'h>,
+        site: &'h Expr,
+        obj_ty: Ty,
+        index: &'h Expr,
+        element_offset: u32,
+    ) -> Result<Ty> {
+        let (obj_def, _) = self.types.strip_nullish(obj_ty);
+        self.check_timer_member(obj_def, element_offset)?;
+        let idx_ty = self.eval_expr(s, index)?;
+        if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
+            if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
+                self.facts.dirty.insert(Fact::Storage(loc));
+            }
+            if idx_ty != Ty::BOTTOM && !kind.accepts_index(idx_ty) {
+                self.write_loc(loc, Ty::OPEN);
+            }
+        }
+        let obj_ty = self.resolve_cell_read(s.inst, obj_ty);
+        if obj_ty == Ty::BOTTOM {
+            return Ok(Ty::BOTTOM);
+        }
+        if let Expr::String(name) = index {
+            let stripped = self.types.strip_nullish(obj_ty).0;
+            let class = self.resolve_class_inst(s.inst, stripped, element_offset)?;
+            if let Some(ty) = self.member_type(s.inst, site, stripped, name, class)? {
+                return Ok(ty);
+            }
+        }
+        Ok(
+            builtins::index_type(self.ctx, self.decls, self.types, obj_ty, index)
+                .unwrap_or(Ty::OPEN),
+        )
+    }
+
     pub(super) fn eval_property_get(
         &mut self,
         s: &mut EvalState<'h>,
@@ -389,20 +425,33 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             obj_ty = self.resolve_cell_read(s.inst, obj_ty);
         }
-        let (stripped, _) = self.types.strip_nullish(obj_ty);
-        if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, 0)? {
-            if let Some(loc) = self.class_field_loc(cinst_id, property) {
-                return Ok(self.read_loc(loc, s.inst));
+        let stripped = self.types.strip_nullish(obj_ty).0;
+        let class = self.resolve_class_inst(s.inst, stripped, byte_offset)?;
+        Ok(self
+            .member_type(s.inst, site, stripped, property, class)?
+            .unwrap_or(Ty::OPEN))
+    }
+
+    pub(super) fn member_type(
+        &mut self,
+        inst: InstanceId,
+        site: &'h Expr,
+        stripped: Ty,
+        property: &str,
+        class: Option<ClassInstId>,
+    ) -> Result<Option<Ty>> {
+        if let Some(class) = class {
+            if let Some(loc) = self.class_field_loc(class, property) {
+                return Ok(Some(self.read_loc(loc, inst)));
             }
-            if let Some(target) = self.request_accessor(s.inst, cinst_id, property, None)? {
-                self.record_site(s.inst, site, SiteResolution::ReadMember(target));
-                return Ok(self.read_loc(self.instances[target].return_loc, s.inst));
+            if let Some(target) = self.request_accessor(inst, class, property, None)? {
+                self.record_site(inst, site, SiteResolution::ReadMember(target));
+                return Ok(Some(self.read_loc(self.instances[target].return_loc, inst)));
             }
         }
-        Ok(
-            builtins::property_type(self.ctx, self.decls, self.types, obj_ty, property)
-                .unwrap_or(Ty::OPEN),
-        )
+        Ok(builtins::property_type(
+            self.ctx, self.decls, self.types, stripped, property,
+        ))
     }
 
     pub(super) fn class_declaration(&self, id: ClassInstId) -> &'h perry_hir::ir::Class {

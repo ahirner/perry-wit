@@ -53,7 +53,7 @@ pub(crate) fn export(
         };
     if let ExportKind::Async {
         task_return,
-        command,
+        completion: mode,
     } = &export.kind
     {
         return async_export(
@@ -61,7 +61,7 @@ pub(crate) fn export(
             state,
             function,
             export,
-            (task_return, *command),
+            (task_return, *mode),
             (&mir_params, &mir_results),
             completion,
         );
@@ -88,8 +88,7 @@ pub(crate) fn export(
     let glue = FuncOp::new(ctx, identifier(&export.core_name), fn_ty);
     set_export(ctx, &glue, &export.core_name);
     let entry = glue.get_entry_block(ctx);
-    let mut flat: Vec<Value> = entry.deref(ctx).arguments().collect();
-    flat.reverse();
+    let flat: Vec<Value> = entry.deref(ctx).arguments().collect();
 
     let mut b = FunctionLowering::glue(state, ctx, &glue);
     if scope == Scope::Task {
@@ -114,7 +113,7 @@ pub(crate) fn export(
         b.block = active;
         joined
     });
-    let args = b.lift_parameters(ctx, export, &mir_params, &mut flat)?;
+    let args = b.lift_parameters(ctx, export, &mir_params, &flat)?;
     let throws = b.state.may_throw(&function.get_symbol_name(ctx));
     if throws {
         call_results.push(i32_type(ctx));
@@ -139,11 +138,7 @@ pub(crate) fn export(
         // An uncaught exception without a WIT error type has no value to return.
         let normal = b.enter_if(ctx, status);
         b.return_resources(ctx);
-        if let Some(ty) = export
-            .result
-            .as_ref()
-            .filter(|r| matches!(r.kind, AbiKind::Result { .. }) && r.accepts_exception())
-        {
+        if let Some(ty) = export.exception_result() {
             let returned = b.lower_exception(ctx, ty, status, indirect)?;
             b.ret(ctx, returned);
         } else {
@@ -169,7 +164,7 @@ pub(crate) fn export(
         .first()
         .map(|ty| (*ty, Carriers::Scalar(values[0])));
     let source = if completion {
-        Some(BoundaryValue::Completion { case: 0, payload })
+        Some(BoundaryValue::Case(&["ok"], payload))
     } else {
         payload.map(|(mir, value)| BoundaryValue::Native(mir, value))
     };
@@ -215,11 +210,12 @@ fn async_export(
     state: &mut ModuleState,
     function: &FuncOp,
     export: &Export,
-    ((module, wit_name), command): (&(String, String), bool),
+    ((module, wit_name), mode): (&(String, String), AsyncCompletion),
     (mir_params, mir_results): (&[TypeHandle], &[TypeHandle]),
     completion: bool,
 ) -> Result<()> {
     // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
+    let command = matches!(mode, AsyncCompletion::Command);
     let result = if command {
         Some([Flat::I32].as_slice())
     } else {
@@ -348,20 +344,17 @@ fn async_export(
             let rejected = b.num(ctx, NumOpcode::I32Eq, vec![settled, rejected_state]);
             let fulfilled = b.enter_if(ctx, rejected);
             b.return_resources(ctx);
-            if let Some(ty) = export.result.as_ref().filter(|r| r.accepts_exception()) {
+            if let Some(ty) = export.exception_result() {
                 if uses_io {
                     b.flush_io(ctx, wait);
                 }
-                let values = if let AbiKind::OkHandle { error_case } = ty.kind {
-                    // `err(error_case(some(description)))`, then end the task.
+                let values = if let AsyncCompletion::RejectionText(path) = mode {
                     let text = b.runtime(ctx, Runtime::RejectionText, vec![promise]);
-                    let data = b.load(ctx, MemKind::I32, text, strings::DATA);
-                    let len = b.load(ctx, MemKind::I32, text, strings::LEN);
-                    let one = b.i32_const(ctx, 1);
-                    let case = b.i32_const(ctx, error_case as i32);
-                    let mut values = Vec::new();
-                    b.flat_i32s(ctx, ty.direct()?, &[one, case, one, data, len], &mut values)?;
-                    values
+                    let payload = Some((
+                        perry_mir::StringType::get(ctx).into(),
+                        Carriers::Scalar(text),
+                    ));
+                    b.lower_return(ctx, ty, BoundaryValue::Case(path, payload), indirect)?
                 } else {
                     let status = b.runtime(ctx, Runtime::PromiseRethrow, vec![promise]);
                     b.lower_exception(ctx, ty, status, indirect)?
@@ -402,10 +395,7 @@ fn async_export(
             let value =
                 b.load_slot_value(ctx, promise, perry_abi::layout::promise::VALUE, *mir_ty)?;
             let source = if completion {
-                BoundaryValue::Completion {
-                    case: 0,
-                    payload: Some((*mir_ty, value)),
-                }
+                BoundaryValue::Case(&["ok"], Some((*mir_ty, value)))
             } else {
                 BoundaryValue::Native(*mir_ty, value)
             };
@@ -457,8 +447,7 @@ fn async_export(
     let lift = FuncOp::new(ctx, identifier(&lift_name), lift_ty);
     set_export(ctx, &lift, &lift_name);
     {
-        let mut flat: Vec<Value> = lift.get_entry_block(ctx).deref(ctx).arguments().collect();
-        flat.reverse();
+        let flat: Vec<Value> = lift.get_entry_block(ctx).deref(ctx).arguments().collect();
         let mut b = FunctionLowering::glue(state, ctx, &lift);
         let task = b.task_enter(ctx);
         if command {
@@ -478,7 +467,7 @@ fn async_export(
             b.block = active;
             joined
         });
-        let args = b.lift_parameters(ctx, export, mir_params, &mut flat)?;
+        let args = b.lift_parameters(ctx, export, mir_params, &flat)?;
         let ramp = CallOp::new(ctx, function.get_symbol_name(ctx), args, vec![i32]);
         let mut promise = b.result(ctx, ramp.get_operation());
         if let Some(joined) = joined {
@@ -590,12 +579,7 @@ impl FunctionLowering<'_, '_> {
     ) -> Result<Vec<Value>> {
         let exception = self.runtime(ctx, Runtime::ExceptionCatch, vec![status]);
         let payload = self.completion_error(ctx, ty, exception)?;
-        self.lower_return(
-            ctx,
-            ty,
-            BoundaryValue::Completion { case: 1, payload },
-            indirect,
-        )
+        self.lower_return(ctx, ty, BoundaryValue::Case(&["err"], payload), indirect)
     }
 
     fn lower_return(
@@ -616,10 +600,7 @@ impl FunctionLowering<'_, '_> {
             Some(area) => Canonical::Memory(area, 0),
             None => Canonical::Flat(&mut flat),
         };
-        match source {
-            BoundaryValue::Native(mir, value) => self.lower_abi(ctx, ty, mir, value, target)?,
-            source @ BoundaryValue::Completion { .. } => self.lower_sum(ctx, ty, source, target)?,
-        }
+        self.lower_abi(ctx, ty, source, target)?;
         if let Some(area) = area {
             flat.push(area);
         }

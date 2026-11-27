@@ -35,18 +35,18 @@ macro_rules! method_catalog {
                 ArrayIndexOf "indexOf" -> [Number] Upstream Method [value, from:optional] => value(array_search(Search::Index(value, from, Direction::Forward))), "requires a value and optional starting index";
                 ArrayLastIndexOf "lastIndexOf" -> [Number] Always Method [value, from:optional] => value(array_search(Search::Index(value, from, Direction::Reverse))), "requires a value and optional starting index";
             }
-            Receiver::Map, "Map" {
+            Receiver::Collection($crate::source::CollectionKind::Map), "Map" {
                 MapGet "get" -> Lookup Upstream Method [key] => value(map_get(key)), "requires one key argument";
                 MapSet "set" -> Receiver Upstream Method [key, value] => value(map_set(key, value)), "requires key and value arguments";
-                MapHas "has" -> [Bool] Upstream Method [key] => value(map_has(key)), "requires one key argument";
-                MapDelete "delete" -> [Bool] Upstream Method [key] => value(map_delete(key)), "requires one key argument";
+                MapHas "has" -> [Bool] Upstream Method [key] => keyed(Map, key, kv_has), "requires one key argument";
+                MapDelete "delete" -> [Bool] Upstream Method [key] => keyed(Map, key, kv_delete), "requires one key argument";
                 MapClear "clear" -> [] Upstream Method [] => value(collection_clear()), "takes no arguments";
-                MapForEach "forEach" -> [] Always Method [callback] => value(collection_for_each(callback)), "requires one callback argument";
+                MapForEach "forEach" -> [] Always Method callback(Collection) [callback] => value(collection_for_each(callback)), "requires one callback argument";
             }
-            Receiver::Set, "Set" {
-                SetAdd "add" -> Receiver Upstream Method [value] => value(set_insert(value)), "requires one value argument";
-                SetHas "has" -> [Bool] Upstream Method [value] => value(set_contains(value)), "requires one value argument";
-                SetDelete "delete" -> [Bool] Upstream Method [value] => value(set_remove(value)), "requires one value argument";
+            Receiver::Collection($crate::source::CollectionKind::Set), "Set" {
+                SetAdd "add" -> Receiver Upstream Method [value] => keyed(Set, value, set_add), "requires one value argument";
+                SetHas "has" -> [Bool] Upstream Method [value] => keyed(Set, value, kv_has), "requires one value argument";
+                SetDelete "delete" -> [Bool] Upstream Method [value] => keyed(Set, value, kv_delete), "requires one value argument";
                 SetDifference "difference" -> Receiver Always Method [other] => value(set_operation(other, SetOperation::Difference)), "requires one Set argument";
                 SetIntersection "intersection" -> Receiver Always Method [other] => value(set_operation(other, SetOperation::Intersection)), "requires one Set argument";
                 SetUnion "union" -> Receiver Always Method [other] => value(set_operation(other, SetOperation::Union)), "requires one Set argument";
@@ -55,7 +55,7 @@ macro_rules! method_catalog {
                 SetIsSupersetOf "isSupersetOf" -> [Bool] Always Method [other] => value(set_relation(other, SetRelation::Superset)), "requires one Set argument";
                 SetIsDisjointFrom "isDisjointFrom" -> [Bool] Always Method [other] => value(set_relation(other, SetRelation::Disjoint)), "requires one Set argument";
                 SetClear "clear" -> [] Upstream Method [] => value(collection_clear()), "takes no arguments";
-                SetForEach "forEach" -> [] Always Method [callback] => value(collection_for_each(callback)), "requires one callback argument";
+                SetForEach "forEach" -> [] Always Method callback(Collection) [callback] => value(collection_for_each(callback)), "requires one callback argument";
             }
             Receiver::Value(Kind::String), "String" {
                 StringCharAt "charAt" Upstream Method [args:rest] => intrinsic(StringCharAt, args, [Number(0.0)], Value), "accepts method arguments";
@@ -172,10 +172,10 @@ macro_rules! method_catalog {
             Receiver::Value(Kind::Bytes), "method" {
                 BytesSet "set" -> [] Upstream Method [args:rest] => optional(bytes_set(args)), "needs a source and optional offset";
             }
-            Receiver::Map | Receiver::Set | Receiver::Value(Kind::Array), "method" {
-                CollectionKeys "keys" -> IteratorKeys Upstream Method [] => value(iterator_method(IteratorMethod::Keys)), "takes no arguments";
-                CollectionValues "values" -> IteratorValues Upstream Method [] => value(iterator_method(IteratorMethod::Values)), "takes no arguments";
-                CollectionEntries "entries" -> IteratorEntries Upstream Method [] => value(iterator_method(IteratorMethod::Entries)), "takes no arguments";
+            Receiver::Collection(_) | Receiver::Value(Kind::Array), "method" {
+                CollectionKeys "keys" Upstream Method [] => value(iterator_method(IteratorMethod::Keys)), "takes no arguments";
+                CollectionValues "values" Upstream Method [] => value(iterator_method(IteratorMethod::Values)), "takes no arguments";
+                CollectionEntries "entries" Upstream Method [] => value(iterator_method(IteratorMethod::Entries)), "takes no arguments";
             }
             Receiver::Value(Kind::Instant), "Temporal" {
                 InstantEpochMs "epochMilliseconds" Upstream Property [] => intrinsic(InstantMs), "takes no arguments";

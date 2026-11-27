@@ -23,7 +23,7 @@ impl<'r> Layouts<'r> {
             .map_err(|e| Diagnostic::internal(e.to_string()))?;
         Ok(Self { resolve, sizes })
     }
-    pub(super) fn layout(&self, ty: Type, kind: AbiKind) -> AbiType {
+    fn layout(&self, ty: Type, kind: AbiKind) -> AbiType {
         let mut space = [WasmType::I32; Resolve::MAX_FLAT_PARAMS];
         let mut slots = FlatTypes::new(&mut space);
         let flat = self

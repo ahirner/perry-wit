@@ -143,16 +143,9 @@ fn optional_of(ctx: &Context, ty: TypeHandle, value: Ty) -> bool {
     crate::optional::optional_value(ctx, ty) == Some(value.get(ctx))
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("record projection is missing its field name")]
 pub(super) struct MissingProjectionField;
-
-impl core::fmt::Display for MissingProjectionField {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("record projection is missing its field name")
-    }
-}
-
-impl core::error::Error for MissingProjectionField {}
 
 pub(super) trait TypePattern: Copy {
     fn accepts_type(self, ctx: &Context, ty: TypeHandle) -> bool;

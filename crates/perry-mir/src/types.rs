@@ -91,34 +91,19 @@ pub struct RecordType {
     kind: RecordKind,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum RecordErr {
+    #[error("unknown record kind {0}")]
     UnknownKind(String),
+    #[error("record {0} already exists with different fields")]
     Mismatch(String),
+    #[error("record {0} has duplicate field {1}")]
     DuplicateField(String, String),
+    #[error("record {0} is used before its fields are known")]
     Opaque(String),
+    #[error("a variant needs distinct literal tags")]
     InvalidVariant,
 }
-
-impl core::fmt::Display for RecordErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::UnknownKind(kind) => write!(f, "unknown record kind {kind}"),
-            Self::Mismatch(record) => {
-                write!(f, "record {record} already exists with different fields")
-            }
-            Self::DuplicateField(record, field) => {
-                write!(f, "record {record} has duplicate field {field}")
-            }
-            Self::Opaque(record) => {
-                write!(f, "record {record} is used before its fields are known")
-            }
-            Self::InvalidVariant => f.write_str("a variant needs distinct literal tags"),
-        }
-    }
-}
-
-impl core::error::Error for RecordErr {}
 
 impl RecordType {
     /// Get or create the record `name`. Supplying `fields` defines an opaque record, and
@@ -336,78 +321,39 @@ impl Parsable for RecordType {
     }
 }
 
-/// Storage for one mutable local prior to SSA construction by pliron `mem2reg`.
-#[pliron_type(
-    name = "perry.slot",
-    generate_get = true,
-    format = "`<` $value `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct SlotType {
-    value: TypeHandle,
+macro_rules! payload_type {
+    ($(#[$doc:meta])* $ty:ident($name:literal, $accessor:ident)) => {
+        $(#[$doc])*
+        #[pliron_type(name = $name, generate_get = true, format = "`<` $payload `>`", verifier = "succ")]
+        #[derive(Hash, PartialEq, Eq, Debug)]
+        pub struct $ty {
+            payload: TypeHandle,
+        }
+
+        impl $ty {
+            pub fn $accessor(&self) -> TypeHandle {
+                self.payload
+            }
+        }
+    };
 }
 
-impl SlotType {
-    pub fn value(&self) -> TypeHandle {
-        self.value
-    }
-}
-
-/// A dense, growable array of a single element type.
-#[pliron_type(
-    name = "perry.array",
-    generate_get = true,
-    format = "`<` $element `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct ArrayType {
-    element: TypeHandle,
-}
-
-impl ArrayType {
-    pub fn element(&self) -> TypeHandle {
-        self.element
-    }
-}
-
-/// The eventual value of an async call, scoped to its export task.
-#[pliron_type(
-    name = "perry.promise",
-    generate_get = true,
-    format = "`<` $value `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct PromiseType {
-    value: TypeHandle,
-}
-
-impl PromiseType {
-    pub fn value(&self) -> TypeHandle {
-        self.value
-    }
-}
-
-/// An element of `Promise.allSettled`'s result: the settled input promise itself, read as
-/// `{ status, value, reason }` (`perry.settled_field`).
-#[pliron_type(
-    name = "perry.settled",
-    generate_get = true,
-    format = "`<` $value `>`",
-    verifier = "succ"
-)]
-#[derive(Hash, PartialEq, Eq, Debug)]
-pub struct SettledType {
-    value: TypeHandle,
-}
-
-impl SettledType {
-    pub fn value(&self) -> TypeHandle {
-        self.value
-    }
-}
+payload_type!(
+    /// Storage for one mutable local prior to SSA construction by pliron `mem2reg`.
+    SlotType("perry.slot", value)
+);
+payload_type!(
+    /// A dense, growable array of a single element type.
+    ArrayType("perry.array", element)
+);
+payload_type!(
+    /// The eventual value of an async call, scoped to its export task.
+    PromiseType("perry.promise", value)
+);
+payload_type!(
+    /// The input promise of a `Promise.allSettled` result, read by `perry.settled_field`.
+    SettledType("perry.settled", value)
+);
 
 /// A value with one or both absence states (`null`, `undefined`). Single-absence references
 /// use a null pointer, and values admitting both states reserve a second unboxed sentinel.

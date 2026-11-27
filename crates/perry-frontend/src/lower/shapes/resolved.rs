@@ -8,11 +8,12 @@ impl Shapes<'_, Preparing<'_>> {
         ctx: &Context,
         ty: Ty,
     ) -> Result<BindingType> {
-        if let Some(&binding) = self.types.resolved.get(&ty) {
+        let key = (ty, self.types.wit_input);
+        if let Some(&binding) = self.types.resolved.get(&key) {
             return Ok(binding);
         }
         let binding = self.project_type(ctx, ty, &mut Vec::new())?;
-        self.types.resolved.insert(ty, binding);
+        self.types.resolved.insert(key, binding);
         Ok(binding)
     }
 }
@@ -32,7 +33,10 @@ impl Shapes<'_> {
         param: crate::engine::NativeParam,
     ) -> Result<(BindingType, bool)> {
         Ok(match param {
-            crate::engine::NativeParam::Value(ty) => (self.resolved_binding(ty)?, ty == Ty::NEVER),
+            crate::engine::NativeParam::Value(ty)
+            | crate::engine::NativeParam::Argument { ty, .. } => {
+                (self.resolved_binding(ty)?, ty == Ty::NEVER)
+            }
             crate::engine::NativeParam::Environment(id) => (
                 BindingType::plain(self.environment(id)?.record.into()),
                 false,
@@ -105,11 +109,15 @@ impl Shapes<'_, Preparing<'_>> {
         };
         let promise = |this: &mut Self, inner, visiting: &mut Vec<LocId>| -> Result<TypeHandle> {
             let inner = if inner == Ty::BOTTOM { Ty::VOID } else { inner };
-            Ok(PromiseType::get(ctx, this.project_type(ctx, inner, visiting)?.carrier).into())
+            Ok(PromiseType::get(ctx, this.project_view(ctx, inner, visiting, false)?).into())
         };
         let dict = |this: &mut Self, inner, visiting: &mut Vec<LocId>| -> Result<TypeHandle> {
             let value = this.project_type(ctx, inner, visiting)?.carrier;
-            let entry = this.dict_tuple_type(ctx, StringType::get(ctx).into(), value)?;
+            let entry = this.positional_record(
+                ctx,
+                RecordKind::DictionaryEntry,
+                [StringType::get(ctx).into(), value],
+            )?;
             Ok(ArrayType::get(ctx, entry.into()).into())
         };
         let kind = self.types.source.kind(ty);
@@ -176,16 +184,11 @@ impl Shapes<'_, Preparing<'_>> {
             TyKind::Tuple(span) => {
                 let elements = self.types.source.ty_slice(span).to_vec();
                 let fields = elements
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &elem)| {
-                        Ok((
-                            format!("_{i}"),
-                            slot(self, elem, visiting)?.expected_type(ctx),
-                        ))
-                    })
-                    .collect::<Result<_>>()?;
-                self.mir_tuple(ctx, fields)?.into()
+                    .into_iter()
+                    .map(|elem| Ok(slot(self, elem, visiting)?.expected_type(ctx)))
+                    .collect::<Result<Vec<_>>>()?;
+                self.positional_record(ctx, RecordKind::Tuple, fields)?
+                    .into()
             }
             TyKind::Object { props, index } => {
                 let mut fields: Vec<_> = {
@@ -271,6 +274,24 @@ impl Shapes<'_, Preparing<'_>> {
                 perry_wit_diagnostics::bail_internal!("missing function value layout")
             }
         };
+        let carrier = if self.types.wit_input && carrier.deref(ctx).is::<perry_mir::BytesType>() {
+            perry_mir::ByteInputType::get(ctx).into()
+        } else {
+            carrier
+        };
         Ok(BindingType::plain(carrier))
+    }
+
+    pub(super) fn project_view(
+        &mut self,
+        ctx: &Context,
+        ty: Ty,
+        visiting: &mut Vec<LocId>,
+        wit_input: bool,
+    ) -> Result<TypeHandle> {
+        let previous = std::mem::replace(&mut self.types.wit_input, wit_input);
+        let binding = self.project_type(ctx, ty, visiting);
+        self.types.wit_input = previous;
+        binding.map(|binding| binding.carrier)
     }
 }

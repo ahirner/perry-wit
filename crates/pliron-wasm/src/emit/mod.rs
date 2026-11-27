@@ -48,36 +48,17 @@ use wasm_encoder::{
     TypeSection, ValType,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EmitError {
+    #[error("function {function}: control flow is irreducible at block {block}")]
     Irreducible { function: String, block: String },
+    #[error("function {function}: {op} is not part of the wasm dialect")]
     UnsupportedOp { function: String, op: String },
+    #[error("{0} has a type that is not a Wasm value type")]
     ValueType(String),
+    #[error("function {function}: {message}")]
     Malformed { function: String, message: String },
 }
-
-impl core::fmt::Display for EmitError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Irreducible { function, block } => {
-                write!(
-                    f,
-                    "function {function}: control flow is irreducible at block {block}"
-                )
-            }
-            Self::UnsupportedOp { function, op } => {
-                write!(
-                    f,
-                    "function {function}: {op} is not part of the wasm dialect"
-                )
-            }
-            Self::ValueType(item) => write!(f, "{item} has a type that is not a Wasm value type"),
-            Self::Malformed { function, message } => write!(f, "function {function}: {message}"),
-        }
-    }
-}
-
-impl core::error::Error for EmitError {}
 
 type EmitResult<T> = Result<T, EmitError>;
 

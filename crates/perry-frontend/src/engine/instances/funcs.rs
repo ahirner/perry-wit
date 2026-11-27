@@ -21,12 +21,16 @@ impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
         })
     }
 
-    pub(super) fn local_ty_in_owner(&self, owner: CaptureOwner, local: LocalIdx) -> Option<Ty> {
-        let loc = self
-            .solved
-            .capture_locs
-            .get(self.index, &self.solved.instances, owner, local)?;
-        Some(self.solved.locations[loc])
+    pub(super) fn local_location(
+        &self,
+        owner: CaptureOwner,
+        local: LocalIdx,
+    ) -> Option<super::LocId> {
+        owner.location(
+            &self.solved.instances,
+            self.index.locals[local],
+            self.solved.collapsed_locals[local],
+        )
     }
 
     fn capture_fields(&self, ident: FuncIdentity) -> Result<Vec<EnvironmentField>> {
@@ -34,7 +38,10 @@ impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
         let mut fields = Vec::with_capacity(caps.len());
         for &cap_id in caps {
             let local = self.index.local_idx(cap_id);
-            let cap_ty = match local.and_then(|i| self.local_ty_in_owner(ident.capture_owner, i)) {
+            let cap_ty = match local
+                .and_then(|i| self.local_location(ident.capture_owner, i))
+                .map(|loc| self.solved.locations[loc])
+            {
                 Some(ty) if !matches!(ty, Ty::BOTTOM | Ty::OPEN) => ty,
                 _ => {
                     let err = self.annotate_local(
@@ -59,6 +66,15 @@ impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
                 ty: cap_ty,
                 cell: local.and_then(|i| self.cell_init(i)),
             });
+        }
+        if self.index.view(ident.template).captures_this
+            && let Some(receiver) = ident.capture_owner.receiver(&self.solved.instances)
+        {
+            let ty = match receiver {
+                super::Receiver::Class(id) => self.solved.class_insts[id].ty,
+                super::Receiver::Object(ty) => ty,
+            };
+            fields.push(EnvironmentField::Receiver(ty));
         }
         if fields.is_empty() {
             fields.push(EnvironmentField::Unit);

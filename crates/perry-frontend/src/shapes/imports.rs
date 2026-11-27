@@ -11,7 +11,7 @@ pub(crate) enum Imported<'s> {
     Path(Intrinsic, &'static str),
     Writable,
     Service(Intrinsic),
-    Foreign(&'s str, &'s crate::wit::ImportSignature<'s>),
+    Foreign(crate::wit::MemberId),
     Other,
 }
 

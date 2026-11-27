@@ -103,9 +103,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Outcome::Boolean(hit) => self.boolean(ctx, !hit),
         };
         let result_type = miss.get_type(ctx);
-        let result = self.entry_slot(ctx, result_type);
-        self.store(ctx, result, miss);
-        self.iterate(
+        self.find_item(
             ctx,
             Input::Slice(
                 array,
@@ -116,7 +114,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 },
                 holes,
             ),
-            |b, ctx, item, current, next, done| {
+            miss,
+            |b, ctx, item, current| {
                 let matched = match predicate {
                     Predicate::Equal(needle, same_value_zero) => {
                         if same_value_zero {
@@ -136,23 +135,20 @@ impl<'s> FunctionBuilder<'s, '_> {
                         b.truthy(ctx, value)?
                     }
                 };
-                let hit = b.new_block(ctx, "search_hit");
-                if matches!(outcome, Outcome::Boolean(false)) {
-                    b.branch(ctx, matched, next, hit);
+                Ok(if matches!(outcome, Outcome::Boolean(false)) {
+                    b.not(ctx, matched)
                 } else {
-                    b.branch(ctx, matched, hit, next);
-                }
-                b.switch_to(hit);
+                    matched
+                })
+            },
+            |b, ctx, item, current| {
                 let value = match outcome {
                     Outcome::Index => current,
                     Outcome::Item => b.fit(ctx, item, result_type)?,
                     Outcome::Boolean(value) => b.boolean(ctx, value),
                 };
-                b.store(ctx, result, value);
-                b.jump(ctx, done);
-                Ok(())
+                Ok(value)
             },
-        )?;
-        self.load(ctx, result)
+        )
     }
 }

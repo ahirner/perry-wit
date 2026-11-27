@@ -37,8 +37,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     || incoming == Ty::BOTTOM
                     || abs.is_some_and(Absence::admits_undefined);
                 let def_ty = self.eval_expr(&mut s, default_expr)?;
-                if default_runs && let Some(&ploc) = self.capture_locs.slots[activation].get(p_idx)
-                {
+                if default_runs && let Some(ploc) = activation.locations().nth(p_idx) {
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, def_ty);
@@ -65,7 +64,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ));
             };
             let instance = &self.class_insts[id];
-            let info = &self.index.classes[instance.class];
+            let info = self.index.class(instance.class);
             let fields = &info.declaration.fields;
             let field_locs = instance.field_locs;
             for (f_idx, field) in fields.iter().enumerate() {
@@ -130,9 +129,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 && matches!(self.types.kind(result_ty), TyKind::Object { .. }))
             .then_some(result_ty);
             if view.is_async {
-                while let Some(inner) = self.unwrap_promise_once(inst_id, result_ty) {
-                    result_ty = inner;
-                }
+                result_ty = self.awaited_type(inst_id, result_ty);
                 if let TyKind::Cell {
                     loc: inner_loc,
                     kind: CellKind::Promise,
@@ -152,22 +149,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn local_frame_slot_in(
-        &self,
-        inst_id: InstanceId,
-        local: LocalIdx,
-    ) -> Option<usize> {
-        let info = self.index.locals[local];
-        let slot = info.frame_slot()?;
-        (info.owner == self.instances[inst_id].template).then_some(slot)
+    fn local_location(&self, inst: InstanceId, local: LocalIdx) -> Option<LocId> {
+        CaptureOwner::Instance(inst).location(
+            &self.instances,
+            self.index.locals[local],
+            self.collapsed_locals[local],
+        )
     }
 
-    pub(super) fn read_local_value(&mut self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
-        if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
-            return self.inst_frame_locals[inst_id].get(slot).copied();
-        }
-        let loc = self.local_loc_in_instance(inst_id, local)?;
-        Some(self.read_loc(loc, inst_id))
+    pub(super) fn read_local_value(&mut self, inst: InstanceId, local: LocalIdx) -> Option<Ty> {
+        let loc = self.local_location(inst, local)?;
+        Some(
+            if self.index.locals[local]
+                .flags
+                .intersects(LocalFlags::SHARED)
+            {
+                self.read_loc(loc, inst)
+            } else {
+                self.facts[loc]
+            },
+        )
     }
 
     pub(super) fn write_local_value(
@@ -176,50 +177,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         local: LocalIdx,
         value: Ty,
     ) -> Result<()> {
-        if let Some(cloc) = self.capture_locs.collapsed[local] {
-            self.write_loc(cloc, value);
+        if let Some(loc) = self.collapsed_locals[local] {
+            self.write_loc(loc, value);
         }
-        if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
-            if let Some(cell) = self.inst_frame_locals[s.inst].get_mut(slot) {
-                let (next, self_nested) = self.types.join_bounded(*cell, value);
-                if self_nested {
-                    self.self_nested_locals.insert(local.index());
-                }
-                if next != *cell {
-                    *cell = next;
-                    s.local_changed = true;
-                }
-            }
-            return Ok(());
-        }
-        let loc = self.local_loc_in_instance(s.inst, local).ok_or_else(|| {
-            perry_wit_diagnostics::internal!(
-                "missing capture location for local {}",
-                self.index.locals[local].id
-            )
+        let info = self.index.locals[local];
+        let loc = self.local_location(s.inst, local).ok_or_else(|| {
+            perry_wit_diagnostics::internal!("missing storage for local {}", info.id)
         })?;
-        self.write_loc(loc, value);
-        if self
-            .facts
-            .self_nested
-            .contains(self.facts.root(loc).index())
-        {
-            self.self_nested_locals.insert(local.index());
+        if info.flags.intersects(LocalFlags::SHARED) {
+            self.write_loc(loc, value);
+        } else {
+            s.local_changed |= self.facts.join(self.types, loc, value);
         }
         Ok(())
-    }
-
-    pub(super) fn local_loc_in_instance(
-        &self,
-        inst_id: InstanceId,
-        local: LocalIdx,
-    ) -> Option<LocId> {
-        self.capture_locs.get(
-            self.index,
-            &self.instances,
-            CaptureOwner::Instance(inst_id),
-            local,
-        )
     }
 
     pub(super) fn invalidate_conservative_cell(&mut self, ty: Ty) {
@@ -321,12 +291,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
             TyKind::Cell { loc, kind } => {
-                let ok = if kind.is_array() {
-                    matches!(idx_ty, Ty::NUMBER | Ty::INT32)
-                } else {
-                    idx_ty == Ty::STRING
-                };
-                if ok {
+                if kind.accepts_index(idx_ty) {
                     self.write_cell(loc, val_ty);
                 } else if idx_ty != Ty::BOTTOM {
                     self.write_loc(loc, Ty::OPEN);
@@ -336,14 +301,23 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn unwrap_promise_once(&mut self, inst_id: InstanceId, ty: Ty) -> Option<Ty> {
+    pub(super) fn awaited_type(&mut self, inst: InstanceId, ty: Ty) -> Ty {
         match self.types.kind(ty) {
-            TyKind::Promise(inner) => Some(inner),
+            TyKind::Promise(value) => self.awaited_type(inst, value),
             TyKind::Cell {
                 loc,
                 kind: CellKind::Promise,
-            } => Some(self.read_loc(loc, inst_id)),
-            _ => None,
+            } => {
+                let value = self.read_loc(loc, inst);
+                self.awaited_type(inst, value)
+            }
+            TyKind::Union(_) => self
+                .try_map_children(ty, |solver, child| {
+                    let value = solver.awaited_type(inst, child);
+                    (value != Ty::BOTTOM).then_some(value).ok_or(())
+                })
+                .unwrap_or(Ty::BOTTOM),
+            _ => ty,
         }
     }
 
@@ -352,67 +326,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             return;
         }
         self.facts.declare(loc, expected);
-    }
-
-    pub(super) fn resolve_promise_cells(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
-        match self.types.kind(ty) {
-            TyKind::Cell {
-                loc,
-                kind: CellKind::Promise,
-            } => {
-                let elem = self.read_loc(loc, inst_id);
-                if elem == Ty::BOTTOM {
-                    Ty::BOTTOM
-                } else {
-                    self.types.promise(elem)
-                }
-            }
-            TyKind::Cell { loc, kind } if kind.is_array() => {
-                let elem = self.read_loc(loc, inst_id);
-                if elem == Ty::BOTTOM {
-                    Ty::BOTTOM
-                } else {
-                    let elem = self.resolve_promise_cells(inst_id, elem);
-                    if elem == Ty::BOTTOM {
-                        Ty::BOTTOM
-                    } else {
-                        self.types.array(elem)
-                    }
-                }
-            }
-            TyKind::Array(elem) => {
-                let next = self.resolve_promise_cells(inst_id, elem);
-                if next == Ty::BOTTOM {
-                    Ty::BOTTOM
-                } else if next == elem {
-                    ty
-                } else {
-                    self.types.array(next)
-                }
-            }
-            TyKind::Tuple(span) | TyKind::Union(span) => {
-                let is_tuple = matches!(self.types.kind(ty), TyKind::Tuple(_));
-                let items: Vec<Ty> = self.types.ty_slice(span).to_vec();
-                let mut out = Vec::with_capacity(items.len());
-                let mut changed = false;
-                for item in items {
-                    let next = self.resolve_promise_cells(inst_id, item);
-                    if next == Ty::BOTTOM {
-                        return Ty::BOTTOM;
-                    }
-                    changed |= next != item;
-                    out.push(next);
-                }
-                if !changed {
-                    ty
-                } else if is_tuple {
-                    self.types.tuple(&out)
-                } else {
-                    self.types.union(&out)
-                }
-            }
-            _ => ty,
-        }
     }
 
     pub(super) fn resolve_cell_read(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
@@ -556,17 +469,17 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn eval_stmt(&mut self, s: &mut EvalState<'h>, stmt: &'h Stmt) -> Result<()> {
         match stmt {
-            Stmt::Let { id, ty, init, .. } => {
+            Stmt::Let { id, init, .. } => {
                 let Some(lidx) = self.index.local_idx(*id) else {
                     if let Some(init) = init {
                         self.eval_expr(s, init)?;
                     }
                     return Ok(());
                 };
-                let local_flags = self.index.locals[lidx].flags;
-                let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                let is_deferred = local_flags.contains(LocalFlags::DEFERRED);
-                let declared = self.types.intern_hir(self.ctx, ty, !is_inferred);
+                let local = self.index.locals[lidx];
+                let is_inferred = !local.flags.is_explicit();
+                let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
+                let declared = local.declared;
                 let declared = if !is_inferred {
                     self.instantiate_annotated_class(declared, 0, Some(s.inst))?
                 } else {
@@ -597,7 +510,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             None
                         }
                     } else if needs_context
-                        && !local_flags.contains(LocalFlags::REASSIGNED)
+                        && !local.flags.contains(LocalFlags::REASSIGNED)
                         && self.index.is_empty_object_expr(init_expr)
                     {
                         Some(CellKind::Dict)
@@ -689,9 +602,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.constrain_promise_loc(loc, expected_inner);
                 }
                 if self.index.view(self.instances[s.inst].template).is_async {
-                    while let Some(inner) = self.unwrap_promise_once(s.inst, ty) {
-                        ty = inner;
-                    }
+                    ty = self.awaited_type(s.inst, ty);
                 }
                 let norm = self.types.normalize_for_storage(self.ctx, self.decls, ty);
                 self.check_escaping_func(s.inst, norm, 0, s.current_span)?;
@@ -840,7 +751,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         let (locations, self_nested_locs, escaping_env_templates) = self.facts.finish();
         Solved {
             writes,
-            witness_instances: self.witness_instances,
             resource_instances: self.resource_instances,
             init_inst,
             instances: self.instances,
@@ -849,8 +759,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             field_locs: self.field_locs,
             dispatch_arms: self.dispatch_arms,
             helpers: self.helpers,
-            capture_locs: self.capture_locs,
-            inst_frame_locals: self.inst_frame_locals,
+            collapsed_locals: self.collapsed_locals,
             inst_sites: self.inst_sites,
             live_instances,
             live_helpers,
@@ -860,7 +769,6 @@ impl<'h, 'a> Solver<'h, 'a> {
 
             dict_reads: self.dict_reads,
             self_nested_locs,
-            self_nested_locals: self.self_nested_locals,
             deletes_array_elements: self.deletes_array_elements,
         }
     }

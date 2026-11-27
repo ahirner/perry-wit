@@ -1,5 +1,6 @@
 //! Imported async functions specialize only their canonical input views.
 use super::*;
+use crate::engine::types::WitView;
 use perry_mir::{ForeignOp, Phase};
 
 pub(super) fn wrapper<'h>(
@@ -58,9 +59,9 @@ pub(super) fn wrapper<'h>(
 }
 
 impl Shapes<'_> {
-    fn wit_carrier(&self, value: crate::wit::WitValue<'_>) -> Result<TypeHandle> {
+    fn wit_carrier(&self, value: crate::wit::WitValue<'_>, view: WitView) -> Result<TypeHandle> {
         Ok(self
-            .resolved_binding(self.types.source.boundary_type(value)?)?
+            .resolved_binding(self.types.source.boundary_type(value, view)?)?
             .carrier)
     }
 
@@ -70,7 +71,8 @@ impl Shapes<'_> {
         wit: crate::wit::WitValue<'_>,
         result: &wit_parser::Result_,
     ) -> Result<TypeHandle> {
-        let mut payload = |ty| self.wit_carrier(crate::wit::WitValue { ty, ..wit });
+        let mut payload =
+            |ty| self.wit_carrier(crate::wit::WitValue { ty, ..wit }, WitView::Boundary);
         Ok(perry_mir::VariantType::get(
             ctx,
             vec![
@@ -79,14 +81,6 @@ impl Shapes<'_> {
             ],
         )
         .into())
-    }
-
-    fn import_input(
-        &mut self,
-        ctx: &Context,
-        value: crate::wit::WitValue<'_>,
-    ) -> Result<TypeHandle> {
-        self.input_type(ctx, self.wit_carrier(value)?)
     }
 }
 
@@ -103,28 +97,27 @@ impl<'s> FunctionBuilder<'s, '_> {
         receiver: Option<Value>,
         args: &'s [Expr],
     ) -> Result<Option<Value>> {
-        let decls = self.shapes.decls;
-        let binding = &decls.world.members[member].binding;
-        let signature = decls.resource_signatures[member]
-            .ok_or_else(|| internal!("missing WIT resource binding {binding}"))?;
-        self.import_call(ctx, binding, signature, args, CallKind::Resource(receiver))
+        self.import_call(ctx, member, args, CallKind::Resource(receiver))
     }
 
     pub(super) fn import_call(
         &mut self,
         ctx: &mut Context,
-        binding: &'s str,
-        signature: &'s crate::wit::ImportSignature<'s>,
+        member: crate::wit::MemberId,
         args: &'s [Expr],
         kind: CallKind,
     ) -> Result<Option<Value>> {
-        let mut params = signature.params.as_slice();
+        let (binding, signature) = member.binding(self.shapes.decls.world)?;
+        let mut params = signature
+            .abi_params
+            .as_deref()
+            .ok_or_else(|| internal!("missing WIT resource binding {binding}"))?;
         let mut values = Vec::with_capacity(params.len());
         if let CallKind::Resource(Some(receiver)) = kind {
             let (this, rest) = params
                 .split_first()
                 .ok_or_else(|| internal!("WIT resource method has no receiver"))?;
-            let ty = self.shapes.import_input(ctx, *this)?;
+            let ty = self.shapes.wit_carrier(*this, WitView::Input)?;
             values.push(self.fit(ctx, receiver, ty)?);
             params = rest;
         }
@@ -141,7 +134,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let ty = if resource_method && let Some(result) = wit.result() {
                 self.shapes.resource_result_type(ctx, wit, result)?
             } else {
-                self.shapes.import_input(ctx, wit)?
+                self.shapes.wit_carrier(wit, WitView::Input)?
             };
             let value = if resource_method
                 && matches!(arg, Expr::Undefined)
@@ -178,7 +171,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Some((wit, result)) => Some(self.shapes.resource_result_type(ctx, wit, result)?),
             None => signature
                 .result
-                .map(|ty| self.shapes.wit_carrier(ty))
+                .map(|ty| self.shapes.wit_carrier(ty, WitView::Boundary))
                 .transpose()?,
         };
         if signature.is_async {
@@ -217,7 +210,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         let failed = self.compare(ctx, CompareKind::Eq, tag, err_tag);
         let success = self.enter_case(ctx, failed);
         let payload = |b: &mut Self, ctx: &mut Context, ty| -> Result<Value> {
-            let carrier = b.shapes.wit_carrier(crate::wit::WitValue { ty, ..wit })?;
+            let carrier = b
+                .shapes
+                .wit_carrier(crate::wit::WitValue { ty, ..wit }, WitView::Boundary)?;
             Ok(b.emit_value(ctx, |ctx| {
                 perry_mir::VariantPayloadOp::new(ctx, raw, carrier)
             }))
@@ -241,7 +236,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                         .get(&(owner.index() as u32))
                         .copied()
                         .ok_or_else(|| internal!("owned WIT error has no resource destructor"))?;
-                    let binding = &world.members[drop].binding;
+                    let (binding, _) = drop.binding(world)?;
                     let expected = self.string(ctx, &case.name);
                     let matches = self.compare(ctx, CompareKind::Eq, tag, expected);
                     let next = self.enter_case(ctx, matches);

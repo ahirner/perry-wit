@@ -196,38 +196,25 @@ pub fn may_throw(ctx: &Context, op: Ptr<Operation>) -> bool {
     crate::semantics::exception(ctx, op).is_some()
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum IntrinsicErr {
+    #[error("missing intrinsic attribute")]
     Missing,
+    #[error("intrinsic {0} has the wrong operand or result types")]
     Signature(String),
+    #[error("perry.json_stringify produces a string, or string | undefined for an optional value")]
     Stringify,
+    #[error("perry.promise_combinator takes an array of promises of one type")]
     Combinator,
+    #[error("{0} has an invalid promise result type")]
     PromiseResult(&'static str),
+    #[error(
+        "perry.promise_settle takes a perry.promise and a matching fulfillment value or rejection reason"
+    )]
     Settle,
+    #[error("perry.settled_field reads a perry.settled value")]
     Settled,
 }
-
-impl core::fmt::Display for IntrinsicErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Missing => f.write_str("missing intrinsic attribute"),
-            Self::Signature(name) => write!(f, "intrinsic {name} has the wrong operand or result types"),
-            Self::Stringify => f.write_str(
-                "perry.json_stringify produces a string, or string | undefined for an optional value",
-            ),
-            Self::Combinator => {
-                f.write_str("perry.promise_combinator takes an array of promises of one type")
-            }
-            Self::PromiseResult(op) => write!(f, "{op} has an invalid promise result type"),
-            Self::Settle => f.write_str(
-                "perry.promise_settle takes a perry.promise and a matching fulfillment value or rejection reason",
-            ),
-            Self::Settled => f.write_str("perry.settled_field reads a perry.settled value"),
-        }
-    }
-}
-
-impl core::error::Error for IntrinsicErr {}
 
 op_schema! {
     /// A call of a host or runtime service.

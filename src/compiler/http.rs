@@ -9,10 +9,10 @@
 //! export runs until the host has read it.
 use super::{Compiled, emit_component, lower};
 use crate::component;
-use perry_codegen::boundary::{AbiKind, Export, ExportKind};
+use perry_codegen::boundary::{AbiKind, AsyncCompletion, Export, ExportKind};
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal};
 use pliron::context::Context;
-use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
+use wit_parser::{Resolve, Type, WorldId};
 
 /// The world programs implement.
 pub(crate) fn is_handler_world(resolve: &Resolve, world: WorldId) -> bool {
@@ -118,13 +118,8 @@ pub(crate) fn compile(
         .map_err(|err| {
             Diagnostic::internal_from("selecting embedded handler world", err.as_ref())
         })?;
-    let (key, interface) = resolve.worlds[world]
-        .exports
-        .iter()
-        .find_map(|(key, item)| match item {
-            WorldItem::Interface { id, .. } => Some((key, *id)),
-            _ => None,
-        })
+    let (key, interface) = perry_contract::world_interfaces(&resolve.worlds[world].exports)
+        .next()
         .ok_or_else(|| Diagnostic::internal("the handler world exports wasi:http/handler"))?;
     let name = resolve.name_world_key(key);
     let handle = &resolve.interfaces[interface].functions["handle"];
@@ -132,6 +127,15 @@ pub(crate) fn compile(
         .result
         .ok_or_else(|| Diagnostic::internal("handle returns a result"))?;
     let layouts = super::abi::Layouts::new(&resolve)?;
+    let mut result = layouts.value(result)?;
+    let AbiKind::Result { ok: Some(ok), .. } = &mut result.kind else {
+        bail_internal!("HTTP handler must return a result with a response");
+    };
+    // The HTTP runtime has already transferred the response and returns its canonical handle.
+    if !matches!(ok.kind, AbiKind::Resource { owned: true, .. }) {
+        bail_internal!("HTTP handler must return an owned response");
+    }
+    ok.kind = AbiKind::Scalar(Type::U32);
     let exports = vec![Export {
         source_name: None,
         annotations: Vec::new(),
@@ -140,15 +144,10 @@ pub(crate) fn compile(
         signature: layouts.signature(handle, false),
         params: vec![layouts.value(Type::U32)?],
         indirect_size: None,
-        result: Some(layouts.layout(
-            result,
-            AbiKind::OkHandle {
-                error_case: internal_error(&resolve, &result)?,
-            },
-        )),
+        result: Some(result),
         kind: ExportKind::Async {
             task_return: (format!("[export]{name}"), "handle".into()),
-            command: false,
+            completion: AsyncCompletion::RejectionText(&["err", "internal-error", "some"]),
         },
     }];
     emit_component(
@@ -164,32 +163,4 @@ pub(crate) fn compile(
         vec![],
         false,
     )
-}
-
-/// The case of `error-code` (the `err` of `result`) that reports a handler's exception:
-/// `internal-error(option<string>)`.
-fn internal_error(resolve: &Resolve, result: &Type) -> Result<u32> {
-    let mut ty = *result;
-    let mut in_error = false;
-    while let Type::Id(id) = ty {
-        match &resolve.types[id].kind {
-            TypeDefKind::Type(inner) => ty = *inner,
-            TypeDefKind::Result(result) if !in_error => {
-                ty = result
-                    .err
-                    .ok_or_else(|| Diagnostic::internal("handle's result has an error type"))?;
-                in_error = true;
-            }
-            TypeDefKind::Variant(variant) => {
-                return variant
-                    .cases
-                    .iter()
-                    .position(|case| case.name == "internal-error")
-                    .map(|index| index as u32)
-                    .ok_or_else(|| Diagnostic::internal("error-code has internal-error"));
-            }
-            _ => break,
-        }
-    }
-    bail_internal!("handle's error type is not error-code")
 }

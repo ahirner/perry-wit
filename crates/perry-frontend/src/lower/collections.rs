@@ -5,7 +5,8 @@
 //! compactions resynchronize cursor positions against monotonic entry sequence numbers.
 
 use super::*;
-use crate::lower::control_flow::{ArrayOutput, Holes, Input, Projection};
+use crate::collections::Yield;
+use crate::lower::control_flow::{ArrayOutput, Holes, Input};
 pub(super) use crate::source::CollectionKind;
 use crate::source::ConstructorSites;
 use perry_mir::{OptionalType, RecordKind};
@@ -17,7 +18,12 @@ mod storage;
 pub(super) use storage::LiveCursor;
 
 /// Stable tuple slots shared by collection construction and live iteration.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum StorageField {
+    Key,
+    MapValue,
+    Live(CollectionKind),
+    Sequence(CollectionKind),
     BoxEntries,
     BoxLength,
     BoxSequence,
@@ -32,10 +38,17 @@ pub(super) enum StorageField {
 impl StorageField {
     pub(super) fn name(self) -> &'static str {
         match self {
-            Self::BoxEntries | Self::ViewBox | Self::CursorIndex => "_0",
-            Self::BoxLength | Self::ViewCursor | Self::CursorSequence => "_1",
-            Self::BoxSequence | Self::CursorEpoch => "_2",
-            Self::BoxEpoch => "_3",
+            Self::Key | Self::BoxEntries | Self::ViewBox | Self::CursorIndex => "_0",
+            Self::MapValue
+            | Self::Live(CollectionKind::Set)
+            | Self::BoxLength
+            | Self::ViewCursor
+            | Self::CursorSequence => "_1",
+            Self::Sequence(CollectionKind::Set)
+            | Self::Live(CollectionKind::Map)
+            | Self::BoxSequence
+            | Self::CursorEpoch => "_2",
+            Self::Sequence(CollectionKind::Map) | Self::BoxEpoch => "_3",
         }
     }
 }
@@ -47,22 +60,6 @@ pub(super) enum EntryTypes {
 }
 
 impl CollectionKind {
-    /// The entry record's liveness flag.
-    pub(super) fn live_field(self) -> &'static str {
-        match self {
-            Self::Map => "_2",
-            Self::Set => "_1",
-        }
-    }
-
-    /// The entry record's monotonic insertion sequence number.
-    pub(super) fn seq_field(self) -> &'static str {
-        match self {
-            Self::Map => "_3",
-            Self::Set => "_2",
-        }
-    }
-
     /// The collection's box record role.
     pub(super) fn box_kind(self) -> RecordKind {
         match self {
@@ -82,31 +79,16 @@ impl CollectionKind {
 }
 
 pub(super) use crate::collections::{CollectionViewKind, IteratorMethod};
-impl CollectionViewKind {
-    /// The view's record role.
-    pub(super) fn record_kind(self) -> RecordKind {
-        match self {
-            Self::MapKeys => RecordKind::MapKeys,
-            Self::MapValues => RecordKind::MapValues,
-            Self::MapEntries => RecordKind::MapEntries,
-            Self::SetValues => RecordKind::SetValues,
-            Self::SetEntries => RecordKind::SetEntries,
-        }
-    }
-
-    /// The collection the view reads.
-    pub(super) fn source(self) -> CollectionKind {
-        match self {
-            Self::MapKeys | Self::MapValues | Self::MapEntries => CollectionKind::Map,
-            Self::SetValues | Self::SetEntries => CollectionKind::Set,
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum Collection {
     Box(CollectionKind),
     View(CollectionViewKind),
+}
+
+impl CollectionViewKind {
+    pub(super) fn fields(self) -> Yield<StorageField> {
+        self.project([StorageField::Key, StorageField::MapValue])
+    }
 }
 
 impl Collection {
@@ -116,10 +98,7 @@ impl Collection {
         match kind {
             RecordKind::Map => Some(Self::Box(CollectionKind::Map)),
             RecordKind::Set => Some(Self::Box(CollectionKind::Set)),
-            _ => CollectionViewKind::ALL
-                .into_iter()
-                .find(|view| view.record_kind() == kind)
-                .map(Self::View),
+            _ => CollectionViewKind::from_record(kind).map(Self::View),
         }
     }
 }
@@ -196,9 +175,47 @@ pub(super) fn kv_entry_types(
     tuple_kv_types(ctx, ty)
 }
 
+fn iterable_yield(ctx: &Context, ty: TypeHandle) -> Result<Yield<TypeHandle>> {
+    let ty = present_type(ctx, ty);
+    if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
+        return Ok(Yield::Item(array.deref(ctx).element()));
+    }
+    let (view, box_type) = match Collection::of(ctx, ty) {
+        Some(Collection::View(view)) => {
+            let boxed = perry_mir::typed::<RecordType>(ctx, ty)
+                .and_then(|r| r.deref(ctx).field(StorageField::ViewBox.name()))
+                .ok_or_else(|| internal!("collection view missing box"))?
+                .1;
+            (view, boxed)
+        }
+        Some(Collection::Box(kind)) => (kind.default_view(), ty),
+        None => bail_unsupported!("expected an array or collection iterable"),
+    };
+    let record = view
+        .source()
+        .entry(ctx, box_type)
+        .ok_or_else(|| internal!("collection view requires a Map or Set box"))?;
+    view.fields().try_map(|field| {
+        record
+            .deref(ctx)
+            .field(field.name())
+            .map(|(_, ty)| ty)
+            .ok_or_else(|| internal!("collection entry missing field"))
+    })
+}
+
 /// Extract `(K, V)` from any iterable of `[K, V]` pairs (`Map`, `Record`, `[K, V][]`, `MapEntries`, `SetEntries`).
 pub(super) fn iterable_kv_types(ctx: &Context, ty: TypeHandle) -> Option<(TypeHandle, TypeHandle)> {
-    Projection::collection(ctx, ty).ok()?.pair_types(ctx)
+    let ty = match iterable_yield(ctx, ty).ok()? {
+        Yield::Pair(first, second) => return Some((first, second)),
+        Yield::Item(ty) => ty,
+    };
+    if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
+        let element = array.deref(ctx).element();
+        return Some((element, element));
+    }
+    let record = perry_mir::typed::<RecordType>(ctx, ty)?;
+    tuple_pair(ctx, record)
 }
 
 /// The element and entry types of a `Set<T>` box.
@@ -307,30 +324,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::ArrayIsArray(v) => Ok(Some(self.array_is_array(ctx, v)?)),
             Expr::In { property, object } => Ok(Some(self.in_operator(ctx, property, object)?)),
             Expr::Delete(inner) => Ok(Some(self.delete_operator(ctx, inner)?)),
-            Expr::MapGroupBy { items, key_fn } => {
-                Ok(Some(self.map_group_by(ctx, items, key_fn, expected)?))
-            }
-            Expr::Call { callee, args, .. }
-                if matches!(
-                    callee.as_ref(),
-                    Expr::PropertyGet { object, property, .. }
-                        if property == "groupBy"
-                            && matches!(
-                                object.as_ref(),
-                                Expr::PropertyGet { object: g, property: m, .. }
-                                    if matches!(g.as_ref(), Expr::GlobalGet(_)) && m == "Map"
-                            )
-                ) =>
-            {
-                let [items, key_fn] = args.as_slice() else {
-                    bail_diag!(
-                        codes::TYPE_MISMATCH,
-                        "Map.groupBy requires (items, callbackFn)"
-                    );
-                };
-                Ok(Some(self.map_group_by(ctx, items, key_fn, expected)?))
-            }
-            _ => Ok(None),
+            _ => crate::hir_compat::map_group_by(expr)?
+                .map(|(items, key_fn)| self.map_group_by(ctx, items, key_fn, expected))
+                .transpose(),
         }
     }
 
@@ -342,11 +338,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let ty = receiver.get_type(ctx);
         if let Some(Collection::Box(kind)) = Collection::of(ctx, ty) {
-            let view = match kind {
-                CollectionKind::Map => method.map_view(),
-                CollectionKind::Set => method.set_view(),
-            };
-            return self.alloc_collection_view(ctx, receiver, view);
+            return self.alloc_collection_view(ctx, receiver, method.view(kind));
         }
         let keyed = tuple_kv_types(ctx, ty);
         if keyed.is_none() && method == IteratorMethod::Values {
@@ -365,11 +357,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             } else {
                 (index, item)
             };
-            Ok(ArrayOutput::Item(match method {
-                IteratorMethod::Keys => key,
-                IteratorMethod::Values => value,
-                IteratorMethod::Entries => b.pair(ctx, key, value)?,
-            }))
+            method
+                .project([key, value])
+                .materialize(Ok, |[k, v]| b.pair(ctx, k, v))
+                .map(ArrayOutput::Item)
         })
     }
 
@@ -406,7 +397,9 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let init_expected =
             if let Some((k_ty, v_ty, _)) = expected.and_then(|exp| kv_entry_types(ctx, exp)) {
-                let pair_rec = self.shapes.pair_type(ctx, k_ty, v_ty)?;
+                let pair_rec =
+                    self.shapes
+                        .positional_record(ctx, RecordKind::Tuple, [k_ty, v_ty])?;
                 Some(ArrayType::get(ctx, pair_rec.into()).into())
             } else {
                 None
@@ -457,8 +450,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         let (elem_ty, tuple_rec) = match set_entry_type(ctx, arr.get_type(ctx)) {
             Some((e, r)) => (e, r),
             None => {
-                let e = Projection::collection(ctx, arr.get_type(ctx))?
-                    .output_type(ctx, self.shapes)?;
+                let e = iterable_yield(ctx, arr.get_type(ctx))?.materialize(Ok, |fields| {
+                    self.shapes
+                        .positional_record(ctx, RecordKind::Tuple, fields)
+                        .map(Into::into)
+                })?;
                 let r = match expected.and_then(|exp| set_entry_type(ctx, exp).map(|(_, r)| r)) {
                     Some(r) => r,
                     None => self.shapes.entry_type(ctx, EntryTypes::Set(e))?,

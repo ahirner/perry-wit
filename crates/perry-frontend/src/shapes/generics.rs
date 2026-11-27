@@ -11,7 +11,10 @@ pub(crate) use resolution::{Query, Resolver};
 const RESOLUTION_DEPTH: usize = 32;
 pub(crate) const ARGUMENT_LIMIT: usize = 4096;
 
-pub(crate) type InstanceKey = (crate::engine::types::NameId, crate::engine::types::TySpan);
+pub(crate) type InstanceKey = (
+    crate::engine::types::NameId,
+    crate::engine::types::TypeListId,
+);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Application {
@@ -31,37 +34,18 @@ pub(crate) enum Declaration<'a> {
 fn validate(types: &TypeTable, ctx: &Context, ty: Ty, remaining: &mut usize) -> Result<Ty> {
     ensure_unsupported!(*remaining > 1, "generic type arguments expand indefinitely");
     *remaining -= 1;
-    match types.kind(ty) {
-        TyKind::TypeVar(name) => {
-            return Err(diag!(
-                codes::TYPE_MISMATCH,
-                "unresolved type argument {}",
-                name.get(ctx)
-            ));
+    let kind = types.kind(ty);
+    if let TyKind::TypeVar(name) = kind {
+        return Err(diag!(
+            codes::TYPE_MISMATCH,
+            "unresolved type argument {}",
+            name.get(ctx)
+        ));
+    }
+    if !matches!(kind, TyKind::Variant(_)) {
+        for child in types.children(kind) {
+            validate(types, ctx, child, remaining)?;
         }
-        TyKind::Signature { params, result, .. } => {
-            for p in types.object_slice(params) {
-                validate(types, ctx, p.ty, remaining)?;
-            }
-            validate(types, ctx, result, remaining)?;
-        }
-        TyKind::Promise(inner) | TyKind::Array(inner) => {
-            validate(types, ctx, inner, remaining)?;
-        }
-        TyKind::Tuple(span) | TyKind::Union(span) | TyKind::Generic { args: span, .. } => {
-            for &item in types.ty_slice(span) {
-                validate(types, ctx, item, remaining)?;
-            }
-        }
-        TyKind::Object { props, index } => {
-            for prop in types.object_slice(props) {
-                validate(types, ctx, prop.ty, remaining)?;
-            }
-            if let Some(value) = index {
-                validate(types, ctx, value, remaining)?;
-            }
-        }
-        _ => {}
     }
     Ok(ty)
 }

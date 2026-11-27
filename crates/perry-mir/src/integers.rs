@@ -26,13 +26,6 @@ impl BigIntConstOp {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("bigint constant needs an unsigned magnitude and a bigint result")]
 struct InvalidConstant;
-
-impl core::fmt::Display for InvalidConstant {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("bigint constant needs an unsigned magnitude and a bigint result")
-    }
-}
-
-impl core::error::Error for InvalidConstant {}

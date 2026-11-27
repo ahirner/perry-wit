@@ -141,9 +141,9 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
                     NativeBody::Helper(HelperSpec::PromiseReaction(reaction)) => {
                         builder.reaction_body(ctx, *reaction, &args)?
                     }
-                    NativeBody::Helper(HelperSpec::TimerRunner { kind, cb_call, .. }) => {
-                        builder.timer_body(ctx, *kind, *cb_call, &args)?
-                    }
+                    NativeBody::Helper(HelperSpec::TimerRunner {
+                        schedule, cb_call, ..
+                    }) => builder.timer_body(ctx, *schedule, *cb_call, &args)?,
                     NativeBody::Settle(kind) => builder.settle_body(ctx, *kind, &args)?,
                 }
                 remove_unreachable(ctx, builder.region);

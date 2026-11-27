@@ -34,18 +34,9 @@ op_schema! {
     check binding.as_str().contains('#') => InvalidForeign;
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("foreign call must have a binding and the signature required by its transfer phase")]
 struct InvalidForeign;
-
-impl core::fmt::Display for InvalidForeign {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(
-            "foreign call must have a binding and the signature required by its transfer phase",
-        )
-    }
-}
-
-impl core::error::Error for InvalidForeign {}
 
 impl OutputContract for Phase {
     fn accepts(self, ctx: &Context, op: &Operation) -> bool {

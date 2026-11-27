@@ -11,6 +11,8 @@ pub(super) enum Parameter<'s> {
 }
 
 pub(super) struct ParamSig<'s> {
+    /// Position before erasing function-valued arguments, including the implicit prefix.
+    pub(super) position: usize,
     pub(super) origin: Parameter<'s>,
     pub(super) is_rest: bool,
     pub(super) is_never: bool,
@@ -30,9 +32,15 @@ impl<'s> ParamSig<'s> {
         shapes: &Shapes<'_>,
         ty: crate::engine::NativeParam,
         origin: Parameter<'s>,
+        position: usize,
     ) -> Result<Self> {
         let (binding, is_never) = shapes.native_param(ty)?;
+        let position = match ty {
+            crate::engine::NativeParam::Argument { position, .. } => position,
+            _ => position,
+        };
         Ok(Self {
+            position,
             origin,
             binding,
             base: binding,
@@ -76,7 +84,8 @@ impl<'s> Signature<'s> {
             params: function
                 .params
                 .iter()
-                .map(|&p| ParamSig::native(shapes, p, Parameter::Native))
+                .enumerate()
+                .map(|(index, &p)| ParamSig::native(shapes, p, Parameter::Native, index))
                 .collect::<Result<_>>()?,
             result: shapes.solved_result(function.result, function.is_async)?,
         })
@@ -96,6 +105,22 @@ impl<'s> Signature<'s> {
         }
     }
 
+    pub(super) fn supplied_values(
+        &self,
+        prefix: usize,
+        values: &[Value],
+    ) -> impl Iterator<Item = Value> {
+        let (fixed, rest) = self.parameters();
+        let trailing = rest
+            .and_then(|p| values.get(p.position - prefix..))
+            .unwrap_or_default();
+        fixed
+            .iter()
+            .skip(prefix)
+            .filter_map(move |param| values.get(param.position - prefix).copied())
+            .chain(trailing.iter().copied())
+    }
+
     pub(super) fn carrier_results(&self) -> Vec<TypeHandle> {
         self.result.iter().map(|r| r.carrier).collect()
     }
@@ -112,15 +137,15 @@ impl<'s> Signature<'s> {
     }
 }
 
-pub(crate) fn build_module(
+pub(crate) fn build_module<'r>(
     ctx: &mut Context,
     declarations: &crate::source::ModuleDeclarations,
     decls: crate::shapes::Declarations<'_>,
     locations: &mut hir_compat::Locations<'_>,
-    witnesses: &[hir_compat::Witness<'_, hir_compat::Target<FuncId>>],
     specialization: &crate::engine::Specialization,
+    exports: hir_compat::Witnesses<'r, FuncId>,
     layouts: (crate::engine::types::TypeTable, perry_mir::RecordLayouts),
-) -> Result<LoweredProgram> {
+) -> Result<LoweredProgram<'r>> {
     let bodies = &specialization.bodies;
     let mut functions = HashMap::new();
     let mut command = None;
@@ -176,6 +201,7 @@ pub(crate) fn build_module(
                 &shapes,
                 crate::engine::NativeParam::Environment(env),
                 Parameter::Environment(env),
+                params.len(),
             )?);
         }
         if let Some(receiver) = function.receiver {
@@ -183,8 +209,10 @@ pub(crate) fn build_module(
                 &shapes,
                 crate::engine::NativeParam::Value(receiver),
                 Parameter::Receiver,
+                params.len(),
             )?);
         }
+        let prefix = params.len();
         for (idx, param) in declaration.params.iter().enumerate() {
             use crate::engine::Storage;
             let ty = match specialization
@@ -231,6 +259,7 @@ pub(crate) fn build_module(
                 base.carrier
             };
             params.push(ParamSig {
+                position: prefix + idx,
                 is_rest: param.is_rest,
                 origin: Parameter::Source(function.id, param),
                 is_never,
@@ -379,32 +408,41 @@ pub(crate) fn build_module(
         }
         module.append_operation(ctx, func.get_operation(), 0);
     }
-    let exports = witnesses
-        .iter()
-        .zip(&bodies.exports)
-        .map(|(witness, id)| {
-            let Some(id) = id else {
-                return command.map(ExportTarget::Command).ok_or_else(|| {
-                    diag!(
-                        codes::MISSING_EXPORT,
-                        "wasi:cli/run requires an implementation or top-level statements"
-                    )
-                });
+    let exports = exports
+        .into_iter()
+        .map(|witness| {
+            use hir_compat::ExportDeclaration;
+            let declaration = witness.signature.map(|sig| sig.declaration);
+            let Some(id) = witness.target else {
+                let Some(ExportDeclaration::Function(entry, _)) = declaration else {
+                    bail_internal!("command witness missing its WIT declaration");
+                };
+                return command
+                    .map(|f| ExportTarget::Command(f, entry))
+                    .ok_or_else(|| {
+                        diag!(
+                            codes::MISSING_EXPORT,
+                            "wasi:cli/run requires an implementation or top-level statements"
+                        )
+                    });
             };
             let &f = functions
-                .get(id)
+                .get(&id)
                 .ok_or_else(|| internal!("witness function was not emitted"))?;
-            if matches!(witness.target, Some(hir_compat::Target::Destructor(..))) {
-                return Ok(ExportTarget::Destructor(f, witness.name.clone()));
-            }
+            let (entry, annotations) = match declaration {
+                Some(ExportDeclaration::Destructor) => {
+                    return Ok(ExportTarget::Destructor(f, witness.name));
+                }
+                Some(ExportDeclaration::Function(entry, annotations)) => (Some(entry), annotations),
+                None => (None, Vec::new()),
+            };
             let symbol = f.get_symbol_name(ctx);
             let name = locations.display_function_name(symbol.as_ref());
             Ok(ExportTarget::Function(
                 f,
-                witness
-                    .signature
-                    .iter()
-                    .flat_map(|s| &s.annotations)
+                entry,
+                annotations
+                    .into_iter()
                     .map(|span| {
                         span.and_then(|s| locations.span(s))
                             .or_else(|| locations.declaration_span(symbol.as_ref()))

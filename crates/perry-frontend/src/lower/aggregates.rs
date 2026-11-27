@@ -203,12 +203,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                     states = perry_mir::Absence::join_optional(states, absence(ctx, ty));
                 }
                 if !uniform {
-                    let fields: Vec<(String, TypeHandle)> = values
-                        .iter()
-                        .enumerate()
-                        .map(|(i, v)| (format!("_{i}"), v.get_type(ctx)))
-                        .collect();
-                    let record = self.shapes.mir_tuple(ctx, fields)?;
+                    let fields = values.iter().map(|v| v.get_type(ctx));
+                    let record = self
+                        .shapes
+                        .positional_record(ctx, RecordKind::Tuple, fields)?;
                     return Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, values)));
                 }
                 states.map_or(inner, |states| {

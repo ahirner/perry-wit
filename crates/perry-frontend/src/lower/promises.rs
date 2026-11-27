@@ -120,6 +120,30 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(())
     }
 
+    pub(super) fn as_promise_value(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        let ty = value.get_type(ctx);
+        let Some(promise) = perry_mir::typed::<PromiseType>(ctx, present_type(ctx, ty)) else {
+            return Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)));
+        };
+        let Some(states) = absence(ctx, ty) else {
+            return Ok(value);
+        };
+        let settled = super::coerce::admitting(ctx, promise.deref(ctx).value(), states);
+        let target = PromiseType::get(ctx, settled).into();
+        let absent = |b: &mut Self, ctx: &mut Context, null| {
+            let item = b.absent_literal(ctx, null, Some(settled))?;
+            Ok(b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, item)))
+        };
+        self.match_optional(
+            ctx,
+            value,
+            target,
+            |b, ctx| absent(b, ctx, !states.admits_undefined()),
+            |b, ctx| absent(b, ctx, states.admits_null()),
+            |b, ctx, promise| b.fit(ctx, promise, target),
+        )
+    }
+
     fn adopt(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         if self.is_async && value.get_type(ctx).deref(ctx).is::<PromiseType>() {
             let op = AwaitOp::new(ctx, value).to_diag(ctx)?;

@@ -43,7 +43,7 @@ fn exported_class_handles_keep_the_instance_until_canonical_drop() -> Result<()>
         static twice(value:number) {return new Local(value*2);}
         [Symbol.dispose]() {disposed++;} }",
     )?;
-    let source = "import { Local, drops } from './counter'; class Label { text(){return 'label';} } export const counters={Counter:Local,Label,drops,copy(value){return new Local(value.get());},visit(values){for (const n of values) { if(n) continue; }}};";
+    let source = "import { Local as Counter, drops } from './counter'; class Label { text(){return 'label';} } const api={Counter,Label,drops,copy(value){return new Counter(value.get());},visit(values){for (const n of values) { if(n) continue; }}}; export {api as counters};";
     let entry = directory.path().join("entry.ts");
     let engine = Engine::default();
     let bytes = MemoryChecked.component(wit, "api", &entry.to_string_lossy(), source)?;

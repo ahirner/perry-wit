@@ -1,6 +1,6 @@
 //! Source-level inference types of resolved WIT values.
 use super::*;
-use crate::wit::{Foreign, WitValue, WorldTypes};
+use crate::wit::{WitValue, WorldTypes};
 use perry_contract::{
     names::NamedType,
     types::{Contract, Input, convert},
@@ -12,9 +12,30 @@ pub(crate) enum WitView {
     Reference,
     Definition,
     Boundary,
+    Input,
 }
 
 impl TypeTable {
+    pub(crate) fn wit_input(&mut self, ctx: &Context, ty: Ty) -> Ty {
+        let (present, absent) = self.strip_nullish(ty);
+        match self.kind(present) {
+            TyKind::Named(_)
+            | TyKind::Generic { .. }
+            | TyKind::Object { .. }
+            | TyKind::Array(_)
+            | TyKind::Tuple(_)
+            | TyKind::Variant(_)
+            | TyKind::Union(_)
+            | TyKind::WitCarrier(_)
+            | TyKind::ClassInst(_)
+            | TyKind::Cell { .. } => {
+                let input = self.generic(shapes::TypeName::new(ctx, "WitInput".into()), &[present]);
+                self.with_absences(input, absent)
+            }
+            _ => ty,
+        }
+    }
+
     pub(crate) fn export_type(&mut self, ctx: &Context, value: WitValue<'_>) -> Ty {
         match value.integer() {
             Some((64, _)) => Ty::BIGINT,
@@ -26,6 +47,12 @@ impl TypeTable {
     pub(crate) fn wit_type(&mut self, ctx: &Context, value: WitValue<'_>, view: WitView) -> Ty {
         let key = (std::ptr::from_ref(value.resolve), value.ty, view);
         if let Some(&ty) = self.wit_shapes.get(&key) {
+            return ty;
+        }
+        if view == WitView::Input {
+            let boundary = self.wit_type(ctx, value, WitView::Boundary);
+            let ty = self.wit_input(ctx, boundary);
+            self.wit_shapes.insert(key, ty);
             return ty;
         }
         let input = match value.ty {
@@ -134,7 +161,7 @@ impl TypeTable {
                         })
                         .collect();
                     if view == WitView::Boundary {
-                        let arms = table.ty_pool.intern(&mut table.members_index, &cases);
+                        let arms = TypeListId::intern(&mut table.members, &cases);
                         table.intern_kind(TyKind::Variant(arms))
                     } else {
                         table.union(&cases)
@@ -155,24 +182,26 @@ impl TypeTable {
     }
 
     pub(crate) fn intern_imports(&mut self, ctx: &Context, world: &WorldTypes<'_>) {
-        let imports: std::collections::BTreeMap<_, _> = world
-            .foreign()
-            .iter()
-            .filter_map(|(name, f)| match f {
-                Foreign::Function(signature) => Some((name, signature)),
-                _ => None,
-            })
-            .collect();
-        for signature in imports.into_values() {
-            for &value in signature.params.iter().chain(&signature.result) {
+        for signature in world.signatures() {
+            let Some(params) = &signature.abi_params else {
+                continue;
+            };
+            for &value in params {
+                self.wit_type(ctx, value, WitView::Input);
+            }
+            if let Some(value) = signature.result {
                 self.wit_type(ctx, value, WitView::Boundary);
             }
         }
     }
 
-    pub(crate) fn boundary_type(&self, value: WitValue<'_>) -> perry_wit_diagnostics::Result<Ty> {
+    pub(crate) fn boundary_type(
+        &self,
+        value: WitValue<'_>,
+        view: WitView,
+    ) -> perry_wit_diagnostics::Result<Ty> {
         self.wit_shapes
-            .get(&(value.resolve, value.ty, WitView::Boundary))
+            .get(&(value.resolve, value.ty, view))
             .copied()
             .ok_or_else(|| perry_wit_diagnostics::internal!("missing WIT import type"))
     }

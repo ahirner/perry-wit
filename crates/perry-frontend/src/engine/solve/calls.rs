@@ -2,6 +2,21 @@
 use super::*;
 use crate::engine::types::WitView;
 
+#[derive(Clone, Copy)]
+pub(super) enum CallOrigin<'h> {
+    Source(SourceCall<'h>),
+    Callback(u32, &'h [HirType]),
+}
+
+impl CallOrigin<'_> {
+    pub(super) fn offset(self) -> u32 {
+        match self {
+            Self::Source(call) => call.offset,
+            Self::Callback(offset, _) => offset,
+        }
+    }
+}
+
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn eval_args(&mut self, s: &mut EvalState<'h>, args: &'h [Expr]) -> Result<Vec<Ty>> {
         args.iter().map(|a| self.eval_expr(s, a)).collect()
@@ -31,14 +46,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             let ty = self.eval_expr(s, expr)?;
             self.invalidate_conservative_cell(ty);
             self.check_escaping_func(s.inst, ty, 0, s.current_span)?;
-            let erased = self
+            self.site_mut(s.inst, expr)?.erased = self
                 .types
                 .is_zero_sized_func(ty, &self.index.capture_free_templates);
-            self.site_mut(s.inst, expr)?.operand = if erased {
-                OperandUse::Erased
-            } else {
-                OperandUse::Value
-            };
             let ty = self.types.normalize_for_storage(self.ctx, self.decls, ty);
             props.push(self.types.property(name, ty, false));
         }
@@ -49,69 +59,48 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn resource_result(&mut self, member: crate::wit::MemberId) -> Ty {
-        self.decls.world.members[member]
+        member
+            .signature(self.decls.world)
             .result
+            .and_then(|value| {
+                Some(crate::wit::WitValue {
+                    ty: value.result().map_or(Some(value.ty), |r| r.ok)?,
+                    ..value
+                })
+            })
             .map_or(Ty::VOID, |value| {
                 self.types.wit_type(self.ctx, value, WitView::Reference)
             })
     }
 
-    pub(super) fn eval_static_method_call(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        class_name: &str,
-        method_name: &str,
-        args: &'h [Expr],
-        byte_offset: u32,
-    ) -> Result<Ty> {
-        let arg_tys = self.eval_args(s, args)?;
-        if arg_tys.contains(&Ty::BOTTOM) {
-            return Ok(Ty::BOTTOM);
-        }
-        let class = self.types.intern_name(class_name);
-        if let Some(cid) = self.index.class_by_name_id(class)
-            && let Some(tid) = self.index.method_template(
-                &self.index.class(cid).declaration.static_methods,
-                hir_compat::method(method_name).name(),
-            )
-        {
-            let (_, ret) = self.dispatch_call_site(
-                s.inst,
-                expr,
-                InstanceReq::new(tid, &arg_tys, Some(s.inst)).at(byte_offset),
-                false,
-            )?;
-            return Ok(ret);
-        }
-        Ok(Ty::OPEN)
-    }
-
-    pub(super) fn dispatch_call_site(
+    pub(super) fn class_call(
         &mut self,
         inst_id: InstanceId,
-        expr: &'h Expr,
-        mut req: InstanceReq<'_>,
-        pass_env: bool,
-    ) -> Result<(InstanceId, Ty)> {
-        let view = self.index.view(req.template);
-        if view.kind.is_class_member() && !view.params.last().is_some_and(|p| p.is_rest) {
-            req.args = &req.args[..req.args.len().min(view.params.len())];
+        call: SourceCall<'h>,
+        template: TemplateId,
+        receiver: Option<ClassInstId>,
+        inputs: &[Ty],
+    ) -> Result<Ty> {
+        if inputs.contains(&Ty::BOTTOM) {
+            return Ok(Ty::BOTTOM);
         }
-        let arg_types = req.args;
-        let pass_receiver = req.receiver.is_some();
-        let target = self.request_instance(req)?;
-        let res = SiteResolution::Call {
-            target: CallTarget::Direct {
-                target,
-                pass_receiver,
-                pass_env,
-            },
-            argument_types: self.types.tuple(arg_types),
-        };
-        self.record_site(inst_id, expr, res);
+        let view = self.index.view(template);
+        self.check_callback_params(inst_id, view, inputs, call.offset)?;
+        let explicit = self.eval_type_args(inst_id, call.type_args);
+        let target = self.request_instance(
+            InstanceReq::new(template, view.accepted_inputs(inputs), Some(inst_id))
+                .receiver(receiver.map(Receiver::Class))
+                .type_args(&explicit)
+                .at(call.offset),
+        )?;
+        let res = SiteResolution::Call(CallTarget::Direct {
+            target,
+            pass_receiver: receiver.is_some(),
+            pass_env: false,
+        });
+        self.record_site(inst_id, call.site, res);
         let return_loc = self.instances[target].return_loc;
-        Ok((target, self.read_loc(return_loc, inst_id)))
+        Ok(self.read_loc(return_loc, inst_id))
     }
 
     pub(super) fn resolve_class_inst(
@@ -122,20 +111,11 @@ impl<'h, 'a> Solver<'h, 'a> {
     ) -> Result<Option<ClassInstId>> {
         match self.types.kind(stripped) {
             TyKind::ClassInst(id) => Ok(Some(id)),
-            TyKind::Named(id) => {
-                {
-                    let nid = self.types.intern_name(id.get(self.ctx));
-                    if let Some(cid) = self.index.class_by_name_id(nid) {
-                        return Ok(Some(self.request_class_inst(
-                            cid,
-                            &[],
-                            byte_offset,
-                            Some(inst_id),
-                        )?));
-                    }
-                }
-                Ok(None)
-            }
+            TyKind::Named(id) => self
+                .index
+                .class_named(id.get(self.ctx))
+                .map(|cid| self.request_class_inst(cid, &[], byte_offset, Some(inst_id)))
+                .transpose(),
             _ => Ok(None),
         }
     }
@@ -155,12 +135,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 fields.iter().zip(args).map(|(f, a)| (f.name.as_str(), a)),
             );
         }
-        let cname_id = self.types.intern_name(class_name);
-        if class_name == "Promise" && self.index.class_by_name_id(cname_id).is_none() {
+        let class = self.index.class_named(class_name);
+        if class_name == "Promise" && class.is_none() {
             return self.eval_new_promise(s, expr, args, type_args, byte_offset);
         }
         let arg_tys = self.eval_args(s, args)?;
-        if let Some(cid) = self.index.class_by_name_id(cname_id) {
+        if let Some(cid) = class {
             if arg_tys.contains(&Ty::BOTTOM) {
                 return Ok(Ty::BOTTOM);
             }
@@ -170,22 +150,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             for &ty in &arg_tys {
                 self.mark_escaping_env(ty);
             }
-            let arguments = self.types.tuple(&arg_tys);
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::ClassNew(class_inst, arguments),
-            );
+            self.record_site(s.inst, expr, SiteResolution::ClassNew(class_inst));
             return Ok(self.types.class_inst(class_inst));
         }
-        if arg_tys.iter().any(|&a| self.types.has_func(a)) {
-            return Err(self.hir.locations.annotate_call(
-                Diagnostic::unsupported(format!(
-                    "passing a callback to runtime '{class_name}' requires the runtime to call a guest function"
-                )),
-                byte_offset,
-            ));
-        }
+        self.check_host_arguments(s, class_name, &arg_tys, byte_offset)?;
         Ok(if class_name == "Array" {
             self.types.array(Ty::OPEN)
         } else {
@@ -217,7 +185,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 )?;
             }
             bindings
-        } else if self.index.class_has_implicit_params.contains(cid.index()) {
+        } else if self.index.class(cid).implicit_params {
             arg_tys.to_vec()
         } else {
             Vec::new()
@@ -225,50 +193,78 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.request_class_inst(cid, &class_args, byte_offset, caller)
     }
 
-    pub(super) fn eval_call(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        callee: &'h Expr,
-        args: &'h [Expr],
-        byte_offset: u32,
-    ) -> Result<Ty> {
-        if matches!(callee, Expr::ExternFuncRef { name, .. } if name == "structuredClone") {
-            return match args.first() {
-                Some(a) => self.eval_expr(s, a),
-                None => Ok(Ty::OPEN),
-            };
-        }
-        if let Expr::ExternFuncRef {
-            name, return_type, ..
-        } = callee
-        {
-            use crate::shapes::Imported;
-            let binding = self.decls.imports.get(name.as_str()).copied();
-            let builtin = match binding {
-                Some(Imported::Timer(imported)) => Some(imported),
-                None => Some(name.as_str()),
-                _ => None,
-            };
-            if let Some(builtin) = builtin {
-                match builtin {
-                    "queueMicrotask" => {
-                        return Err(self.annotate_expr_error(
-                            s,
-                            Diagnostic::unsupported(
-                                "queueMicrotask is not supported: this runtime has no microtask queue",
-                            ),
-                            byte_offset,
-                        ));
-                    }
-                    "setTimeout" | "setInterval" | "setImmediate" => {
-                        return self.eval_timer_start(s, expr, builtin, args, byte_offset);
-                    }
-                    "clearTimeout" | "clearInterval" | "clearImmediate" => {
-                        return self.eval_timer_clear(s, expr, args);
-                    }
-                    _ => {}
+    pub(super) fn eval_call(&mut self, s: &mut EvalState<'h>, call: SourceCall<'h>) -> Result<Ty> {
+        let SourceCall {
+            site: expr,
+            callee,
+            offset: byte_offset,
+            ..
+        } = call;
+        let callee = match callee {
+            crate::source::Callee::Value(callee) => callee,
+            crate::source::Callee::Static { class, method } => {
+                let arg_tys = self.call_argument_types(s, call.args)?;
+                if arg_tys.contains(&Ty::BOTTOM) {
+                    return Ok(Ty::BOTTOM);
                 }
+                if let Some(cid) = self.index.class_named(class)
+                    && let Some(tid) = self.index.method_template(
+                        &self.index.class(cid).declaration.static_methods,
+                        hir_compat::method(method).name(),
+                    )
+                {
+                    return self.class_call(s.inst, call, tid, None, &arg_tys);
+                }
+                return Ok(Ty::OPEN);
+            }
+        };
+        use crate::shapes::Imported;
+        let binding = match callee {
+            Expr::ExternFuncRef { name, .. } => self.decls.imports.get(name.as_str()).copied(),
+            _ => None,
+        };
+        let builtin = match (callee, binding) {
+            (_, Some(Imported::Timer(name))) => Some(name),
+            (Expr::ExternFuncRef { name, .. }, None) => Some(name.as_str()),
+            _ => match hir_compat::member(callee) {
+                Some((Expr::GlobalGet(_), hir_compat::MemberKey::Named(name, _))) => {
+                    Some(hir_compat::method(name).name())
+                }
+                _ => None,
+            },
+        };
+        if let (Some(builtin), Some(args)) = (builtin, call.args.plain()) {
+            match builtin {
+                "queueMicrotask" => {
+                    return Err(self.annotate_expr_error(
+                        s,
+                        Diagnostic::unsupported(
+                            "queueMicrotask is not supported: this runtime has no microtask queue",
+                        ),
+                        byte_offset,
+                    ));
+                }
+                "setTimeout" | "setInterval" | "setImmediate" => {
+                    return self.eval_timer_start(s, expr, builtin, args, byte_offset);
+                }
+                "clearTimeout" | "clearInterval" | "clearImmediate" => {
+                    return self.eval_timer_clear(s, expr, args);
+                }
+                _ => {}
+            }
+        }
+        if let (
+            Expr::ExternFuncRef {
+                name, return_type, ..
+            },
+            Some(args),
+        ) = (callee, call.args.plain())
+        {
+            if name == "structuredClone" {
+                return match args.first() {
+                    Some(value) => self.eval_expr(s, value),
+                    None => Ok(Ty::OPEN),
+                };
             }
             let arg_tys = self.eval_args(s, args)?;
             match binding {
@@ -299,7 +295,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     ));
                 }
                 Some(Imported::WriteFile) => return Ok(self.types.promise(Ty::VOID)),
-                Some(Imported::Foreign(_, sig)) => {
+                Some(Imported::Foreign(id)) => {
+                    let sig = id.signature(self.decls.world);
                     let ret = sig.result.map_or(Ty::VOID, |ty| {
                         self.types.wit_type(self.ctx, ty, WitView::Reference)
                     });
@@ -313,209 +310,113 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 _ => {}
             }
-            if binding.is_none()
-                && hir_compat::is_source_extern(name, byte_offset)
-                && arg_tys.iter().any(|&a| self.types.has_func(a))
-            {
-                return Err(self.hir.locations.annotate_call(
-                    Diagnostic::unsupported(format!(
-                        "passing a callback to runtime '{name}' requires the runtime to call a guest function"
-                    )),
-                    byte_offset,
-                ));
+            if binding.is_none() && hir_compat::is_source_extern(name, byte_offset) {
+                self.check_host_arguments(s, name, &arg_tys, byte_offset)?;
             }
             return Ok(self.types.intern_hir(self.ctx, return_type, true));
         }
-        if let Some((object, property)) = self.index.receiver_members.method(callee) {
-            if let Some(property) = property {
-                return self.eval_method_call(s, expr, object, property, args, byte_offset);
+        let (callee_ty, receiver) = match hir_compat::member(callee) {
+            Some((object, hir_compat::MemberKey::Named(property, _))) => {
+                return self.eval_method_call(s, call, callee, object, property);
             }
-            let ty = self.eval_expr(s, object)?;
-            if ty == Ty::BOTTOM {
-                return Ok(ty);
+            Some((object, hir_compat::MemberKey::Computed(index, offset))) => {
+                let receiver = self.eval_expr(s, object)?;
+                if let Some(args) = call.args.plain()
+                    && let TyKind::Named(name) = self.types.kind(receiver)
+                    && let Some(owner) = self.decls.resource(name.get(self.ctx))
+                    && let Some(member) = self.index.receiver_members.get(object, owner)
+                {
+                    self.eval_args(s, args)?;
+                    self.record_site(s.inst, expr, SiteResolution::ResourceCall(member));
+                    return Ok(Ty::VOID);
+                }
+                (
+                    self.eval_index(s, callee, receiver, index, offset)?,
+                    Some(receiver),
+                )
             }
-            if let TyKind::Named(name) = self.types.kind(ty)
-                && let Some(owner) = self.decls.resource(name.get(self.ctx))
-                && let Some(member) = self.index.receiver_members.get(object, owner)
-            {
-                self.eval_args(s, args)?;
-                self.record_site(s.inst, expr, SiteResolution::ResourceCall(member));
-                return Ok(Ty::VOID);
-            }
-        }
-
-        let callee_ty = self.eval_expr(s, callee)?;
-        let arg_tys = self.eval_args(s, args)?;
-        self.eval_callable(s, expr, callee_ty, None, &arg_tys)
+            _ => (self.eval_expr(s, callee)?, None),
+        };
+        let arg_tys = self.call_argument_types(s, call.args)?;
+        self.eval_callable(s, call, callee_ty, receiver, &arg_tys)
     }
 
     pub(super) fn eval_callable(
         &mut self,
         s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        callee_ty: Ty,
+        call: SourceCall<'h>,
+        callee: Ty,
         receiver: Option<Ty>,
-        arg_tys: &[Ty],
+        inputs: &[Ty],
     ) -> Result<Ty> {
-        let (args, type_args, byte_offset) = match expr {
-            Expr::Call {
-                args,
-                type_args,
-                byte_offset,
-                ..
-            } => (Some(args.as_slice()), type_args, *byte_offset),
-            Expr::CallSpread {
-                type_args,
-                byte_offset,
-                ..
-            } => (None, type_args, *byte_offset),
-            _ => return Err(Diagnostic::internal("call site requires a call expression")),
-        };
-        if callee_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
-            return Ok(Ty::BOTTOM);
-        }
-        if matches!(callee_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let argument_types = self.types.tuple(arg_tys);
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::Call {
-                    target: CallTarget::ThrowTypeError,
-                    argument_types,
-                },
-            );
-            return Ok(Ty::NEVER);
-        }
-        if let Some(idents) = self.types.func_dispatch_members(callee_ty, true) {
-            return self.eval_dispatch_call(
-                s,
-                expr,
-                callee_ty,
-                &idents,
-                receiver,
-                arg_tys,
-                byte_offset,
-            );
-        }
-        let TyKind::Func(ident) = self.types.kind(callee_ty) else {
-            if !self.types.is_open(callee_ty) && callee_ty != Ty::DYNAMIC {
-                return Err(attach_inst_chain(
-                    &self.instances,
-                    self.index,
-                    &self.hir.locations,
-                    self.hir.locations.annotate_call(
-                        diag!(codes::TYPE_MISMATCH, "expression is not callable"),
-                        byte_offset,
-                    ),
-                    s.inst,
-                ));
-            }
-            return Ok(Ty::OPEN);
-        };
-        for &a in arg_tys {
-            self.invalidate_conservative_cell(a);
-        }
-        let target_view = self.index.view(ident.template);
-        let is_promise_handle =
-            self.apply_promise_handle_call(s, ident, arg_tys, args, byte_offset)?;
-
-        if receiver.is_none()
-            && args.into_iter().flatten().any(|a| {
-                matches!(
-                    a,
-                    Expr::Closure {
-                        captures_this: true,
-                        ..
-                    } | Expr::Closure {
-                        captures_new_target: true,
-                        ..
-                    }
-                )
-            })
-        {
-            return Err(self.hir.locations.annotate_call(
-                Diagnostic::unsupported(
-                    "a callback that captures this or new.target requires its original receiver",
-                ),
-                byte_offset,
-            ));
-        }
-        if args.is_some()
-            && receiver.is_none()
-            && !is_promise_handle
-            && !target_view.params.iter().any(|p| p.is_rest)
-            && arg_tys.len() > target_view.params.len()
-        {
-            self.check_escaping_unannotated_func(ident.template, None)?;
-        }
-        self.check_callback_params(s.inst, target_view, arg_tys, byte_offset)?;
-
-        let explicit_targs = self.eval_type_args(s.inst, type_args);
-        let pass_env = self.is_escaping_env(ident.template, s.inst);
-        let call_arg_tys = if is_promise_handle {
-            arg_tys.get(..1).unwrap_or(&[])
-        } else {
-            arg_tys
-        };
-        let (target_inst, ret) = self.dispatch_call_site(
-            s.inst,
-            expr,
-            InstanceReq::new(ident.template, call_arg_tys, Some(s.inst))
-                .receiver(
-                    receiver
-                        .filter(|_| target_view.uses_this)
-                        .map(Receiver::Object),
-                )
-                .owner(ident.capture_owner)
-                .type_args(&explicit_targs)
-                .at(byte_offset),
-            pass_env,
-        )?;
-        self.propagate_writes(s.inst, target_inst);
-        Ok(ret)
+        let (result, _) =
+            self.resolve_invocation(s, callee, receiver, inputs, CallOrigin::Source(call))?;
+        Ok(result)
     }
 
-    pub(super) fn eval_call_spread(
+    pub(super) fn resolve_invocation(
         &mut self,
         s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        callee: &'h Expr,
-        args: &'h [perry_hir::ir::CallArg],
-    ) -> Result<Ty> {
-        let (callee_ty, receiver, builtin_result) = if let Expr::PropertyGet {
-            object,
-            property,
-            byte_offset,
-            ..
-        } = callee
-        {
-            let ty = self.eval_expr(s, object)?;
-            let (ty, _) = self.types.strip_nullish(ty);
-            let name = hir_compat::method(property).name();
-            if name == "push" && self.type_may_be_array(ty) {
-                for (value, spread) in crate::source::Arguments::Spread(args) {
-                    let value_ty = self.eval_expr(s, value)?;
-                    self.push_argument(s.inst, ty, value, value_ty, spread);
-                }
-                return Ok(Ty::NUMBER);
+        callee: Ty,
+        receiver: Option<Ty>,
+        inputs: &[Ty],
+        invocation: CallOrigin<'h>,
+    ) -> Result<(Ty, Option<CallTarget>)> {
+        if callee == Ty::BOTTOM || inputs.contains(&Ty::BOTTOM) {
+            return Ok((Ty::BOTTOM, None));
+        }
+        let offset = invocation.offset();
+        let (target, result) = if matches!(callee, Ty::NEVER | Ty::NULL | Ty::VOID) {
+            (CallTarget::ThrowTypeError, Ty::NEVER)
+        } else if let Some(identities) = self.types.func_dispatch_members(callee, true) {
+            self.callback_dispatcher(
+                s,
+                callee,
+                &identities,
+                inputs,
+                callbacks::DispatchSite::Call(receiver, invocation),
+            )?
+        } else if let TyKind::Func(identity) = self.types.kind(callee) {
+            for &input in inputs {
+                self.invalidate_conservative_cell(input);
             }
-            let callable = self.method_property(s, ty, name, *byte_offset)?;
-            let fallback = match name {
-                "concat" | "filter" | "sort" | "toSorted" => ty,
-                "max" | "min" => Ty::NUMBER,
-                _ => Ty::OPEN,
+            let (arm, result, _) =
+                self.select_call_arm(s, identity, receiver, inputs, invocation)?;
+            let target = CallTarget::Direct {
+                target: arm.target,
+                pass_receiver: arm.receiver,
+                pass_env: self.is_escaping_env(identity.template, s.inst),
             };
-            (callable, Some(ty), fallback)
+            (target, result)
+        } else if self.types.is_open(callee) || callee == Ty::DYNAMIC {
+            return Ok((Ty::OPEN, None));
         } else {
-            (Some(self.eval_expr(s, callee)?), None, Ty::OPEN)
+            return Err(self.annotate_expr_error(
+                s,
+                diag!(codes::TYPE_MISMATCH, "expression is not callable"),
+                offset,
+            ));
         };
-        let mut expanded = Vec::with_capacity(args.len());
-        for (expr, spread) in crate::source::Arguments::Spread(args) {
+        if let CallOrigin::Source(call) = invocation {
+            self.record_site(s.inst, call.site, SiteResolution::Call(target));
+        }
+        Ok((result, Some(target)))
+    }
+
+    pub(super) fn call_argument_types(
+        &mut self,
+        s: &mut EvalState<'h>,
+        args: Arguments<'h>,
+    ) -> Result<Vec<Ty>> {
+        if let Some(args) = args.plain() {
+            return self.eval_args(s, args);
+        }
+        let mut expanded = Vec::new();
+        for (expr, spread) in args {
             let ty = self.eval_expr(s, expr)?;
             if spread && ty != Ty::BOTTOM {
                 let (ty, _) = self.types.strip_nullish(ty);
                 let ty = self.resolve_cell_read(s.inst, ty);
-                self.site_mut(s.inst, expr)?.operand = OperandUse::Spread(ty);
                 match self.types.kind(ty) {
                     TyKind::Tuple(span) => expanded.extend_from_slice(self.types.ty_slice(span)),
                     _ => expanded.push(
@@ -526,41 +427,22 @@ impl<'h, 'a> Solver<'h, 'a> {
                 expanded.push(ty);
             }
         }
-        match callee_ty {
-            Some(ty) if receiver.is_none() || self.types.has_func(ty) => {
-                self.eval_callable(s, expr, ty, receiver, &expanded)
-            }
-            _ => Ok(builtin_result),
-        }
+        Ok(expanded)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn eval_dispatch_call(
-        &mut self,
-        s: &mut EvalState<'h>,
-        expr: &'h Expr,
-        callee_ty: Ty,
-        idents: &[FuncIdentity],
-        recv_ty: Option<Ty>,
-        arg_tys: &[Ty],
-        byte_offset: u32,
-    ) -> Result<Ty> {
-        let (target, argument_types, ret) = self.callback_dispatcher(
-            s,
-            callee_ty,
-            idents,
-            arg_tys,
-            callbacks::DispatchSite::Call(recv_ty, byte_offset),
-        )?;
-        self.record_site(
-            s.inst,
-            expr,
-            SiteResolution::Call {
-                target,
-                argument_types,
-            },
-        );
-        Ok(ret)
+    pub(super) fn check_host_arguments(
+        &self,
+        s: &EvalState<'h>,
+        name: &str,
+        inputs: &[Ty],
+        offset: u32,
+    ) -> Result<()> {
+        if inputs.iter().any(|&ty| self.types.has_func(ty)) {
+            return Err(self.annotate_expr_error(s, Diagnostic::unsupported(format!(
+                "passing a callback to runtime '{name}' requires the runtime to call a guest function"
+            )), offset));
+        }
+        Ok(())
     }
 
     pub(super) fn check_callback_params(
@@ -656,9 +538,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             _ => view.display_name(&self.hir.locations),
         };
         for param in view.params {
-            if !self.index.is_param_annotated(param.id)
-                && matches!(param.ty, HirType::Any | HirType::Unknown)
-            {
+            if self.hir.declarations.implicit_parameter(param) {
                 let mut err = diag!(
                     codes::MISSING_TYPE_ANNOTATION,
                     "parameter '{}' of '{}' needs a type annotation",

@@ -11,10 +11,9 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         let local = self.index.locals[binding.local];
         let id = local.id;
         let name = binding.name;
-        let ty = binding.ty;
-        let resolved = self.local_ty(inst_id, binding.local);
-        let is_inferred = !self.declarations.locals.contains_key(&id)
-            || local.flags.contains(LocalFlags::INFERRED);
+        let loc = self.local_location(CaptureOwner::Instance(inst_id), binding.local);
+        let resolved = loc.map(|loc| self.solved.locations[loc]);
+        let is_inferred = !local.flags.is_explicit();
         let solved = match resolved {
             Some(t)
                 if let TyKind::Func(identity) = self.types.kind(t)
@@ -26,8 +25,11 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             Some(t)
                 if self.is_resolved(t)
                     && (is_inferred
-                        || matches!(ty, HirType::Any | HirType::Unknown)
-                        || matches!(ty, HirType::Array(e) if matches!(**e, HirType::Any | HirType::Unknown))
+                        || matches!(local.declared, Ty::OPEN | Ty::DYNAMIC)
+                        || matches!(
+                            self.types.kind(local.declared),
+                            TyKind::Array(Ty::OPEN | Ty::DYNAMIC)
+                        )
                         || matches!(self.types.kind(t), TyKind::ClassInst(_))) =>
             {
                 Some(t)
@@ -63,10 +65,8 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             }
             Some(Ty::OPEN)
                 if is_inferred
-                    && self
-                        .solved
-                        .self_nested_locals
-                        .contains(binding.local.index()) =>
+                    && loc
+                        .is_some_and(|loc| self.solved.self_nested_locs.contains(loc.index())) =>
             {
                 let err = diag!(
                     codes::MISSING_TYPE_ANNOTATION,

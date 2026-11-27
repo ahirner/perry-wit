@@ -23,7 +23,6 @@ impl AbiType {
                     || matches!(err.kind, AbiKind::String | AbiKind::Enum(..))
                     || err.is_error_record()
             }),
-            AbiKind::OkHandle { .. } => true,
             _ => false,
         }
     }
@@ -35,6 +34,12 @@ impl AbiType {
                 | AbiKind::Enum(_, _)
                 | AbiKind::Variant(_, _)
         )
+    }
+
+    fn payload_slots(&self) -> Result<&[Flat]> {
+        self.direct()?
+            .get(1..)
+            .ok_or_else(|| internal!("sum layout has no discriminant"))
     }
 
     fn case(&self, index: usize) -> Option<(&str, Option<&Self>)> {
@@ -76,10 +81,10 @@ impl AbiType {
 #[derive(Clone, Copy)]
 pub(super) enum BoundaryValue<T = TypeHandle> {
     Native(T, Carriers<Value>),
-    Completion {
-        case: usize,
-        payload: Option<(TypeHandle, Carriers<Value>)>,
-    },
+    Case(
+        &'static [&'static str],
+        Option<(TypeHandle, Carriers<Value>)>,
+    ),
 }
 
 struct NativePayload {
@@ -337,14 +342,25 @@ impl FunctionLowering<'_, '_> {
         }
     }
 
-    /// Reinterpret canonical joined slots, preserving the low payload bits when widening.
-    pub(super) fn coerce_flat(
+    fn coerce_slots(
         &mut self,
         ctx: &mut Context,
-        value: Value,
-        from: Flat,
-        to: Flat,
-    ) -> Value {
+        values: &mut [Value],
+        from: &[Flat],
+        to: &[Flat],
+    ) -> Result<()> {
+        ensure_internal!(
+            values.len() <= from.len() && values.len() <= to.len(),
+            "invalid joined payload layout"
+        );
+        for ((value, &from), &to) in values.iter_mut().zip(from).zip(to) {
+            *value = self.coerce_flat(ctx, *value, from, to);
+        }
+        Ok(())
+    }
+
+    /// Reinterpret canonical joined slots, preserving the low payload bits when widening.
+    fn coerce_flat(&mut self, ctx: &mut Context, value: Value, from: Flat, to: Flat) -> Value {
         if from == to {
             return value;
         }
@@ -381,26 +397,21 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir: TypeHandle,
-        mut source: Canonical<'_>,
+        mut source: Canonical<&mut &[Value]>,
     ) -> Result<Value> {
         let sum = self.native_sum(ctx, ty, mir)?;
         let tag = source.read(self, ctx, ty.discriminant_kind(), 0)?;
-        let flat = if matches!(source, Canonical::Memory(..)) {
-            None
-        } else {
-            Some(
-                ty.direct()?
-                    .iter()
-                    .copied()
-                    .skip(1)
-                    .map(|slot| {
-                        source
-                            .read(self, ctx, slot.mem_kind(), 0)
-                            .map(|value| (value, slot))
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            )
+        let flat = match &mut source {
+            Canonical::Flat(values) => {
+                let layout = ty.payload_slots()?;
+                let values = values
+                    .split_off(..layout.len())
+                    .ok_or_else(|| internal!("too few joined flat values"))?;
+                Some((values, layout))
+            }
+            Canonical::Memory(..) => None,
         };
+        let mut slots = Vec::new();
         let result = wasm_type(ctx, mir)?;
         Ok(self.sum_switch(
             ctx,
@@ -411,12 +422,21 @@ impl FunctionLowering<'_, '_> {
                 let payload = if let Some(abi) = abi {
                     let payload_mir = sum.payload(ctx, case, name, abi)?.mir;
                     let lift_mir = scalar_mir_type(ctx, payload_mir);
-                    let mut index = 0;
-                    let source = match &flat {
-                        Some(values) => Canonical::JoinedInput(values, &mut index),
-                        None => source.at(abi.offset),
+                    let value = match flat {
+                        Some((values, joined)) => {
+                            let layout = abi.direct()?;
+                            slots.clear();
+                            slots.extend_from_slice(
+                                values
+                                    .get(..layout.len())
+                                    .ok_or_else(|| internal!("too few joined flat values"))?,
+                            );
+                            b.coerce_slots(ctx, &mut slots, joined, layout)?;
+                            b.lift_abi(ctx, abi, lift_mir, Canonical::Flat(&mut slots.as_slice()))?
+                        }
+                        None => b.lift_abi(ctx, abi, lift_mir, source.at(abi.offset))?,
                     };
-                    Some((payload_mir, b.lift_abi(ctx, abi, lift_mir, source)?))
+                    Some((payload_mir, value))
                 } else {
                     None
                 };
@@ -492,7 +512,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         source: BoundaryValue,
-        mut target: Canonical<'_>,
+        target: Canonical<&mut Vec<Value>>,
     ) -> Result<()> {
         let layout = if matches!(target, Canonical::Memory(..)) {
             &[][..]
@@ -503,9 +523,7 @@ impl FunctionLowering<'_, '_> {
             BoundaryValue::Native(mir, value) => {
                 BoundaryValue::Native(self.native_sum(ctx, ty, mir)?, value)
             }
-            BoundaryValue::Completion { case, payload } => {
-                BoundaryValue::Completion { case, payload }
-            }
+            BoundaryValue::Case(path, payload) => BoundaryValue::Case(path, payload),
         };
         let write_case = |b: &mut Self,
                           ctx: &mut Context,
@@ -517,56 +535,68 @@ impl FunctionLowering<'_, '_> {
                 _ => Canonical::Flat(&mut out),
             };
             let tag = b.i32_const(ctx, case as i32);
-            destination.write(b, ctx, ty.discriminant_kind(), 0, tag)?;
+            destination.write(b, ctx, ty.discriminant_kind(), 0, tag);
             if let Some(payload_abi) = payload_abi {
-                let (mir, value) = match source {
-                    BoundaryValue::Completion { payload, .. } => payload.ok_or_else(|| {
-                        Diagnostic::new(
-                            codes::CONTRACT_MISMATCH,
-                            "WIT result payload requires a return value",
-                        )
-                    })?,
+                let payload = match source {
+                    BoundaryValue::Case([_, next @ ..], payload) if !next.is_empty() => {
+                        BoundaryValue::Case(next, payload)
+                    }
+                    BoundaryValue::Case(_, Some((mir, value))) => BoundaryValue::Native(mir, value),
+                    BoundaryValue::Case(_, None) => bail_diag!(
+                        codes::CONTRACT_MISMATCH,
+                        "WIT result payload requires a return value"
+                    ),
                     BoundaryValue::Native(ref sum, value) => {
                         let payload = sum.payload(ctx, case, name, payload_abi)?;
-                        b.read_native_payload(ctx, payload, value)?
+                        let (mir, value) = b.read_native_payload(ctx, payload, value)?;
+                        BoundaryValue::Native(mir, value)
                     }
                 };
-                let destination = match destination {
-                    Canonical::Memory(address, offset) => {
-                        Canonical::Memory(address, offset + payload_abi.offset)
-                    }
-                    _ => Canonical::JoinedOutput(&mut out, layout),
-                };
-                b.lower_abi(ctx, payload_abi, mir, value, destination)?;
+                b.lower_abi(
+                    ctx,
+                    payload_abi,
+                    payload,
+                    destination.at(payload_abi.offset),
+                )?;
+                if let Canonical::Flat(values) = destination {
+                    b.coerce_slots(
+                        ctx,
+                        &mut values[1..],
+                        payload_abi.direct()?,
+                        ty.payload_slots()?,
+                    )?;
+                }
             }
-            for slot in &layout[out.len()..] {
+            for slot in layout
+                .get(out.len()..)
+                .ok_or_else(|| internal!("sum exceeds flat layout"))?
+            {
                 let zero = b.i64_const(ctx, 0);
                 out.push(b.coerce_flat(ctx, zero, Flat::I64, *slot));
             }
             Ok(out)
         };
         let out = match source {
-            BoundaryValue::Completion { case, .. } => write_case(
-                self,
-                ctx,
-                case,
-                ty.case(case)
-                    .ok_or_else(|| internal!("missing WIT completion case"))?,
-            )?,
+            BoundaryValue::Case(path, _) => {
+                let (case, item) = ty
+                    .cases()
+                    .enumerate()
+                    .find(|(_, (name, _))| Some(name) == path.first())
+                    .ok_or_else(|| internal!("missing WIT completion case {path:?}"))?;
+                ensure_internal!(
+                    path.len() == 1 || item.1.is_some(),
+                    "WIT case {path:?} continues past an empty case"
+                );
+                write_case(self, ctx, case, item)?
+            }
             BoundaryValue::Native(ref sum, value) => {
                 let tag = self.sum_tag(ctx, ty, sum, value)?;
                 let results = layout.iter().map(|ty| flat_type(ctx, *ty)).collect();
                 self.sum_switch(ctx, tag, ty.cases(), results, write_case)?
             }
         };
-        match target {
-            Canonical::Flat(values) if values.is_empty() => *values = out,
-            Canonical::Flat(values) => values.extend(out),
-            _ => {
-                for (value, slot) in out.into_iter().zip(layout) {
-                    target.write(self, ctx, slot.mem_kind(), 0, value)?;
-                }
-            }
+        if let Canonical::Flat(values) = target {
+            values.extend(out);
         }
         Ok(())
     }

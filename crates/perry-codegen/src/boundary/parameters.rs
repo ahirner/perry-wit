@@ -8,18 +8,19 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         export: &Export,
         mir: &[TypeHandle],
-        flat: &mut Vec<Value>,
+        mut flat: &[Value],
     ) -> Result<Vec<Value>> {
         let area = export
             .indirect_size
             .map(|_| {
-                flat.pop()
+                flat.split_off_first()
+                    .copied()
                     .ok_or_else(|| Diagnostic::internal("missing indirect parameter record"))
             })
             .transpose()?;
         let mut source = match area {
             Some(area) => Canonical::Memory(area, 0),
-            None => Canonical::Flat(flat),
+            None => Canonical::Flat(&mut flat),
         };
         let mut args = Vec::with_capacity(export.params.len());
         for (i, (ty, &mir)) in export.params.iter().zip(mir).enumerate() {

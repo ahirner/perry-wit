@@ -7,14 +7,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         class: &'s crate::source::InstanceClass<'s>,
         args: &'s [Expr],
-        arguments: Option<crate::engine::types::Ty>,
     ) -> Result<Value> {
         self.invoke_arguments(
             ctx,
             self.signature(class.factory()?)?,
             std::iter::empty(),
-            Arguments::Constructor(args),
-            arguments,
+            Arguments::Plain(args),
             None,
         )?
         .ok_or_else(|| internal!("class constructor has no result"))
@@ -30,94 +28,51 @@ impl<'s> FunctionBuilder<'s, '_> {
         let rec_ty = self.shapes.resolved_binding(class.ty)?.carrier;
         let rec = TypedHandle::<RecordType>::from_handle(rec_ty, ctx)
             .map_err(|_| internal!("expected class record for {class_name}"))?;
-        let layout = self
-            .shapes
-            .class_records
-            .get(&rec_ty)
-            .ok_or_else(|| internal!("missing layout for class {class_name}"))?
-            .clone();
-        let mut operands = Vec::with_capacity(layout.fields.len());
-        let mut initializers = Vec::new();
-        for (i, (&(field, _), &ty)) in class.fields.iter().zip(&layout.fields).enumerate() {
+        let fields: Vec<_> = crate::shapes::ClassShape::Instance(class)
+            .fields()
+            .zip(rec.deref(ctx).fields().to_diag(ctx)?)
+            .map(|((field, _), (_, ty))| (field, *ty))
+            .collect();
+        let mut operands = Vec::with_capacity(fields.len());
+        let mut order = Vec::new();
+        for (index, &(field, ty)) in fields.iter().enumerate() {
             let value = if let Some(args) = arguments {
-                self.fit(
-                    ctx,
-                    *args
-                        .get(i)
-                        .ok_or_else(|| internal!("missing direct field argument"))?,
-                    ty,
-                )?
-            } else if let Some(value) = self.field_placeholder(ctx, ty) {
-                if let Some(init) = &field.init {
-                    initializers.push((field.name.as_str(), ty, init));
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| internal!("missing direct field argument"))?;
+                if !hir_compat::private_field(field) {
+                    order.push(index as u32);
                 }
-                value
+                self.fit(ctx, *value, ty)?
             } else {
-                let init = field.init.as_ref().ok_or_else(|| unsupported!(
-                    "class {class_name} field {} has no placeholder before its constructor assignment", field.name
-                ))?;
-                self.field_initializer(ctx, class, init, ty)?
+                self.emit_value(ctx, |ctx| OmittedOp::with_type(ctx, ty))
             };
             operands.push(value);
         }
         let instance = self.emit_value(ctx, |ctx| {
             let alloc = AllocOp::new(ctx, rec, operands);
-            alloc.set_attr_perry_field_order(ctx, layout.order.clone());
+            alloc.set_attr_perry_field_order(ctx, perry_mir::FieldOrder(order));
             alloc
         });
         if arguments.is_none() {
-            let slot = self.initialized_local(ctx, instance).slot;
-            self.frame.this_slot = Some(slot);
-            for (name, ty, init) in initializers {
-                let val = self.field_initializer(ctx, class, init, ty)?;
-                self.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, instance, name.to_owned(), val)
-                });
+            self.frame.this_slot = Some(self.initialized_local(ctx, instance).slot);
+            self.frame.owner = class
+                .initializer
+                .map_or(BodyOwner::Initializer, BodyOwner::Function);
+            for (index, &(field, ty)) in fields.iter().enumerate() {
+                if field.origin.is_definition() {
+                    let init = match &field.init {
+                        Some(expr) => expressions::Assigned::Expression(expr),
+                        None => expressions::Assigned::Value(
+                            self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)),
+                        ),
+                    };
+                    expressions::Member::Field(instance, &field.name, index, ty)
+                        .write(self, ctx, init)?;
+                }
             }
         }
         Ok(instance)
-    }
-
-    fn field_placeholder(&mut self, ctx: &mut Context, ty: TypeHandle) -> Option<Value> {
-        if let Some(states) = absence(ctx, ty) {
-            return Some(if states.admits_undefined() {
-                self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty))
-            } else {
-                self.emit_value(ctx, |ctx| NullOp::new(ctx, ty))
-            });
-        }
-        if ty.deref(ctx).is::<FP64Type>() {
-            return Some(self.number(ctx, 0.0));
-        }
-        if perry_mir::typed::<IntegerType>(ctx, ty).is_some_and(|int| int.deref(ctx).width() == 1) {
-            return Some(self.boolean(ctx, false));
-        }
-        self.zero_value_for_type(ctx, ty).or_else(|| {
-            let variant = perry_mir::typed::<perry_mir::VariantType>(ctx, ty)?;
-            let (tag, _) = variant
-                .deref(ctx)
-                .cases()
-                .iter()
-                .find(|(_, payload)| payload.is_none())?
-                .clone();
-            Some(self.emit_value(ctx, |ctx| perry_mir::VariantNewOp::new(ctx, ty, &tag, None)))
-        })
-    }
-
-    fn field_initializer(
-        &mut self,
-        ctx: &mut Context,
-        class: &crate::source::InstanceClass,
-        expr: &'s Expr,
-        ty: TypeHandle,
-    ) -> Result<Value> {
-        let owner = class
-            .initializer
-            .map_or(BodyOwner::Initializer, BodyOwner::Function);
-        let saved = std::mem::replace(&mut self.frame.owner, owner);
-        let result = self.expression_with(ctx, expr, Some(ty));
-        self.frame.owner = saved;
-        self.fit(ctx, result?, ty)
     }
 
     pub(super) fn class_this(&mut self, ctx: &mut Context) -> Result<Value> {

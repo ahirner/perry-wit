@@ -31,16 +31,31 @@ function cb(){console.log("cb");return inc;}
 function mark(n:number){console.log(n);return n;}
 function sum(f,x:number,...rest:number[]){return f(x)+rest[0];}
 function sub(f,x:number,...rest:number[]){return f(x)-rest[0];}
+class Apply { map(f, x: number) { return f(x); } }
+function receiver() { console.log("receiver"); return new Apply(); }
+console.log(receiver().map(cb(), mark(4), mark(9)));
 function test(flag:boolean){const fn=flag?sum:sub; console.log(fn(cb(),mark(3),mark(2)));}
 console.log(sum(cb(),mark(3),mark(2)));
 test(true); test(false);
+class Counter {
+    n: number;
+    constructor(n: number) { this.n = n; }
+    reader() { return () => () => this.n; }
+    get callback() { console.log("get"); return readArgument; }
+}
+function readArgument(value) { return this.n + value; }
+const left = new Counter(3), right = new Counter(11);
+const read = left.reader()(), other = { n: 99, read };
+console.log(left["callback"](mark(2)));
+left.n = 5;
+console.log(other.read(), right.reader()()(), read === left.reader()());
 "#,
     )
     .await?;
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "Error: boom none 3\ntrue false 3 2,3\n6 1,2,3 A-B\nnone 2 Error: small 1\ncb\n3\n2\n6\ncb\n3\n2\n6\ncb\n3\n2\n2\n"
+        "Error: boom none 3\ntrue false 3 2,3\n6 1,2,3 A-B\nnone 2 Error: small 1\nreceiver\ncb\n4\n9\n5\ncb\n3\n2\n6\ncb\n3\n2\n6\ncb\n3\n2\n2\nget\n2\n5\n5 11 false\n"
     );
     Ok(())
 }
@@ -103,20 +118,30 @@ console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs inst
 class Box<T> {
   value: T;
   constructor(value: T) { this.value = value; }
+  static empty<U>(): Set<U> { return new Set<U>(); }
   contains<T>(value: T) {
     const items = new Set<T>(); items.add(value);
     console.log(this.value); return items.has(value);
   }
 }
 const box = new Box(3);
-console.log(box.contains<string>("x"), box.contains(true));
+const args: [string] = ["x"];
+console.log(box.contains<string>(...args), box.contains(true));
 function outer<T>(value:T){
   function inner<T>(items:T[]){const s=new Set<T>(); s.add(items[0]); console.log(value); return s.has(items[0]);}
   return inner(["x"]);
 }
 console.log(outer(4));
+const set = Box.empty<string>(); set.add("x"); console.log(set.has("x"));
+function left<T>(): Set<T> { return new Set<T>(); }
+function right<T>(): Set<T> { return new Set<T>(); }
+function has(flag: boolean) {
+  const make = flag ? left : right;
+  const set = make<number>(); set.add(7); return set.has(7);
+}
+console.log(has(true), has(false));
 "#,
-            "3\n3\ntrue true\n4\ntrue\n",
+            "3\n3\ntrue true\n4\ntrue\ntrue\ntrue true\n",
         ),
         (
             "generic_promise_settles_after_specialization",
@@ -128,8 +153,27 @@ async function contains<T>(p: Promise<T>) {
 }
 async function source() { return "abc"; }
 console.log(await contains(source()));
+class Gate {
+  constructor() {
+    this.open = null;
+    this.ready = new Promise(resolve => { this.open = resolve; });
+  }
+}
+const gate = new Gate();
+gate.open("go");
+console.log(await gate.ready);
+async function settle(flag: boolean) { return await (flag ? Promise.resolve(7) : null); }
+console.log(await settle(false), await settle(true));
+function tick(v: number) { console.log(v); return v; }
+try { await Promise.all([Promise.reject(tick(1)), Promise.resolve(tick(2))]); }
+catch (e) { console.log("caught", e); }
+async function recover(prefix: string) {
+  const rejected = (e: Error) => prefix + e.message;
+  return await Promise.reject(new Error("x")).then(undefined, rejected, tick(3));
+}
+console.log(await recover("caught:"));
 "#,
-            "true\n",
+            "true\ngo\nnull 7\n1\n2\ncaught 1\n3\ncaught:x\n",
         ),
         (
             "capture_owners_and_mutual_recursion",
@@ -704,7 +748,13 @@ async function dispatch(flag) {
   });
   return result + timer;
 }
+let order = "";
+function ignored(value: number) { order += "ran"; }
+function selectCallback() { order += "c"; return ignored; }
+function timerArgument(label: string) { order += label; return 1; }
 async function main() {
+  clearTimeout(setTimeout(selectCallback(), timerArgument("d"), timerArgument("a")));
+  await new Promise(resolve => setTimeout(() => resolve(1)));
   const immediate = await new Promise((resolve) => resolve(41 + 1));
   const delayed = await new Promise((resolve) => {
     setTimeout(() => resolve("later"), 5);
@@ -764,7 +814,7 @@ async function main() {
   });
 
   console.log(
-    immediate,
+    order, immediate,
     delayed,
     withArgs,
     caught,
@@ -785,7 +835,7 @@ async function main() {
 }
 await main();
 "#,
-            "42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm user 10 17\n",
+            "cda 42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm user 10 17\n",
         ),
     ];
     for &(name, source, expected) in cases {

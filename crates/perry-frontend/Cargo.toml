@@ -6,6 +6,7 @@ publish = false
 description = "TypeScript module resolution, specialization and lowering to Perry MIR"
 
 [dependencies]
+bit-set = "0.11"
 perry-mir.workspace = true
 perry-hir.workspace = true
 perry-parser.workspace = true

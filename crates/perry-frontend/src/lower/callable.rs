@@ -8,11 +8,7 @@ use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 pub(in crate::lower) enum Callback<'s> {
     Source(&'s crate::engine::boundary::TemplateView<'s>),
     Function(&'s Signature<'s>),
-    Bound {
-        call: CallTarget,
-        inputs: Ty,
-        callee: Value,
-    },
+    Bound { call: CallTarget, callee: Value },
 }
 
 impl ValueCoercion {
@@ -87,12 +83,9 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Option<Callback<'s>>> {
         let site = self.site(expr);
         let callback =
-            if let Some(crate::engine::solve::FuncCoercion::Callback { target, inputs }) =
-                site.coercion
-            {
+            if let Some(crate::engine::solve::FuncCoercion::Callback(target)) = site.coercion {
                 Callback::Bound {
                     call: target,
-                    inputs,
                     callee: self
                         .instance_value(ctx, expr, None, site.resolution, true)?
                         .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))?,
@@ -126,7 +119,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         inputs: impl Iterator<Item = Value>,
     ) -> Result<Option<Value>> {
         let signature = self.signature(target)?;
-        self.invoke_arguments(ctx, signature, inputs, Arguments::Plain(&[]), None, None)
+        self.invoke_arguments(ctx, signature, inputs, Arguments::Plain(&[]), None)
     }
 
     pub(super) fn dispatch_body(

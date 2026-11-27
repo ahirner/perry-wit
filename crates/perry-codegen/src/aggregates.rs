@@ -325,7 +325,7 @@ impl FunctionLowering<'_, '_> {
             let RecordField { offset, ty, .. } = self.field_slot(ctx, record, &set.field(ctx))?;
             let object = self.mapped(ctx, record)?;
             let value = self.mapped_value(ctx, val_opd)?;
-            if perry_mir::field_order_may_change(ctx, ty) {
+            if set.updates_order(ctx) {
                 let (table, count) = self.json_field_table(ctx, record.get_type(ctx))?;
                 let table = self.i32_const(ctx, table as i32);
                 let count = self.i32_const(ctx, count as i32);

@@ -1,5 +1,5 @@
 //! Data-oriented monomorphization and type-inference engine over dense indices.
-pub(crate) mod bitset;
+pub(crate) type BitSet = bit_set::BitSet<u64>;
 pub(crate) mod boundary;
 pub(crate) mod builtins;
 mod instances;
@@ -45,14 +45,14 @@ pub(crate) enum InstanceResult {
 #[derive(Clone, Copy)]
 pub(crate) enum NativeParam {
     Value(types::Ty),
+    Argument { position: usize, ty: types::Ty },
     Environment(types::FuncIdentity),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum TimerKind {
-    Immediate,
-    Timeout,
-    Interval,
+pub(crate) struct TimerSchedule {
+    pub(crate) repeats: bool,
+    pub(crate) has_delay: bool,
 }
 
 pub(crate) enum NativeBody {
@@ -76,6 +76,7 @@ pub(crate) enum EnvironmentField {
         ty: types::Ty,
         cell: Option<CellInit>,
     },
+    Receiver(types::Ty),
     Settler(types::Ty),
     Unit,
 }
@@ -86,6 +87,7 @@ impl EnvironmentField {
             Self::Capture { ty, cell, .. } => {
                 cell.map_or(Storage::Value(ty), |init| Storage::Boxed { ty, init })
             }
+            Self::Receiver(ty) => Storage::Value(ty),
             Self::Settler(ty) => Storage::Promise(ty),
             Self::Unit => Storage::Value(types::Ty::NUMBER),
         }
@@ -133,9 +135,8 @@ pub(crate) struct Specialization<'s> {
     pub(crate) bodies: crate::source::InstanceBodies<'s>,
     pub(crate) sparse_arrays: bool,
     pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
-    pub(crate) dict_reads: bitset::BitSet,
-    pub(crate) capture_free: bitset::BitSet,
-    pub(crate) escaping_env_templates: bitset::BitSet,
+    pub(crate) dict_reads: BitSet,
+    pub(crate) capture_free: BitSet,
 
     pub(crate) instances: InstancePlans,
     pub(crate) resources:
@@ -168,11 +169,12 @@ impl<'s> Specialization<'s> {
     }
 }
 
-pub(crate) fn lower_module(
+pub(crate) fn lower_module<'r>(
     ctx: &mut Context,
     mut source: SourceModule<'_>,
+    exports: Vec<crate::hir_compat::SourceWitness<'r>>,
     world: &crate::wit::WorldTypes<'_>,
-) -> Result<crate::LoweredProgram> {
+) -> Result<crate::LoweredProgram<'r>> {
     let mut types = TypeTable::new();
     let decls = crate::shapes::Declarations::new(
         &source.declarations.interfaces,
@@ -191,15 +193,15 @@ pub(crate) fn lower_module(
         (&source.constructors, &decls),
         &mut types,
     );
-    let solved = solve::solve(ctx, &source, &index, &decls, &mut types)?;
+    let (solved, exports) = solve::solve(ctx, &source, exports, &index, &decls, &mut types)?;
     let mut records = perry_mir::RecordLayouts::default();
-    let (bodies, mut instances) = instances::build(
+    let (bodies, mut instances, exports) = instances::build(
         &source.bodies,
         &source.declarations,
         &mut source.locations,
         &mut index,
         &types,
-        &solved,
+        (&solved, exports),
         (ctx, &mut records),
     )?;
     drop(solved.inst_sites);
@@ -207,20 +209,13 @@ pub(crate) fn lower_module(
     let capture_free = index.capture_free_templates;
     let specialization = Specialization {
         resources: source
-            .exports
             .resources
             .into_iter()
             .map(|(id, resource)| {
                 let class = *solved.resource_instances.get(&id).ok_or_else(|| {
                     perry_wit_diagnostics::internal!("missing resource specialization")
                 })?;
-                Ok((
-                    id,
-                    crate::hir_compat::ResourceClass {
-                        class,
-                        binding: resource.binding,
-                    },
-                ))
+                Ok((id, resource.with_class(class)))
             })
             .collect::<Result<_>>()?,
         templates: index.views,
@@ -236,7 +231,6 @@ pub(crate) fn lower_module(
         locations: solved.locations,
         dict_reads: solved.dict_reads,
         capture_free,
-        escaping_env_templates: solved.escaping_env_templates,
 
         instances,
     };
@@ -245,8 +239,8 @@ pub(crate) fn lower_module(
         &source.declarations,
         decls,
         &mut source.locations,
-        &source.exports.functions,
         &specialization,
+        exports,
         (types, records),
     )
 }
@@ -292,16 +286,12 @@ impl InstancePlans {
         }
     }
 
-    pub(crate) fn binding_has_any(
-        &self,
-        id: perry_hir::types::LocalId,
-        flag: types::LocalFlags,
-    ) -> bool {
+    pub(crate) fn binding_flags(&self, id: perry_hir::types::LocalId) -> types::LocalFlags {
         self.local_ids
             .get(id as usize)
             .copied()
             .flatten()
-            .is_some_and(|idx| self.local_flags[idx].intersects(flag))
+            .map_or(types::LocalFlags::GENERATED, |idx| self.local_flags[idx])
     }
 
     pub(crate) fn site(&self, owner: BodyOwner, expr: &perry_hir::ir::Expr) -> solve::SiteEntry {
@@ -311,36 +301,11 @@ impl InstancePlans {
 
 #[cfg(test)]
 mod tests {
-    use super::bitset::BitSet;
     use super::types::{FuncIdentity, TemplateId, Ty, TypeTable};
     use crate::Absence;
     use perry_hir::types::Type as HirType;
     use pliron::context::Context;
     use std::collections::BTreeMap;
-
-    #[test]
-    fn bitset_insert_remove_and_union_across_words() {
-        let mut a = BitSet::default();
-        assert!(!a.contains(0));
-        assert!(a.insert(0));
-        assert!(!a.insert(0));
-        assert!(a.insert(63));
-        assert!(a.insert(64));
-        assert!(a.insert(129));
-        assert!(a.contains(64));
-        assert!(!a.contains(65));
-
-        assert!(a.remove(63));
-        assert!(!a.remove(63));
-        let mut b = BitSet::default();
-        b.insert(5);
-        b.insert(129);
-        assert!(a.union_with(&b));
-        assert!(!a.union_with(&b));
-        for bit in 0..=130 {
-            assert_eq!(a.contains(bit), [0, 5, 64, 129].contains(&bit));
-        }
-    }
 
     #[test]
     fn type_table_canonical_unions_and_joins() {

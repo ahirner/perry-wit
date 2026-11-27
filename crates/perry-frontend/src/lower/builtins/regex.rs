@@ -45,7 +45,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         );
         let (global, captures, named) = if regex {
             let facts = self.shapes.specialization;
-            let known = facts.regexes.get(source).filter(|_| !matches!(source, Expr::LocalGet(id) if facts.instances.binding_has_any(*id, LocalFlags::WRITTEN)));
+            let known = facts.regexes.get(source).filter(|_| !matches!(source, Expr::LocalGet(id) if facts.instances.binding_flags(*id).intersects(LocalFlags::WRITTEN)));
             let global = known.map_or_else(
                 || Self::regex_global(ctx, search),
                 |r| Ok(r.flags.contains('g')),

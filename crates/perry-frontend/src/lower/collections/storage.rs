@@ -2,21 +2,13 @@
 
 use super::StorageField as Field;
 use super::*;
-use crate::lower::control_flow::Projection;
-
-/// The entry and payload fields cleared when a live collection member is deleted.
-struct Tombstone<'a> {
-    entry: Value,
-    kind: CollectionKind,
-    fields: &'a [(&'a str, TypeHandle)],
-}
 
 /// A cursor tracking `(index, min_seq, epoch)` against a collection box.
 #[derive(Clone, Copy)]
 pub(crate) struct LiveCursor {
     box_val: Value,
     cursor: Value,
-    kind: CollectionKind,
+    view: CollectionViewKind,
     owner: CursorOwner,
 }
 
@@ -35,9 +27,9 @@ impl LiveCursor {
         coll: Value,
         index: Value,
     ) -> Result<Option<Self>> {
-        let (kind, box_val, cursor, owner) = match Collection::of(ctx, coll.get_type(ctx)) {
+        let (view, box_val, cursor, owner) = match Collection::of(ctx, coll.get_type(ctx)) {
             Some(Collection::View(view)) => (
-                view.source(),
+                view,
                 b.storage_field(ctx, coll, Field::ViewBox)?,
                 b.storage_field(ctx, coll, Field::ViewCursor)?,
                 CursorOwner::View,
@@ -45,7 +37,7 @@ impl LiveCursor {
             Some(Collection::Box(kind)) => {
                 let start = b.load(ctx, index)?;
                 (
-                    kind,
+                    kind.default_view(),
                     coll,
                     b.new_collection_cursor(ctx, coll, start)?,
                     CursorOwner::Loop,
@@ -56,7 +48,7 @@ impl LiveCursor {
         let live = Self {
             box_val,
             cursor,
-            kind,
+            view,
             owner,
         };
         if matches!(owner, CursorOwner::View) {
@@ -68,7 +60,7 @@ impl LiveCursor {
 
     /// Record that the next visit starts at `next` (after `entry`'s sequence number), before the
     /// body can delete entries.
-    pub(crate) fn advance(
+    fn advance(
         self,
         b: &mut FunctionBuilder<'_, '_>,
         ctx: &mut Context,
@@ -78,11 +70,10 @@ impl LiveCursor {
         let Self {
             box_val,
             cursor,
-            kind,
+            view,
             ..
         } = self;
-        let seq_op = FieldGetOp::new(ctx, entry, kind.seq_field().to_string()).to_diag(ctx)?;
-        let seq = b.append_value(ctx, &seq_op);
+        let seq = b.storage_field(ctx, entry, Field::Sequence(view.source()))?;
         let one = b.number(ctx, 1.0);
         let next_seq = b.binary(ctx, BinaryKind::Add, seq, one);
         let epoch = b.storage_field(ctx, box_val, Field::BoxEpoch)?;
@@ -98,31 +89,37 @@ impl LiveCursor {
         b: &mut FunctionBuilder<'_, '_>,
         ctx: &mut Context,
     ) -> Result<Value> {
-        b.sync_collection_cursor(ctx, self.box_val, self.cursor, self.kind)
+        b.sync_collection_cursor(ctx, self.box_val, self.cursor, self.view.source())
     }
 
     /// The loop ran out of entries: a view stays exhausted at infinity.
-    pub(crate) fn exhausted(
-        self,
-        b: &mut FunctionBuilder<'_, '_>,
-        ctx: &mut Context,
-    ) -> Result<()> {
+    pub(crate) fn exhausted(self, b: &mut FunctionBuilder<'_, '_>, ctx: &mut Context) {
         if matches!(self.owner, CursorOwner::View) {
             let inf = b.number(ctx, f64::INFINITY);
             b.set_storage_field(ctx, self.cursor, Field::CursorIndex, inf);
             b.set_storage_field(ctx, self.cursor, Field::CursorSequence, inf);
         }
-        Ok(())
     }
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
-    fn storage_field(&mut self, ctx: &mut Context, record: Value, field: Field) -> Result<Value> {
+    pub(super) fn storage_field(
+        &mut self,
+        ctx: &mut Context,
+        record: Value,
+        field: Field,
+    ) -> Result<Value> {
         let op = FieldGetOp::new(ctx, record, field.name().to_owned()).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }
 
-    fn set_storage_field(&mut self, ctx: &mut Context, record: Value, field: Field, value: Value) {
+    pub(super) fn set_storage_field(
+        &mut self,
+        ctx: &mut Context,
+        record: Value,
+        field: Field,
+        value: Value,
+    ) {
         self.emit(ctx, |ctx| {
             FieldSetOp::new(ctx, record, field.name().to_owned(), value)
         });
@@ -160,15 +157,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         }))
     }
 
-    /// Return the underlying box of a `Map`, `Set`, or view, or `None` for plain arrays.
-    pub(super) fn collection_underlying_box(
+    pub(super) fn collection_storage(
         &mut self,
         ctx: &mut Context,
         val: Value,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Option<(CollectionViewKind, Value)>> {
         Ok(match Collection::of(ctx, val.get_type(ctx)) {
-            Some(Collection::Box(_)) => Some(val),
-            Some(Collection::View(_)) => Some(self.storage_field(ctx, val, Field::ViewBox)?),
+            Some(Collection::Box(kind)) => Some((kind.default_view(), val)),
+            Some(Collection::View(view)) => {
+                Some((view, self.storage_field(ctx, val, Field::ViewBox)?))
+            }
             None => None,
         })
     }
@@ -179,8 +177,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         val: Value,
     ) -> Result<Value> {
-        match self.collection_underlying_box(ctx, val)? {
-            Some(box_val) => self.storage_field(ctx, box_val, Field::BoxEntries),
+        match self.collection_storage(ctx, val)? {
+            Some((_, box_val)) => self.storage_field(ctx, box_val, Field::BoxEntries),
             None => Ok(val),
         }
     }
@@ -202,14 +200,61 @@ impl<'s> FunctionBuilder<'s, '_> {
         val: Value,
         idx: Value,
     ) -> Result<Value> {
-        let projection = Projection::collection(ctx, val.get_type(ctx))?;
-        let entries = self.collection_entries_array(ctx, val)?;
-        let entry = if val.get_type(ctx).deref(ctx).is::<ArrayType>() {
-            self.array_value(ctx, entries, idx)?
-        } else {
-            self.element_at(ctx, entries, idx)?
+        let Some((view, source)) = self.collection_storage(ctx, val)? else {
+            return self.array_value(ctx, val, idx);
         };
-        projection.read(self, ctx, entry)
+        let entries = self.storage_field(ctx, source, Field::BoxEntries)?;
+        let entry = self.element_at(ctx, entries, idx)?;
+        self.project_entry(ctx, view, entry)
+    }
+
+    fn project_entry(
+        &mut self,
+        ctx: &mut Context,
+        view: CollectionViewKind,
+        entry: Value,
+    ) -> Result<Value> {
+        view.fields()
+            .try_map(|field| self.storage_field(ctx, entry, field))?
+            .materialize(Ok, |[key, value]| self.pair(ctx, key, value))
+    }
+
+    pub(in crate::lower) fn visit_collection_entry(
+        &mut self,
+        ctx: &mut Context,
+        source: Value,
+        index: Value,
+        cursor: Option<LiveCursor>,
+        next: Ptr<BasicBlock>,
+    ) -> Result<Value> {
+        let (entries, kind) = if let Some(cursor) = cursor {
+            (
+                self.storage_field(ctx, cursor.box_val, Field::BoxEntries)?,
+                cursor.view.source(),
+            )
+        } else {
+            let element = self.array_element(ctx, source)?;
+            let Some(kind) =
+                perry_mir::typed(ctx, element).and_then(|r| CollectionKind::of_entry(ctx, r))
+            else {
+                return self.array_value(ctx, source, index);
+            };
+            (source, kind)
+        };
+        let entry = self.element_at(ctx, entries, index)?;
+        if let Some(cursor) = cursor {
+            let one = self.number(ctx, 1.0);
+            let advanced = self.binary(ctx, BinaryKind::Add, index, one);
+            cursor.advance(self, ctx, advanced, entry)?;
+        }
+        let live = self.storage_field(ctx, entry, Field::Live(kind))?;
+        let visit = self.new_block(ctx, "loop_live");
+        self.branch(ctx, live, visit, next);
+        self.switch_to(visit);
+        match cursor {
+            Some(cursor) => self.project_entry(ctx, cursor.view, entry),
+            None => Ok(entry),
+        }
     }
 
     /// The key (`_0`) and value (`_1`) of a key-value entry or pair.
@@ -225,30 +270,32 @@ impl<'s> FunctionBuilder<'s, '_> {
             let v = self.element_at(ctx, entry, one)?;
             return Ok((k, v));
         }
-        let k_op = FieldGetOp::new(ctx, entry, "_0".to_string()).to_diag(ctx)?;
-        let k = self.append_value(ctx, &k_op);
-        let v_op = FieldGetOp::new(ctx, entry, "_1".to_string()).to_diag(ctx)?;
-        let v = self.append_value(ctx, &v_op);
+        let k = self.storage_field(ctx, entry, Field::Key)?;
+        let v = self.storage_field(ctx, entry, Field::MapValue)?;
         Ok((k, v))
     }
 
     /// A fresh `[first, second]` tuple.
     pub(crate) fn pair(&mut self, ctx: &mut Context, first: Value, second: Value) -> Result<Value> {
         let (first_ty, second_ty) = (first.get_type(ctx), second.get_type(ctx));
-        let tuple_rec = self.shapes.pair_type(ctx, first_ty, second_ty)?;
+        let tuple_rec =
+            self.shapes
+                .positional_record(ctx, RecordKind::Tuple, [first_ty, second_ty])?;
         Ok(self.emit_value(ctx, |ctx| AllocOp::new(ctx, tuple_rec, vec![first, second])))
     }
 
-    pub(super) fn next_collection_seq(
+    pub(super) fn update_counter(
         &mut self,
         ctx: &mut Context,
-        box_val: Value,
-    ) -> Result<Value> {
-        let seq = self.storage_field(ctx, box_val, Field::BoxSequence)?;
+        storage: Value,
+        field: Field,
+        op: BinaryKind,
+    ) -> Result<(Value, Value)> {
+        let before = self.storage_field(ctx, storage, field)?;
         let one = self.number(ctx, 1.0);
-        let next_seq = self.binary(ctx, BinaryKind::Add, seq, one);
-        self.set_storage_field(ctx, box_val, Field::BoxSequence, next_seq);
-        Ok(seq)
+        let after = self.binary(ctx, op, before, one);
+        self.set_storage_field(ctx, storage, field, after);
+        Ok((before, after))
     }
 
     fn new_collection_cursor(
@@ -301,8 +348,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             len,
             |b, ctx, i, next, scan_done| {
                 let e = b.element_at(ctx, entries, i)?;
-                let seq_op = FieldGetOp::new(ctx, e, kind.seq_field().to_string()).to_diag(ctx)?;
-                let e_seq = b.append_value(ctx, &seq_op);
+                let e_seq = b.storage_field(ctx, e, Field::Sequence(kind))?;
                 let reached = b.compare(ctx, CompareKind::Ge, e_seq, min_seq);
                 let step_bb = b.new_block(ctx, "sync_cursor_step");
                 b.branch(ctx, reached, scan_done, step_bb);
@@ -321,67 +367,6 @@ impl<'s> FunctionBuilder<'s, '_> {
 
         self.switch_to(done_bb);
         self.storage_field(ctx, cursor, Field::CursorIndex)
-    }
-
-    fn bump_box_epoch(&mut self, ctx: &mut Context, box_val: Value) -> Result<()> {
-        let epoch = self.storage_field(ctx, box_val, Field::BoxEpoch)?;
-        let one = self.number(ctx, 1.0);
-        let next_epoch = self.binary(ctx, BinaryKind::Add, epoch, one);
-        self.set_storage_field(ctx, box_val, Field::BoxEpoch, next_epoch);
-        Ok(())
-    }
-
-    /// Mark `entry` deleted, overwrite its `cleared` fields so they hold no references, and
-    /// compact the owning box.
-    pub(super) fn tombstone_entry(
-        &mut self,
-        ctx: &mut Context,
-        entries: Value,
-        entry: Value,
-        kind: CollectionKind,
-        cleared: &[(&str, TypeHandle)],
-        box_val: Value,
-    ) -> Result<()> {
-        let tombstone = Tombstone {
-            entry,
-            kind,
-            fields: cleared,
-        };
-        let live = self.bump_live_count(ctx, box_val, BinaryKind::Sub)?;
-        self.reclaim_after_delete(ctx, box_val, entries, live, tombstone)
-    }
-
-    fn clear_tombstone_entry(&mut self, ctx: &mut Context, tombstone: &Tombstone<'_>) {
-        let Tombstone {
-            entry,
-            kind,
-            fields,
-        } = *tombstone;
-        let dead = self.boolean(ctx, false);
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, entry, kind.live_field().to_string(), dead)
-        });
-        for &(field, ty) in fields {
-            if let Some(dummy) = self.zero_value_for_type(ctx, ty) {
-                self.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, entry, field.to_string(), dummy)
-                });
-            }
-        }
-    }
-
-    /// Add one to (`Add`) or remove one from (`Sub`) a box's live-entry count.
-    pub(super) fn bump_live_count(
-        &mut self,
-        ctx: &mut Context,
-        box_val: Value,
-        kind: BinaryKind,
-    ) -> Result<Value> {
-        let sz = self.storage_field(ctx, box_val, Field::BoxLength)?;
-        let one = self.number(ctx, 1.0);
-        let next_sz = self.binary(ctx, kind, sz, one);
-        self.set_storage_field(ctx, box_val, Field::BoxLength, next_sz);
-        Ok(next_sz)
     }
 
     /// Emit a reference-free placeholder of `ty` when `ty` holds references, or `None` for scalar types.
@@ -415,14 +400,15 @@ impl<'s> FunctionBuilder<'s, '_> {
 
     /// After a delete: empty the entries when nothing is live, else mark the tombstone and
     /// compact once at least 32 and at least half of the slots are tombstones, bumping the box epoch.
-    fn reclaim_after_delete(
+    pub(super) fn delete_entry(
         &mut self,
         ctx: &mut Context,
         box_val: Value,
         entries: Value,
-        live: Value,
-        tombstone: Tombstone<'_>,
+        entry: Value,
+        kind: CollectionKind,
     ) -> Result<()> {
+        let (_, live) = self.update_counter(ctx, box_val, Field::BoxLength, BinaryKind::Sub)?;
         let zero = self.number(ctx, 0.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
 
@@ -437,11 +423,27 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.switch_to(empty_bb);
         let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
         self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
-        self.bump_box_epoch(ctx, box_val)?;
+        self.update_counter(ctx, box_val, Field::BoxEpoch, BinaryKind::Add)?;
         self.jump(ctx, done_bb);
 
         self.switch_to(check_compact_bb);
-        self.clear_tombstone_entry(ctx, &tombstone);
+        let dead = self.boolean(ctx, false);
+        self.set_storage_field(ctx, entry, Field::Live(kind), dead);
+        let record =
+            TypedHandle::<RecordType>::from_handle(entry.get_type(ctx), ctx).to_diag(ctx)?;
+        let fields: &[Field] = match kind {
+            CollectionKind::Map => &[Field::Key, Field::MapValue],
+            CollectionKind::Set => &[Field::Key],
+        };
+        for &field in fields {
+            let (_, ty) = record
+                .deref(ctx)
+                .field(field.name())
+                .ok_or_else(|| internal!("missing collection payload"))?;
+            if let Some(dummy) = self.zero_value_for_type(ctx, ty) {
+                self.set_storage_field(ctx, entry, field, dummy);
+            }
+        }
         let cap = self.array_length(ctx, entries);
         let dead = self.binary(ctx, BinaryKind::Sub, cap, live);
         let min_dead = self.number(ctx, 32.0);
@@ -459,35 +461,18 @@ impl<'s> FunctionBuilder<'s, '_> {
 
         self.switch_to(compact_bb);
         self.retain_array(ctx, entries, |b, ctx, entry| {
-            let op = FieldGetOp::new(ctx, entry, tombstone.kind.live_field().to_string())
-                .to_diag(ctx)?;
-            Ok(b.append_value(ctx, &op))
+            b.storage_field(ctx, entry, Field::Live(kind))
         })?;
-        self.bump_box_epoch(ctx, box_val)?;
+        self.update_counter(ctx, box_val, Field::BoxEpoch, BinaryKind::Add)?;
         self.jump(ctx, done_bb);
 
         self.switch_to(done_bb);
         Ok(())
     }
 
-    /// Load the liveness flag of a `Map` or `Set` entry when the entry carries one.
-    pub(crate) fn collection_entry_live(
-        &mut self,
-        ctx: &mut Context,
-        entry: Value,
-    ) -> Result<Option<Value>> {
-        let kind = perry_mir::typed::<RecordType>(ctx, entry.get_type(ctx))
-            .and_then(|rec| CollectionKind::of_entry(ctx, rec));
-        let Some(kind) = kind else {
-            return Ok(None);
-        };
-        let op = FieldGetOp::new(ctx, entry, kind.live_field().to_string()).to_diag(ctx)?;
-        Ok(Some(self.append_value(ctx, &op)))
-    }
-
     /// `size`: a box's live count or a plain array's length.
     pub(crate) fn collection_size(&mut self, ctx: &mut Context, arr: Value) -> Result<Value> {
-        if let Some(box_val) = self.collection_underlying_box(ctx, arr)? {
+        if let Some((_, box_val)) = self.collection_storage(ctx, arr)? {
             return self.storage_field(ctx, box_val, Field::BoxLength);
         }
         Ok(self.array_length(ctx, arr))
@@ -495,16 +480,16 @@ impl<'s> FunctionBuilder<'s, '_> {
 
     /// Empty a collection box and invalidate its cursors' cached positions.
     pub(crate) fn collection_clear(&mut self, ctx: &mut Context, coll: Value) -> Result<Value> {
-        let box_val = self.collection_underlying_box(ctx, coll)?.ok_or_else(|| {
+        let (_, box_val) = self.collection_storage(ctx, coll)?.ok_or_else(|| {
             Diagnostic::new(codes::TYPE_MISMATCH, "clear() requires a Map or Set")
         })?;
-        let entries = self.collection_entries_array(ctx, box_val)?;
+        let entries = self.storage_field(ctx, box_val, Field::BoxEntries)?;
         let zero = self.number(ctx, 0.0);
         let u32_ty = IntegerType::get(ctx, 32, Signedness::Signless).into();
         let zero_u32 = self.emit_value(ctx, |ctx| NumericCastOp::new(ctx, zero, u32_ty));
         self.emit(ctx, |ctx| ArrayTruncateOp::new(ctx, entries, zero_u32));
         self.set_storage_field(ctx, box_val, Field::BoxLength, zero);
-        self.bump_box_epoch(ctx, box_val)?;
+        self.update_counter(ctx, box_val, Field::BoxEpoch, BinaryKind::Add)?;
         let ty = void_type(ctx);
         Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, ty)))
     }

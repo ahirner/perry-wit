@@ -39,21 +39,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         expected: Option<InlineResult>,
     ) -> Result<Option<Value>> {
         let value = match callback {
-            Callback::Bound {
-                call,
-                inputs: tuple,
-                callee,
-            } => {
-                let mut inputs = Vec::new();
-                for (index, ty) in self.shapes.runtime_arguments(tuple) {
-                    let ty = self.shapes.resolved_binding(ty)?.carrier;
-                    let value = match arguments.get(index) {
-                        Some(&value) => self.fit(ctx, value, ty)?,
-                        None => self.absent_literal(ctx, false, Some(ty))?,
-                    };
-                    inputs.push(value);
-                }
-                call.invoke(self, ctx, Some(callee), None, Values(&inputs))?
+            Callback::Bound { call, callee } => {
+                call.invoke(self, ctx, Some(callee), None, Values(arguments))?
             }
             Callback::Function(signature) => {
                 ensure_unsupported!(
@@ -63,9 +50,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.invoke_arguments(
                     ctx,
                     signature,
-                    arguments.iter().copied(),
+                    signature.supplied_values(0, arguments),
                     Arguments::Plain(&[]),
-                    None,
                     expected,
                 )?
             }

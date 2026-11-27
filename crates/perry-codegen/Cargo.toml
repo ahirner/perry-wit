@@ -9,6 +9,7 @@ description = "Lowers perry MIR to the pliron `wasm` dialect and core Wasm"
 indexmap = "2"
 wit-parser.workspace = true
 perry-abi.workspace = true
+perry-contract.workspace = true
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true
 pliron.workspace = true

@@ -178,7 +178,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 std::iter::empty(),
                 Arguments::Spread(args),
                 None,
-                None,
             )?;
             return result.map_or_else(|| self.absent_literal(ctx, false, None), Ok);
         }

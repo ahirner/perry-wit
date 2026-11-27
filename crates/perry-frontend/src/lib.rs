@@ -28,17 +28,17 @@ pub fn lower_sources(
     Ok(lower_world(ctx, source, identity, sources, types, None)?.module)
 }
 
-pub fn lower_world(
+pub fn lower_world<'r>(
     ctx: &mut Context,
     source: &str,
     identity: &str,
     sources: &BTreeMap<String, String>,
     types: &wit::WorldTypes,
-    world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
-) -> Result<LoweredProgram> {
+    world: Option<(&'r wit_parser::Resolve, wit_parser::WorldId)>,
+) -> Result<LoweredProgram<'r>> {
     let loaded = modules::load(source, identity, sources, types.foreign())?;
-    let source = hir_compat::lower(loaded, identity, world)?;
-    engine::lower_module(ctx, source, types)
+    let (source, exports) = hir_compat::lower(loaded, identity, world)?;
+    engine::lower_module(ctx, source, exports, types)
 }
 
 pub(crate) fn is_identifier(name: &str) -> bool {

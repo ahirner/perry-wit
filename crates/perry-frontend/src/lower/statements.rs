@@ -3,7 +3,6 @@ use super::*;
 use crate::engine::types::LocalFlags;
 use crate::engine::{CellInit, Storage};
 use crate::lower::control_flow::{LoopCondition, LoopUpdate};
-use crate::source::ConstructorSites;
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn statements(&mut self, ctx: &mut Context, statements: &'s [Stmt]) -> Result<()> {
@@ -130,10 +129,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             Stmt::Let { id, ty, init, .. } => {
                 let storage = self.local_storage(*id);
                 if matches!(storage, Some(Storage::ErasedFunction(_))) {
-                    if let Some(expr) = init
-                        && !crate::source::is_pure_func_expr(expr)
-                    {
-                        self.effect(ctx, expr)?;
+                    if let Some(expr) = init {
+                        self.discard_function_operand(ctx, expr)?;
                     }
                     return Ok(());
                 }
@@ -163,10 +160,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.get(&id).and_then(Signature::source)
                     .is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
-                    if let Some(expr) = value
-                        && !crate::source::is_pure_func_expr(expr)
-                    {
-                        self.effect(ctx, expr)?;
+                    if let Some(expr) = value {
+                        self.discard_function_operand(ctx, expr)?;
                     }
                     None
                 } else {
@@ -495,13 +490,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             return Ok(());
         }
-        let inferred = self
-            .shapes
-            .source
-            .locals
-            .get(&id)
-            .map(|local| local.flags.contains(LocalFlags::INFERRED));
-        let explicit = inferred == Some(false);
+        let flags = self.shapes.specialization.instances.binding_flags(id);
+        let explicit = flags.is_explicit();
         let (mut binding, is_never) = match self.declared_local(ctx, storage, ty) {
             Err(error)
                 if error.code() == codes::MISSING_TYPE_ANNOTATION
@@ -515,7 +505,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             Err(error)
                 if !explicit
-                    && self.shapes.deferred_binding(id)
+                    && flags.contains(LocalFlags::DEFERRED)
                     && error.code() == codes::UNSUPPORTED_TYPE =>
             {
                 let ty = match storage {
@@ -565,7 +555,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             binding.integer = perry_mir::typed::<IntegerType>(ctx, src.get_type(ctx));
         }
         if let Some(value) = init
-            && inferred == Some(true)
+            && flags.contains(LocalFlags::INFERRED)
         {
             binding.carrier = crate::lower::coerce::result_carrier(ctx, declared, &[value]);
         }
@@ -591,85 +581,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(result.filter(|value| !self.never_values.contains(value)))
     }
 
-    pub(super) fn source_operand(
-        &mut self,
-        ctx: &mut Context,
-        expr: &'s Expr,
-        expected: Option<TypeHandle>,
-    ) -> Result<Option<Value>> {
-        if self.shapes.specialization.iteration.is_release(expr) {
-            return Ok(None);
+    pub(super) fn getter(&self, expr: &Expr) -> Option<FuncId> {
+        match self.site(expr).resolution {
+            Some(crate::engine::solve::SiteResolution::ReadMember(id)) => {
+                Some(self.shapes.specialization.instances.function(id))
+            }
+            _ => None,
         }
-        let value = match expr {
-            Expr::ScopedTemp { id, value, body } => {
-                return self.with_temp(ctx, *id, value, |this, ctx| {
-                    this.optional_operand(ctx, body, expected)
-                });
-            }
-            Expr::Sequence(parts) if hir_compat::non_null_assertion(expr).is_none() => {
-                let Some((last, effects)) = parts.split_last() else {
-                    return Ok(None);
-                };
-                if let Some(span) = self.shapes.locations.operator_span(parts) {
-                    return self
-                        .optional_operand(ctx, last, expected)
-                        .map_err(|error| error.with_fallback_span(Some(span)));
-                }
-                for part in effects {
-                    self.effect(ctx, part)?;
-                }
-                return self.optional_operand(ctx, last, expected);
-            }
-            Expr::Undefined => None,
-            Expr::Call { .. }
-                if self
-                    .shapes
-                    .specialization
-                    .instances
-                    .constructor(expr)
-                    .is_some() =>
-            {
-                Some(self.source_expression(ctx, expr, expected)?)
-            }
-            Expr::Call {
-                callee,
-                args,
-
-                byte_offset,
-                ..
-            } => self
-                .call(ctx, callee, args, *byte_offset)
-                .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
-            Expr::StaticMethodCall {
-                class_name,
-                method_name,
-                ..
-            } => bail_diag!(
-                codes::TYPE_MISMATCH,
-                "static method {class_name}.{method_name} not found"
-            ),
-            Expr::ProcessExit(code) => {
-                let code = match code {
-                    Some(code) => {
-                        let code = self.expression(ctx, code)?;
-                        let code = self.arithmetic(ctx, code);
-                        ensure_diag!(
-                            kind(ctx, code)? == Kind::Number,
-                            codes::TYPE_MISMATCH,
-                            "process.exit takes a number"
-                        );
-                        code
-                    }
-                    None => self.number(ctx, 0.0),
-                };
-                let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
-                self.propagate(ctx, status);
-                self.after_terminator(ctx);
-                None
-            }
-            _ => Some(self.source_expression(ctx, expr, expected)?),
-        };
-        Ok(value)
     }
 
     pub(super) fn discard_function_operand(
@@ -677,10 +595,34 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<()> {
-        if !crate::source::is_pure_func_expr(expr) {
-            self.effect(ctx, expr)?;
+        match expr {
+            Expr::FuncRef(_)
+            | Expr::Closure { .. }
+            | Expr::LocalGet(_)
+            | Expr::This
+            | Expr::ClassRef(_) => Ok(()),
+            Expr::PropertyGet {
+                object,
+                byte_offset,
+                ..
+            } if self.getter(expr).is_none() => {
+                if hir_compat::class_receiver(object).is_none() {
+                    let receiver = self.expression(ctx, object)?;
+                    self.receiver(ctx, receiver, *byte_offset)?;
+                }
+                Ok(())
+            }
+            Expr::IndexGet { object, index, .. }
+                if hir_compat::class_receiver(object).is_some() =>
+            {
+                self.effect(ctx, index)
+            }
+            Expr::ExternFuncRef { .. } => Ok(()),
+            _ => {
+                self.instance_value(ctx, expr, None, self.site(expr).resolution, false)?;
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub(super) fn effect(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<()> {

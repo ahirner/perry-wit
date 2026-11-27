@@ -379,12 +379,13 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn temporal_factory(
         &mut self,
         ctx: &mut Context,
-        class: &str,
-        factory: &str,
+        method: crate::methods::TemporalFactory,
         args: &'s [Expr],
     ) -> Result<Value> {
-        match (class, factory) {
-            ("Now", "timeZoneId") => {
+        use crate::methods::TemporalFactory::*;
+        let factory = method.name();
+        let (intrinsic, input, what) = match method {
+            NowZone => {
                 ensure_diag!(
                     args.is_empty(),
                     codes::TYPE_MISMATCH,
@@ -392,7 +393,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 );
                 return Ok(self.string(ctx, "UTC"));
             }
-            ("Now", "instant") => {
+            NowInstant => {
                 ensure_diag!(
                     args.is_empty(),
                     codes::TYPE_MISMATCH,
@@ -401,7 +402,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let ms = self.intrinsic(ctx, Intrinsic::DateNow, vec![]);
                 return Ok(self.intrinsic(ctx, Intrinsic::InstantFromMs, vec![ms]));
             }
-            ("Now", "plainDateISO" | "plainDateTimeISO") => {
+            NowDate | NowDateTime => {
                 if let [arg] = args {
                     if let Expr::String(tz) = arg
                         && !matches!(tz.as_str(), "UTC" | "Z" | "+00:00")
@@ -417,7 +418,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     );
                 }
                 let ms = self.intrinsic(ctx, Intrinsic::DateNow, vec![]);
-                if factory == "plainDateISO" {
+                if matches!(method, NowDate) {
                     let day_ms = self.number(ctx, 86_400_000.0);
                     let quot = self.binary(ctx, BinaryKind::Div, ms, day_ms);
                     let days = self.intrinsic(ctx, Intrinsic::MathFloor, vec![quot]);
@@ -432,20 +433,20 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let local_iso = self.intrinsic(ctx, Intrinsic::StringSlice, vec![iso, start, end]);
                 return Ok(self.intrinsic(ctx, Intrinsic::PlainDateTimeFrom, vec![local_iso]));
             }
-            ("PlainDate" | "PlainDateTime", "from") => {
+            DateFrom | DateTimeFrom => {
+                let (class, target) = if matches!(method, DateFrom) {
+                    ("PlainDate", Kind::PlainDate)
+                } else {
+                    ("PlainDateTime", Kind::PlainDateTime)
+                };
                 ensure_diag!(
                     (1..=2).contains(&args.len()),
                     codes::TYPE_MISMATCH,
                     "Temporal.{class}.from takes one or two arguments"
                 );
-                let target = if class == "PlainDate" {
-                    Kind::PlainDate
-                } else {
-                    Kind::PlainDateTime
-                };
                 return self.coerce_plain(ctx, &args[0], args.get(1), target);
             }
-            ("PlainDate", "compare") => {
+            CompareDates => {
                 ensure_diag!(
                     args.len() == 2,
                     codes::TYPE_MISMATCH,
@@ -457,20 +458,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let db = self.intrinsic(ctx, Intrinsic::PlainDateEpochDays, vec![b]);
                 return self.compare_sign(ctx, da, db);
             }
-            _ => {}
-        }
-        let (intrinsic, input, what) = match (class, factory) {
-            ("Instant", "fromEpochMilliseconds") => {
-                (Intrinsic::InstantFromMs, Kind::Number, "a number")
-            }
-            ("Instant", "from") => (Intrinsic::InstantFrom, Kind::String, "an ISO string"),
-            _ => bail_unsupported!(
-                "Temporal.{class}.{factory} is not supported; use Instant.from, Instant.fromEpochMilliseconds, PlainDate.from, PlainDate.compare, PlainDateTime.from or Temporal.Now"
-            ),
+            InstantFromMs => (Intrinsic::InstantFromMs, Kind::Number, "a number"),
+            InstantFrom => (Intrinsic::InstantFrom, Kind::String, "an ISO string"),
         };
         let [arg] = args else {
             bail_unsupported!(
-                "Temporal.{class}.{factory} takes one argument; options are not supported"
+                "Temporal.Instant.{factory} takes one argument; options are not supported"
             );
         };
         let arg = self.typed_operand(ctx, arg, input, what)?;

@@ -24,7 +24,11 @@ impl Shapes<'_, Preparing<'_>> {
             (app.key, app.ty)
         } else {
             let key = resolver.types.application_key(base, arguments);
-            if let Some(Some(ty)) = self.types.projections.get(&ShapeKey::Application(key)) {
+            if let Some(Some(ty)) = self
+                .types
+                .projections
+                .get(&(ShapeKey::Application(key), self.types.wit_input))
+            {
                 return Ok(*ty);
             }
             let value = match base {
@@ -45,7 +49,7 @@ impl Shapes<'_, Preparing<'_>> {
             })?;
             (key, value)
         };
-        let application = ShapeKey::Application(key);
+        let application = (ShapeKey::Application(key), self.types.wit_input);
         if let Some(&Some(ty)) = self.types.projections.get(&application) {
             return Ok(ty);
         }

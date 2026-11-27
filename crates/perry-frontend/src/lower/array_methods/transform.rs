@@ -13,16 +13,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         let array = self.defined(ctx, array)?;
         self.array_element(ctx, array)?;
         let callback = self.prepare_callback(ctx, callback)?;
-        if matches!(transform, Transform::Map) && self.shapes.specialization.sparse_arrays {
-            let zero = self.number(ctx, 0.0);
-            let len = self.array_length(ctx, array);
-            return self.collect_preserving_holes(ctx, array, zero, len, |b, ctx, item, index| {
-                b.array_callback(ctx, callback, &[item, index, array])
-            });
-        }
+        let holes = match transform {
+            Transform::Map => self.preserve_holes(ctx),
+            Transform::Filter | Transform::FlatMap => Holes::Skip,
+        };
         self.collect_items(
             ctx,
-            Input::Array(array, Holes::Skip),
+            Input::Array(array, holes),
             |b, ctx, item, current, next| {
                 let mapped = b.array_callback(ctx, callback, &[item, current, array])?;
                 Ok(match transform {
@@ -163,16 +160,25 @@ impl<'s> FunctionBuilder<'s, '_> {
         let callback = self.prepare_callback(ctx, callback)?;
         let initial = if let Some(init_expr) = initial {
             let expected_acc = match callback {
-                crate::lower::callable::Callback::Bound { inputs, .. } => self
-                    .shapes
-                    .runtime_arguments(inputs)
-                    .next()
-                    .and_then(|(i, ty)| (i == 0).then_some(ty))
-                    .map(|ty| self.shapes.resolved_binding(ty).map(|b| b.carrier))
-                    .transpose()?,
-                crate::lower::callable::Callback::Function(signature) => {
-                    signature.params.first().map(|p| p.base.carrier)
+                crate::lower::callable::Callback::Bound { call, .. } => {
+                    let prefix =
+                        usize::from(call.needs_value()) + usize::from(call.needs_receiver());
+                    self.shapes
+                        .specialization
+                        .instances
+                        .emitted_callee(call)
+                        .transpose()?
+                        .map(|id| self.signature(id))
+                        .transpose()?
+                        .and_then(|signature| signature.params.get(prefix))
+                        .filter(|p| p.position == prefix)
+                        .map(|p| p.base.carrier)
                 }
+                crate::lower::callable::Callback::Function(signature) => signature
+                    .params
+                    .first()
+                    .filter(|p| p.position == 0)
+                    .map(|p| p.base.carrier),
                 crate::lower::callable::Callback::Source(decl) => {
                     decl.params.first().and_then(|param| {
                         self.shapes

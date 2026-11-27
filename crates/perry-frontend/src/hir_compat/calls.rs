@@ -16,13 +16,96 @@ pub(crate) fn class_receiver(object: &Expr) -> Option<&str> {
     }
 }
 
-pub(crate) fn member(callee: &Expr) -> Option<(&Expr, Option<&str>)> {
+#[derive(Clone, Copy)]
+pub(crate) enum MemberKey<'h> {
+    Named(&'h str, u32),
+    Computed(&'h Expr, u32),
+}
+
+impl<'h> MemberKey<'h> {
+    pub(crate) fn offset(self) -> u32 {
+        match self {
+            Self::Named(_, offset) | Self::Computed(_, offset) => offset,
+        }
+    }
+    pub(crate) fn name(self) -> Option<&'h str> {
+        match self {
+            Self::Named(name, _) => Some(name),
+            Self::Computed(..) => None,
+        }
+    }
+}
+
+pub(crate) fn member(callee: &Expr) -> Option<(&Expr, MemberKey<'_>)> {
     match callee {
         Expr::PropertyGet {
-            object, property, ..
-        } => Some((object, Some(property))),
-        Expr::IndexGet { object, .. } => Some((object, None)),
+            object,
+            property,
+            byte_offset,
+            ..
+        } => Some((object, MemberKey::Named(property, *byte_offset))),
+        Expr::IndexGet {
+            object,
+            index,
+            element_offset,
+            ..
+        } => Some((object, MemberKey::Computed(index, *element_offset))),
         _ => None,
+    }
+}
+
+pub(crate) fn member_assignment(expr: &Expr) -> Option<(&Expr, MemberKey<'_>, &Expr)> {
+    use MemberKey::{Computed, Named};
+    match expr {
+        Expr::PropertySet {
+            object,
+            property,
+            value,
+            byte_offset,
+            ..
+        } => Some((object, Named(property, *byte_offset), value)),
+        Expr::IndexSet {
+            object,
+            index,
+            value,
+            element_offset,
+            ..
+        } => Some((object, Computed(index, *element_offset), value)),
+        Expr::PutValueSet {
+            target,
+            key,
+            value,
+            element_offset,
+            ..
+        } => {
+            let key = match key.as_ref() {
+                Expr::String(name) => Named(name, *element_offset),
+                expr => Computed(expr, *element_offset),
+            };
+            Some((target, key, value))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn map_group_by(expr: &Expr) -> Result<Option<(&Expr, &Expr)>> {
+    match expr {
+        Expr::MapGroupBy { items, key_fn } => Ok(Some((items, key_fn))),
+        Expr::Call { callee, args, .. }
+            if let Some((class, MemberKey::Named(name, _))) = member(callee)
+                && method(name).name() == "groupBy"
+                && let Some((global, MemberKey::Named("Map", _))) = member(class)
+                && matches!(global, Expr::GlobalGet(_)) =>
+        {
+            let [items, key_fn] = args.as_slice() else {
+                perry_wit_diagnostics::bail_diag!(
+                    codes::TYPE_MISMATCH,
+                    "Map.groupBy requires (items, callbackFn)"
+                );
+            };
+            Ok(Some((items, key_fn)))
+        }
+        _ => Ok(None),
     }
 }
 

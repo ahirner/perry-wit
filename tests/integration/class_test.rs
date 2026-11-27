@@ -46,7 +46,15 @@ class Rest {
     last:number;
     constructor(...values:number[]) { this.first=values[0]; this.last=values[1]; }
 }
+class Fields {
+    first = this.keys();
+    second = this.keys();
+    constructor() { this.later = 17; }
+    keys() { return Object.keys(this).join(","); }
+}
 export function constructorOrder() {
+    const fields = new Fields();
+    if (fields.first !== "" || fields.second !== "first" || fields.keys() !== "first,second,later") return 13;
     step=0;
     const pair=new Pair(next(),next());
     if(pair.z!==1 || pair.a!==2 || Object.keys(pair).join(',')!=='z,a')return 11;

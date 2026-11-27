@@ -25,19 +25,23 @@ impl<'s> FunctionBuilder<'s, '_> {
             .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))
     }
 
-    pub(super) fn source_expression(
+    pub(super) fn source_operand(
         &mut self,
         ctx: &mut Context,
         expr: &'s Expr,
         expected: Option<TypeHandle>,
-    ) -> Result<Value> {
+        required: bool,
+    ) -> Result<Option<Value>> {
+        if !required && self.shapes.specialization.iteration.is_release(expr) {
+            return Ok(None);
+        }
         if let Some(value) = hir_compat::non_null_assertion(expr) {
             let value = self.expression_with(ctx, value, expected)?;
-            return Ok(if self.is_optional(ctx, value) {
+            return Ok(Some(if self.is_optional(ctx, value) {
                 self.emit_value(ctx, |ctx| OptionalCastOp::assert_present(ctx, value))
             } else {
                 value
-            });
+            }));
         }
         if let Some(record) = self.shapes.specialization.iteration.expression(expr) {
             return match record {
@@ -59,21 +63,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                 }
                 hir_compat::RecordExpr::Close => self.absent_literal(ctx, false, expected),
-            };
-        }
-        if let Expr::Sequence(parts) = expr {
-            let (last, effects) = parts
-                .split_last()
-                .ok_or_else(|| Diagnostic::internal("empty sequence expression"))?;
-            if let Some(span) = self.shapes.locations.operator_span(parts) {
-                return self
-                    .expression_with(ctx, last, expected)
-                    .map_err(|error| error.with_fallback_span(Some(span)));
             }
-            for effect in effects {
-                self.effect(ctx, effect)?;
-            }
-            return self.expression_with(ctx, last, expected);
+            .map(Some);
         }
         if let Some(args) = self.shapes.specialization.instances.regexp(expr) {
             let regex = self
@@ -87,18 +78,20 @@ impl<'s> FunctionBuilder<'s, '_> {
             for arg in args.operands() {
                 self.effect(ctx, arg)?;
             }
-            return Ok(self.emit_value(ctx, |ctx| {
+            return Ok(Some(self.emit_value(ctx, |ctx| {
                 perry_mir::RegexConstOp::new(ctx, &regex.pattern, &regex.flags)
-            }));
+            })));
         }
         if let Some(value) = self.date_expression(ctx, expr)? {
-            return Ok(value);
+            return Ok(Some(value));
         }
         if let Some(value) = self.url_expression(ctx, expr)? {
-            return Ok(value);
+            return Ok(Some(value));
         }
         if let Some(value) = self.collection_expression(ctx, expr, expected)? {
-            return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
+            return self
+                .narrow_value(ctx, || crate::narrowing::path(expr), value)
+                .map(Some);
         }
         if let Some((receiver, call)) = Call::expression(expr) {
             let receiver = match receiver {
@@ -110,10 +103,16 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .map_err(|error| self.shapes.annotate_local(error, id))?,
             };
             let receiver = self.defined(ctx, receiver)?;
-            let value = call.lower(self, ctx, receiver)?.ok_or_else(|| {
-                Diagnostic::new(codes::TYPE_MISMATCH, "method expression produces no value")
-            })?;
-            return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
+            return match call.lower(self, ctx, receiver)? {
+                Some(value) => self
+                    .narrow_value(ctx, || crate::narrowing::path(expr), value)
+                    .map(Some),
+                None if required => Err(diag!(
+                    codes::TYPE_MISMATCH,
+                    "method expression produces no value"
+                )),
+                None => Ok(None),
+            };
         }
         let value = match expr {
             expr if let Some((op, inputs)) = crate::engine::builtins::hir_intrinsic(expr) => {
@@ -154,6 +153,70 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::Integer(value) => self.number(ctx, *value as f64),
             Expr::Bool(value) => self.boolean(ctx, *value),
             Expr::String(text) => self.string(ctx, text),
+            Expr::ScopedTemp { id, value, body } => {
+                return self.with_temp(ctx, *id, value, |this, ctx| {
+                    this.instance_operand(ctx, body, expected, required)
+                });
+            }
+            Expr::Sequence(parts) => {
+                let Some((last, effects)) = parts.split_last() else {
+                    return Ok(None);
+                };
+                if let Some(span) = self.shapes.locations.operator_span(parts) {
+                    return self
+                        .instance_operand(ctx, last, expected, required)
+                        .map_err(|error| error.with_fallback_span(Some(span)));
+                }
+                for part in effects {
+                    self.effect(ctx, part)?;
+                }
+                return self.instance_operand(ctx, last, expected, required);
+            }
+            Expr::Undefined if !required => return Ok(None),
+            Expr::Call {
+                callee,
+                args,
+                byte_offset,
+                ..
+            } => {
+                let value = self
+                    .call(ctx, callee, args, *byte_offset)
+                    .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?;
+                if required && value.is_none() {
+                    return Err(self.shapes.annotate_call(
+                        diag!(codes::TYPE_MISMATCH, "a void call has no value"),
+                        *byte_offset,
+                    ));
+                }
+                return Ok(value);
+            }
+            Expr::StaticMethodCall {
+                class_name,
+                method_name,
+                ..
+            } => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "static method {class_name}.{method_name} not found"
+            ),
+            Expr::ProcessExit(code) => {
+                let code = match code {
+                    Some(code) => {
+                        let code = self.expression(ctx, code)?;
+                        let code = self.arithmetic(ctx, code);
+                        ensure_diag!(
+                            kind(ctx, code)? == Kind::Number,
+                            codes::TYPE_MISMATCH,
+                            "process.exit takes a number"
+                        );
+                        code
+                    }
+                    None => self.number(ctx, 0.0),
+                };
+                let status = self.emit_value(ctx, |ctx| ExitOp::new(ctx, code));
+                self.propagate(ctx, status);
+                self.after_terminator(ctx);
+                return Ok(None);
+            }
             Expr::LocalGet(id) => self
                 .load_local(ctx, *id)
                 .map_err(|error| self.shapes.annotate_local(error, *id))?,
@@ -175,11 +238,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::Binary { op, left, right } => self.binary_expression(ctx, op, left, right)?,
             Expr::Compare { op, left, right } => self.comparison(ctx, op, left, right)?,
             Expr::Logical { op, left, right } => self.logical(ctx, op, left, right, expected)?,
-            Expr::ScopedTemp { id, value, body } => {
-                self.with_temp(ctx, *id, value, |this, ctx| {
-                    this.expression_with(ctx, body, expected)
-                })?
-            }
             Expr::Conditional {
                 condition,
                 then_expr,
@@ -196,14 +254,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.array_length(ctx, array)
             }
             Expr::CallSpread { callee, args, .. } => self.array_push_spread(ctx, callee, args)?,
-            Expr::Call { byte_offset, .. } => {
-                self.source_operand(ctx, expr, expected)?.ok_or_else(|| {
-                    self.shapes.annotate_call(
-                        diag!(codes::TYPE_MISMATCH, "a void call has no value"),
-                        *byte_offset,
-                    )
-                })?
-            }
             Expr::MathMin(values) => self.math_extremum(ctx, false, Arguments::Plain(values))?,
             Expr::MathMax(values) => self.math_extremum(ctx, true, Arguments::Plain(values))?,
             Expr::MathMinSpread(array) => {
@@ -377,21 +427,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.shapes.static_field(class_name, field_name)?,
                 value,
             )?,
-            Expr::StaticMethodCall { .. } => {
-                self.source_operand(ctx, expr, expected)?.ok_or_else(|| {
-                    diag!(
-                        codes::TYPE_MISMATCH,
-                        "a void static method call has no value"
-                    )
-                })?
-            }
             Expr::New {
                 class_name,
                 args,
                 byte_offset,
                 ..
             } if let Some(class) = self.shapes.instance_class(class_name) => self
-                .class_new(ctx, class, args, None)
+                .class_new(ctx, class, args)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
                 class_name, args, ..
@@ -414,25 +456,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::ArrayFromMapped {
                 iterable, map_fn, ..
             } => self.array_from(ctx, iterable, Some(map_fn), expected)?,
-            Expr::IndexGet {
-                object,
-                index,
-                element_offset,
-                byte_offset: _,
-                byte_end: _,
-            } => self
-                .index_get(ctx, object, index)
-                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
-            Expr::IndexSet {
-                object,
-                index,
-                value,
-                element_offset,
-                byte_offset: _,
-                byte_end: _,
-            } => self
-                .set_index(ctx, object, index, value)
-                .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             Expr::Object(fields) => {
                 let pairs: Vec<(&str, &'s Expr)> =
                     fields.iter().map(|(k, v)| (k.as_str(), v)).collect();
@@ -441,6 +464,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             _ => bail_unsupported!("this expression form is not supported yet"),
         };
         self.narrow_value(ctx, || crate::narrowing::path(expr), value)
+            .map(Some)
     }
 
     /// A bigint literal (`0x…n`, `1_000n`), independent of WIT transport widths.
@@ -553,12 +577,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         let assigned = self.expression_with(ctx, value, Some(writes.expected_type(ctx)))?;
         if writes.carrier.deref(ctx).is::<JsonType>()
             && local.cell.is_none()
-            && self.shapes.deferred_binding(id)
-            && self.shapes.source.locals.get(&id).is_none_or(|local| {
-                local
-                    .flags
-                    .contains(crate::engine::types::LocalFlags::INFERRED)
-            })
+            && self
+                .shapes
+                .specialization
+                .instances
+                .binding_flags(id)
+                .contains(crate::engine::types::LocalFlags::INFERRED_DEFERRED)
             && !perry_mir::JsonSchema::supports_boxing(ctx, assigned.get_type(ctx))
         {
             let name = self.shapes.local_name(id).unwrap_or("<unknown>");
@@ -670,10 +694,16 @@ impl<'s> FunctionBuilder<'s, '_> {
     fn await_(&mut self, ctx: &mut Context, promise: &'s Expr) -> Result<Value> {
         ensure_unsupported!(self.is_async, "await is only valid in async functions");
         let promise = self.expression(ctx, promise)?;
+        let present = present_type(ctx, promise.get_type(ctx));
         ensure_unsupported!(
-            perry_mir::typed::<PromiseType>(ctx, promise.get_type(ctx)).is_some(),
-            "await of a non-promise value is not supported yet"
+            present.deref(ctx).is::<PromiseType>()
+                || matches!(
+                    Kind::of(ctx, present),
+                    Some(Kind::Number | Kind::Boolean | Kind::String | Kind::BigInt)
+                ),
+            "await supports promises and primitive values"
         );
+        let promise = self.as_promise_value(ctx, promise)?;
         let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
         Ok(self.append_value(ctx, &op))
     }

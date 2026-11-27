@@ -136,7 +136,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 })?
             };
             let pair = if method == IteratorMethod::Entries {
-                Some(self.shapes.pair_type(ctx, str_ty, elem_ty)?)
+                Some(
+                    self.shapes
+                        .positional_record(ctx, RecordKind::Tuple, [str_ty, elem_ty])?,
+                )
             } else {
                 None
             };
@@ -206,7 +209,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             })?;
         let dict_tuple = match expected.and_then(|e| dict_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
-            None => self.shapes.dict_tuple_type(ctx, k_ty, v_ty)?,
+            None => {
+                self.shapes
+                    .positional_record(ctx, RecordKind::DictionaryEntry, [k_ty, v_ty])?
+            }
         };
         let dict = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, dict_tuple.into(), vec![]));
         self.populate_from_entries(ctx, entries_val, dict)

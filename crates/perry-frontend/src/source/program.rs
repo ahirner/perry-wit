@@ -9,9 +9,95 @@ use std::collections::HashMap;
 #[derive(Clone, Copy)]
 pub(crate) enum Arguments<'s> {
     Plain(&'s [Expr]),
-    Constructor(&'s [Expr]),
     Spread(&'s [perry_hir::CallArg]),
     OneSpread(&'s Expr),
+}
+
+impl<'s> Arguments<'s> {
+    pub(crate) fn plain(self) -> Option<&'s [Expr]> {
+        match self {
+            Self::Plain(args) => Some(args),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum Callee<'s> {
+    Value(&'s Expr),
+    Static { class: &'s str, method: &'s str },
+}
+
+impl<'s> Callee<'s> {
+    fn of(expr: &'s Expr) -> Self {
+        match crate::hir_compat::member(expr) {
+            Some((Expr::ClassRef(class), crate::hir_compat::MemberKey::Named(method, _))) => {
+                Self::Static { class, method }
+            }
+            _ => Self::Value(expr),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SourceCall<'s> {
+    pub(crate) site: &'s Expr,
+    pub(crate) callee: Callee<'s>,
+    pub(crate) args: Arguments<'s>,
+    pub(crate) type_args: &'s [perry_hir::types::Type],
+    pub(crate) offset: u32,
+}
+
+impl<'s> SourceCall<'s> {
+    pub(crate) fn of(site: &'s Expr) -> Option<Self> {
+        let (callee, args, type_args, offset) = match site {
+            Expr::Call {
+                callee,
+                args,
+                type_args,
+                byte_offset,
+                ..
+            } => (
+                Callee::of(callee),
+                Arguments::Plain(args),
+                type_args.as_slice(),
+                *byte_offset,
+            ),
+            Expr::CallSpread {
+                callee,
+                args,
+                type_args,
+                byte_offset,
+                ..
+            } => (
+                Callee::of(callee),
+                Arguments::Spread(args),
+                type_args.as_slice(),
+                *byte_offset,
+            ),
+            Expr::StaticMethodCall {
+                class_name,
+                method_name,
+                args,
+            } => (
+                Callee::Static {
+                    class: class_name,
+                    method: method_name,
+                },
+                Arguments::Plain(args),
+                &[][..],
+                0,
+            ),
+            _ => return None,
+        };
+        Some(Self {
+            site,
+            callee,
+            args,
+            type_args,
+            offset,
+        })
+    }
 }
 
 impl<'s> Iterator for Arguments<'s> {
@@ -19,7 +105,7 @@ impl<'s> Iterator for Arguments<'s> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Plain(args) | Self::Constructor(args) => Some((args.split_off_first()?, false)),
+            Self::Plain(args) => Some((args.split_off_first()?, false)),
             Self::Spread(args) => Some(match args.split_off_first()? {
                 perry_hir::CallArg::Expr(expr) => (expr, false),
                 perry_hir::CallArg::Spread(expr) => (expr, true),
@@ -44,6 +130,20 @@ pub(crate) struct ModuleDeclarations {
 }
 
 impl ModuleDeclarations {
+    pub(crate) fn local_flags(&self, id: LocalId) -> LocalFlags {
+        self.locals
+            .get(&id)
+            .map_or(LocalFlags::GENERATED, |local| local.flags)
+    }
+
+    pub(crate) fn implicit_parameter(&self, param: &Param) -> bool {
+        use perry_hir::types::Type;
+        !self
+            .local_flags(param.id)
+            .contains(LocalFlags::PARAM_ANNOTATED)
+            && matches!(param.ty, Type::Any | Type::Unknown)
+    }
+
     pub(crate) fn for_of<'a>(&self, init: Option<&'a Stmt>) -> Option<(LocalId, &'a Expr)> {
         let Stmt::Let {
             id,
@@ -70,7 +170,8 @@ pub(crate) struct SourceModule<'s> {
     pub(crate) member_prefix: String,
     pub(crate) constructors: super::Constructors,
     pub(crate) locations: crate::hir_compat::Locations<'s>,
-    pub(crate) exports: crate::hir_compat::Exports<'s>,
+    pub(crate) resources:
+        std::collections::BTreeMap<u32, crate::hir_compat::ResourceClass<super::ClassId>>,
     pub(crate) sparse_arrays: bool,
     pub(crate) declarations: ModuleDeclarations,
     pub(crate) bodies: Bodies,
@@ -83,7 +184,10 @@ impl<'s> SourceModule<'s> {
         mut analysis: super::Analysis,
         constructors: super::Constructors,
         locations: crate::hir_compat::Locations<'s>,
-        exports: crate::hir_compat::Exports<'s>,
+        resources: std::collections::BTreeMap<
+            u32,
+            crate::hir_compat::ResourceClass<super::ClassId>,
+        >,
     ) -> Self {
         let locals = module
             .local_source_spans
@@ -127,7 +231,7 @@ impl<'s> SourceModule<'s> {
         Self {
             locations,
             constructors,
-            exports,
+            resources,
             member_prefix: analysis.names.prefix("member"),
             sparse_arrays: analysis.sparse_arrays,
             declarations: ModuleDeclarations {
@@ -211,14 +315,17 @@ pub(crate) struct StaticField<'s> {
     pub(crate) ty: Option<crate::engine::types::Ty>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum FieldOverride {
+    Solved(crate::engine::types::Ty),
+    Erased,
+}
+
 pub(crate) struct InstanceClass<'s> {
     pub(crate) ty: crate::engine::types::Ty,
     pub(crate) declaration: &'s Class,
     pub(crate) name: String,
-    pub(crate) fields: Vec<(
-        &'s perry_hir::ir::ClassField,
-        Option<crate::engine::types::Ty>,
-    )>,
+    pub(crate) field_overrides: Vec<(usize, FieldOverride)>,
     pub(crate) initializer: Option<FuncId>,
     pub(crate) constructor: Option<InstanceFunction<'s>>,
     pub(crate) direct_constructor: bool,
@@ -234,7 +341,6 @@ impl InstanceClass<'_> {
 
 pub(crate) struct InstanceBodies<'s> {
     pub(crate) static_fields: std::collections::BTreeMap<(&'s str, &'s str), StaticField<'s>>,
-    pub(crate) exports: Vec<Option<FuncId>>,
     pub(crate) native: Vec<(FuncId, crate::engine::NativeFunction)>,
     pub(crate) init: &'s [Stmt],
     pub(crate) functions: Vec<InstanceFunction<'s>>,
@@ -263,7 +369,7 @@ impl crate::engine::InstancePlans {
         }
     }
     pub(crate) fn call_target(&self, owner: BodyOwner, expr: &Expr) -> Option<FuncId> {
-        if let Some(crate::engine::solve::SiteResolution::Call { target, .. }) =
+        if let Some(crate::engine::solve::SiteResolution::Call(target)) =
             self.site(owner, expr).resolution
         {
             return self.emitted_callee(target)?.ok();
@@ -274,12 +380,5 @@ impl crate::engine::InstancePlans {
             }
             _ => None,
         }
-    }
-}
-pub(crate) fn is_pure_func_expr(expr: &Expr) -> bool {
-    match expr {
-        Expr::FuncRef(_) | Expr::Closure { .. } | Expr::LocalGet(_) | Expr::This => true,
-        Expr::PropertyGet { object, .. } => is_pure_func_expr(object),
-        _ => false,
     }
 }

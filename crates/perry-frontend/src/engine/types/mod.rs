@@ -1,7 +1,10 @@
 //! Interned solver types, canonical unions, and monotone joins.
 mod idx;
+mod rewrite;
+pub(super) use rewrite::TypeContext;
 mod wit;
-use super::bitset::BitSet;
+use super::BitSet;
+pub(crate) use crate::source::ClassId;
 use crate::{Absence, shapes};
 pub(crate) use idx::*;
 use perry_hir::types::Type as HirType;
@@ -13,7 +16,6 @@ const MAX_TYPE_DEPTH: u8 = 16;
 
 #[derive(Clone, Copy, Default)]
 struct TyMeta {
-    contains_cell: bool,
     open: bool,
     depth: u8,
 }
@@ -33,12 +35,9 @@ pub(crate) struct TypeTable {
     kinds: IdxVec<Ty, TyKind>,
     meta: IdxVec<Ty, TyMeta>,
     kind_index: HashMap<TypeKey, Ty>,
-    members_index: HashMap<Box<[Ty]>, TySpan>,
-    props_index: HashMap<Box<[ObjectProp]>, PropSpan>,
-    ty_pool: Pool<TySpan, Ty>,
-    object_props: Pool<PropSpan, ObjectProp>,
-    names: IdxVec<NameId, String>,
-    name_index: HashMap<String, NameId>,
+    members: indexmap::IndexSet<Box<[Ty]>>,
+    properties: indexmap::IndexSet<Box<[ObjectProp]>>,
+    names: indexmap::IndexSet<Box<str>>,
     scratch: Vec<Ty>,
     pub(crate) applications: HashMap<shapes::generics::InstanceKey, shapes::generics::Application>,
     wit_shapes: HashMap<(*const wit_parser::Resolve, wit_parser::Type, WitView), Ty>,
@@ -48,7 +47,7 @@ impl TypeTable {
     pub(crate) fn new() -> Self {
         let mut table = Self {
             kind_index: HashMap::with_capacity(64),
-            name_index: HashMap::with_capacity(32),
+            names: indexmap::IndexSet::with_capacity(32),
             ..Self::default()
         };
         for kind in [
@@ -72,52 +71,20 @@ impl TypeTable {
     }
 
     fn push_kind(&mut self, kind: TyKind) -> Ty {
-        let (open, depth) = match kind {
-            TyKind::Bottom | TyKind::Open | TyKind::TypeVar(_) => (true, 0),
-            TyKind::Array(i) | TyKind::Promise(i) => {
-                let m = self.meta[i];
-                (m.open, m.depth.saturating_add(1))
+        let mut open = matches!(kind, TyKind::Bottom | TyKind::Open | TyKind::TypeVar(_));
+        let mut depth: u8 = 0;
+        if !matches!(kind, TyKind::Signature { .. }) {
+            for child in self.children(kind) {
+                let meta = self.meta[child];
+                open |= meta.open;
+                depth = depth.max(meta.depth);
             }
-            TyKind::Tuple(s) | TyKind::Variant(s) | TyKind::Generic { args: s, .. } => {
-                let (mut o, mut d) = (false, 0u8);
-                for &c in self.ty_slice(s) {
-                    let m = self.meta[c];
-                    o |= m.open;
-                    d = d.max(m.depth);
-                }
-                (o, d.saturating_add(1))
-            }
-            TyKind::Union(s) => {
-                let (mut o, mut d) = (false, 0u8);
-                for &c in self.ty_slice(s) {
-                    let m = self.meta[c];
-                    o |= m.open;
-                    d = d.max(m.depth);
-                }
-                (o, d)
-            }
-            TyKind::Object { props, index } => {
-                let (mut o, mut d) = index.map_or((false, 0u8), |i| {
-                    let m = self.meta[i];
-                    (m.open, m.depth)
-                });
-                for p in self.object_slice(props) {
-                    let m = self.meta[p.ty];
-                    o |= m.open;
-                    d = d.max(m.depth);
-                }
-                (o, d.saturating_add(1))
-            }
-            _ => (false, 0),
-        };
+        }
+        if Self::is_composite(kind) || matches!(kind, TyKind::Variant(_)) {
+            depth = depth.saturating_add(1);
+        }
         let ty = self.kinds.push(kind);
-        let contains_cell = matches!(kind, TyKind::Cell { .. })
-            || self.any_child(ty, &mut |child| self.meta[child].contains_cell);
-        let meta_ty = self.meta.push(TyMeta {
-            open,
-            depth,
-            contains_cell,
-        });
+        let meta_ty = self.meta.push(TyMeta { open, depth });
         debug_assert_eq!(ty, meta_ty);
         ty
     }
@@ -129,8 +96,8 @@ impl TypeTable {
     pub(crate) fn kind(&self, ty: Ty) -> TyKind {
         self.kinds[ty]
     }
-    pub(crate) fn ty_slice(&self, span: TySpan) -> &[Ty] {
-        &self.ty_pool[span]
+    pub(crate) fn ty_slice(&self, span: TypeListId) -> &[Ty] {
+        span.get(&self.members)
     }
     pub(crate) fn tuple_slice(&self, ty: Ty) -> &[Ty] {
         match self.kind(ty) {
@@ -138,21 +105,15 @@ impl TypeTable {
             _ => &[],
         }
     }
-    pub(crate) fn object_slice(&self, span: PropSpan) -> &[ObjectProp] {
-        &self.object_props[span]
+    pub(crate) fn object_slice(&self, span: PropertiesId) -> &[ObjectProp] {
+        span.get(&self.properties)
     }
     pub(crate) fn name_str(&self, id: NameId) -> &str {
-        self.names[id].as_str()
+        id.get(&self.names)
     }
 
     pub(crate) fn intern_name(&mut self, name: &str) -> NameId {
-        if let Some(&id) = self.name_index.get(name) {
-            return id;
-        }
-        let owned = name.to_owned();
-        let id = self.names.push(owned.clone());
-        self.name_index.insert(owned, id);
-        id
+        NameId::intern(&mut self.names, name)
     }
 
     fn intern_kind(&mut self, kind: TyKind) -> Ty {
@@ -202,16 +163,16 @@ impl TypeTable {
     ) -> shapes::generics::InstanceKey {
         (
             self.intern_name(base),
-            self.ty_pool.intern(&mut self.members_index, args),
+            TypeListId::intern(&mut self.members, args),
         )
     }
 
     pub(crate) fn tuple(&mut self, items: &[Ty]) -> Ty {
-        let span = self.ty_pool.intern(&mut self.members_index, items);
+        let span = TypeListId::intern(&mut self.members, items);
         self.intern_kind(TyKind::Tuple(span))
     }
     pub(crate) fn generic(&mut self, base: shapes::TypeName, args: &[Ty]) -> Ty {
-        let args = self.ty_pool.intern(&mut self.members_index, args);
+        let args = TypeListId::intern(&mut self.members, args);
         self.intern_kind(TyKind::Generic { base, args })
     }
     pub(crate) fn property(&mut self, name: &str, ty: Ty, optional: bool) -> ObjectProp {
@@ -223,18 +184,18 @@ impl TypeTable {
         }
     }
 
-    pub(crate) fn closed_record(&self, ty: Ty) -> Option<PropSpan> {
+    pub(crate) fn closed_record(&self, ty: Ty) -> Option<PropertiesId> {
         match self.kind(ty) {
             TyKind::Object { props, index: None } => Some(props),
             _ => None,
         }
     }
 
-    pub(crate) fn intern_properties(&mut self, props: &[ObjectProp]) -> PropSpan {
-        self.object_props.intern(&mut self.props_index, props)
+    pub(crate) fn intern_properties(&mut self, props: &[ObjectProp]) -> PropertiesId {
+        PropertiesId::intern(&mut self.properties, props)
     }
 
-    pub(crate) fn object_type(&mut self, props: PropSpan, index: Option<Ty>) -> Ty {
+    pub(crate) fn object_type(&mut self, props: PropertiesId, index: Option<Ty>) -> Ty {
         self.intern_kind(TyKind::Object { props, index })
     }
 
@@ -266,7 +227,7 @@ impl TypeTable {
         res
     }
 
-    pub(crate) fn union_span(&mut self, span: TySpan) -> Ty {
+    pub(crate) fn union_span(&mut self, span: TypeListId) -> Ty {
         let mut flat = std::mem::take(&mut self.scratch);
         flat.clear();
         for &ty in self.ty_slice(span) {
@@ -293,7 +254,7 @@ impl TypeTable {
             [] => Ty::NEVER,
             [single] => *single,
             slice => {
-                let span = self.ty_pool.intern(&mut self.members_index, slice);
+                let span = TypeListId::intern(&mut self.members, slice);
                 self.intern_kind(TyKind::Union(span))
             }
         }
@@ -332,14 +293,9 @@ impl TypeTable {
         if old == value || value == Ty::BOTTOM || (value == Ty::NEVER && old != Ty::BOTTOM) {
             return (old, false);
         }
-        let self_nested = match self.kind(old) {
-            TyKind::Union(s) => self
-                .ty_slice(s)
-                .iter()
-                .any(|&m| Self::is_composite(self.kind(m)) && self.contains_nested_ty(value, m)),
-            k if Self::is_composite(k) => self.contains_nested_ty(value, old),
-            _ => false,
-        };
+        let self_nested = self.alternatives(&old).iter().any(|&member| {
+            Self::is_composite(self.kind(member)) && self.contains_nested_ty(value, member)
+        });
         if self_nested {
             return (Ty::OPEN, true);
         }
@@ -476,17 +432,29 @@ impl TypeTable {
         res
     }
 
+    pub(crate) fn children(&self, kind: TyKind) -> impl Iterator<Item = Ty> {
+        let (items, properties, last) = match kind {
+            TyKind::Array(inner) | TyKind::Promise(inner) => (&[][..], &[][..], Some(inner)),
+            TyKind::Tuple(s)
+            | TyKind::Variant(s)
+            | TyKind::Union(s)
+            | TyKind::Generic { args: s, .. } => (self.ty_slice(s), &[][..], None),
+            TyKind::Signature { params, result, .. } => {
+                (&[][..], self.object_slice(params), Some(result))
+            }
+            TyKind::Object { props, index } => (&[][..], self.object_slice(props), index),
+            _ => (&[][..], &[][..], None),
+        };
+        items
+            .iter()
+            .copied()
+            .chain(properties.iter().map(|p| p.ty))
+            .chain(last)
+    }
+
     pub(super) fn any_child(&self, ty: Ty, f: &mut impl FnMut(Ty) -> bool) -> bool {
-        match self.kind(ty) {
-            TyKind::Array(inner) | TyKind::Promise(inner) => f(inner),
-            TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. } => {
-                self.ty_slice(s).iter().copied().any(f)
-            }
-            TyKind::Object { props, index } => {
-                index.is_some_and(&mut *f) || self.object_slice(props).iter().map(|p| p.ty).any(f)
-            }
-            _ => false,
-        }
+        let kind = self.kind(ty);
+        !matches!(kind, TyKind::Signature { .. } | TyKind::Variant(_)) && self.children(kind).any(f)
     }
 
     pub(crate) fn is_open(&self, ty: Ty) -> bool {
@@ -844,22 +812,9 @@ impl TypeTable {
         target: TemplateId,
         exclude_owner: Option<CaptureOwner>,
     ) -> bool {
-        fn walk(
-            table: &TypeTable,
-            ty: Ty,
-            target: TemplateId,
-            exclude_owner: Option<CaptureOwner>,
-            visited: &mut BitSet,
-        ) -> bool {
-            if !visited.insert(ty.index()) {
-                return false;
-            }
-            if let TyKind::Func(ident) = table.kind(ty) {
-                return ident.template == target && Some(ident.capture_owner) != exclude_owner;
-            }
-            table.any_child(ty, &mut |c| walk(table, c, target, exclude_owner, visited))
-        }
-        walk(self, ty, target, exclude_owner, &mut BitSet::default())
+        self.any_descendant(ty, &mut BitSet::default(), &|ty| {
+            matches!(self.kind(ty), TyKind::Func(id) if id.template == target && exclude_owner != Some(id.capture_owner))
+        })
     }
 
     pub(crate) fn is_valid_dict_value(&self, elem: Ty, dict_read: bool) -> bool {
@@ -901,63 +856,10 @@ impl TypeTable {
         if let Some(bound) = replace(self, ty) {
             return bound;
         }
-        match self.kind(ty) {
-            TyKind::Signature {
-                params,
-                result,
-                is_async,
-                is_generator,
-            } => {
-                let mut params = self.object_slice(params).to_vec();
-                for p in &mut params {
-                    p.ty = self.rewrite(p.ty, replace);
-                }
-                let params = self.intern_properties(&params);
-                let result = self.rewrite(result, replace);
-                self.intern_kind(TyKind::Signature {
-                    params,
-                    result,
-                    is_async,
-                    is_generator,
-                })
-            }
-            TyKind::Array(i) => {
-                let n = self.rewrite(i, replace);
-                if n == i { ty } else { self.array(n) }
-            }
-            TyKind::Promise(i) => {
-                let n = self.rewrite(i, replace);
-                if n == i { ty } else { self.promise(n) }
-            }
-            kind @ (TyKind::Tuple(s) | TyKind::Union(s) | TyKind::Generic { args: s, .. }) => {
-                let mut out = self.ty_slice(s).to_vec();
-                for item in &mut out {
-                    *item = self.rewrite(*item, replace);
-                }
-                if out == self.ty_slice(s) {
-                    return ty;
-                }
-                match kind {
-                    TyKind::Tuple(_) => self.tuple(&out),
-                    TyKind::Union(_) => self.union(&out),
-                    TyKind::Generic { base, .. } => self.generic(base, &out),
-                    _ => ty,
-                }
-            }
-            TyKind::Object { props, index } => {
-                let mut items = self.object_slice(props).to_vec();
-                for p in &mut items {
-                    p.ty = self.rewrite(p.ty, replace);
-                }
-                let next_idx = index.map(|i| self.rewrite(i, replace));
-                if items != self.object_slice(props) || next_idx != index {
-                    self.object(&items, next_idx)
-                } else {
-                    ty
-                }
-            }
-            _ => ty,
-        }
+        let Ok(result) = self.try_map_children(ty, |table, child| {
+            Ok::<_, std::convert::Infallible>(table.rewrite(child, replace))
+        });
+        result
     }
 
     pub(crate) fn unify(
@@ -970,26 +872,22 @@ impl TypeTable {
         if matches!(actual, Ty::BOTTOM | Ty::OPEN | Ty::NEVER) {
             return;
         }
-        match (self.kind(pattern), self.kind(actual)) {
+        let pair = (self.kind(pattern), self.kind(actual));
+        match pair {
             (TyKind::TypeVar(name) | TyKind::Named(name), _)
                 if let Some(slot) = type_params(name).and_then(|i| bindings.get_mut(i))
                     && *slot == Ty::OPEN =>
             {
                 *slot = actual;
             }
-            (TyKind::Array(p), TyKind::Array(a)) | (TyKind::Promise(p), TyKind::Promise(a)) => {
-                self.unify(p, a, type_params, bindings)
-            }
-            (TyKind::Tuple(p), TyKind::Tuple(a)) => {
-                for (&pt, &at) in self.ty_slice(p).iter().zip(self.ty_slice(a)) {
-                    self.unify(pt, at, type_params, bindings);
-                }
-            }
-            (TyKind::Generic { base: pb, args: pa }, TyKind::Generic { base: ab, args: aa })
-                if pb == ab =>
-            {
-                for (&pt, &at) in self.ty_slice(pa).iter().zip(self.ty_slice(aa)) {
-                    self.unify(pt, at, type_params, bindings);
+            (TyKind::Generic { base: left, .. }, TyKind::Generic { base: right, .. })
+                if left != right => {}
+            (TyKind::Array(_), TyKind::Array(_))
+            | (TyKind::Promise(_), TyKind::Promise(_))
+            | (TyKind::Tuple(_), TyKind::Tuple(_))
+            | (TyKind::Generic { .. }, TyKind::Generic { .. }) => {
+                for (pattern, actual) in self.children(pair.0).zip(self.children(pair.1)) {
+                    self.unify(pattern, actual, type_params, bindings);
                 }
             }
             (
@@ -1070,32 +968,31 @@ impl TypeTable {
         self.has_nested_unresolved_walk(ty, nested, &mut [BitSet::default(), BitSet::default()])
     }
 
-    fn contains_ty_walk(&self, ty: Ty, needle: Ty, visited: &mut BitSet) -> bool {
-        if ty == needle {
-            return true;
-        }
-        if !visited.insert(ty.index()) {
-            return false;
-        }
-        self.any_child(ty, &mut |c| self.contains_ty_walk(c, needle, visited))
+    fn any_descendant(
+        &self,
+        ty: Ty,
+        visited: &mut BitSet,
+        predicate: &impl Fn(Ty) -> bool,
+    ) -> bool {
+        visited.insert(ty.index())
+            && (predicate(ty)
+                || self.any_child(ty, &mut |child| {
+                    self.any_descendant(child, visited, predicate)
+                }))
     }
 
     pub(crate) fn contains_ty(&self, haystack: Ty, needle: Ty) -> bool {
-        self.contains_ty_walk(haystack, needle, &mut BitSet::default())
+        self.any_descendant(haystack, &mut BitSet::default(), &|ty| ty == needle)
     }
 
     fn contains_nested_ty(&self, haystack: Ty, needle: Ty) -> bool {
         let mut visited = BitSet::default();
-        match self.kind(haystack) {
-            TyKind::Union(s) => self.ty_slice(s).iter().any(|&m| {
-                Self::is_composite(self.kind(m))
-                    && self.any_child(m, &mut |c| self.contains_ty_walk(c, needle, &mut visited))
-            }),
-            k if Self::is_composite(k) => self.any_child(haystack, &mut |c| {
-                self.contains_ty_walk(c, needle, &mut visited)
-            }),
-            _ => false,
-        }
+        self.alternatives(&haystack).iter().any(|&member| {
+            Self::is_composite(self.kind(member))
+                && self.any_child(member, &mut |child| {
+                    self.any_descendant(child, &mut visited, &|ty| ty == needle)
+                })
+        })
     }
 }
 
@@ -1103,8 +1000,19 @@ pub(crate) fn func_tag(ident: FuncIdentity) -> String {
     match ident.capture_owner {
         CaptureOwner::None => format!("fn_{}", ident.template.index()),
         CaptureOwner::Instance(owner) => format!("fn_{}_{}", ident.template.index(), owner.index()),
-        CaptureOwner::Template(owner) => {
+        CaptureOwner::Template(owner, None) => {
             format!("fn_{}_t{}", ident.template.index(), owner.index())
+        }
+        CaptureOwner::Template(owner, Some(receiver)) => {
+            let (kind, id) = match receiver {
+                Receiver::Class(id) => ("c", id.index()),
+                Receiver::Object(ty) => ("o", ty.index()),
+            };
+            format!(
+                "fn_{}_t{}_{kind}{id}",
+                ident.template.index(),
+                owner.index()
+            )
         }
     }
 }

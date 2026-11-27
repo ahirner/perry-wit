@@ -132,6 +132,8 @@ export function canonicalKeys() {
  for(const key of mixed.keys())if(typeof key==='number' && 1/key!==Infinity)return 9;
  const numbers=new Set<number>([NaN,NaN,-0,0]);
  if(numbers.size!==2 || !numbers.has(NaN) || !numbers.has(-0))return 10;
+ for(const [a,b] of inserted.entries())if(1/a!==Infinity || 1/b!==Infinity)return 11;
+ if(Array.from(updates.values()).join(',')!=='4')return 12;
  return 0;
 }
 

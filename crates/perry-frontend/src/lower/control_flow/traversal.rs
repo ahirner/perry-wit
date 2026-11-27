@@ -1,15 +1,13 @@
 use super::*;
 use crate::lower::array_methods::Direction;
 use crate::lower::builder::insert_before_terminator;
-use crate::lower::collections::{
-    Collection, CollectionKind, CollectionViewKind, StorageField, tuple_pair,
-};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Holes {
     Dense,
     Skip,
     Visit(TypeHandle),
+    Preserve(Ptr<BasicBlock>),
 }
 pub(crate) struct Span {
     pub(crate) start: Value,
@@ -77,12 +75,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         let index = self.entry_slot(ctx, start.get_type(ctx));
         self.store(ctx, index, start);
-        let walk = match input {
-            Input::Collection(collection) => Some(CollectionTraversal {
-                index,
-                collection,
-                cursor: LiveCursor::open(self, ctx, collection, index)?,
-            }),
+        let cursor = match input {
+            Input::Collection(value) => LiveCursor::open(self, ctx, value, index)?,
             _ => None,
         };
         self.repeat(
@@ -90,7 +84,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             "iterate",
             LoopCondition::Indices(index, bound),
             LoopUpdate::default(),
-            walk,
+            cursor.map(|cursor| (index, cursor)),
             |b, ctx, next, done| {
                 let mut current = b.load(ctx, index)?;
                 let item = match input {
@@ -111,7 +105,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                         }
                         match holes {
                             Holes::Dense => b.array_value(ctx, value, current)?,
-                            Holes::Skip | Holes::Visit(_) => {
+                            Holes::Skip | Holes::Visit(_) | Holes::Preserve(_) => {
                                 let present = if b.shapes.specialization.sparse_arrays {
                                     b.emit_value(ctx, |ctx| {
                                         perry_mir::ArrayPresentOp::new(ctx, value, current)
@@ -137,7 +131,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                                     )?
                                 } else {
                                     let read = b.new_block(ctx, "array_read");
-                                    b.branch(ctx, present, read, next);
+                                    let missing = match holes {
+                                        Holes::Preserve(hole) => hole,
+                                        _ => next,
+                                    };
+                                    b.branch(ctx, present, read, missing);
                                     b.switch_to(read);
                                     b.element_at(ctx, value, current)?
                                 }
@@ -149,7 +147,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                         b.intrinsic(ctx, Intrinsic::StringIndex, vec![value, current])
                     }
                     Input::Collection(value) => {
-                        b.collection_view_element_at(ctx, value, current)?
+                        b.visit_collection_entry(ctx, value, current, cursor, next)?
                     }
                     Input::UndefinedCount(_) => {
                         let ty = void_type(ctx);
@@ -161,6 +159,38 @@ impl<'s> FunctionBuilder<'s, '_> {
         )
     }
 
+    /// Return the first matching result and stop traversal, or return `miss` on exhaustion.
+    pub(in crate::lower) fn find_item(
+        &mut self,
+        ctx: &mut Context,
+        input: Input,
+        miss: Value,
+        matches: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<Value>,
+        found: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<Value>,
+    ) -> Result<Value> {
+        let result = self.entry_slot(ctx, miss.get_type(ctx));
+        self.store(ctx, result, miss);
+        self.iterate(ctx, input, |b, ctx, item, index, next, done| {
+            let matched = matches(b, ctx, item, index)?;
+            let hit = b.new_block(ctx, "search_hit");
+            b.branch(ctx, matched, hit, next);
+            b.switch_to(hit);
+            let value = found(b, ctx, item, index)?;
+            b.store(ctx, result, value);
+            b.jump(ctx, done);
+            Ok(())
+        })?;
+        self.load(ctx, result)
+    }
+
+    pub(in crate::lower) fn preserve_holes(&mut self, ctx: &mut Context) -> Holes {
+        if self.shapes.specialization.sparse_arrays {
+            Holes::Preserve(self.new_block(ctx, "missing_element"))
+        } else {
+            Holes::Skip
+        }
+    }
+
     pub(crate) fn collect_items(
         &mut self,
         ctx: &mut Context,
@@ -168,6 +198,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         item: impl FnOnce(&mut Self, &mut Context, Value, Value, Ptr<BasicBlock>) -> Result<ArrayOutput>,
     ) -> Result<Value> {
         let prepare = self.block;
+        let missing = match input {
+            Input::Array(_, Holes::Preserve(hole)) | Input::Slice(_, _, Holes::Preserve(hole)) => {
+                Some(hole)
+            }
+            _ => None,
+        };
         self.iterate(ctx, input, |b, ctx, value, index, next, _| {
             let output = item(b, ctx, value, index, next)?;
             let element = match output {
@@ -177,103 +213,18 @@ impl<'s> FunctionBuilder<'s, '_> {
             let allocation = ArrayNewOp::new(ctx, element, vec![]);
             insert_before_terminator(ctx, prepare, [allocation.get_operation()])?;
             let result = allocation.get_result(ctx);
+            if let Some(hole) = missing {
+                let present = b.block;
+                b.switch_to(hole);
+                let position = b.array_length(ctx, result);
+                b.emit(ctx, |ctx| {
+                    perry_mir::ArrayHoleOp::new(ctx, result, position)
+                });
+                b.jump(ctx, next);
+                b.switch_to(present);
+            }
             output.append_to(b, ctx, result);
             Ok(result)
         })
-    }
-}
-
-pub(crate) enum Projection {
-    Item(TypeHandle),
-    Field((&'static str, TypeHandle)),
-    Pair((&'static str, TypeHandle), (&'static str, TypeHandle)),
-}
-
-impl Projection {
-    pub(crate) fn collection(ctx: &Context, ty: TypeHandle) -> Result<Self> {
-        let ty = present_type(ctx, ty);
-        if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
-            return Ok(Self::Item(array.deref(ctx).element()));
-        }
-        let (view, box_type) = match Collection::of(ctx, ty) {
-            Some(Collection::View(view)) => {
-                let boxed = perry_mir::typed::<RecordType>(ctx, ty)
-                    .and_then(|r| r.deref(ctx).field(StorageField::ViewBox.name()))
-                    .ok_or_else(|| internal!("collection view missing box"))?
-                    .1;
-                (view, boxed)
-            }
-            Some(Collection::Box(CollectionKind::Map)) => (CollectionViewKind::MapEntries, ty),
-            Some(Collection::Box(CollectionKind::Set)) => (CollectionViewKind::SetValues, ty),
-            None => bail_unsupported!("expected an array or collection iterable"),
-        };
-        let record = view
-            .source()
-            .entry(ctx, box_type)
-            .ok_or_else(|| internal!("collection view requires a Map or Set box"))?;
-        let field = |name| {
-            record
-                .deref(ctx)
-                .field(name)
-                .map(|(_, ty)| (name, ty))
-                .ok_or_else(|| Diagnostic::internal("collection entry missing field"))
-        };
-        Ok(match view {
-            CollectionViewKind::MapKeys | CollectionViewKind::SetValues => {
-                Self::Field(field("_0")?)
-            }
-            CollectionViewKind::MapValues => Self::Field(field("_1")?),
-            CollectionViewKind::MapEntries => Self::Pair(field("_0")?, field("_1")?),
-            CollectionViewKind::SetEntries => Self::Pair(field("_0")?, field("_0")?),
-        })
-    }
-
-    pub(crate) fn pair_types(&self, ctx: &Context) -> Option<(TypeHandle, TypeHandle)> {
-        let ty = match *self {
-            Self::Pair((_, first), (_, second)) => return Some((first, second)),
-            Self::Item(ty) | Self::Field((_, ty)) => ty,
-        };
-        if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
-            let element = array.deref(ctx).element();
-            return Some((element, element));
-        }
-        let record = perry_mir::typed::<RecordType>(ctx, ty)?;
-        tuple_pair(ctx, record)
-    }
-
-    pub(crate) fn output_type(
-        &self,
-        ctx: &mut Context,
-        shapes: &mut Shapes<'_>,
-    ) -> Result<TypeHandle> {
-        Ok(match *self {
-            Self::Item(ty) | Self::Field((_, ty)) => ty,
-            Self::Pair((_, first), (_, second)) => shapes.pair_type(ctx, first, second)?.into(),
-        })
-    }
-
-    pub(crate) fn read(
-        self,
-        b: &mut FunctionBuilder<'_, '_>,
-        ctx: &mut Context,
-        entry: Value,
-    ) -> Result<Value> {
-        let field = |b: &mut FunctionBuilder<'_, '_>, ctx: &mut Context, name: &str| {
-            let op = FieldGetOp::new(ctx, entry, name.to_owned()).to_diag(ctx)?;
-            Ok::<_, crate::lower::Diagnostic>(b.append_value(ctx, &op))
-        };
-        match self {
-            Self::Item(_) => Ok(entry),
-            Self::Field((name, _)) => field(b, ctx, name),
-            Self::Pair((first, _), (second, _)) => {
-                let key = field(b, ctx, first)?;
-                let value = if first == second {
-                    key
-                } else {
-                    field(b, ctx, second)?
-                };
-                b.pair(ctx, key, value)
-            }
-        }
     }
 }

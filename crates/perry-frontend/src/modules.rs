@@ -105,9 +105,7 @@ fn wit_imports(
                     let imported = named.imported.as_ref().map(ast::ModuleExportName::atom);
                     let name: &str = imported.as_deref().unwrap_or(&named.local.sym);
                     (import.type_only || named.is_type_only)
-                        && (foreign
-                            .get(name)
-                            .is_some_and(|item| !matches!(item, crate::wit::Foreign::Function(_)))
+                        && (foreign.contains_key(name)
                             || matches!(name, "WitInput" | "WitResource"))
                 }
                 _ => false,

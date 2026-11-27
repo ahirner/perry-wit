@@ -1,9 +1,6 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
-use crate::engine::{
-    solve::{CallTarget, OperandUse},
-    types::{Ty, TyKind},
-};
+use crate::engine::solve::CallTarget;
 use crate::lower::{builder::LocalBinding, hir_compat::RuntimeCall, inline::InlineResult};
 
 enum SpreadInput {
@@ -12,7 +9,7 @@ enum SpreadInput {
 }
 
 pub(super) enum CallArguments<'s, 'v> {
-    Expressions(Arguments<'s>, Ty),
+    Expressions(Arguments<'s>),
     Values(&'v [Value]),
 }
 
@@ -32,7 +29,7 @@ impl CallTarget {
             .emitted_callee(self)
             .transpose()?
         else {
-            if let CallArguments::Expressions(args, _) = args {
+            if let CallArguments::Expressions(args) = args {
                 for (arg, spread) in args {
                     if spread {
                         b.call_spread_input(ctx, arg, None)?;
@@ -61,11 +58,14 @@ impl CallTarget {
         };
         let prefix = callee.into_iter().chain(receiver);
         match args {
-            CallArguments::Expressions(args, types) => {
-                b.invoke_arguments(ctx, b.signature(id)?, prefix, args, Some(types), None)
+            CallArguments::Expressions(args) => {
+                b.invoke_arguments(ctx, b.signature(id)?, prefix, args, None)
             }
             CallArguments::Values(args) => {
-                b.call_values(ctx, id, prefix.chain(args.iter().copied()))
+                let supplied = b
+                    .signature(id)?
+                    .supplied_values(prefix.clone().count(), args);
+                b.call_values(ctx, id, prefix.chain(supplied))
             }
         }
     }
@@ -171,6 +171,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .iter()
                     .enumerate()
                 {
+                    if matches!(field, crate::engine::EnvironmentField::Receiver(_)) {
+                        let receiver = self.capture_field(ctx, value, slot)?;
+                        self.frame.this_slot = Some(self.initialized_local(ctx, receiver).slot);
+                        continue;
+                    }
                     let &crate::engine::EnvironmentField::Capture {
                         local, ty, cell, ..
                     } = field
@@ -199,20 +204,6 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<SpreadInput> {
         let source = self.spread_operand(ctx, expr, element)?;
         let source = self.defined(ctx, source)?;
-        if let OperandUse::Spread(ty) = self.site(expr).operand {
-            match self.shapes.types.source.kind(ty) {
-                TyKind::Tuple(span) => {
-                    return Ok(SpreadInput::Tuple(
-                        source,
-                        self.shapes.types.source.ty_slice(span).len(),
-                    ));
-                }
-                TyKind::Array(_) | TyKind::String => {
-                    return Ok(SpreadInput::Items(self.spread_items(ctx, source, element)?));
-                }
-                _ => {}
-            }
-        }
         if let Some(record) = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
             && record.deref(ctx).kind() == RecordKind::Tuple
         {
@@ -228,61 +219,35 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         target: CallTarget,
-        argument_types: Ty,
-        callee: &'s Expr,
-        args: Arguments<'s>,
+        call: crate::source::SourceCall<'s>,
     ) -> Result<Option<Value>> {
-        let (receiver, callable) = match callee {
-            _ if target == CallTarget::ThrowTypeError => {
-                self.discard_function_operand(ctx, callee)?;
-                (None, None)
-            }
-            Expr::IndexGet { object, index, .. }
-                if target.needs_receiver() && !target.needs_value() =>
-            {
-                let receiver = self.expression(ctx, object)?;
-                self.effect(ctx, index)?;
-                (Some(self.defined(ctx, receiver)?), None)
-            }
-            Expr::PropertyGet {
-                object,
-                property,
-                byte_offset,
-                ..
-            } if target.needs_receiver() => {
-                let receiver = self.expression(ctx, object)?;
-                let callable = if !target.needs_value() {
-                    None
-                } else {
-                    Some(self.property_of_value(ctx, object, receiver, property, *byte_offset)?)
-                };
-                (Some(self.defined(ctx, receiver)?), callable)
-            }
-            _ if !target.needs_value() => {
-                match callee {
-                    Expr::PropertyGet { object, .. }
-                        if hir_compat::class_receiver(object).is_some() => {}
-                    Expr::IndexGet { object, index, .. }
-                        if hir_compat::class_receiver(object).is_some() =>
-                    {
-                        self.effect(ctx, index)?
-                    }
-                    Expr::PropertyGet { object, .. } => {
-                        self.discard_function_operand(ctx, object)?
-                    }
-                    _ => self.discard_function_operand(ctx, callee)?,
-                }
-                (None, None)
-            }
-            _ => (None, Some(self.expression(ctx, callee)?)),
+        let args = CallArguments::Expressions(call.args);
+        let crate::source::Callee::Value(callee) = call.callee else {
+            return target.invoke(self, ctx, None, None, args);
         };
-        target.invoke(
-            self,
-            ctx,
-            callable,
-            receiver,
-            CallArguments::Expressions(args, argument_types),
-        )
+        let mut receiver = None;
+        let callable = if let Some((object, key)) = hir_compat::member(callee)
+            && target.needs_receiver()
+        {
+            let value = self.expression(ctx, object)?;
+            let get = self.getter(callee);
+            let callable = if target.needs_value() || get.is_some() {
+                self.read_member(ctx, object, value, key, get)?
+            } else {
+                if let hir_compat::MemberKey::Computed(index, _) = key {
+                    self.effect(ctx, index)?;
+                }
+                None
+            };
+            receiver = Some(self.defined(ctx, value)?);
+            callable
+        } else if target.needs_value() {
+            Some(self.expression(ctx, callee)?)
+        } else {
+            self.discard_function_operand(ctx, callee)?;
+            None
+        };
+        target.invoke(self, ctx, callable, receiver, args)
     }
 
     pub(super) fn invoke_arguments(
@@ -290,17 +255,27 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         signature: &'s Signature<'s>,
         implicit: impl Iterator<Item = Value>,
-        args: Arguments<'s>,
-        arguments: Option<Ty>,
+        args: impl IntoIterator<Item = (&'s Expr, bool)>,
         result: Option<InlineResult>,
     ) -> Result<Option<Value>> {
+        let values = self.bind_arguments(ctx, signature, 0, implicit, args)?;
+        self.emit_signature_call(ctx, signature, values, result)
+    }
+
+    pub(super) fn bind_arguments(
+        &mut self,
+        ctx: &mut Context,
+        signature: &'s Signature<'s>,
+        reserved: usize,
+        implicit: impl Iterator<Item = Value>,
+        args: impl IntoIterator<Item = (&'s Expr, bool)>,
+    ) -> Result<Vec<Value>> {
         let (fixed, rest) = signature.parameters();
         let rest_element = rest
             .map(|p| Self::rest_element_type(ctx, p.binding.carrier))
             .transpose()?;
         let mut values = Vec::with_capacity(signature.params.len());
-        let arity = fixed.len();
-        let mut fixed = fixed.iter();
+        let mut fixed = fixed.iter().skip(reserved).peekable();
         let mut rest_values = Vec::new();
         for value in implicit {
             if let Some(param) = fixed.next() {
@@ -313,27 +288,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .shapes
             .locations
             .display_function_name(signature.name.as_ref());
-        let mut remaining = arguments.map(|tuple| self.shapes.runtime_arguments(tuple).peekable());
-        if let Arguments::Plain(args) = args
-            && rest.is_none()
-        {
-            let count = remaining
-                .as_ref()
-                .map_or(args.len(), |slots| slots.clone().count());
-            if count > fixed.len() {
-                bail_diag!(
-                    codes::TYPE_MISMATCH,
-                    "call to {callee_name} with {} arguments, expected {arity}",
-                    values.len() + count
-                );
-            }
-        }
-        let mut passed = |index| {
-            remaining
-                .as_mut()
-                .is_none_or(|slots| slots.next_if(|&(pos, _)| pos == index).is_some())
-        };
-        let mut argument_index = 0;
+        let mut argument_index = reserved + values.len();
         let mut rest_array = None;
         for (expr, spread) in args {
             let (tuple, count) = if spread {
@@ -355,7 +310,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                             let source = self.fit(ctx, source, ty)?;
                             self.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, source));
                         }
-                        passed(argument_index);
                         argument_index += 1;
                         continue;
                     }
@@ -366,8 +320,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             for field in 0..count {
                 let index = argument_index;
                 argument_index += 1;
-                let param = fixed.as_slice().first();
-                if !passed(index) || (param.is_none() && rest_element.is_none()) {
+                let param = fixed.peek().copied();
+                if param.or(rest).is_none_or(|next| index < next.position) {
                     if tuple.is_none() {
                         self.discard_function_operand(ctx, expr)?;
                     }
@@ -396,8 +350,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
         }
         for param in fixed {
-            let position = values.len() + 1;
-            values.push(self.bind_fixed_arg(ctx, param, None).map_err(|error| {
+            let position = param.position + 1;
+            values.push(self.missing_argument(ctx, param).map_err(|error| {
                 error.with_note(format!("in argument {position} of '{callee_name}'"))
             })?);
         }
@@ -406,7 +360,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, rest_values))
             }));
         }
-        self.emit_signature_call(ctx, signature, values, result)
+        Ok(values)
     }
 
     pub(super) fn clear_timer_args(
@@ -429,40 +383,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(())
     }
 
-    pub(super) fn promise_reaction(
-        &mut self,
-        ctx: &mut Context,
-        target: FuncId,
-        passed: [bool; 2],
-        callee: &'s Expr,
-        args: &'s [Expr],
-    ) -> Result<Option<Value>> {
-        let Expr::PropertyGet { object, .. } = callee else {
-            bail_internal!("reaction requires a promise receiver")
-        };
-        let signature = self.signature(target)?;
-        let mut params = signature.params.iter();
-        let mut values = vec![
-            self.bind_fixed_arg(
-                ctx,
-                params
-                    .next()
-                    .ok_or_else(|| internal!("missing promise receiver"))?,
-                Some(object),
-            )?,
-        ];
-        for (i, arg) in args.iter().enumerate() {
-            if passed.get(i) == Some(&true) {
-                let param = params
-                    .next()
-                    .ok_or_else(|| internal!("missing reaction parameter"))?;
-                values.push(self.bind_fixed_arg(ctx, param, Some(arg))?);
-            } else {
-                self.discard_function_operand(ctx, arg)?;
-            }
-        }
-        self.emit_signature_call(ctx, signature, values, None)
-    }
     pub(super) fn call(
         &mut self,
         ctx: &mut Context,
@@ -517,25 +437,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Expr::PropertyGet {
             object, property, ..
         } = callee
-            && let Expr::PropertyGet {
-                object: namespace,
-                property: class,
-                ..
-            } = &**object
-            && let Expr::PropertyGet {
-                object: global,
-                property: name,
-                ..
-            } = &**namespace
-            && matches!(**global, Expr::GlobalGet(_))
-            && name == "Temporal"
-        {
-            return self.temporal_factory(ctx, class, property, args).map(Some);
-        }
-
-        if let Expr::PropertyGet {
-            object, property, ..
-        } = callee
             && matches!(**object, Expr::GlobalGet(0))
         {
             if property == "fetch" {
@@ -552,64 +453,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         if let Some((object, property)) = self.shapes.specialization.receiver_members.method(callee)
         {
-            if let Some(property) = property
-                && let Expr::PropertyGet {
-                    object: global,
-                    property: class,
-                    ..
-                } = object
-                && matches!(**global, Expr::GlobalGet(_))
-            {
-                if class == "performance" {
-                    return match property {
-                        "now" => {
-                            for arg in args {
-                                self.expression(ctx, arg)?;
-                            }
-                            Ok(Some(self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![])))
-                        }
-                        other => bail_unsupported!("performance.{other} is not supported yet"),
-                    };
-                }
-                if class == "Promise" {
-                    if property == "resolve" && args.is_empty() {
-                        let undef = self.emit_value(ctx, |ctx| {
-                            UndefinedOp::new(ctx, FP64Type::get(ctx).into())
-                        });
-                        return Ok(Some(
-                            self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, undef)),
-                        ));
-                    }
-                    if let ("resolve" | "reject", [value]) = (property, args) {
-                        return self.promise_settled(ctx, property, value, None).map(Some);
-                    }
-                    let combinator = match property {
-                        "all" => Combinator::All,
-                        "race" => Combinator::Race,
-                        "allSettled" => Combinator::AllSettled,
-                        other => bail_unsupported!("Promise.{other} is not supported yet"),
-                    };
-                    let [inputs] = args else {
-                        bail_diag!(codes::TYPE_MISMATCH, "Promise.{property} takes one array");
-                    };
-                    let inputs = match inputs {
-                        Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
-                        inputs => self.expression(ctx, inputs)?,
-                    };
-                    let inputs = if self.shapes.specialization.sparse_arrays {
-                        self.combinator_holes(ctx, inputs)?
-                    } else {
-                        inputs
-                    };
-                    let op =
-                        PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_else(|| {
-                            Diagnostic::unsupported(
-                                "Promise combinators take an array of promises of one type",
-                            )
-                        })?;
-                    return Ok(Some(self.append_value(ctx, &op)));
-                }
-            }
             return self.method(ctx, object, property, args);
         }
         if hir_compat::is_import_initializer(callee) {
@@ -652,23 +495,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                     );
                     return Ok(Some(self.intrinsic(ctx, op, vec![path])));
                 }
-                Some(Imported::Foreign(binding, signature)) => {
-                    return self.import_call(
-                        ctx,
-                        binding,
-                        signature,
-                        args,
-                        foreign::CallKind::Function,
-                    );
+                Some(Imported::Foreign(signature)) => {
+                    return self.import_call(ctx, signature, args, foreign::CallKind::Function);
                 }
-                _ if let Some((binding, signature)) = self.shapes.decls.world.function(name) => {
-                    return self.import_call(
-                        ctx,
-                        binding,
-                        signature,
-                        args,
-                        foreign::CallKind::Function,
-                    );
+                _ if let Some(signature) = self.shapes.decls.world.function(name) => {
+                    return self.import_call(ctx, signature, args, foreign::CallKind::Function);
                 }
                 _ => {}
             }
@@ -724,7 +555,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             std::iter::empty(),
             Arguments::Plain(args),
             None,
-            None,
         )
     }
 
@@ -738,18 +568,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(array.deref(ctx).element())
     }
 
-    pub(super) fn bind_fixed_arg(
+    fn missing_argument(
         &mut self,
         ctx: &mut Context,
         param: &program::ParamSig<'s>,
-        arg: Option<&'s Expr>,
     ) -> Result<Value> {
         let carrier = param.binding.carrier;
-        if let Some(arg) = arg {
-            let expected = (!param.is_never).then_some(carrier);
-            let value = self.expression_with(ctx, arg, expected)?;
-            return self.fixed_value(ctx, param, value);
-        }
         if admits_undefined(ctx, carrier) {
             return Ok(self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, carrier)));
         }
@@ -896,79 +720,117 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(val)
     }
 
+    pub(super) fn static_call(
+        &mut self,
+        ctx: &mut Context,
+        method: crate::methods::StaticMethod,
+        args: &'s [Expr],
+    ) -> Result<Value> {
+        use crate::methods::StaticMethod::*;
+        match method {
+            PerformanceNow => {
+                for arg in args {
+                    self.expression(ctx, arg)?;
+                }
+                Ok(self.intrinsic(ctx, Intrinsic::PerformanceNow, vec![]))
+            }
+            Resolve if args.is_empty() => {
+                let undef =
+                    self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, FP64Type::get(ctx).into()));
+                Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, undef)))
+            }
+            Resolve | Reject => {
+                let [value] = args else {
+                    let name = if matches!(method, Resolve) {
+                        "resolve"
+                    } else {
+                        "reject"
+                    };
+                    bail_unsupported!("Promise.{name} is not supported yet")
+                };
+                let value = self.expression(ctx, value)?;
+                if matches!(method, Resolve) {
+                    self.as_promise_value(ctx, value)
+                } else {
+                    let settled = void_type(ctx);
+                    Ok(self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, value, settled)))
+                }
+            }
+            Combine(combinator) => {
+                let [inputs] = args else {
+                    let name = match combinator {
+                        Combinator::All => "all",
+                        Combinator::AllSettled => "allSettled",
+                        Combinator::Race => "race",
+                    };
+                    bail_diag!(codes::TYPE_MISMATCH, "Promise.{name} takes one array");
+                };
+                let inputs = match inputs {
+                    Expr::Array(items, _) => self.combinator_inputs(ctx, items)?,
+                    inputs => self.expression(ctx, inputs)?,
+                };
+                let inputs = if self.shapes.specialization.sparse_arrays {
+                    self.combinator_holes(ctx, inputs)?
+                } else {
+                    inputs
+                };
+
+                let op = PromiseCombinatorOp::new(ctx, combinator, inputs).ok_or_else(|| {
+                    unsupported!("Promise combinators take an array of promises of one type")
+                })?;
+                Ok(self.append_value(ctx, &op))
+            }
+            Unsupported(id) => Err(Diagnostic::unsupported(
+                self.shapes.types.source.name_str(id).to_owned(),
+            )),
+            Temporal(factory) => self.temporal_factory(ctx, factory, args),
+        }
+    }
+
     /// A combinator's input array with holes read as `undefined` values, so each element is a
     /// promise of `T | undefined`, or of the plain element value.
     fn combinator_holes(&mut self, ctx: &mut Context, inputs: Value) -> Result<Value> {
         use crate::lower::control_flow::{ArrayOutput, Holes, Input};
-        let element = self.array_element(ctx, inputs)?;
-        let promise = perry_mir::typed::<PromiseType>(ctx, present_type(ctx, element));
-        let settled = promise.map(|promise| {
-            let value = promise.deref(ctx).value();
-            let settled =
-                crate::lower::coerce::admitting(ctx, value, perry_mir::Absence::Undefined);
-            (settled, PromiseType::get(ctx, settled).into())
-        });
         self.collect_items(
             ctx,
             Input::Array(inputs, Holes::Dense),
-            |b, ctx, item, _, _| {
-                let Some((settled, promise)) = settled else {
-                    return Ok(ArrayOutput::Item(
-                        b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, item)),
-                    ));
-                };
-                let hole = b.emit_value(ctx, |ctx| IsUndefinedOp::new(ctx, item));
-                let promise = b.choose(
-                    ctx,
-                    promise,
-                    hole,
-                    |b, ctx| {
-                        let value = b.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, settled));
-                        Ok(b.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)))
-                    },
-                    |b, ctx| {
-                        let item = b.defined(ctx, item)?;
-                        b.fit(ctx, item, promise)
-                    },
-                )?;
-                Ok(ArrayOutput::Item(promise))
-            },
+            |b, ctx, item, _, _| Ok(ArrayOutput::Item(b.as_promise_value(ctx, item)?)),
         )
     }
 
     /// The array literal given to a promise combinator: plain values among promises of `T`
     /// become promises fulfilled with them, as `Promise.all` treats them.
     fn combinator_inputs(&mut self, ctx: &mut Context, items: &'s [Expr]) -> Result<Value> {
-        // `Promise.reject(e)` takes its settled type from the other inputs: lower it last.
         let mut inputs = Vec::with_capacity(items.len());
         let mut promised = None;
         let mut first = None;
         for item in items {
-            inputs.push(match promise_call(item) {
-                Some(("reject", reason)) => CombinatorInput::Reject(reason),
-                _ => {
-                    let value = self.expression(ctx, item)?;
-                    let value = self.defined(ctx, value)?;
-                    first.get_or_insert(value);
-                    if promised.is_none()
-                        && let Some(p) = perry_mir::typed::<PromiseType>(ctx, value.get_type(ctx))
-                    {
-                        promised = Some(p.deref(ctx).value());
-                    }
-                    CombinatorInput::Lowered(value)
+            if matches!(
+                self.site(item).resolution,
+                Some(crate::engine::solve::SiteResolution::Static(
+                    crate::methods::StaticMethod::Reject
+                ))
+            ) && let Some(([reason], _)) = hir_compat::call_arguments(item)
+            {
+                inputs.push(CombinatorInput::Reject(self.expression(ctx, reason)?));
+            } else {
+                let value = self.expression(ctx, item)?;
+                let ty = value.get_type(ctx);
+                first.get_or_insert(ty);
+                if let Some(promise) = perry_mir::typed::<PromiseType>(ctx, ty) {
+                    promised.get_or_insert(promise.deref(ctx).value());
                 }
-            });
+                inputs.push(CombinatorInput::Lowered(value));
+            }
         }
-        let settled = promised
-            .or_else(|| first.map(|v| v.get_type(ctx)))
-            .unwrap_or_else(|| void_type(ctx));
+        let settled = promised.or(first).unwrap_or_else(|| void_type(ctx));
         let promise: TypeHandle = PromiseType::get(ctx, settled).into();
         let mut values = Vec::with_capacity(items.len());
         for input in inputs {
             let value = match input {
                 CombinatorInput::Lowered(value) => value,
                 CombinatorInput::Reject(reason) => {
-                    self.promise_settled(ctx, "reject", reason, Some(settled))?
+                    self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, reason, settled))
                 }
             };
             let value = if value.get_type(ctx) == promise {
@@ -981,61 +843,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         Ok(self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, promise, values)))
     }
-
-    /// `Promise.resolve(value)` (a promise passes through) or `Promise.reject(reason)`, a
-    /// promise of `settled` (`undefined` when nothing says).
-    fn promise_settled(
-        &mut self,
-        ctx: &mut Context,
-        name: &str,
-        value: &'s Expr,
-        settled: Option<TypeHandle>,
-    ) -> Result<Value> {
-        let value = self.expression(ctx, value)?;
-        let value = self.defined(ctx, value)?;
-        if name == "resolve" {
-            if perry_mir::typed::<PromiseType>(ctx, value.get_type(ctx)).is_some() {
-                return Ok(value);
-            }
-            return Ok(self.emit_value(ctx, |ctx| PromiseResolvedOp::new(ctx, value)));
-        }
-        let settled = match settled {
-            Some(settled) => settled,
-            None => void_type(ctx),
-        };
-        Ok(self.emit_value(ctx, |ctx| PromiseRejectedOp::new(ctx, value, settled)))
-    }
 }
 
-/// A promise combinator input: lowered in order, or a `Promise.reject(reason)` lowered once
-/// the other inputs decide its settled type.
-enum CombinatorInput<'e> {
+enum CombinatorInput {
     Lowered(Value),
-    Reject(&'e Expr),
-}
-
-/// `Promise.<name>(argument)`: the name and the argument.
-fn promise_call(expr: &Expr) -> Option<(&str, &Expr)> {
-    let Expr::Call { callee, args, .. } = expr else {
-        return None;
-    };
-    let Expr::PropertyGet {
-        object, property, ..
-    } = &**callee
-    else {
-        return None;
-    };
-    let Expr::PropertyGet {
-        object: global,
-        property: class,
-        ..
-    } = &**object
-    else {
-        return None;
-    };
-    let [argument] = args.as_slice() else {
-        return None;
-    };
-    (matches!(**global, Expr::GlobalGet(_)) && class == "Promise")
-        .then_some((property.as_str(), argument))
+    Reject(Value),
 }

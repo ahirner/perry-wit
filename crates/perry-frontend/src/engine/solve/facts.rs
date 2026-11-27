@@ -33,6 +33,10 @@ impl Facts {
         self.values.push(initial)
     }
 
+    pub(super) fn activation(&mut self, values: Vec<Ty>) -> ActivationSpan {
+        self.values.append_activation(values)
+    }
+
     pub(super) fn root(&self, mut loc: LocId) -> LocId {
         while let Some(parent) = self.parents.get(&loc) {
             loc = parent.get();
@@ -50,15 +54,23 @@ impl Facts {
     }
 
     pub(super) fn write(&mut self, types: &mut TypeTable, loc: LocId, value: Ty) {
-        let (root, old) = self.resolve(loc);
-        if self.declared.contains(root.index()) {
-            return;
+        let root = self.root(loc);
+        if self.join(types, root, value) {
+            self.dirty.insert(Fact::Storage(root));
         }
+    }
+
+    pub(super) fn join(&mut self, types: &mut TypeTable, root: LocId, value: Ty) -> bool {
+        if self.declared.contains(root.index()) {
+            return false;
+        }
+        let old = self.values[root];
         let (next, nested) = types.join_bounded(old, value);
         if nested {
             self.self_nested.insert(root.index());
         }
-        self.set(root, next);
+        self.values[root] = next;
+        old != next
     }
 
     pub(super) fn declare(&mut self, loc: LocId, value: Ty) {

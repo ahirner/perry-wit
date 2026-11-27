@@ -14,7 +14,11 @@ use swc_ecma_visit::VisitMutWith;
 
 mod calls;
 mod classes;
-pub(crate) use calls::{RuntimeCall, call_arguments, class_receiver, member, runtime_call};
+pub(crate) use calls::{
+    MemberKey, RuntimeCall, call_arguments, class_receiver, map_group_by, member,
+    member_assignment, runtime_call,
+};
+pub(crate) use classes::{direct_constructor, private_field};
 mod locations;
 pub(crate) use calls::{is_array_insertion, is_source_extern};
 pub(crate) use iteration::is_object_coercibility_check;
@@ -30,18 +34,21 @@ pub(crate) use methods::Preservation;
 pub(crate) use methods::{Method, method};
 pub(crate) use streams::is_writable_to_web;
 pub(crate) use timers::is_timer_module;
-pub(crate) use witnesses::{Exports, ResourceClass, Target, Witness, adapter_name};
+pub(crate) use witnesses::{
+    ExportDeclaration, ResourceClass, SourceWitness, Target, Witnesses, adapter_name,
+};
 
-pub(crate) fn lower<'s>(
+pub(crate) fn lower<'s, 'r>(
     loaded: modules::Loaded<'s>,
     identity: &str,
-    world: Option<(&'s wit_parser::Resolve, wit_parser::WorldId)>,
-) -> Result<crate::source::SourceModule<'s>> {
+    world: Option<(&'r wit_parser::Resolve, wit_parser::WorldId)>,
+) -> Result<(crate::source::SourceModule<'s>, Vec<SourceWitness<'r>>)> {
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
-    let (constructors, witnesses) = GLOBALS.set(&Globals::new(), || {
+    let (constructors, witnesses, top_level) = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
-        ast.visit_mut_with(&mut resolver(unresolved, Mark::new(), true));
+        let top_level = Mark::new();
+        ast.visit_mut_with(&mut resolver(unresolved, top_level, true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
         locations.collect(&ast, unresolved);
         timers::check_imports(&ast, &locations)?;
@@ -50,11 +57,12 @@ pub(crate) fn lower<'s>(
         Ok::<_, Diagnostic>((
             constructors,
             witnesses::resolve(&ast, &loaded.exports, world, &mut locations, unresolved)?,
+            SyntaxContext::empty().apply_mark(top_level),
         ))
     })?;
-    let mut analysis = crate::source::analyze(&mut ast, &mut locations);
+    let mut analysis = crate::source::analyze(&mut ast, &mut locations, top_level);
     streams::lower(&mut ast, &mut analysis)?;
-    methods::preserve_arguments(&mut ast, &mut analysis.names);
+    methods::preserve_arguments(&mut ast, &mut analysis);
     classes::preserve_field_types(&mut ast);
     let capture_spans = !witnesses.witnesses.is_empty() || !analysis.signature_prefix.is_empty();
     if capture_spans {
@@ -81,7 +89,7 @@ pub(crate) fn lower<'s>(
     })?;
     for class in &mut module.classes {
         for field in &mut class.fields {
-            if field.is_private && field.name.starts_with('#') {
+            if private_field(field) {
                 field.name = perry_hir::private_names::private_value_key(class.id, &field.name);
             }
         }
@@ -101,12 +109,15 @@ pub(crate) fn lower<'s>(
             );
         }
     }
-    Ok(crate::source::SourceModule::bind(
-        module,
-        analysis,
-        constructors,
-        locations,
-        witnesses,
+    Ok((
+        crate::source::SourceModule::bind(
+            module,
+            analysis,
+            constructors,
+            locations,
+            witnesses.resources,
+        ),
+        witnesses.functions,
     ))
 }
 
@@ -157,7 +168,7 @@ function builtin() { return new Set<string>(); }
 "#;
         let modules = std::collections::BTreeMap::new();
         let loaded = modules::load(source, "shadow.ts", &modules, &HashMap::new()).unwrap();
-        let lowered = lower(loaded, "shadow.ts", None).unwrap();
+        let (lowered, _) = lower(loaded, "shadow.ts", None).unwrap();
         for function in &lowered.bodies.functions {
             let Stmt::Return(Some(expr)) = &function.body[0] else {
                 panic!("expected constructor return");
@@ -203,7 +214,7 @@ function builtin() { return new Set<string>(); }
         ] {
             let modules = std::collections::BTreeMap::new();
             let loaded = modules::load(source, "names.ts", &modules, &HashMap::new()).unwrap();
-            let lowered = lower(loaded, "names.ts", None).unwrap();
+            let (lowered, _) = lower(loaded, "names.ts", None).unwrap();
             let function = &lowered.bodies.functions[0];
             let user = function.body.iter().find_map(|stmt| match stmt {
                 Stmt::Let {

@@ -50,16 +50,9 @@ pub fn value_tag(ctx: &Context, ty: TypeHandle) -> Option<&'static str> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("variant operation has an invalid tag or payload type")]
 struct InvalidVariant;
-
-impl core::fmt::Display for InvalidVariant {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("variant operation has an invalid tag or payload type")
-    }
-}
-
-impl core::error::Error for InvalidVariant {}
 
 op_schema! {
     pub VariantNewOp(..operands) -> infallible;

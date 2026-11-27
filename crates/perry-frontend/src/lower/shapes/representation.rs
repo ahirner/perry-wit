@@ -16,21 +16,12 @@ impl Shapes<'_, Preparing<'_>> {
         ctx: &Context,
         entry: &crate::wit::Foreign,
     ) -> Result<TypeHandle> {
-        let (value, input) = match entry {
-            crate::wit::Foreign::Type(value) => (*value, false),
-            crate::wit::Foreign::Input(value) => (*value, true),
-            crate::wit::Foreign::Function(_) => bail_diag!(
-                codes::TYPE_MISMATCH,
-                "foreign function cannot be used as a value type"
-            ),
+        let (value, view) = match entry {
+            crate::wit::Foreign::Type(value) => (*value, WitView::Boundary),
+            crate::wit::Foreign::Input(value) => (*value, WitView::Input),
         };
-        let ty = self.types.source.wit_type(ctx, value, WitView::Boundary);
-        let carrier = self.resolved_binding(ctx, ty)?.carrier;
-        if input {
-            self.input_type(ctx, carrier)
-        } else {
-            Ok(carrier)
-        }
+        let ty = self.types.source.wit_type(ctx, value, view);
+        Ok(self.resolved_binding(ctx, ty)?.carrier)
     }
 }
 

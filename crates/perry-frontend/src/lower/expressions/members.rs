@@ -4,7 +4,7 @@ use crate::lower::collections::{Collection, dict_entry_types};
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Member<'p> {
-    Field(Value, &'p str, TypeHandle),
+    Field(Value, &'p str, usize, TypeHandle),
     Accessor(Value, FuncId),
 }
 
@@ -37,13 +37,13 @@ impl<'p> Member<'p> {
         let record = perry_mir::typed::<RecordType>(ctx, object.get_type(ctx))
             .filter(|record| kind.is_none_or(|kind| record.deref(ctx).kind() == kind))
             .ok_or_else(|| unsupported!("property access requires a record"))?;
-        let (_, ty) = record.deref(ctx).field(name).ok_or_else(|| {
+        let (index, ty) = record.deref(ctx).field(name).ok_or_else(|| {
             diag!(
                 codes::TYPE_MISMATCH,
                 "property {name} does not exist on this shape (subset rule R1)"
             )
         })?;
-        Ok(Self::Field(object, name, ty))
+        Ok(Self::Field(object, name, index, ty))
     }
 
     pub(in crate::lower) fn read(
@@ -52,7 +52,7 @@ impl<'p> Member<'p> {
         ctx: &mut Context,
     ) -> Result<Value> {
         match self {
-            Self::Field(object, name, ty) => {
+            Self::Field(object, name, _, ty) => {
                 let get = FieldGetOp::with_type(ctx, object, name.to_owned(), ty).to_diag(ctx)?;
                 b.field_read(ctx, &get)
             }
@@ -81,12 +81,21 @@ impl<'p> Member<'p> {
                 b.call_values(ctx, set, std::iter::once(object).chain(value))?;
                 Ok(value)
             }
-            Self::Field(object, name, ty) => {
+            Self::Field(object, name, index, ty) => {
                 let value = rhs.lower(b, ctx, ty)?;
                 let value = b.fit(ctx, value, ty)?;
-                b.emit(ctx, |ctx| {
-                    FieldSetOp::new(ctx, object, name.to_owned(), value)
-                });
+                let set = if b
+                    .shapes
+                    .class_records
+                    .get(&object.get_type(ctx))
+                    .and_then(|class| class.fields().nth(index))
+                    .is_some_and(|(field, _)| hir_compat::private_field(field))
+                {
+                    FieldSetOp::private
+                } else {
+                    FieldSetOp::new
+                };
+                b.emit(ctx, |ctx| set(ctx, object, name.to_owned(), value));
                 Ok(Some(b.bigint_view(ctx, value)))
             }
         }
@@ -137,25 +146,30 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     /// `object.property`, by the kind of `object`.
-    pub(super) fn property_get(
+    pub(in crate::lower) fn read_member(
         &mut self,
         ctx: &mut Context,
         object: &'s Expr,
-        property: &str,
-        byte_offset: u32,
-        get: Option<FuncId>,
-    ) -> Result<Value> {
-        if let Expr::ClassRef(class_name) = object {
-            return self.load_local(ctx, self.shapes.static_field(class_name, property)?);
-        }
-        let value = self.expression(ctx, object)?;
-        if let Some(id) = get {
-            return Member::Accessor(self.defined(ctx, value)?, id).read(self, ctx);
-        }
-        self.property_of_value(ctx, object, value, property, byte_offset)
+        value: Value,
+        key: hir_compat::MemberKey<'s>,
+        getter: Option<FuncId>,
+    ) -> Result<Option<Value>> {
+        let result = if let Some(getter) = getter {
+            let receiver = self.defined(ctx, value)?;
+            self.call_values(ctx, getter, std::iter::once(receiver))
+        } else {
+            match key {
+                hir_compat::MemberKey::Named(name, offset) => {
+                    self.property_of_value(ctx, object, value, name, offset)
+                }
+                hir_compat::MemberKey::Computed(index, _) => self.index_get(ctx, value, index),
+            }
+            .map(Some)
+        };
+        result.map_err(|e| self.shapes.annotate_member(e, key.offset()))
     }
 
-    pub(in crate::lower) fn property_of_value(
+    fn property_of_value(
         &mut self,
         ctx: &mut Context,
         object: &'s Expr,
@@ -258,13 +272,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     /// `object[index]` on arrays, strings, bytes, JSON values and records (literal keys).
-    pub(super) fn index_get(
-        &mut self,
-        ctx: &mut Context,
-        object: &'s Expr,
-        index: &'s Expr,
-    ) -> Result<Value> {
-        let array = self.expression(ctx, object)?;
+    fn index_get(&mut self, ctx: &mut Context, array: Value, index: &'s Expr) -> Result<Value> {
         let array = self.defined(ctx, array)?;
         let ty = array.get_type(ctx);
         match kind(ctx, array)? {

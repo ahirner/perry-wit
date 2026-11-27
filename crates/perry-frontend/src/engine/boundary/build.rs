@@ -1,36 +1,6 @@
 //! Assemble the lexical index and close over capture, frame and promise sites.
 use super::*;
 
-fn assigns_constructor_arguments(class: &perry_hir::ir::Class) -> bool {
-    let Some(ctor) = &class.constructor else {
-        return false;
-    };
-    ctor.params.len() == class.fields.len()
-        && ctor.body.len() == class.fields.len()
-        && ctor
-            .body
-            .iter()
-            .zip(&ctor.params)
-            .zip(&class.fields)
-            .all(|((stmt, param), field)| {
-                let Stmt::Expr(Expr::PropertySet {
-                    object,
-                    property,
-                    value,
-                    ..
-                }) = stmt
-                else {
-                    return false;
-                };
-                field.init.is_none()
-                    && param.default.is_none()
-                    && !param.is_rest
-                    && matches!(object.as_ref(), Expr::This)
-                    && property == &field.name
-                    && matches!(value.as_ref(), Expr::LocalGet(id) if *id == param.id)
-            })
-}
-
 impl<'h> ModuleIndex<'h> {
     pub(crate) fn build(
         ctx: &Context,
@@ -48,25 +18,12 @@ impl<'h> ModuleIndex<'h> {
         let mut idx = Self {
             functions: Vec::with_capacity(bodies.functions.len() + 1),
             local_to_idx: vec![None; max_local_hint as usize + 1],
-            max_local_id: max_local_hint,
             ..Self::default()
         };
         let init_tid = idx.add_template(TemplateView {
-            kind: TemplateKind::ModuleInit,
-            name: "<init>".into(),
-            func_id: 0,
-            params: &[],
-            return_type: &VOID_HIR,
             body: &bodies.init,
-            captures: &[],
-            type_params: &[],
             is_async: declarations.has_top_level_await,
-            is_generator: false,
-
-            captures_this: false,
-            captures_new_target: false,
-            uses_this: false,
-            explicit_return: false,
+            ..TemplateView::synthetic(TemplateKind::ModuleInit, "<init>")
         });
         debug_assert_eq!(init_tid, TemplateId::INIT);
         let mut scan = ScanCtx {
@@ -83,7 +40,7 @@ impl<'h> ModuleIndex<'h> {
             defined_locals: BitSet::default(),
             pending_captures: Vec::new(),
         };
-        idx.scan_stmts(&mut scan, &bodies.init, init_tid, true, false);
+        idx.scan_stmts(&mut scan, &bodies.init, init_tid, false);
 
         for f in &bodies.functions {
             idx.register_member(
@@ -95,26 +52,35 @@ impl<'h> ModuleIndex<'h> {
         }
 
         for class in &bodies.classes {
-            if hir_compat::is_object_literal(&class.name) {
+            let Some(cid) = ClassId::of(class) else {
                 idx.literal_classes.insert(&class.name, &class.fields);
                 continue;
-            }
-            let cid = idx.classes.push(ClassInfo {
-                declaration: class,
-                ty: scan.types.named(scan.ctx, &class.name),
-                name_id: scan.types.intern_name(&class.name),
-                field_init: None,
-                ctor: None,
-                direct_constructor: assigns_constructor_arguments(class),
-                static_field_locs: Vec::new(),
-            });
+            };
+            idx.classes.insert(
+                cid,
+                ClassInfo {
+                    declaration: class,
+                    ty: scan.types.named(scan.ctx, &class.name),
+                    field_init: None,
+                    ctor: None,
+                    implicit_params: class
+                        .constructor
+                        .iter()
+                        .chain(&class.methods)
+                        .flat_map(|f| &f.params)
+                        .any(|p| scan.declarations.implicit_parameter(p)),
+                    direct_constructor: hir_compat::direct_constructor(class),
+                    static_field_locs: Vec::new(),
+                },
+            );
             idx.register_type_params(scan.ctx, GenericOwner::Class(cid), &class.type_params);
+            for field in &class.fields {
+                idx.annotations.register(&mut scan, &field.ty, true);
+            }
             for field in &class.static_fields {
                 let ty = idx.annotations.register(&mut scan, &field.ty, true);
                 let loc = idx.add_location(if ty == Ty::OPEN { Ty::BOTTOM } else { ty });
-                idx.classes[cid]
-                    .static_field_locs
-                    .push((scan.types.intern_name(&field.name), loc));
+                idx.classes[&cid].static_field_locs.push(loc);
             }
             let mut initializers = class
                 .fields
@@ -122,23 +88,16 @@ impl<'h> ModuleIndex<'h> {
                 .filter_map(|field| field.init.as_ref())
                 .peekable();
             if class.constructor.is_none() || initializers.peek().is_some() {
-                let owner =
-                    idx.add_synthetic_template(TemplateKind::FieldInitializers, &class.name);
-                idx.classes[cid].field_init = Some(owner);
+                let owner = idx.add_template(TemplateView::synthetic(
+                    TemplateKind::FieldInitializers,
+                    &class.name,
+                ));
+                idx.classes[&cid].field_init = Some(owner);
                 for init in initializers {
                     idx.scan_expr(&mut scan, init, owner, false);
                 }
             }
-            if class
-                .constructor
-                .iter()
-                .chain(&class.methods)
-                .flat_map(|f| &f.params)
-                .any(|p| idx.param_is_unannotated(scan.declarations, p))
-            {
-                idx.class_has_implicit_params.insert(cid.index());
-            }
-            idx.classes[cid].ctor = class
+            idx.classes[&cid].ctor = class
                 .constructor
                 .as_ref()
                 .map(|c| idx.register_member(&mut scan, TemplateKind::ClassConstructor, c, false));
@@ -188,8 +147,14 @@ impl<'h> ModuleIndex<'h> {
             }
         }
         for (owner, site) in scan.promise_sites {
-            let resolve = idx.add_synthetic_template(TemplateKind::PromiseResolve(site), "resolve");
-            let reject = idx.add_synthetic_template(TemplateKind::PromiseReject(site), "reject");
+            let resolve = idx.add_template(TemplateView::synthetic(
+                TemplateKind::PromiseResolve(site),
+                "resolve",
+            ));
+            let reject = idx.add_template(TemplateView::synthetic(
+                TemplateKind::PromiseReject(site),
+                "reject",
+            ));
             idx.promises
                 .entry(owner)
                 .or_default()
@@ -206,19 +171,6 @@ impl<'h> ModuleIndex<'h> {
                 if forward && !flags.intersects(LocalFlags::MODULE_OR_PARAM) {
                     flags.insert(LocalFlags::FORWARD_CAPTURED);
                 }
-            }
-        }
-        for local in idx.locals.as_mut_slice() {
-            if local.flags.intersects(LocalFlags::MODULE_OR_PARAM) {
-                continue;
-            }
-            let layout = &mut idx.layouts[local.owner];
-            if local.flags.contains(LocalFlags::CAPTURED) {
-                local.storage = LocalStorage::Activation(layout.activation_slots);
-                layout.activation_slots += 1;
-            } else {
-                local.storage = LocalStorage::Frame(layout.frame_slots);
-                layout.frame_slots += 1;
             }
         }
         let mut references = idx.views.filled(BTreeMap::new());
@@ -243,10 +195,12 @@ impl<'h> ModuleIndex<'h> {
                 .peekable();
             if captures.peek().is_some() {
                 idx.layouts[tid].captures = idx.capture_pool.extend(captures);
-            } else if !matches!(
-                view.kind,
-                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-            ) {
+            } else if !view.captures_this
+                && !matches!(
+                    view.kind,
+                    TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
+                )
+            {
                 idx.capture_free_templates.insert(tid.index());
             }
             if let Some(parent) = idx.closure_owner(tid) {
@@ -280,7 +234,7 @@ impl ModuleIndex<'_> {
         if locations.has_imports() {
             let functions: HashMap<_, _> = bodies.functions.iter().map(|f| (f.id, f)).collect();
             for (&(tid, _), &expr) in &self.events {
-                let Expr::Call { byte_offset, .. } = expr else {
+                let Some(call) = crate::source::SourceCall::of(expr) else {
                     continue;
                 };
                 for &(owner, kind, caller) in &origins[tid] {
@@ -290,7 +244,7 @@ impl ModuleIndex<'_> {
                     {
                         locations.record_cross_file_call(
                             (&callee.name, &self.view(callee.template).name),
-                            *byte_offset,
+                            call.offset,
                             caller
                                 .and_then(|id| functions.get(&id))
                                 .map(|f| f.name.as_ref()),
@@ -306,7 +260,7 @@ impl ModuleIndex<'_> {
                 (origins[template]
                     .iter()
                     .any(|(_, kind, _)| *kind != CallerKind::Initializer)
-                    && plans.binding_has_any(id, LocalFlags::MODULE))
+                    && plans.binding_flags(id).contains(LocalFlags::MODULE))
                 .then_some(id)
             })
             .collect()

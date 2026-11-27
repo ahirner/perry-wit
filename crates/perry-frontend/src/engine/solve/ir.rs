@@ -1,19 +1,54 @@
 //! Solved inference tables, call-site resolutions, and synthesized helper specs.
-use super::super::bitset::BitSet;
+use super::super::BitSet;
 use super::super::plans::ExprIdx;
 use super::super::types::{
     ActivationSpan, CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan,
     FuncIdentity, HelperId, Idx, IdxVec, InstanceId, LocId, Pool, TemplateId, Ty, TyKind,
     TypeTable,
 };
+use super::super::types::{LocalInfo, LocalStorage};
 use crate::hir_compat;
 use perry_wit_diagnostics::{Diagnostic, Result};
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum Receiver<T = Ty> {
-    Class(ClassInstId),
-    Object(T),
+pub(crate) use super::super::types::Receiver;
+
+impl CaptureOwner {
+    pub(in crate::engine) fn location(
+        mut self,
+        instances: &IdxVec<InstanceId, Instance>,
+        local: LocalInfo,
+        collapsed: Option<LocId>,
+    ) -> Option<LocId> {
+        let slot = match local.storage {
+            LocalStorage::Module(loc) => return Some(loc),
+            LocalStorage::Activation(slot) => slot,
+        };
+        loop {
+            match self {
+                Self::Instance(id) => {
+                    let inst = &instances[id];
+                    if inst.template == local.owner {
+                        return inst.activation.locations().nth(slot as usize);
+                    }
+                    self = inst.capture_owner;
+                }
+                Self::Template(..) => return collapsed,
+                Self::None => return None,
+            }
+        }
+    }
+
+    pub(in crate::engine) fn receiver(
+        self,
+        instances: &IdxVec<InstanceId, Instance>,
+    ) -> Option<Receiver> {
+        match self {
+            Self::Instance(id) => instances[id].receiver,
+            Self::Template(_, receiver) => receiver,
+            Self::None => None,
+        }
+    }
 }
 
 impl Receiver {
@@ -125,8 +160,11 @@ pub(crate) struct PromiseReaction {
 }
 
 impl PromiseReaction {
-    pub(crate) fn callbacks(self) -> impl Iterator<Item = (CallTarget, Ty)> {
-        self.on_fulfilled.into_iter().chain(self.on_rejected)
+    pub(crate) fn arguments(self) -> [Option<(CallTarget, Ty)>; 2] {
+        match self.kind {
+            ReactionKind::Catch => [self.on_rejected, None],
+            ReactionKind::Then | ReactionKind::Finally => [self.on_fulfilled, self.on_rejected],
+        }
     }
 
     pub(crate) fn result(self) -> Ty {
@@ -149,18 +187,16 @@ pub(crate) enum HelperSpec {
     },
     PromiseReaction(PromiseReaction),
     TimerRunner {
-        kind: crate::engine::TimerKind,
-        timer_ty: Ty,
+        schedule: crate::engine::TimerSchedule,
         cb_call: CallTarget,
-        cb_ty: Ty,
-        extra_arg_tys: Ty,
+        inputs: Ty,
     },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FuncCoercion {
     Value(ValueCoercion),
-    Callback { target: CallTarget, inputs: Ty },
+    Callback(CallTarget),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,10 +248,7 @@ pub(crate) struct PromiseExecutor {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum SiteResolution {
-    Call {
-        target: CallTarget,
-        argument_types: Ty,
-    },
+    Call(CallTarget),
     FuncTypeOf(Option<Ty>),
     FuncCompare {
         left_ty: Ty,
@@ -230,6 +263,7 @@ pub(crate) enum SiteResolution {
         equal: bool,
     },
     ResourceCall(crate::wit::MemberId),
+    Static(crate::methods::StaticMethod),
     Builtin(crate::methods::Method),
     ReadMember(InstanceId),
     WriteMember(InstanceId),
@@ -240,7 +274,7 @@ pub(crate) enum SiteResolution {
     Callback {
         target: InstanceId,
     },
-    ClassNew(ClassInstId, Ty),
+    ClassNew(ClassInstId),
     Closure(FuncIdentity),
     Environment(super::super::ClosureValue),
     BranchResult(Ty),
@@ -262,8 +296,6 @@ pub(crate) enum SiteResolution {
     PromiseReaction {
         result: LocId,
         helper: HelperId,
-        pass_first: bool,
-        pass_second: bool,
     },
     TimerStart {
         helper: HelperId,
@@ -273,17 +305,9 @@ pub(crate) enum SiteResolution {
     },
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub(crate) enum OperandUse {
-    #[default]
-    Value,
-    Erased,
-    Spread(Ty),
-}
-
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct SiteEntry {
-    pub(crate) operand: OperandUse,
+    pub(crate) erased: bool,
     pub(crate) resolution: Option<SiteResolution>,
     pub(crate) coercion: Option<FuncCoercion>,
 }
@@ -342,7 +366,6 @@ pub(crate) enum ExportRoot {
 
 pub(crate) struct Solved {
     pub(crate) writes: crate::narrowing::WriteEffects,
-    pub(crate) witness_instances: Vec<Option<ExportRoot>>,
     pub(crate) resource_instances: HashMap<u32, ClassInstId>,
     pub(crate) init_inst: InstanceId,
     pub(crate) instances: IdxVec<InstanceId, Instance>,
@@ -351,8 +374,7 @@ pub(crate) struct Solved {
     pub(crate) field_locs: Pool<FieldLocSpan, LocId>,
     pub(crate) dispatch_arms: Pool<DispatchArmSpan, DispatchArm>,
     pub(crate) helpers: IdxVec<HelperId, HelperEntry>,
-    pub(in crate::engine) capture_locs: super::CaptureLocations,
-    pub(crate) inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
+    pub(in crate::engine) collapsed_locals: IdxVec<super::LocalIdx, Option<LocId>>,
     pub(crate) inst_sites: IdxVec<InstanceId, InstanceSites>,
     pub(crate) live_instances: BitSet,
     pub(crate) live_helpers: BitSet,
@@ -362,6 +384,5 @@ pub(crate) struct Solved {
 
     pub(crate) dict_reads: BitSet,
     pub(crate) self_nested_locs: BitSet,
-    pub(crate) self_nested_locals: BitSet,
     pub(crate) deletes_array_elements: bool,
 }

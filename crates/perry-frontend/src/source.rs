@@ -14,13 +14,22 @@ pub(crate) use parser::parse;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 pub(crate) use program::{
-    Arguments, Bodies, CallerKind, InstanceBodies, InstanceClass, InstanceFunction,
-    ModuleDeclarations, SourceModule, StaticField, authored_body, is_pure_func_expr,
+    Arguments, Bodies, Callee, CallerKind, FieldOverride, InstanceBodies, InstanceClass,
+    InstanceFunction, ModuleDeclarations, SourceCall, SourceModule, StaticField, authored_body,
 };
 use std::collections::{HashMap, HashSet};
 pub(crate) use strings::{RegexInputs, RegexSites};
 use swc_common::Span;
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ClassId(perry_hir::ir::ClassId);
+
+impl ClassId {
+    pub(crate) fn of(class: &perry_hir::ir::Class) -> Option<Self> {
+        (!crate::hir_compat::is_object_literal(&class.name)).then_some(Self(class.id))
+    }
+}
 
 pub(crate) type LiteralClasses<'s> = HashMap<&'s str, &'s [perry_hir::ir::ClassField]>;
 
@@ -94,6 +103,7 @@ pub(crate) fn validate_ast(module: &ast::Module, locations: &Locations<'_>) -> R
 #[derive(Default)]
 pub(crate) struct Analysis {
     bindings: HashMap<u32, SourceBinding>,
+    pub(crate) classes: HashSet<ast::Id>,
     pub(crate) signature_prefix: String,
     pub(crate) sparse_arrays: bool,
 
@@ -106,9 +116,14 @@ impl Analysis {
     }
 }
 
-pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -> Analysis {
+pub(crate) fn analyze(
+    module: &mut ast::Module,
+    locations: &mut Locations<'_>,
+    top_level: swc_common::SyntaxContext,
+) -> Analysis {
     struct AstScanner<'a, 's> {
         locations: &'a mut Locations<'s>,
+        top_level: swc_common::SyntaxContext,
         mark_spans: bool,
         analysis: Analysis,
         closure_signatures: Vec<ast::TsTypeAliasDecl>,
@@ -119,12 +134,12 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
     impl AstScanner<'_, '_> {
         fn infer_pattern(&mut self, pattern: &ast::Pat) {
             pattern_bindings(pattern, &mut |id, annotated| {
+                let binding = self.analysis.bindings.entry(id.span.lo.0).or_default();
                 if !annotated {
-                    self.analysis
-                        .bindings
-                        .entry(id.span.lo.0)
-                        .or_default()
-                        .inferred_end = Some(id.span.hi.0);
+                    binding.inferred_end = Some(id.span.hi.0);
+                }
+                if id.ctxt == self.top_level {
+                    binding.flags.insert(LocalFlags::MODULE);
                 }
             });
         }
@@ -237,6 +252,11 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
     }
 
     impl VisitMut for AstScanner<'_, '_> {
+        fn visit_mut_class_decl(&mut self, decl: &mut ast::ClassDecl) {
+            self.analysis.classes.insert(decl.ident.to_id());
+            decl.visit_mut_children_with(self);
+        }
+
         fn visit_mut_ident(&mut self, ident: &mut ast::Ident) {
             self.analysis.names.reserve(&ident.sym);
         }
@@ -361,6 +381,7 @@ pub(crate) fn analyze(module: &mut ast::Module, locations: &mut Locations<'_>) -
 
     let mut scanner = AstScanner {
         locations,
+        top_level,
         mark_spans: true,
         analysis: Analysis::default(),
         closure_signatures: Vec::new(),

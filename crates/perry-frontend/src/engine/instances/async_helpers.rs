@@ -3,7 +3,7 @@ use super::InstancePlanner;
 use crate::engine::boundary::TemplateKind;
 use crate::engine::solve::{HelperSpec, Instance, ReactionKind};
 use crate::engine::types::{HelperId, Ty};
-use crate::engine::{NativeBody, NativeFunction, NativeParam, TimerKind};
+use crate::engine::{NativeBody, NativeFunction, NativeParam};
 use perry_wit_diagnostics::Result;
 
 impl<'h> InstancePlanner<'h, '_, '_> {
@@ -53,8 +53,11 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                     .runtime_arguments(arg_tys, &self.solved.escaping_env_templates);
                 let params = std::iter::once(callee_ty)
                     .chain(recv_ty)
-                    .chain(args.map(|(_, ty)| ty))
                     .map(NativeParam::Value)
+                    .chain(args.map(|(index, ty)| NativeParam::Argument {
+                        position: 1 + usize::from(recv_ty.is_some()) + index,
+                        ty,
+                    }))
                     .collect();
                 let erased =
                     matches!(result, Ty::BOTTOM | Ty::NEVER) || self.is_zero_sized_func(result);
@@ -78,12 +81,14 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             }
             HelperSpec::PromiseReaction(reaction) => {
                 let mut params = vec![NativeParam::Value(reaction.promise_ty)];
-                params.extend(
-                    reaction
-                        .callbacks()
-                        .filter(|(call, _)| call.needs_value())
-                        .map(|(_, ty)| NativeParam::Value(ty)),
-                );
+                for (index, callback) in reaction.arguments().into_iter().enumerate() {
+                    if let Some((_, ty)) = callback.filter(|(call, _)| call.needs_value()) {
+                        params.push(NativeParam::Argument {
+                            position: index + 1,
+                            ty,
+                        });
+                    }
+                }
                 let label = match reaction.kind {
                     ReactionKind::Then => "then",
                     ReactionKind::Catch => "catch",
@@ -92,25 +97,19 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 (label, params, reaction.result(), true)
             }
             HelperSpec::TimerRunner {
-                kind,
-                timer_ty,
-                cb_call,
-                cb_ty,
-                extra_arg_tys,
+                cb_call, inputs, ..
             } => {
-                let mut params = vec![NativeParam::Value(timer_ty)];
-                if cb_call.needs_value() {
-                    params.push(NativeParam::Value(cb_ty));
-                }
-                if kind != TimerKind::Immediate {
-                    params.push(NativeParam::Value(Ty::NUMBER));
-                }
+                let mut params = vec![NativeParam::Value(Ty::TIMER)];
                 params.extend(
                     self.types
-                        .tuple_slice(extra_arg_tys)
+                        .tuple_slice(inputs)
                         .iter()
-                        .copied()
-                        .map(NativeParam::Value),
+                        .enumerate()
+                        .filter(|(index, _)| *index != 0 || cb_call.needs_value())
+                        .map(|(index, &ty)| NativeParam::Argument {
+                            position: index + 1,
+                            ty,
+                        }),
                 );
                 ("timer", params, Ty::VOID, true)
             }

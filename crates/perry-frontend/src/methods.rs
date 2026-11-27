@@ -1,115 +1,10 @@
 //! Built-in method signatures and HIR call normalization.
 use crate::hir_compat::Preservation;
 use perry_hir::{ir::Expr, types::LocalId};
+pub(crate) use perry_mir::ValueKind as Kind;
 use perry_wit_diagnostics::Result;
-use perry_wit_diagnostics::bail_unsupported;
-use pliron::{
-    builtin::types::{FP64Type, IntegerType},
-    context::Context,
-    r#type::TypeHandle,
-};
-/// Source-level value families, their diagnostic labels, optional builtin constructor names,
-/// and corresponding MIR reference types.
-#[macro_export]
-macro_rules! kind_catalog {
-    ($consumer:ident) => {
-        $consumer! {
-            primitives {
-                Number "number";
-                Boolean "boolean";
-            }
-            references {
-                String "string" => StringType;
-                BigInt "bigint" => BigIntType;
-                Bytes "Uint8Array" builtin => BytesType;
-                Url "URL" builtin => UrlType;
-                SearchParams "URLSearchParams" builtin => SearchParamsType;
-                Json "JSON value" => JsonType;
-                Date "Date" builtin => DateType;
-                Stats "Stats" => StatsType;
-                Headers "Headers" builtin => HeadersType;
-                Response "Response" builtin => ResponseType;
-                Request "Request" builtin => RequestType;
-                Writable "WritableStream" builtin => WritableType;
-                Writer "WritableStreamDefaultWriter" builtin => WriterType;
-                Readable "ReadableStream" builtin => ReadableType;
-                ByteBuffer "ArrayBuffer" builtin => ByteBufferType;
-                DataView "DataView" builtin => DataViewType;
-                ByobReader "ReadableStreamBYOBReader" builtin => ByobReaderType;
-                Reader "ReadableStreamDefaultReader" builtin => ReaderType;
-                ReadResult "ReadableStreamReadResult" builtin => ReadResultType;
-                Instant "Temporal.Instant" builtin => InstantType;
-                PlainDate "Temporal.PlainDate" builtin => PlainDateType;
-                PlainDateTime "Temporal.PlainDateTime" builtin => PlainDateTimeType;
-                Abort "AbortController" builtin("AbortController" | "AbortSignal") => AbortType;
-                Incoming "IncomingRequest" => IncomingType;
-                Exception "Error" builtin("Error" | "TypeError" | "RangeError" | "ReferenceError" | "SyntaxError") => ExceptionType;
-                Encoder "TextEncoder" builtin => EncoderType;
-                Decoder "TextDecoder" builtin => DecoderType;
-                Regex "RegExp" builtin => RegexType;
-                ValueUnion "finite value union" => ValueUnionType;
-                Array "array" => ArrayType;
-                Record "record" => RecordType;
-                Variant "variant" => VariantType;
-                Resource "WIT resource" => ResourceType;
-                Settled "PromiseSettlementResult" => SettledType;
-            }
-        }
-    };
-}
+use perry_wit_diagnostics::unsupported;
 
-macro_rules! define_kinds {
-    (
-        primitives { $($prim:ident $plabel:literal;)* }
-        references { $($refk:ident $rlabel:literal $(builtin $(($($alias:literal)|+))?)? => $mir:ident;)* }
-    ) => {
-        /// Source-level families used by built-in method signatures.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub(crate) enum Kind {
-            $($prim,)*
-            $($refk,)*
-        }
-
-        impl Kind {
-            pub(crate) fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
-                let ty = ty.deref(ctx);
-                if ty.is::<FP64Type>() {
-                    return Some(Self::Number);
-                }
-                if let Some(integer) = ty.downcast_ref::<IntegerType>() {
-                    return match integer.width() {
-                        1 => Some(Self::Boolean),
-                        64 => Some(Self::BigInt),
-                        _ => None,
-                    };
-                }
-                $(if ty.is::<perry_mir::$mir>() { return Some(Self::$refk); })*
-                None
-            }
-
-            pub(crate) const fn label(self) -> &'static str {
-                match self {
-                    $(Self::$prim => $plabel,)*
-                    $(Self::$refk => $rlabel,)*
-                }
-            }
-
-            pub(crate) fn builtin(name: &str) -> Option<Self> {
-                $(define_kinds!(@builtin name $refk $rlabel $(builtin $(($($alias)|+))?)?);)*
-                None
-            }
-        }
-    };
-    (@builtin $name:ident $kind:ident $label:literal builtin ($($alias:literal)|+)) => {
-        if matches!($name, $($alias)|+) { return Some(Self::$kind); }
-    };
-    (@builtin $name:ident $kind:ident $label:literal builtin) => {
-        if $name == $label { return Some(Self::$kind); }
-    };
-    (@builtin $name:ident $kind:ident $label:literal) => {};
-}
-
-crate::kind_catalog!(define_kinds);
 pub(crate) enum CallReceiver<'s> {
     Expression(&'s Expr),
     Local(LocalId),
@@ -118,8 +13,7 @@ pub(crate) enum CallReceiver<'s> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Receiver {
     Value(Kind),
-    Map,
-    Set,
+    Collection(crate::source::CollectionKind),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,56 +28,19 @@ pub(crate) enum MethodResult {
     Reduced,
     Lookup,
     Duration,
-    IteratorKeys,
-    IteratorValues,
-    IteratorEntries,
+    Iterator(crate::collections::IteratorMethod),
     StreamReader,
 }
 
-macro_rules! arguments {
-    ($args:ident;) => {
-        match $args {
-            [] => Some(()),
-            _ => None,
-        }
-    };
-    ($args:ident; $all:ident:rest) => {
-        Some(($args,))
-    };
-    ($args:ident; $first:ident) => {
-        match $args {
-            [first] => Some((first,)),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident:optional) => {
-        match $args {
-            [] => Some((None,)),
-            [first] => Some((Some(first),)),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident, $second:ident) => {
-        match $args {
-            [first, second] => Some((first, second)),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident, $second:ident:optional) => {
-        match $args {
-            [first] => Some((first, None)),
-            [first, second] => Some((first, Some(second))),
-            _ => None,
-        }
-    };
-    ($args:ident; $first:ident:optional, $second:ident:optional) => {
-        match $args {
-            [] => Some((None, None)),
-            [first] => Some((Some(first), None)),
-            [first, second] => Some((Some(first), Some(second))),
-            _ => None,
-        }
-    };
+macro_rules! bind_arguments {
+    ($args:ident, $error:ident; $variant:ident; $all:ident:rest) => { Some(Call::$variant($args)) };
+    ($args:ident, $error:ident; $variant:ident; $($name:ident $(:$mode:ident)?),*) => {{
+        let mut remaining = $args.iter();
+        $(let $name = bind_arguments!(@next remaining, $error $($mode)?);)*
+        remaining.next().is_none().then_some(Call::$variant($($name),*))
+    }};
+    (@next $args:ident, $error:ident optional) => { $args.next() };
+    (@next $args:ident, $error:ident) => { $args.next().ok_or_else($error)? };
 }
 
 macro_rules! argument_type {
@@ -199,9 +56,13 @@ pub(crate) enum Callback {
     Fold,
     Comparator,
     Replacement,
+    Collection,
 }
 
 macro_rules! registry {
+    (@result value (iterator_method(IteratorMethod::$method:ident));) => {
+        MethodResult::Iterator(crate::collections::IteratorMethod::$method)
+    };
     (@result $action:ident $recipe:tt; [$($kind:ident)?]) => {
         MethodResult::Signature(&[$(perry_mir::SignatureType::$kind)?])
     };
@@ -212,6 +73,8 @@ macro_rules! registry {
     (@result intrinsic ($op:ident $(, $args:expr, $inputs:tt, Value)?);) => {
         MethodResult::Signature(perry_mir::Intrinsic::$op.result_kinds())
     };
+    (@accepts_callback $name:ident, $pattern:pat, $kind:ident) => { matches!($name, $pattern) };
+    (@accepts_callback $name:ident, $pattern:pat,) => { false };
     (@callback $kind:ident) => { Some(Callback::$kind) };
     (@callback) => { None };
     ($( $family:pat, $class:literal {
@@ -233,6 +96,10 @@ macro_rules! registry {
 
             pub(crate) fn callback(self) -> Option<Callback> {
                 match self { $($(Self::$variant => registry!(@callback $($callback)?),)*)* }
+            }
+
+            pub(crate) fn accepts_callback(name: &str) -> bool {
+                false $($(|| registry!(@accepts_callback name, $($name)|+, $($callback)?))*)*
             }
 
             pub(crate) fn is_property(self) -> bool {
@@ -275,14 +142,12 @@ macro_rules! registry {
 
         impl Method {
             pub(crate) fn bind<'s>(self, name: &str, args: &'s [Expr]) -> Result<Call<'s>> {
-                Ok(match self {
+                match self {
                     $($(Self::$variant => {
-                        let Some(($($argument,)*)) = arguments!(args; $($argument $(:$mode)?),*) else {
-                            bail_unsupported!("{}.{} {}", $class, name, $requirement);
-                        };
-                        Call::$variant($($argument),*)
+                        let arity = || unsupported!("{}.{} {}", $class, name, $requirement);
+                        bind_arguments!(args, arity; $variant; $($argument $(:$mode)?),*).ok_or_else(arity)
                     },)*)*
-                })
+                }
             }
         }
     };
@@ -291,16 +156,12 @@ macro_rules! registry {
 }
 
 mod registry;
+mod statics;
+pub(crate) use statics::{StaticMethod, TemporalFactory};
 crate::method_catalog!(registry);
 impl<'s> Call<'s> {
-    pub(crate) fn array_callback(
-        expr: &'s Expr,
-    ) -> Option<(&'s Expr, Method, &'s Expr, Option<&'s Expr>)> {
-        let (CallReceiver::Expression(array), call) = Self::expression(expr)? else {
-            return None;
-        };
-        let method = call.method();
-        let (callback, initial) = match call {
+    pub(crate) fn array_callback(&self) -> Option<(&'s Expr, Option<&'s Expr>)> {
+        Some(match *self {
             Self::ArrayMap(cb)
             | Self::ArrayFilter(cb)
             | Self::ArrayFlatMap(cb)
@@ -313,8 +174,7 @@ impl<'s> Call<'s> {
             | Self::ArrayToSorted(Some(cb)) => (cb, None),
             Self::ArrayReduce(cb, initial) | Self::ArrayReduceRight(cb, initial) => (cb, initial),
             _ => return None,
-        };
-        Some((array, method, callback, initial))
+        })
     }
 
     pub(crate) fn expression(expr: &'s Expr) -> Option<(CallReceiver<'s>, Self)> {

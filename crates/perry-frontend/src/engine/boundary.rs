@@ -1,15 +1,15 @@
 //! Single-pass boundary indexing over Perry HIR.
-use super::bitset::BitSet;
+use super::BitSet;
 use super::plans::ExprIdx;
 use super::solve::SiteResolution;
 pub(crate) use super::types::LocalFlags;
 use super::types::{
-    BindingSpan, CaptureSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage,
-    NameId, Pool, TemplateId, Ty, TypeTable,
+    BindingSpan, CaptureSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage, Pool,
+    TemplateId, Ty, TypeTable,
 };
 use crate::hir_compat;
 use crate::narrowing::Region;
-use crate::source::{CallerKind, ConstructorSites, SourceModule};
+use crate::source::{CallerKind, ConstructorSites};
 use perry_hir::{
     ir::{Expr, Function, Param, Stmt},
     types::{FuncId, LocalId},
@@ -80,6 +80,25 @@ impl<'h> TemplateView<'h> {
         }
     }
 
+    fn synthetic(kind: TemplateKind, name: &'h str) -> Self {
+        Self {
+            kind,
+            name: name.into(),
+            func_id: 0,
+            params: &[],
+            return_type: &VOID_HIR,
+            body: &[],
+            captures: &[],
+            type_params: &[],
+            is_async: false,
+            is_generator: false,
+            captures_this: false,
+            captures_new_target: false,
+            uses_this: false,
+            explicit_return: !matches!(kind, TemplateKind::ModuleInit),
+        }
+    }
+
     fn from_function(kind: TemplateKind, f: &'h Function, explicit_return: bool) -> Self {
         let body = crate::source::authored_body(&f.params, &f.body);
         Self {
@@ -105,11 +124,11 @@ impl<'h> TemplateView<'h> {
 pub(crate) struct ClassInfo<'h> {
     pub(crate) declaration: &'h perry_hir::ir::Class,
     pub(crate) ty: Ty,
-    pub(crate) name_id: NameId,
     pub(crate) field_init: Option<TemplateId>,
     pub(crate) ctor: Option<TemplateId>,
+    pub(super) implicit_params: bool,
     pub(super) direct_constructor: bool,
-    static_field_locs: Vec<(NameId, LocId)>,
+    static_field_locs: Vec<LocId>,
 }
 
 impl<'h> ClassInfo<'h> {
@@ -119,14 +138,12 @@ impl<'h> ClassInfo<'h> {
         self.declaration
             .static_fields
             .iter()
-            .zip(self.static_field_locs.iter().map(|&(_, loc)| loc))
+            .zip(self.static_field_locs.iter().copied())
     }
 
-    pub(super) fn static_field(&self, name: NameId) -> Option<LocId> {
-        self.static_field_locs
-            .iter()
-            .find(|(key, _)| *key == name)
-            .map(|&(_, loc)| loc)
+    pub(super) fn static_field(&self, name: &str) -> Option<LocId> {
+        self.static_fields()
+            .find_map(|(field, loc)| (field.name == name).then_some(loc))
     }
 }
 
@@ -134,7 +151,6 @@ impl<'h> ClassInfo<'h> {
 pub(super) struct SourceLocal<'h> {
     pub(super) local: LocalIdx,
     pub(super) name: &'h str,
-    pub(super) ty: &'h perry_hir::types::Type,
 }
 #[derive(Clone, Copy, Default)]
 struct TemplateLayout {
@@ -143,7 +159,6 @@ struct TemplateLayout {
     references: CaptureSpan,
     activation_slots: u32,
     closure_owner: Option<TemplateId>,
-    frame_slots: u32,
 }
 
 #[derive(Default)]
@@ -201,8 +216,7 @@ pub(crate) struct ModuleIndex<'h> {
     pub(super) promises: HashMap<TemplateId, Vec<(ExprIdx, TemplateId, TemplateId)>>,
     bindings: Pool<BindingSpan, SourceLocal<'h>>,
     capture_pool: Pool<CaptureSpan, LocalId>,
-    pub(crate) classes: IdxVec<ClassId, ClassInfo<'h>>,
-    pub(crate) class_has_implicit_params: BitSet,
+    pub(crate) classes: indexmap::IndexMap<ClassId, ClassInfo<'h>>,
     pub(super) literal_classes: crate::source::LiteralClasses<'h>,
     pub(crate) locals: IdxVec<LocalIdx, LocalInfo>,
     pub(crate) receiver_members: crate::wit::ReceiverMembers<'h>,
@@ -213,7 +227,6 @@ pub(crate) struct ModuleIndex<'h> {
     pub(crate) closure_in_loop: BitSet,
     pub(crate) location_types: IdxVec<LocId, Ty>,
     pub(crate) max_func_id: FuncId,
-    pub(crate) max_local_id: LocalId,
 }
 
 static VOID_HIR: perry_hir::types::Type = perry_hir::types::Type::Void;
@@ -221,9 +234,6 @@ static VOID_HIR: perry_hir::types::Type = perry_hir::types::Type::Void;
 mod build;
 
 impl<'h> ModuleIndex<'h> {
-    pub(crate) fn template_frame_count(&self, t: TemplateId) -> usize {
-        self.layouts[t].frame_slots as usize
-    }
     pub(crate) fn closure_owner(&self, t: TemplateId) -> Option<TemplateId> {
         self.layouts[t].closure_owner
     }
@@ -234,12 +244,12 @@ impl<'h> ModuleIndex<'h> {
         &self.views[id]
     }
     pub(crate) fn class(&self, id: ClassId) -> &ClassInfo<'h> {
-        &self.classes[id]
+        &self.classes[&id]
     }
-    pub(crate) fn class_by_name_id(&self, name: NameId) -> Option<ClassId> {
+    pub(crate) fn class_named(&self, name: &str) -> Option<ClassId> {
         self.classes
-            .iter_enumerated()
-            .find_map(|(id, c)| (c.name_id == name).then_some(id))
+            .iter()
+            .find_map(|(&id, c)| (c.declaration.name == name).then_some(id))
     }
     pub(crate) fn is_empty_object_expr(&self, expr: &Expr) -> bool {
         match expr {
@@ -252,19 +262,6 @@ impl<'h> ModuleIndex<'h> {
                 .is_some_and(|fields| fields.is_empty()),
             _ => false,
         }
-    }
-    pub(crate) fn is_param_annotated(&self, id: LocalId) -> bool {
-        self.local_idx(id)
-            .is_some_and(|li| self.locals[li].flags.contains(LocalFlags::PARAM_ANNOTATED))
-    }
-    pub(crate) fn is_inferred_local(
-        &self,
-        hir: &SourceModule,
-        id: LocalId,
-        lidx: LocalIdx,
-    ) -> bool {
-        self.locals[lidx].flags.contains(LocalFlags::INFERRED)
-            || !hir.declarations.locals.contains_key(&id)
     }
     pub(crate) fn is_non_global_local(&self, id: LocalId) -> bool {
         self.local_idx(id)
@@ -304,31 +301,8 @@ impl<'h> ModuleIndex<'h> {
     }
 
     fn add_template(&mut self, view: TemplateView<'h>) -> TemplateId {
-        self.layouts.push(TemplateLayout {
-            activation_slots: view.params.len() as u32,
-            ..TemplateLayout::default()
-        });
+        self.layouts.push(TemplateLayout::default());
         self.views.push(view)
-    }
-
-    fn add_synthetic_template(&mut self, kind: TemplateKind, name: &'h str) -> TemplateId {
-        self.add_template(TemplateView {
-            kind,
-            name: name.into(),
-            func_id: 0,
-            params: &[],
-            return_type: &VOID_HIR,
-            body: &[],
-            captures: &[],
-            type_params: &[],
-            is_async: false,
-            is_generator: false,
-
-            captures_this: false,
-            captures_new_target: false,
-            uses_this: false,
-            explicit_return: true,
-        })
     }
 
     fn register_type_params(
@@ -355,7 +329,7 @@ impl<'h> ModuleIndex<'h> {
         let tid = self.add_template(TemplateView::from_function(kind, func, explicit_return));
         self.set_func_template(func.id, tid);
         self.scan_params(scan, &func.params, tid, &[]);
-        self.scan_stmts(scan, self.view(tid).body, tid, false, false);
+        self.scan_stmts(scan, self.view(tid).body, tid, false);
         tid
     }
 
@@ -368,23 +342,25 @@ impl<'h> ModuleIndex<'h> {
         id: LocalId,
         owner: TemplateId,
         declared: Ty,
-        declarations: &crate::source::ModuleDeclarations,
+        flags: LocalFlags,
     ) -> LocalIdx {
-        self.max_local_id = self.max_local_id.max(id);
         let lid = id as usize;
         if let Some(existing) = self.local_to_idx.get(lid).copied().flatten() {
             return existing;
         }
-        let flags = declarations
-            .locals
-            .get(&id)
-            .map(|binding| binding.flags)
-            .unwrap_or_default();
+        let storage = if flags.contains(LocalFlags::MODULE) {
+            LocalStorage::Module(self.add_location(Ty::BOTTOM))
+        } else {
+            let layout = &mut self.layouts[owner];
+            let slot = layout.activation_slots;
+            layout.activation_slots += 1;
+            LocalStorage::Activation(slot)
+        };
         let idx = self.locals.push(LocalInfo {
             id,
             owner,
             declared,
-            storage: LocalStorage::None,
+            storage,
             flags,
         });
         if lid >= self.local_to_idx.len() {
@@ -394,21 +370,6 @@ impl<'h> ModuleIndex<'h> {
             *slot = Some(idx);
         }
         idx
-    }
-
-    fn param_is_unannotated(
-        &self,
-        declarations: &crate::source::ModuleDeclarations,
-        param: &Param,
-    ) -> bool {
-        !declarations
-            .locals
-            .get(&param.id)
-            .is_some_and(|s| s.flags.contains(LocalFlags::PARAM_ANNOTATED))
-            && matches!(
-                param.ty,
-                perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
-            )
     }
 
     pub(super) fn param_local(&self, param: &Param) -> perry_wit_diagnostics::Result<LocalIdx> {
@@ -433,16 +394,17 @@ impl<'h> ModuleIndex<'h> {
             let ty = scan.types.intern_hir(scan.ctx, authored, true);
             self.annotations.0.insert(std::ptr::from_ref(&param.ty), ty);
         }
-        for (slot, param) in params.iter().enumerate() {
-            let explicit = scan
-                .declarations
-                .locals
-                .get(&param.id)
-                .is_some_and(|s| s.flags.contains(LocalFlags::PARAM_ANNOTATED));
-            let ty = self.annotations.register(scan, &param.ty, explicit);
-            let local = self.ensure_local(param.id, owner, ty, scan.declarations);
-            self.locals[local].flags.insert(LocalFlags::PARAM);
-            self.locals[local].storage = LocalStorage::Activation(slot as u32);
+        for param in params {
+            let mut flags = scan.declarations.local_flags(param.id);
+            let ty = self.annotations.register(
+                scan,
+                &param.ty,
+                flags.contains(LocalFlags::PARAM_ANNOTATED),
+            );
+            flags.insert(LocalFlags::PARAM);
+            self.ensure_local(param.id, owner, ty, flags);
+        }
+        for param in params {
             scan.defined_locals.insert(param.id as usize);
             if let Some(default) = &param.default {
                 self.scan_expr(scan, default, owner, false);
@@ -480,7 +442,6 @@ impl<'h> ModuleIndex<'h> {
         scan: &mut ScanCtx<'h, '_>,
         stmts: &'h [Stmt],
         owner: TemplateId,
-        is_module_top: bool,
         in_loop: bool,
     ) -> u8 {
         use crate::completion::*;
@@ -497,21 +458,11 @@ impl<'h> ModuleIndex<'h> {
                     ..
                 } => {
                     self.iteration.bind(*id, name, init.as_ref());
-                    let explicit = scan
-                        .declarations
-                        .locals
-                        .get(id)
-                        .is_some_and(|s| !s.flags.contains(LocalFlags::INFERRED));
-                    let declared = self.annotations.register(scan, ty, explicit);
-                    let local = self.ensure_local(*id, owner, declared, scan.declarations);
+                    let flags = scan.declarations.local_flags(*id);
+                    let declared = self.annotations.register(scan, ty, flags.is_explicit());
+                    let local = self.ensure_local(*id, owner, declared, flags);
                     if scan.declarations.for_of(Some(stmt)).is_none() {
-                        scan.bindings.push((owner, SourceLocal { local, name, ty }));
-                    }
-                    if is_module_top && !self.locals[local].flags.contains(LocalFlags::FOR_HEAD) {
-                        let loc = self.add_location(Ty::BOTTOM);
-                        let entry = &mut self.locals[local];
-                        entry.flags.insert(LocalFlags::MODULE);
-                        entry.storage = LocalStorage::Module(loc);
+                        scan.bindings.push((owner, SourceLocal { local, name }));
                     }
                     if let Some(init) = init {
                         if matches!(init, Expr::Null | Expr::Undefined) {
@@ -550,15 +501,15 @@ impl<'h> ModuleIndex<'h> {
                     else_branch,
                 } => {
                     self.scan_test(scan, condition, owner, in_loop);
-                    self.scan_stmts(scan, then_branch, owner, false, in_loop)
-                        | else_branch.as_ref().map_or(FALLTHROUGH, |b| {
-                            self.scan_stmts(scan, b, owner, false, in_loop)
-                        })
+                    self.scan_stmts(scan, then_branch, owner, in_loop)
+                        | else_branch
+                            .as_ref()
+                            .map_or(FALLTHROUGH, |b| self.scan_stmts(scan, b, owner, in_loop))
                 }
                 Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
                     self.scan_test(scan, condition, owner, true);
                     loop_exits(
-                        self.scan_stmts(scan, body, owner, false, true),
+                        self.scan_stmts(scan, body, owner, true),
                         matches!(condition, Expr::Bool(true)),
                     )
                 }
@@ -569,7 +520,7 @@ impl<'h> ModuleIndex<'h> {
                     body,
                 } => {
                     if let Some(i) = init {
-                        self.scan_stmts(scan, std::slice::from_ref(i), owner, false, in_loop);
+                        self.scan_stmts(scan, std::slice::from_ref(i), owner, in_loop);
                     }
                     if let Some(c) = condition {
                         self.scan_test(scan, c, owner, true);
@@ -581,7 +532,7 @@ impl<'h> ModuleIndex<'h> {
                         && condition
                             .as_ref()
                             .is_none_or(|c| matches!(c, Expr::Bool(true)));
-                    loop_exits(self.scan_stmts(scan, body, owner, false, true), infinite)
+                    loop_exits(self.scan_stmts(scan, body, owner, true), infinite)
                 }
                 Stmt::Try {
                     body,
@@ -589,17 +540,22 @@ impl<'h> ModuleIndex<'h> {
                     finally,
                     ..
                 } => {
-                    let mut exits = self.scan_stmts(scan, body, owner, false, in_loop);
+                    let mut exits = self.scan_stmts(scan, body, owner, in_loop);
                     if let Some(catch) = catch {
                         if let Some((id, _)) = &catch.param {
                             let err_ty = scan.types.named(scan.ctx, "Error");
-                            self.ensure_local(*id, owner, err_ty, scan.declarations);
+                            self.ensure_local(
+                                *id,
+                                owner,
+                                err_ty,
+                                scan.declarations.local_flags(*id),
+                            );
                         }
-                        exits |= self.scan_stmts(scan, &catch.body, owner, false, in_loop);
+                        exits |= self.scan_stmts(scan, &catch.body, owner, in_loop);
                     }
-                    let cleanup = finally.as_ref().map_or(FALLTHROUGH, |f| {
-                        self.scan_stmts(scan, f, owner, false, in_loop)
-                    });
+                    let cleanup = finally
+                        .as_ref()
+                        .map_or(FALLTHROUGH, |f| self.scan_stmts(scan, f, owner, in_loop));
                     sequence(cleanup, exits)
                 }
                 Stmt::Switch {
@@ -615,7 +571,7 @@ impl<'h> ModuleIndex<'h> {
                             self.scan_expr(scan, t, owner, in_loop);
                         }
                         branches = (branches & !FALLTHROUGH)
-                            | self.scan_stmts(scan, &case.body, owner, false, in_loop);
+                            | self.scan_stmts(scan, &case.body, owner, in_loop);
                     }
                     if !has_default || branches & BREAK != 0 {
                         branches |= FALLTHROUGH;
@@ -624,7 +580,7 @@ impl<'h> ModuleIndex<'h> {
                 }
                 Stmt::Labeled { body, .. } => {
                     FALLTHROUGH
-                        | (self.scan_stmts(scan, std::slice::from_ref(body), owner, false, in_loop)
+                        | (self.scan_stmts(scan, std::slice::from_ref(body), owner, in_loop)
                             & EMPTY_RETURN)
                 }
                 Stmt::ReleaseBoxes(ids) => {
@@ -713,6 +669,11 @@ impl<'h> ModuleIndex<'h> {
             }
             _ => {}
         }
+        if let Some(method) = crate::methods::StaticMethod::select(expr, scan.types) {
+            self.expressions
+                .declared
+                .insert(site, SiteResolution::Static(method));
+        }
         if let Some(id) = self.receiver_members.bind(expr, scan.decls, scan.locations) {
             self.expressions
                 .declared
@@ -723,6 +684,8 @@ impl<'h> ModuleIndex<'h> {
         }
         match expr {
             Expr::Call { .. }
+            | Expr::CallSpread { .. }
+            | Expr::StaticMethodCall { .. }
             | Expr::FuncRef(_)
             | Expr::Closure { .. }
             | Expr::LocalSet(..)
@@ -759,7 +722,7 @@ impl<'h> ModuleIndex<'h> {
                 self.record_local_use(*id, owner, true);
             }
             Expr::ScopedTemp { id, .. } => {
-                self.ensure_local(*id, owner, Ty::OPEN, scan.declarations);
+                self.ensure_local(*id, owner, Ty::OPEN, scan.declarations.local_flags(*id));
             }
             Expr::Closure {
                 func_id,
@@ -823,9 +786,10 @@ impl<'h> ModuleIndex<'h> {
                     scan.pending_captures.push((cap, true, forward));
                 }
                 self.scan_params(scan, params, tid, params_ty);
-                self.scan_stmts(scan, body, tid, false, false);
-                self.views[owner].uses_this |=
-                    *captures_this || (*is_arrow && self.views[tid].uses_this);
+                self.scan_stmts(scan, body, tid, false);
+                let lexical_this = *is_arrow && (*captures_this || self.views[tid].uses_this);
+                self.views[tid].captures_this = lexical_this;
+                self.views[owner].uses_this |= lexical_this;
                 return;
             }
             _ => {}

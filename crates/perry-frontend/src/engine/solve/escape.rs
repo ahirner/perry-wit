@@ -8,7 +8,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         template: TemplateId,
     ) -> FuncIdentity {
         let captures = self.index.template_captures(template);
-        let capture_owner = if captures.is_empty() {
+        let lexical_this = self.index.view(template).captures_this;
+        let receiver = self.instances[owner].receiver.filter(|_| lexical_this);
+        let capture_owner = if captures.is_empty() && receiver.is_none() {
             CaptureOwner::None
         } else {
             let instance = &self.instances[owner];
@@ -31,7 +33,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 });
             if nested {
                 self.collapse_closure(template, owner_template);
-                CaptureOwner::Template(owner_template)
+                CaptureOwner::Template(owner_template, receiver)
             } else {
                 CaptureOwner::Instance(owner)
             }
@@ -55,32 +57,16 @@ impl<'h, 'a> Solver<'h, 'a> {
             if local.flags.contains(LocalFlags::MODULE) {
                 continue;
             }
-            let cloc = match self.capture_locs.collapsed[lidx] {
-                Some(loc) => loc,
-                None => {
-                    let loc = self.facts.alloc(Ty::BOTTOM);
-                    self.capture_locs.collapsed[lidx] = Some(loc);
-                    loc
+            let cloc =
+                *self.collapsed_locals[lidx].get_or_insert_with(|| self.facts.alloc(Ty::BOTTOM));
+            for (id, inst) in self.instances.iter_enumerated() {
+                if inst.template == local.owner
+                    && !self.inst_superseded.contains(id.index())
+                    && let Some(loc) =
+                        CaptureOwner::Instance(id).location(&self.instances, local, Some(cloc))
+                {
+                    self.facts.write(self.types, cloc, self.facts[loc]);
                 }
-            };
-            let cap_owner_tid = local.owner;
-            let seed_tys: Vec<Ty> = self
-                .instances
-                .iter_enumerated()
-                .filter_map(|(id, inst)| {
-                    if self.inst_superseded.contains(id.index()) || inst.template != cap_owner_tid {
-                        return None;
-                    }
-                    if let Some(slot) = self.local_frame_slot_in(id, lidx) {
-                        self.inst_frame_locals[id].get(slot).copied()
-                    } else {
-                        self.local_loc_in_instance(id, lidx)
-                            .map(|loc| self.facts[loc])
-                    }
-                })
-                .collect();
-            for ty in seed_tys {
-                self.write_loc(cloc, ty);
             }
         }
         let owners: Vec<InstanceId> = self

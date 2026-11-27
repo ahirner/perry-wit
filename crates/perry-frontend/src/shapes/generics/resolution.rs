@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::engine::types::{ObjectProp, PropSpan};
+use crate::engine::types::{ObjectProp, PropertiesId};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Query {
@@ -217,7 +217,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         Some((ty, depth))
     }
 
-    pub(crate) fn record(&mut self, ty: Ty, depth: usize) -> Option<PropSpan> {
+    pub(crate) fn record(&mut self, ty: Ty, depth: usize) -> Option<PropertiesId> {
         let (ty, _) = self.resolve(ty, Query::Record, depth)?;
         self.types.closed_record(ty)
     }

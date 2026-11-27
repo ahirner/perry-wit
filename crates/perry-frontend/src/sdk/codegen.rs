@@ -247,22 +247,19 @@ pub(super) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
     let names = &TsNames::new(resolve, world);
     let mut out = String::new();
     let mut emitted = HashSet::new();
-    for (imported, (key, item)) in world
-        .imports
-        .iter()
-        .map(|item| (true, item))
-        .chain(world.exports.iter().map(|item| (false, item)))
+    for (imported, (key, id)) in [(true, &world.imports), (false, &world.exports)]
+        .into_iter()
+        .flat_map(|(imported, items)| {
+            perry_contract::world_interfaces(items).map(move |entry| (imported, entry))
+        })
     {
-        let WorldItem::Interface { id, .. } = item else {
-            continue;
-        };
         if !emitted.insert(key) {
             continue;
         }
         let module = serde_json::Value::String(resolve.name_world_key(key));
-        let interface = &resolve.interfaces[*id];
+        let interface = &resolve.interfaces[id];
         let mut live = wit_parser::LiveTypes::default();
-        live.add_interface(resolve, *id);
+        live.add_interface(resolve, id);
         let mut declarations: Vec<_> = live.iter().filter_map(|id| names.name(id)).collect();
         declarations.sort();
         declarations.dedup();
@@ -286,21 +283,19 @@ pub(super) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
                 let _ = writeln!(out, "  export type {local} = {target};");
             }
         }
-        for (name, id) in &interface.types {
-            if !matches!(names.resolve.types[*id].kind, TypeDefKind::Resource) {
-                continue;
-            }
-            let resource = type_to_ts(names, Input::Reference(Type::Id(*id)));
-            let suffix = to_pascal_case(name);
-            let _ = writeln!(
-                out,
-                "  /** Dispose an owned resource. Aliases become invalid. */\n  export function drop{suffix}(value: {resource}): void;"
-            );
-            if !imported {
+        for (resource, id) in perry_contract::interface_resources(resolve, id) {
+            for &operation in perry_contract::ResourceOperation::for_interface(!imported) {
+                let (param, ty, result) = operation.signature(id);
+                let name = operation.name(resource);
+                let ts = |ty| type_to_ts(names, Input::Reference(ty));
+                let result = result.map_or_else(|| "void".into(), ts);
+                if matches!(operation, perry_contract::ResourceOperation::Drop) {
+                    out.push_str("  /** Dispose an owned resource. Aliases become invalid. */\n");
+                }
                 let _ = writeln!(
                     out,
-                    "  export function new{suffix}(representation: number): {resource};\n  export function {local}Rep(value: {resource}): number;",
-                    local = to_camel_case(name)
+                    "  export function {name}({param}: {}): {result};",
+                    ts(ty)
                 );
             }
         }

@@ -15,10 +15,6 @@ pub(crate) struct Declarations<'h> {
     pub(crate) type_aliases: HashMap<&'h str, &'h perry_hir::ir::TypeAlias>,
     pub(crate) classes: HashMap<&'h str, ClassShape<'h>>,
     pub(crate) world: &'h crate::wit::WorldTypes<'h>,
-    pub(crate) resource_signatures: crate::engine::types::IdxVec<
-        crate::wit::MemberId,
-        Option<&'h crate::wit::ImportSignature<'h>>,
-    >,
     integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub(crate) imported_types: HashMap<&'h str, &'h crate::wit::Foreign<'h>>,
     pub(crate) imports: HashMap<&'h str, Imported<'h>>,
@@ -70,15 +66,11 @@ impl<'h> Declarations<'h> {
                 }
                 let source = source.strip_prefix("wit:").unwrap_or(source);
                 let binding = format!("{source}#{imported}");
-                if matches!(value, Imported::Other)
-                    && let Some((function, sig)) = world.function(&binding)
-                {
-                    bindings.insert(local, Imported::Foreign(function, sig));
-                }
-                if let Some(entry) = [binding.as_str(), imported]
-                    .into_iter()
-                    .find_map(|key| foreign.get(key))
-                    .filter(|entry| !matches!(entry, crate::wit::Foreign::Function(_)))
+                if let Some(function) = world.function(&binding) {
+                    if matches!(value, Imported::Other) {
+                        bindings.insert(local, Imported::Foreign(function));
+                    }
+                } else if let Some(entry) = foreign.get(&binding).or_else(|| foreign.get(imported))
                 {
                     imported_types.insert(local, entry);
                 }
@@ -89,11 +81,6 @@ impl<'h> Declarations<'h> {
             type_aliases,
             classes: HashMap::new(),
             world,
-            resource_signatures: world.members.map(|member| {
-                world
-                    .function(&member.binding)
-                    .map(|(_, signature)| signature)
-            }),
             integer_imports,
             imported_types,
             imports: bindings,
@@ -138,7 +125,6 @@ impl<'h> Declarations<'h> {
             crate::wit::Foreign::Type(value) | crate::wit::Foreign::Input(value) => {
                 value.integer()?
             }
-            _ => return None,
         };
         (self.imported_types.contains_key(name)
             || perry_mir::builtin_value_type(ctx, name).is_none())

@@ -18,7 +18,7 @@ use pliron::{
 use std::collections::{BTreeMap, HashMap};
 
 mod collection_types;
-use crate::engine::types::{LocId, ObjectProp, PropSpan, Ty, TyKind};
+use crate::engine::types::{LocId, ObjectProp, PropertiesId, Ty, TyKind};
 use crate::shapes::{Declarations, generics::InstanceKey};
 
 mod generics;
@@ -68,7 +68,7 @@ impl BindingType {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum ShapeKey {
     Application(InstanceKey),
-    Structural(PropSpan),
+    Structural(PropertiesId),
 }
 
 pub(super) struct Prepared<'h> {
@@ -78,29 +78,23 @@ pub(super) struct Prepared<'h> {
 
 pub(super) struct Preparing<'h> {
     source: &'h mut crate::engine::types::TypeTable,
-    resolved: HashMap<Ty, BindingType>,
+    wit_input: bool,
+    resolved: HashMap<(Ty, bool), BindingType>,
     timer: Option<TypeHandle>,
     depth: usize,
-    projections: HashMap<ShapeKey, Option<TypeHandle>>,
-}
-
-pub(super) struct ClassLayout<'h> {
-    pub(super) name: &'h str,
-    pub(super) fields: Box<[TypeHandle]>,
-    pub(super) order: perry_mir::FieldOrder,
+    projections: HashMap<(ShapeKey, bool), Option<TypeHandle>>,
 }
 
 pub(super) struct Shapes<'h, T = Prepared<'h>> {
     pub(super) specialization: &'h crate::engine::Specialization<'h>,
     pub(super) records: perry_mir::RecordLayouts,
-    inputs: HashMap<TypeHandle, TypeHandle>,
     pub(super) types: T,
     pub(super) module: pliron::builtin::ops::ModuleOp,
     pub(super) foreign_wrappers: HashMap<(&'h str, Vec<TypeHandle>), Identifier>,
     pub(super) globals: BTreeMap<perry_hir::types::LocalId, Option<LocalBinding<TypeHandle>>>,
     pub(super) decls: &'h Declarations<'h>,
-    callables: crate::engine::bitset::BitSet,
-    pub(super) class_records: HashMap<TypeHandle, std::rc::Rc<ClassLayout<'h>>>,
+    callables: crate::engine::BitSet,
+    pub(super) class_records: HashMap<TypeHandle, crate::shapes::ClassShape<'h>>,
     pub(super) source: &'h crate::source::ModuleDeclarations,
     pub(super) locations: &'h crate::hir_compat::Locations<'h>,
 }
@@ -131,10 +125,10 @@ impl<'h> Shapes<'h, Preparing<'h>> {
         );
         Shapes {
             records: layouts.1,
-            inputs: HashMap::new(),
             specialization,
             types: Preparing {
                 source: layouts.0,
+                wit_input: false,
                 resolved: HashMap::default(),
                 timer: None,
                 depth: 0,
@@ -164,7 +158,6 @@ impl<'h> Shapes<'h, Preparing<'h>> {
                 bindings,
             },
             records: self.records,
-            inputs: self.inputs,
             specialization: self.specialization,
             module: self.module,
             foreign_wrappers: self.foreign_wrappers,
@@ -244,76 +237,18 @@ impl<'h, T> Shapes<'h, T> {
     }
 }
 
-impl<T> Shapes<'_, T> {
-    pub(super) fn input_type(&mut self, ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {
-        if let Some(mapped) = self.inputs.get(&ty) {
-            return Ok(*mapped);
-        }
-        let deref = ty.deref(ctx);
-        let mapped = if deref.is::<perry_mir::BytesType>() {
-            drop(deref);
-            perry_mir::ByteInputType::get(ctx).into()
-        } else if let Some(array) = deref.downcast_ref::<ArrayType>() {
-            let element = array.element();
-            drop(deref);
-            let element = self.input_type(ctx, element)?;
-            ArrayType::get(ctx, element).into()
-        } else if let Some(optional) = deref.downcast_ref::<OptionalType>() {
-            let (value, absence) = (optional.value(), optional.absence());
-            drop(deref);
-            let value = self.input_type(ctx, value)?;
-            OptionalType::get_with(ctx, value, absence).into()
-        } else if let Some(variant) = deref.downcast_ref::<perry_mir::VariantType>() {
-            let cases = variant.cases().to_vec();
-            drop(deref);
-            let cases = cases
-                .into_iter()
-                .map(|(tag, payload)| {
-                    Ok((tag, payload.map(|ty| self.input_type(ctx, ty)).transpose()?))
-                })
-                .collect::<Result<_>>()?;
-            perry_mir::VariantType::get(ctx, cases).into()
-        } else if let Some(record) = deref.downcast_ref::<RecordType>() {
-            let kind = record.kind();
-            let fields = record
-                .fields()
-                .map_err(|_| Diagnostic::internal("opaque input record"))?
-                .to_vec();
-            drop(deref);
-            let mapped = self.records.fresh(ctx, kind, None).to_diag(ctx)?;
-            self.inputs.insert(ty, mapped.into());
-            let fields = fields
-                .into_iter()
-                .map(|(name, ty)| Ok((name, self.input_type(ctx, ty)?)))
-                .collect::<Result<_>>()?;
-            let name = mapped.deref(ctx).name().clone();
-            RecordType::get_kind(ctx, name, Some(fields), kind)
-                .to_diag(ctx)?
-                .into()
-        } else {
-            ty
-        };
-        self.inputs.insert(ty, mapped);
-        Ok(mapped)
-    }
-}
-
 impl<'h, T> Shapes<'h, T> {
-    pub(super) fn deferred_binding(&self, id: perry_hir::types::LocalId) -> bool {
-        self.source.locals.get(&id).is_some_and(|local| {
-            local
-                .flags
-                .contains(crate::engine::types::LocalFlags::DEFERRED)
-        })
-    }
-
     pub(super) fn deferred_storage(
         &self,
         ctx: &mut Context,
         id: perry_hir::types::LocalId,
         ty: TypeHandle,
     ) -> Option<TypeHandle> {
-        (self.deferred_binding(id)
+        (self
+            .specialization
+            .instances
+            .binding_flags(id)
+            .contains(crate::engine::types::LocalFlags::DEFERRED)
             && !perry_mir::admits_undefined(ctx, ty)
             && !ty.deref(ctx).is::<perry_mir::JsonType>())
         .then(|| crate::lower::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined))
@@ -326,7 +261,7 @@ impl<'h, T> Shapes<'h, T> {
 
     pub(super) fn class_of_type(&self, ctx: &Context, ty: TypeHandle) -> Option<&'h str> {
         let inner = crate::lower::present_type(ctx, ty);
-        self.class_records.get(&inner).map(|class| class.name)
+        self.class_records.get(&inner).map(|class| class.name())
     }
 
     pub(super) fn static_field(
@@ -366,15 +301,6 @@ impl Shapes<'_, Preparing<'_>> {
 }
 
 impl<'h> Shapes<'h> {
-    pub(super) fn runtime_arguments(
-        &self,
-        tuple: Ty,
-    ) -> impl Iterator<Item = (usize, Ty)> + Clone + 'h {
-        self.types
-            .source
-            .runtime_arguments(tuple, &self.specialization.escaping_env_templates)
-    }
-
     pub(super) fn resolved_binding(&self, ty: Ty) -> Result<BindingType> {
         self.types.bindings[ty].clone()
     }
@@ -470,6 +396,12 @@ impl<'h> Shapes<'h, Preparing<'_>> {
             if let Some(ty) = perry_mir::builtin_value_type(ctx, name) {
                 return Ok(ty);
             }
+            if self.decls.world.function(name).is_some() {
+                bail_diag!(
+                    codes::TYPE_MISMATCH,
+                    "foreign function cannot be used as a value type"
+                );
+            }
             if let Some(entry) = self.decls.world.foreign().get(name) {
                 return self.foreign_value_type(ctx, entry);
             }
@@ -507,11 +439,16 @@ impl<'h> Shapes<'h, Preparing<'_>> {
         &mut self,
         ctx: &Context,
         key: InstanceKey,
-        props: PropSpan,
+        props: PropertiesId,
         class: Option<crate::shapes::ClassShape<'h>>,
     ) -> Result<TypeHandle> {
         let mut fields = self.types.source.object_slice(props).to_vec();
-        let identity = if class.is_some() {
+        let identity = if let Some(class) = class {
+            if !matches!(class, crate::shapes::ClassShape::Instance(c) if c.direct_constructor) {
+                for field in &mut fields {
+                    field.optional = true;
+                }
+            }
             ShapeKey::Application(key)
         } else {
             for field in &mut fields {
@@ -520,6 +457,7 @@ impl<'h> Shapes<'h, Preparing<'_>> {
             fields.sort_unstable_by_key(|p| self.types.source.name_str(p.name));
             ShapeKey::Structural(self.types.source.intern_properties(&fields))
         };
+        let identity = (identity, self.types.wit_input);
         if let Some(slot) = self.types.projections.get_mut(&identity) {
             if let Some(record) = *slot {
                 return Ok(record);
@@ -534,18 +472,6 @@ impl<'h> Shapes<'h, Preparing<'_>> {
         let fields = self.record_fields(ctx, &fields, &mut Vec::new());
         let recursive = self.types.projections.remove(&identity).flatten();
         let fields = fields?;
-        let layout = class.map(|class| ClassLayout {
-            name: class.name(),
-            fields: fields.iter().map(|(_, ty)| *ty).collect(),
-            order: perry_mir::FieldOrder(
-                class
-                    .fields()
-                    .enumerate()
-                    .filter(|(_, (f, _))| !(f.is_private && f.name.starts_with('#')))
-                    .map(|(index, _)| index as u32)
-                    .collect(),
-            ),
-        });
         let record = match recursive {
             Some(record) => {
                 let name = perry_mir::typed::<RecordType>(ctx, record)
@@ -562,8 +488,10 @@ impl<'h> Shapes<'h, Preparing<'_>> {
             None => self.mir_record(ctx, fields)?,
         };
         self.types.projections.insert(identity, Some(record.into()));
-        if let Some(layout) = layout {
-            self.class_records.insert(record.into(), layout.into());
+        if !self.types.wit_input
+            && let Some(class) = class
+        {
+            self.class_records.insert(record.into(), class);
         }
         Ok(record.into())
     }
@@ -576,23 +504,22 @@ impl<'h, T> Shapes<'h, T> {
         ctx: &Context,
         fields: Vec<(String, TypeHandle)>,
     ) -> Result<TypedHandle<RecordType>> {
-        self.mir_record_kind(ctx, RecordKind::Object, fields)
+        self.records
+            .structural(ctx, RecordKind::Object, fields)
+            .to_diag(ctx)
     }
 
-    pub(super) fn mir_tuple(
-        &mut self,
-        ctx: &Context,
-        fields: Vec<(String, TypeHandle)>,
-    ) -> Result<TypedHandle<RecordType>> {
-        self.mir_record_kind(ctx, RecordKind::Tuple, fields)
-    }
-
-    pub(super) fn mir_record_kind(
+    pub(super) fn positional_record(
         &mut self,
         ctx: &Context,
         kind: RecordKind,
-        fields: Vec<(String, TypeHandle)>,
+        types: impl IntoIterator<Item = TypeHandle>,
     ) -> Result<TypedHandle<RecordType>> {
+        let fields = types
+            .into_iter()
+            .enumerate()
+            .map(|(i, ty)| (format!("_{i}"), ty))
+            .collect();
         self.records.structural(ctx, kind, fields).to_diag(ctx)
     }
 

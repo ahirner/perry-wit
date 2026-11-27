@@ -1,6 +1,6 @@
 //! Instance facts attached to their original expression sites.
 use super::*;
-use crate::engine::solve::{OperandUse, SiteResolution};
+use crate::engine::solve::SiteResolution;
 use crate::engine::types::{CaptureConversionSpan, FuncIdentity, Pool};
 use crate::engine::{ClosureValue, EnvironmentField, solve::ValueCoercion};
 
@@ -50,10 +50,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                     }
                     _ => {}
                 }
-                if site.operand != OperandUse::Value
-                    || site.coercion.is_some()
-                    || site.resolution.is_some()
-                {
+                if site.erased || site.coercion.is_some() || site.resolution.is_some() {
                     rows.push((index, site));
                 }
             }
@@ -72,7 +69,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         pool: &mut Pool<CaptureConversionSpan, (LocalId, ValueCoercion)>,
     ) -> Result<ClosureValue> {
         let layout = self.environment(ident)?;
-        let conversions = if matches!(ident.capture_owner, CaptureOwner::Template(_)) {
+        let conversions = if matches!(ident.capture_owner, CaptureOwner::Template(..)) {
             pool.extend(
                 self.plans.environment_fields[layout.fields]
                     .iter()
@@ -85,13 +82,13 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                         else {
                             return None;
                         };
-                        let from = self.local_ty_in_owner(
+                        let loc = self.local_location(
                             CaptureOwner::Instance(instance),
                             self.index.local_idx(local)?,
                         )?;
                         let conversion = ValueCoercion::into_union(
                             self.types,
-                            from,
+                            self.solved.locations[loc],
                             ty,
                             &self.index.capture_free_templates,
                             &self.solved.escaping_env_templates,

@@ -124,15 +124,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             Some(end) => self.normalize_slice_bound(ctx, end, len)?,
         };
-        if self.shapes.specialization.sparse_arrays {
-            return self.collect_preserving_holes(
-                ctx,
-                array,
-                norm_start,
-                norm_end,
-                |_, _, item, _| Ok(item),
-            );
-        }
+        let holes = self.preserve_holes(ctx);
         self.collect_items(
             ctx,
             Input::Slice(
@@ -142,7 +134,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     limit: norm_end,
                     direction: Direction::Forward,
                 },
-                Holes::Skip,
+                holes,
             ),
             |_, _, item, _, _| Ok(ArrayOutput::Item(item)),
         )

@@ -10,7 +10,7 @@ impl Shapes<'_, Preparing<'_>> {
             _ => None,
         }
     }
-    fn runtime_properties(&self, props: PropSpan) -> impl Iterator<Item = (&str, Ty)> {
+    fn runtime_properties(&self, props: PropertiesId) -> impl Iterator<Item = (&str, Ty)> {
         let types = &self.types.source;
         types
             .object_slice(props)
@@ -70,7 +70,7 @@ impl Shapes<'_, Preparing<'_>> {
         if scalar {
             let mut cases = Vec::with_capacity(members.len());
             for member in members {
-                let ty = self.project_type(ctx, *member, visiting)?.carrier;
+                let ty = self.project_view(ctx, *member, visiting, false)?;
                 ensure_diag!(
                     self.class_of_type(ctx, ty).is_none(),
                     codes::UNSUPPORTED_TYPE,
@@ -143,7 +143,7 @@ impl Shapes<'_, Preparing<'_>> {
     fn result(
         &mut self,
         ctx: &Context,
-        alternatives: &[PropSpan],
+        alternatives: &[PropertiesId],
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
         ensure_diag!(
@@ -191,7 +191,7 @@ impl Shapes<'_, Preparing<'_>> {
     fn variant(
         &mut self,
         ctx: &Context,
-        members: &[PropSpan],
+        members: &[PropertiesId],
         visiting: &mut Vec<LocId>,
     ) -> Result<TypeHandle> {
         let mut cases = Vec::with_capacity(members.len());

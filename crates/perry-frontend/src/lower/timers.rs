@@ -1,6 +1,6 @@
 //! Timer allocation, cancellation, and asynchronous callback execution.
 use super::*;
-use crate::engine::{TimerKind, solve::CallTarget};
+use crate::engine::{TimerSchedule, solve::CallTarget};
 use crate::lower::calls::CallArguments::Values;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -11,37 +11,17 @@ impl<'s> FunctionBuilder<'s, '_> {
         args: &'s [Expr],
     ) -> Result<Value> {
         let signature = self.signature(id)?;
-        let (handle, params) = signature
+        let handle = signature
             .params
-            .split_first()
+            .first()
             .ok_or_else(|| internal!("missing timer handle parameter"))?;
-        let Body::Native(crate::engine::NativeBody::Helper(
-            crate::engine::solve::HelperSpec::TimerRunner { kind, cb_call, .. },
-        )) = signature.body
-        else {
-            bail_internal!("expected a timer runner")
-        };
-        let (callback_arg, remaining) = args
-            .split_first()
-            .ok_or_else(|| internal!("missing timer callback"))?;
-        let retained = if cb_call.needs_value() {
-            args
-        } else {
-            self.discard_function_operand(ctx, callback_arg)?;
-            remaining
-        };
-        let default_delay = *kind != TimerKind::Immediate && remaining.is_empty();
-        ensure_internal!(
-            retained.len() + usize::from(default_delay) == params.len(),
-            "timer runner argument count mismatch"
-        );
-        let mut operands = Vec::with_capacity(signature.params.len());
-        for (param, arg) in params.iter().zip(retained) {
-            operands.push(self.bind_fixed_arg(ctx, param, Some(arg))?);
-        }
-        if default_delay {
-            operands.push(self.number(ctx, 0.0));
-        }
+        let mut operands = self.bind_arguments(
+            ctx,
+            signature,
+            1,
+            std::iter::empty(),
+            Arguments::Plain(args),
+        )?;
         let controller = self.intrinsic(ctx, Intrinsic::AbortNew, vec![]);
         let cancelled = self.boolean(ctx, false);
         let record = perry_mir::typed::<RecordType>(ctx, handle.binding.carrier)
@@ -83,7 +63,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn timer_body(
         &mut self,
         ctx: &mut Context,
-        kind: TimerKind,
+        schedule: TimerSchedule,
         callback: CallTarget,
         args: &[Value],
     ) -> Result<()> {
@@ -92,7 +72,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .ok_or_else(|| internal!("missing timer handle"))?;
         let mut args = args;
         let callback_value = callback.take_operand(&mut args)?;
-        let (delay, args) = if kind == TimerKind::Immediate {
+        let (delay, args) = if !schedule.has_delay {
             (self.number(ctx, 0.0), args)
         } else {
             let (&delay, args) = args
@@ -104,7 +84,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let wait = self.new_block(ctx, "timer_wait");
         self.jump(ctx, wait);
         self.switch_to(wait);
-        if kind == TimerKind::Interval {
+        if schedule.repeats {
             let active = self.new_block(ctx, "timer_active");
             let cancelled = self.record_field(ctx, timer, "cancelled")?;
             self.branch(ctx, cancelled, done, active);
@@ -124,14 +104,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.branch(ctx, cancelled, done, run);
         self.switch_to(run);
         callback.invoke(self, ctx, callback_value, Some(timer), Values(args))?;
-        self.jump(
-            ctx,
-            if kind == TimerKind::Interval {
-                wait
-            } else {
-                done
-            },
-        );
+        self.jump(ctx, if schedule.repeats { wait } else { done });
         self.switch_to(handler.block);
         self.catch_exception(ctx, handler.status)?;
         self.jump(ctx, done);

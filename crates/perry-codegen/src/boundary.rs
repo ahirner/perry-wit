@@ -84,13 +84,6 @@ pub enum AbiKind {
         key: u32,
         owned: bool,
     },
-    /// A result whose `ok` is a resource handle (a number in TypeScript), with the given flat
-    /// layout: `result<response, error-code>` of `wasi:http/handler`. A rejection returns
-    /// `err` with the case `error_case` of the error variant carrying `option<string>`
-    /// (`internal-error`), the rejection's description.
-    OkHandle {
-        error_case: u32,
-    },
 }
 
 /// A statically typed host import from the selected WIT world.
@@ -101,12 +94,7 @@ pub struct ResourceDefinition {
     pub name: String,
     pub exported: bool,
 }
-#[derive(Clone, Copy, Debug)]
-pub enum ResourceOperation {
-    New,
-    Representation,
-    Drop,
-}
+pub use perry_contract::ResourceOperation;
 #[derive(Clone, Debug)]
 pub enum ImportKind {
     Function(WasmSignature),
@@ -134,10 +122,16 @@ pub enum ExportKind {
     Async {
         /// The import module and WIT function name of `task.return`.
         task_return: (String, String),
-        /// `wasi:cli/run`'s `run: async func() -> result`, implemented by the top-level
-        /// statements: the result is `err` after an uncaught exception or a non-zero exit code.
-        command: bool,
+        completion: AsyncCompletion,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum AsyncCompletion {
+    Function,
+    Command,
+    /// A rejected task supplies its diagnostic text to this nested WIT case.
+    RejectionText(&'static [&'static str]),
 }
 
 /// One component export bound to a TypeScript function.
@@ -168,8 +162,25 @@ impl Export {
         matches!(self.kind, ExportKind::Async { .. })
     }
 
+    pub(crate) fn exception_result(&self) -> Option<&AbiType> {
+        let result = self.result.as_ref()?;
+        match self.kind {
+            ExportKind::Async {
+                completion: AsyncCompletion::RejectionText(_),
+                ..
+            } => Some(result),
+            _ => result.accepts_exception().then_some(result),
+        }
+    }
+
     pub fn is_command(&self) -> bool {
-        matches!(self.kind, ExportKind::Async { command: true, .. })
+        matches!(
+            self.kind,
+            ExportKind::Async {
+                completion: AsyncCompletion::Command,
+                ..
+            }
+        )
     }
 }
 
@@ -414,7 +425,7 @@ impl FunctionLowering<'_, '_> {
         ctx: &mut Context,
         ty: &AbiType,
         mir_ty: TypeHandle,
-        mut source: Canonical<'_>,
+        mut source: Canonical<&mut &[Value]>,
     ) -> Result<Value> {
         match &ty.kind {
             _ if ty.is_sum() => self.lift_sum(ctx, ty, mir_ty, source),
@@ -686,8 +697,7 @@ impl FunctionLowering<'_, '_> {
             b.lower_abi(
                 ctx,
                 element,
-                element_mir,
-                item,
+                BoundaryValue::Native(element_mir, item),
                 Canonical::Memory(target, 0),
             )?;
             if let Some(done) = done {
@@ -699,59 +709,22 @@ impl FunctionLowering<'_, '_> {
         Ok((buffer, len))
     }
 
-    /// Lower a MIR value to its flat core values (appended to `out`).
-    /// `values` (`i32`s) in the leading slots of the flat layout `flat`, widened where a
-    /// slot is `i64`, and zeros in the others.
-    fn flat_i32s(
-        &mut self,
-        ctx: &mut Context,
-        flat: &[Flat],
-        values: &[Value],
-        out: &mut Vec<Value>,
-    ) -> Result<()> {
-        for (index, slot) in flat.iter().enumerate() {
-            out.push(match (slot, values.get(index)) {
-                (Flat::I32, Some(&value)) => value,
-                (Flat::I64, Some(&value)) => self.num(ctx, NumOpcode::I64ExtendI32U, vec![value]),
-                (Flat::I32, None) => self.i32_const(ctx, 0),
-                (Flat::I64, None) => self.i64_const(ctx, 0),
-                (Flat::F32 | Flat::F64, _) => bail_internal!("float slots in a handle result"),
-            });
-        }
-        Ok(())
-    }
-
     fn lower_abi(
         &mut self,
         ctx: &mut Context,
         ty: &AbiType,
-        mir_ty: TypeHandle,
-        value: Carriers<Value>,
-        mut target: Canonical<'_>,
+        source: BoundaryValue,
+        mut target: Canonical<&mut Vec<Value>>,
     ) -> Result<()> {
+        if ty.is_sum() {
+            return self.lower_sum(ctx, ty, source, target);
+        }
+        let BoundaryValue::Native(mir_ty, value) = source else {
+            bail_internal!("WIT completion path enters a non-sum type");
+        };
         match &ty.kind {
-            _ if ty.is_sum() => {
-                self.lower_sum(ctx, ty, BoundaryValue::Native(mir_ty, value), target)?
-            }
             AbiKind::ByteStream => {
                 bail_unsupported!("returning a stream<u8> is not supported yet")
-            }
-            AbiKind::OkHandle { .. } => {
-                let flat = ty.direct()?;
-                let Canonical::Flat(out) = target else {
-                    bail_internal!("handle results are returned flat");
-                };
-                // `ok` (0), the handle, and zeros for the rest of the error payload.
-                let f64_ty = FP64Type::get(ctx).into();
-                let value = if is_numeric_type(ctx, mir_ty) {
-                    self.cast_value(ctx, value, mir_ty, f64_ty)?.scalar()?
-                } else {
-                    expect_number(ctx, mir_ty, ty)?;
-                    value.scalar()?
-                };
-                let zero = self.i32_const(ctx, 0);
-                let handle = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![value]);
-                self.flat_i32s(ctx, flat, &[zero, handle], out)?;
             }
             AbiKind::String | AbiKind::List(_) => {
                 let value = value.scalar()?;
@@ -770,8 +743,8 @@ impl FunctionLowering<'_, '_> {
                         )
                     }
                 };
-                target.write(self, ctx, MemKind::I32, 0, data)?;
-                target.write(self, ctx, MemKind::I32, 4, len)?;
+                target.write(self, ctx, MemKind::I32, 0, data);
+                target.write(self, ctx, MemKind::I32, 4, len);
             }
             AbiKind::Record(fields) => {
                 let value = value.scalar()?;
@@ -780,7 +753,12 @@ impl FunctionLowering<'_, '_> {
                     let at = field_ty.offset;
                     let field = layout.field(ctx, name)?;
                     let value = self.load_slot_value(ctx, value, field.offset, field.ty)?;
-                    self.lower_abi(ctx, field_ty, field.ty, value, target.at(at))?;
+                    self.lower_abi(
+                        ctx,
+                        field_ty,
+                        BoundaryValue::Native(field.ty, value),
+                        target.at(at),
+                    )?;
                 }
             }
             _ => {
@@ -788,7 +766,7 @@ impl FunctionLowering<'_, '_> {
                 let kind = ty
                     .mem_kind()
                     .ok_or_else(|| internal!("{ty:?} is not a scalar"))?;
-                target.write(self, ctx, kind, 0, raw)?;
+                target.write(self, ctx, kind, 0, raw);
             }
         }
         Ok(())

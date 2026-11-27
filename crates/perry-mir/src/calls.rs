@@ -21,28 +21,19 @@ use pliron::{
     verify_err,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum CallErr {
+    #[error("callee {0} is not a function of the enclosing module")]
     Unknown(String),
+    #[error("call to {0} does not match the callee's signature")]
     Signature(String),
+    #[error("perry.await operand must be a perry.promise of the result type")]
     Await,
+    #[error(
+        "perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value"
+    )]
     Timer,
 }
-
-impl core::fmt::Display for CallErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Unknown(callee) => write!(f, "callee {callee} is not a function of the enclosing module"),
-            Self::Signature(callee) => write!(f, "call to {callee} does not match the callee's signature"),
-            Self::Await => f.write_str("perry.await operand must be a perry.promise of the result type"),
-            Self::Timer => f.write_str(
-                "perry.timer takes an f64 delay in milliseconds and settles a perry.promise of its value",
-            ),
-        }
-    }
-}
-
-impl core::error::Error for CallErr {}
 
 /// Signature `(arguments, results)` of the module-level function `callee` seen from `op`.
 fn callee_signature(
