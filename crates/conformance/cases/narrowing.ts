@@ -265,3 +265,13 @@ function guardedLength(message: string | null) {
   return measured(message);
 }
 console.log("guarded lengths", guardedLength("abc"), guardedLength(null));
+
+type Attempt<T> = { ok: true; value: T } | { ok: false; error: string };
+function readWordResult(word: string): Attempt<string> {
+  return word.length > 0 ? { ok: true, value: word } : { ok: false, error: "empty" };
+}
+function copyWordResult(word: string): Attempt<string> {
+  const attempt = readWordResult(word);
+  return attempt.ok ? { ok: true, value: attempt.value } : { ok: false, error: attempt.error };
+}
+console.log(JSON.stringify(copyWordResult("ink")), JSON.stringify(copyWordResult("")));

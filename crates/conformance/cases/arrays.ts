@@ -208,3 +208,11 @@ function nestedConstructorInference(n: number): number {
     return pair.value + pair.extra + inferred.size + inferredMap.size;
 }
 for (const n of [0, 7]) console.log("nested-constructors", nestedConstructorInference(n));
+
+function byCode<T extends { code: string }>(values: T[]): Map<string, T> {
+  return new Map(values.map(value => [value.code, value] as const));
+}
+const weights = byCode([{ code: "b", weight: 1 }, { code: "a", weight: 2 }]);
+for (const [code, value] of [...weights.entries()].toSorted(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+  console.log(code, value.weight);
+}

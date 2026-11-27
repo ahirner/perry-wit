@@ -114,3 +114,21 @@ for (const input of casing) console.log("case", JSON.stringify([input.toLowerCas
 const replacementTable: Record<string,string> = {a:"A", b:"B"};
 console.log("callback-replace", "abba".replace(/[ab]/g, ch => replacementTable[ch]));
 console.log("named-capture", /(?<word>a)/.exec("abc")?.groups?.word ?? "missing");
+
+function splitFields(fields: string[], delimiter: string, keepDelimiter: boolean): string[] {
+  if (!fields.some(field => field.includes(delimiter))) return fields;
+  const result: string[] = [];
+  for (const field of fields) {
+    if (!field.includes(delimiter)) {
+      result.push(field);
+      continue;
+    }
+    for (const [index, piece] of field.split(delimiter).entries()) {
+      if (piece !== "") result.push(keepDelimiter && index > 0 ? delimiter + piece : piece);
+    }
+  }
+  return result;
+}
+console.log(JSON.stringify(splitFields(["a::b", "c"], ":", false)));
+console.log(JSON.stringify(splitFields(["a::b", "c"], ":", true)));
+console.log(JSON.stringify(splitFields(["a", "c"], ":", true)));
