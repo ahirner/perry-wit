@@ -3,8 +3,7 @@ use crate::hir_compat::Locations;
 use perry_hir::{ir::Expr, types::Type};
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag, unsupported};
-use std::collections::HashMap;
-use swc_common::{BytePos, Span, SyntaxContext, util::take::Take};
+use swc_common::{DUMMY_SP, Span, SyntaxContext, util::take::Take};
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,8 +33,7 @@ pub(crate) enum BuiltinConstructor {
     RegExp,
 }
 
-#[derive(Default)]
-pub(crate) struct Constructors(HashMap<Span, BuiltinConstructor>);
+pub(crate) struct Constructors;
 
 #[derive(Clone, Copy)]
 pub(crate) struct RegExpArguments<'a> {
@@ -85,7 +83,7 @@ pub(crate) trait ConstructorSites {
         };
         Some(Constructor {
             kind,
-            types: type_args,
+            types: type_args.split_last()?.1,
             init: args
                 .first()
                 .filter(|arg| !matches!(arg, Expr::Null | Expr::Undefined)),
@@ -95,17 +93,18 @@ pub(crate) trait ConstructorSites {
 
 impl ConstructorSites for Constructors {
     fn constructor(&self, expr: &Expr) -> Option<BuiltinConstructor> {
-        let Expr::Call {
-            byte_offset,
-            byte_end,
-            ..
-        } = expr
-        else {
+        let Expr::Call { type_args, .. } = expr else {
             return None;
         };
-        self.0
-            .get(&Span::new(BytePos(*byte_offset), BytePos(*byte_end)))
-            .copied()
+        let Type::Named(marker) = type_args.last()? else {
+            return None;
+        };
+        match marker.as_str() {
+            "perry:new Map" => Some(BuiltinConstructor::Collection(CollectionKind::Map)),
+            "perry:new Set" => Some(BuiltinConstructor::Collection(CollectionKind::Set)),
+            "perry:RegExp" => Some(BuiltinConstructor::RegExp),
+            _ => None,
+        }
     }
 }
 
@@ -114,10 +113,9 @@ impl Constructors {
         module: &mut ast::Module,
         unresolved: SyntaxContext,
         locations: &Locations<'_>,
-    ) -> Result<Self> {
+    ) -> Result<()> {
         struct Binder {
             unresolved: SyntaxContext,
-            sites: Constructors,
             diagnostic: Option<(Span, Diagnostic)>,
         }
         impl VisitMut for Binder {
@@ -129,7 +127,7 @@ impl Constructors {
                     && let ast::Callee::Expr(callee) = &call.callee
                     && matches!(callee.unwrap_parens(), ast::Expr::Ident(name) if name.ctxt == self.unresolved && name.sym == "RegExp")
                 {
-                    self.sites.0.insert(call.span, BuiltinConstructor::RegExp);
+                    mark(call, "perry:RegExp");
                 }
                 let ast::Expr::New(new) = expr else { return };
                 let ast::Expr::Ident(name) = new.callee.unwrap_parens() else {
@@ -145,8 +143,7 @@ impl Constructors {
                 {
                     // Perry keeps all arguments on ordinary calls. Its new-RegExp form
                     // drops operands after the flags and loses the zero-argument builtin.
-                    self.sites.0.insert(new.span, BuiltinConstructor::RegExp);
-                    *expr = constructor_call(new);
+                    *expr = constructor_call(new, "perry:RegExp");
                     return;
                 }
                 let kind = match name.sym.as_ref() {
@@ -176,33 +173,53 @@ impl Constructors {
                     self.diagnostic.get_or_insert((new.span, problem));
                     return;
                 }
-                self.sites
-                    .0
-                    .insert(new.span, BuiltinConstructor::Collection(kind));
-                // Perry retains generic arguments and both endpoints on calls. The source
-                // site supplies constructor identity even when a lexical class shadows a global.
-                *expr = constructor_call(new);
+                *expr = constructor_call(
+                    new,
+                    match kind {
+                        CollectionKind::Map => "perry:new Map",
+                        CollectionKind::Set => "perry:new Set",
+                    },
+                );
             }
         }
         let mut binder = Binder {
             unresolved,
-            sites: Self::default(),
             diagnostic: None,
         };
         module.visit_mut_with(&mut binder);
         match binder.diagnostic {
             Some((span, err)) => Err(locations.annotate(err, span)),
-            None => Ok(binder.sites),
+            None => Ok(()),
         }
     }
 }
 
-fn constructor_call(new: &mut ast::NewExpr) -> ast::Expr {
-    ast::Expr::Call(ast::CallExpr {
+/// A source identifier cannot contain a colon or space. Perry retains named type
+/// arguments on a Call, including its original arguments and diagnostic span.
+fn mark(call: &mut ast::CallExpr, marker: &str) {
+    let types = call.type_args.get_or_insert_with(|| {
+        Box::new(ast::TsTypeParamInstantiation {
+            span: DUMMY_SP,
+            params: Vec::new(),
+        })
+    });
+    types
+        .params
+        .push(Box::new(ast::TsType::TsTypeRef(ast::TsTypeRef {
+            span: DUMMY_SP,
+            type_name: ast::TsEntityName::Ident(ast::Ident::new_no_ctxt(marker.into(), DUMMY_SP)),
+            type_params: None,
+        })));
+}
+
+fn constructor_call(new: &mut ast::NewExpr, marker: &str) -> ast::Expr {
+    let mut call = ast::CallExpr {
         span: new.span,
         ctxt: new.ctxt,
         callee: ast::Callee::Expr(new.callee.take()),
         type_args: new.type_args.take(),
         args: new.args.take().unwrap_or_default(),
-    })
+    };
+    mark(&mut call, marker);
+    ast::Expr::Call(call)
 }

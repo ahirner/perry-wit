@@ -5,7 +5,7 @@ use crate::hir_compat::ResourceClass;
 use crate::hir_compat::Target;
 
 impl<'s> FunctionBuilder<'s, '_> {
-    fn guest_class(&self, owner: u32) -> Result<&'s ResourceClass<ClassInstId>> {
+    fn guest_class(&self, owner: crate::wit::ResourceId) -> Result<&'s ResourceClass<ClassInstId>> {
         self.shapes
             .specialization
             .resources
@@ -15,7 +15,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     fn resource_table(
         &mut self,
         ctx: &mut Context,
-        owner: u32,
+        owner: crate::wit::ResourceId,
     ) -> Result<(Value, super::collections::CollectionLayout)> {
         let id = self.guest_class(owner)?.class;
         let value = self
@@ -27,7 +27,11 @@ impl<'s> FunctionBuilder<'s, '_> {
             super::collections::EntryTypes::Map(FP64Type::get(ctx).into(), value),
         )?;
         Ok((
-            self.named_global_slot(ctx, format!("resource_instances_{owner}"), map.boxed.into())?,
+            self.named_global_slot(
+                ctx,
+                format!("resource_instances_{}", owner.key()),
+                map.boxed.into(),
+            )?,
             map,
         ))
     }
@@ -41,7 +45,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(())
     }
 
-    fn resource_instance(&mut self, ctx: &mut Context, owner: u32, rep: Value) -> Result<Value> {
+    fn resource_instance(
+        &mut self,
+        ctx: &mut Context,
+        owner: crate::wit::ResourceId,
+        rep: Value,
+    ) -> Result<Value> {
         let (slot, layout) = self.resource_table(ctx, owner)?;
         let table = self.load(ctx, slot)?;
         let value = self.kv_get(ctx, table, rep, layout.fields[0], layout.fields[1])?;

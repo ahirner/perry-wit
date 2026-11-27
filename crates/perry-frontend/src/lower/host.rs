@@ -38,7 +38,11 @@ impl<'s> FunctionBuilder<'s, '_> {
             Some(options) => {
                 let signal = hir_compat::literal_option(
                     options,
-                    &self.shapes.specialization.literal_classes,
+                    self.shapes
+                        .specialization
+                        .instances
+                        .expressions()
+                        .literal(options),
                     "signal",
                 )
                 .ok_or_else(|| unsupported!("setTimeout options must be a literal {{ signal }}"))?;
@@ -114,7 +118,14 @@ impl<'s> FunctionBuilder<'s, '_> {
         &self,
         expr: &'s Expr,
     ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
-        crate::hir_compat::object_literal_pairs(expr, &self.shapes.specialization.literal_classes)
+        crate::hir_compat::object_literal_pairs(
+            expr,
+            self.shapes
+                .specialization
+                .instances
+                .expressions()
+                .literal(expr),
+        )
     }
 
     /// The fields of an init object literal, by name.

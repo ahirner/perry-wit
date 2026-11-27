@@ -253,7 +253,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let Some(lidx) = self.index.local_idx(id) else {
             return Ok(Ty::OPEN);
         };
-        let local = self.index.locals[lidx];
+        let local = self.index.locals.rows[lidx];
         let Some(mut ty) = self.read_local_value(s.inst, lidx) else {
             return Ok(local.declared);
         };
@@ -364,7 +364,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let idx_ty = self.eval_expr(s, index)?;
         if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
             if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
-                self.facts.dirty.insert(Fact::Storage(loc));
+                self.facts.mark(Fact::Storage(loc));
             }
             if idx_ty != Ty::BOTTOM && !kind.accepts_index(idx_ty) {
                 self.write_loc(loc, Ty::OPEN);
@@ -395,8 +395,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         property: &str,
         byte_offset: u32,
     ) -> Result<Ty> {
-        if let Expr::ClassRef(class_name) = object {
-            return Ok(self.read_static_field(s.inst, class_name, property));
+        if matches!(object, Expr::ClassRef(_)) {
+            return Ok(self.read_static_field(s.inst, object));
         }
         let mut obj_ty = self.eval_expr(s, object)?;
         if obj_ty == Ty::BOTTOM {
@@ -412,7 +412,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .with_fallback_span(self.hir.locations.member_span(byte_offset).or_else(|| {
                 self.hir
                     .locations
-                    .offset_span(self.index.iteration.object_pattern_offset(object)?, 1)
+                    .offset_span(self.index.locals.object_pattern_offset(object)?, 1)
             })));
         }
         if let TyKind::Cell {
@@ -421,7 +421,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         } = self.types.kind(stripped)
         {
             if self.dict_reads.insert(loc.index()) {
-                self.facts.dirty.insert(Fact::Storage(loc));
+                self.facts.mark(Fact::Storage(loc));
             }
             obj_ty = self.resolve_cell_read(s.inst, obj_ty);
         }
@@ -431,7 +431,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .member_type(s.inst, site, stripped, property, class)?
             .unwrap_or_else(|| {
                 if self.types.closed_record(stripped).is_some()
-                    && self.index.iteration.object_pattern_offset(object).is_some()
+                    && self.index.locals.object_pattern_offset(object).is_some()
                 {
                     Ty::VOID
                 } else {

@@ -2,13 +2,17 @@
 use super::*;
 use std::collections::HashMap;
 
+use crate::engine::types::{IdxVec, LocalFlags, LocalIdx, LocalInfo};
+
 #[derive(Default)]
-pub(crate) struct Iteration<'h> {
-    bindings: HashMap<LocalId, (Binding<'h>, bool)>,
-    elements: HashMap<LocalId, Element<'h>>,
+pub(crate) struct Locals<'h> {
+    pub(crate) rows: IdxVec<LocalIdx, LocalInfo<'h>>,
+    pub(crate) ids: Vec<Option<LocalIdx>>,
+    elements: Vec<Element<'h>>,
 }
 
-enum Binding<'h> {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Binding<'h> {
     Guard(Option<&'h Expr>),
     ObjectPattern(u32),
     Cursor,
@@ -30,7 +34,6 @@ pub(crate) enum Availability<'a> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Element<'a> {
-    pub(crate) ty: &'a perry_hir::types::Type,
     pub(crate) id: LocalId,
     pub(crate) value: &'a Expr,
     pub(crate) advance: Option<&'a Expr>,
@@ -71,8 +74,39 @@ fn compared_to_true(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-impl<'h> Iteration<'h> {
-    pub(crate) fn bind(&mut self, id: LocalId, name: &str, init: Option<&'h Expr>) {
+impl<'h> Locals<'h> {
+    pub(crate) fn for_of<'a>(&self, init: Option<&'a Stmt>) -> Option<(LocalId, &'a Expr)> {
+        let Stmt::Let {
+            id,
+            init: Some(source),
+            ..
+        } = init?
+        else {
+            return None;
+        };
+        self.row(*id)?
+            .flags
+            .contains(LocalFlags::FOR_OF)
+            .then_some((*id, source))
+    }
+
+    pub(crate) fn index(&self, id: LocalId) -> Option<LocalIdx> {
+        self.ids.get(id as usize).copied().flatten()
+    }
+    pub(crate) fn row(&self, id: LocalId) -> Option<&LocalInfo<'h>> {
+        Some(&self.rows[self.index(id)?])
+    }
+    pub(crate) fn insert(&mut self, row: LocalInfo<'h>) -> LocalIdx {
+        let id = row.id as usize;
+        let index = self.rows.push(row);
+        if id >= self.ids.len() {
+            self.ids.resize(id + 1, None);
+        }
+        self.ids[id] = Some(index);
+        index
+    }
+
+    pub(crate) fn bind(&mut self, local: LocalIdx, name: &str, init: Option<&'h Expr>) {
         let call = init.and_then(runtime);
         let released = name.starts_with("__iterator_record_")
             || name.starts_with("__iterator_literal_")
@@ -90,28 +124,31 @@ impl<'h> Iteration<'h> {
             _ if released => Binding::Temporary,
             _ => return,
         };
-        self.bindings.insert(id, (role, released));
+        self.rows[local].iteration = Some((role, released));
     }
 
     pub(crate) fn object_pattern_offset(&self, receiver: &Expr) -> Option<u32> {
         let Expr::LocalGet(id) = receiver else {
             return None;
         };
-        match self.bindings.get(id)? {
-            (Binding::ObjectPattern(offset), _) => Some(*offset),
+        match self.row(*id)?.iteration? {
+            (Binding::ObjectPattern(offset), _) => Some(offset),
             _ => None,
         }
     }
 
     pub(crate) fn guard(&self, id: LocalId) -> Option<Option<&'h Expr>> {
-        match self.bindings.get(&id)? {
-            (Binding::Guard(source), _) => Some(*source),
+        match self.row(id)?.iteration? {
+            (Binding::Guard(source), _) => Some(source),
             _ => None,
         }
     }
 
     pub(crate) fn is_cursor(&self, id: LocalId) -> bool {
-        matches!(self.bindings.get(&id), Some((Binding::Cursor, _)))
+        matches!(
+            self.row(id).and_then(|r| r.iteration),
+            Some((Binding::Cursor, _))
+        )
     }
 
     pub(crate) fn is_guard(&self, expr: &Expr) -> bool {
@@ -142,13 +179,16 @@ impl<'h> Iteration<'h> {
     }
 
     pub(crate) fn is_release(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::LocalSet(id, value) if self.bindings.get(id).is_some_and(|(_, released)| *released) && matches!(&**value, Expr::Undefined))
+        matches!(expr, Expr::LocalSet(id, value) if self.row(*id).and_then(|r| r.iteration).is_some_and(|(_, released)| released) && matches!(&**value, Expr::Undefined))
     }
 
     pub(crate) fn index_elements(&mut self, statements: &'h [Stmt]) {
         for pair in statements.array_windows::<2>() {
-            if let Some(element) = self.recognize_element(pair) {
-                self.elements.insert(element.id, element);
+            if let Some(element) = self.recognize_element(pair)
+                && let Some(local) = self.index(element.id)
+            {
+                self.rows[local].element = Some(self.elements.len());
+                self.elements.push(element);
             }
         }
     }
@@ -157,7 +197,7 @@ impl<'h> Iteration<'h> {
         let [Stmt::Let { id, .. }, Stmt::If { condition, .. }, rest @ ..] = statements else {
             return None;
         };
-        let element = self.elements.get(id)?;
+        let element = self.elements.get(self.row(*id)?.element?)?;
         std::ptr::eq(condition, element.condition).then_some((*element, rest))
     }
 
@@ -165,7 +205,6 @@ impl<'h> Iteration<'h> {
         let [
             Stmt::Let {
                 id,
-                ty,
                 init: Some(Expr::Undefined),
                 ..
             },
@@ -226,7 +265,6 @@ impl<'h> Iteration<'h> {
             None => Availability::Known(matches!(steps.last(), Some(Expr::Bool(false)))),
         };
         Some(Element {
-            ty,
             id: *id,
             value,
             advance,

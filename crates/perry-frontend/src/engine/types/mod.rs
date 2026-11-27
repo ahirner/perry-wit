@@ -41,7 +41,7 @@ pub(crate) struct TypeTable {
     names: indexmap::IndexSet<Box<str>>,
     scratch: Vec<Ty>,
     pub(crate) applications: HashMap<shapes::generics::InstanceKey, shapes::generics::Application>,
-    wit_shapes: HashMap<(*const wit_parser::Resolve, wit_parser::Type, WitView), Ty>,
+    wit_shapes: HashMap<(wit_parser::Type, WitView), Ty>,
 }
 
 impl TypeTable {

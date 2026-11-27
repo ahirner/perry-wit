@@ -102,7 +102,11 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Option<Value>> {
         if let Expr::ClassRef(class_name) = object {
             return self
-                .local_set(ctx, self.shapes.static_field(class_name, field)?, value)
+                .local_set(
+                    ctx,
+                    self.shapes.static_field(object, class_name, field)?,
+                    value,
+                )
                 .map(Some);
         }
         let record = self.expression(ctx, object)?;
@@ -146,22 +150,13 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn object_literal(
         &mut self,
         ctx: &mut Context,
+        expr: &'s Expr,
         class_name: &str,
-        args: &'s [Expr],
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let names = self
-            .shapes
-            .literal_fields(class_name)
-            .ok_or_else(|| unsupported!("class {class_name} is not supported yet"))?;
-        ensure_internal!(
-            names.len() == args.len(),
-            "object literal arity differs from its shape"
-        );
-        let fields: Vec<(&str, &'s Expr)> = names
-            .iter()
-            .map(|field| field.name.as_str())
-            .zip(args)
+        let fields: Vec<_> = self
+            .object_literal_pairs(expr)
+            .ok_or_else(|| unsupported!("class {class_name} is not supported yet"))?
             .collect();
         self.record_literal(ctx, &fields, expected, RecordKind::Object)
     }

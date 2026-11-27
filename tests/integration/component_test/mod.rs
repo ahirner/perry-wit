@@ -87,9 +87,11 @@ fn witness_instances_preserve_function_identity_and_internal_results() -> Result
             export text:func(x:string)->u32; export raw:func(x:list<u8>)->u32;
             export echo:func(x:string)->list<u8>; export same:func()->bool;
             export byte:func(x:u8)->u8; export real:func(x:f64)->f64;
+            export small:func(x:u8,y:u8)->f64; export fraction:func(x:u8,y:f64)->f64;
         }",
         "function size(x) { return x.length; } export { size as text, size as raw };
          function identity(x) {return x;} export {identity as byte, identity as real};
+         function add(x:number,y:number) {return x+y;} export {add as small, add as fraction};
          export function echo(x) { return x; }
          const alias = size;
          export function same() { return alias === size && typeof echo('é') === 'string'; }",
@@ -99,6 +101,8 @@ fn witness_instances_preserve_function_identity_and_internal_results() -> Result
     guest.check("echo", ("é",), &"é".as_bytes().to_vec())?;
     guest.check("byte", (255u8,), &255u8)?;
     guest.check("real", (1.5f64,), &1.5f64)?;
+    guest.check("small", (255u8, 2u8), &257.0f64)?;
+    guest.check("fraction", (255u8, 0.5f64), &255.5f64)?;
     guest.check("same", (), &true)
 }
 

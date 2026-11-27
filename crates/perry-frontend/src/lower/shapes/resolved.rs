@@ -23,15 +23,6 @@ impl Shapes<'_, Preparing<'_>> {
 }
 
 impl Shapes<'_> {
-    pub(in crate::lower) fn source_closure_result(
-        &self,
-        source: &HirType,
-    ) -> Result<Option<TypeHandle>> {
-        (source != &HirType::Void)
-            .then(|| self.source_binding(source).map(|binding| binding.carrier))
-            .transpose()
-    }
-
     pub(in crate::lower) fn native_param(
         &self,
         param: crate::engine::NativeParam,
@@ -56,10 +47,7 @@ impl Shapes<'_> {
         let ty = match function.result {
             crate::engine::InstanceResult::Value(ty) => ty,
             crate::engine::InstanceResult::ErasedFunction => Ty::VOID,
-            crate::engine::InstanceResult::Source => self
-                .specialization
-                .annotations
-                .get(declaration.return_type)?,
+            crate::engine::InstanceResult::Source => declaration.result,
         };
         Ok((
             self.solved_result(ty, declaration.is_async)?,

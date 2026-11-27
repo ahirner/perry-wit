@@ -161,14 +161,8 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
         }
         if matches!(signature.body, Body::Initializer(_)) {
             builder.initialize_resources(ctx)?;
-            for entry in builder.shapes.specialization.bodies.static_fields.values() {
-                builder.binding(
-                    ctx,
-                    entry.id,
-                    &entry.field.ty,
-                    None,
-                    entry.ty.map(crate::engine::Storage::Value),
-                )?;
+            for &(id, ty) in &builder.shapes.specialization.bodies.static_fields {
+                builder.binding(ctx, id, None, ty.map(crate::engine::Storage::Value))?;
             }
         }
         builder.statements(ctx, statements)?;

@@ -8,7 +8,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         binding: &crate::engine::boundary::SourceLocal<'_>,
     ) -> Result<()> {
         use crate::engine::Storage;
-        let local = self.index.locals[binding.local];
+        let local = self.index.locals.rows[binding.local];
         let id = local.id;
         let name = binding.name;
         let loc = self.local_location(CaptureOwner::Instance(inst_id), binding.local);
@@ -19,7 +19,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 if let TyKind::Func(identity) = self.types.kind(t)
                     && !self.is_env_template(identity.template) =>
             {
-                self.locals[inst_id].insert(binding.local, Storage::ErasedFunction(None));
+                self.locals[inst_id].push((binding.local, Storage::ErasedFunction(None)));
                 return Ok(());
             }
             Some(t)
@@ -88,7 +88,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 None => return Ok(()),
             },
         };
-        self.locals[inst_id].insert(binding.local, storage);
+        self.locals[inst_id].push((binding.local, storage));
         Ok(())
     }
 }

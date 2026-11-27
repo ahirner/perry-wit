@@ -85,6 +85,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .this_slot
             .and_then(|slot| self.slot_type(ctx, slot).ok())
             .and_then(|ty| self.shapes.class_of_type(ctx, ty))
+            .map(|c| c.name())
             == Some(class_name)
     }
 }

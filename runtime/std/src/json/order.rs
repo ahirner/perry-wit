@@ -38,7 +38,7 @@ pub(super) unsafe fn field_present(native: *mut u8, count: u32, index: u32, key:
     }
 }
 
-unsafe fn lookup_field(table: *const u32, count: u32, key: &[u8]) -> u32 {
+pub(super) unsafe fn lookup_field(table: *const u32, count: u32, key: &[u8]) -> u32 {
     unsafe { field_index(table, count, |name| key_cmp(key, name)) }
 }
 

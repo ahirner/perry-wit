@@ -69,7 +69,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Some((object, key)) = hir_compat::member(expr) {
             if let (Expr::ClassRef(class), Some(property)) = (object, key.name()) {
                 return self
-                    .load_local(ctx, self.shapes.static_field(class, property)?)
+                    .load_local(ctx, self.shapes.static_field(object, class, property)?)
                     .map(Some);
             }
             let receiver = self

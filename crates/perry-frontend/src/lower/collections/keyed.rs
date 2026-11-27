@@ -373,8 +373,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         let items = self.expression(ctx, items_expr)?;
         let items = self.defined(ctx, items)?;
         let callback = self.prepare_callback(ctx, callback)?;
-        let elem_ty = self.array_element(ctx, items)?;
-        let group_arr_ty: TypeHandle = ArrayType::get(ctx, elem_ty).into();
+        let ordinal = self.callback_ordinal(ctx);
+        let input = if items.get_type(ctx).deref(ctx).is::<StringType>() {
+            Input::String(items)
+        } else {
+            Input::Collection(items)
+        };
 
         let alloc_bb = self.new_block(ctx, "groupby_alloc");
         let loop_start_bb = self.new_block(ctx, "groupby_start");
@@ -383,10 +387,11 @@ impl<'s> FunctionBuilder<'s, '_> {
 
         let declared =
             expected.and_then(|ty| self.shapes.boxed_collection(ctx, ty, CollectionKind::Map));
-        self.iterate(ctx, Input::Collection(items), |b, ctx, elem, idx, _, _| {
+        self.iterate(ctx, input, |b, ctx, elem, _, _, _| {
             let elem = elem.into_value(b, ctx)?;
-            let raw_key =
-                b.array_callback(ctx, callback, &Yield::Pair(idx, elem).indexed_args())?;
+            let elem_ty = elem.get_type(ctx);
+            let group_arr_ty = ArrayType::get(ctx, elem_ty).into();
+            let raw_key = b.indexed_callback(ctx, callback, ordinal, elem)?;
             let layout = match declared {
                 Some(map) => map,
                 None => b

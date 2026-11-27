@@ -169,7 +169,6 @@ pub(crate) fn build_module<'r>(
     types.applications.retain(|_, app| !app.reads_class_fields);
     let shapes = Shapes::new(
         module,
-        declarations,
         &decls,
         locations,
         specialization,
@@ -179,7 +178,7 @@ pub(crate) fn build_module<'r>(
     let mut shapes = shapes.prepare(ctx);
     shapes.define_environments(ctx)?;
     let mut signatures = Functions::default();
-    for (function, class) in bodies.functions.iter().map(|f| (f, None)).chain(
+    for (function, class) in bodies.functions.values().map(|f| (f, None)).chain(
         bodies
             .classes
             .iter()
@@ -330,8 +329,8 @@ pub(crate) fn build_module<'r>(
         // Without exported functions, the top-level statements (with top-level `await`) form
         // the body of a command's `wasi:cli/run`. With exported functions they initialize the
         // module once before the first entry point, and `run` only awaits that initialization.
-        let persistent =
-            !specialization.resources.is_empty() || bodies.functions.iter().any(|f| f.is_exported);
+        let persistent = !specialization.resources.is_empty()
+            || bodies.functions.values().any(|f| f.is_exported);
         let async_init = declarations.has_top_level_await;
         let settled = BindingType::plain(void_type(ctx));
         let mut entries = vec![Signature {

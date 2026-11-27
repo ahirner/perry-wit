@@ -7,19 +7,15 @@ impl<'h> ModuleIndex<'h> {
         bodies: &'h crate::source::Bodies,
         declarations: &'h crate::source::ModuleDeclarations,
         locations: &crate::hir_compat::Locations<'_>,
-        closure_names: &'h HashMap<FuncId, String>,
-        (constructors, decls): (
-            &crate::source::Constructors,
-            &crate::shapes::Declarations<'h>,
-        ),
+        decls: &crate::shapes::Declarations<'h>,
         types: &mut TypeTable,
     ) -> Self {
         let max_local_hint = declarations.locals.keys().copied().max().unwrap_or(0);
         let mut idx = Self {
             functions: Vec::with_capacity(bodies.functions.len() + 1),
-            local_to_idx: vec![None; max_local_hint as usize + 1],
             ..Self::default()
         };
+        idx.locals.ids.resize(max_local_hint as usize + 1, None);
         let init_tid = idx.add_template(TemplateView {
             body: &bodies.init,
             is_async: declarations.has_top_level_await,
@@ -27,16 +23,21 @@ impl<'h> ModuleIndex<'h> {
         });
         debug_assert_eq!(init_tid, TemplateId::INIT);
         let mut scan = ScanCtx {
-            constructors,
             decls,
             locations,
             strings: Default::default(),
+            static_uses: Vec::new(),
+            literals: bodies
+                .classes
+                .iter()
+                .filter(|c| hir_compat::is_object_literal(&c.name))
+                .map(|c| (c.name.as_str(), c.fields.as_slice()))
+                .collect(),
             regex_constructors: Vec::new(),
             ctx,
             declarations,
-            closure_names,
             types,
-            promise_sites: BTreeSet::new(),
+            promise_sites: Vec::new(),
             bindings: Vec::new(),
             defined_locals: BitSet::default(),
             pending_captures: Vec::new(),
@@ -54,7 +55,6 @@ impl<'h> ModuleIndex<'h> {
 
         for class in &bodies.classes {
             let Some(cid) = ClassId::of(class) else {
-                idx.literal_classes.insert(&class.name, &class.fields);
                 continue;
             };
             idx.classes.insert(
@@ -69,15 +69,19 @@ impl<'h> ModuleIndex<'h> {
                         .iter()
                         .chain(&class.methods)
                         .flat_map(|f| &f.params)
-                        .any(|p| scan.declarations.implicit_parameter(p)),
+                        .any(|p| {
+                            hir_compat::declaration_flags(scan.declarations, p.id)
+                                .implicit_parameter(p)
+                        }),
                     direct_constructor: hir_compat::direct_constructor(class),
-                    static_field_locs: Vec::new(),
+                    field_types: class
+                        .fields
+                        .iter()
+                        .map(|field| scan.types.intern_hir(scan.ctx, &field.ty, true))
+                        .collect(),
                 },
             );
             idx.register_type_params(scan.ctx, GenericOwner::Class(cid), &class.type_params);
-            for field in &class.fields {
-                idx.annotations.register(&mut scan, &field.ty, true);
-            }
             let mut initializers = class
                 .fields
                 .iter()
@@ -134,30 +138,42 @@ impl<'h> ModuleIndex<'h> {
             }
         }
 
-        for class in idx.classes.values_mut() {
+        let mut static_fields = HashMap::new();
+        for class in idx.classes.values() {
             for field in &class.declaration.static_fields {
-                let declared = idx.annotations.register(&mut scan, &field.ty, true);
+                let declared = scan.types.intern_hir(scan.ctx, &field.ty, true);
                 let loc = idx.location_types.push(if declared == Ty::OPEN {
                     Ty::BOTTOM
                 } else {
                     declared
                 });
-                let id = idx.local_to_idx.len() as LocalId;
-                let local = idx.locals.push(LocalInfo {
+                let id = idx.locals.ids.len() as LocalId;
+                let local = idx.locals.insert(LocalInfo {
+                    iteration: None,
+                    element: None,
+                    span: None,
                     id,
                     owner: TemplateId::INIT,
                     declared,
+                    annotation: declared,
                     storage: LocalStorage::Module(loc),
-                    flags: LocalFlags::GENERATED,
+                    flags: LocalFlags::STATIC_FIELD,
                 });
-                idx.local_to_idx.push(Some(local));
-                class.static_field_locs.push((loc, id));
+                static_fields
+                    .entry((class.declaration.name.as_str(), field.name.as_str()))
+                    .or_insert(local);
+            }
+        }
+        for (site, class, field) in scan.static_uses {
+            if let Some(&local) = static_fields.get(&(class, field)) {
+                idx.expressions.static_fields.set(site, local);
             }
         }
         for (site, args) in scan.regex_constructors {
-            idx.expressions
-                .declared
-                .insert(site, SiteResolution::Regex(scan.strings.regexp(ctx, args)));
+            idx.expressions.declare(
+                site,
+                SiteResolution::Regex(scan.strings.regexp(ctx, &idx.locals, args)),
+            );
         }
         scan.bindings.sort_by_key(|(owner, _)| *owner);
         for group in scan.bindings.chunk_by(|a, b| a.0 == b.0) {
@@ -166,24 +182,31 @@ impl<'h> ModuleIndex<'h> {
                     idx.bindings.extend(group.iter().map(|(_, local)| *local));
             }
         }
-        for (owner, site) in scan.promise_sites {
-            let resolve = idx.add_template(TemplateView::synthetic(
-                TemplateKind::PromiseResolve(site),
-                "resolve",
-            ));
-            let reject = idx.add_template(TemplateView::synthetic(
-                TemplateKind::PromiseReject(site),
-                "reject",
-            ));
-            idx.promises
-                .entry(owner)
-                .or_default()
-                .push((site, resolve, reject));
+        idx.events.sort_unstable_by_key(|&(key, _)| key);
+        idx.events.dedup_by_key(|row| row.0);
+        idx.external_uses.sort_unstable();
+        idx.external_uses.dedup();
+        scan.promise_sites.sort_unstable();
+        scan.promise_sites.dedup();
+        let mut promises = Pool::default();
+        for group in scan.promise_sites.chunk_by(|a, b| a.0 == b.0) {
+            let span = promises.extend(group.iter().map(|&(_, site)| {
+                let mut settle = |kind, name| idx.add_template(TemplateView::synthetic(kind, name));
+                (
+                    site,
+                    settle(TemplateKind::PromiseResolve(site), "resolve"),
+                    settle(TemplateKind::PromiseReject(site), "reject"),
+                )
+            }));
+            if let Some(&(owner, _)) = group.first() {
+                idx.layouts[owner].promises = span;
+            }
         }
 
+        idx.promises = promises;
         for (cap_id, written, forward) in scan.pending_captures {
             if let Some(lidx) = idx.local_idx(cap_id) {
-                let flags = &mut idx.locals[lidx].flags;
+                let flags = &mut idx.locals.rows[lidx].flags;
                 flags.insert(LocalFlags::CAPTURED);
                 if written {
                     flags.insert(LocalFlags::WRITTEN_FROM_CLOSURE);
@@ -207,7 +230,7 @@ impl<'h> ModuleIndex<'h> {
             );
             free.retain(|&id, _| {
                 idx.local_idx(id)
-                    .is_some_and(|local| idx.locals[local].owner != tid)
+                    .is_some_and(|local| idx.locals.rows[local].owner != tid)
             });
             let mut captures = free
                 .iter()
@@ -230,6 +253,9 @@ impl<'h> ModuleIndex<'h> {
                 }
             }
         }
+        for local in idx.locals.rows.as_mut_slice() {
+            local.span = declarations.locals.get(&local.id).map(|d| d.span);
+        }
         idx
     }
 }
@@ -239,9 +265,9 @@ impl ModuleIndex<'_> {
         &self,
         bodies: &crate::source::InstanceBodies<'_>,
         mut origins: Origins,
-        plans: &super::super::InstancePlans,
+        plans: &mut super::super::InstancePlans<'_>,
         locations: &mut hir_compat::Locations,
-    ) -> perry_wit_diagnostics::Result<std::collections::HashSet<LocalId>> {
+    ) -> perry_wit_diagnostics::Result<()> {
         use crate::engine::BodyOwner;
         for (tid, view) in self.views.iter_enumerated() {
             if origins[tid].is_empty()
@@ -252,8 +278,8 @@ impl ModuleIndex<'_> {
             }
         }
         if locations.has_imports() {
-            let functions: HashMap<_, _> = bodies.functions.iter().map(|f| (f.id, f)).collect();
-            for (&(tid, _), &expr) in &self.events {
+            let functions = &bodies.functions;
+            for &((tid, _), expr) in &self.events {
                 let Some(call) = crate::source::SourceCall::of(expr) else {
                     continue;
                 };
@@ -274,16 +300,19 @@ impl ModuleIndex<'_> {
                 }
             }
         }
-        let mut globals = std::collections::HashSet::new();
         for &(template, id) in &self.external_uses {
             if origins[template]
                 .iter()
                 .any(|(_, kind, _)| *kind != CallerKind::Initializer)
-                && plans.binding_flags(id)?.contains(LocalFlags::MODULE)
             {
-                globals.insert(id);
+                let local = plans.local_id(id)?;
+                if plans.locals.rows[local].flags.contains(LocalFlags::MODULE) {
+                    plans.locals.rows[local]
+                        .flags
+                        .insert(LocalFlags::GLOBAL_SLOT);
+                }
             }
         }
-        Ok(globals)
+        Ok(())
     }
 }

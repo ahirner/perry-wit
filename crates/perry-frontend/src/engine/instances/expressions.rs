@@ -18,14 +18,17 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         let mut conversions = Pool::default();
         for instance in self.solved.instances.ids() {
             let owner = self.solved.body_owner(instance);
-            let locals = std::mem::take(&mut self.locals[instance]);
+            let mut locals = std::mem::take(&mut self.locals[instance]);
+            locals.reverse();
+            locals.sort_by_key(|row| row.0);
+            locals.dedup_by_key(|row| row.0);
             if !self.solved.live_instances.contains(instance.index()) {
                 if !locals.is_empty() {
                     self.plans.decisions.record_body(owner, [], locals);
                 }
                 continue;
             }
-            for (&index, &site) in &self.solved.inst_sites[instance] {
+            for &(index, site) in &self.solved.inst_sites[instance].0 {
                 let mut site = site;
                 match site.resolution {
                     Some(SiteResolution::Closure(ident)) => {

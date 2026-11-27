@@ -40,11 +40,9 @@ impl<'h> Solver<'h, '_> {
         let Some(indexed) = self.index.regions.get(&region) else {
             return;
         };
-        for (_, &expr) in self
-            .index
-            .events
-            .range((indexed.template, indexed.sites.start)..(indexed.template, indexed.sites.end))
-        {
+        let events = &self.index.events;
+        let boundary = |site| events.partition_point(|&(key, _)| key < (indexed.template, site));
+        for &(_, expr) in &events[boundary(indexed.sites.start)..boundary(indexed.sites.end)] {
             match expr {
                 Expr::LocalSet(id, _) | Expr::Update { id, .. } => write(*id),
                 Expr::Closure { func_id, .. } | Expr::FuncRef(func_id) => {

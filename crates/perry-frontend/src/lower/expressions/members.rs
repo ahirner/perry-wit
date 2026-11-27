@@ -114,7 +114,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         (get, set): (Option<FuncId>, Option<FuncId>),
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
-            let id = self.shapes.static_field(class_name, property)?;
+            let id = self.shapes.static_field(object, class_name, property)?;
             return self.update(ctx, id, op, prefix);
         }
         let object = self.expression(ctx, object)?;
@@ -240,7 +240,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                     if self
                         .shapes
                         .specialization
-                        .iteration
+                        .instances
+                        .locals
                         .object_pattern_offset(object)
                         .is_some() =>
                 {

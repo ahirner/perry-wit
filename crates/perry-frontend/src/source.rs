@@ -16,7 +16,7 @@ use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Result, unsupported};
 pub(crate) use program::{
     Arguments, Bodies, Callee, CallerKind, FieldOverride, InstanceBodies, InstanceClass,
-    InstanceFunction, ModuleDeclarations, SourceCall, SourceModule, StaticField, authored_body,
+    InstanceFunction, ModuleDeclarations, SourceCall, SourceModule, authored_body,
 };
 use std::collections::{HashMap, HashSet};
 pub(crate) use strings::ConstantStrings;
@@ -31,8 +31,6 @@ impl ClassId {
         (!crate::hir_compat::is_object_literal(&class.name)).then_some(Self(class.id))
     }
 }
-
-pub(crate) type LiteralClasses<'s> = HashMap<&'s str, &'s [perry_hir::ir::ClassField]>;
 
 #[derive(Clone, Copy, Default)]
 struct SourceBinding {

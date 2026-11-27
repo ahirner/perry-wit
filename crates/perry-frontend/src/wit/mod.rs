@@ -38,7 +38,7 @@ impl<'r> WitValue<'r> {
             .map(|&(_, _, domain)| domain)
     }
 
-    pub(crate) fn resource(self) -> Option<u32> {
+    pub(crate) fn resource(self) -> Option<ResourceId> {
         let Type::Id(id) = self.ty else { return None };
         let id = canonical_type(self.resolve, id);
         let owner = match self.resolve.types[id].kind {
@@ -48,7 +48,25 @@ impl<'r> WitValue<'r> {
             }
             _ => return None,
         };
-        Some(owner.index() as u32)
+        Some(ResourceId::of(owner))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct ResourceId(u32);
+
+impl ResourceId {
+    pub(crate) fn of(id: TypeId) -> Self {
+        Self(id.index() as u32)
+    }
+    pub(crate) fn key(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::borrow::Borrow<u32> for ResourceId {
+    fn borrow(&self) -> &u32 {
+        &self.0
     }
 }
 
@@ -69,7 +87,7 @@ pub struct WorldTypes<'r> {
     imports: IndexMap<String, ImportSignature<'r>>,
     constructors: MemberGroup,
     statics: HashMap<String, MemberGroup>,
-    methods: HashMap<String, MemberGroup>,
+    methods: IndexMap<String, MemberGroup>,
     pub(crate) drops: MemberGroup,
 }
 
@@ -222,22 +240,39 @@ impl MemberId {
 
 pub(crate) type MemberGroup = HashMap<u32, MemberId>;
 
-#[derive(Default)]
-pub(crate) struct ReceiverMembers<'h>(HashMap<*const Expr, &'h MemberGroup>);
+#[derive(Clone, Copy)]
+pub(crate) enum MemberGroupId {
+    Method(usize),
+    Drop,
+}
 
-impl<'h> ReceiverMembers<'h> {
-    pub(crate) fn bind(
-        &mut self,
-        expr: &Expr,
-        decls: &crate::shapes::Declarations<'h>,
+impl MemberGroupId {
+    pub(crate) fn member(self, world: &WorldTypes, owner: u32) -> Option<MemberId> {
+        let group = match self {
+            Self::Method(id) => world.methods.get_index(id)?.1,
+            Self::Drop => &world.drops,
+        };
+        group.get(&owner).copied()
+    }
+}
+
+pub(crate) enum BoundMember<'h> {
+    Static(MemberId),
+    Receiver(&'h Expr, MemberGroupId),
+}
+
+impl<'h> BoundMember<'h> {
+    pub(crate) fn at(
+        expr: &'h Expr,
+        decls: &crate::shapes::Declarations,
         locations: &crate::hir_compat::Locations,
-    ) -> Option<MemberId> {
+    ) -> Option<Self> {
         use crate::hir_compat::{class_receiver, member, method};
         let world = decls.world;
         if world.imports.is_empty() {
             return None;
         }
-        let (class, members) = match expr {
+        let (class, group) = match expr {
             Expr::New { class_name, .. } => (class_name.as_str(), &world.constructors),
             Expr::StaticMethodCall {
                 class_name,
@@ -251,39 +286,30 @@ impl<'h> ReceiverMembers<'h> {
                 ..
             } => {
                 let (object, property) = member(callee)?;
-                match property.name().map(|name| method(name).name()) {
+                match property.name().map(|n| method(n).name()) {
                     Some(name) if let Some(class) = class_receiver(object) => {
                         (class, world.statics.get(name)?)
                     }
                     Some(name) => {
-                        self.0.insert(object, world.methods.get(name)?);
-                        return None;
+                        return Some(Self::Receiver(
+                            object,
+                            MemberGroupId::Method(world.methods.get_index_of(name)?),
+                        ));
                     }
                     None if !world.drops.is_empty()
                         && locations.calls_dispose(*byte_offset, *byte_end) =>
                     {
-                        self.0.insert(object, &world.drops);
-                        return None;
+                        return Some(Self::Receiver(object, MemberGroupId::Drop));
                     }
                     None => return None,
                 }
             }
             _ => return None,
         };
-        members.get(&decls.resource(class)?).copied()
-    }
-
-    pub(crate) fn method<'s>(&self, callee: &'s Expr) -> Option<(&'s Expr, Option<&'s str>)> {
-        let (object, property) = crate::hir_compat::member(callee)?;
-        (property.name().is_some() || self.0.contains_key(&std::ptr::from_ref(object)))
-            .then_some((object, property.name()))
-    }
-
-    pub(crate) fn get(&self, object: &Expr, owner: u32) -> Option<MemberId> {
-        self.0
-            .get(&std::ptr::from_ref(object))?
-            .get(&owner)
+        group
+            .get(&decls.resource(class)?)
             .copied()
+            .map(Self::Static)
     }
 }
 

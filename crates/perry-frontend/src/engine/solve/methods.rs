@@ -106,9 +106,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
             if name == "toWeb"
-                && let Expr::ExternFuncRef { name: local, .. } = object
                 && matches!(
-                    self.decls.imports.get(local.as_str()),
+                    self.index
+                        .expressions
+                        .symbol(self.decls, object)
+                        .and_then(|s| s.import),
                     Some(crate::shapes::Imported::Writable)
                 )
             {
@@ -142,7 +144,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 )
                 .with_fallback_span(span));
             }
-            if let Some(member) = self.index.receiver_members.get(object, owner) {
+            if let Some(member) = self
+                .index
+                .expressions
+                .receiver(object)
+                .and_then(|group| group.member(self.decls.world, owner))
+            {
                 self.record_site(s.inst, expr, SiteResolution::ResourceCall(member));
                 return Ok(self.resource_result(member));
             }

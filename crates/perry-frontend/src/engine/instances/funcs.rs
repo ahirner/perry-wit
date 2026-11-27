@@ -9,7 +9,7 @@ use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
     pub(super) fn cell_init(&self, local: LocalIdx) -> Option<crate::engine::CellInit> {
         use crate::engine::CellInit;
-        let flags = self.index.locals[local].flags;
+        let flags = self.index.locals.rows[local].flags;
         self.solved.boxed_locals.contains(local.index()).then(|| {
             if flags.contains(LocalFlags::FORWARD_CAPTURED) {
                 CellInit::Hoisted
@@ -28,7 +28,7 @@ impl<'h, 'a> InstancePlanner<'h, 'a, '_> {
     ) -> Option<super::LocId> {
         owner.location(
             &self.solved.instances,
-            self.index.locals[local],
+            self.index.locals.rows[local],
             self.solved.collapsed_locals[local],
         )
     }

@@ -454,16 +454,24 @@ impl<'s> FunctionBuilder<'s, '_> {
             self.call_intrinsic(ctx, intrinsic, vec![line]);
             return Ok(None);
         }
-        if let Some((object, property)) = self.shapes.specialization.receiver_members.method(callee)
+        if let Some((object, property)) = hir_compat::member(callee)
+            && (property.name().is_some()
+                || self
+                    .shapes
+                    .specialization
+                    .instances
+                    .expressions()
+                    .receiver(object)
+                    .is_some())
         {
-            return self.method(ctx, object, property, args, Some(byte_offset));
+            return self.method(ctx, object, property.name(), args, Some(byte_offset));
         }
         if hir_compat::is_import_initializer(callee) {
             // Module initialization of a named built-in import (`Writable`): nothing to run.
             return Ok(None);
         }
         if let Expr::ExternFuncRef { name, .. } = callee {
-            match self.shapes.decls.imports.get(name.as_str()).copied() {
+            match self.shapes.symbol(callee).and_then(|s| s.import) {
                 Some(Imported::TimeoutPromise) => return self.timer(ctx, args).map(Some),
                 Some(Imported::Writable) => {
                     bail_unsupported!("Writable is a class; only Writable.toWeb is supported")
@@ -485,7 +493,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Some(Imported::ReadFile) => {
                     let text = hir_compat::read_file_text(
                         args.get(1),
-                        &self.shapes.specialization.literal_classes,
+                        args.get(1).and_then(|e| {
+                            self.shapes
+                                .specialization
+                                .instances
+                                .expressions()
+                                .literal(e)
+                        }),
                     )?;
                     return self.read_file(ctx, args, text).map(Some);
                 }

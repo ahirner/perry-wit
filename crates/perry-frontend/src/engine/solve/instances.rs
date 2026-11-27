@@ -6,6 +6,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn seed_roots<'r: 'h>(
         &mut self,
         witnesses: Vec<hir_compat::SourceWitness<'r>>,
+        mut pending: hir_compat::ResourceClasses<ClassId>,
     ) -> Result<(InstanceId, hir_compat::Witnesses<'r, ExportRoot>)> {
         let init_inst = self.request_instance(InstanceReq::new(TemplateId::INIT, &[], None))?;
         self.enqueue(init_inst);
@@ -17,21 +18,27 @@ impl<'h, 'a> Solver<'h, 'a> {
                         constructors.entry(owner).or_insert(sig.params.as_slice());
                     }
                     Some(Target::Function(id)) => {
-                        self.list_exports
-                            .entry(id)
-                            .and_modify(|r| {
-                                if r.map(|v| v.ty) != sig.result.map(|v| v.ty) {
-                                    *r = None;
-                                }
-                            })
-                            .or_insert(sig.result);
+                        let tid = self
+                            .index
+                            .template_of_func(id)
+                            .ok_or_else(|| Diagnostic::internal("missing export template"))?;
+                        let previous = self.list_exports[tid].get_or_insert(sig.result);
+                        if previous.map(|v| v.ty) != sig.result.map(|v| v.ty) {
+                            *previous = None;
+                        }
                     }
                     _ => {}
                 }
             }
         }
-        for &owner in self.hir.resources.keys() {
-            self.exported_class(owner, &constructors, &mut Vec::new())?;
+        while let Some((owner, resource)) = pending.pop_first() {
+            self.exported_class(
+                owner,
+                resource,
+                &mut pending,
+                &constructors,
+                &mut Vec::new(),
+            )?;
         }
         let mut exports = Vec::with_capacity(witnesses.len());
         for witness in witnesses {
@@ -49,9 +56,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 });
             let receiver = match target {
                 Target::Method(owner, _) | Target::Destructor(owner, _) => Some(Receiver::Class(
-                    *self
-                        .resource_instances
+                    self.resources
                         .get(&owner)
+                        .map(|r| r.class)
                         .ok_or_else(|| Diagnostic::internal("missing resource receiver"))?,
                 )),
                 _ => None,
@@ -74,12 +81,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                             self.types.class_inst(class)
                         } else if let Some(p) = view.params.get(i).filter(|p| {
                             self.index.local_idx(p.id).is_some_and(|id| {
-                                self.index.locals[id]
+                                self.index.locals.rows[id]
                                     .flags
                                     .contains(LocalFlags::PARAM_ANNOTATED)
                             })
                         }) {
-                            self.index.locals[self.index.param_local(p)?].declared
+                            self.index.locals.rows[self.index.param_local(p)?].declared
                         } else {
                             self.types.export_type(self.ctx, value)
                         };
@@ -134,7 +141,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .params
             .iter()
             .map(|p| {
-                let declared = self.index.locals[self.index.param_local(p)?].declared;
+                let declared = self.index.locals.rows[self.index.param_local(p)?].declared;
                 let ty = self.types.substitute(declared, &bindings);
                 self.instantiate_annotated_class(ty, 0, None)
             })
@@ -142,46 +149,40 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     fn exported_instance(&self, value: crate::wit::WitValue<'_>) -> Option<ClassInstId> {
-        self.resource_instances.get(&value.resource()?).copied()
+        Some(self.resources.get(&value.resource()?)?.class)
     }
 
     fn exported_class(
         &mut self,
-        owner: u32,
-        constructors: &HashMap<u32, &[crate::wit::WitValue<'_>]>,
-        active: &mut Vec<u32>,
+        owner: crate::wit::ResourceId,
+        resource: hir_compat::ResourceClass<ClassId>,
+        pending: &mut hir_compat::ResourceClasses<ClassId>,
+        constructors: &HashMap<crate::wit::ResourceId, &[crate::wit::WitValue<'_>]>,
+        active: &mut Vec<(crate::wit::ResourceId, ClassId)>,
     ) -> Result<ClassInstId> {
-        if let Some(&id) = self.resource_instances.get(&owner) {
-            return Ok(id);
-        }
-        let resource = self
-            .hir
-            .resources
-            .get(&owner)
-            .ok_or_else(|| Diagnostic::internal("unknown exported resource"))?;
-        let cid = resource.class;
+        active.push((owner, resource.class));
         let mut args = Vec::new();
-        active.push(owner);
-        for &p in constructors.get(&owner).copied().unwrap_or_default() {
-            let ty = if let Some((id, r)) = p
-                .resource()
-                .and_then(|id| self.hir.resources.get_key_value(&id))
-            {
-                if active.contains(id) {
-                    self.index.class(r.class).ty
-                } else {
-                    let class = self.exported_class(*id, constructors, active)?;
-                    self.types.class_inst(class)
+        for &param in constructors.get(&owner).copied().unwrap_or_default() {
+            let ty = match param.resource() {
+                Some(id) if let Some(&(_, class)) = active.iter().find(|(key, _)| *key == id) => {
+                    self.index.class(class).ty
                 }
-            } else {
-                self.types.export_type(self.ctx, p)
+                Some(id) if let Some(declaration) = pending.remove(&id) => {
+                    let instance =
+                        self.exported_class(id, declaration, pending, constructors, active)?;
+                    self.types.class_inst(instance)
+                }
+                Some(id) if let Some(done) = self.resources.get(&id) => {
+                    self.types.class_inst(done.class)
+                }
+                _ => self.types.export_type(self.ctx, param),
             };
             args.push(ty);
         }
         active.pop();
-        let id = self.construct_class(cid, &args, Vec::new(), 0, None)?;
-        self.resource_instances.insert(owner, id);
-        Ok(id)
+        let instance = self.construct_class(resource.class, &args, Vec::new(), 0, None)?;
+        self.resources.insert(owner, resource.with_class(instance));
+        Ok(instance)
     }
 
     fn default_type_param_bindings(&mut self, tid: TemplateId) -> Vec<(shapes::TypeName, Ty)> {
@@ -221,7 +222,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             TyKind::Generic { base, args } => (base, Some(args)),
             _ => return Ok(resolved),
         };
-        let Some(class) = self.index.class_named(base.get(self.ctx)) else {
+        let Some(class) = self.decls.class_id(base.get(self.ctx)) else {
             return Ok(resolved);
         };
         let args = args.map_or_else(Vec::new, |s| self.types.ty_slice(s).to_vec());
@@ -299,7 +300,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             if self.index.returns_empty_list.contains(template.index()) && !view.explicit_return {
                 let result = match witness {
                     Some(w) => w.signature.as_ref().and_then(|s| s.result),
-                    None => self.list_exports.get(&view.func_id).copied().flatten(),
+                    None => self.list_exports[template].flatten(),
                 };
                 caller
                     .and_then(|id| self.instances.get(id))
@@ -423,7 +424,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .unwrap_or(view.params.len());
         for (p_idx, param) in view.params.iter().enumerate() {
             let local = self.index.param_local(param)?;
-            let declared = self.index.locals[local].declared;
+            let declared = self.index.locals.rows[local].declared;
             let declared = self.index.substitute(self.types, declared, &type_bindings);
             let bound_ty = if param.is_rest {
                 let extra_args = args.get(fixed_count..).unwrap_or(&[]);
@@ -469,7 +470,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let explicit_return = view
             .explicit_return
             .then(|| {
-                let ret = self.types.intern_hir(self.ctx, view.return_type, true);
+                let ret = view.result;
                 let ret = self.index.substitute(self.types, ret, &type_bindings);
                 (!self.types.is_open(ret)).then_some(ret)
             })
@@ -524,11 +525,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.type_bindings.push(type_bindings.into_boxed_slice());
         self.instance_index.insert(key, inst_id);
         self.inst_written.push(BitSet::default());
-        let mut sites = InstanceSites::new();
-        for &(site, resolve_tid, reject_tid) in
-            self.index.promises.get(&template).into_iter().flatten()
-        {
-            sites.insert(
+        let mut sites = InstanceSites::default();
+        for &(site, resolve_tid, reject_tid) in self.index.promises(template) {
+            sites.0.push((
                 site,
                 SiteEntry {
                     resolution: Some(SiteResolution::PromiseNew {
@@ -539,7 +538,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }),
                     ..SiteEntry::default()
                 },
-            );
+            ));
         }
         self.inst_sites.push(sites);
         self.subscriptions.inputs.push(Vec::new());
@@ -568,7 +567,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     continue;
                 }
                 let resolved_arg = self.types.promise_argument(arg_ty, |loc| read(loc).1);
-                let pat = self.index.locals[self.index.param_local(param)?].declared;
+                let pat = self.index.locals.rows[self.index.param_local(param)?].declared;
                 self.types.unify(
                     pat,
                     resolved_arg,
@@ -636,14 +635,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             arguments: inputs,
         };
         let mut field_loc_buf = Vec::with_capacity(hir_class.fields.len());
-        for field in &hir_class.fields {
+        for (field, &annotation) in hir_class.fields.iter().zip(&cinfo.field_types) {
             let ty = match field.ty {
                 HirType::Any | HirType::Unknown | HirType::Function(_) => Ty::OPEN,
-                _ => self.index.substitute(
-                    self.types,
-                    self.index.annotations.get(&field.ty)?,
-                    &[scope],
-                ),
+                _ => self.index.substitute(self.types, annotation, &[scope]),
             };
             let declared = !self.types.is_open(ty);
             let loc = self.facts.alloc(if declared { ty } else { Ty::BOTTOM });

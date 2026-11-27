@@ -22,7 +22,14 @@ impl Callback<'_> {
                     .map(|p| p.base.carrier)
             }
             Self::Source(decl) => shapes
-                .source_binding(&decl.params.first()?.ty)
+                .resolved_binding(
+                    shapes
+                        .specialization
+                        .instances
+                        .local(decl.params.first()?.id)
+                        .ok()?
+                        .annotation,
+                )
                 .ok()
                 .map(|ty| ty.carrier),
         }

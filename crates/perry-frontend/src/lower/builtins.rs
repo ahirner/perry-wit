@@ -30,8 +30,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Some(member) = resource.and_then(|ty| {
             self.shapes
                 .specialization
-                .receiver_members
-                .get(object, ty.deref(ctx).key())
+                .instances
+                .expressions()
+                .receiver(object)?
+                .member(self.shapes.decls.world, ty.deref(ctx).key())
         }) {
             return self.resource_call(ctx, member, Some(receiver), args);
         }
@@ -141,8 +143,12 @@ impl<'s> FunctionBuilder<'s, '_> {
             let is_inst = self
                 .shapes
                 .class_of_type(ctx, value.get_type(ctx))
-                .and_then(|name| self.shapes.instance_class(name))
-                .is_some_and(|class| class.name == ty || class.declaration.name == ty);
+                .is_some_and(|class| match class {
+                    crate::shapes::ClassShape::Instance(c) => {
+                        c.name == ty || c.declaration.name == ty
+                    }
+                    crate::shapes::ClassShape::Source(c) => c.name == ty,
+                });
             return Ok(self.boolean(ctx, is_inst));
         }
         let (error, code) = match ty {

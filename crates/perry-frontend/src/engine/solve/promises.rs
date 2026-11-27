@@ -128,7 +128,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             reject_tid,
             ..
         }) = self.inst_sites[s.inst]
-            .get(&site)
+            .get(site)
             .and_then(|entry| entry.resolution.as_ref())
         else {
             return Err(Diagnostic::internal(
@@ -188,7 +188,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 None => (false, false),
             };
             let entry = self.inst_sites[s.inst]
-                .get_mut(&site)
+                .get_mut(site)
                 .ok_or_else(|| Diagnostic::internal("missing promise constructor site"))?;
             entry.resolution = Some(SiteResolution::PromiseNew {
                 value_loc,

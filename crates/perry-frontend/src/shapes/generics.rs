@@ -64,12 +64,12 @@ pub(crate) fn substitute(
 
 impl<'a> Declaration<'a> {
     pub(crate) fn find(decls: &Declarations<'a>, base: &str) -> Option<Self> {
-        decls
-            .interfaces
-            .get(base)
-            .map(|i| Self::Interface(i))
-            .or_else(|| decls.classes.get(base).copied().map(Self::Class))
-            .or_else(|| decls.type_aliases.get(base).map(|a| Self::Alias(a)))
+        let symbol = decls.symbols.get(base)?;
+        symbol
+            .interface
+            .map(Self::Interface)
+            .or_else(|| symbol.class.map(Self::Class))
+            .or_else(|| symbol.alias.map(Self::Alias))
     }
 
     pub(crate) fn parameters(self) -> &'a [perry_hir::types::TypeParam] {

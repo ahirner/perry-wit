@@ -1,22 +1,24 @@
 //! Expression, property, collection-constructor, and object-spread evaluation.
 use super::*;
+use crate::engine::types::LocalStorage;
 use crate::methods::MethodResult;
 use crate::source::ConstructorSites;
 
 impl<'h, 'a> Solver<'h, 'a> {
-    fn static_field_loc(&self, class: &str, field: &str) -> Option<LocId> {
-        self.index
-            .class(self.index.class_named(class)?)
-            .static_field(field)
+    fn static_field_loc(&self, site: &Expr) -> Option<LocId> {
+        match self.index.locals.rows[self.index.expressions.static_field(site)?].storage {
+            LocalStorage::Module(loc) => Some(loc),
+            LocalStorage::Activation(_) => None,
+        }
     }
 
-    pub(super) fn read_static_field(&mut self, reader: InstanceId, class: &str, field: &str) -> Ty {
-        self.static_field_loc(class, field)
+    pub(super) fn read_static_field(&mut self, reader: InstanceId, site: &Expr) -> Ty {
+        self.static_field_loc(site)
             .map_or(Ty::OPEN, |loc| self.read_loc(loc, reader))
     }
 
     pub(super) fn eval_expr(&mut self, s: &mut EvalState<'h>, expr: &'h Expr) -> Result<Ty> {
-        if let Some(record) = self.index.iteration.expression(expr) {
+        if let Some(record) = self.index.locals.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(inner) => self.eval_expr(s, inner),
                 hir_compat::RecordExpr::RequireObject(inner) => {
@@ -112,14 +114,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         match expr {
             Expr::LocalGet(id) => self.eval_local_get(s, *id),
             Expr::LocalSet(id, value) => {
-                if self.index.iteration.is_release(expr) {
+                if self.index.locals.is_release(expr) {
                     return Ok(Ty::VOID);
                 }
                 s.guards.assign(*id);
                 let val_ty = self.eval_expr(s, value)?;
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
-                        let is_inferred = !self.index.locals[lidx].flags.is_explicit();
+                        let is_inferred = !self.index.locals.rows[lidx].flags.is_explicit();
                         let local_span = self.hir.declarations.locals.get(id).map(|sp| sp.span);
                         if matches!(self.types.kind(existing), TyKind::Func(_))
                             || self.is_tagged_func_union_in(existing, s.inst)
@@ -156,7 +158,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 self.write_loc(loc, Ty::OPEN);
                             }
                         } else if (is_inferred
-                            && self.index.locals[lidx]
+                            && self.index.locals.rows[lidx]
                                 .flags
                                 .intersects(LocalFlags::DEFERRED_OR_NULLISH))
                             || self.types.is_open(existing)
@@ -514,17 +516,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(Ty::NUMBER)
             }
-            Expr::StaticFieldGet {
-                class_name,
-                field_name,
-            } => Ok(self.read_static_field(s.inst, class_name, field_name)),
-            Expr::StaticFieldSet {
-                class_name,
-                field_name,
-                value,
-            } => {
+            Expr::JsonParseTyped { text, .. } => {
+                self.eval_expr(s, text)?;
+                let ty = self.index.expressions.annotation(expr)?;
+                Ok(if ty == Ty::OPEN { Ty::DYNAMIC } else { ty })
+            }
+            Expr::StaticFieldGet { .. } => Ok(self.read_static_field(s.inst, expr)),
+            Expr::StaticFieldSet { value, .. } => {
                 let val_ty = self.eval_expr(s, value)?;
-                if let Some(loc) = self.static_field_loc(class_name, field_name) {
+                if let Some(loc) = self.static_field_loc(expr) {
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, val_ty);

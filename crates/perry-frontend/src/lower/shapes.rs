@@ -5,7 +5,6 @@ use crate::lower::{
     Diagnostic, LocalBinding, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
     missing_type_annotation, unsupported,
 };
-use perry_hir::types::Type as HirType;
 use perry_mir::{
     ArrayType, OptionalType, PlironResultExt as _, PromiseType, RecordKind, RecordType, StringType,
 };
@@ -95,7 +94,6 @@ pub(super) struct Shapes<'h, T = Prepared<'h>> {
     pub(super) decls: &'h Declarations<'h>,
     callables: crate::engine::BitSet,
     pub(super) class_records: HashMap<TypeHandle, crate::shapes::ClassShape<'h>>,
-    pub(super) source: &'h crate::source::ModuleDeclarations,
     pub(super) locations: &'h crate::hir_compat::Locations<'h>,
 }
 
@@ -107,7 +105,6 @@ pub(super) fn identifier(name: &str) -> Result<Identifier> {
 impl<'h> Shapes<'h, Preparing<'h>> {
     pub(super) fn new(
         module: pliron::builtin::ops::ModuleOp,
-        declarations: &'h crate::source::ModuleDeclarations,
         decls: &'h Declarations<'h>,
         locations: &'h crate::hir_compat::Locations<'h>,
         specialization: &'h crate::engine::Specialization<'h>,
@@ -116,13 +113,7 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             perry_mir::RecordLayouts,
         ),
     ) -> Self {
-        let global_ids = specialization.instances.globals.iter().copied().chain(
-            specialization
-                .bodies
-                .static_fields
-                .values()
-                .map(|field| field.id),
-        );
+        let global_ids = specialization.instances.globals();
         Shapes {
             records: layouts.1,
             specialization,
@@ -140,7 +131,6 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             decls,
             callables: Default::default(),
             class_records: HashMap::default(),
-            source: declarations,
             locations,
         }
     }
@@ -165,7 +155,6 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             decls: self.decls,
             callables: self.callables,
             class_records: self.class_records,
-            source: self.source,
             locations: self.locations,
         }
     }
@@ -173,7 +162,7 @@ impl<'h> Shapes<'h, Preparing<'h>> {
 
 impl<'h, T> Shapes<'h, T> {
     pub(super) fn local_name(&self, id: perry_hir::types::LocalId) -> Option<&str> {
-        let span = self.source.locals.get(&id)?.span;
+        let span = self.specialization.instances.locals.row(id)?.span?;
         self.locations
             .source_at(span.lo.0)?
             .get(..span.hi.0.checked_sub(span.lo.0)? as usize)
@@ -184,8 +173,14 @@ impl<'h, T> Shapes<'h, T> {
         error: Diagnostic,
         id: perry_hir::types::LocalId,
     ) -> Diagnostic {
-        match self.source.locals.get(&id) {
-            Some(local) => error.with_fallback_span(self.locations.span(local.span)),
+        match self
+            .specialization
+            .instances
+            .locals
+            .row(id)
+            .and_then(|r| r.span)
+        {
+            Some(span) => error.with_fallback_span(self.locations.span(span)),
             None => error,
         }
     }
@@ -232,7 +227,7 @@ impl<'h, T> Shapes<'h, T> {
         self.specialization
             .bodies
             .functions
-            .iter()
+            .values()
             .any(|f| f.name == name)
     }
 }
@@ -255,21 +250,26 @@ impl<'h, T> Shapes<'h, T> {
         self.decls.is_user_type(name)
     }
 
-    pub(super) fn class_of_type(&self, ctx: &Context, ty: TypeHandle) -> Option<&'h str> {
+    pub(super) fn class_of_type(
+        &self,
+        ctx: &Context,
+        ty: TypeHandle,
+    ) -> Option<crate::shapes::ClassShape<'h>> {
         let inner = crate::lower::present_type(ctx, ty);
-        self.class_records.get(&inner).map(|class| class.name())
+        self.class_records.get(&inner).copied()
     }
 
     pub(super) fn static_field(
         &self,
+        site: &perry_hir::ir::Expr,
         class: &str,
         name: &str,
     ) -> Result<perry_hir::types::LocalId> {
         self.specialization
-            .bodies
-            .static_fields
-            .get(&(class, name))
-            .map(|field| field.id)
+            .instances
+            .expressions()
+            .static_field(site)
+            .map(|local| self.specialization.instances.locals.rows[local].id)
             .ok_or_else(|| {
                 diag!(
                     codes::TYPE_MISMATCH,
@@ -278,14 +278,11 @@ impl<'h, T> Shapes<'h, T> {
             })
     }
 
-    pub(super) fn instance_class(
-        &self,
-        name: &str,
-    ) -> Option<&'h crate::source::InstanceClass<'h>> {
-        match *self.decls.classes.get(name)? {
-            crate::shapes::ClassShape::Instance(class) => Some(class),
-            crate::shapes::ClassShape::Source(_) => None,
-        }
+    pub(super) fn symbol(&self, expr: &perry_hir::ir::Expr) -> Option<&crate::shapes::Symbol<'h>> {
+        self.specialization
+            .instances
+            .expressions()
+            .symbol(self.decls, expr)
     }
 }
 
@@ -386,7 +383,7 @@ impl<'h> Shapes<'h, Preparing<'_>> {
         // Built-in classes the subset models (a user type or explicit import takes precedence).
         let user = self.is_user_type(name);
         if !user {
-            if let Some(entry) = self.decls.imported_types.get(name) {
+            if let Some(entry) = self.decls.imported_type(name) {
                 return self.foreign_value_type(ctx, entry);
             }
             if let Some(ty) = perry_mir::builtin_value_type(ctx, name) {
@@ -518,13 +515,5 @@ impl<'h, T> Shapes<'h, T> {
             .map(|(i, ty)| (format!("_{i}"), ty))
             .collect();
         self.records.structural(ctx, kind, fields).to_diag(ctx)
-    }
-
-    /// Field names, in source order, of a synthesized object-literal shape.
-    pub(super) fn literal_fields(
-        &self,
-        class_name: &str,
-    ) -> Option<&'h [perry_hir::ir::ClassField]> {
-        self.specialization.literal_classes.get(class_name).copied()
     }
 }

@@ -53,7 +53,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             let Some(lidx) = self.index.local_idx(cap_id) else {
                 continue;
             };
-            let local = self.index.locals[lidx];
+            let local = self.index.locals.rows[lidx];
             if local.flags.contains(LocalFlags::MODULE) {
                 continue;
             }
@@ -116,10 +116,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             if !self.facts.escaping.insert(tid.index()) {
                 continue;
             }
-            self.facts.dirty.insert(Fact::Escape(tid));
+            self.facts.mark(Fact::Escape(tid));
             for &cap_id in self.index.template_captures(tid) {
                 if let Some(lidx) = self.index.local_idx(cap_id) {
-                    let flags = self.index.locals[lidx].flags;
+                    let flags = self.index.locals.rows[lidx].flags;
                     if !flags.contains(LocalFlags::MODULE)
                         && flags.intersects(LocalFlags::BOXED_TRIGGER)
                     {
@@ -132,7 +132,9 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn record_operand_use(&mut self, inst_id: InstanceId, expr: &Expr, c: OperandUse) {
         if let Some(site) = self.index.expressions.index(expr) {
-            self.inst_sites[inst_id].entry(site).or_default().operand = Some(c);
+            self.inst_sites[inst_id]
+                .entry(site, SiteEntry::default)
+                .operand = Some(c);
         } else {
             debug_assert!(false, "unindexed operand");
         }
@@ -140,7 +142,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn clear_site(&mut self, inst: InstanceId, expr: &Expr) {
         if let Some(site) = self.index.expressions.index(expr)
-            && let Some(entry) = self.inst_sites[inst].get_mut(&site)
+            && let Some(entry) = self.inst_sites[inst].get_mut(site)
         {
             entry.resolution = None;
         }

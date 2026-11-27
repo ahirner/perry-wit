@@ -31,7 +31,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         expected: Option<TypeHandle>,
         required: bool,
     ) -> Result<Option<Value>> {
-        if !required && self.shapes.specialization.iteration.is_release(expr) {
+        if !required && self.shapes.specialization.instances.locals.is_release(expr) {
             return Ok(None);
         }
         if let Some(value) = hir_compat::non_null_assertion(expr) {
@@ -42,7 +42,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 value
             }));
         }
-        if let Some(record) = self.shapes.specialization.iteration.expression(expr) {
+        if let Some(record) = self.shapes.specialization.instances.locals.expression(expr) {
             return match record {
                 hir_compat::RecordExpr::Value(value) => self.expression_with(ctx, value, expected),
                 hir_compat::RecordExpr::RequireObject(value) => {
@@ -293,7 +293,15 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let target = if matches!(ty, HirType::Any | HirType::Unknown) {
                     expected.unwrap_or_else(|| JsonType::get(ctx).into())
                 } else {
-                    self.shapes.source_binding(ty)?.expected_type(ctx)
+                    self.shapes
+                        .resolved_binding(
+                            self.shapes
+                                .specialization
+                                .instances
+                                .expressions()
+                                .annotation(expr)?,
+                        )?
+                        .expected_type(ctx)
                 };
                 let parsed = self.parse_json_text(ctx, text, Some(target))?;
                 let decoded = self.fit(ctx, parsed, target)?;
@@ -397,27 +405,22 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::StaticFieldGet {
                 class_name,
                 field_name,
-            } => self.load_local(ctx, self.shapes.static_field(class_name, field_name)?)?,
+            } => self.load_local(ctx, self.shapes.static_field(expr, class_name, field_name)?)?,
             Expr::StaticFieldSet {
                 class_name,
                 field_name,
                 value,
             } => self.local_set(
                 ctx,
-                self.shapes.static_field(class_name, field_name)?,
+                self.shapes.static_field(expr, class_name, field_name)?,
                 value,
             )?,
             Expr::New {
-                class_name,
-                args,
-                byte_offset,
-                ..
-            } if let Some(class) = self.shapes.instance_class(class_name) => self
+                args, byte_offset, ..
+            } if let Some(class) = self.shapes.symbol(expr).and_then(|s| s.instance()) => self
                 .class_new(ctx, class, args)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
-            Expr::New {
-                class_name, args, ..
-            } => self.object_literal(ctx, class_name, args, expected)?,
+            Expr::New { class_name, .. } => self.object_literal(ctx, expr, class_name, expected)?,
             // `[a, b]` where a tuple is expected: its record `{ _0: a, _1: b }`.
             Expr::Array(items, _)
                 if expected.is_some_and(|ty| {
@@ -561,7 +564,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .shapes
                 .specialization
                 .instances
-                .binding_flags(id)?
+                .local(id)?
+                .flags
                 .contains(crate::engine::types::LocalFlags::INFERRED_DEFERRED)
             && !perry_mir::JsonSchema::supports_boxing(ctx, assigned.get_type(ctx))
         {

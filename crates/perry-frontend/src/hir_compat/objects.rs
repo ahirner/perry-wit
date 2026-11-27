@@ -1,10 +1,10 @@
 use super::{Diagnostic, Expr, Result, static_property};
-use crate::source::LiteralClasses;
+use perry_hir::ir::ClassField;
 
 /// Object fields retained across Perry's duplicate-key and literal-class desugarings.
 pub(crate) fn object_literal_pairs<'s>(
     expr: &'s Expr,
-    literals: &LiteralClasses<'s>,
+    literal: Option<&'s [ClassField]>,
 ) -> Option<impl Iterator<Item = (&'s str, &'s Expr)> + use<'s>> {
     let (fields, defined, names, args) = match expr {
         Expr::Object(fields) => (&fields[..], &[][..], &[][..], &[][..]),
@@ -13,10 +13,8 @@ pub(crate) fn object_literal_pairs<'s>(
         {
             (&[][..], &parts[..], &[][..], &[][..])
         }
-        Expr::New {
-            class_name, args, ..
-        } => {
-            let fields = *literals.get(class_name.as_str())?;
+        Expr::New { args, .. } => {
+            let fields = literal?;
             if fields.len() != args.len() {
                 return None;
             }
@@ -39,22 +37,22 @@ pub(crate) fn object_literal_pairs<'s>(
 
 pub(crate) fn literal_option<'s>(
     expr: &'s Expr,
-    literals: &LiteralClasses<'s>,
+    literal: Option<&'s [ClassField]>,
     key: &str,
 ) -> Option<&'s Expr> {
-    let mut fields = object_literal_pairs(expr, literals)?;
+    let mut fields = object_literal_pairs(expr, literal)?;
     let (name, value) = fields.next()?;
     (name == key && fields.next().is_none()).then_some(value)
 }
 
 pub(crate) fn read_file_text<'s>(
     option: Option<&'s Expr>,
-    literals: &LiteralClasses<'s>,
+    literal: Option<&'s [ClassField]>,
 ) -> Result<bool> {
     let Some(option) = option else {
         return Ok(false);
     };
-    let encoding = literal_option(option, literals, "encoding").unwrap_or(option);
+    let encoding = literal_option(option, literal, "encoding").unwrap_or(option);
     if matches!(encoding, Expr::String(name) if matches!(name.as_str(), "utf8" | "utf-8" | "UTF-8" | "UTF8"))
     {
         return Ok(true);

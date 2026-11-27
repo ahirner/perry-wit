@@ -152,7 +152,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     fn local_location(&self, inst: InstanceId, local: LocalIdx) -> Option<LocId> {
         CaptureOwner::Instance(inst).location(
             &self.instances,
-            self.index.locals[local],
+            self.index.locals.rows[local],
             self.collapsed_locals[local],
         )
     }
@@ -160,7 +160,7 @@ impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn read_local_value(&mut self, inst: InstanceId, local: LocalIdx) -> Option<Ty> {
         let loc = self.local_location(inst, local)?;
         Some(
-            if self.index.locals[local]
+            if self.index.locals.rows[local]
                 .flags
                 .intersects(LocalFlags::SHARED)
             {
@@ -180,7 +180,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(loc) = self.collapsed_locals[local] {
             self.write_loc(loc, value);
         }
-        let info = self.index.locals[local];
+        let info = self.index.locals.rows[local];
         let loc = self.local_location(s.inst, local).ok_or_else(|| {
             perry_wit_diagnostics::internal!("missing storage for local {}", info.id)
         })?;
@@ -404,12 +404,14 @@ impl<'h, 'a> Solver<'h, 'a> {
             .expressions
             .index(expr)
             .ok_or_else(|| Diagnostic::internal("operand missing from lexical site index"))?;
-        Ok(self.inst_sites[inst].entry(site).or_default())
+        Ok(self.inst_sites[inst].entry(site, SiteEntry::default))
     }
 
     pub(super) fn record_site(&mut self, inst: InstanceId, expr: &Expr, res: SiteResolution) {
         if let Some(site) = self.index.expressions.index(expr) {
-            self.inst_sites[inst].entry(site).or_default().resolution = Some(res);
+            self.inst_sites[inst]
+                .entry(site, SiteEntry::default)
+                .resolution = Some(res);
         } else {
             debug_assert!(false, "unindexed resolution site");
         }
@@ -425,11 +427,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     init: Some(init),
                     ..
                 } if let Some(hir_compat::RecordExpr::Value(value)) =
-                    self.index.iteration.expression(init) =>
+                    self.index.locals.expression(init) =>
                 {
                     Some((*id, self.eval_expr(s, value)?))
                 }
-                _ if let Some((element, _)) = self.index.iteration.element(remaining) => {
+                _ if let Some((element, _)) = self.index.locals.element(remaining) => {
                     let ty = self.eval_expr(s, element.value)?;
                     let ty = match element.available {
                         hir_compat::Availability::Known(true) => ty,
@@ -465,7 +467,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     return Ok(());
                 };
-                let local = self.index.locals[lidx];
+                let local = self.index.locals.rows[lidx];
                 let is_inferred = !local.flags.is_explicit();
                 let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
                 let declared = local.declared;
@@ -657,7 +659,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 update,
                 body,
             } => {
-                if let Some((id, source)) = self.hir.declarations.for_of(init.as_deref()) {
+                if let Some((id, source)) = self.index.locals.for_of(init.as_deref()) {
                     let iterable = self.eval_expr(s, source)?;
                     let iterable = self.resolve_cell_read(s.inst, iterable);
                     let element = if iterable == Ty::BOTTOM {
@@ -743,7 +745,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let (locations, self_nested_locs, escaping_env_templates) = self.facts.finish();
         Solved {
             writes,
-            resource_instances: self.resource_instances,
+            resources: self.resources,
             init_inst,
             instances: self.instances,
             class_insts: self.class_insts,

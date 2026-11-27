@@ -194,6 +194,11 @@ export function liveGrouping() {
  if(visits!==2 || missing===undefined || missing.length!==1 || missing[0]!==undefined)return 6;
  const empty:number[]=[];
  if(Map.groupBy(empty,(value,index)=>{throw new Error('empty callback');return 0;}).size!==0)return 7;
+ const numbers=new Set<number>([10,20,30]);
+ numbers.delete(10);
+ trace='';
+ Map.groupBy(numbers,(value,index)=>{trace+=String(index)+':'+String(value)+';';return 0;});
+ if(trace!=='0:20;1:30;')return 8;
  return 0;
 }
 

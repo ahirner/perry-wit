@@ -125,35 +125,14 @@ pub(crate) struct ModuleDeclarations {
     pub(crate) interfaces: Vec<Interface>,
     pub(crate) type_aliases: Vec<TypeAlias>,
     pub(crate) locals: HashMap<LocalId, LocalDeclaration>,
-    pub(crate) closure_signatures: HashMap<FuncId, TypeAlias>,
+    pub(crate) closures: HashMap<FuncId, ClosureDeclaration>,
     pub(crate) has_top_level_await: bool,
 }
 
-impl ModuleDeclarations {
-    pub(crate) fn implicit_parameter(&self, param: &Param) -> bool {
-        use perry_hir::types::Type;
-        !self
-            .locals
-            .get(&param.id)
-            .is_some_and(|local| local.flags.contains(LocalFlags::PARAM_ANNOTATED))
-            && matches!(param.ty, Type::Any | Type::Unknown)
-    }
-
-    pub(crate) fn for_of<'a>(&self, init: Option<&'a Stmt>) -> Option<(LocalId, &'a Expr)> {
-        let Stmt::Let {
-            id,
-            init: Some(source),
-            ..
-        } = init?
-        else {
-            return None;
-        };
-        self.locals
-            .get(id)?
-            .flags
-            .contains(LocalFlags::FOR_OF)
-            .then_some((*id, source))
-    }
+#[derive(Default)]
+pub(crate) struct ClosureDeclaration {
+    pub(crate) name: String,
+    pub(crate) signature: Option<TypeAlias>,
 }
 
 pub(crate) struct LocalDeclaration {
@@ -163,26 +142,19 @@ pub(crate) struct LocalDeclaration {
 
 pub(crate) struct SourceModule<'s> {
     pub(crate) member_prefix: String,
-    pub(crate) constructors: super::Constructors,
     pub(crate) locations: crate::hir_compat::Locations<'s>,
-    pub(crate) resources:
-        std::collections::BTreeMap<u32, crate::hir_compat::ResourceClass<super::ClassId>>,
+    pub(crate) resources: crate::hir_compat::ResourceClasses<super::ClassId>,
     pub(crate) sparse_arrays: bool,
     pub(crate) declarations: ModuleDeclarations,
     pub(crate) bodies: Bodies,
-    pub(crate) closure_display_names: HashMap<FuncId, String>,
 }
 
 impl<'s> SourceModule<'s> {
     pub(crate) fn bind(
         mut module: Module,
         mut analysis: super::Analysis,
-        constructors: super::Constructors,
         locations: crate::hir_compat::Locations<'s>,
-        resources: std::collections::BTreeMap<
-            u32,
-            crate::hir_compat::ResourceClass<super::ClassId>,
-        >,
+        resources: crate::hir_compat::ResourceClasses<super::ClassId>,
     ) -> Self {
         let locals = module
             .local_source_spans
@@ -207,7 +179,19 @@ impl<'s> SourceModule<'s> {
                 (id, LocalDeclaration { span, flags })
             })
             .collect();
-        let mut closure_signatures = HashMap::new();
+        let mut closures: HashMap<_, _> = module
+            .closure_display_names
+            .into_iter()
+            .map(|(id, name)| {
+                (
+                    id,
+                    ClosureDeclaration {
+                        name,
+                        signature: None,
+                    },
+                )
+            })
+            .collect();
         if !analysis.signature_prefix.is_empty() {
             let mut aliases: HashMap<_, _> = module
                 .type_aliases
@@ -219,13 +203,12 @@ impl<'s> SourceModule<'s> {
                     && let Some(alias) =
                         aliases.remove(&format!("{}{lo}", analysis.signature_prefix))
                 {
-                    closure_signatures.insert(id, alias);
+                    closures.entry(id).or_default().signature = Some(alias);
                 }
             }
         }
         Self {
             locations,
-            constructors,
             resources,
             member_prefix: analysis.names.prefix("member"),
             sparse_arrays: analysis.sparse_arrays,
@@ -235,7 +218,7 @@ impl<'s> SourceModule<'s> {
                 interfaces: module.interfaces,
                 type_aliases: module.type_aliases,
                 locals,
-                closure_signatures,
+                closures,
                 has_top_level_await: module.has_top_level_await,
             },
             bodies: Bodies {
@@ -243,7 +226,6 @@ impl<'s> SourceModule<'s> {
                 functions: module.functions,
                 classes: module.classes,
             },
-            closure_display_names: module.closure_display_names,
         }
     }
 }
@@ -304,12 +286,6 @@ pub(crate) struct InstanceFunction<'s> {
     pub(crate) is_exported: bool,
 }
 
-pub(crate) struct StaticField<'s> {
-    pub(crate) id: LocalId,
-    pub(crate) field: &'s perry_hir::ir::ClassField,
-    pub(crate) ty: Option<crate::engine::types::Ty>,
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum FieldOverride {
     Solved(crate::engine::types::Ty),
@@ -335,15 +311,15 @@ impl InstanceClass<'_> {
 }
 
 pub(crate) struct InstanceBodies<'s> {
-    pub(crate) static_fields: std::collections::BTreeMap<(&'s str, &'s str), StaticField<'s>>,
+    pub(crate) static_fields: Vec<(LocalId, Option<crate::engine::types::Ty>)>,
     pub(crate) native: Vec<(FuncId, crate::engine::NativeFunction)>,
     pub(crate) init: &'s [Stmt],
-    pub(crate) functions: Vec<InstanceFunction<'s>>,
+    pub(crate) functions: indexmap::IndexMap<FuncId, InstanceFunction<'s>>,
     pub(crate) classes:
         crate::engine::types::IdxVec<crate::engine::types::ClassInstId, InstanceClass<'s>>,
 }
 
-impl crate::engine::InstancePlans {
+impl crate::engine::InstancePlans<'_> {
     pub(crate) fn reference(
         &self,
         owner: BodyOwner,

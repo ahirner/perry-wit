@@ -165,13 +165,16 @@ impl EvalState<'_> {
 pub(crate) fn solve<'h, 'r: 'h>(
     ctx: &Context,
     hir: &'h SourceModule<'h>,
-    witnesses: Vec<hir_compat::SourceWitness<'r>>,
+    (witnesses, resources): (
+        Vec<hir_compat::SourceWitness<'r>>,
+        hir_compat::ResourceClasses<ClassId>,
+    ),
     index: &ModuleIndex<'h>,
     decls: &Declarations,
     types: &mut TypeTable,
 ) -> Result<(Solved, hir_compat::Witnesses<'r, ExportRoot>)> {
     let mut solver = Solver::new(ctx, hir, index, decls, types);
-    let (init_inst, exports) = solver.seed_roots(witnesses)?;
+    let (init_inst, exports) = solver.seed_roots(witnesses, resources)?;
     solver.run_worklist()?;
     let live = solver.live_instances(|_| {});
     if !solver.instances.iter_enumerated().any(|(id, inst)| {
@@ -186,7 +189,7 @@ pub(crate) fn solve<'h, 'r: 'h>(
                 && !view.is_generator
                 && view.type_params.is_empty()
                 && view.params.iter().all(|p| !matches!(p.ty, HirType::Any))
-                && !matches!(view.return_type, HirType::Any)
+                && view.result != Ty::OPEN
             {
                 let args = solver.declared_arguments(tid)?;
                 solver.request_instance(InstanceReq::new(tid, &args, None))?;
@@ -200,7 +203,7 @@ pub(crate) fn solve<'h, 'r: 'h>(
 }
 
 struct Solver<'h, 'a> {
-    resource_instances: HashMap<u32, ClassInstId>,
+    resources: hir_compat::ResourceClasses<ClassInstId>,
     ctx: &'a Context,
     hir: &'h SourceModule<'h>,
     index: &'a ModuleIndex<'h>,
@@ -213,7 +216,7 @@ struct Solver<'h, 'a> {
     worklist: Vec<InstanceId>,
     queued: BitSet,
     instances: IdxVec<InstanceId, Instance>,
-    list_exports: HashMap<perry_hir::types::FuncId, Option<crate::wit::WitValue<'h>>>,
+    list_exports: IdxVec<TemplateId, Option<Option<crate::wit::WitValue<'h>>>>,
     instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: IdxVec<TemplateId, u16>,
     field_locs: Pool<FieldLocSpan, LocId>,
@@ -292,7 +295,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             values.push(Ty::VOID);
         }
         Self {
-            resource_instances: HashMap::new(),
+            resources: Default::default(),
             ctx,
             hir,
             index,
@@ -304,7 +307,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             worklist: Vec::new(),
             queued: BitSet::default(),
             instances: IdxVec::default(),
-            list_exports: HashMap::new(),
+            list_exports: index.views.filled(None),
             instance_index: HashMap::with_capacity(64),
             template_counts: index.views.filled(0),
             field_locs: Pool::default(),
@@ -312,7 +315,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             dispatch_arm_spans: Vec::new(),
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
-            collapsed_locals: index.locals.filled(None),
+            collapsed_locals: index.locals.rows.filled(None),
             inst_written: IdxVec::default(),
             inst_sites: IdxVec::default(),
             inst_superseded: BitSet::default(),
@@ -340,7 +343,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .expressions
             .index(expr)
             .ok_or_else(|| Diagnostic::internal("missing storage site for expression"))?;
-        let entry = self.inst_sites[inst].entry(index).or_default();
+        let entry = self.inst_sites[inst].entry(index, SiteEntry::default);
         let loc = match entry.resolution {
             Some(
                 SiteResolution::Cell(loc) | SiteResolution::PromiseReaction { result: loc, .. },
@@ -461,7 +464,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut head = 0usize;
         while let Some(&caller) = queue.get(head) {
             head += 1;
-            for entry in self.inst_sites[caller].values() {
+            for (_, entry) in &self.inst_sites[caller].0 {
                 self.for_each_site_target(
                     entry,
                     |target| {
@@ -484,7 +487,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             if live.contains(idx) {
                 bump_count(&mut self.template_counts, inst.template);
             } else if self.inst_superseded.insert(idx) {
-                self.inst_sites[id].clear();
+                self.inst_sites[id].0.clear();
                 self.subscriptions.forget(id);
             }
         }
@@ -514,16 +517,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.evaluate_instance(inst_id)?;
                 }
             }
-            for &fact in &self.facts.dirty {
-                for &reader in self.subscriptions.readers(fact) {
-                    if !self.inst_superseded.contains(reader.index())
-                        && self.queued.insert(reader.index())
-                    {
-                        self.worklist.push(reader);
-                    }
+            for reader in self.subscriptions.affected(&self.facts.dirty) {
+                if !self.inst_superseded.contains(reader.index())
+                    && self.queued.insert(reader.index())
+                {
+                    self.worklist.push(reader);
                 }
             }
-            self.facts.dirty.clear();
+            self.facts.dirty.iter_mut().for_each(BitSet::make_empty);
         }
         Ok(())
     }
@@ -541,7 +542,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let prev_inst_count = self.instances.len();
         let prev_loc_count = self.facts.len();
         let prev_collapsed = self.collapsed_closures.clone();
-        self.facts.dirty.clear();
+        self.facts.dirty.iter_mut().for_each(BitSet::make_empty);
         for id in live_ids {
             self.evaluate_instance(id)?;
         }
@@ -565,7 +566,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 "fixed-point check mutated a local frame slot",
             ));
         }
-        if !self.facts.dirty.is_empty() {
+        if self.facts.dirty.iter().any(|bits| !bits.is_empty()) {
             return Err(Diagnostic::internal(
                 "fixed-point check changed a solver fact",
             ));

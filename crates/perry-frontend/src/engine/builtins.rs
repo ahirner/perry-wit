@@ -44,8 +44,7 @@ pub(crate) fn receiver_of(
         TyKind::BigInt => Some(Receiver::Value(Kind::BigInt)),
         TyKind::Literal(_) => Some(Receiver::Value(Kind::String)),
         TyKind::Named(id) | TyKind::Generic { base: id, .. }
-            if !decls.is_user_type(id.get(ctx))
-                && !decls.imported_types.contains_key(id.get(ctx).as_str()) =>
+            if !decls.is_user_type(id.get(ctx)) && decls.imported_type(id.get(ctx)).is_none() =>
         {
             let name = id.get(ctx);
             CollectionKind::from_type_name(name)
@@ -442,10 +441,6 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
     }
     match expr {
         Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) => Ty::DYNAMIC,
-        Expr::JsonParseTyped { ty, .. } => {
-            let p = types.intern_hir(ctx, ty, true);
-            if p == Ty::OPEN { Ty::DYNAMIC } else { p }
-        }
         Expr::Uint8ArraySet { .. } => Ty::NUMBER,
         Expr::UrlSetPathname { .. } => Ty::STRING,
         _ => {

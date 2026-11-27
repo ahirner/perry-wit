@@ -108,8 +108,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         match self.types.kind(stripped) {
             TyKind::ClassInst(id) => Ok(Some(id)),
             TyKind::Named(id) => self
-                .index
-                .class_named(id.get(self.ctx))
+                .decls
+                .class_id(id.get(self.ctx))
                 .map(|cid| self.request_class_inst(cid, &[], byte_offset, Some(inst_id)))
                 .transpose(),
             _ => Ok(None),
@@ -125,13 +125,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         type_args: &'h [HirType],
         byte_offset: u32,
     ) -> Result<Ty> {
-        if let Some(&fields) = self.index.literal_classes.get(class_name) {
+        if let Some(fields) = self.index.expressions.literal(expr) {
             return self.eval_object_fields(
                 s,
                 fields.iter().zip(args).map(|(f, a)| (f.name.as_str(), a)),
             );
         }
-        let class = self.index.class_named(class_name);
+        let class = self
+            .index
+            .expressions
+            .symbol(self.decls, expr)
+            .and_then(|s| s.class_id());
         if class_name == "Promise" && class.is_none() {
             return self.eval_new_promise(s, expr, args, type_args, byte_offset);
         }
@@ -198,12 +202,16 @@ impl<'h, 'a> Solver<'h, 'a> {
         } = call;
         let callee = match callee {
             crate::source::Callee::Value(callee) => callee,
-            crate::source::Callee::Static { class, method } => {
+            crate::source::Callee::Static { method, .. } => {
                 let arg_tys = self.call_argument_types(s, call.args)?;
                 if arg_tys.contains(&Ty::BOTTOM) {
                     return Ok(Ty::BOTTOM);
                 }
-                if let Some(cid) = self.index.class_named(class)
+                if let Some(cid) = self
+                    .index
+                    .expressions
+                    .symbol(self.decls, expr)
+                    .and_then(|s| s.class_id())
                     && let Some(tid) = self.index.method_template(
                         &self.index.class(cid).declaration.static_methods,
                         hir_compat::method(method).name(),
@@ -215,10 +223,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         };
         use crate::shapes::Imported;
-        let binding = match callee {
-            Expr::ExternFuncRef { name, .. } => self.decls.imports.get(name.as_str()).copied(),
-            _ => None,
-        };
+        let binding = self
+            .index
+            .expressions
+            .symbol(self.decls, callee)
+            .and_then(|s| s.import);
         let builtin = match (callee, binding) {
             (_, Some(Imported::Timer(name))) => Some(name),
             (Expr::ExternFuncRef { name, .. }, None) => Some(name.as_str()),
@@ -265,8 +274,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             let arg_tys = self.eval_args(s, args)?;
             match binding {
                 Some(Imported::ReadFile) => {
-                    let text = hir_compat::read_file_text(args.get(1), &self.index.literal_classes)
-                        .map_err(|e| self.annotate_expr_error(s, e, byte_offset))?;
+                    let text = hir_compat::read_file_text(
+                        args.get(1),
+                        args.get(1).and_then(|e| self.index.expressions.literal(e)),
+                    )
+                    .map_err(|e| self.annotate_expr_error(s, e, byte_offset))?;
                     self.record_site(s.inst, expr, SiteResolution::ReadFile { text });
                     let inner = if text {
                         Ty::STRING
@@ -320,7 +332,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(args) = call.args.plain()
                     && let TyKind::Named(name) = self.types.kind(receiver)
                     && let Some(owner) = self.decls.resource(name.get(self.ctx))
-                    && let Some(member) = self.index.receiver_members.get(object, owner)
+                    && let Some(member) = self
+                        .index
+                        .expressions
+                        .receiver(object)
+                        .and_then(|group| group.member(self.decls.world, owner))
                 {
                     self.eval_args(s, args)?;
                     self.record_site(s.inst, expr, SiteResolution::ResourceCall(member));
@@ -535,7 +551,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             _ => view.display_name(&self.hir.locations),
         };
         for param in view.params {
-            if self.hir.declarations.implicit_parameter(param) {
+            if self.index.locals.rows[self.index.param_local(param)?]
+                .flags
+                .implicit_parameter(param)
+            {
                 let mut err = diag!(
                     codes::MISSING_TYPE_ANNOTATION,
                     "parameter '{}' of '{}' needs a type annotation",
@@ -543,8 +562,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     owner_name
                 )
                 .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
-                if let Some(span) = self.hir.declarations.locals.get(&param.id) {
-                    err = self.hir.locations.annotate(err, span.span);
+                if let Some(span) = self.index.locals.row(param.id).and_then(|r| r.span) {
+                    err = self.hir.locations.annotate(err, span);
                 }
                 return Err(err);
             }

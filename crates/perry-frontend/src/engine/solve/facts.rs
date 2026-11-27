@@ -1,5 +1,5 @@
 use super::*;
-use std::{collections::BTreeSet, ops::Index};
+use std::ops::Index;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Fact {
@@ -7,11 +7,20 @@ pub(super) enum Fact {
     Storage(LocId),
 }
 
+impl Fact {
+    fn key(self) -> (usize, usize) {
+        match self {
+            Self::Escape(id) => (0, id.index()),
+            Self::Storage(id) => (1, id.index()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Facts {
     values: IdxVec<LocId, Ty>,
     parents: IdxVec<LocId, LocId>,
-    pub(super) dirty: BTreeSet<Fact>,
+    pub(super) dirty: [BitSet; 2],
     pub(super) escaping: BitSet,
     declared: BitSet,
     pub(super) self_nested: BitSet,
@@ -30,6 +39,10 @@ impl Facts {
         }
     }
 
+    pub(super) fn mark(&mut self, fact: Fact) {
+        let (kind, id) = fact.key();
+        self.dirty[kind].insert(id);
+    }
     pub(super) fn len(&self) -> usize {
         self.values.len()
     }
@@ -67,7 +80,7 @@ impl Facts {
     pub(super) fn write(&mut self, types: &mut TypeTable, loc: LocId, value: Ty) {
         let root = self.root(loc);
         if self.join(types, root, value) {
-            self.dirty.insert(Fact::Storage(root));
+            self.mark(Fact::Storage(root));
         }
     }
 
@@ -93,7 +106,7 @@ impl Facts {
     fn set(&mut self, loc: LocId, value: Ty) {
         if self.values[loc] != value {
             self.values[loc] = value;
-            self.dirty.insert(Fact::Storage(loc));
+            self.mark(Fact::Storage(loc));
         }
     }
 
@@ -108,7 +121,7 @@ impl Facts {
         self.write(types, root, self.values[alias]);
         self.parents[alias] = root;
         // Readers of the retired location must resubscribe even when its type matched.
-        self.dirty.insert(Fact::Storage(alias));
+        self.mark(Fact::Storage(alias));
         if self.self_nested.contains(alias.index()) {
             self.self_nested.insert(root.index());
         }
@@ -137,12 +150,17 @@ impl Index<LocId> for Facts {
 #[derive(Default)]
 pub(super) struct Subscriptions {
     pub(super) inputs: IdxVec<InstanceId, Vec<Fact>>,
-    readers: HashMap<Fact, Vec<InstanceId>>,
+    readers: [Vec<Vec<InstanceId>>; 2],
 }
 
 impl Subscriptions {
     pub(super) fn read(&mut self, reader: InstanceId, fact: Fact) {
-        let readers = self.readers.entry(fact).or_default();
+        let (kind, id) = fact.key();
+        let column = &mut self.readers[kind];
+        if column.len() <= id {
+            column.resize_with(id + 1, Vec::new);
+        }
+        let readers = &mut column[id];
         if let Err(index) = readers.binary_search(&reader) {
             readers.insert(index, reader);
             self.inputs[reader].push(fact);
@@ -151,7 +169,8 @@ impl Subscriptions {
 
     pub(super) fn forget(&mut self, reader: InstanceId) {
         for fact in self.inputs[reader].drain(..) {
-            if let Some(readers) = self.readers.get_mut(&fact)
+            let (kind, id) = fact.key();
+            if let Some(readers) = self.readers[kind].get_mut(id)
                 && let Ok(index) = readers.binary_search(&reader)
             {
                 readers.remove(index);
@@ -159,7 +178,19 @@ impl Subscriptions {
         }
     }
 
-    pub(super) fn readers(&self, fact: Fact) -> &[InstanceId] {
-        self.readers.get(&fact).map_or(&[], Vec::as_slice)
+    pub(super) fn affected<'a>(
+        &'a self,
+        dirty: &'a [BitSet; 2],
+    ) -> impl Iterator<Item = InstanceId> + 'a {
+        dirty
+            .iter()
+            .zip(&self.readers)
+            .flat_map(|(dirty, readers)| {
+                dirty
+                    .iter()
+                    .filter_map(|id| readers.get(id))
+                    .flatten()
+                    .copied()
+            })
     }
 }

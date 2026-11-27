@@ -55,7 +55,7 @@ impl TypeTable {
     }
 
     pub(crate) fn wit_type(&mut self, ctx: &Context, value: WitValue<'_>, view: WitView) -> Ty {
-        let key = (std::ptr::from_ref(value.resolve), value.ty, view);
+        let key = (value.ty, view);
         if let Some(&ty) = self.wit_shapes.get(&key) {
             return ty;
         }
@@ -199,7 +199,7 @@ impl TypeTable {
         view: WitView,
     ) -> perry_wit_diagnostics::Result<Ty> {
         self.wit_shapes
-            .get(&(value.resolve, value.ty, view))
+            .get(&(value.ty, view))
             .copied()
             .ok_or_else(|| perry_wit_diagnostics::internal!("missing WIT import type"))
     }

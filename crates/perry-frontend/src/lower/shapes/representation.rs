@@ -3,13 +3,6 @@ use super::*;
 use crate::engine::types::WitView;
 use crate::engine::types::{FuncIdentity, Idx, func_tag};
 
-impl Shapes<'_> {
-    pub(in crate::lower) fn source_binding(&self, ty: &HirType) -> Result<BindingType> {
-        let ty = self.specialization.annotations.get(ty)?;
-        self.resolved_binding(ty)
-    }
-}
-
 impl Shapes<'_, Preparing<'_>> {
     pub(super) fn foreign_value_type(
         &mut self,

@@ -1,6 +1,6 @@
 //! Entry-module declarations that implement the selected world's exports.
 use super::Locations;
-use crate::wit::WitValue;
+use crate::wit::{ResourceId, WitValue};
 use perry_contract::types::Input;
 use perry_hir::types::FuncId;
 use perry_parser::swc_ecma_ast as ast;
@@ -51,10 +51,10 @@ enum Declaration<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum Target<F> {
     Function(F),
-    Constructor(u32),
-    Method(u32, F),
-    Static(u32, F),
-    Destructor(u32, Option<F>),
+    Constructor(ResourceId),
+    Method(ResourceId, F),
+    Static(ResourceId, F),
+    Destructor(ResourceId, Option<F>),
 }
 
 impl<F> Target<F> {
@@ -68,6 +68,8 @@ impl<F> Target<F> {
         })
     }
 }
+
+pub(crate) type ResourceClasses<T> = BTreeMap<ResourceId, ResourceClass<T>>;
 
 pub(crate) struct ResourceClass<T> {
     pub(crate) class: T,
@@ -91,7 +93,7 @@ pub(crate) struct ResourceBinding {
 
 pub(crate) struct Exports<'r> {
     pub(crate) functions: Vec<Witness<'r, Target<FuncId>>>,
-    pub(crate) resources: BTreeMap<u32, ResourceClass<crate::source::ClassId>>,
+    pub(crate) resources: ResourceClasses<crate::source::ClassId>,
 }
 
 pub(crate) fn adapter_name(export: usize) -> String {
@@ -102,7 +104,7 @@ pub(crate) fn adapter_name(export: usize) -> String {
 pub(super) struct Roots<'r> {
     namespaces: HashSet<u32>,
     pub(super) witnesses: Vec<Witness<'r, Target<Span>>>,
-    classes: BTreeMap<u32, ResourceClass<Span>>,
+    classes: ResourceClasses<Span>,
 }
 
 impl Declaration<'_> {
@@ -282,7 +284,7 @@ pub(super) fn resolve<'a, 'r>(
             let source_name = perry_contract::names::NamedType::get(r, resource)
                 .map(|name| name.qualified())
                 .ok_or_else(|| Diagnostic::internal("unnamed exported resource"))?;
-            let owner = resource.index() as u32;
+            let owner = ResourceId::of(resource);
             let destructor = format!("{source_name}::[Symbol.dispose]");
             roots.classes.insert(
                 owner,
@@ -344,7 +346,7 @@ pub(super) fn resolve<'a, 'r>(
         let requirement = entry.core_name(r);
         let mut target = None;
         let mut annotations = Vec::new();
-        if let Some(owner) = f.kind.resource().map(|r| r.index() as u32)
+        if let Some(owner) = f.kind.resource().map(ResourceId::of)
             && let Some(class) = roots.classes.get(&owner)
         {
             let member = to_camel_case(f.item_name());

@@ -1,5 +1,5 @@
 //! Bind solved instances to borrowed source declarations and native MIR operation plans.
-use crate::source::{Bodies, InstanceBodies, InstanceClass, InstanceFunction, ModuleDeclarations};
+use crate::source::{Bodies, InstanceBodies, InstanceClass, InstanceFunction};
 mod async_helpers;
 mod expressions;
 mod funcs;
@@ -9,7 +9,8 @@ use super::boundary::{ModuleIndex, Origins, TemplateKind};
 use super::solve::Invocation;
 use super::solve::{ClassInst, Receiver, SiteEntry, Solved};
 use super::types::{
-    CaptureOwner, CellKind, ClassId, Idx, IdxVec, InstanceId, LocId, Ty, TyKind, TypeTable,
+    CaptureOwner, CellKind, ClassId, Idx, IdxVec, InstanceId, LocId, LocalFlags, LocalStorage, Ty,
+    TyKind, TypeTable,
 };
 use crate::source::CallerKind;
 use perry_hir::types::{FuncId, LocalId, Type as HirType};
@@ -20,7 +21,6 @@ use crate::hir_compat::Witnesses;
 
 pub(super) fn build<'h, 'r>(
     bodies: &'h Bodies,
-    declarations: &ModuleDeclarations,
     locations: &mut crate::hir_compat::Locations<'_>,
     index: &mut ModuleIndex<'h>,
     types: &TypeTable,
@@ -28,7 +28,7 @@ pub(super) fn build<'h, 'r>(
     layouts: (&Context, &mut perry_mir::RecordLayouts),
 ) -> Result<(
     InstanceBodies<'h>,
-    super::InstancePlans,
+    super::InstancePlans<'h>,
     Witnesses<'r, FuncId>,
 )> {
     let max_inst_fid = solved
@@ -39,7 +39,6 @@ pub(super) fn build<'h, 'r>(
         .unwrap_or(0);
     let mut planner = InstancePlanner {
         bodies,
-        declarations,
         locations,
         index,
         types,
@@ -62,15 +61,13 @@ pub(super) fn build<'h, 'r>(
         mut plans, origins, ..
     } = planner;
     plans.decisions.expressions = std::mem::take(&mut index.expressions);
-    plans.local_ids = std::mem::take(&mut index.local_to_idx);
-    plans.local_flags = index.locals.map(|local| local.flags);
-    plans.globals = index.emitted_uses(&bodies, origins, &plans, locations)?;
+    plans.locals = std::mem::take(&mut index.locals);
+    index.emitted_uses(&bodies, origins, &mut plans, locations)?;
     Ok((bodies, plans, exports))
 }
 
 struct InstancePlanner<'h, 'a, 's> {
     bodies: &'h Bodies,
-    declarations: &'a ModuleDeclarations,
     locations: &'a mut crate::hir_compat::Locations<'s>,
     index: &'a ModuleIndex<'h>,
     types: &'a TypeTable,
@@ -80,8 +77,8 @@ struct InstancePlanner<'h, 'a, 's> {
     layouts: (&'a Context, &'a mut perry_mir::RecordLayouts),
 
     native: Vec<(FuncId, super::NativeFunction)>,
-    plans: super::InstancePlans,
-    locals: IdxVec<InstanceId, std::collections::BTreeMap<super::types::LocalIdx, super::Storage>>,
+    plans: super::InstancePlans<'h>,
+    locals: IdxVec<InstanceId, Vec<(super::types::LocalIdx, super::Storage)>>,
 }
 
 impl<'h> InstancePlanner<'h, '_, '_> {
@@ -94,8 +91,8 @@ impl<'h> InstancePlanner<'h, '_, '_> {
     }
 
     fn annotate_local(&self, err: Diagnostic, id: LocalId) -> Diagnostic {
-        match self.declarations.locals.get(&id) {
-            Some(local) => self.locations.annotate(err, local.span),
+        match self.index.locals.row(id).and_then(|r| r.span) {
+            Some(span) => self.locations.annotate(err, span),
             None => err,
         }
     }
@@ -117,7 +114,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         let init_inst = self.solved.init_inst;
         self.prepare_bindings(init_inst)?;
 
-        let mut new_functions = Vec::new();
+        let mut new_functions = indexmap::IndexMap::new();
         for (inst_id, inst) in self.solved.instances.iter_enumerated() {
             if !self.solved.live_instances.contains(inst_id.index()) {
                 continue;
@@ -146,7 +143,8 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 | TemplateKind::ClassMethod
                 | TemplateKind::ClassGetter
                 | TemplateKind::ClassSetter => {
-                    new_functions.push(self.plan_function(inst_id, None)?);
+                    let function = self.plan_function(inst_id, None)?;
+                    new_functions.insert(function.id, function);
                 }
                 _ => {}
             }
@@ -159,16 +157,20 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 &f.name,
             ));
         }
-        let mut static_fields = std::collections::BTreeMap::new();
-        for class in self.index.classes.values() {
-            for (field, (loc, id)) in class.static_fields() {
-                let value = self.solved.locations[loc];
-                let ty = self.is_resolved(value).then_some(value);
-                static_fields
-                    .entry((class.declaration.name.as_str(), field.name.as_str()))
-                    .or_insert(crate::source::StaticField { id, field, ty });
-            }
-        }
+        let static_fields = self
+            .index
+            .locals
+            .rows
+            .iter()
+            .filter(|local| local.flags.contains(LocalFlags::STATIC_FIELD))
+            .filter_map(|local| match local.storage {
+                LocalStorage::Module(loc) => {
+                    let ty = self.solved.locations[loc];
+                    Some((local.id, self.is_resolved(ty).then_some(ty)))
+                }
+                LocalStorage::Activation(_) => None,
+            })
+            .collect();
         let mut new_classes = IdxVec::default();
         let mut emitted_classes = std::collections::HashSet::new();
         for cinst in self.solved.class_insts.iter() {
@@ -287,13 +289,19 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         let field_locs = &self.solved.field_locs[cinst.field_locs];
         use crate::source::FieldOverride;
         cls.direct_constructor = class.direct_constructor;
-        for (index, (field, &loc)) in orig.fields.iter().zip(field_locs).enumerate() {
+        for (index, ((field, &annotation), &loc)) in orig
+            .fields
+            .iter()
+            .zip(&class.field_types)
+            .zip(field_locs)
+            .enumerate()
+        {
             let resolved = self.solved.locations[loc];
             let storage = if self.is_zero_sized_func(resolved) {
                 cls.direct_constructor = false;
                 FieldOverride::Erased
             } else if self.is_resolved(resolved) {
-                if resolved == self.index.annotations.get(&field.ty)? {
+                if resolved == annotation {
                     continue;
                 }
                 FieldOverride::Solved(resolved)
@@ -368,21 +376,25 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                     .types
                     .erased_function(param_ty, &self.solved.escaping_env_templates)
             {
-                self.locals[inst_id].insert(
+                self.locals[inst_id].push((
                     local,
                     super::Storage::ErasedFunction(Some(self.index.view(ident.template).func_id)),
-                );
+                ));
                 continue;
             }
             let resolved = self.is_resolved(param_ty).then_some(param_ty);
-            if resolved.is_none() && !inst.is_witness && self.declarations.implicit_parameter(param)
+            if resolved.is_none()
+                && !inst.is_witness
+                && self.index.locals.rows[local]
+                    .flags
+                    .implicit_parameter(param)
             {
                 let err = diag!(codes::MISSING_TYPE_ANNOTATION, "cannot infer the type of parameter '{}' of '{}'", param.name, view.display_name(self.locations))
                     .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
                 let err = self.annotate_local(err, param.id);
                 return Err(self.attach_inst_chain(err, inst_id));
             }
-            let ty = resolved.unwrap_or(self.index.locals[local].declared);
+            let ty = resolved.unwrap_or(self.index.locals.rows[local].declared);
             let storage = if self.solved.boxed_locals.contains(local.index()) {
                 super::Storage::Boxed {
                     ty,
@@ -391,7 +403,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             } else {
                 super::Storage::Value(ty)
             };
-            self.locals[inst_id].insert(local, storage);
+            self.locals[inst_id].push((local, storage));
         }
 
         let ret_ty = self.solved.locations[inst.return_loc];

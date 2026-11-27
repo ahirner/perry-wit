@@ -15,12 +15,7 @@ use std::collections::HashMap;
 use wit_parser::{Resolve, Type, TypeDefKind, WorldId, WorldItem};
 
 /// Validate source number/bigint distinctions before exposing integer domains to MIR.
-fn constrain_numbers(
-    ctx: &mut Context,
-    function: &FuncOp,
-    export: &Export,
-    common_domain: bool,
-) -> Result<()> {
+fn constrain_numbers(ctx: &mut Context, function: &FuncOp, exports: &[&Export]) -> Result<()> {
     use pliron::{
         builtin::{
             type_interfaces::FunctionTypeInterface,
@@ -32,57 +27,73 @@ fn constrain_numbers(
         perry_mir::wit_signature(ctx, function).unwrap_or_else(|| function.get_type(ctx));
     let ty = TypedHandle::<FunctionType>::from_handle(existing, ctx).to_diag(ctx)?;
     let (mut args, mut results) = (ty.deref(ctx).arg_types(), ty.deref(ctx).res_types());
-    if !export.is_command() && args.len() != export.params.len() {
-        return Err(diag!(
-            crate::codes::CONTRACT_MISMATCH,
-            "{} takes {} parameters but the WIT export {} has {}",
-            export.declaration(),
-            args.len(),
-            export.core_name,
-            export.params.len()
-        )
-        .with_optional_span(perry_mir::source_span(ctx, function))
-        .with_help(format!(
-            "Update 'export function {}(...)' to accept {} parameter(s) matching WIT export '{}'.",
-            export.declaration(),
-            export.params.len(),
-            export.core_name
-        )));
-    }
-    if args.len() != export.params.len() || results.len() != usize::from(export.result.is_some()) {
-        return Ok(());
-    }
-    let mut constrained = false;
-    for (index, (source, abi)) in args
-        .iter_mut()
-        .zip(export.params.iter().map(|field| &field.ty))
-        .chain(results.iter_mut().zip(export.result.iter()))
-        .enumerate()
-    {
-        let AbiKind::Scalar(perry_contract::types::Scalar::Integer(domain)) = abi.kind else {
-            continue;
-        };
-        let wide = domain.bits() == 64;
-        let is_wide_int = source
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|int| int.width() == 64);
-        if wide && !source.deref(ctx).is::<perry_mir::BigIntType>() && !is_wide_int {
-            return Err(Diagnostic::new(
+    let mut common = vec![None; args.len() + results.len()];
+    for (member, &export) in exports.iter().enumerate() {
+        if !export.is_command() && args.len() != export.params.len() {
+            return Err(diag!(
                 crate::codes::CONTRACT_MISMATCH,
-                "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion",
+                "{} takes {} parameters but the WIT export {} has {}",
+                export.declaration(),
+                args.len(),
+                export.core_name,
+                export.params.len()
             )
-            .with_optional_span(export.annotation(index).or_else(|| perry_mir::source_span(ctx,function)))
+            .with_optional_span(perry_mir::source_span(ctx, function))
             .with_help(format!(
-                "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
-                export.declaration(), export.core_name
+                "Update 'export function {}(...)' to accept {} parameter(s) matching WIT export '{}'.",
+                export.declaration(),
+                export.params.len(),
+                export.core_name
             )));
         }
-        if common_domain
-            && (wide || source.deref(ctx).is::<FP64Type>() || source.deref(ctx).is::<IntegerType>())
+        if args.len() != export.params.len()
+            || results.len() != usize::from(export.result.is_some())
         {
+            common.fill(None);
+            continue;
+        }
+        for (index, (source, abi)) in args
+            .iter()
+            .zip(export.params.iter().map(|field| &field.ty))
+            .chain(results.iter().zip(export.result.iter()))
+            .enumerate()
+        {
+            let AbiKind::Scalar(perry_contract::types::Scalar::Integer(domain)) = abi.kind else {
+                common[index] = None;
+                continue;
+            };
+            let wide = domain.bits() == 64;
+            let is_wide_int = source
+                .deref(ctx)
+                .downcast_ref::<IntegerType>()
+                .is_some_and(|int| int.width() == 64);
+            if wide && !source.deref(ctx).is::<perry_mir::BigIntType>() && !is_wide_int {
+                return Err(Diagnostic::new(
+                    crate::codes::CONTRACT_MISMATCH,
+                    "WIT 64-bit integers require TypeScript bigint; use Number(value) for an explicit lossy conversion",
+                )
+                .with_optional_span(export.annotation(index).or_else(|| perry_mir::source_span(ctx, function)))
+                .with_help(format!(
+                    "Update function '{}' (implementing WIT export '{}') to use 'bigint' for 64-bit integer parameters and results.",
+                    export.declaration(), export.core_name
+                )));
+            }
+            if member == 0 {
+                if wide
+                    || source.deref(ctx).is::<FP64Type>()
+                    || source.deref(ctx).is::<IntegerType>()
+                {
+                    common[index] = Some(domain);
+                }
+            } else if common[index] != Some(domain) {
+                common[index] = None;
+            }
+        }
+    }
+    let constrained = common.iter().any(Option::is_some);
+    for (source, domain) in args.iter_mut().chain(&mut results).zip(common) {
+        if let Some(domain) = domain {
             *source = perry_mir::integer_type(ctx, domain).into();
-            constrained = true;
         }
     }
     if constrained {
@@ -197,12 +208,16 @@ pub(super) fn exports(
             },
         ));
     }
+    let mut groups = pliron::utils::table::IMap::default();
     for (function, export) in &bound {
-        let common_domain = bound.iter().all(|(other, abi)| {
-            function.get_operation() != other.get_operation()
-                || (abi.params == export.params && abi.result == export.result)
-        });
-        constrain_numbers(ctx, function, export, common_domain)?;
+        groups
+            .entry(function.get_operation())
+            .or_insert_with(|| (function, Vec::new()))
+            .1
+            .push(export);
+    }
+    for (function, exports) in groups.into_values() {
+        constrain_numbers(ctx, function, &exports)?;
     }
     Ok(bound.into_iter().map(|(_, export)| export).collect())
 }

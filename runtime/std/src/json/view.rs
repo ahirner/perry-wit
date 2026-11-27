@@ -25,6 +25,16 @@ unsafe fn field_descriptor(schema: *mut u8, index: u32) -> *mut u8 {
     unsafe { schema.add((d::FIELDS + index * d::FIELD_SIZE) as usize) }
 }
 
+unsafe fn field_table(schema: *mut u8, count: u32) -> *const u32 {
+    unsafe {
+        node(word(
+            schema,
+            (d::FIELDS + count * d::FIELD_SIZE + 8) as usize,
+        ))
+        .cast()
+    }
+}
+
 unsafe fn field_key(schema: *mut u8, index: u32) -> *mut u8 {
     unsafe { node(word(field_descriptor(schema, index), 0)) }
 }
@@ -131,10 +141,10 @@ pub(super) fn property(value: *mut u8, name: &[u8]) -> *mut u8 {
         let view = word(value, 0) == VIEW;
         match (word(schema, 0), view) {
             (d::RECORD, _) | (d::JSON_TUPLE, false) => {
-                for index in 0..count {
-                    if crate::runtime::bytes(field_key(schema, index)) == name {
-                        return field(origin, schema, index, view);
-                    }
+                let table = field_table(schema, count);
+                let index = super::order::lookup_field(table, count, name);
+                if index < count {
+                    return field(origin, schema, index, view);
                 }
                 if view {
                     object_member(node(word(origin, record::JSON as usize)), name)
@@ -216,13 +226,7 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
         let (origin, schema) = (node(word(value, 8)), node(word(value, 12)));
         let count = word(schema, 4);
         let graph = match word(schema, 0) {
-            d::RECORD => {
-                let table = node(word(
-                    schema,
-                    (d::FIELDS + count * d::FIELD_SIZE + 8) as usize,
-                ));
-                super::order::order_graph(origin, table.cast(), count)
-            }
+            d::RECORD => super::order::order_graph(origin, field_table(schema, count), count),
             d::JSON_DICTIONARY => {
                 let graph = new_node(OBJECT);
                 let data = node(word(origin, array::DATA as usize));

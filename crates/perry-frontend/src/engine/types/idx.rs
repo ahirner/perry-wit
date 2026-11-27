@@ -35,8 +35,11 @@ impl<I, T> Default for IdxVec<I, T> {
 
 #[allow(private_bounds)]
 impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
+    pub(crate) fn next_id(&self) -> I {
+        I::from_usize(self.data.len())
+    }
     pub(crate) fn push(&mut self, value: T) -> I {
-        let id = I::from_usize(self.data.len());
+        let id = self.next_id();
         self.data.push(value);
         id
     }
@@ -113,6 +116,8 @@ macro_rules! id_type {
 }
 
 id_type!(
+    ExprIdx,
+    DeclaredId,
     Ty,
     TemplateId,
     InstanceId,
@@ -213,6 +218,7 @@ span_type!(
     FieldLocSpan,
     DispatchArmSpan,
     BindingSpan,
+    PromiseSpan,
     PlanSpan,
     LocalPlanSpan,
     EnvFieldSpan,
@@ -383,7 +389,16 @@ impl LocalFlags {
     pub(crate) const WRITTEN_FROM_CLOSURE: Self = Self(1 << 9);
     pub(crate) const FORWARD_CAPTURED: Self = Self(1 << 10);
     pub(crate) const FOR_OF: Self = Self(1 << 11);
+    pub(crate) const GLOBAL_SLOT: Self = Self(1 << 13);
+    pub(crate) const STATIC_FIELD: Self = Self((1 << 14) | Self::GLOBAL_SLOT.0 | Self::GENERATED.0);
     pub(crate) const GENERATED: Self = Self(1 << 12);
+    pub(crate) fn implicit_parameter(self, param: &perry_hir::ir::Param) -> bool {
+        !self.contains(Self::PARAM_ANNOTATED)
+            && matches!(
+                param.ty,
+                perry_hir::types::Type::Any | perry_hir::types::Type::Unknown
+            )
+    }
     pub(crate) fn is_explicit(self) -> bool {
         !self.intersects(Self(Self::GENERATED.0 | Self::INFERRED.0))
     }
@@ -413,10 +428,14 @@ pub(crate) enum LocalStorage {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct LocalInfo {
+pub(crate) struct LocalInfo<'h> {
+    pub(crate) iteration: Option<(crate::hir_compat::Binding<'h>, bool)>,
+    pub(crate) element: Option<usize>,
+    pub(crate) span: Option<swc_common::Span>,
     pub(crate) id: LocalId,
     pub(crate) owner: TemplateId,
     pub(crate) declared: Ty,
+    pub(crate) annotation: Ty,
     pub(crate) storage: LocalStorage,
     pub(crate) flags: LocalFlags,
 }

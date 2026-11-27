@@ -394,21 +394,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             );
         };
         let expected_elem = expected_elem.filter(|_| matches!(input, Input::UndefinedCount(_)));
-        let mapper = map_fn.map(|callback| {
-            let zero = self.number(ctx, 0.0);
-            let index = self.entry_slot(ctx, zero.get_type(ctx));
-            self.store(ctx, index, zero);
-            (callback, index)
-        });
+        let mapper = map_fn.map(|callback| (callback, self.callback_ordinal(ctx)));
         self.collect_items(ctx, input, |b, ctx, item, _, _| {
             let item = if let Some((callback, index)) = mapper {
-                let ordinal = b.load(ctx, index)?;
-                let mapped =
-                    b.array_callback(ctx, callback, &Pair(ordinal, item).indexed_args())?;
-                let one = b.number(ctx, 1.0);
-                let advanced = b.binary(ctx, BinaryKind::Add, ordinal, one);
-                b.store(ctx, index, advanced);
-                mapped
+                b.indexed_callback(ctx, callback, index, item)?
             } else {
                 item
             };

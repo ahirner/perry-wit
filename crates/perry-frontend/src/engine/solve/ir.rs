@@ -9,7 +9,6 @@ use super::super::types::{
 use super::super::types::{LocalInfo, LocalStorage};
 use crate::hir_compat;
 use perry_wit_diagnostics::{Diagnostic, Result};
-use std::collections::HashMap;
 
 pub(crate) use super::super::types::Receiver;
 
@@ -17,7 +16,7 @@ impl CaptureOwner {
     pub(in crate::engine) fn location(
         mut self,
         instances: &IdxVec<InstanceId, Instance>,
-        local: LocalInfo,
+        local: LocalInfo<'_>,
         collapsed: Option<LocId>,
     ) -> Option<LocId> {
         let slot = match local.storage {
@@ -327,7 +326,7 @@ pub(crate) struct SiteEntry {
     pub(crate) operand: Option<OperandUse>,
 }
 
-pub(crate) type InstanceSites = std::collections::BTreeMap<ExprIdx, SiteEntry>;
+pub(in crate::engine) type InstanceSites = super::super::plans::SiteRows<SiteEntry>;
 
 impl SiteEntry {
     pub(crate) fn environment(self) -> Option<super::super::ClosureValue> {
@@ -344,12 +343,12 @@ impl SiteEntry {
         }
     }
 
-    pub(crate) fn promise(
+    pub(in crate::engine) fn promise(
         sites: &IdxVec<InstanceId, InstanceSites>,
         owner: CaptureOwner,
         site: ExprIdx,
     ) -> Result<LocId> {
-        let entry = owner.instance().and_then(|inst| sites[inst].get(&site));
+        let entry = owner.instance().and_then(|inst| sites[inst].get(site));
         match entry.and_then(|e| e.resolution.as_ref()) {
             Some(SiteResolution::PromiseNew { value_loc, .. }) => Ok(*value_loc),
             _ => Err(Diagnostic::internal(
@@ -381,7 +380,7 @@ pub(crate) enum ExportRoot {
 
 pub(crate) struct Solved {
     pub(crate) writes: crate::narrowing::WriteEffects,
-    pub(crate) resource_instances: HashMap<u32, ClassInstId>,
+    pub(crate) resources: crate::hir_compat::ResourceClasses<ClassInstId>,
     pub(crate) init_inst: InstanceId,
     pub(crate) instances: IdxVec<InstanceId, Instance>,
     pub(crate) class_insts: IdxVec<ClassInstId, ClassInst>,
@@ -390,7 +389,7 @@ pub(crate) struct Solved {
     pub(crate) dispatch_arms: Pool<DispatchArmSpan, DispatchArm>,
     pub(crate) helpers: IdxVec<HelperId, HelperEntry>,
     pub(in crate::engine) collapsed_locals: IdxVec<super::LocalIdx, Option<LocId>>,
-    pub(crate) inst_sites: IdxVec<InstanceId, InstanceSites>,
+    pub(in crate::engine) inst_sites: IdxVec<InstanceId, InstanceSites>,
     pub(crate) live_instances: BitSet,
     pub(crate) live_helpers: BitSet,
     pub(crate) escaping_env_templates: BitSet,

@@ -26,7 +26,7 @@ pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset};
 mod iteration;
 mod methods;
-pub(crate) use iteration::{Availability, CursorPositions, Iteration, RecordExpr};
+pub(crate) use iteration::{Availability, Binding, CursorPositions, Locals, RecordExpr};
 mod streams;
 mod timers;
 mod witnesses;
@@ -35,7 +35,8 @@ pub(crate) use methods::{Method, method};
 pub(crate) use streams::is_writable_to_web;
 pub(crate) use timers::is_timer_module;
 pub(crate) use witnesses::{
-    ExportDeclaration, ResourceClass, SourceWitness, Target, Witnesses, adapter_name,
+    ExportDeclaration, ResourceClass, ResourceClasses, SourceWitness, Target, Witnesses,
+    adapter_name,
 };
 
 pub(crate) fn lower<'s, 'r>(
@@ -45,17 +46,16 @@ pub(crate) fn lower<'s, 'r>(
 ) -> Result<(crate::source::SourceModule<'s>, Vec<SourceWitness<'r>>)> {
     let mut ast = loaded.module;
     let mut locations = loaded.locations;
-    let (constructors, witnesses, top_level) = GLOBALS.set(&Globals::new(), || {
+    let (witnesses, top_level) = GLOBALS.set(&Globals::new(), || {
         let unresolved = Mark::new();
         let top_level = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, top_level, true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
         locations.collect(&ast, unresolved);
         timers::check_imports(&ast, &locations)?;
-        let constructors = crate::source::Constructors::bind(&mut ast, unresolved, &locations)?;
+        crate::source::Constructors::bind(&mut ast, unresolved, &locations)?;
         streams::preserve_options(&mut ast, unresolved, &locations)?;
         Ok::<_, Diagnostic>((
-            constructors,
             witnesses::resolve(&ast, &loaded.exports, world, &mut locations, unresolved)?,
             SyntaxContext::empty().apply_mark(top_level),
         ))
@@ -110,13 +110,7 @@ pub(crate) fn lower<'s, 'r>(
         }
     }
     Ok((
-        crate::source::SourceModule::bind(
-            module,
-            analysis,
-            constructors,
-            locations,
-            witnesses.resources,
-        ),
+        crate::source::SourceModule::bind(module, analysis, locations, witnesses.resources),
         witnesses.functions,
     ))
 }
@@ -188,7 +182,7 @@ function builtin() { return new Set<string>(); }
             };
             if function.name == "builtin" {
                 assert!(matches!(
-                    lowered.constructors.collection(expr),
+                    crate::source::Constructors.collection(expr),
                     Some(crate::source::Constructor {
                         kind: crate::source::CollectionKind::Set,
                         types: [HirType::String],
@@ -197,7 +191,7 @@ function builtin() { return new Set<string>(); }
                     })
                 ));
             } else {
-                assert!(lowered.constructors.collection(expr).is_none());
+                assert!(crate::source::Constructors.collection(expr).is_none());
                 let args = match expr {
                     Expr::New { args, .. } | Expr::NewDynamic { args, .. } => args,
                     other => panic!("unexpected shadowed constructor: {other:?}"),

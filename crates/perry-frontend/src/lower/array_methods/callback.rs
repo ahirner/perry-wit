@@ -3,6 +3,32 @@ use crate::lower::callable::Callback;
 use crate::lower::inline::InlineResult;
 
 impl<'s> FunctionBuilder<'s, '_> {
+    pub(in crate::lower) fn callback_ordinal(&mut self, ctx: &mut Context) -> Value {
+        let zero = self.number(ctx, 0.0);
+        let index = self.entry_slot(ctx, zero.get_type(ctx));
+        self.store(ctx, index, zero);
+        index
+    }
+
+    pub(in crate::lower) fn indexed_callback(
+        &mut self,
+        ctx: &mut Context,
+        callback: Callback<'s>,
+        index: Value,
+        item: Value,
+    ) -> Result<Value> {
+        let ordinal = self.load(ctx, index)?;
+        let result = self.array_callback(
+            ctx,
+            callback,
+            &crate::collections::Yield::Pair(ordinal, item).indexed_args(),
+        )?;
+        let one = self.number(ctx, 1.0);
+        let next = self.binary(ctx, BinaryKind::Add, ordinal, one);
+        self.store(ctx, index, next);
+        Ok(result)
+    }
+
     /// Apply an array callback (a named function or an inline closure) to `arguments`. An
     /// inline closure's body lowers in place, with its `return` statements branching to a `done` block.
     pub(in crate::lower) fn array_callback(
@@ -52,14 +78,24 @@ impl<'s> FunctionBuilder<'s, '_> {
                 );
                 let result = match expected {
                     Some(result) => result,
-                    None => self
-                        .shapes
-                        .source_closure_result(decl.return_type)?
-                        .map_or(InlineResult::Void, InlineResult::Declared),
+                    None => {
+                        if decl.result == crate::engine::types::Ty::VOID {
+                            InlineResult::Void
+                        } else {
+                            InlineResult::Declared(
+                                self.shapes.resolved_binding(decl.result)?.carrier,
+                            )
+                        }
+                    }
                 };
                 self.with_inline_scope(ctx, decl.func_id, self.frame.this_slot, |b, ctx| {
                     for (index, param) in decl.params.iter().enumerate() {
-                        let ty = b.shapes.specialization.annotations.get(&param.ty)?;
+                        let ty = b
+                            .shapes
+                            .specialization
+                            .instances
+                            .local(param.id)?
+                            .annotation;
                         let (binding, is_never) = b
                             .shapes
                             .native_param(crate::engine::NativeParam::Value(ty))?;
