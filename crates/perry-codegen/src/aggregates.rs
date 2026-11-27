@@ -24,8 +24,7 @@ use pliron::{
 use pliron_wasm::attrs::{MemKind, NumOpcode};
 use std::{
     cell::OnceCell,
-    collections::{HashMap, hash_map::Entry},
-    rc::Rc,
+    collections::{HashMap, HashSet},
 };
 
 #[derive(Clone, Copy)]
@@ -80,46 +79,85 @@ impl RecordLayout {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct RecordLayouts {
-    native: HashMap<TypedHandle<RecordType>, Rc<RecordLayout>>,
-    pub(super) wit_slots: HashMap<(TypedHandle<RecordType>, wit_parser::Type), Rc<[RecordField]>>,
+    native: HashMap<TypedHandle<RecordType>, RecordLayout>,
+    pub(super) completion_error: TypedHandle<RecordType>,
+    pub(super) resources: HashSet<u32>,
 }
 
 impl RecordLayouts {
-    pub(crate) fn get(
-        &mut self,
+    pub(super) fn prepare(
         ctx: &Context,
-        record: TypedHandle<RecordType>,
-    ) -> Result<Rc<RecordLayout>> {
-        let entry = match self.native.entry(record) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let mut size = record::HEADER;
-                let mut fields = IndexMap::new();
-                for (index, (name, ty)) in
-                    record.deref(ctx).fields().to_diag(ctx)?.iter().enumerate()
-                {
-                    fields.insert(
-                        name.clone(),
-                        RecordField {
-                            index: index as u32,
-                            offset: size,
-                            ty: *ty,
-                        },
-                    );
+        functions: &[pliron::builtin::ops::FuncOp],
+    ) -> Result<Self> {
+        let string = perry_mir::StringType::get(ctx).into();
+        let completion_error = RecordType::get(
+            ctx,
+            pliron::ident!("perry_completion_error"),
+            Some(vec![("message".into(), string), ("name".into(), string)]),
+        )
+        .to_diag(ctx)?;
+        let roots = functions
+            .iter()
+            .flat_map(|f| perry_mir::function_values::<Vec<_>>(ctx, f))
+            .map(|value| value.get_type(ctx))
+            .chain([completion_error.into()]);
+        let mut native = HashMap::new();
+        let mut resources = HashSet::new();
+        for ty in perry_mir::nested_types(ctx, roots) {
+            if let Some(resource) = perry_mir::typed::<perry_mir::ResourceType>(ctx, ty) {
+                resources.insert(resource.deref(ctx).key());
+            }
+            let Some(record) = perry_mir::typed::<RecordType>(ctx, ty) else {
+                continue;
+            };
+            let definition = record.deref(ctx);
+            let Ok(members) = definition.fields() else {
+                continue;
+            };
+            let mut size = record::HEADER;
+            let fields = members
+                .iter()
+                .enumerate()
+                .map(|(index, (name, ty))| {
+                    let field = RecordField {
+                        index: index as u32,
+                        offset: size,
+                        ty: *ty,
+                    };
                     size += slot_size(ctx, *ty);
-                }
-                entry.insert(Rc::new(RecordLayout {
+                    (name.clone(), field)
+                })
+                .collect();
+            native.insert(
+                record,
+                RecordLayout {
                     record,
                     fields,
                     size,
                     pointer_shapes: Default::default(),
                     json_names: OnceCell::new(),
-                }))
-            }
-        };
-        Ok(Rc::clone(entry))
+                },
+            );
+        }
+        Ok(Self {
+            native,
+            resources,
+            completion_error,
+        })
+    }
+
+    pub(crate) fn get(
+        &self,
+        ctx: &Context,
+        record: TypedHandle<RecordType>,
+    ) -> Result<&RecordLayout> {
+        self.native.get(&record).ok_or_else(|| {
+            Diagnostic::internal(format!(
+                "missing record layout for {}",
+                record.deref(ctx).name()
+            ))
+        })
     }
 }
 
@@ -279,7 +317,7 @@ impl FunctionLowering<'_, '_> {
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
-                self.record_storage(ctx, &layout)
+                self.record_storage(ctx, layout)
             };
             let order = {
                 let order = allocation.get_attr_perry_field_order(ctx);

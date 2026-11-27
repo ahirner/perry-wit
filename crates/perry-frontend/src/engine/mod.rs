@@ -284,16 +284,23 @@ impl InstancePlans {
         }
     }
 
-    pub(crate) fn binding_flags(&self, id: perry_hir::types::LocalId) -> types::LocalFlags {
+    pub(crate) fn binding_flags(&self, id: perry_hir::types::LocalId) -> Result<types::LocalFlags> {
         self.local_ids
             .get(id as usize)
             .copied()
             .flatten()
-            .map_or(types::LocalFlags::GENERATED, |idx| self.local_flags[idx])
+            .map(|idx| self.local_flags[idx])
+            .ok_or_else(|| perry_wit_diagnostics::internal!("unindexed local {id}"))
     }
 
-    pub(crate) fn site(&self, owner: BodyOwner, expr: &perry_hir::ir::Expr) -> solve::SiteEntry {
-        self.decisions.site(owner, expr).unwrap_or_default()
+    pub(crate) fn site(
+        &self,
+        owner: BodyOwner,
+        expr: &perry_hir::ir::Expr,
+    ) -> Result<solve::SiteEntry> {
+        self.decisions
+            .site(owner, expr)
+            .ok_or_else(|| perry_wit_diagnostics::internal!("unindexed HIR expression {expr:?}"))
     }
 }
 

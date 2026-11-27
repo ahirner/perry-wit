@@ -159,7 +159,8 @@ pub(crate) struct ModuleState<'e> {
     /// Operations whose previous results are dead whenever they run again (`lease`).
     pub(crate) leased: HashSet<Ptr<Operation>>,
     pub(crate) layout_descriptors: HashMap<TypeHandle, u32>,
-    pub(crate) record_layouts: RecordLayouts,
+    pub(crate) record_layouts: &'e RecordLayouts,
+    pub(crate) wit_slots: crate::boundary::WitSlots,
     pub(crate) json_copy_plans: HashMap<(TypeHandle, TypeHandle), u32>,
     pub(crate) json_result: Option<u32>,
     pub(crate) json_write_data: Option<u32>,
@@ -222,7 +223,8 @@ pub(crate) fn lower(
     let live = analyses
         .try_get_analysis::<perry_mir::LiveValues>(root)
         .ok_or_else(|| Diagnostic::internal("computed liveness is missing"))?;
-    let resource_keys = boundary::used_keys(ctx, &functions);
+    let layouts = RecordLayouts::prepare(ctx, &functions)?;
+    let resource_keys = &layouts.resources;
     let raw = matches!(exports, Exports::Raw | Exports::RawChecked);
     let memory_checks = matches!(
         exports,
@@ -306,7 +308,8 @@ pub(crate) fn lower(
         program_facts: &effects,
         live: &live,
         count_roots: matches!(exports, Exports::RawChecked),
-        record_layouts: Default::default(),
+        record_layouts: &layouts,
+        wit_slots: Default::default(),
         globals: HashMap::new(),
         initializer: None,
         numeric_result: None,

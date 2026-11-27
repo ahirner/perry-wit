@@ -36,7 +36,7 @@ use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
     ops::{CallOp, set_export},
 };
-use std::{rc::Rc, sync::Arc};
+use std::sync::Arc;
 use wit_parser::abi::{WasmSignature, WasmType};
 
 mod canonical;
@@ -50,7 +50,7 @@ mod sums;
 
 use canonical::Canonical;
 pub(super) use exports::export;
-pub(super) use resources::{emit_drain, used_keys};
+pub(super) use resources::emit_drain;
 pub(super) use scopes::Scope;
 use sums::BoundaryValue;
 pub use sums::SumLayout;
@@ -108,7 +108,7 @@ impl PartialEq for AbiRecord {
 }
 
 impl RecordLayouts {
-    fn boundary_record(&mut self, ctx: &Context, mir_ty: TypeHandle) -> Result<Rc<RecordLayout>> {
+    fn boundary_record(&self, ctx: &Context, mir_ty: TypeHandle) -> Result<&RecordLayout> {
         let Some(record) = RecordType::data_record(ctx, mir_ty) else {
             bail_diag!(
                 codes::CONTRACT_MISMATCH,
@@ -117,26 +117,41 @@ impl RecordLayouts {
         };
         self.get(ctx, record)
     }
+}
 
-    fn bind_record(
+#[derive(Default)]
+pub(crate) struct WitSlots {
+    records: std::collections::HashMap<
+        (TypedHandle<RecordType>, wit_parser::Type),
+        std::ops::Range<usize>,
+    >,
+    fields: Vec<RecordField>,
+}
+
+impl WitSlots {
+    fn bind(
         &mut self,
         ctx: &Context,
-        mir: TypeHandle,
+        layout: &RecordLayout,
         record: &AbiRecord,
-    ) -> Result<(Rc<RecordLayout>, Rc<[RecordField]>)> {
-        use std::collections::hash_map::Entry;
-        let layout = self.boundary_record(ctx, mir)?;
-        let slots = match self.wit_slots.entry((layout.record, record.wit)) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(
-                record
-                    .fields
-                    .iter()
-                    .map(|(name, _)| layout.field(ctx, name))
-                    .collect::<Result<_>>()?,
-            ),
+    ) -> Result<std::ops::Range<usize>> {
+        let span = match self.records.entry((layout.record, record.wit)) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let start = self.fields.len();
+                for (name, _) in &record.fields {
+                    match layout.field(ctx, name) {
+                        Ok(field) => self.fields.push(field),
+                        Err(error) => {
+                            self.fields.truncate(start);
+                            return Err(error);
+                        }
+                    }
+                }
+                entry.insert(start..self.fields.len())
+            }
         };
-        Ok((layout, slots.clone()))
+        Ok(span.clone())
     }
 }
 
@@ -451,16 +466,18 @@ impl FunctionLowering<'_, '_> {
                 self.lift_stream(ctx, mir_ty, handle)
             }
             AbiKind::Record(record) => {
-                let (layout, slots) = self.state.record_layouts.bind_record(ctx, mir_ty, record)?;
+                let layout = self.state.record_layouts.boundary_record(ctx, mir_ty)?;
+                let slots = self.state.wit_slots.bind(ctx, layout, record)?;
                 let mut values = Vec::with_capacity(slots.len());
-                for ((_, abi), &field) in record.fields.iter().zip(slots.iter()) {
+                for ((_, abi), slot) in record.fields.iter().zip(slots) {
+                    let field = self.state.wit_slots.fields[slot];
                     let mir = scalar_mir_type(ctx, field.ty);
                     values.push((
                         field,
                         self.lift_abi(ctx, &abi.ty, mir, source.at(abi.offset))?,
                     ));
                 }
-                self.build_record(ctx, &layout, values)
+                self.build_record(ctx, layout, values)
             }
             AbiKind::Scalar(scalar) => {
                 let raw = source.read(self, ctx, scalar_memory(*scalar), 0)?;
@@ -705,8 +722,10 @@ impl FunctionLowering<'_, '_> {
             }
             AbiKind::Record(record) => {
                 let value = value.scalar()?;
-                let (_, slots) = self.state.record_layouts.bind_record(ctx, mir_ty, record)?;
-                for ((_, field_ty), field) in record.fields.iter().zip(slots.iter()) {
+                let layout = self.state.record_layouts.boundary_record(ctx, mir_ty)?;
+                let slots = self.state.wit_slots.bind(ctx, layout, record)?;
+                for ((_, field_ty), slot) in record.fields.iter().zip(slots) {
+                    let field = self.state.wit_slots.fields[slot];
                     let value = self.load_slot_value(ctx, value, field.offset, field.ty)?;
                     self.lower_abi(
                         ctx,

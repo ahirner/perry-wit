@@ -121,6 +121,19 @@ pub(crate) fn lower<'s, 'r>(
     ))
 }
 
+/// Perry supplies source spans for authored declarations and omits them for its temporaries.
+pub(crate) fn declaration_flags(
+    source: &crate::source::ModuleDeclarations,
+    id: LocalId,
+) -> crate::engine::types::LocalFlags {
+    source
+        .locals
+        .get(&id)
+        .map_or(crate::engine::types::LocalFlags::GENERATED, |local| {
+            local.flags
+        })
+}
+
 fn classify_hir_error(message: &str) -> perry_wit_diagnostics::Code {
     if message.starts_with("SyntaxError:") {
         codes::PARSE_ERROR

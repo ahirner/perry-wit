@@ -116,7 +116,8 @@ pub fn compile(
     {}
     // Resuming an `await` inside a loop enters the loop at a second block.
     for function in perry_mir::functions(wasm.get_operation(), ctx) {
-        pliron_wasm::reducible::make_reducible(ctx, &function);
+        pliron_wasm::reducible::make_reducible(ctx, &function)
+            .map_err(perry_wit_diagnostics::Diagnostic::internal)?;
     }
     verify_operation(wasm.get_operation(), ctx)
         .to_diag(ctx)

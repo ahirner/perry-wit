@@ -244,10 +244,10 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
                 let capacity = if graph.is_null() {
                     0
                 } else {
-                    word(graph, MEMBER_COUNT) as usize
+                    word(graph, MEMBER_COUNT)
                 };
                 let mut keys = crate::runtime::ReferenceArray::with_capacity(
-                    capacity + 1 + usize::from(payload),
+                    capacity.saturating_add(1 + u32::from(payload)),
                 );
                 while let Some(member) =
                     members.next_if(|&member| array_index(key_bytes(member)).is_some())

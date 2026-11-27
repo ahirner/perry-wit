@@ -64,7 +64,7 @@ pub(super) fn build<'h, 'r>(
     plans.decisions.expressions = std::mem::take(&mut index.expressions);
     plans.local_ids = std::mem::take(&mut index.local_to_idx);
     plans.local_flags = index.locals.map(|local| local.flags);
-    plans.globals = index.emitted_uses(&bodies, origins, &plans, locations);
+    plans.globals = index.emitted_uses(&bodies, origins, &plans, locations)?;
     Ok((bodies, plans, exports))
 }
 
@@ -161,10 +161,9 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         }
         let mut static_fields = std::collections::BTreeMap::new();
         for class in self.index.classes.values() {
-            for (field, loc) in class.static_fields() {
+            for (field, (loc, id)) in class.static_fields() {
                 let value = self.solved.locations[loc];
                 let ty = self.is_resolved(value).then_some(value);
-                let id = 0x8000_0000 + static_fields.len() as LocalId;
                 static_fields
                     .entry((class.declaration.name.as_str(), field.name.as_str()))
                     .or_insert(crate::source::StaticField { id, field, ty });

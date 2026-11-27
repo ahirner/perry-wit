@@ -190,7 +190,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let separator = self.defined(ctx, separator)?;
         let intrinsic = match kind(ctx, separator)? {
             Kind::String => Intrinsic::StringSplit,
-            Kind::Regex => self.search_shape(ctx, source, separator).split(),
+            Kind::Regex => self.search_shape(ctx, source, separator)?.split(),
             _ => bail_unsupported!("string.split requires a string or literal regex separator"),
         };
         Ok(self.call_intrinsic(ctx, intrinsic, vec![text, separator]))

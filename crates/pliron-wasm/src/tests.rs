@@ -558,7 +558,7 @@ builtin.module @m {{
         use pliron::builtin::op_interfaces::SymbolOpInterface;
         let name = function.get_symbol_name(ctx).to_string();
         crate::ops::set_export(ctx, &function, &name);
-        guards.push(crate::reducible::make_reducible(ctx, &function));
+        guards.push(crate::reducible::make_reducible(ctx, &function).unwrap());
     }
     assert_eq!(guards, [1, 1, 1]);
     verify_operation(module.get_operation(), ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));

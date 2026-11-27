@@ -365,8 +365,13 @@ impl<'s> FunctionBuilder<'s, '_> {
             expected,
             fields
                 .iter()
-                .filter(|(_, e)| !self.erased_operand(e))
-                .map(|&(name, _)| name),
+                .filter_map(|&(name, e)| match self.erased_operand(e) {
+                    Ok(false) => Some(Ok(name)),
+                    Ok(true) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>>>()?
+                .into_iter(),
             MissingFields::Diagnose,
         )?;
         let mut assembly = RecordAssembly {
@@ -374,7 +379,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             fields: Vec::with_capacity(fields.len()),
         };
         for &(name, arg) in fields {
-            if self.erased_operand(arg) {
+            if self.erased_operand(arg)? {
                 self.discard_function_operand(ctx, arg)?;
                 continue;
             }

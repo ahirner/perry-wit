@@ -232,7 +232,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             && target.needs_receiver()
         {
             let value = self.expression(ctx, object)?;
-            let get = self.getter(callee);
+            let get = self.getter(callee)?;
             let callable = if target.needs_value() || get.is_some() {
                 self.read_member(ctx, object, value, key, get)?
             } else {
@@ -805,7 +805,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let mut first = None;
         for item in items {
             if matches!(
-                self.site(item).resolution,
+                self.site(item)?.resolution,
                 Some(crate::engine::solve::SiteResolution::Static(
                     crate::methods::StaticMethod::Reject
                 ))

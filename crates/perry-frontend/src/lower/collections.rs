@@ -95,7 +95,30 @@ pub(super) struct CollectionLayout {
 
 impl<T> Shapes<'_, T> {
     pub(super) fn collection(&self, ctx: &Context, ty: TypeHandle) -> Option<CollectionLayout> {
-        self.collections.get(&present_type(ctx, ty)).copied()
+        let record = perry_mir::typed::<RecordType>(ctx, present_type(ctx, ty))?;
+        let field =
+            |record: TypedHandle<RecordType>, name| record.deref(ctx).field(name).map(|(_, ty)| ty);
+        let (view, boxed) = match record.deref(ctx).kind() {
+            RecordKind::Map => (CollectionKind::Map.default_view(), record),
+            RecordKind::Set => (CollectionKind::Set.default_view(), record),
+            kind => (
+                CollectionViewKind::from_record(kind)?,
+                perry_mir::typed(ctx, field(record, "_0")?)?,
+            ),
+        };
+        let entries = perry_mir::typed::<ArrayType>(ctx, field(boxed, "_0")?)?;
+        let entry = perry_mir::typed(ctx, entries.deref(ctx).element())?;
+        let key = field(entry, "_0")?;
+        let value = match view.source() {
+            CollectionKind::Map => field(entry, "_1")?,
+            CollectionKind::Set => key,
+        };
+        Some(CollectionLayout {
+            view,
+            boxed,
+            entry,
+            fields: [key, value],
+        })
     }
 
     pub(super) fn collection_box(&self, ctx: &Context, ty: TypeHandle) -> Option<CollectionLayout> {

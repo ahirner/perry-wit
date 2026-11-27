@@ -7,11 +7,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &Context,
         source: &Expr,
         search: Value,
-    ) -> perry_mir::RegexShape {
-        match self.site(source).operand {
+    ) -> Result<perry_mir::RegexShape> {
+        Ok(match self.site(source)?.operand {
             Some(crate::engine::solve::OperandUse::RegexSearch(shape)) => shape,
             _ => perry_mir::RegexShape::of(ctx, search),
-        }
+        })
     }
 
     pub(in crate::lower) fn replace_string(
@@ -28,7 +28,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         let (intrinsic, regex) = match kind(ctx, search)? {
             Kind::Regex => (
                 Intrinsic::RegexReplace,
-                (all || callback.is_some()).then(|| self.search_shape(ctx, pattern, search)),
+                (all || callback.is_some())
+                    .then(|| self.search_shape(ctx, pattern, search))
+                    .transpose()?,
             ),
             Kind::String if all => (Intrinsic::StringReplaceAll, None),
             Kind::String => (Intrinsic::StringReplace, None),

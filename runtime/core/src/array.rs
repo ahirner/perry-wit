@@ -206,10 +206,7 @@ unsafe fn grow<const COLLECTIBLE: bool>(array: *mut u8, elements: Elements) {
     let array = array as *mut Array;
     // SAFETY: the caller passes a live array; the new block holds every old element.
     unsafe {
-        let cap = (*array)
-            .cap
-            .checked_mul(2)
-            .expect("array capacity overflow");
+        let cap = crate::byte_size((*array).cap, 2, 0);
         resize::<COLLECTIBLE>(array, cap, elements);
     }
 }

@@ -557,7 +557,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .shapes
             .specialization
             .instances
-            .reference(self.frame.owner, expr)
+            .reference(self.frame.owner, expr)?
             .is_some()
             || matches!(expr, Expr::Closure { .. })
         {

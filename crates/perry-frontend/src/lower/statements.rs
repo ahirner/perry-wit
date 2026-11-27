@@ -448,7 +448,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         if let Some(expr) = init {
             let source = self.shapes.specialization;
-            let site = self.site(expr);
+            let site = self.site(expr)?;
             let erased = match expr {
                 Expr::Closure { .. } => site.environment().is_none(),
                 _ => source
@@ -473,7 +473,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             return Ok(());
         }
-        let flags = self.shapes.specialization.instances.binding_flags(id);
+        let flags = self.shapes.specialization.instances.binding_flags(id)?;
         let explicit = flags.is_explicit();
         let (mut binding, is_never) = match self.declared_local(ctx, storage, ty) {
             Err(error)
@@ -520,7 +520,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         binding.integer = binding
             .integer
             .filter(|ty| explicit || ty.deref(ctx).width() == 64);
-        let deferred = self.shapes.deferred_storage(ctx, id, declared);
+        let deferred = self.shapes.deferred_storage(ctx, flags, declared);
         let init = if is_never {
             if let Some(expr) = init {
                 self.effect(ctx, expr)?;
@@ -564,13 +564,13 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(result.filter(|value| !self.never_values.contains(value)))
     }
 
-    pub(super) fn getter(&self, expr: &Expr) -> Option<FuncId> {
-        match self.site(expr).resolution {
+    pub(super) fn getter(&self, expr: &Expr) -> Result<Option<FuncId>> {
+        Ok(match self.site(expr)?.resolution {
             Some(crate::engine::solve::SiteResolution::ReadMember(id)) => {
                 Some(self.shapes.specialization.instances.function(id))
             }
             _ => None,
-        }
+        })
     }
 
     pub(super) fn discard_function_operand(
@@ -588,7 +588,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 object,
                 byte_offset,
                 ..
-            } if self.getter(expr).is_none() => {
+            } if self.getter(expr)?.is_none() => {
                 if hir_compat::class_receiver(object).is_none() {
                     let receiver = self.expression(ctx, object)?;
                     self.receiver(ctx, receiver, *byte_offset)?;
@@ -602,7 +602,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             Expr::ExternFuncRef { .. } => Ok(()),
             _ => {
-                self.instance_value(ctx, expr, None, self.site(expr).resolution, false)?;
+                self.instance_value(ctx, expr, None, self.site(expr)?.resolution, false)?;
                 Ok(())
             }
         }

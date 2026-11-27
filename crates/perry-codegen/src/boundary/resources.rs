@@ -2,21 +2,6 @@
 use super::*;
 use perry_wit_diagnostics::Diagnostic;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
-use std::collections::HashSet;
-
-pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
-    let roots = functions
-        .iter()
-        .flat_map(|function| perry_mir::function_values::<Vec<_>>(ctx, function))
-        .map(|value| value.get_type(ctx));
-    perry_mir::nested_types(ctx, roots)
-        .filter_map(|ty| {
-            ty.deref(ctx)
-                .downcast_ref::<perry_mir::ResourceType>()
-                .map(|resource| resource.key())
-        })
-        .collect()
-}
 
 impl AbiType {
     pub(super) fn has_resources(&self) -> bool {
@@ -285,6 +270,9 @@ mod tests {
         union.deref(ctx).verify(ctx).unwrap();
         let signature = FunctionType::get(ctx, vec![union], vec![]);
         let function = FuncOp::new(ctx, pliron::ident!("receive"), signature);
-        assert_eq!(used_keys(ctx, &[function]), HashSet::from([7]));
+        assert_eq!(
+            RecordLayouts::prepare(ctx, &[function]).unwrap().resources,
+            std::collections::HashSet::from([7])
+        );
     }
 }

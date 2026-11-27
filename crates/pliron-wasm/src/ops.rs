@@ -262,20 +262,15 @@ impl ImportFuncOp {
     }
 }
 
-impl Typed for ImportFuncOp {
-    fn get_type(&self, ctx: &Context) -> TypeHandle {
-        self.get_attr_wasm_import_type(ctx)
-            .expect("verified import signature")
-            .get_type(ctx)
+impl ImportFuncOp {
+    pub fn signature(&self, ctx: &Context) -> Option<TypedHandle<FunctionType>> {
+        TypedHandle::from_handle(self.get_attr_wasm_import_type(ctx)?.get_type(ctx), ctx).ok()
     }
 }
 
 impl Verify for ImportFuncOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if !self
-            .get_attr_wasm_import_type(ctx)
-            .is_some_and(|ty| ty.get_type(ctx).deref(ctx).is::<FunctionType>())
-        {
+        if self.signature(ctx).is_none() {
             verify_err!(self.loc(ctx), OpErr::ValueType("wasm.import_func".into()))?
         }
         Ok(())
@@ -291,7 +286,7 @@ fn callee_type(
     let symbol = pliron_control::enclosing_symbols(ctx, op, callee).next()?;
     let ty = match Operation::get_op::<FuncOp>(symbol, ctx) {
         Some(function) => function.get_type(ctx),
-        None => Operation::get_op::<ImportFuncOp>(symbol, ctx)?.get_type(ctx),
+        None => return Operation::get_op::<ImportFuncOp>(symbol, ctx)?.signature(ctx),
     };
     TypedHandle::<FunctionType>::from_handle(ty, ctx).ok()
 }

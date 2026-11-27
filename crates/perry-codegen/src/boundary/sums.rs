@@ -1,7 +1,6 @@
 //! Canonical discriminants and payloads for closed WIT sums.
 use super::*;
 use perry_mir::{absence, optional_value, present_type};
-use perry_wit_diagnostics::Diagnostic;
 
 type AbiCase = (String, Option<AbiField>);
 
@@ -28,18 +27,18 @@ impl SumLayout {
         })
     }
 
-    pub(super) fn discriminant(&self) -> MemKind {
+    pub(super) fn discriminant(&self) -> Result<MemKind> {
         use wit_parser::Int;
         let tag = match self {
             Self::Option(_) | Self::Result(_) => Int::U8,
             Self::Variant(tag, _) | Self::Enum(tag, _) => *tag,
         };
-        match tag {
+        Ok(match tag {
             Int::U8 => MemKind::I32U8,
             Int::U16 => MemKind::I32U16,
             Int::U32 => MemKind::I32,
-            Int::U64 => unreachable!("WIT discriminants fit in 32 bits"),
-        }
+            Int::U64 => return Err(internal!("WIT discriminant exceeds 32 bits")),
+        })
     }
 }
 
@@ -101,26 +100,26 @@ struct NativePayload {
     slot: Option<(u32, TypeHandle)>,
 }
 
-pub(super) struct TaggedResult {
-    pub(super) layout: std::rc::Rc<RecordLayout>,
+pub(super) struct TaggedResult<'a> {
+    pub(super) layout: &'a RecordLayout,
     tag: RecordField,
 }
 
-impl TaggedResult {
-    pub(super) fn of(ctx: &Context, layout: std::rc::Rc<RecordLayout>) -> Option<Self> {
+impl<'a> TaggedResult<'a> {
+    pub(super) fn of(ctx: &Context, layout: &'a RecordLayout) -> Option<Self> {
         let tag = *layout.fields.get(perry_mir::RESULT_TAG)?;
         (repr(ctx, tag.ty).ok()? == Repr::Bool).then_some(Self { tag, layout })
     }
 }
 
-enum NativeSum {
+enum NativeSum<'a> {
     Optional { mir: TypeHandle, inner: TypeHandle },
     Enum,
     Variant(TypedHandle<perry_mir::VariantType>),
-    Result(TaggedResult),
+    Result(TaggedResult<'a>),
 }
 
-impl NativeSum {
+impl NativeSum<'_> {
     fn payload(
         &self,
         ctx: &Context,
@@ -155,7 +154,7 @@ impl NativeSum {
     }
 }
 
-impl FunctionLowering<'_, '_> {
+impl<'e> FunctionLowering<'_, 'e> {
     /// Thrown scalars are checked against the declared WIT error payload before lowering.
     pub(super) fn completion_error(
         &mut self,
@@ -188,13 +187,7 @@ impl FunctionLowering<'_, '_> {
             let native = self.num(ctx, NumOpcode::I32LtU, vec![offset, two]);
             let matches = self.num(ctx, NumOpcode::I32Or, vec![basic, native]);
             self.trap_unless(ctx, matches, true);
-            let string = perry_mir::StringType::get(ctx).into();
-            let record = RecordType::get(
-                ctx,
-                identifier("perry_completion_error"),
-                Some(vec![("message".into(), string), ("name".into(), string)]),
-            )
-            .map_err(|_| Diagnostic::internal("inconsistent completion Error record shape"))?;
+            let record = self.state.record_layouts.completion_error;
             let name = self.runtime(ctx, Runtime::StdExceptionName, vec![exception]);
             let message = self.runtime(ctx, Runtime::ExceptionMessage, vec![exception]);
             let layout = self.state.record_layouts.get(ctx, record)?;
@@ -202,7 +195,7 @@ impl FunctionLowering<'_, '_> {
                 .into_iter()
                 .map(|(key, value)| Ok((layout.field(ctx, key)?, value)))
                 .collect::<Result<_>>()?;
-            let value = self.build_record(ctx, &layout, fields)?;
+            let value = self.build_record(ctx, layout, fields)?;
             return Ok(Some((record.into(), Carriers::Scalar(value))));
         }
         let (expected, mir, kind) = match &err.kind {
@@ -263,7 +256,12 @@ impl FunctionLowering<'_, '_> {
         Ok(join.deref(ctx).arguments().collect())
     }
 
-    fn native_sum(&mut self, ctx: &Context, wit: &SumLayout, mir: TypeHandle) -> Result<NativeSum> {
+    fn native_sum(
+        &mut self,
+        ctx: &Context,
+        wit: &SumLayout,
+        mir: TypeHandle,
+    ) -> Result<NativeSum<'e>> {
         Ok(match wit {
             SumLayout::Option(_) => NativeSum::Optional {
                 mir,
@@ -302,7 +300,7 @@ impl FunctionLowering<'_, '_> {
     fn lift_case(
         &mut self,
         ctx: &mut Context,
-        sum: &NativeSum,
+        sum: &NativeSum<'_>,
         (case, name): (usize, &str),
         payload: Option<(TypeHandle, Value)>,
     ) -> Result<Value> {
@@ -323,7 +321,7 @@ impl FunctionLowering<'_, '_> {
                 }
             }
             NativeSum::Result(fields) => {
-                let layout = &fields.layout;
+                let layout = fields.layout;
                 let mut values = Vec::with_capacity(layout.fields.len());
                 for (name, field) in &layout.fields {
                     let value = if field.index == fields.tag.index {
@@ -375,7 +373,7 @@ impl FunctionLowering<'_, '_> {
         mut source: Canonical<&mut &[Value]>,
     ) -> Result<Value> {
         let sum = self.native_sum(ctx, wit, mir)?;
-        let tag = source.read(self, ctx, wit.discriminant(), 0)?;
+        let tag = source.read(self, ctx, wit.discriminant()?, 0)?;
         let flat = match &mut source {
             Canonical::Flat(values) => {
                 let layout = ty.payload_slots()?;
@@ -429,7 +427,7 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         wit: &SumLayout,
-        sum: &NativeSum,
+        sum: &NativeSum<'_>,
         value: Carriers<Value>,
     ) -> Result<Value> {
         let names = wit.cases().map(|(name, _)| name);
@@ -516,7 +514,7 @@ impl FunctionLowering<'_, '_> {
                 _ => Canonical::Flat(&mut out),
             };
             let tag = b.i32_const(ctx, case as i32);
-            destination.write(b, ctx, wit.discriminant(), 0, tag);
+            destination.write(b, ctx, wit.discriminant()?, 0, tag);
             if let Some(payload_abi) = payload_abi {
                 let payload = match source {
                     BoundaryValue::Case([_, next @ ..], payload) if !next.is_empty() => {

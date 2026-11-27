@@ -276,7 +276,7 @@ impl Task {
     }
 }
 
-fn out_of_memory() -> ! {
+pub(crate) fn out_of_memory() -> ! {
     #[cfg(target_arch = "wasm32")]
     core::arch::wasm32::unreachable();
     #[cfg(not(target_arch = "wasm32"))]

@@ -117,7 +117,7 @@ pub(crate) unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mu
     let view = view(string);
     let separator = unsafe { bytes(separator) };
     let capacity = if separator.is_empty() {
-        view.scalars as usize
+        view.scalars as u32
     } else {
         0
     };

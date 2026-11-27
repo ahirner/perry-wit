@@ -73,10 +73,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                         let ty = if let Some(class) = self.exported_instance(value) {
                             self.types.class_inst(class)
                         } else if let Some(p) = view.params.get(i).filter(|p| {
-                            self.hir
-                                .declarations
-                                .local_flags(p.id)
-                                .contains(LocalFlags::PARAM_ANNOTATED)
+                            self.index.local_idx(p.id).is_some_and(|id| {
+                                self.index.locals[id]
+                                    .flags
+                                    .contains(LocalFlags::PARAM_ANNOTATED)
+                            })
                         }) {
                             self.index.locals[self.index.param_local(p)?].declared
                         } else {

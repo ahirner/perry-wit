@@ -3,17 +3,24 @@ use perry_abi::{
     number::{Number, Relation},
 };
 
+fn numeric_tag(raw: i32) -> Tag {
+    match Tag::try_from(raw) {
+        Ok(tag) => tag,
+        Err(invalid) => panic!("invalid numeric ABI tag {invalid}"),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn perry_number_relation(at: i32, a: u64, bt: i32, b: u64) -> i32 {
-    let at = Tag::try_from(at).expect("invalid numeric tag");
-    let bt = Tag::try_from(bt).expect("invalid numeric tag");
-    match (at, bt) {
+    match (numeric_tag(at), numeric_tag(bt)) {
         (Tag::Null, Tag::Null) | (Tag::Undefined | Tag::Omitted, Tag::Undefined | Tag::Omitted) => {
             Relation::SameAbsence as i32
         }
         (Tag::Null | Tag::Undefined | Tag::Omitted, _)
         | (_, Tag::Null | Tag::Undefined | Tag::Omitted) => Relation::Unordered as i32,
-        _ => Relation::order_mask(Number::from_numeric(at, a).order(Number::from_numeric(bt, b))),
+        (at, bt) => {
+            Relation::order_mask(Number::from_numeric(at, a).order(Number::from_numeric(bt, b)))
+        }
     }
 }
 
@@ -169,9 +176,7 @@ macro_rules! arithmetic {
         pub(crate) unsafe extern "C" fn $name(
             at: i32, a: u64, bt: i32, b: u64, widen: i32, out: *mut u64,
         ) -> i32 {
-            let at = Tag::try_from(at).expect("invalid numeric tag");
-            let bt = Tag::try_from(bt).expect("invalid numeric tag");
-            let (tag, payload) = Arithmetic::$op.apply(at, a, bt, b, widen != 0);
+            let (tag, payload) = Arithmetic::$op.apply(numeric_tag(at), a, numeric_tag(bt), b, widen != 0);
             unsafe { out.write(payload) };
             tag
         }

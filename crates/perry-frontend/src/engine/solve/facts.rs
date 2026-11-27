@@ -1,5 +1,5 @@
 use super::*;
-use std::{cell::Cell, collections::BTreeSet, ops::Index};
+use std::{collections::BTreeSet, ops::Index};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Fact {
@@ -10,7 +10,7 @@ pub(super) enum Fact {
 #[derive(Default)]
 pub(super) struct Facts {
     values: IdxVec<LocId, Ty>,
-    parents: HashMap<LocId, Cell<LocId>>,
+    parents: IdxVec<LocId, LocId>,
     pub(super) dirty: BTreeSet<Fact>,
     pub(super) escaping: BitSet,
     declared: BitSet,
@@ -19,8 +19,13 @@ pub(super) struct Facts {
 
 impl Facts {
     pub(super) fn new(values: IdxVec<LocId, Ty>) -> Self {
+        let mut parents = IdxVec::default();
+        for id in values.ids() {
+            parents.push(id);
+        }
         Self {
             values,
+            parents,
             ..Self::default()
         }
     }
@@ -30,27 +35,33 @@ impl Facts {
     }
 
     pub(super) fn alloc(&mut self, initial: Ty) -> LocId {
-        self.values.push(initial)
+        let id = self.values.push(initial);
+        self.parents.push(id);
+        id
     }
 
     pub(super) fn activation(&mut self, values: Vec<Ty>) -> ActivationSpan {
-        self.values.append_activation(values)
+        let span = self.values.append_activation(values);
+        for id in span.locations() {
+            self.parents.push(id);
+        }
+        span
     }
 
-    pub(super) fn root(&self, mut loc: LocId) -> LocId {
-        while let Some(parent) = self.parents.get(&loc) {
-            loc = parent.get();
-            if let Some(grandparent) = self.parents.get(&loc) {
-                loc = grandparent.get();
-                parent.set(loc);
-            }
+    pub(super) fn root(&mut self, mut loc: LocId) -> LocId {
+        while self.parents[loc] != loc {
+            let next = self.parents[self.parents[loc]];
+            self.parents[loc] = next;
+            loc = next;
         }
         loc
     }
 
-    pub(super) fn resolve(&self, loc: LocId) -> (LocId, Ty) {
-        let root = self.root(loc);
-        (root, self.values[root])
+    pub(super) fn resolve(&self, mut loc: LocId) -> (LocId, Ty) {
+        while self.parents[loc] != loc {
+            loc = self.parents[loc];
+        }
+        (loc, self.values[loc])
     }
 
     pub(super) fn write(&mut self, types: &mut TypeTable, loc: LocId, value: Ty) {
@@ -95,7 +106,7 @@ impl Facts {
         let root = left.min(right);
         let alias = left.max(right);
         self.write(types, root, self.values[alias]);
-        self.parents.insert(alias, Cell::new(root));
+        self.parents[alias] = root;
         // Readers of the retired location must resubscribe even when its type matched.
         self.dirty.insert(Fact::Storage(alias));
         if self.self_nested.contains(alias.index()) {
@@ -104,9 +115,9 @@ impl Facts {
     }
 
     pub(super) fn finish(mut self) -> (IdxVec<LocId, Ty>, BitSet, BitSet) {
-        for &alias in self.parents.keys() {
-            let (root, ty) = self.resolve(alias);
-            self.values[alias] = ty;
+        for alias in self.parents.ids() {
+            let root = self.root(alias);
+            self.values[alias] = self.values[root];
             if self.self_nested.contains(root.index()) {
                 self.self_nested.insert(alias.index());
             }
@@ -119,7 +130,7 @@ impl Index<LocId> for Facts {
     type Output = Ty;
 
     fn index(&self, loc: LocId) -> &Ty {
-        &self.values[self.root(loc)]
+        &self.values[self.resolve(loc).0]
     }
 }
 

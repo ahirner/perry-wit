@@ -154,13 +154,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         ty: TypeHandle,
         fields: &[(&str, &'s Expr)],
     ) -> Result<Value> {
-        ensure_diag!(
-            fields
-                .iter()
-                .all(|&(n, e)| self.erased_operand(e) || n == "tag" || n == "val"),
-            codes::TYPE_MISMATCH,
-            "variants have tag and val only"
-        );
         let tag_expr = fields
             .iter()
             .find_map(|&(n, e)| (n == "tag").then_some(e))
@@ -177,7 +170,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         })?;
         let mut value = None;
         for &(name, arg) in fields {
-            if self.erased_operand(arg) {
+            if self.erased_operand(arg)? {
                 self.discard_function_operand(ctx, arg)?;
             } else if name == "val" {
                 let payload = payload.ok_or_else(|| {
@@ -188,6 +181,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 })?;
                 let raw = self.expression_with(ctx, arg, Some(payload))?;
                 value = Some(self.fit(ctx, raw, payload)?);
+            } else if name != "tag" {
+                bail_diag!(codes::TYPE_MISMATCH, "variants have tag and val only");
             }
         }
         ensure_diag!(

@@ -579,7 +579,8 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                     }
                     _ => {
                         let entries = op.contents.as_slice().as_chunks::<{ wasi::ENTRY_SIZE }>().0;
-                        let mut names = perry_rt_sys::ReferenceArray::with_capacity(entries.len());
+                        let mut names =
+                            perry_rt_sys::ReferenceArray::with_capacity(entries.len() as u32);
                         for entry in entries {
                             let at = entry.as_ptr() as *mut u8;
                             let (data, len) =

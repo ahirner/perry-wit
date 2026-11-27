@@ -5,15 +5,15 @@ use crate::engine::types::Ty;
 use crate::source::ConstructorSites;
 
 impl<'s> FunctionBuilder<'s, '_> {
-    pub(in crate::lower) fn site(&self, expr: &Expr) -> SiteEntry {
+    pub(in crate::lower) fn site(&self, expr: &Expr) -> Result<SiteEntry> {
         self.shapes
             .specialization
             .instances
             .site(self.frame.owner, expr)
     }
 
-    pub(in crate::lower) fn erased_operand(&self, expr: &Expr) -> bool {
-        self.site(expr).erased
+    pub(in crate::lower) fn erased_operand(&self, expr: &Expr) -> Result<bool> {
+        Ok(self.site(expr)?.erased)
     }
 
     pub(in crate::lower) fn instance_operand(
@@ -23,7 +23,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         expected: Option<TypeHandle>,
         required: bool,
     ) -> Result<Option<Value>> {
-        let site = self.site(expr);
+        let site = self.site(expr)?;
         let Some(conversion) = site.conversion() else {
             return self.instance_value(ctx, expr, expected, site.resolution, required);
         };

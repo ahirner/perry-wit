@@ -39,7 +39,7 @@ use pliron::{
     identifier::Identifier,
     linked_list::ContainsLinkedList,
     operation::Operation,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, TypedHandle},
 };
 use std::collections::HashMap;
 use wasm_encoder::{
@@ -147,7 +147,11 @@ pub fn emit_module(ctx: &Context, module: &ModuleOp, options: &EmitOptions) -> E
     let mut import_section = ImportSection::new();
     for (index, import) in imports.iter().enumerate() {
         let symbol = import.get_symbol_name(ctx);
-        let sig = signature(ctx, import.get_type(ctx), symbol.as_ref())?;
+        let ty = import.signature(ctx).ok_or_else(|| EmitError::Malformed {
+            function: symbol.to_string(),
+            message: "missing or invalid import signature".into(),
+        })?;
+        let sig = signature(ctx, ty.into(), symbol.as_ref())?;
         let ty = intern(&sig);
         let (Some(module), Some(name)) = (
             import.get_attr_wasm_import_module(ctx),

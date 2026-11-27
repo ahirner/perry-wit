@@ -78,11 +78,6 @@ impl<'h> ModuleIndex<'h> {
             for field in &class.fields {
                 idx.annotations.register(&mut scan, &field.ty, true);
             }
-            for field in &class.static_fields {
-                let ty = idx.annotations.register(&mut scan, &field.ty, true);
-                let loc = idx.add_location(if ty == Ty::OPEN { Ty::BOTTOM } else { ty });
-                idx.classes[&cid].static_field_locs.push(loc);
-            }
             let mut initializers = class
                 .fields
                 .iter()
@@ -139,6 +134,26 @@ impl<'h> ModuleIndex<'h> {
             }
         }
 
+        for class in idx.classes.values_mut() {
+            for field in &class.declaration.static_fields {
+                let declared = idx.annotations.register(&mut scan, &field.ty, true);
+                let loc = idx.location_types.push(if declared == Ty::OPEN {
+                    Ty::BOTTOM
+                } else {
+                    declared
+                });
+                let id = idx.local_to_idx.len() as LocalId;
+                let local = idx.locals.push(LocalInfo {
+                    id,
+                    owner: TemplateId::INIT,
+                    declared,
+                    storage: LocalStorage::Module(loc),
+                    flags: LocalFlags::GENERATED,
+                });
+                idx.local_to_idx.push(Some(local));
+                class.static_field_locs.push((loc, id));
+            }
+        }
         for (site, args) in scan.regex_constructors {
             idx.expressions
                 .declared
@@ -226,7 +241,7 @@ impl ModuleIndex<'_> {
         mut origins: Origins,
         plans: &super::super::InstancePlans,
         locations: &mut hir_compat::Locations,
-    ) -> std::collections::HashSet<LocalId> {
+    ) -> perry_wit_diagnostics::Result<std::collections::HashSet<LocalId>> {
         use crate::engine::BodyOwner;
         for (tid, view) in self.views.iter_enumerated() {
             if origins[tid].is_empty()
@@ -244,7 +259,7 @@ impl ModuleIndex<'_> {
                 };
                 for &(owner, kind, caller) in &origins[tid] {
                     if let Some(callee) = plans
-                        .call_target(owner, expr)
+                        .call_target(owner, expr)?
                         .and_then(|id| functions.get(&id))
                     {
                         locations.record_cross_file_call(
@@ -259,15 +274,16 @@ impl ModuleIndex<'_> {
                 }
             }
         }
-        self.external_uses
-            .iter()
-            .filter_map(|&(template, id)| {
-                (origins[template]
-                    .iter()
-                    .any(|(_, kind, _)| *kind != CallerKind::Initializer)
-                    && plans.binding_flags(id).contains(LocalFlags::MODULE))
-                .then_some(id)
-            })
-            .collect()
+        let mut globals = std::collections::HashSet::new();
+        for &(template, id) in &self.external_uses {
+            if origins[template]
+                .iter()
+                .any(|(_, kind, _)| *kind != CallerKind::Initializer)
+                && plans.binding_flags(id)?.contains(LocalFlags::MODULE)
+            {
+                globals.insert(id);
+            }
+        }
+        Ok(globals)
     }
 }

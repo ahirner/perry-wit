@@ -8,12 +8,16 @@ impl Shapes<'_, Preparing<'_>> {
         ctx: &Context,
         ty: Ty,
     ) -> Result<BindingType> {
-        let key = (ty, self.types.wit_input);
-        if let Some(&binding) = self.types.resolved.get(&key) {
+        let view = usize::from(self.types.wit_input);
+        if let Some(&Some(binding)) = self.types.resolved[view].get(ty.index()) {
             return Ok(binding);
         }
         let binding = self.project_type(ctx, ty, &mut Vec::new())?;
-        self.types.resolved.insert(key, binding);
+        let column = &mut self.types.resolved[view];
+        if column.len() <= ty.index() {
+            column.resize(ty.index() + 1, None);
+        }
+        column[ty.index()] = Some(binding);
         Ok(binding)
     }
 }

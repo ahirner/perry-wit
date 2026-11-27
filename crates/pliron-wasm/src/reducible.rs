@@ -35,7 +35,7 @@ use pliron::{
 use std::collections::HashSet;
 
 /// Make the CFG of `function` reducible. Returns the number of guard blocks inserted.
-pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
+pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> Result<usize, &'static str> {
     let entry = function.get_entry_block(ctx);
     let region = function.get_region(ctx);
     let mut guards = 0;
@@ -81,14 +81,13 @@ pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
                 })
                 .collect();
             let header = if entries.len() > 1 {
-                assert!(
-                    !entries.contains(&entry),
-                    "the function entry block cannot be a loop entry"
-                );
+                if entries.contains(&entry) {
+                    return Err("the function entry block cannot be a loop entry");
+                }
                 guards += 1;
-                insert_guard(ctx, region, &entries)
+                insert_guard(ctx, region, &entries)?
             } else {
-                entries[0]
+                *entries.first().ok_or("reachable component has no entry")?
             };
             members.shift_remove(&header);
             if !members.is_empty() {
@@ -96,7 +95,7 @@ pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
             }
         }
     }
-    guards
+    Ok(guards)
 }
 
 fn i32_constant(ctx: &mut Context, value: usize) -> ConstantOp {
@@ -108,7 +107,7 @@ fn insert_guard(
     ctx: &mut Context,
     region: Ptr<Region>,
     entries: &[Ptr<BasicBlock>],
-) -> Ptr<BasicBlock> {
+) -> Result<Ptr<BasicBlock>, &'static str> {
     let mut types = vec![IntegerType::get(ctx, 32, Signedness::Signless).into()];
     let ranges: Vec<_> = entries
         .iter()
@@ -145,7 +144,8 @@ fn insert_guard(
                 (source, arm)
             };
             let dynamic = Operation::get_op_dyn(term, ctx);
-            let branch = op_cast::<dyn BranchOpInterface>(&*dynamic).expect("verified Wasm branch");
+            let branch = op_cast::<dyn BranchOpInterface>(&*dynamic)
+                .ok_or("guard predecessor has no branch interface")?;
             let supplied = branch.successor_operands(ctx, arm);
             for (slot, &ty) in types.iter().enumerate() {
                 let value = if ranges[tag].contains(&slot) {
@@ -195,5 +195,5 @@ fn insert_guard(
             .insert_at_back(block, ctx);
         block = next;
     }
-    guard
+    Ok(guard)
 }

@@ -45,7 +45,7 @@ impl View {
     pub(crate) fn split<C: IntoIterator<Item = *mut u8>>(
         &self,
         mut matches: impl Iterator<Item = (usize, usize)>,
-        capacity: usize,
+        capacity: u32,
         mut captures: impl FnMut(usize, usize) -> C,
     ) -> *mut u8 {
         if self.text.is_empty() && matches.next().is_some() {

@@ -78,7 +78,7 @@ pub(crate) fn byte_size(elements: u32, stride: u32, overhead: u32) -> u32 {
     elements
         .checked_mul(stride)
         .and_then(|bytes| bytes.checked_add(overhead))
-        .expect("sequence capacity overflow")
+        .unwrap_or_else(|| region::out_of_memory())
 }
 
 #[inline(always)]

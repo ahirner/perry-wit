@@ -273,7 +273,7 @@ impl FunctionLowering<'_, '_> {
                 }
             }
             AbiKind::Sum(sum) => {
-                let tag = self.load(ctx, sum.discriminant(), area, offset);
+                let tag = self.load(ctx, sum.discriminant()?, area, offset);
                 self.sum_switch(ctx, tag, sum.cases(), vec![], |b, ctx, _, (_, payload)| {
                     if let Some(payload) = payload {
                         b.discard_canonical(ctx, &payload.ty, area, offset + payload.offset)?;

@@ -99,7 +99,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Option<Callback<'s>>> {
-        let site = self.site(expr);
+        let site = self.site(expr)?;
         let callback =
             if let Some(crate::engine::solve::OperandUse::Callback(target)) = site.operand {
                 let callee = self

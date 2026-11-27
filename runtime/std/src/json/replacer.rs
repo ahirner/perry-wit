@@ -56,7 +56,7 @@ fn property_list(value: *mut u8) -> *mut u8 {
     let Some(length) = view::array_length(value) else {
         return core::ptr::null_mut();
     };
-    let mut keys = crate::runtime::ReferenceArray::with_capacity(length as usize);
+    let mut keys = crate::runtime::ReferenceArray::with_capacity(length);
     unsafe {
         let mut member = if word(value, 0) == ARRAY {
             node(word(value, 16))

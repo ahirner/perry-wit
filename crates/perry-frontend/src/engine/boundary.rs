@@ -128,13 +128,13 @@ pub(crate) struct ClassInfo<'h> {
     pub(crate) ctor: Option<TemplateId>,
     pub(super) implicit_params: bool,
     pub(super) direct_constructor: bool,
-    static_field_locs: Vec<LocId>,
+    static_field_locs: Vec<(LocId, LocalId)>,
 }
 
 impl<'h> ClassInfo<'h> {
     pub(super) fn static_fields(
         &self,
-    ) -> impl Iterator<Item = (&'h perry_hir::ir::ClassField, LocId)> {
+    ) -> impl Iterator<Item = (&'h perry_hir::ir::ClassField, (LocId, LocalId))> {
         self.declaration
             .static_fields
             .iter()
@@ -143,7 +143,7 @@ impl<'h> ClassInfo<'h> {
 
     pub(super) fn static_field(&self, name: &str) -> Option<LocId> {
         self.static_fields()
-            .find_map(|(field, loc)| (field.name == name).then_some(loc))
+            .find_map(|(field, (loc, _))| (field.name == name).then_some(loc))
     }
 }
 
@@ -394,7 +394,7 @@ impl<'h> ModuleIndex<'h> {
             self.annotations.0.insert(std::ptr::from_ref(&param.ty), ty);
         }
         for param in params {
-            let mut flags = scan.declarations.local_flags(param.id);
+            let mut flags = hir_compat::declaration_flags(scan.declarations, param.id);
             let ty = self.annotations.register(
                 scan,
                 &param.ty,
@@ -457,7 +457,7 @@ impl<'h> ModuleIndex<'h> {
                     ..
                 } => {
                     self.iteration.bind(*id, name, init.as_ref());
-                    let flags = scan.declarations.local_flags(*id);
+                    let flags = hir_compat::declaration_flags(scan.declarations, *id);
                     let declared = self.annotations.register(scan, ty, flags.is_explicit());
                     let local = self.ensure_local(*id, owner, declared, flags);
                     if scan.declarations.for_of(Some(stmt)).is_none() {
@@ -547,7 +547,7 @@ impl<'h> ModuleIndex<'h> {
                                 *id,
                                 owner,
                                 err_ty,
-                                scan.declarations.local_flags(*id),
+                                hir_compat::declaration_flags(scan.declarations, *id),
                             );
                         }
                         exits |= self.scan_stmts(scan, &catch.body, owner, in_loop);
@@ -727,7 +727,12 @@ impl<'h> ModuleIndex<'h> {
                 self.record_local_use(*id, owner, true);
             }
             Expr::ScopedTemp { id, .. } => {
-                self.ensure_local(*id, owner, Ty::OPEN, scan.declarations.local_flags(*id));
+                self.ensure_local(
+                    *id,
+                    owner,
+                    Ty::OPEN,
+                    hir_compat::declaration_flags(scan.declarations, *id),
+                );
             }
             Expr::Closure {
                 func_id,

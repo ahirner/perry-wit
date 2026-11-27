@@ -25,14 +25,12 @@ impl<T> Shapes<'_, T> {
         let entries = ArrayType::get(ctx, entry.into()).into();
         let boxed =
             self.positional_record(ctx, kind.box_kind(), [entries, number, number, number])?;
-        let layout = CollectionLayout {
+        Ok(CollectionLayout {
             view: kind.default_view(),
             boxed,
             entry,
             fields,
-        };
-        self.collections.insert(boxed.into(), layout);
-        Ok(layout)
+        })
     }
 
     /// The `{ _0: index, _1: min_seq, _2: epoch }` cursor of a live iterator.
@@ -48,14 +46,11 @@ impl<T> Shapes<'_, T> {
         view: CollectionViewKind,
     ) -> Result<TypedHandle<RecordType>> {
         let cursor = self.cursor_tuple_type(ctx)?;
-        let record = self.positional_record(
+        self.positional_record(
             ctx,
             view.record_kind(),
             [layout.boxed.into(), cursor.into()],
-        )?;
-        self.collections
-            .insert(record.into(), CollectionLayout { view, ..layout });
-        Ok(record)
+        )
     }
 }
 

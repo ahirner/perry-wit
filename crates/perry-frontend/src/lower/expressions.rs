@@ -561,7 +561,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .shapes
                 .specialization
                 .instances
-                .binding_flags(id)
+                .binding_flags(id)?
                 .contains(crate::engine::types::LocalFlags::INFERRED_DEFERRED)
             && !perry_mir::JsonSchema::supports_boxing(ctx, assigned.get_type(ctx))
         {

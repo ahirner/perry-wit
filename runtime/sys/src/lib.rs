@@ -403,8 +403,7 @@ pub fn reject_with(promise: *mut u8, kind: u32, message: *mut u8) {
 pub struct ReferenceArray(&'static mut ArrayHeader);
 
 impl ReferenceArray {
-    pub fn with_capacity(capacity: usize) -> Self {
-        let capacity = u32::try_from(capacity).expect("array capacity overflow");
+    pub fn with_capacity(capacity: u32) -> Self {
         // SAFETY: the runtime returns a fresh header with aligned storage and length zero.
         unsafe { Self(&mut *imports::perry_array_new_typed(capacity, References as u32).cast()) }
     }
@@ -437,7 +436,8 @@ impl ReferenceArray {
 
 pub fn array(values: impl IntoIterator<Item = *mut u8>) -> *mut u8 {
     let values = values.into_iter();
-    let mut result = ReferenceArray::with_capacity(values.size_hint().0);
+    let mut result =
+        ReferenceArray::with_capacity(u32::try_from(values.size_hint().0).unwrap_or(u32::MAX));
     for value in values {
         result.push(value);
     }

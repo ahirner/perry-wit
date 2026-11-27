@@ -729,7 +729,11 @@ impl Solver {
                     | OperationKind::Combine(crate::Combinator::Race) => {
                         heap_facts.map_or(RegexOrigin::Other, |facts| facts.regex)
                     }
-                    _ if kind.aliased_operand().is_some() => heap_facts.expect("alias facts").regex,
+                    _ if let Some(operand) = kind.aliased_operand() => {
+                        self.analysis.states[id]
+                            .value(operation.get_operand(operand))
+                            .regex
+                    }
                     _ => RegexOrigin::Other,
                 }
             };

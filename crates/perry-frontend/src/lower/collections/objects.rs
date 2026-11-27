@@ -28,7 +28,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let dict = self.emit_value(ArrayNewOp::new(ctx, tuple_rec.into(), vec![]), ctx);
         for &(name, val_expr) in fields {
-            if self.erased_operand(val_expr) {
+            if self.erased_operand(val_expr)? {
                 self.discard_function_operand(ctx, val_expr)?;
                 continue;
             }

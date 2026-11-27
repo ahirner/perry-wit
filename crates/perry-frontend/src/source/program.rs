@@ -130,17 +130,12 @@ pub(crate) struct ModuleDeclarations {
 }
 
 impl ModuleDeclarations {
-    pub(crate) fn local_flags(&self, id: LocalId) -> LocalFlags {
-        self.locals
-            .get(&id)
-            .map_or(LocalFlags::GENERATED, |local| local.flags)
-    }
-
     pub(crate) fn implicit_parameter(&self, param: &Param) -> bool {
         use perry_hir::types::Type;
         !self
-            .local_flags(param.id)
-            .contains(LocalFlags::PARAM_ANNOTATED)
+            .locals
+            .get(&param.id)
+            .is_some_and(|local| local.flags.contains(LocalFlags::PARAM_ANNOTATED))
             && matches!(param.ty, Type::Any | Type::Unknown)
     }
 
@@ -349,8 +344,12 @@ pub(crate) struct InstanceBodies<'s> {
 }
 
 impl crate::engine::InstancePlans {
-    pub(crate) fn reference(&self, owner: BodyOwner, expr: &Expr) -> Option<FuncId> {
-        self.reference_at(owner, expr, self.site(owner, expr).resolution)
+    pub(crate) fn reference(
+        &self,
+        owner: BodyOwner,
+        expr: &Expr,
+    ) -> perry_wit_diagnostics::Result<Option<FuncId>> {
+        Ok(self.reference_at(owner, expr, self.site(owner, expr)?.resolution))
     }
 
     pub(crate) fn reference_at(
@@ -368,17 +367,24 @@ impl crate::engine::InstancePlans {
             _ => None,
         }
     }
-    pub(crate) fn call_target(&self, owner: BodyOwner, expr: &Expr) -> Option<FuncId> {
+    pub(crate) fn call_target(
+        &self,
+        owner: BodyOwner,
+        expr: &Expr,
+    ) -> perry_wit_diagnostics::Result<Option<FuncId>> {
         if let Some(crate::engine::solve::SiteResolution::Call(target)) =
-            self.site(owner, expr).resolution
+            self.site(owner, expr)?.resolution
         {
-            return self.emitted_callee(target.callee()?).ok();
+            return target
+                .callee()
+                .map(|callee| self.emitted_callee(callee))
+                .transpose();
         }
         match expr {
             Expr::Call { callee, .. } | Expr::CallSpread { callee, .. } => {
                 self.reference(owner, callee)
             }
-            _ => None,
+            _ => Ok(None),
         }
     }
 }

@@ -79,7 +79,7 @@ pub(super) struct Prepared<'h> {
 pub(super) struct Preparing<'h> {
     source: &'h mut crate::engine::types::TypeTable,
     wit_input: bool,
-    resolved: HashMap<(Ty, bool), BindingType>,
+    resolved: [Vec<Option<BindingType>>; 2],
     timer: Option<TypeHandle>,
     depth: usize,
     projections: HashMap<(ShapeKey, bool), Option<TypeHandle>>,
@@ -94,7 +94,6 @@ pub(super) struct Shapes<'h, T = Prepared<'h>> {
     pub(super) globals: BTreeMap<perry_hir::types::LocalId, Option<LocalBinding<TypeHandle>>>,
     pub(super) decls: &'h Declarations<'h>,
     callables: crate::engine::BitSet,
-    pub(super) collections: HashMap<TypeHandle, super::collections::CollectionLayout>,
     pub(super) class_records: HashMap<TypeHandle, crate::shapes::ClassShape<'h>>,
     pub(super) source: &'h crate::source::ModuleDeclarations,
     pub(super) locations: &'h crate::hir_compat::Locations<'h>,
@@ -130,7 +129,7 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             types: Preparing {
                 source: layouts.0,
                 wit_input: false,
-                resolved: HashMap::default(),
+                resolved: Default::default(),
                 timer: None,
                 depth: 0,
                 projections: HashMap::new(),
@@ -140,7 +139,6 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             globals: global_ids.map(|id| (id, None)).collect(),
             decls,
             callables: Default::default(),
-            collections: HashMap::new(),
             class_records: HashMap::default(),
             source: declarations,
             locations,
@@ -166,7 +164,6 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             globals: self.globals,
             decls: self.decls,
             callables: self.callables,
-            collections: self.collections,
             class_records: self.class_records,
             source: self.source,
             locations: self.locations,
@@ -244,14 +241,10 @@ impl<'h, T> Shapes<'h, T> {
     pub(super) fn deferred_storage(
         &self,
         ctx: &mut Context,
-        id: perry_hir::types::LocalId,
+        flags: crate::engine::types::LocalFlags,
         ty: TypeHandle,
     ) -> Option<TypeHandle> {
-        (self
-            .specialization
-            .instances
-            .binding_flags(id)
-            .contains(crate::engine::types::LocalFlags::DEFERRED)
+        (flags.contains(crate::engine::types::LocalFlags::DEFERRED)
             && !perry_mir::admits_undefined(ctx, ty)
             && !ty.deref(ctx).is::<perry_mir::JsonType>())
         .then(|| crate::lower::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined))
@@ -469,7 +462,8 @@ impl<'h> Shapes<'h, Preparing<'_>> {
                 .records
                 .fresh(ctx, RecordKind::Object, None)
                 .to_diag(ctx)?;
-            return Ok(*slot.insert(record.into()));
+            *slot = Some(record.into());
+            return Ok(record.into());
         }
         self.types.projections.insert(identity, None);
         let fields = self.record_fields(ctx, &fields, &mut Vec::new());
@@ -477,8 +471,8 @@ impl<'h> Shapes<'h, Preparing<'_>> {
         let fields = fields?;
         let record = match recursive {
             Some(record) => {
-                let name = perry_mir::typed::<RecordType>(ctx, record)
-                    .expect("reserved record")
+                let name = TypedHandle::<RecordType>::from_handle(record, ctx)
+                    .to_diag(ctx)?
                     .deref(ctx)
                     .name()
                     .clone();
