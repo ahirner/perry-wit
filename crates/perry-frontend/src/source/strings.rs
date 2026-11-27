@@ -71,6 +71,7 @@ impl<'s> ConstantStrings<'s> {
                 op: BinaryOp::Add,
                 left,
                 right,
+                ..
             } => {
                 self.append(locals, left, output)?;
                 self.append(locals, right, output)?;

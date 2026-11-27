@@ -80,6 +80,7 @@ impl<'s> SourceCall<'s> {
                 class_name,
                 method_name,
                 args,
+                byte_offset,
             } => (
                 Callee::Static {
                     class: class_name,
@@ -87,7 +88,7 @@ impl<'s> SourceCall<'s> {
                 },
                 Arguments::Plain(args),
                 &[][..],
-                0,
+                *byte_offset,
             ),
             _ => return None,
         };
@@ -126,14 +127,8 @@ pub(crate) struct ModuleDeclarations {
     pub(crate) interfaces: Vec<Interface>,
     pub(crate) type_aliases: Vec<TypeAlias>,
     pub(crate) locals: HashMap<LocalId, LocalDeclaration>,
-    pub(crate) closures: HashMap<FuncId, ClosureDeclaration>,
+    pub(crate) closure_names: HashMap<FuncId, String>,
     pub(crate) has_top_level_await: bool,
-}
-
-#[derive(Default)]
-pub(crate) struct ClosureDeclaration {
-    pub(crate) name: String,
-    pub(crate) signature: Option<TypeAlias>,
 }
 
 pub(crate) struct LocalDeclaration {
@@ -152,7 +147,7 @@ pub(crate) struct SourceModule<'s> {
 
 impl<'s> SourceModule<'s> {
     pub(crate) fn bind(
-        mut module: Module,
+        module: Module,
         mut analysis: super::Analysis,
         locations: crate::hir_compat::Locations<'s>,
         resources: crate::hir_compat::ResourceClasses<super::ClassId>,
@@ -180,34 +175,6 @@ impl<'s> SourceModule<'s> {
                 (id, LocalDeclaration { span, flags })
             })
             .collect();
-        let mut closures: HashMap<_, _> = module
-            .closure_display_names
-            .into_iter()
-            .map(|(id, name)| {
-                (
-                    id,
-                    ClosureDeclaration {
-                        name,
-                        signature: None,
-                    },
-                )
-            })
-            .collect();
-        if !analysis.signature_prefix.is_empty() {
-            let mut aliases: HashMap<_, _> = module
-                .type_aliases
-                .extract_if(.., |a| a.name.starts_with(&analysis.signature_prefix))
-                .map(|a| (a.name.clone(), a))
-                .collect();
-            for (id, source) in module.closure_source_text {
-                if let Some((lo, _)) = source.source_span
-                    && let Some(alias) =
-                        aliases.remove(&format!("{}{lo}", analysis.signature_prefix))
-                {
-                    closures.entry(id).or_default().signature = Some(alias);
-                }
-            }
-        }
         Self {
             locations,
             resources,
@@ -219,7 +186,7 @@ impl<'s> SourceModule<'s> {
                 interfaces: module.interfaces,
                 type_aliases: module.type_aliases,
                 locals,
-                closures,
+                closure_names: module.closure_display_names,
                 has_top_level_await: module.has_top_level_await,
             },
             bodies: Bodies {
@@ -248,6 +215,7 @@ pub(crate) fn authored_body<'a>(params: &[Param], mut body: &'a [Stmt]) -> &'a [
                         op: perry_hir::ir::CompareOp::Eq,
                         left,
                         right,
+                        ..
                     },
                 then_branch,
                 else_branch: None,

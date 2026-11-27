@@ -247,14 +247,18 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(ty)
             }
-            Expr::Binary { op, left, right } => {
+            Expr::Binary {
+                op, left, right, ..
+            } => {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
                 Ok(builtins::binary_result(self.types, *op, l, r))
             }
             Expr::Unary { op, operand } => {
                 Ok(builtins::unary_result(*op, self.eval_expr(s, operand)?))
             }
-            Expr::Logical { op, left, right } => {
+            Expr::Logical {
+                op, left, right, ..
+            } => {
                 let l = self.eval_expr(s, left)?;
                 let depth = s.guards.depth();
                 if matches!(op, LogicalOp::And | LogicalOp::Or) {
@@ -273,6 +277,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 condition,
                 then_expr,
                 else_expr,
+                ..
             } => {
                 self.eval_expr(s, condition)?;
                 let guard = DefinedGuard::of(condition);
@@ -320,7 +325,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 self.eval_expr(s, body)
             }
-            Expr::Await(promise) => {
+            Expr::Await(promise, _) => {
                 let ty = self.eval_expr(s, promise)?;
                 let ty = self.resolve_cell_read(s.inst, ty);
                 Ok(self.awaited_type(s.inst, ty))
@@ -668,11 +673,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
                 Ok(Ty::STRING)
             }
-            Expr::Compare { op, left, right }
-                if matches!(
-                    op,
-                    CompareOp::Eq | CompareOp::Ne | CompareOp::LooseEq | CompareOp::LooseNe
-                ) =>
+            Expr::Compare {
+                op, left, right, ..
+            } if matches!(
+                op,
+                CompareOp::Eq | CompareOp::Ne | CompareOp::LooseEq | CompareOp::LooseNe
+            ) =>
             {
                 let (l, r) = (self.eval_expr(s, left)?, self.eval_expr(s, right)?);
                 if l != Ty::BOTTOM

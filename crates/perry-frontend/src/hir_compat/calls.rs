@@ -47,9 +47,9 @@ pub(crate) fn member(callee: &Expr) -> Option<(&Expr, MemberKey<'_>)> {
         Expr::IndexGet {
             object,
             index,
-            element_offset,
+            byte_offset,
             ..
-        } => Some((object, MemberKey::Computed(index, *element_offset))),
+        } => Some((object, MemberKey::Computed(index, *byte_offset))),
         _ => None,
     }
 }
@@ -68,19 +68,19 @@ pub(crate) fn member_assignment(expr: &Expr) -> Option<(&Expr, MemberKey<'_>, &E
             object,
             index,
             value,
-            element_offset,
+            byte_offset,
             ..
-        } => Some((object, Computed(index, *element_offset), value)),
+        } => Some((object, Computed(index, *byte_offset), value)),
         Expr::PutValueSet {
             target,
             key,
             value,
-            element_offset,
+            byte_offset,
             ..
         } => {
             let key = match key.as_ref() {
-                Expr::String(name) => Named(name, *element_offset),
-                expr => Computed(expr, *element_offset),
+                Expr::String(name) => Named(name, *byte_offset),
+                expr => Computed(expr, *byte_offset),
             };
             Some((target, key, value))
         }

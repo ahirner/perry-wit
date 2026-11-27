@@ -57,6 +57,7 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
             object: None,
             method,
             args,
+            ..
         } if module == RUNTIME => Some((method, args)),
         _ => None,
     }
@@ -68,6 +69,7 @@ fn compared_to_true(expr: &Expr) -> Option<&Expr> {
             op: CompareOp::Eq,
             left,
             right,
+            ..
         } if matches!(&**right, Expr::Bool(true)) => Some(left),
         _ => None,
     }

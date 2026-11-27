@@ -565,7 +565,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Stmt::Expr(e) | Stmt::Throw(e) => {
                 self.eval_expr(s, e)?;
             }
-            Stmt::Return(value) => {
+            Stmt::Return(value, _) => {
                 s.has_return_value = true;
                 let mut ty = match value {
                     Some(e) => self.eval_expr(s, e)?,
@@ -716,6 +716,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Stmt::Switch {
                 discriminant,
                 cases,
+                ..
             } => {
                 self.eval_expr(s, discriminant)?;
                 for case in cases {

@@ -580,6 +580,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             op: op @ (LogicalOp::And | LogicalOp::Or),
             left,
             right,
+            ..
         } = expr
         {
             let lhs = self.condition(ctx, left)?;

@@ -51,7 +51,10 @@ impl<'s> DefinedGuard<'s> {
     /// The guard `condition` establishes, if it is `p === undefined` or `p !== undefined`
     /// (either operand order) for an access path `p`.
     pub(crate) fn of(condition: &'s Expr) -> Option<Self> {
-        let Expr::Compare { op, left, right } = condition else {
+        let Expr::Compare {
+            op, left, right, ..
+        } = condition
+        else {
             return None;
         };
         let (tested, Absence::Undefined, defined_when) = absence_test(*op, left, right)? else {
@@ -123,13 +126,15 @@ fn comparisons<'s>(
             op: UnaryOp::Not,
             operand,
         } => comparisons(operand, !truth, visit),
-        Expr::Logical { op, left, right }
-            if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) =>
-        {
+        Expr::Logical {
+            op, left, right, ..
+        } if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) => {
             comparisons(left, truth, visit);
             comparisons(right, truth, visit);
         }
-        Expr::Compare { op, left, right } => visit(*op, left, right, truth),
+        Expr::Compare {
+            op, left, right, ..
+        } => visit(*op, left, right, truth),
         _ => {}
     }
 }
@@ -146,9 +151,9 @@ fn truthy_locals(condition: &Expr, truth: bool, visit: &mut impl FnMut(LocalId))
             op: UnaryOp::Not,
             operand,
         } => truthy_locals(operand, !truth, visit),
-        Expr::Logical { op, left, right }
-            if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) =>
-        {
+        Expr::Logical {
+            op, left, right, ..
+        } if matches!((op, truth), (LogicalOp::And, true) | (LogicalOp::Or, false)) => {
             truthy_locals(left, truth, visit);
             truthy_locals(right, truth, visit);
         }

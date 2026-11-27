@@ -91,6 +91,16 @@ fn resource_members_follow_the_receiver_in_retained_and_specialized_bodies() -> 
         new Text()[Symbol.dispose](); return next().read().length + Count.open().read(); }}"
     );
     MemoryChecked.compile(wit, "source", "retained.ts", &retained)?;
+    let shadowed = retained.replace("retained()", "retained(Symbol: {dispose: string})");
+    let error = MemoryChecked
+        .compile(wit, "source", "retained.ts", &shadowed)
+        .expect_err("a shadowed Symbol.dispose is an ordinary computed key");
+    assert!(
+        error
+            .to_string()
+            .contains("computed method or element calls"),
+        "{error}"
+    );
     let wrong_arity = retained.replace("next().read()", "next().read(1)");
     let error = MemoryChecked
         .compile(wit, "source", "retained.ts", &wrong_arity)

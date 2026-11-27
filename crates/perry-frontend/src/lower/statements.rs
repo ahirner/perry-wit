@@ -142,7 +142,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Stmt::Expr(expr) => {
                 self.effect(ctx, expr)?;
             }
-            Stmt::Return(value) => {
+            Stmt::Return(value, _) => {
                 let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.named.get(&id).and_then(Signature::source)
                     .is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
@@ -297,6 +297,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Stmt::Switch {
                 discriminant,
                 cases,
+                ..
             } => self.switch(ctx, discriminant, cases, label)?,
             Stmt::Break | Stmt::Continue | Stmt::LabeledBreak(_) | Stmt::LabeledContinue(_) => {
                 let (jump, label) = match statement {

@@ -51,7 +51,7 @@ pub(crate) fn lower<'s, 'r>(
         let top_level = Mark::new();
         ast.visit_mut_with(&mut resolver(unresolved, top_level, true));
         let unresolved = SyntaxContext::empty().apply_mark(unresolved);
-        locations.collect(&ast, unresolved);
+        locations.collect(&ast);
         timers::check_imports(&ast, &locations)?;
         crate::source::Constructors::bind(&mut ast, unresolved, &locations)?;
         streams::preserve_options(&mut ast, unresolved, &locations)?;
@@ -64,14 +64,9 @@ pub(crate) fn lower<'s, 'r>(
     streams::lower(&mut ast, &mut analysis)?;
     methods::preserve_arguments(&mut ast, &mut analysis);
     classes::preserve_field_types(&mut ast);
-    let capture_spans = !witnesses.witnesses.is_empty() || !analysis.signature_prefix.is_empty();
-    if capture_spans {
-        perry_hir::ir::set_current_module_source(locations.module_text());
-    }
+    perry_hir::ir::set_current_module_source(locations.module_text());
     let result = perry_hir::lower_module(&ast, "main", identity);
-    if capture_spans {
-        perry_hir::ir::clear_current_module_source();
-    }
+    perry_hir::ir::clear_current_module_source();
     let mut module = result.map_err(|error| {
         let lower_error = error.downcast_ref::<perry_hir::error::LowerError>();
         let span = lower_error.and_then(|error| error.span);
@@ -177,7 +172,7 @@ function builtin() { return new Set<string>(); }
         let loaded = modules::load(source, "shadow.ts", &modules, &HashMap::new()).unwrap();
         let (lowered, _) = lower(loaded, "shadow.ts", None).unwrap();
         for function in &lowered.bodies.functions {
-            let Stmt::Return(Some(expr)) = &function.body[0] else {
+            let Stmt::Return(Some(expr), _) = &function.body[0] else {
                 panic!("expected constructor return");
             };
             if function.name == "builtin" {
@@ -232,7 +227,7 @@ function builtin() { return new Set<string>(); }
                 _ => None,
             });
             let returned = function.body.iter().find_map(|stmt| match stmt {
-                Stmt::Return(Some(Expr::LocalGet(id))) => Some(*id),
+                Stmt::Return(Some(Expr::LocalGet(id)), _) => Some(*id),
                 _ => None,
             });
             assert!(user.is_some(), "no user binding in {:?}", function.body);

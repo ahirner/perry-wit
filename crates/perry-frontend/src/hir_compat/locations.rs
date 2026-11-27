@@ -89,7 +89,6 @@ pub(crate) struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
     calls: HashMap<u32, Span>,
-    disposals: HashSet<(u32, u32)>,
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
@@ -369,10 +368,6 @@ impl<'s> Locations<'s> {
         ))
     }
 
-    pub(crate) fn calls_dispose(&self, start: u32, end: u32) -> bool {
-        self.disposals.contains(&(start, end))
-    }
-
     pub(crate) fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.calls
             .get(&byte_offset)
@@ -421,13 +416,8 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.span(span))
     }
 
-    pub(super) fn collect(
-        &mut self,
-        module: &perry_parser::swc_ecma_ast::Module,
-        unresolved: swc_common::SyntaxContext,
-    ) {
+    pub(super) fn collect(&mut self, module: &perry_parser::swc_ecma_ast::Module) {
         struct Collector<'a, 's> {
-            unresolved: swc_common::SyntaxContext,
             locations: &'a mut Locations<'s>,
             class_name: Option<String>,
         }
@@ -468,23 +458,30 @@ impl<'s> Locations<'s> {
             }
             fn visit_call_expr(&mut self, call: &ast::CallExpr) {
                 if call.span.lo.0 != 0 {
-                    self.locations.calls.insert(call.span.lo.0, call.span);
-                    if let ast::Callee::Expr(callee) = &call.callee
-                        && let ast::Expr::Member(member) = callee.unwrap_parens()
-                        && let ast::MemberProp::Computed(prop) = &member.prop
-                        && let ast::Expr::Member(symbol) = prop.expr.unwrap_parens()
-                        && matches!(&*symbol.obj, ast::Expr::Ident(id) if id.sym == "Symbol" && id.ctxt == self.unresolved)
-                        && matches!(&symbol.prop,ast::MemberProp::Ident(id) if id.sym=="dispose")
-                    {
-                        self.locations
-                            .disposals
-                            .insert((call.span.lo.0, call.span.hi.0));
-                    }
+                    let token = match &call.callee {
+                        ast::Callee::Expr(callee) => match callee.unwrap_with(|e| match e {
+                            ast::Expr::Paren(p) => Some(&p.expr),
+                            ast::Expr::TsAs(t) => Some(&t.expr),
+                            ast::Expr::TsNonNull(t) => Some(&t.expr),
+                            ast::Expr::TsSatisfies(t) => Some(&t.expr),
+                            ast::Expr::TsTypeAssertion(t) => Some(&t.expr),
+                            ast::Expr::TsConstAssertion(t) => Some(&t.expr),
+                            _ => None,
+                        }) {
+                            ast::Expr::Member(m) => m.prop.span().lo,
+                            ast::Expr::SuperProp(m) => m.prop.span().lo,
+                            _ => call.span.lo,
+                        },
+                        _ => call.span.lo,
+                    };
+                    self.locations.calls.insert(token.0, call.span);
                 }
                 call.visit_children_with(self);
             }
             fn visit_member_expr(&mut self, member: &ast::MemberExpr) {
-                self.locations.members.insert(member.span.lo.0, member.span);
+                self.locations
+                    .members
+                    .insert(member.prop.span().lo.0, member.span);
                 member.visit_children_with(self);
             }
             fn visit_new_expr(&mut self, new_expr: &ast::NewExpr) {
@@ -562,7 +559,6 @@ impl<'s> Locations<'s> {
             }
         }
         module.visit_with(&mut Collector {
-            unresolved,
             locations: self,
             class_name: None,
         });

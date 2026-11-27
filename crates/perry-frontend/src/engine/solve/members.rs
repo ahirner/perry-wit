@@ -357,10 +357,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         site: &'h Expr,
         obj_ty: Ty,
         index: &'h Expr,
-        element_offset: u32,
+        byte_offset: u32,
     ) -> Result<Ty> {
         let (obj_def, _) = self.types.strip_nullish(obj_ty);
-        self.check_timer_member(obj_def, element_offset)?;
+        self.check_timer_member(obj_def, byte_offset)?;
         let idx_ty = self.eval_expr(s, index)?;
         if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
             if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
@@ -376,7 +376,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if let Expr::String(name) = index {
             let stripped = self.types.strip_nullish(obj_ty).0;
-            let class = self.resolve_class_inst(s.inst, stripped, element_offset)?;
+            let class = self.resolve_class_inst(s.inst, stripped, byte_offset)?;
             if let Some(ty) = self.member_type(s.inst, site, stripped, name, class)? {
                 return Ok(ty);
             }
@@ -407,14 +407,17 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.check_timer_member(stripped, byte_offset)?;
         if matches!(property, "payload" | "val") && stripped == self.types.named(self.ctx, "Error")
         {
+            let locations = &self.hir.locations;
+            let span = self
+                .index
+                .locals
+                .object_pattern_offset(object)
+                .and_then(|offset| locations.offset_span(offset, 1))
+                .or_else(|| locations.member_span(byte_offset));
             return Err(Diagnostic::unsupported(format!(
                 "property {property} is not supported on Error yet"
             ))
-            .with_fallback_span(self.hir.locations.member_span(byte_offset).or_else(|| {
-                self.hir
-                    .locations
-                    .offset_span(self.index.locals.object_pattern_offset(object)?, 1)
-            })));
+            .with_fallback_span(span));
         }
         if let TyKind::Cell {
             loc,
