@@ -140,16 +140,16 @@ fn imported_error_cases_throw_and_release_owned_payloads() -> Result<()> {
 export function run(closed) {try {if(closed) Reader.read({tag:'ok'}); else Reader.read({tag:'err',val:'failed'}); return 'ok';}
 catch(e) {return e.message;}}";
     let compile = |source: &str| MemoryChecked.component(wit, "app", "read.js", source);
-    for (read, column) in [
-        ("return e.payload.val;", 18),
-        ("const {payload: p = 'none'} = e; return String(p);", 17),
+    for read in [
+        "return e.payload.val;",
+        "const {payload: p = 'none'} = e; return String(p);",
     ] {
         let diagnostic = compile(&source.replace("return e.message;", read))
             .err()
             .ok_or_else(|| anyhow::anyhow!("payload read compiled"))?
             .to_string();
         assert!(
-            diagnostic.contains(&format!("read.js:3:{column}: error[unsupported-construct]"))
+            diagnostic.contains("read.js:3:18: error[unsupported-construct]")
                 && diagnostic.contains("payload"),
             "{diagnostic}"
         );

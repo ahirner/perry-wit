@@ -421,44 +421,33 @@ impl<'h, 'a> Solver<'h, 'a> {
         let depth = s.guards.depth();
         let mut remaining = stmts;
         while let Some((stmt, rest)) = remaining.split_first() {
-            let inferred = match stmt {
-                Stmt::Let {
-                    id,
-                    init: Some(init),
-                    ..
-                } if let Some(hir_compat::RecordExpr::Value(value)) =
-                    self.index.locals.expression(init) =>
-                {
-                    Some((*id, self.eval_expr(s, value)?))
-                }
-                _ if let Some((element, _)) = self.index.locals.element(remaining) => {
-                    let ty = self.eval_expr(s, element.value)?;
-                    let ty = match element.available {
-                        hir_compat::Availability::Known(true) => ty,
-                        hir_compat::Availability::Known(false) => Ty::VOID,
-                        hir_compat::Availability::Test(_) => {
-                            self.types.with_absences(ty, Absence::Undefined)
-                        }
-                    };
-                    Some((element.id, ty))
-                }
-                _ => None,
-            };
-            if let Some((id, ty)) = inferred {
-                if let Some(local) = self.index.local_idx(id) {
+            if let Some((element, tail)) = self.index.locals.element(remaining) {
+                let value = self.eval_expr(s, element.value)?;
+                let ty = match element.available {
+                    hir_compat::Availability::Known(true) => value,
+                    hir_compat::Availability::Known(false) => Ty::VOID,
+                    hir_compat::Availability::Test(_) => {
+                        self.types.with_absences(value, Absence::Undefined)
+                    }
+                };
+                if let Some(local) = self.index.local_idx(element.id) {
                     self.write_local_value(s, local, ty)?;
                     self.mark_written(s.inst, local);
                 }
+                remaining = tail;
             } else {
                 self.eval_stmt(s, stmt)?;
+                remaining = rest;
             }
-            remaining = rest;
         }
         s.guards.truncate(depth);
         Ok(())
     }
 
     pub(super) fn eval_stmt(&mut self, s: &mut EvalState<'h>, stmt: &'h Stmt) -> Result<()> {
+        if let Some(body) = self.index.locals.dense_statements(stmt) {
+            return self.eval_stmts(s, body);
+        }
         match stmt {
             Stmt::Let { id, init, .. } => {
                 let Some(lidx) = self.index.local_idx(*id) else {

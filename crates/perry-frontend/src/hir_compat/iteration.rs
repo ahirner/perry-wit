@@ -14,7 +14,6 @@ pub(crate) struct Locals<'h> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Binding<'h> {
     Guard(Option<&'h Expr>),
-    ObjectPattern(u32),
     Temporary,
 }
 
@@ -22,6 +21,7 @@ pub(crate) enum RecordExpr<'a> {
     Value(&'a Expr),
     RequireObject(&'a Expr),
     Length(&'a Expr),
+    RestAppend(&'a Expr, &'a Expr),
     Close,
 }
 
@@ -38,15 +38,7 @@ pub(crate) struct Element<'a> {
     pub(crate) advance: Option<&'a Expr>,
     pub(crate) done: LocalId,
     pub(crate) condition: &'a Expr,
-    pub(crate) missing: &'a Expr,
     pub(crate) available: Availability<'a>,
-}
-
-const RUNTIME: &str = "__perry_runtime";
-const REQUIRE_OBJECT: &str = "requireObjectCoercible";
-
-pub(crate) fn is_object_coercibility_check(module: &str, method: &str) -> bool {
-    module == RUNTIME && method == REQUIRE_OBJECT
 }
 
 fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
@@ -58,7 +50,7 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
             method,
             args,
             ..
-        } if module == RUNTIME => Some((method, args)),
+        } if module == "__perry_runtime" => Some((method, args)),
         _ => None,
     }
 }
@@ -109,57 +101,78 @@ impl<'h> Locals<'h> {
 
     pub(crate) fn bind(&mut self, local: LocalIdx, name: &str, init: Option<&'h Expr>) {
         let call = init.and_then(runtime);
-        let released = name.starts_with("__iterator_record_")
-            || name.starts_with("__iterator_literal_")
-            || matches!(call, Some(("arrayRecordPayload", _)))
-            || init.and_then(|e| self.dense_branch(e)).is_some();
-        let role = match call {
-            Some(("arrayRecordNeedsIterator", [])) => Binding::Guard(None),
+        self.rows[local].iteration = match call {
+            Some(("arrayRecordNeedsIterator", [])) => Some(Binding::Guard(None)),
             Some(("arrayRecordNeedsIterator", [Expr::LocalSet(local, source), ..])) if matches!(&**source, Expr::LocalGet(other) if other == local) => {
-                Binding::Guard(Some(source))
+                Some(Binding::Guard(Some(source)))
             }
-            Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) => {
-                Binding::ObjectPattern(*offset as u32)
+            _ if self.rows[local].flags.contains(LocalFlags::GENERATED)
+                && (name.starts_with("__iterator_record_")
+                    || name.starts_with("__iterator_literal_")
+                    || matches!(call, Some(("arrayRecordPayload", _)))
+                    || init.and_then(|expr| self.dense_branch(expr)).is_some()) =>
+            {
+                Some(Binding::Temporary)
             }
-            _ if released => Binding::Temporary,
-            _ => return,
-        };
-        self.rows[local].iteration = Some((role, released));
-    }
-
-    pub(crate) fn object_pattern_offset(&self, receiver: &Expr) -> Option<u32> {
-        let Expr::LocalGet(id) = receiver else {
-            return None;
-        };
-        match self.row(*id)?.iteration? {
-            (Binding::ObjectPattern(offset), _) => Some(offset),
             _ => None,
-        }
+        };
     }
 
     pub(crate) fn guard(&self, id: LocalId) -> Option<Option<&'h Expr>> {
         match self.row(id)?.iteration? {
-            (Binding::Guard(source), _) => Some(source),
+            Binding::Guard(source) => Some(source),
             _ => None,
         }
     }
 
-    pub(crate) fn is_guard(&self, expr: &Expr) -> bool {
+    fn is_guard(&self, expr: &Expr) -> bool {
         match expr {
             Expr::LocalGet(id) => self.guard(*id).is_some(),
             _ => compared_to_true(expr).is_some_and(|left| self.is_guard(left)),
         }
     }
 
-    fn dense_branch<'a>(&self, expr: &'a Expr) -> Option<&'a Expr> {
-        match expr {
-            Expr::Conditional {
-                condition,
-                else_expr,
-                ..
-            } if self.is_guard(condition) => Some(else_expr),
+    pub(crate) fn dense_statements<'a>(&self, stmt: &'a Stmt) -> Option<&'a [Stmt]> {
+        let Stmt::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = stmt
+        else {
+            return None;
+        };
+        match condition {
+            Expr::Unary {
+                op: perry_hir::UnaryOp::Not,
+                operand,
+            } if matches!(&**operand, Expr::ArrayIterationPatched) => Some(then_branch),
+            condition if self.is_guard(condition) => {
+                Some(else_branch.as_deref().unwrap_or_default())
+            }
             _ => None,
         }
+    }
+
+    fn dense_branch<'a>(&self, expr: &'a Expr) -> Option<&'a Expr> {
+        let Expr::Conditional {
+            condition,
+            then_expr,
+            else_expr,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        if self.is_guard(condition) {
+            return Some(else_expr);
+        }
+        let Expr::LocalGet(id) = &**else_expr else {
+            return None;
+        };
+        let available = self.bound_element(*id)?.available;
+        (matches!(available, Availability::Known(false))
+            && crate::narrowing::DefinedGuard::of(condition)?.proves(false, else_expr))
+        .then_some(then_expr)
     }
 
     pub(crate) fn expression<'a>(&self, expr: &'a Expr) -> Option<RecordExpr<'a>> {
@@ -167,9 +180,16 @@ impl<'h> Locals<'h> {
             return Some(RecordExpr::Value(value));
         }
         Some(match runtime(expr)? {
+            ("arrayRecordForBound" | "arrayRecordForUpdate", [guard, value, ..])
+            | ("arrayRecordForValue", [guard, _, value])
+                if self.is_guard(guard) =>
+            {
+                RecordExpr::Value(value)
+            }
             ("arrayRecordIndex", [value]) => RecordExpr::Value(value),
-            (REQUIRE_OBJECT, [value, ..]) => RecordExpr::RequireObject(value),
+            ("requireObjectCoercible", [value, ..]) => RecordExpr::RequireObject(value),
             ("arrayRecordLength", [source]) => RecordExpr::Length(source),
+            ("iteratorRestAppend", [array, value]) => RecordExpr::RestAppend(array, value),
             ("arrayRecordPayload", [_, Expr::LocalSet(_, value), _]) => RecordExpr::Value(value),
             ("arrayRecordClose", _) => RecordExpr::Close,
             _ => return None,
@@ -177,7 +197,18 @@ impl<'h> Locals<'h> {
     }
 
     pub(crate) fn is_release(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::LocalSet(id, value) if self.row(*id).and_then(|r| r.iteration).is_some_and(|(_, released)| released) && matches!(&**value, Expr::Undefined))
+        matches!(expr, Expr::LocalSet(id, value) if self.row(*id).and_then(|r| r.iteration).is_some() && matches!(&**value, Expr::Undefined))
+    }
+
+    pub(crate) fn index_rest_value(&mut self, expr: &Expr) {
+        if let Some(RecordExpr::RestAppend(_, Expr::LocalGet(id))) = self.expression(expr)
+            && let Some(local) = self.index(*id)
+            && self.rows[local].flags.contains(LocalFlags::GENERATED)
+        {
+            // Exhaustion writes undefined and exits before appending this item.
+            self.rows[local].flags.insert(LocalFlags::DEFERRED);
+            self.rows[local].iteration = Some(Binding::Temporary);
+        }
     }
 
     pub(crate) fn index_elements(
@@ -214,8 +245,12 @@ impl<'h> Locals<'h> {
         let [Stmt::Let { id, .. }, Stmt::If { condition, .. }, rest @ ..] = statements else {
             return None;
         };
-        let element = self.elements.get(self.row(*id)?.element?)?;
+        let element = self.bound_element(*id)?;
         std::ptr::eq(condition, element.condition).then_some((*element, rest))
+    }
+
+    fn bound_element(&self, id: LocalId) -> Option<&Element<'h>> {
+        self.elements.get(self.row(id)?.element?)
     }
 
     fn recognize_element(&self, stmt: &'h Stmt) -> Option<(Element<'h>, bool)> {
@@ -273,7 +308,6 @@ impl<'h> Locals<'h> {
                 advance,
                 done: *done,
                 condition,
-                missing,
                 available,
             },
             binds,

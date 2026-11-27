@@ -21,7 +21,6 @@ pub(crate) use calls::{
 pub(crate) use classes::{direct_constructor, private_field};
 mod locations;
 pub(crate) use calls::{is_array_insertion, is_source_extern};
-pub(crate) use iteration::is_object_coercibility_check;
 pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset};
 mod iteration;
@@ -62,7 +61,7 @@ pub(crate) fn lower<'s, 'r>(
     })?;
     let mut analysis = crate::source::analyze(&mut ast, &mut locations, top_level);
     streams::lower(&mut ast, &mut analysis)?;
-    methods::preserve_arguments(&mut ast, &mut analysis);
+    methods::preserve_arguments(&mut ast, &analysis.classes);
     classes::preserve_field_types(&mut ast);
     perry_hir::ir::set_current_module_source(locations.module_text());
     let result = perry_hir::lower_module(&ast, "main", identity);

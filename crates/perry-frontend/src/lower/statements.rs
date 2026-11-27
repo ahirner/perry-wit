@@ -55,7 +55,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                             }
                             Ok(value)
                         },
-                        |b, ctx| b.expression_with(ctx, element.missing, Some(element_ty)),
+                        |b, ctx| b.absent_literal(ctx, false, Some(element_ty)),
                     )?;
                     let binding = self.initialized_local(ctx, value);
                     self.variant_guards.assign(element.id);
@@ -88,6 +88,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         label: Option<&'s str>,
         loop_cells: &[LocalId],
     ) -> Result<()> {
+        let locals = &self.shapes.specialization.instances.locals;
+        if let Some(body) = locals.dense_statements(statement) {
+            return self.statements(ctx, body);
+        }
         match statement {
             Stmt::If {
                 condition: Expr::ThisProvenClass(class_name),
@@ -97,21 +101,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 if self.is_proven_this_class(ctx, class_name) {
                     self.statements(ctx, then_branch)?;
                 } else if let Some(else_branch) = else_branch {
-                    self.statements(ctx, else_branch)?;
-                }
-            }
-            Stmt::If {
-                condition,
-                else_branch,
-                ..
-            } if self
-                .shapes
-                .specialization
-                .instances
-                .locals
-                .is_guard(condition) =>
-            {
-                if let Some(else_branch) = else_branch {
                     self.statements(ctx, else_branch)?;
                 }
             }

@@ -445,6 +445,9 @@ impl<'h> ModuleIndex<'h> {
                     self.scan_expr(scan, value, owner, in_loop);
                     RETURN
                 }
+                Stmt::If { .. } if let Some(branch) = self.locals.dense_statements(stmt) => {
+                    self.scan_stmts(scan, branch, owner, in_loop)
+                }
                 Stmt::If {
                     condition,
                     then_branch,
@@ -639,6 +642,7 @@ impl<'h> ModuleIndex<'h> {
                     SiteResolution::CollectionNew(scan.types.generic(base, &args)),
                 );
             }
+            Expr::NativeMethodCall { .. } => self.locals.index_rest_value(expr),
             _ => {}
         }
         if let Some(method) = crate::methods::StaticMethod::select(expr, scan.types) {

@@ -38,6 +38,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                     Ok(Ty::NUMBER)
                 }
                 hir_compat::RecordExpr::Close => Ok(Ty::VOID),
+                hir_compat::RecordExpr::RestAppend(array, item) => {
+                    let array = self.eval_expr(s, array)?;
+                    let ty = self.eval_expr(s, item)?;
+                    self.push_values(s.inst, array, std::slice::from_ref(item), &[ty]);
+                    Ok(array)
+                }
             };
         }
         let declared = self.index.expressions.declared(expr);
@@ -560,7 +566,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Ok(Ty::OPEN)
             }
             Expr::NativeMethodCall {
-                module,
                 object,
                 method,
                 args,
@@ -569,15 +574,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if hir_compat::is_writable_to_web(expr) {
                     self.eval_args(s, args)?;
                     return Ok(self.types.named(self.ctx, "WritableStream"));
-                }
-                if hir_compat::is_object_coercibility_check(module, method) {
-                    return match args.first() {
-                        Some(a) => {
-                            let ty = self.eval_expr(s, a)?;
-                            Ok(self.types.strip_nullish(ty).0)
-                        }
-                        None => Ok(Ty::OPEN),
-                    };
                 }
                 let arg_tys = self.eval_args(s, args)?;
                 if let Some(obj) = object {

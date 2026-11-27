@@ -62,6 +62,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                 }
                 hir_compat::RecordExpr::Close => self.absent_literal(ctx, false, expected),
+                hir_compat::RecordExpr::RestAppend(array, item) => {
+                    let array = self.expression(ctx, array)?;
+                    self.push_values(ctx, array, std::slice::from_ref(item))?;
+                    Ok(array)
+                }
             }
             .map(Some);
         }

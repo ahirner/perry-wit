@@ -4,7 +4,7 @@ use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Result};
 use perry_wit_diagnostics::{bail_unsupported, ensure_unsupported};
 use std::collections::HashSet;
-use swc_common::{DUMMY_SP, SyntaxContext};
+use swc_common::{DUMMY_SP, SyntaxContext, util::take::Take};
 use swc_ecma_utils::ExprFactory;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
@@ -30,18 +30,23 @@ struct Loops<'n> {
 }
 
 impl Loops<'_> {
-    fn rewrite(&mut self, iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
+    fn rewrite(&mut self, mut iteration: ast::ForOfStmt) -> Result<ast::Stmt> {
         let asynchronous = iteration.is_await;
-        let ast::ForHead::VarDecl(declaration) = iteration.left else {
+        let ast::ForHead::VarDecl(declaration) = &mut iteration.left else {
             bail_unsupported!("iteration requires a const or let binding");
         };
         const ONE_BINDING: &str = "iteration requires one const or let binding";
         let kind = declaration.kind;
         ensure_unsupported!(kind != ast::VarDeclKind::Var, "{ONE_BINDING}");
-        let Ok([declarator]) = <[ast::VarDeclarator; 1]>::try_from(declaration.decls) else {
+        let [declarator] = declaration.decls.as_mut_slice() else {
             bail_unsupported!("{ONE_BINDING}");
         };
-        let binding = declarator.name;
+        if !asynchronous
+            && matches!(&*iteration.right, ast::Expr::Array(array) if !array.elems.is_empty())
+        {
+            return Ok(iteration.into());
+        }
+        let binding = declarator.name.take();
         let prefix = self.analysis.names.prefix("loop");
         let ident = |suffix| ast::Ident::new_no_ctxt(format!("{prefix}{suffix}").into(), DUMMY_SP);
         let source = iteration.right;
@@ -152,14 +157,14 @@ fn try_finally(body: ast::Stmt, finalizer: ast::Stmt) -> ast::Stmt {
 impl VisitMut for Loops<'_> {
     fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
         statement.visit_mut_children_with(self);
-        let empty = ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP });
-        *statement = match std::mem::replace(statement, empty) {
-            ast::Stmt::ForOf(iteration) => self.rewrite(iteration).unwrap_or_else(|error| {
-                self.error.get_or_insert(error);
-                ast::Stmt::Empty(ast::EmptyStmt { span: DUMMY_SP })
-            }),
-            other => other,
-        };
+        if let ast::Stmt::ForOf(iteration) = statement {
+            match self.rewrite(iteration.take()) {
+                Ok(lowered) => *statement = lowered,
+                Err(error) => {
+                    self.error.get_or_insert(error);
+                }
+            }
+        }
     }
 }
 

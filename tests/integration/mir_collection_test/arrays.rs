@@ -224,7 +224,7 @@ fn array_callbacks_and_iteration_survive_forced_collection() {
 function twice(n:number) {return n*2;}
 function nothing(n:number) {}
 function missingDefault():number {throw new Error('missing');}
-function refill(values:number[]) {values.push(1,2);return 8;}
+function refill(values:number[]) {values.push(1,2,3);return 8;}
 export function callbacks() {
  let calls=0;
  const numbers:number[]=[1,2,3];
@@ -258,6 +258,18 @@ export function callbacks() {
  if(retained[0].label!=='cell0' || retained[1].label!=='cell1')return 10;
  return small.filter(nothing).length;
 }
+function tail(values: string[]):string[] { const [, ...rest] = values; return rest; }
+export function literalLoop() {
+ let calls=0;
+ function next(){ return ++calls; }
+ const functions=[];
+ for (let x of [next(), next()]) { functions.push(()=>x); x+=10; }
+ let visits=0;
+ for (const value of [1,,3]) { visits+=value ?? 5; }
+ for (const [a,b] of [[1,2],[3,4]]) { visits+=a+b; }
+ if (tail(['a','rest'])[0] !== 'rest') return -1;
+ return calls*1000 + functions[0]()*10 + functions[1]() + visits;
+}
 class IterationName { $$perryIteration(): number { return 13; } }
 export function iteration() {
  if (new IterationName().$$perryIteration() !== 13) return 6;
@@ -287,14 +299,15 @@ export function iteration() {
  try {const [value = missingDefault()] = []; } catch(e) {thrown++;}
  if(thrown!==1)return 4;
  const exhausted:number[]=[];
- const [filled=refill(exhausted), stillMissing=9]=exhausted;
- if(filled!==8 || stillMissing!==9)return 5;
+ const [filled=refill(exhausted), stillMissing=9, ...afterDefault]=exhausted;
+ if(filled!==8 || stillMissing!==9 || afterDefault.length!==0)return 5;
  for(const scalar of 'é🙂a'){text+=scalar+':';}
  return visits===3 && text==='cdé:🙂:a:' ? 0 : 1;
 }
 "#;
     let mut program = Program::checked(source, "array-callbacks.ts");
     program.stress_collection(true);
+    assert_eq!(program.call("literalLoop", &[]).0[0].unwrap_f64(), 2141.0);
     assert_eq!(program.outcome("callbacks", &[]), (0.0, 0));
     assert_eq!(program.call("iteration", &[]).0[0].unwrap_f64(), 0.0);
 }

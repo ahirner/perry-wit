@@ -402,17 +402,10 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.check_timer_member(stripped, byte_offset)?;
         if matches!(property, "payload" | "val") && stripped == self.types.named(self.ctx, "Error")
         {
-            let locations = &self.hir.locations;
-            let span = self
-                .index
-                .locals
-                .object_pattern_offset(object)
-                .and_then(|offset| locations.offset_span(offset, 1))
-                .or_else(|| locations.member_span(byte_offset));
             return Err(Diagnostic::unsupported(format!(
                 "property {property} is not supported on Error yet"
             ))
-            .with_fallback_span(span));
+            .with_fallback_span(self.hir.locations.member_span(byte_offset)));
         }
         if let TyKind::Cell {
             loc,
@@ -430,7 +423,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .member_type(s.inst, site, stripped, property, class)?
             .unwrap_or_else(|| {
                 if self.types.closed_record(stripped).is_some()
-                    && self.index.locals.object_pattern_offset(object).is_some()
+                    && self.hir.locations.is_pattern_key(byte_offset)
                 {
                     Ty::VOID
                 } else {

@@ -35,7 +35,6 @@ impl ClassId {
 #[derive(Clone, Copy, Default)]
 struct SourceBinding {
     inferred_end: Option<u32>,
-    iteration_end: Option<u32>,
     flags: LocalFlags,
 }
 
@@ -110,7 +109,9 @@ pub(crate) struct Analysis {
 
 impl Analysis {
     pub(crate) fn record_iteration(&mut self, span: Span) {
-        self.bindings.entry(span.lo.0).or_default().iteration_end = Some(span.hi.0);
+        let binding = self.bindings.entry(span.lo.0).or_default();
+        binding.flags.insert(LocalFlags::FOR_OF);
+        binding.inferred_end = Some(span.hi.0);
     }
 }
 

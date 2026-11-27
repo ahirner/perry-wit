@@ -439,7 +439,7 @@ pub(crate) enum LocalStorage {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LocalInfo<'h> {
-    pub(crate) iteration: Option<(crate::hir_compat::Binding<'h>, bool)>,
+    pub(crate) iteration: Option<crate::hir_compat::Binding<'h>>,
     pub(crate) element: Option<usize>,
     pub(crate) span: Option<swc_common::Span>,
     pub(crate) id: LocalId,

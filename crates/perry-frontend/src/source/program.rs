@@ -166,10 +166,7 @@ impl<'s> SourceModule<'s> {
                     swc_common::BytePos(span.end),
                 );
                 let mut flags = syntax.flags;
-                if syntax.iteration_end == Some(span.hi.0) {
-                    flags.insert(LocalFlags::FOR_OF);
-                    flags.insert(LocalFlags::INFERRED);
-                } else if syntax.inferred_end == Some(span.hi.0) {
+                if syntax.inferred_end == Some(span.hi.0) {
                     flags.insert(LocalFlags::INFERRED);
                 }
                 (id, LocalDeclaration { span, flags })
