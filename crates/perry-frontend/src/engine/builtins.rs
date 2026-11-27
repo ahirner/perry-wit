@@ -44,7 +44,8 @@ pub(crate) fn receiver_of(
         TyKind::BigInt => Some(Receiver::Value(Kind::BigInt)),
         TyKind::Literal(_) => Some(Receiver::Value(Kind::String)),
         TyKind::Named(id) | TyKind::Generic { base: id, .. }
-            if !decls.is_user_type(id.get(ctx)) && decls.imported_type(id.get(ctx)).is_none() =>
+            if decls.declaration(id).is_none()
+                && decls.symbol(id).is_none_or(|s| s.foreign.is_none()) =>
         {
             let name = id.get(ctx);
             CollectionKind::from_type_name(name)
@@ -513,13 +514,11 @@ pub(crate) fn property_type(
             index.map(|idx| types.with_absences(idx, Absence::Undefined))
         }
         TyKind::Literal(_) => (property == "length").then_some(Ty::NUMBER),
-        TyKind::Named(id) | TyKind::Generic { base: id, .. } => {
+        kind if let Some((id, gargs)) = kind.nominal() => {
             let base_name = id.get(ctx);
-            let gargs = match types.kind(stripped) {
-                TyKind::Generic { args, .. } => Some(args),
-                _ => None,
-            };
-            if let Some(args) = gargs {
+            if let Some(args) = gargs
+                && (base_name == "WitInput" || decls.declaration(id).is_none())
+            {
                 if base_name == "WitInput"
                     && let &[inner] = types.ty_slice(args)
                 {
@@ -529,7 +528,7 @@ pub(crate) fn property_type(
                 if property == "size" && CollectionKind::from_type_name(base_name).is_some() {
                     return Some(Ty::NUMBER);
                 }
-                if base_name == SETTLED && !decls.is_user_type(base_name) {
+                if base_name == SETTLED {
                     let arg0 = match types.ty_slice(args) {
                         &[v] => Some(v),
                         _ => None,
@@ -545,11 +544,8 @@ pub(crate) fn property_type(
                     };
                 }
             }
-            let arguments = gargs
-                .map(|a| types.ty_slice(a).to_vec())
-                .unwrap_or_default();
             if let Some((ty, optional)) = crate::shapes::generics::Resolver::new(ctx, decls, types)
-                .property(base_name, &arguments, property)
+                .property(stripped, property)
             {
                 let ty = if optional {
                     types.with_absences(ty, Absence::Undefined)
@@ -566,7 +562,7 @@ pub(crate) fn property_type(
                 return Some(ty);
             }
             if gargs.is_none()
-                && let Some(resolved) = decls.foreign_type(base_name)
+                && let Some(resolved) = decls.foreign_type(ctx, id)
             {
                 let rty = types.wit_type(ctx, resolved, WitView::Definition);
                 if rty != stripped
@@ -607,14 +603,14 @@ pub(crate) fn index_type(
     decls: &Declarations<'_>,
     types: &mut TypeTable,
     object: Ty,
-    index: &Expr,
+    position: Option<usize>,
 ) -> Option<Ty> {
     let (stripped, _) = types.strip_nullish(object);
     match types.kind(stripped) {
         TyKind::Dynamic => Some(Ty::DYNAMIC),
         TyKind::Array(elem) => Some(elem),
         TyKind::String => Some(Ty::STRING),
-        TyKind::Tuple(span) => match crate::hir_compat::tuple_position(index) {
+        TyKind::Tuple(span) => match position {
             Some(i) => Some(types.ty_slice(span).get(i).copied().unwrap_or(Ty::VOID)),
             None => Some(types.union_span(span)),
         },
@@ -622,7 +618,7 @@ pub(crate) fn index_type(
             Some(types.with_absences(Ty::NUMBER, Absence::Undefined))
         }
         TyKind::Named(id) => dict_value_ty(ctx, decls, types, stripped).or_else(|| {
-            let ty = types.wit_type(ctx, decls.foreign_type(id.get(ctx))?, WitView::Definition);
+            let ty = types.wit_type(ctx, decls.foreign_type(ctx, id)?, WitView::Definition);
             match types.kind(ty) {
                 TyKind::Array(elem) => Some(elem),
                 _ => None,

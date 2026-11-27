@@ -1,9 +1,10 @@
 //! Source declarations and executable bodies have separate lifetimes during specialization.
-use crate::engine::{BodyOwner, types::LocalFlags};
+use crate::engine::{BodyOwner, Storage, solve::SiteResolution, types::LocalFlags};
 use perry_hir::{
     ir::{Class, Expr, Function, Import, Interface, Module, Param, Stmt, TypeAlias},
     types::{FuncId, LocalId},
 };
+use perry_wit_diagnostics::Result;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
@@ -303,7 +304,7 @@ pub(crate) struct InstanceClass<'s> {
 }
 
 impl InstanceClass<'_> {
-    pub(crate) fn factory(&self) -> perry_wit_diagnostics::Result<FuncId> {
+    pub(crate) fn factory(&self) -> Result<FuncId> {
         self.constructor.as_ref().map(|f| f.id).ok_or_else(|| {
             perry_wit_diagnostics::internal!("missing constructor for {}", self.name)
         })
@@ -320,46 +321,39 @@ pub(crate) struct InstanceBodies<'s> {
 }
 
 impl crate::engine::InstancePlans<'_> {
-    pub(crate) fn reference(
-        &self,
-        owner: BodyOwner,
-        expr: &Expr,
-    ) -> perry_wit_diagnostics::Result<Option<FuncId>> {
-        Ok(self.reference_at(owner, expr, self.site(owner, expr)?.resolution))
+    pub(crate) fn reference(&self, owner: BodyOwner, expr: &Expr) -> Result<Option<FuncId>> {
+        self.reference_at(owner, expr, self.site(owner, expr)?.resolution)
     }
 
     pub(crate) fn reference_at(
         &self,
         owner: BodyOwner,
         expr: &Expr,
-        resolution: Option<crate::engine::solve::SiteResolution>,
-    ) -> Option<FuncId> {
-        if let Some(crate::engine::solve::SiteResolution::Callback { target }) = resolution {
-            return Some(self.function(target));
+        resolution: Option<SiteResolution>,
+    ) -> Result<Option<FuncId>> {
+        if let Some(SiteResolution::Callback { target }) = resolution {
+            return self.targets.instance(target).map(Some);
         }
-        match *expr {
-            Expr::LocalGet(id) => self.erased_parameter_declaration(owner, id),
+        Ok(match *expr {
+            Expr::LocalGet(id) => match self.storage(owner, id) {
+                Some(Storage::ErasedFunction(source)) => source,
+                _ => None,
+            },
             Expr::FuncRef(id) => Some(id),
             _ => None,
-        }
+        })
     }
+
     pub(crate) fn call_target(
         &self,
         owner: BodyOwner,
-        expr: &Expr,
-    ) -> perry_wit_diagnostics::Result<Option<FuncId>> {
-        if let Some(crate::engine::solve::SiteResolution::Call(target)) =
-            self.site(owner, expr)?.resolution
-        {
-            return target
-                .callee()
-                .map(|callee| self.emitted_callee(callee))
-                .transpose();
-        }
-        match expr {
-            Expr::Call { callee, .. } | Expr::CallSpread { callee, .. } => {
-                self.reference(owner, callee)
+        call: SourceCall<'_>,
+    ) -> Result<Option<FuncId>> {
+        match (self.site(owner, call.site)?.resolution, call.callee) {
+            (Some(SiteResolution::Call(target)), _) => {
+                target.callee().map(|f| self.targets.callee(f)).transpose()
             }
+            (_, Callee::Value(expr)) => self.reference(owner, expr),
             _ => Ok(None),
         }
     }

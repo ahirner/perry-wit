@@ -15,7 +15,6 @@ pub(crate) struct Locals<'h> {
 pub(crate) enum Binding<'h> {
     Guard(Option<&'h Expr>),
     ObjectPattern(u32),
-    Cursor,
     Temporary,
 }
 
@@ -111,7 +110,7 @@ impl<'h> Locals<'h> {
         let released = name.starts_with("__iterator_record_")
             || name.starts_with("__iterator_literal_")
             || matches!(call, Some(("arrayRecordPayload", _)))
-            || matches!(init, Some(Expr::Conditional { condition, .. }) if self.is_guard(condition));
+            || init.and_then(|e| self.dense_branch(e)).is_some();
         let role = match call {
             Some(("arrayRecordNeedsIterator", [])) => Binding::Guard(None),
             Some(("arrayRecordNeedsIterator", [Expr::LocalSet(local, source), ..])) if matches!(&**source, Expr::LocalGet(other) if other == local) => {
@@ -120,7 +119,6 @@ impl<'h> Locals<'h> {
             Some((REQUIRE_OBJECT, [_, Expr::Number(offset)])) => {
                 Binding::ObjectPattern(*offset as u32)
             }
-            Some(("arrayRecordIndex", [Expr::Integer(0)])) => Binding::Cursor,
             _ if released => Binding::Temporary,
             _ => return,
         };
@@ -144,13 +142,6 @@ impl<'h> Locals<'h> {
         }
     }
 
-    pub(crate) fn is_cursor(&self, id: LocalId) -> bool {
-        matches!(
-            self.row(id).and_then(|r| r.iteration),
-            Some((Binding::Cursor, _))
-        )
-    }
-
     pub(crate) fn is_guard(&self, expr: &Expr) -> bool {
         match expr {
             Expr::LocalGet(id) => self.guard(*id).is_some(),
@@ -158,15 +149,20 @@ impl<'h> Locals<'h> {
         }
     }
 
+    fn dense_branch<'a>(&self, expr: &'a Expr) -> Option<&'a Expr> {
+        match expr {
+            Expr::Conditional {
+                condition,
+                else_expr,
+                ..
+            } if self.is_guard(condition) => Some(else_expr),
+            _ => None,
+        }
+    }
+
     pub(crate) fn expression<'a>(&self, expr: &'a Expr) -> Option<RecordExpr<'a>> {
-        if let Expr::Conditional {
-            condition,
-            else_expr,
-            ..
-        } = expr
-            && self.is_guard(condition)
-        {
-            return Some(RecordExpr::Value(else_expr));
+        if let Some(value) = self.dense_branch(expr) {
+            return Some(RecordExpr::Value(value));
         }
         Some(match runtime(expr)? {
             ("arrayRecordIndex", [value]) => RecordExpr::Value(value),
@@ -182,9 +178,28 @@ impl<'h> Locals<'h> {
         matches!(expr, Expr::LocalSet(id, value) if self.row(*id).and_then(|r| r.iteration).is_some_and(|(_, released)| released) && matches!(&**value, Expr::Undefined))
     }
 
-    pub(crate) fn index_elements(&mut self, statements: &'h [Stmt]) {
-        for pair in statements.array_windows::<2>() {
-            if let Some(element) = self.recognize_element(pair)
+    pub(crate) fn index_elements(
+        &mut self,
+        statements: &'h [Stmt],
+        mut position: impl FnMut(&Expr, usize),
+    ) {
+        let mut ordinals = HashMap::<LocalId, usize>::new();
+        for [previous, statement] in statements.array_windows() {
+            let Some((element, binds)) = self.recognize_element(statement) else {
+                continue;
+            };
+            if let Expr::IndexGet { index, .. } = element.value
+                && matches!(
+                    runtime(index),
+                    Some(("arrayRecordIndex", [Expr::LocalGet(_)]))
+                )
+            {
+                let next = ordinals.entry(element.done).or_default();
+                position(index, *next);
+                *next += 1;
+            }
+            if binds
+                && matches!(previous, Stmt::Let {id, init: Some(Expr::Undefined), ..} if *id == element.id)
                 && let Some(local) = self.index(element.id)
             {
                 self.rows[local].element = Some(self.elements.len());
@@ -201,43 +216,28 @@ impl<'h> Locals<'h> {
         std::ptr::eq(condition, element.condition).then_some((*element, rest))
     }
 
-    fn recognize_element(&self, pair: &'h [Stmt; 2]) -> Option<Element<'h>> {
-        let [
-            Stmt::Let {
-                id,
-                init: Some(Expr::Undefined),
-                ..
-            },
-            Stmt::If {
-                condition,
-                then_branch,
-                else_branch: Some(pull),
-            },
-        ] = pair
+    fn recognize_element(&self, stmt: &'h Stmt) -> Option<(Element<'h>, bool)> {
+        let Stmt::If {
+            condition,
+            then_branch,
+            else_branch: Some(pull),
+        } = stmt
         else {
             return None;
         };
         let Expr::LocalGet(done) = compared_to_true(condition)? else {
             return None;
         };
-        let [Stmt::Expr(Expr::LocalSet(target, missing))] = then_branch.as_slice() else {
+        let [Stmt::Expr(Expr::LocalSet(id, missing))] = then_branch.as_slice() else {
             return None;
         };
-        if target != id || !matches!(&**missing, Expr::Undefined) {
+        if !matches!(&**missing, Expr::Undefined) {
             return None;
         }
-        let indexed = pull.iter().find_map(|statement| match statement {
+        let indexed = pull.iter().find_map(|stmt| match stmt {
             Stmt::Let {
                 init: Some(init), ..
-            } if let Expr::Conditional {
-                condition,
-                else_expr,
-                ..
-            } = init
-                && self.is_guard(condition) =>
-            {
-                Some(&**else_expr)
-            }
+            } => self.dense_branch(init),
             _ => None,
         })?;
         let (success, test) = match indexed {
@@ -251,12 +251,12 @@ impl<'h> Locals<'h> {
         let Expr::Sequence(steps) = success else {
             return None;
         };
-        let [Expr::LocalSet(target, value), remaining @ ..] = steps.as_slice() else {
-            return None;
+        let (first, remaining) = steps.split_first()?;
+        let (value, binds) = match first {
+            Expr::LocalSet(target, value) if target == id => (value.as_ref(), true),
+            elision @ Expr::IndexGet { .. } => (elision, false),
+            _ => return None,
         };
-        if target != id {
-            return None;
-        }
         let advance = remaining
             .first()
             .filter(|expr| !matches!(expr, Expr::Bool(_)));
@@ -264,34 +264,17 @@ impl<'h> Locals<'h> {
             Some(test) => Availability::Test(test),
             None => Availability::Known(matches!(steps.last(), Some(Expr::Bool(false)))),
         };
-        Some(Element {
-            id: *id,
-            value,
-            advance,
-            done: *done,
-            condition,
-            missing,
-            available,
-        })
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct CursorPositions(HashMap<LocalId, usize>);
-
-impl CursorPositions {
-    pub(crate) fn reset(&mut self, id: LocalId) {
-        self.0.insert(id, 0);
-    }
-    pub(crate) fn index(&self, expr: &Expr) -> Option<usize> {
-        let ("arrayRecordIndex", [Expr::LocalGet(id)]) = runtime(expr)? else {
-            return None;
-        };
-        self.0.get(id).copied()
-    }
-    pub(crate) fn advance(&mut self, id: LocalId) {
-        if let Some(position) = self.0.get_mut(&id) {
-            *position += 1;
-        }
+        Some((
+            Element {
+                id: *id,
+                value,
+                advance,
+                done: *done,
+                condition,
+                missing,
+                available,
+            },
+            binds,
+        ))
     }
 }

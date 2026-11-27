@@ -56,7 +56,7 @@ pub(crate) struct TimerSchedule {
 }
 
 pub(crate) enum NativeBody {
-    Resource(crate::hir_compat::Target<perry_hir::types::FuncId>),
+    Resource(crate::hir_compat::Target<types::InstanceId>),
     Settle(perry_mir::SettleKind),
     Helper(solve::HelperSpec),
 }
@@ -107,11 +107,43 @@ pub(crate) struct ClosureValue {
 }
 
 #[derive(Default)]
+pub(crate) struct CallTargets<T> {
+    instances: types::IdxVec<types::InstanceId, Option<T>>,
+    helpers: types::IdxVec<types::HelperId, Option<T>>,
+}
+
+impl<T: Copy> CallTargets<T> {
+    pub(crate) fn bind<U>(&self, f: impl Fn(T) -> Option<U>) -> CallTargets<U> {
+        CallTargets {
+            instances: self.instances.map(|id| id.and_then(&f)),
+            helpers: self.helpers.map(|id| id.and_then(&f)),
+        }
+    }
+
+    pub(crate) fn instance(&self, id: types::InstanceId) -> Result<T> {
+        self.instances[id]
+            .ok_or_else(|| perry_wit_diagnostics::internal!("missing emitted instance {id:?}"))
+    }
+
+    pub(crate) fn helper(&self, id: types::HelperId) -> Result<T> {
+        self.helpers[id]
+            .ok_or_else(|| perry_wit_diagnostics::internal!("missing emitted helper {id:?}"))
+    }
+
+    pub(crate) fn callee(&self, target: solve::FunctionTarget) -> Result<T> {
+        use solve::FunctionTarget::*;
+        match target {
+            Direct(id) | Closure(id) => self.instance(id),
+            Dispatcher(id) => self.helper(id),
+        }
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct InstancePlans<'s> {
     pub(crate) dispatch_arms: types::Pool<types::DispatchArmSpan, solve::DispatchArm>,
     decisions: plans::Decisions<'s>,
-    functions: types::IdxVec<types::InstanceId, perry_hir::types::FuncId>,
-    helpers: types::IdxVec<types::HelperId, Option<perry_hir::types::FuncId>>,
+    pub(crate) targets: CallTargets<perry_hir::types::FuncId>,
     pub(crate) locals: crate::hir_compat::Locals<'s>,
     pub(crate) capture_conversions: types::Pool<
         types::CaptureConversionSpan,
@@ -169,6 +201,7 @@ pub(crate) fn lower_module<'r>(
 ) -> Result<crate::LoweredProgram<'r>> {
     let mut types = TypeTable::new();
     let decls = crate::shapes::Declarations::new(
+        ctx,
         &source.declarations.interfaces,
         &source.declarations.type_aliases,
         &source.declarations.imports,
@@ -234,43 +267,12 @@ impl<'s> InstancePlans<'s> {
         &self.decisions.expressions
     }
 
-    pub(crate) fn function(&self, id: types::InstanceId) -> perry_hir::types::FuncId {
-        self.functions[id]
-    }
-
-    pub(crate) fn helper(&self, id: types::HelperId) -> Result<perry_hir::types::FuncId> {
-        self.helpers[id]
-            .ok_or_else(|| perry_wit_diagnostics::Diagnostic::internal("missing emitted helper"))
-    }
-
-    pub(crate) fn emitted_callee(
-        &self,
-        function: solve::FunctionTarget,
-    ) -> Result<perry_hir::types::FuncId> {
-        use solve::FunctionTarget::*;
-        match function {
-            Direct(id) | Closure(id) => Ok(self.function(id)),
-            Dispatcher(id) => self.helper(id),
-        }
-    }
-
     pub(crate) fn storage(
         &self,
         owner: BodyOwner,
         id: perry_hir::types::LocalId,
     ) -> Option<Storage> {
         self.decisions.storage(owner, self.locals.index(id)?)
-    }
-
-    pub(crate) fn erased_parameter_declaration(
-        &self,
-        owner: BodyOwner,
-        id: perry_hir::types::LocalId,
-    ) -> Option<perry_hir::types::FuncId> {
-        match self.storage(owner, id)? {
-            Storage::ErasedFunction(declaration) => declaration,
-            _ => None,
-        }
     }
 
     pub(crate) fn globals(&self) -> impl Iterator<Item = perry_hir::types::LocalId> + '_ {

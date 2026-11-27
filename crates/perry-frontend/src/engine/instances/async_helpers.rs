@@ -39,7 +39,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
     pub(super) fn prepare_helper(&mut self, id: HelperId) -> Result<()> {
         let entry = self.solved.helpers[id];
         let fid = self.fresh_func_id()?;
-        self.plans.helpers[id] = Some(fid);
+        self.plans.targets.helpers[id] = Some(fid);
         let (label, params, result, is_async) = match entry.spec {
             HelperSpec::Dispatcher {
                 result,

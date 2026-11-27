@@ -357,6 +357,16 @@ pub(crate) enum TyKind {
     ClassInst(ClassInstId),
 }
 
+impl TyKind {
+    pub(crate) fn nominal(self) -> Option<(shapes::TypeName, Option<TypeListId>)> {
+        match self {
+            Self::Named(id) => Some((id, None)),
+            Self::Generic { base, args } => Some((base, Some(args))),
+            _ => None,
+        }
+    }
+}
+
 impl Ty {
     pub(crate) const BOTTOM: Self = Self(0);
     pub(crate) const OPEN: Self = Self(1);

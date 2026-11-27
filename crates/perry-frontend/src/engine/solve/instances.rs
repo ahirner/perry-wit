@@ -217,12 +217,10 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             _ => ty,
         };
-        let (base, args) = match self.types.kind(resolved) {
-            TyKind::Named(base) => (base, None),
-            TyKind::Generic { base, args } => (base, Some(args)),
-            _ => return Ok(resolved),
+        let Some((base, args)) = self.types.kind(resolved).nominal() else {
+            return Ok(resolved);
         };
-        let Some(class) = self.decls.class_id(base.get(self.ctx)) else {
+        let Some(class) = self.decls.symbol(base).and_then(|s| s.class_id()) else {
             return Ok(resolved);
         };
         let args = args.map_or_else(Vec::new, |s| self.types.ty_slice(s).to_vec());

@@ -7,10 +7,9 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn start_timer(
         &mut self,
         ctx: &mut Context,
-        id: FuncId,
+        signature: &'s Signature<'s>,
         args: &'s [Expr],
     ) -> Result<Value> {
-        let signature = self.signature(id)?;
         let handle = signature
             .params
             .first()

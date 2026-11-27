@@ -266,6 +266,13 @@ export function iteration() {
    for (const n of row) { steps += n; continue outer; }
  }
  if (steps !== 4) return 7;
+ const select = (pair: [number, boolean, string]) => {
+   const [first, , last] = pair;
+   return first + last.length;
+ };
+ const left: [number, boolean, string][] = [[2, true, 'abc']];
+ const right: [number, boolean, string][] = [[6, false, 'x']];
+ if (left.map(select)[0] !== 5 || right.map(select)[0] !== 7) return 8;
  const values:number[]=[1,2];
  let visits=0;
  for(const n of values){visits++;if(n===1){values.push(3);continue;}if(n===3)break;}

@@ -207,7 +207,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .local_set(ctx, *id, value)
                 .map_err(|error| self.shapes.annotate_local(error, *id))?,
             Expr::Update { id, op, prefix } => {
-                self.frame.cursors.advance(*id);
                 let op = match op {
                     UpdateOp::Increment => BinaryOp::Add,
                     UpdateOp::Decrement => BinaryOp::Sub,
@@ -369,12 +368,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                 args,
                 byte_offset,
                 ..
-            } if class_name == "DataView" && !self.shapes.is_user_type(class_name) => self
+            } if class_name == "DataView" && self.shapes.is_builtin(expr) => self
                 .data_view(ctx, args)
                 .map_err(|error| self.shapes.annotate_call(error, *byte_offset))?,
             Expr::New {
                 class_name, args, ..
-            } if class_name == "AbortController" && !self.shapes.is_user_type(class_name) => {
+            } if class_name == "AbortController" && self.shapes.is_builtin(expr) => {
                 ensure_diag!(
                     args.is_empty(),
                     codes::TYPE_MISMATCH,
@@ -385,7 +384,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Expr::New {
                 class_name, args, ..
             } if matches!(class_name.as_str(), "Headers" | "Response" | "Request")
-                && !self.shapes.is_user_type(class_name) =>
+                && self.shapes.is_builtin(expr) =>
             {
                 self.web_new(ctx, class_name, args)?
             }

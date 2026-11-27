@@ -46,7 +46,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         required: bool,
     ) -> Result<Option<Value>> {
         let plans = &self.shapes.specialization.instances;
-        if let Some(id) = plans.reference_at(self.frame.owner, expr, site) {
+        if let Some(id) = plans.reference_at(self.frame.owner, expr, site)? {
             let value = self
                 .shapes
                 .specialization
@@ -56,12 +56,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
         use SiteResolution::*;
         let (get, set) = match site {
-            Some(ReadMember(id)) => (Some(plans.function(id)), None),
-            Some(WriteMember(id)) => (None, Some(plans.function(id))),
-            Some(UpdateMember { get, set }) => (
-                get.map(|id| plans.function(id)),
-                set.map(|id| plans.function(id)),
-            ),
+            Some(ReadMember(id)) => (Some(id), None),
+            Some(WriteMember(id)) => (None, Some(id)),
+            Some(UpdateMember { get, set }) => (get, set),
             None | Some(Cell(_)) => (None, None),
             Some(TypedArray(_)) if expected.is_some() => (None, None),
             Some(site) => return self.solved_value(ctx, expr, expected, site, required),
@@ -183,7 +180,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 return self
                     .invoke_arguments(
                         ctx,
-                        self.signature(plans.helper(helper)?)?,
+                        self.signatures.solved.helper(helper)?,
                         std::iter::empty(),
                         arguments,
                         None,
@@ -196,7 +193,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                     args, byte_offset, ..
                 },
             ) => self
-                .start_timer(ctx, plans.helper(helper)?, args)
+                .start_timer(ctx, self.signatures.solved.helper(helper)?, args)
                 .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?,
             (
                 TimerClear { arg_ty },

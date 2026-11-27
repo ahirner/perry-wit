@@ -6,7 +6,6 @@ pub(super) struct Frame<'s> {
     pub(super) this_slot: Option<Value>,
     pub(super) controls: Vec<Control<'s>>,
     pub(super) return_to: Option<Ptr<BasicBlock>>,
-    pub(super) cursors: hir_compat::CursorPositions,
 }
 
 impl<'s> Frame<'s> {
@@ -16,7 +15,6 @@ impl<'s> Frame<'s> {
             this_slot,
             controls: Vec::new(),
             return_to: None,
-            cursors: Default::default(),
         }
     }
     pub(super) fn jump_target(

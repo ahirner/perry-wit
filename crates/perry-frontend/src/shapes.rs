@@ -1,10 +1,10 @@
 //! Source declarations used by type inference and MIR lowering.
-use indexmap::IndexMap;
+
 use perry_contract::types::{INTEGERS, Integer};
 use perry_hir::types::Type as HirType;
 use perry_wit_diagnostics::Result;
 use pliron::context::Context;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 pub(crate) mod generics;
 mod imports;
 mod records;
@@ -18,12 +18,9 @@ pub(crate) struct Symbol<'h> {
     alias: Option<&'h perry_hir::ir::TypeAlias>,
     class: Option<ClassShape<'h>>,
     pub(crate) import: Option<Imported<'h>>,
-    foreign: Option<&'h crate::wit::Foreign<'h>>,
+    pub(crate) foreign: Option<&'h crate::wit::Foreign<'h>>,
     integer: Option<Integer>,
 }
-
-#[derive(Clone, Copy)]
-pub(crate) struct SymbolId(usize);
 
 impl<'h> Symbol<'h> {
     pub(crate) fn class_id(&self) -> Option<crate::source::ClassId> {
@@ -41,12 +38,13 @@ impl<'h> Symbol<'h> {
 }
 
 pub(crate) struct Declarations<'h> {
-    symbols: IndexMap<&'h str, Symbol<'h>>,
+    symbols: HashMap<TypeName, Symbol<'h>>,
     pub(crate) world: &'h crate::wit::WorldTypes<'h>,
 }
 
 impl<'h> Declarations<'h> {
     pub(crate) fn new(
+        ctx: &Context,
         interfaces: &'h [perry_hir::ir::Interface],
         type_aliases: &'h [perry_hir::ir::TypeAlias],
         imports: &'h [perry_hir::ir::Import],
@@ -55,12 +53,15 @@ impl<'h> Declarations<'h> {
         locations: &crate::hir_compat::Locations,
     ) -> Result<Self> {
         let foreign = world.foreign();
-        let mut symbols = IndexMap::<&str, Symbol>::new();
+        let mut declarations = Self {
+            symbols: HashMap::new(),
+            world,
+        };
         for interface in interfaces {
-            symbols.entry(&interface.name).or_default().interface = Some(interface);
+            declarations.entry(ctx, &interface.name).interface = Some(interface);
         }
         for alias in type_aliases {
-            symbols.entry(&alias.name).or_default().alias = Some(alias);
+            declarations.entry(ctx, &alias.name).alias = Some(alias);
         }
         for import in imports {
             let source = import.source.as_str();
@@ -75,7 +76,7 @@ impl<'h> Declarations<'h> {
                     Default { local } | Namespace { local } => (local.as_str(), None),
                 };
                 let value = module.resolve(source, name).map_err(annotate)?;
-                let symbol = symbols.entry(local).or_default();
+                let symbol = declarations.entry(ctx, local);
                 symbol.import = Some(value);
                 let Some(imported) = name else { continue };
                 if import.source == "perry:types"
@@ -97,81 +98,89 @@ impl<'h> Declarations<'h> {
                 }
             }
         }
-        Ok(Self { symbols, world }.with_classes(classes.iter().map(ClassShape::Source)))
+        Ok(declarations.with_classes(ctx, classes.iter().map(ClassShape::Source)))
     }
 
-    pub(crate) fn with_classes(mut self, classes: impl Iterator<Item = ClassShape<'h>>) -> Self {
+    pub(crate) fn with_classes(
+        mut self,
+        ctx: &Context,
+        classes: impl Iterator<Item = ClassShape<'h>>,
+    ) -> Self {
         for symbol in self.symbols.values_mut() {
             symbol.class = None;
         }
         for class in classes.filter(|c| !crate::hir_compat::is_object_literal(c.name())) {
-            self.symbols.entry(class.name()).or_default().class = Some(class);
+            self.entry(ctx, class.name()).class = Some(class);
         }
         self
     }
 
-    pub(crate) fn is_user_type(&self, name: &str) -> bool {
-        generics::Declaration::find(self, name).is_some()
+    fn entry(&mut self, ctx: &Context, name: &str) -> &mut Symbol<'h> {
+        self.symbols
+            .entry(TypeName::new(ctx, name.into()))
+            .or_default()
     }
 
-    pub(crate) fn bind(&self, name: &str) -> Option<SymbolId> {
-        self.symbols.get_index_of(name).map(SymbolId)
-    }
-    pub(crate) fn symbol(&self, id: SymbolId) -> &Symbol<'h> {
-        &self.symbols[id.0]
-    }
-    pub(crate) fn class_id(&self, name: &str) -> Option<crate::source::ClassId> {
-        self.symbols.get(name)?.class_id()
+    pub(crate) fn declaration(&self, id: TypeName) -> Option<generics::Declaration<'h>> {
+        self.symbol(id)?.declaration()
     }
 
-    pub(crate) fn imported_type(&self, name: &str) -> Option<&'h crate::wit::Foreign<'h>> {
-        self.symbols.get(name)?.foreign
+    pub(crate) fn symbol(&self, id: TypeName) -> Option<&Symbol<'h>> {
+        self.symbols.get(&id)
     }
 
-    pub(crate) fn integer_spec<'a>(&'a self, ctx: &Context, mut name: &'a str) -> Option<Integer> {
+    pub(crate) fn integer_spec(&self, ctx: &Context, mut id: TypeName) -> Option<Integer> {
         let mut seen = HashSet::new();
-        while self.is_user_type(name) {
-            let alias = self.symbols.get(name)?.alias?;
+        while self.declaration(id).is_some() {
+            let alias = self.symbol(id)?.alias?;
             let HirType::Named(target) = &alias.ty else {
                 return None;
             };
-            if !alias.type_params.is_empty() || !seen.insert(name) {
+            if !alias.type_params.is_empty() || !seen.insert(id) {
                 return None;
             }
-            name = target;
+            id = TypeName::new(ctx, target.clone());
         }
-        if let Some(domain) = self.symbols.get(name).and_then(|s| s.integer) {
+        if let Some(domain) = self.symbol(id).and_then(|s| s.integer) {
             return Some(domain);
         }
-        let domain = match self.foreign_entry(name)? {
+        let domain = match self.foreign_entry(ctx, id)? {
             crate::wit::Foreign::Type(value) | crate::wit::Foreign::Input(value) => {
                 value.integer()?
             }
         };
-        (self.imported_type(name).is_some() || perry_mir::builtin_value_type(ctx, name).is_none())
-            .then_some(domain)
+        (self.symbol(id).is_some_and(|s| s.foreign.is_some())
+            || perry_mir::builtin_value_type(ctx, id.get(ctx)).is_none())
+        .then_some(domain)
     }
 
-    fn foreign_entry(&self, name: &str) -> Option<&crate::wit::Foreign<'h>> {
-        self.imported_type(name)
-            .or_else(|| self.world.foreign().get(name))
+    fn foreign_entry(&self, ctx: &Context, id: TypeName) -> Option<&crate::wit::Foreign<'h>> {
+        self.symbol(id)
+            .and_then(|s| s.foreign)
+            .or_else(|| self.world.foreign().get(id.get(ctx).as_str()))
     }
 
-    pub(crate) fn foreign_type(&self, name: &str) -> Option<crate::wit::WitValue<'h>> {
-        match self.foreign_entry(name)? {
-            crate::wit::Foreign::Type(value) if !self.is_user_type(name) => Some(*value),
+    pub(crate) fn foreign_type(
+        &self,
+        ctx: &Context,
+        id: TypeName,
+    ) -> Option<crate::wit::WitValue<'h>> {
+        match self.foreign_entry(ctx, id)? {
+            crate::wit::Foreign::Type(value) if self.declaration(id).is_none() => Some(*value),
             _ => None,
         }
     }
 
-    pub(crate) fn resource(&self, name: &str) -> Option<u32> {
-        let value = self.foreign_type(name)?;
+    pub(crate) fn resource(&self, ctx: &Context, name: TypeName) -> Option<u32> {
+        let value = self.foreign_type(ctx, name)?;
         let resource = value.resource()?;
-        if self.imported_type(name).is_none() {
+        if self.symbol(name).is_none_or(|s| s.foreign.is_none()) {
             let wit_parser::Type::Id(id) = value.ty else {
                 return None;
             };
-            if perry_contract::names::NamedType::get(value.resolve, id)?.qualified() != name {
+            if perry_contract::names::NamedType::get(value.resolve, id)?.qualified()
+                != *name.get(ctx)
+            {
                 return None;
             }
         }

@@ -25,6 +25,7 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
     let ctx = Context::new();
     let foreign = crate::wit::WorldTypes::default();
     let decls = Declarations::new(
+        &ctx,
         &module.interfaces,
         &module.type_aliases,
         &module.imports,
@@ -34,12 +35,16 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
     )?;
     let mut types = TypeTable::new();
     let mut resolver = Resolver::new(&ctx, &decls, &mut types);
+    let mut field = |name: &str| {
+        let ty = resolver.types.named(&ctx, name);
+        resolver.property(ty, "a")
+    };
     for name in ["Cycle", "Chain0"] {
-        assert_eq!(resolver.property(name, &[], "a"), None, "{name}");
+        assert_eq!(field(name), None, "{name}");
     }
     // Warm the parents in order; a deep query has the same limit with a warm cache.
     for index in 0..64 {
-        let field = resolver.property(&format!("Parent{index}"), &[], "a");
+        let field = field(&format!("Parent{index}"));
         if index == 63 {
             assert_eq!(field, None);
         }

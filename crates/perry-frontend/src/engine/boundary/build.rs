@@ -285,7 +285,7 @@ impl ModuleIndex<'_> {
                 };
                 for &(owner, kind, caller) in &origins[tid] {
                     if let Some(callee) = plans
-                        .call_target(owner, expr)?
+                        .call_target(owner, call)?
                         .and_then(|id| functions.get(&id))
                     {
                         locations.record_cross_file_call(

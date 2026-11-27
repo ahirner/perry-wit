@@ -41,11 +41,10 @@ impl<'a, 'h> Resolver<'a, 'h> {
     pub(crate) fn application(
         &mut self,
         declaration: Declaration<'h>,
-        base: &str,
-        args: &[Ty],
+        written: InstanceKey,
         depth: usize,
     ) -> Result<Application> {
-        let written = self.types.application_key(base, args);
+        let (base, args) = written;
         // Inherited fields are resolved recursively. A cached parent must respect the caller's depth budget.
         let cacheable = depth == 0
             || !matches!(declaration, Declaration::Interface(i) if !i.extends.is_empty());
@@ -53,14 +52,12 @@ impl<'a, 'h> Resolver<'a, 'h> {
             self.reads_class_fields |= app.reads_class_fields;
             return Ok(app);
         }
-        let bindings = declaration.bind(self.ctx, base, self.types, args)?;
-        let key = if bindings.len() == args.len() {
+        let bindings = declaration.bind(self.ctx, base.get(self.ctx), self.types, args)?;
+        let key = if bindings.len() == self.types.ty_slice(args).len() {
             written
         } else {
-            self.types.application_key(
-                base,
-                &bindings.iter().map(|&(_, ty)| ty).collect::<Vec<_>>(),
-            )
+            let defaults = bindings.iter().map(|&(_, ty)| ty).collect::<Vec<_>>();
+            (base, self.types.type_list(&defaults))
         };
         let app = if cacheable
             && key != written
@@ -152,31 +149,29 @@ impl<'a, 'h> Resolver<'a, 'h> {
         Ok(self.types.object(&properties, None))
     }
 
-    pub(crate) fn named(
+    fn named(
         &mut self,
-        base: &str,
-        arguments: &[Ty],
-        plain: bool,
+        base: TypeName,
+        args: Option<TypeListId>,
         query: Query,
         depth: usize,
     ) -> Option<(Ty, usize)> {
         if depth >= RESOLUTION_DEPTH {
             return None;
         }
-        let Some(declaration) = Declaration::find(self.decls, base) else {
-            return self.utility(base, arguments, query, depth);
+        let Some(declaration) = self.decls.declaration(base) else {
+            let arguments = args.map_or_else(Vec::new, |args| self.types.ty_slice(args).to_vec());
+            return self.utility(base.get(self.ctx), &arguments, query, depth);
         };
         if query.aliases_only()
             && !(matches!(declaration, Declaration::Alias(_))
-                && (!plain || declaration.parameters().is_empty()))
+                && (args.is_some() || declaration.parameters().is_empty()))
             || matches!(declaration, Declaration::Class(_)) && query == Query::Dictionary
         {
             return None;
         }
-        let target = self
-            .application(declaration, base, arguments, depth)
-            .ok()?
-            .ty;
+        let args = args.unwrap_or_else(|| self.types.type_list(&[]));
+        let target = self.application(declaration, (base, args), depth).ok()?.ty;
         if matches!(declaration, Declaration::Class(_)) {
             return Some((target, depth));
         }
@@ -188,16 +183,9 @@ impl<'a, 'h> Resolver<'a, 'h> {
 
     fn resolve(&mut self, ty: Ty, query: Query, depth: usize) -> Option<(Ty, usize)> {
         let kind = self.types.kind(ty);
-        let named = match kind {
-            TyKind::Generic { base, args } => {
-                Some((base, self.types.ty_slice(args).to_vec(), false))
-            }
-            TyKind::Named(id) => Some((id, Vec::new(), true)),
-            _ => None,
-        };
-        if let Some((id, args, plain)) = named {
+        if let Some((id, args)) = kind.nominal() {
             return self
-                .named(id.get(self.ctx), &args, plain, query, depth)
+                .named(id, args, query, depth)
                 .or_else(|| (query == Query::Union).then_some((ty, depth)));
         }
         if query == Query::Property
@@ -294,7 +282,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         arguments: &[Ty],
         depth: usize,
     ) -> Option<Ty> {
-        if depth >= RESOLUTION_DEPTH || self.decls.is_user_type(base) {
+        if depth >= RESOLUTION_DEPTH {
             return None;
         }
         let members: Vec<Ty> = match (base, arguments) {
@@ -324,7 +312,7 @@ impl<'a, 'h> Resolver<'a, 'h> {
         })
     }
 
-    fn utility(
+    pub(crate) fn utility(
         &mut self,
         base: &str,
         arguments: &[Ty],
@@ -397,13 +385,8 @@ impl<'a, 'h> Resolver<'a, 'h> {
         Some((self.types.object(&properties, None), depth))
     }
 
-    pub(crate) fn property(
-        &mut self,
-        base: &str,
-        arguments: &[Ty],
-        property: &str,
-    ) -> Option<(Ty, bool)> {
-        let (ty, _) = self.named(base, arguments, false, Query::Property, 0)?;
+    pub(crate) fn property(&mut self, receiver: Ty, property: &str) -> Option<(Ty, bool)> {
+        let (ty, _) = self.resolve(receiver, Query::Property, 0)?;
         let TyKind::Object { props, index } = self.types.kind(ty) else {
             return None;
         };

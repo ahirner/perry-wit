@@ -61,15 +61,21 @@ pub(crate) struct Expressions<'h> {
     sites: HashMap<*const Expr, ExprIdx>,
     declared: IdxVec<DeclaredId, SiteResolution>,
     source: IdxVec<ExprIdx, SourcePlan>,
-    pub(super) symbols: SiteRows<crate::shapes::SymbolId>,
+    pub(super) symbols: SiteRows<crate::shapes::TypeName>,
     pub(super) static_fields: SiteRows<LocalIdx>,
     pub(super) literals: SiteRows<&'h [perry_hir::ir::ClassField]>,
     constructors: SiteRows<BuiltinConstructor>,
+    pub(super) tuple_positions: SiteRows<usize>,
     pub(super) annotations: SiteRows<super::types::Ty>,
     pub(super) receivers: SiteRows<crate::wit::MemberGroupId>,
 }
 
 impl<'h> Expressions<'h> {
+    pub(crate) fn tuple_position(&self, index: &Expr) -> Option<usize> {
+        crate::hir_compat::tuple_position(index)
+            .or_else(|| self.tuple_positions.get(self.index(index)?).copied())
+    }
+
     pub(crate) fn annotation(
         &self,
         expr: &Expr,
@@ -83,7 +89,7 @@ impl<'h> Expressions<'h> {
         decls: &'a crate::shapes::Declarations<'h>,
         expr: &Expr,
     ) -> Option<&'a crate::shapes::Symbol<'h>> {
-        Some(decls.symbol(*self.symbols.get(self.index(expr)?)?))
+        decls.symbol(*self.symbols.get(self.index(expr)?)?)
     }
     pub(crate) fn static_field(&self, expr: &Expr) -> Option<LocalIdx> {
         self.static_fields.get(self.index(expr)?).copied()

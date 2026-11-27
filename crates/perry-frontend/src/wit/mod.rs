@@ -263,6 +263,7 @@ pub(crate) enum BoundMember<'h> {
 
 impl<'h> BoundMember<'h> {
     pub(crate) fn at(
+        ctx: &pliron::context::Context,
         expr: &'h Expr,
         decls: &crate::shapes::Declarations,
         locations: &crate::hir_compat::Locations,
@@ -307,7 +308,7 @@ impl<'h> BoundMember<'h> {
             _ => return None,
         };
         group
-            .get(&decls.resource(class)?)
+            .get(&decls.resource(ctx, crate::shapes::TypeName::new(ctx, class.into()))?)
             .copied()
             .map(Self::Static)
     }

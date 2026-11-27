@@ -53,15 +53,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         expected: Option<InlineResult>,
     ) -> Result<Option<Value>> {
         let value = match callback {
-            Callback::Function(signature, bound) => {
+            Callback::Function(signature, prefix) => {
                 ensure_unsupported!(
-                    bound.is_some() || !signature.is_async && signature.parameters().1.is_none(),
+                    prefix.is_some() || !signature.is_async && signature.parameters().1.is_none(),
                     "array callbacks require synchronous functions without rest parameters"
                 );
-                let prefix = match bound {
-                    Some((target, value)) => target.operand(self, ctx, Some(value))?,
-                    None => None,
-                };
                 let supplied = signature.supplied_values(usize::from(prefix.is_some()), arguments);
                 self.invoke_arguments(
                     ctx,

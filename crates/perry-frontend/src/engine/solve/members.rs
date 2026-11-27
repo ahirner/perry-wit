@@ -381,8 +381,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(ty);
             }
         }
+        let position = self.index.expressions.tuple_position(index);
         Ok(
-            builtins::index_type(self.ctx, self.decls, self.types, obj_ty, index)
+            builtins::index_type(self.ctx, self.decls, self.types, obj_ty, position)
                 .unwrap_or(Ty::OPEN),
         )
     }

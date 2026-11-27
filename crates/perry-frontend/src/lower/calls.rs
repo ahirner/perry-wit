@@ -36,8 +36,7 @@ impl CallTarget {
             b.raise_error(ctx, ErrorKind::TypeError, "callee is not a function");
             return Ok(None);
         };
-        let signature = b.signature(b.shapes.specialization.instances.emitted_callee(function)?)?;
-        let callee = function.operand(b, ctx, value)?;
+        let (signature, callee) = function.bind(b, ctx, value)?;
         let receiver = if self.needs_receiver() {
             Some(receiver.ok_or_else(|| internal!("missing call receiver"))?)
         } else {
@@ -57,27 +56,29 @@ impl CallTarget {
 }
 
 impl FunctionTarget {
-    pub(super) fn operand(
+    pub(super) fn bind<'s>(
         self,
-        b: &mut FunctionBuilder<'_, '_>,
+        b: &mut FunctionBuilder<'s, '_>,
         ctx: &mut Context,
         value: Option<Value>,
-    ) -> Result<Option<Value>> {
-        match (self, value) {
-            (Self::Direct(_), _) => Ok(None),
-            (Self::Dispatcher(_), Some(value)) => Ok(Some(value)),
+    ) -> Result<(&'s Signature<'s>, Option<Value>)> {
+        let operand = match (self, value) {
+            (Self::Direct(_), _) => None,
+            (Self::Dispatcher(_), Some(value)) => Some(value),
             (Self::Closure(_), Some(value)) => {
                 let wrapper = b.defined(ctx, value)?;
-                b.record_field(ctx, wrapper, "val").map(Some)
+                Some(b.record_field(ctx, wrapper, "val")?)
             }
             _ => bail_internal!("missing callable operand"),
-        }
+        };
+        Ok((b.signatures.solved.callee(self)?, operand))
     }
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn signature(&self, id: FuncId) -> Result<&'s Signature<'s>> {
         self.signatures
+            .named
             .get(&id)
             .ok_or_else(|| internal!("unknown function {}", id))
     }
@@ -534,7 +535,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             return self.clone_structured_value(ctx, val).map(Some);
         }
         if matches!(callee, Expr::Closure { .. })
-            || matches!(callee, Expr::FuncRef(id) if self.signatures.get(id).is_none())
+            || matches!(callee, Expr::FuncRef(id) if !self.signatures.named.contains_key(id))
         {
             let callback = self.prepare_callback(ctx, callee)?;
             let values = args

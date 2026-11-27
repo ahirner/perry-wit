@@ -169,9 +169,12 @@ impl Shapes<'_, Preparing<'_>> {
                 if let Some(domain) = self.types.source.integer_domain(ctx, self.decls, ty) {
                     return Ok(BindingType::integer(ctx, domain));
                 }
-                self.named(ctx, id.get(ctx))?
+                self.named(ctx, id)?
             }
-            TyKind::ClassInst(id) => self.named(ctx, &facts.bodies.classes[id].name)?,
+            TyKind::ClassInst(id) => self.named(
+                ctx,
+                TypeName::new(ctx, facts.bodies.classes[id].name.to_owned()),
+            )?,
             TyKind::Array(elem) => ArrayType::get(ctx, slot(self, elem, visiting)?.carrier).into(),
             TyKind::Promise(inner) => promise(self, inner, visiting)?,
             TyKind::Tuple(span) => {
@@ -245,18 +248,13 @@ impl Shapes<'_, Preparing<'_>> {
             }
             TyKind::Generic { base, args } => {
                 let name = base.get(ctx);
-                let args = self.types.source.ty_slice(args).to_vec();
-                if let Some(carrier) = self.builtin_generic(ctx, name, &args, visiting)? {
-                    carrier
-                } else if name == "ReadableStream"
-                    && !self.is_user_type(name)
-                    && let [arg] = args.as_slice()
-                    && let TyKind::Named(id) = self.types.source.kind(*arg)
-                    && id.get(ctx) == "Uint8Array"
+                let declaration = self.decls.declaration(base);
+                if (declaration.is_none() || name == "WitInput")
+                    && let Some(carrier) = self.builtin_generic(ctx, name, args, visiting)?
                 {
-                    perry_mir::ReadableType::get(ctx).into()
+                    carrier
                 } else {
-                    self.generic(ctx, name, &args)?
+                    self.generic(ctx, (base, args), declaration)?
                 }
             }
             TyKind::Union(span) => {

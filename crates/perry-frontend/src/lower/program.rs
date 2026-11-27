@@ -50,7 +50,10 @@ impl<'s> ParamSig<'s> {
     }
 }
 
-pub(super) type Functions<'s> = indexmap::IndexMap<FuncId, Signature<'s>>;
+pub(super) struct Functions<'s> {
+    pub(super) named: &'s indexmap::IndexMap<FuncId, Signature<'s>>,
+    pub(super) solved: crate::engine::CallTargets<&'s Signature<'s>>,
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Body<'s> {
@@ -160,6 +163,7 @@ pub(crate) fn build_module<'r>(
         bail_unsupported!("class {class} extends {base}: class inheritance is not supported yet");
     }
     let decls = decls.with_classes(
+        ctx,
         bodies
             .classes
             .iter()
@@ -177,7 +181,7 @@ pub(crate) fn build_module<'r>(
     locations.set_mir_frames(ctx, &module);
     let mut shapes = shapes.prepare(ctx);
     shapes.define_environments(ctx)?;
-    let mut signatures = Functions::default();
+    let mut signatures = indexmap::IndexMap::new();
     for (function, class) in bodies.functions.values().map(|f| (f, None)).chain(
         bodies
             .classes
@@ -316,6 +320,13 @@ pub(crate) fn build_module<'r>(
             .entry(id)
             .or_insert(Signature::native(&shapes, function).map_err(annotate)?);
     }
+    let targets = Functions {
+        named: &signatures,
+        solved: specialization
+            .instances
+            .targets
+            .bind(|id| signatures.get(&id)),
+    };
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run (calls lower it to nothing); without other statements there is no main
     // function.
@@ -358,7 +369,7 @@ pub(crate) fn build_module<'r>(
             });
         }
         for signature in &entries {
-            let func = FunctionBuilder::lower_body(ctx, signature, &signatures, &mut shapes)
+            let func = FunctionBuilder::lower_body(ctx, signature, &targets, &mut shapes)
                 .map_err(|err| err.with_internal_context("lowering top-level statements"))?;
             if signature.is_async {
                 set_async(ctx, &func);
@@ -387,7 +398,7 @@ pub(crate) fn build_module<'r>(
             Body::Inline(_) | Body::Initializer(_) | Body::Command => continue,
         };
         let func =
-            FunctionBuilder::lower_body(ctx, signature, &signatures, &mut shapes).map_err(|e| {
+            FunctionBuilder::lower_body(ctx, signature, &targets, &mut shapes).map_err(|e| {
                 locations.annotate_caller(
                     e.with_fallback_span(locations.function_span(name))
                         .with_internal_context(format!("lowering function {name}")),

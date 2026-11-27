@@ -1,11 +1,12 @@
 //! Member access: `object.property`, `object[index]` and `++object.field`.
 use super::*;
+use crate::engine::types::InstanceId;
 use crate::lower::collections::dict_entry_types;
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Member<'p> {
     Field(Value, &'p str, usize, TypeHandle),
-    Accessor(Value, FuncId),
+    Accessor(Value, InstanceId),
 }
 
 pub(in crate::lower) enum Assigned<'s> {
@@ -57,7 +58,11 @@ impl<'p> Member<'p> {
                 b.field_read(ctx, get)
             }
             Self::Accessor(object, get) => b
-                .call_values(ctx, get, std::iter::once(object))?
+                .call_values(
+                    ctx,
+                    b.signatures.solved.instance(get)?,
+                    std::iter::once(object),
+                )?
                 .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "class member produced no value")),
         }
     }
@@ -70,7 +75,8 @@ impl<'p> Member<'p> {
     ) -> Result<Option<Value>> {
         match self {
             Self::Accessor(object, set) => {
-                let value = if let Some(param) = b.signature(set)?.params.get(1) {
+                let signature = b.signatures.solved.instance(set)?;
+                let value = if let Some(param) = signature.params.get(1) {
                     Some(rhs.lower(b, ctx, param.base.carrier)?)
                 } else {
                     if let Assigned::Expression(expr) = rhs {
@@ -78,7 +84,7 @@ impl<'p> Member<'p> {
                     }
                     None
                 };
-                b.call_values(ctx, set, std::iter::once(object).chain(value))?;
+                b.call_values(ctx, signature, std::iter::once(object).chain(value))?;
                 Ok(value)
             }
             Self::Field(object, name, index, ty) => {
@@ -111,7 +117,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         property: &str,
         op: &BinaryOp,
         prefix: bool,
-        (get, set): (Option<FuncId>, Option<FuncId>),
+        (get, set): (Option<InstanceId>, Option<InstanceId>),
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
             let id = self.shapes.static_field(object, class_name, property)?;
@@ -153,11 +159,15 @@ impl<'s> FunctionBuilder<'s, '_> {
         object: &'s Expr,
         value: Value,
         key: hir_compat::MemberKey<'s>,
-        getter: Option<FuncId>,
+        getter: Option<InstanceId>,
     ) -> Result<Option<Value>> {
         let result = if let Some(getter) = getter {
             let receiver = self.defined(ctx, value)?;
-            self.call_values(ctx, getter, std::iter::once(receiver))
+            self.call_values(
+                ctx,
+                self.signatures.solved.instance(getter)?,
+                std::iter::once(receiver),
+            )
         } else {
             match key {
                 hir_compat::MemberKey::Named(name, offset) => {
@@ -309,7 +319,11 @@ impl<'s> FunctionBuilder<'s, '_> {
             Kind::Record => {
                 let field = match (
                     index,
-                    hir_compat::tuple_position(index).or_else(|| self.frame.cursors.index(index)),
+                    self.shapes
+                        .specialization
+                        .instances
+                        .expressions()
+                        .tuple_position(index),
                 ) {
                     (Expr::String(name), _) => name.clone(),
                     (_, Some(position)) => format!("_{position}"),

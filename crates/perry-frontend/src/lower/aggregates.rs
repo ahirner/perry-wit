@@ -98,7 +98,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         object: &'s Expr,
         field: &str,
         value: &'s Expr,
-        setter: Option<FuncId>,
+        setter: Option<crate::engine::types::InstanceId>,
     ) -> Result<Option<Value>> {
         if let Expr::ClassRef(class_name) = object {
             return self

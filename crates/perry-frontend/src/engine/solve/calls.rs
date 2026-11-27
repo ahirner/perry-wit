@@ -109,7 +109,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             TyKind::ClassInst(id) => Ok(Some(id)),
             TyKind::Named(id) => self
                 .decls
-                .class_id(id.get(self.ctx))
+                .symbol(id)
+                .and_then(|s| s.class_id())
                 .map(|cid| self.request_class_inst(cid, &[], byte_offset, Some(inst_id)))
                 .transpose(),
             _ => Ok(None),
@@ -331,7 +332,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let receiver = self.eval_expr(s, object)?;
                 if let Some(args) = call.args.plain()
                     && let TyKind::Named(name) = self.types.kind(receiver)
-                    && let Some(owner) = self.decls.resource(name.get(self.ctx))
+                    && let Some(owner) = self.decls.resource(self.ctx, name)
                     && let Some(member) = self
                         .index
                         .expressions

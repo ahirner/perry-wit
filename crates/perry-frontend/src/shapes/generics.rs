@@ -1,6 +1,6 @@
 //! Instantiation of generic interfaces, type aliases, and classes.
 use super::*;
-use crate::engine::types::{Ty, TyKind, TypeTable};
+use crate::engine::types::{Ty, TyKind, TypeListId, TypeTable};
 use perry_hir::ir::{Interface, TypeAlias};
 use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported};
 use pliron::utils::vec_exns::VecExtns;
@@ -11,10 +11,7 @@ pub(crate) use resolution::{Query, Resolver};
 const RESOLUTION_DEPTH: usize = 32;
 pub(crate) const ARGUMENT_LIMIT: usize = 4096;
 
-pub(crate) type InstanceKey = (
-    crate::engine::types::NameId,
-    crate::engine::types::TypeListId,
-);
+pub(crate) type InstanceKey = (TypeName, TypeListId);
 
 #[derive(Clone, Copy)]
 pub(crate) struct Application {
@@ -62,16 +59,16 @@ pub(crate) fn substitute(
     validate(types, ctx, bound, remaining)
 }
 
-impl<'a> Declaration<'a> {
-    pub(crate) fn find(decls: &Declarations<'a>, base: &str) -> Option<Self> {
-        let symbol = decls.symbols.get(base)?;
-        symbol
-            .interface
-            .map(Self::Interface)
-            .or_else(|| symbol.class.map(Self::Class))
-            .or_else(|| symbol.alias.map(Self::Alias))
+impl<'a> Symbol<'a> {
+    pub(crate) fn declaration(&self) -> Option<Declaration<'a>> {
+        self.interface
+            .map(Declaration::Interface)
+            .or_else(|| self.class.map(Declaration::Class))
+            .or_else(|| self.alias.map(Declaration::Alias))
     }
+}
 
+impl<'a> Declaration<'a> {
     pub(crate) fn parameters(self) -> &'a [perry_hir::types::TypeParam] {
         match self {
             Self::Interface(interface) => &interface.type_params,
@@ -85,18 +82,18 @@ impl<'a> Declaration<'a> {
         ctx: &Context,
         base: &str,
         types: &mut TypeTable,
-        arguments: &[Ty],
+        arguments: TypeListId,
     ) -> Result<Vec<(TypeName, Ty)>> {
         let parameters = self.parameters();
         ensure_diag!(
-            arguments.len() <= parameters.len(),
+            types.ty_slice(arguments).len() <= parameters.len(),
             codes::TYPE_MISMATCH,
             "too many type arguments for {base}"
         );
         let mut bindings = Vec::with_capacity(parameters.len());
         let mut remaining = ARGUMENT_LIMIT;
         for (index, parameter) in parameters.iter().enumerate() {
-            let argument = match arguments.get(index) {
+            let argument = match types.ty_slice(arguments).get(index) {
                 Some(&argument) => validate(types, ctx, argument, &mut remaining)?,
                 None => substitute(
                     ctx,

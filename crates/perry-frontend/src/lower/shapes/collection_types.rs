@@ -59,14 +59,12 @@ impl Shapes<'_, Preparing<'_>> {
         &mut self,
         ctx: &Context,
         name: &str,
-        arguments: &[Ty],
+        args: crate::engine::types::TypeListId,
         visiting: &mut Vec<crate::engine::types::LocId>,
     ) -> Result<Option<TypeHandle>> {
+        let arguments = self.types.source.ty_slice(args);
         let mut carrier =
-            |this: &mut Self, ty: &Ty| this.project_type(ctx, *ty, visiting).map(|b| b.carrier);
-        if name != "WitInput" && self.is_user_type(name) {
-            return Ok(None);
-        }
+            |this: &mut Self, ty: Ty| this.project_type(ctx, ty, visiting).map(|b| b.carrier);
         let view = CollectionViewKind::from_type_name(name);
         let collection =
             CollectionKind::from_type_name(name).or_else(|| view.map(CollectionViewKind::source));
@@ -79,9 +77,9 @@ impl Shapes<'_, Preparing<'_>> {
                 diag!(codes::TYPE_MISMATCH, "{name} needs {needed}")
             })?;
             let [key, value] = entry.key_value();
-            let key = carrier(self, &key)?;
+            let key = carrier(self, key)?;
             let entries = match collection {
-                CollectionKind::Map => EntryTypes::Map(key, carrier(self, &value)?),
+                CollectionKind::Map => EntryTypes::Map(key, carrier(self, value)?),
                 CollectionKind::Set => EntryTypes::Set(key),
             };
             let storage = self.collection_type(ctx, entries)?;
@@ -91,14 +89,17 @@ impl Shapes<'_, Preparing<'_>> {
             }));
         }
         Ok(Some(match (name, arguments) {
-            ("WitInput", [arg]) => self.project_view(ctx, *arg, visiting, true)?,
-            ("PromiseSettledResult", [arg]) => {
-                perry_mir::SettledType::get(ctx, self.project_view(ctx, *arg, visiting, false)?)
+            ("ReadableStream", &[arg]) if matches!(self.types.source.kind(arg), TyKind::Named(id) if id.get(ctx) == "Uint8Array") => {
+                perry_mir::ReadableType::get(ctx).into()
+            }
+            ("WitInput", &[arg]) => self.project_view(ctx, arg, visiting, true)?,
+            ("PromiseSettledResult", &[arg]) => {
+                perry_mir::SettledType::get(ctx, self.project_view(ctx, arg, visiting, false)?)
                     .into()
             }
-            ("ReadonlyArray" | "Array", [arg]) => ArrayType::get(ctx, carrier(self, arg)?).into(),
-            ("Readonly", [arg]) => carrier(self, arg)?,
-            ("Record", [key, value]) => {
+            ("ReadonlyArray" | "Array", &[arg]) => ArrayType::get(ctx, carrier(self, arg)?).into(),
+            ("Readonly", &[arg]) => carrier(self, arg)?,
+            ("Record", &[key, value]) => {
                 let key = carrier(self, key)?;
                 let value = carrier(self, value)?;
                 let entry =

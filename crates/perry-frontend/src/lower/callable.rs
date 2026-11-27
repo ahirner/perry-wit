@@ -1,13 +1,13 @@
 //! MIR representations and operations for finite sets of function identities.
 use super::*;
-use crate::engine::solve::{CallTarget, FunctionTarget, ValueCoercion};
+use crate::engine::solve::{CallTarget, OperandUse, SiteResolution, ValueCoercion};
 use crate::engine::types::{FuncIdentity, Ty, func_tag};
 use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Callback<'s> {
     Source(&'s crate::engine::boundary::TemplateView<'s>),
-    Function(&'s Signature<'s>, Option<(FunctionTarget, Value)>),
+    Function(&'s Signature<'s>, Option<Value>),
 }
 
 impl Callback<'_> {
@@ -107,46 +107,44 @@ impl<'s> FunctionBuilder<'s, '_> {
         expr: &'s Expr,
     ) -> Result<Option<Callback<'s>>> {
         let site = self.site(expr)?;
-        let callback =
-            if let Some(crate::engine::solve::OperandUse::Callback(target)) = site.operand {
-                let callee = self
+        let source = self.shapes.specialization;
+        let callback = match (site.operand, site.resolution) {
+            (Some(OperandUse::Callback(target)), _) => {
+                let value = self
                     .instance_value(ctx, expr, None, site.resolution, true)?
                     .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))?;
-                let id = self
-                    .shapes
-                    .specialization
-                    .instances
-                    .emitted_callee(target)?;
-                Callback::Function(self.signature(id)?, Some((target, callee)))
-            } else {
-                let id = self
-                    .shapes
-                    .specialization
-                    .instances
-                    .reference_at(self.frame.owner, expr, site.resolution)
-                    .or(match expr {
-                        Expr::Closure { func_id, .. } => Some(*func_id),
-                        _ => None,
-                    });
+                let (signature, operand) = target.bind(self, ctx, Some(value))?;
+                Callback::Function(signature, operand)
+            }
+            (_, Some(SiteResolution::Callback { target })) => {
+                Callback::Function(self.signatures.solved.instance(target)?, None)
+            }
+            _ => {
+                let id = match expr {
+                    Expr::Closure { func_id, .. } => Some(*func_id),
+                    _ => source
+                        .instances
+                        .reference_at(self.frame.owner, expr, site.resolution)?,
+                };
                 let Some(id) = id else { return Ok(None) };
-                if let Some(signature) = self.signatures.get(&id) {
+                if let Some(signature) = self.signatures.named.get(&id) {
                     Callback::Function(signature, None)
-                } else if let Some((declaration, _)) = self.shapes.specialization.closure(id) {
+                } else if let Some((declaration, _)) = source.closure(id) {
                     Callback::Source(declaration)
                 } else {
                     return Err(internal!("unknown callback function {id}"));
                 }
-            };
+            }
+        };
         Ok(Some(callback))
     }
 
     pub(super) fn call_values(
         &mut self,
         ctx: &mut Context,
-        target: FuncId,
+        signature: &'s Signature<'s>,
         inputs: impl Iterator<Item = Value>,
     ) -> Result<Option<Value>> {
-        let signature = self.signature(target)?;
         self.invoke_arguments(ctx, signature, inputs, Arguments::Plain(&[]), None)
     }
 
@@ -201,7 +199,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .into_iter()
                 .chain(receiver.filter(|_| arm.receiver))
                 .chain(args.iter().copied());
-            let value = self.call_values(ctx, plans.function(arm.target), inputs)?;
+            let value =
+                self.call_values(ctx, self.signatures.solved.instance(arm.target)?, inputs)?;
             self.return_callback(ctx, value, false)?;
             if let Some(next) = next {
                 self.switch_to(next);

@@ -73,7 +73,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn resource_adapter(
         &mut self,
         ctx: &mut Context,
-        target: Target<FuncId>,
+        target: Target<crate::engine::types::InstanceId>,
         mut args: Vec<Value>,
     ) -> Result<()> {
         let number = FP64Type::get(ctx).into();
@@ -92,7 +92,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 *arg = self.resource_instance(ctx, owner, rep)?;
             }
         }
-        let result = match target {
+        let result = match target.try_map(|id| self.signatures.solved.instance(id))? {
             Target::Function(id) | Target::Static(_, id) | Target::Method(_, id) => {
                 self.call_values(ctx, id, args.into_iter())?
             }
@@ -100,7 +100,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let id = self.guest_class(owner)?.class;
                 self.call_values(
                     ctx,
-                    self.shapes.specialization.bodies.classes[id].factory()?,
+                    self.signature(self.shapes.specialization.bodies.classes[id].factory()?)?,
                     args.into_iter(),
                 )?
             }

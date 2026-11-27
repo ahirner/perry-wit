@@ -49,8 +49,10 @@ pub(super) fn build<'h, 'r>(
         origins: index.views.filled(Vec::new()),
         native: Default::default(),
         plans: super::InstancePlans {
-            functions: solved.instances.map(|inst| inst.emitted_func_id),
-            helpers: solved.helpers.filled(None),
+            targets: super::CallTargets {
+                instances: solved.instances.filled(None),
+                helpers: solved.helpers.filled(None),
+            },
             ..Default::default()
         },
         locals: solved.instances.filled(Default::default()),
@@ -135,7 +137,8 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             self.origins[inst.template].push((self.solved.body_owner(inst_id), kind, caller));
             match view.kind {
                 TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_) => {
-                    self.promise_handle_function(inst, view.kind)?
+                    self.promise_handle_function(inst, view.kind)?;
+                    self.plans.targets.instances[inst_id] = Some(inst.emitted_func_id);
                 }
                 TemplateKind::Function
                 | TemplateKind::Closure(_)
@@ -195,7 +198,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             use crate::engine::{NativeBody, NativeFunction, NativeParam, solve::ExportRoot};
             let id = match &witness.target {
                 None => None,
-                Some(ExportRoot::Function(id)) => Some(self.plans.function(*id)),
+                Some(ExportRoot::Function(id)) => Some(self.plans.targets.instance(*id)?),
                 Some(ExportRoot::Adapter {
                     target,
                     params,
@@ -229,9 +232,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                                 }
                             },
                             is_async: false,
-                            body: NativeBody::Resource(
-                                target.try_map(|id| Ok(self.plans.function(id)))?,
-                            ),
+                            body: NativeBody::Resource(*target),
                         },
                     ));
                     Some(id)
@@ -457,6 +458,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 || (!self.is_env_template(inst.template)
                     && (inst.invocation == Invocation::Inline || captures_frame))))
             .then_some(inst.invocation);
+        self.plans.targets.instances[inst_id] = Some(inst.emitted_func_id);
         Ok(InstanceFunction {
             template: inst.template,
             inline,

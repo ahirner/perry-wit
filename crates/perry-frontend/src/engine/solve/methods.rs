@@ -127,7 +127,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
         if let Some(args) = call.args.plain()
             && let TyKind::Named(id) = self.types.kind(stripped)
-            && let Some(owner) = self.decls.resource(id.get(self.ctx))
+            && let Some(owner) = self.decls.resource(self.ctx, id)
         {
             self.eval_args(s, args)?;
             if matches!(method, hir_compat::Method::UsingCheck)

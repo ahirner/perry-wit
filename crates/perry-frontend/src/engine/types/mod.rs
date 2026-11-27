@@ -163,23 +163,16 @@ impl TypeTable {
         self.intern_kind(TyKind::ClassInst(inst))
     }
 
-    pub(crate) fn application_key(
-        &mut self,
-        base: &str,
-        args: &[Ty],
-    ) -> shapes::generics::InstanceKey {
-        (
-            self.intern_name(base),
-            TypeListId::intern(&mut self.members, args),
-        )
+    pub(crate) fn type_list(&mut self, items: &[Ty]) -> TypeListId {
+        TypeListId::intern(&mut self.members, items)
     }
 
     pub(crate) fn tuple(&mut self, items: &[Ty]) -> Ty {
-        let span = TypeListId::intern(&mut self.members, items);
+        let span = self.type_list(items);
         self.intern_kind(TyKind::Tuple(span))
     }
     pub(crate) fn generic(&mut self, base: shapes::TypeName, args: &[Ty]) -> Ty {
-        let args = TypeListId::intern(&mut self.members, args);
+        let args = self.type_list(args);
         self.intern_kind(TyKind::Generic { base, args })
     }
     pub(crate) fn property(&mut self, name: &str, ty: Ty, optional: bool) -> ObjectProp {
@@ -334,10 +327,9 @@ impl TypeTable {
     ) -> Option<TypedHandle<IntegerType>> {
         match self.kind(ty) {
             TyKind::Integer(domain) => Some(domain),
-            TyKind::Named(name) => Some(perry_mir::integer_type(
-                ctx,
-                decls.integer_spec(ctx, name.get(ctx))?,
-            )),
+            TyKind::Named(name) => {
+                Some(perry_mir::integer_type(ctx, decls.integer_spec(ctx, name)?))
+            }
             _ => None,
         }
     }

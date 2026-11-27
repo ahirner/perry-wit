@@ -26,7 +26,7 @@ pub(crate) use locations::{Locations, non_null_assertion};
 pub(crate) use locations::{display_name, function_label, has_source_offset};
 mod iteration;
 mod methods;
-pub(crate) use iteration::{Availability, Binding, CursorPositions, Locals, RecordExpr};
+pub(crate) use iteration::{Availability, Binding, Locals, RecordExpr};
 mod streams;
 mod timers;
 mod witnesses;

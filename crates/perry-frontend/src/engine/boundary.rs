@@ -555,7 +555,10 @@ impl<'h> ModuleIndex<'h> {
             exits = sequence(exits, next);
         }
         if !stmts.is_empty() {
-            self.locals.index_elements(stmts);
+            self.locals.index_elements(stmts, |index, position| {
+                let site = self.expressions.register(index);
+                self.expressions.tuple_positions.set(site, position);
+            });
             self.record_region(Region::Body(stmts), owner, start, exits);
         }
         exits
@@ -614,7 +617,8 @@ impl<'h> ModuleIndex<'h> {
                 _ => None,
             }),
         };
-        if let Some(id) = name.and_then(|name| scan.decls.bind(name)) {
+        if let Some(name) = name {
+            let id = crate::shapes::TypeName::new(scan.ctx, name.into());
             self.expressions.symbols.set(site, id);
         }
         match expr {
@@ -798,7 +802,9 @@ impl<'h> ModuleIndex<'h> {
                 }
             }
         }
-        if let Some(binding) = crate::wit::BoundMember::at(expr, scan.decls, scan.locations) {
+        if let Some(binding) =
+            crate::wit::BoundMember::at(scan.ctx, expr, scan.decls, scan.locations)
+        {
             match binding {
                 crate::wit::BoundMember::Static(id) => self
                     .expressions

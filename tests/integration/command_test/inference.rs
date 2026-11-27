@@ -140,8 +140,11 @@ function has(flag: boolean) {
   const set = make<number>(); set.add(7); return set.has(7);
 }
 console.log(has(true), has(false));
+interface Map<T> { size: T }
+function label(entry: Map<string>) { return entry.size.toUpperCase(); }
+console.log(label(JSON.parse<Map<string>>('{"size":"box"}')));
 "#,
-            "3\n3\ntrue true\n4\ntrue\ntrue\ntrue true\n",
+            "3\n3\ntrue true\n4\ntrue\ntrue\ntrue true\nBOX\n",
         ),
         (
             "generic_promise_settles_after_specialization",

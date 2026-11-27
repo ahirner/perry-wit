@@ -124,9 +124,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                     return Ok(());
                 }
                 let init = init.as_ref();
-                if self.shapes.specialization.instances.locals.is_cursor(*id) {
-                    self.frame.cursors.reset(*id);
-                }
                 if matches!(
                     storage,
                     Some(Storage::Boxed {
@@ -146,7 +143,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.effect(ctx, expr)?;
             }
             Stmt::Return(value) => {
-                let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.get(&id).and_then(Signature::source)
+                let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.named.get(&id).and_then(Signature::source)
                     .is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
                     if let Some(expr) = value {
@@ -463,7 +460,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 Expr::Closure { .. } => site.environment().is_none(),
                 _ => source
                     .instances
-                    .reference_at(self.frame.owner, expr, site.resolution)
+                    .reference_at(self.frame.owner, expr, site.resolution)?
                     .is_some_and(|id| source.closure_value(self.frame.owner, id).is_none()),
             };
             if erased && site.conversion().is_none() {
@@ -574,11 +571,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(result.filter(|value| !self.never_values.contains(value)))
     }
 
-    pub(super) fn getter(&self, expr: &Expr) -> Result<Option<FuncId>> {
+    pub(super) fn getter(&self, expr: &Expr) -> Result<Option<crate::engine::types::InstanceId>> {
         Ok(match self.site(expr)?.resolution {
-            Some(crate::engine::solve::SiteResolution::ReadMember(id)) => {
-                Some(self.shapes.specialization.instances.function(id))
-            }
+            Some(crate::engine::solve::SiteResolution::ReadMember(id)) => Some(id),
             _ => None,
         })
     }

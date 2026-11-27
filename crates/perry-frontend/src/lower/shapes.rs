@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 
 mod collection_types;
 use crate::engine::types::{LocId, ObjectProp, PropertiesId, Ty, TyKind};
-use crate::shapes::{Declarations, generics::InstanceKey};
+use crate::shapes::{Declarations, TypeName, generics::InstanceKey};
 
 mod generics;
 mod representation;
@@ -245,11 +245,6 @@ impl<'h, T> Shapes<'h, T> {
         .then(|| crate::lower::coerce::admitting(ctx, ty, perry_mir::Absence::Undefined))
     }
 
-    /// Whether the program declares a type of this name (shadowing a built-in class).
-    pub(super) fn is_user_type(&self, name: &str) -> bool {
-        self.decls.is_user_type(name)
-    }
-
     pub(super) fn class_of_type(
         &self,
         ctx: &Context,
@@ -278,6 +273,12 @@ impl<'h, T> Shapes<'h, T> {
             })
     }
 
+    pub(super) fn is_builtin(&self, constructor: &perry_hir::ir::Expr) -> bool {
+        self.symbol(constructor)
+            .and_then(|s| s.declaration())
+            .is_none()
+    }
+
     pub(super) fn symbol(&self, expr: &perry_hir::ir::Expr) -> Option<&crate::shapes::Symbol<'h>> {
         self.specialization
             .instances
@@ -287,9 +288,9 @@ impl<'h, T> Shapes<'h, T> {
 }
 
 impl Shapes<'_, Preparing<'_>> {
-    pub(super) fn named(&mut self, ctx: &Context, name: &str) -> Result<TypeHandle> {
+    pub(super) fn named(&mut self, ctx: &Context, name: TypeName) -> Result<TypeHandle> {
         self.resolve_named(ctx, name)
-            .map_err(|error| error.with_fallback_span(self.locations.type_span(name)))
+            .map_err(|error| error.with_fallback_span(self.locations.type_span(name.get(ctx))))
     }
 }
 
@@ -379,28 +380,26 @@ impl Shapes<'_> {
 }
 
 impl<'h> Shapes<'h, Preparing<'_>> {
-    fn resolve_named(&mut self, ctx: &Context, name: &str) -> Result<TypeHandle> {
-        // Built-in classes the subset models (a user type or explicit import takes precedence).
-        let user = self.is_user_type(name);
-        if !user {
-            if let Some(entry) = self.decls.imported_type(name) {
-                return self.foreign_value_type(ctx, entry);
-            }
-            if let Some(ty) = perry_mir::builtin_value_type(ctx, name) {
-                return Ok(ty);
-            }
-            if self.decls.world.function(name).is_some() {
-                bail_diag!(
-                    codes::TYPE_MISMATCH,
-                    "foreign function cannot be used as a value type"
-                );
-            }
-            if let Some(entry) = self.decls.world.foreign().get(name) {
-                return self.foreign_value_type(ctx, entry);
-            }
+    fn resolve_named(&mut self, ctx: &Context, id: TypeName) -> Result<TypeHandle> {
+        if let Some(declaration) = self.decls.declaration(id) {
+            let args = self.types.source.type_list(&[]);
+            return self.generic(ctx, (id, args), Some(declaration));
         }
-        if user {
-            return self.generic(ctx, name, &[]);
+        let name = id.get(ctx);
+        if let Some(entry) = self.decls.symbol(id).and_then(|s| s.foreign) {
+            return self.foreign_value_type(ctx, entry);
+        }
+        if let Some(ty) = perry_mir::builtin_value_type(ctx, name) {
+            return Ok(ty);
+        }
+        if self.decls.world.function(name).is_some() {
+            bail_diag!(
+                codes::TYPE_MISMATCH,
+                "foreign function cannot be used as a value type"
+            );
+        }
+        if let Some(entry) = self.decls.world.foreign().get(name.as_str()) {
+            return self.foreign_value_type(ctx, entry);
         }
         bail_diag!(codes::UNSUPPORTED_TYPE, "type {name} is not supported yet")
     }
