@@ -234,7 +234,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "web members produce a value"))
     }
 
-    fn fs_path(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
+    pub(super) fn fs_path(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         let path = args
             .first()
             .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "a path is required"))?;
@@ -256,40 +256,16 @@ impl<'s> FunctionBuilder<'s, '_> {
         Ok(self.intrinsic(ctx, intrinsic, vec![path]))
     }
 
-    pub(super) fn fs(
-        &mut self,
-        ctx: &mut Context,
-        builtin: Builtin,
-        args: &'s [Expr],
-    ) -> Result<Value> {
+    pub(super) fn write_file(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         let path = self.fs_path(ctx, args)?;
-        let (intrinsic, operands) = match builtin {
-            Builtin::WriteFile => {
-                ensure_unsupported!(args.len() == 2, "writeFile options are not supported yet");
-                let data = self.expression(ctx, &args[1])?;
-                let data = self.defined(ctx, data)?;
-                let intrinsic = match kind(ctx, data)? {
-                    Kind::String => Intrinsic::FsWriteText,
-                    Kind::Bytes => Intrinsic::FsWriteBytes,
-                    _ => bail_unsupported!("writeFile writes strings and Uint8Arrays"),
-                };
-                (intrinsic, vec![path, data])
-            }
-            other => {
-                ensure_unsupported!(
-                    args.len() == 1,
-                    "{other:?} options are not supported yet (recursive, withFileTypes)"
-                );
-                let intrinsic = match other {
-                    Builtin::Stat => Intrinsic::FsStat,
-                    Builtin::Readdir => Intrinsic::FsReaddir,
-                    Builtin::Mkdir => Intrinsic::FsMkdir,
-                    Builtin::Unlink => Intrinsic::FsUnlink,
-                    _ => Intrinsic::FsRmdir,
-                };
-                (intrinsic, vec![path])
-            }
+        ensure_unsupported!(args.len() == 2, "writeFile options are not supported yet");
+        let data = self.expression(ctx, &args[1])?;
+        let data = self.defined(ctx, data)?;
+        let intrinsic = match kind(ctx, data)? {
+            Kind::String => Intrinsic::FsWriteText,
+            Kind::Bytes => Intrinsic::FsWriteBytes,
+            _ => bail_unsupported!("writeFile writes strings and Uint8Arrays"),
         };
-        Ok(self.intrinsic(ctx, intrinsic, operands))
+        Ok(self.intrinsic(ctx, intrinsic, vec![path, data]))
     }
 }

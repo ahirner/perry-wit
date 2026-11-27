@@ -40,33 +40,6 @@ pub(super) fn result_carrier(
 
 pub(super) use crate::methods::Kind;
 
-macro_rules! impl_kind_of {
-    (
-        primitives { $($prim:ident $plabel:literal;)* }
-        references { $($refk:ident $rlabel:literal $(builtin $(($($alias:literal)|+))?)? => $mir:ident;)* }
-    ) => {
-        impl Kind {
-            pub(super) fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
-                let ty = ty.deref(ctx);
-                if ty.is::<FP64Type>() {
-                    return Some(Self::Number);
-                }
-                if let Some(integer) = ty.downcast_ref::<IntegerType>() {
-                    return match integer.width() {
-                        1 => Some(Self::Boolean),
-                        64 => Some(Self::BigInt),
-                        _ => None,
-                    };
-                }
-                $(if ty.is::<perry_mir::$mir>() { return Some(Self::$refk); })*
-                None
-            }
-        }
-    };
-}
-
-crate::kind_catalog!(impl_kind_of);
-
 pub(super) fn kind(ctx: &Context, value: Value) -> Result<Kind> {
     Kind::of(ctx, value.get_type(ctx))
         .ok_or_else(|| Diagnostic::unsupported("unsupported value type in expression"))
@@ -352,14 +325,7 @@ impl<'s> FunctionBuilder<'s, '_> {
 
     /// An expression that must be a string (`undefined` throws `TypeError`).
     pub(super) fn string_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
-        let value = self.expression(ctx, expr)?;
-        let value = self.defined(ctx, value)?;
-        ensure_diag!(
-            kind(ctx, value)? == Kind::String,
-            codes::TYPE_MISMATCH,
-            "a string is required here"
-        );
-        Ok(value)
+        self.typed_operand(ctx, expr, Kind::String, "a string")
     }
 
     /// An ECMAScript number used as an array index (out-of-bounds reads yield `undefined`).
@@ -377,6 +343,10 @@ impl<'s> FunctionBuilder<'s, '_> {
     /// An expression used as a number (`undefined` becomes `NaN`).
     pub(super) fn number_operand(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
         let value = self.expression(ctx, expr)?;
+        self.require_number(ctx, value)
+    }
+
+    pub(super) fn require_number(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         let value = self.arithmetic(ctx, value);
         ensure_diag!(
             kind(ctx, value)? == Kind::Number,
@@ -535,7 +505,12 @@ pub(super) fn void_type(ctx: &Context) -> TypeHandle {
 fn describe_type(ctx: &Context, ty: TypeHandle) -> String {
     if let Some((k, v, _)) = crate::lower::collections::map_entry_types(ctx, ty) {
         format!("Map<{}, {}>", describe_type(ctx, k), describe_type(ctx, v))
-    } else if crate::lower::collections::set_box_record(ctx, ty).is_some() {
+    } else if matches!(
+        crate::lower::collections::Collection::of(ctx, ty),
+        Some(crate::lower::collections::Collection::Box(
+            crate::source::CollectionKind::Set
+        ))
+    ) {
         "Set".into()
     } else if let Some((k, v, _)) = crate::lower::collections::dict_entry_types(ctx, ty) {
         format!(

@@ -198,7 +198,6 @@ pub(crate) struct InstanceFunction<'s> {
     pub(crate) template: crate::engine::types::TemplateId,
     pub(crate) id: FuncId,
     pub(crate) name: std::borrow::Cow<'s, str>,
-    pub(crate) params: Vec<(&'s Param, Option<crate::engine::types::Ty>)>,
     pub(crate) inline: Option<crate::engine::solve::Invocation>,
     pub(crate) environment: Option<crate::engine::types::FuncIdentity>,
     pub(crate) receiver: Option<crate::engine::types::Ty>,

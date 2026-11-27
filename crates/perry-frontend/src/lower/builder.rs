@@ -13,20 +13,28 @@ pub(super) enum CellRead {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct LocalBinding {
-    pub(super) slot: Value,
+pub(super) struct LocalBinding<S = Value> {
+    pub(super) slot: S,
     pub(super) writes: BindingType,
     pub(super) is_never: bool,
     pub(super) cell: Option<CellRead>,
 }
 
-impl LocalBinding {
-    pub(super) fn slot(slot: Value, writes: BindingType, is_never: bool) -> Self {
+impl<S> LocalBinding<S> {
+    pub(super) fn slot(slot: S, writes: BindingType, is_never: bool) -> Self {
         Self {
             slot,
             writes,
             is_never,
             cell: None,
+        }
+    }
+    fn at(self, slot: Value) -> LocalBinding {
+        LocalBinding {
+            slot,
+            writes: self.writes,
+            is_never: self.is_never,
+            cell: self.cell,
         }
     }
     pub(super) fn captured(self, payload: TypeHandle, deferred: bool) -> Self {
@@ -40,12 +48,6 @@ impl LocalBinding {
             ..self
         }
     }
-}
-
-pub(super) enum Body<'s> {
-    Statements(BodyOwner, &'s [Stmt]),
-    Native(&'s crate::engine::NativeBody),
-    Constructor(&'s crate::source::InstanceClass<'s>, &'s Function<'s>),
 }
 
 pub(super) struct FunctionBuilder<'s, 'm> {
@@ -63,8 +65,6 @@ pub(super) struct FunctionBuilder<'s, 'm> {
     pub(super) inline_functions: Vec<FuncId>,
     pub(super) signatures: &'s Functions<'s>,
     pub(super) shapes: &'m mut Shapes<'s>,
-    /// Imported built-ins by local name.
-    pub(super) builtins: &'s HashMap<&'s str, Builtin>,
     pub(super) result: Option<BindingType>,
     pub(super) is_async: bool,
     pub(super) labels: usize,
@@ -74,10 +74,8 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
     pub(super) fn lower_body(
         ctx: &mut Context,
         signature: &Signature<'s>,
-        body: Body<'s>,
         signatures: &'s Functions<'s>,
         shapes: &'m mut Shapes<'s>,
-        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Result<FuncOp> {
         let ty = FunctionType::get(
             ctx,
@@ -92,7 +90,6 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             signature.is_async,
             signatures,
             shapes,
-            builtins,
         );
         let globals: Vec<_> = builder
             .shapes
@@ -100,38 +97,16 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             .iter()
             .filter_map(|(&id, &binding)| Some((id, binding?)))
             .collect();
-        for (id, binding) in globals {
-            let cell = match builder
-                .shapes
-                .specialization
-                .instances
-                .storage(BodyOwner::Initializer, id)
-            {
-                Some(crate::engine::Storage::Boxed { ty, init }) => {
-                    let deferred = init.admits_undefined();
-                    Some((builder.shapes.box_layout(ctx, ty, deferred)?.1, deferred))
-                }
-                _ => None,
-            };
-            let storage = if cell.is_some() {
-                binding.carrier
-            } else {
-                builder
-                    .shapes
-                    .deferred_storage(ctx, id, binding.carrier)
-                    .unwrap_or(binding.carrier)
-            };
-            let slot = builder.global_slot(ctx, id, storage)?;
-            let mut local = LocalBinding::slot(slot, binding, false);
-            if let Some((payload, deferred)) = cell {
-                local = local.captured(payload, deferred);
-            }
-            builder.locals.insert(id, local);
+        for (id, layout) in globals {
+            let slot = builder.global_slot(ctx, id, layout.slot)?;
+            builder.locals.insert(id, layout.at(slot));
         }
-        let statements = match body {
-            Body::Statements(owner, statements) => {
-                builder.frame.owner = owner;
-                statements
+        let statements = match signature.body {
+            Body::Initializer(statements) => statements,
+            Body::Command => &[][..],
+            Body::Source(function) | Body::Inline(function) => {
+                builder.frame.owner = BodyOwner::Function(function.id);
+                builder.shapes.specialization.templates[function.template].body
             }
             Body::Constructor(class, function) => {
                 let inputs = builder.entry.deref(ctx).arguments().collect::<Vec<_>>();
@@ -156,26 +131,20 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
                 return Ok(func);
             }
             Body::Native(body) => {
+                use crate::engine::{NativeBody, solve::HelperSpec};
                 let args = builder.entry.deref(ctx).arguments().collect::<Vec<_>>();
                 match body {
-                    crate::engine::NativeBody::Resource(target) => {
-                        builder.resource_adapter(ctx, *target, args)?
+                    NativeBody::Resource(target) => builder.resource_adapter(ctx, *target, args)?,
+                    NativeBody::Helper(HelperSpec::Dispatcher { recv_ty, arms, .. }) => {
+                        builder.dispatch_body(ctx, recv_ty.is_some(), *arms, &args)?
                     }
-                    crate::engine::NativeBody::Dispatch {
-                        receiver,
-                        arms,
-                        inputs,
-                    } => builder.dispatch_body(ctx, *receiver, *arms, *inputs, &args)?,
-                    crate::engine::NativeBody::Reaction {
-                        reaction,
-                        returns_void,
-                    } => builder.reaction_body(ctx, reaction, *returns_void, &args)?,
-                    crate::engine::NativeBody::Timer { kind, callback } => {
-                        builder.timer_body(ctx, *kind, *callback, &args)?
+                    NativeBody::Helper(HelperSpec::PromiseReaction(reaction)) => {
+                        builder.reaction_body(ctx, *reaction, &args)?
                     }
-                    crate::engine::NativeBody::Settle(kind) => {
-                        builder.settle_body(ctx, *kind, &args)?
+                    NativeBody::Helper(HelperSpec::TimerRunner { kind, cb_call, .. }) => {
+                        builder.timer_body(ctx, *kind, *cb_call, &args)?
                     }
+                    NativeBody::Settle(kind) => builder.settle_body(ctx, *kind, &args)?,
                 }
                 remove_unreachable(ctx, builder.region);
                 return Ok(func);
@@ -190,7 +159,7 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             let await_ = AwaitOp::new(ctx, promise).to_diag(ctx)?;
             builder.append_value(ctx, &await_);
         }
-        if signature.top_level {
+        if matches!(signature.body, Body::Initializer(_)) {
             builder.initialize_resources(ctx)?;
             for entry in builder.shapes.specialization.bodies.static_fields.values() {
                 builder.binding(
@@ -218,7 +187,6 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
         is_async: bool,
         signatures: &'s Functions<'s>,
         shapes: &'m mut Shapes<'s>,
-        builtins: &'s HashMap<&'s str, Builtin>,
     ) -> Self {
         let entry = func.get_entry_block(ctx);
         let region = func.get_operation().deref(ctx).get_region(0);
@@ -236,7 +204,6 @@ impl<'s, 'm> FunctionBuilder<'s, 'm> {
             inline_functions: Vec::new(),
             signatures,
             shapes,
-            builtins,
             result,
             is_async,
             labels: 0,
@@ -455,13 +422,25 @@ impl<'s> FunctionBuilder<'s, '_> {
         self.entry
     }
 
-    /// The slot of module binding `id`, shared by every function that reads or writes it.
-    pub(super) fn global_slot(
+    pub(super) fn declare_slot(
         &mut self,
         ctx: &mut Context,
         id: LocalId,
-        ty: TypeHandle,
+        layout: LocalBinding<TypeHandle>,
     ) -> Result<Value> {
+        let slot = if let Some(global) = self.shapes.globals.get_mut(&id) {
+            *global = Some(layout);
+            self.global_slot(ctx, id, layout.slot)?
+        } else {
+            self.entry_slot(ctx, layout.slot)
+        };
+        self.variant_guards.assign(id);
+        self.locals.insert(id, layout.at(slot));
+        Ok(slot)
+    }
+
+    /// The slot of module binding `id`, shared by every function that reads or writes it.
+    fn global_slot(&mut self, ctx: &mut Context, id: LocalId, ty: TypeHandle) -> Result<Value> {
         self.named_global_slot(ctx, format!("global_{id}"), ty)
     }
 

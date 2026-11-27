@@ -1,6 +1,9 @@
 //! Guest promise creation, settlement, and reaction handlers.
 use super::*;
-use crate::engine::{Reaction, solve::CallTarget, types::Ty};
+use crate::engine::{
+    solve::{CallTarget, PromiseReaction, ReactionKind},
+    types::Ty,
+};
 use crate::lower::calls::CallArguments::Values;
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -80,7 +83,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let promise = self.emit_value(ctx, |ctx| PromisePendingOp::new(ctx, settled));
         let mut inputs = Vec::new();
         for handle in handles.into_iter().flatten() {
-            let record = self.shapes.environment_record(handle)?;
+            let record = self.shapes.environment(handle)?.record;
             let capture = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![promise]));
             inputs.push(self.function_value(ctx, handle, Some(capture), None)?);
         }
@@ -162,21 +165,16 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn reaction_body(
         &mut self,
         ctx: &mut Context,
-        reaction: &Reaction,
-        discard: bool,
+        reaction: PromiseReaction,
         args: &[Value],
     ) -> Result<()> {
         let (&promise, mut args) = args
             .split_first()
             .ok_or_else(|| internal!("missing source promise"))?;
-        let (fulfilled, rejected) = match *reaction {
-            Reaction::Chain {
-                fulfilled,
-                rejected,
-                ..
-            } => (fulfilled, rejected),
-            Reaction::Finally(callback) => (Some(callback), None),
-        };
+        let discard = reaction.result() == Ty::VOID;
+        let fulfilled = reaction.on_fulfilled.map(|(call, _)| call);
+        let rejected = reaction.on_rejected.map(|(call, _)| call);
+        let finalizer = fulfilled.filter(|_| reaction.kind == ReactionKind::Finally);
         let f = fulfilled
             .map(|cb| cb.take_operand(&mut args))
             .transpose()?
@@ -185,40 +183,35 @@ impl<'s> FunctionBuilder<'s, '_> {
             .map(|cb| cb.take_operand(&mut args))
             .transpose()?
             .flatten();
-        let handler = (rejected.is_some() || matches!(reaction, Reaction::Finally(_)))
+        let handler = (rejected.is_some() || finalizer.is_some())
             .then(|| self.catch_handler(ctx, "promise_rejected"));
         let settled = self.with_handler(ctx, handler.or(self.handler), None, |b, ctx| {
             let op = AwaitOp::new(ctx, promise).to_diag(ctx)?;
             Ok(b.append_value(ctx, &op))
         })?;
-        match *reaction {
-            Reaction::Finally(callback) => {
-                self.finalizer(ctx, callback, f)?;
+        if let Some(callback) = finalizer {
+            self.finalizer(ctx, callback, f)?;
+            self.return_callback(ctx, Some(settled), discard)?;
+        } else if let Some(callback) = fulfilled {
+            let skip = self.if_callable(ctx, f)?;
+            let result = callback.invoke(self, ctx, f, None, Values(&[settled]))?;
+            self.return_callback(ctx, result, discard)?;
+            if let Some(skip) = skip {
+                self.switch_to(skip);
                 self.return_callback(ctx, Some(settled), discard)?;
             }
-            Reaction::Chain {
-                fulfilled: Some(callback),
-                ..
-            } => {
-                let skip = self.if_callable(ctx, f)?;
-                let result = callback.invoke(self, ctx, f, None, Values(&[settled]))?;
-                self.return_callback(ctx, result, discard)?;
-                if let Some(skip) = skip {
-                    self.switch_to(skip);
-                    self.return_callback(ctx, Some(settled), discard)?;
-                }
-            }
-            Reaction::Chain {
-                rejects_only: true,
-                rejected: Some(_),
-                ..
-            } if !discard => self.raise_error(ctx, ErrorKind::Any, "unreachable"),
-            Reaction::Chain { .. } => self.return_callback(ctx, Some(settled), discard)?,
+        } else if matches!(reaction.inner_ty, Ty::BOTTOM | Ty::NEVER)
+            && rejected.is_some()
+            && !discard
+        {
+            self.raise_error(ctx, ErrorKind::Any, "unreachable");
+        } else {
+            self.return_callback(ctx, Some(settled), discard)?;
         }
         if let Some(handler) = handler {
             self.switch_to(handler.block);
             let reason = self.catch_exception(ctx, handler.status)?;
-            if let Reaction::Finally(callback) = *reaction {
+            if let Some(callback) = finalizer {
                 self.finalizer(ctx, callback, f)?;
             } else if let Some(callback) = rejected {
                 let skip = self.if_callable(ctx, g)?;

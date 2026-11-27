@@ -265,6 +265,26 @@ fn identifier(name: &str) -> Identifier {
     crate::host::symbol(pliron::ident!("wit_"), name)
 }
 
+fn list_element_type(ctx: &Context, ty: TypeHandle) -> Result<TypeHandle> {
+    perry_mir::typed::<ArrayType>(ctx, ty)
+        .map(|array| array.deref(ctx).element())
+        .ok_or_else(|| {
+            diag!(
+                codes::CONTRACT_MISMATCH,
+                "WIT list needs a TypeScript array"
+            )
+        })
+}
+
+fn expect_string(ctx: &Context, ty: TypeHandle) -> Result<()> {
+    ensure_diag!(
+        ty.deref(ctx).is::<perry_mir::StringType>(),
+        codes::CONTRACT_MISMATCH,
+        "WIT string needs a TypeScript string"
+    );
+    Ok(())
+}
+
 fn expect_number(ctx: &Context, mir_ty: TypeHandle, ty: &AbiType) -> Result<()> {
     ensure_diag!(
         mir_ty.deref(ctx).is::<FP64Type>(),
@@ -401,10 +421,23 @@ impl FunctionLowering<'_, '_> {
             AbiKind::String | AbiKind::List(_) => {
                 let ptr = source.read(self, ctx, MemKind::I32, 0)?;
                 let len = source.read(self, ctx, MemKind::I32, 4)?;
-                match &ty.kind {
-                    AbiKind::List(element) => self.lift_list(ctx, element, mir_ty, ptr, len),
-                    _ => self.lift_string(ctx, mir_ty, ptr, len),
+                let value = match &ty.kind {
+                    AbiKind::List(element)
+                        if element.kind == AbiKind::Scalar(Wit::U8)
+                            && mir_ty.deref(ctx).is::<perry_mir::BytesType>() =>
+                    {
+                        self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, ptr])
+                    }
+                    AbiKind::List(element) => self.lift_list(ctx, element, mir_ty, ptr, len)?,
+                    _ => {
+                        expect_string(ctx, mir_ty)?;
+                        self.runtime(ctx, Runtime::StringAdopt, vec![ptr, len])
+                    }
+                };
+                if self.state.collectible {
+                    self.runtime_void(ctx, Runtime::CabiRelease, vec![ptr]);
                 }
+                Ok(value)
             }
             AbiKind::ByteStream => {
                 let handle = source.read(self, ctx, MemKind::I32, 0)?;
@@ -448,23 +481,20 @@ impl FunctionLowering<'_, '_> {
         Ok(self.runtime(ctx, Runtime::WebReadableNew, vec![handle]))
     }
 
-    fn lift_string(
+    fn list_elements(
         &mut self,
         ctx: &mut Context,
-        mir_ty: TypeHandle,
-        ptr: Value,
+        element: &AbiType,
+        buffer: Value,
         len: Value,
-    ) -> Result<Value> {
-        ensure_diag!(
-            mir_ty.deref(ctx).is::<perry_mir::StringType>(),
-            codes::CONTRACT_MISMATCH,
-            "WIT string needs a TypeScript string"
-        );
-        let string = self.runtime(ctx, Runtime::StringAdopt, vec![ptr, len]);
-        if self.state.collectible {
-            self.runtime_void(ctx, Runtime::CabiRelease, vec![ptr]);
-        }
-        Ok(string)
+        body: impl FnOnce(&mut Self, &mut Context, Value, Value) -> Result<()>,
+    ) -> Result<()> {
+        self.counted_loop(ctx, len, |b, ctx, index| {
+            let stride = b.i32_const(ctx, element.size as i32);
+            let offset = b.num(ctx, NumOpcode::I32Mul, vec![index, stride]);
+            let address = b.num(ctx, NumOpcode::I32Add, vec![buffer, offset]);
+            body(b, ctx, index, address)
+        })
     }
 
     fn lift_list(
@@ -475,32 +505,11 @@ impl FunctionLowering<'_, '_> {
         ptr: Value,
         len: Value,
     ) -> Result<Value> {
-        if element.kind == AbiKind::Scalar(Wit::U8)
-            && mir_ty.deref(ctx).is::<perry_mir::BytesType>()
-        {
-            let bytes = self.runtime(ctx, Runtime::StdBytesAdopt, vec![len, ptr]);
-            if self.state.collectible {
-                self.runtime_void(ctx, Runtime::CabiRelease, vec![ptr]);
-            }
-            return Ok(bytes);
-        }
-        let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_err(|_| {
-                Diagnostic::new(
-                    codes::CONTRACT_MISMATCH,
-                    "WIT list needs a TypeScript array",
-                )
-            })?
-            .deref(ctx)
-            .element();
+        let element_mir = list_element_type(ctx, mir_ty)?;
         let lift_mir = scalar_mir_type(ctx, element_mir);
         let array = self.new_array(ctx, len, element_mir)?;
         let data = self.load(ctx, MemKind::I32, array, layout::DATA);
-        let size = element.size as i32;
-        self.counted_loop(ctx, len, |b, ctx, i| {
-            let stride = b.i32_const(ctx, size);
-            let offset = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
-            let source = b.num(ctx, NumOpcode::I32Add, vec![ptr, offset]);
+        self.list_elements(ctx, element, ptr, len, |b, ctx, i, source| {
             let value = b.lift_abi(ctx, element, lift_mir, Canonical::Memory(source, 0))?;
             let carriers = b.cast_value(ctx, Carriers::Scalar(value), lift_mir, element_mir)?;
             let slot = b.slot_address(ctx, data, i, element_mir);
@@ -508,9 +517,6 @@ impl FunctionLowering<'_, '_> {
             Ok(())
         })?;
         self.store(ctx, MemKind::I32, array, layout::LEN, len);
-        if self.state.collectible {
-            self.runtime_void(ctx, Runtime::CabiRelease, vec![ptr]);
-        }
         Ok(array)
     }
 
@@ -636,48 +642,29 @@ impl FunctionLowering<'_, '_> {
         mir_ty: TypeHandle,
         value: Value,
     ) -> Result<(Value, Value)> {
-        if element.kind == AbiKind::Scalar(Wit::U8) {
-            if mir_ty.deref(ctx).is::<perry_mir::StringType>() {
-                return Ok((
-                    self.load(ctx, MemKind::I32, value, strings::DATA),
-                    self.load(ctx, MemKind::I32, value, strings::LEN),
-                ));
+        if element.kind == AbiKind::Scalar(Wit::U8)
+            && (mir_ty.deref(ctx).is::<perry_mir::BytesType>()
+                || mir_ty.deref(ctx).is::<perry_mir::ByteInputType>())
+        {
+            let view = self.runtime(ctx, Runtime::StdBytesBoundary, vec![value]);
+            let data = self.load(ctx, MemKind::I32, view, 4);
+            let len = self.load(ctx, MemKind::I32, view, 0);
+            if self.canonical_borrows {
+                self.publish_roots(ctx, &[data]);
+            } else if self.state.collectible {
+                self.runtime(ctx, Runtime::GcPin, vec![data]);
             }
-            if mir_ty.deref(ctx).is::<perry_mir::BytesType>()
-                || mir_ty.deref(ctx).is::<perry_mir::ByteInputType>()
-            {
-                let view = self.runtime(ctx, Runtime::StdBytesBoundary, vec![value]);
-                let data = self.load(ctx, MemKind::I32, view, 4);
-                let len = self.load(ctx, MemKind::I32, view, 0);
-                if self.canonical_borrows {
-                    self.publish_roots(ctx, &[data]);
-                } else if self.state.collectible {
-                    self.runtime(ctx, Runtime::GcPin, vec![data]);
-                }
-                return Ok((data, len));
-            }
+            return Ok((data, len));
         }
-        let element_mir = TypedHandle::<ArrayType>::from_handle(mir_ty, ctx)
-            .map_err(|_| {
-                Diagnostic::new(
-                    codes::CONTRACT_MISMATCH,
-                    "WIT list needs a TypeScript array",
-                )
-            })?
-            .deref(ctx)
-            .element();
+        let element_mir = list_element_type(ctx, mir_ty)?;
         let len = self.load(ctx, MemKind::I32, value, layout::LEN);
         let data = self.load(ctx, MemKind::I32, value, layout::DATA);
         let stride = self.i32_const(ctx, element.size as i32);
         let bytes = self.num(ctx, NumOpcode::I32Mul, vec![len, stride]);
         let buffer = self.alloc(ctx, bytes);
-        let size = element.size as i32;
-        self.counted_loop(ctx, len, |b, ctx, i| {
+        self.list_elements(ctx, element, buffer, len, |b, ctx, i, target| {
             let slot = b.slot_address(ctx, data, i, element_mir);
             let item = b.load_slot_value(ctx, slot, 0, element_mir)?;
-            let stride = b.i32_const(ctx, size);
-            let at = b.num(ctx, NumOpcode::I32Mul, vec![i, stride]);
-            let target = b.num(ctx, NumOpcode::I32Add, vec![buffer, at]);
             let mut done = None;
             if b.state.program_facts.has_array_holes() {
                 let present = b.array_slot_present(ctx, value, i);
@@ -766,22 +753,24 @@ impl FunctionLowering<'_, '_> {
                 let handle = self.num(ctx, NumOpcode::I32TruncSatF64U, vec![value]);
                 self.flat_i32s(ctx, flat, &[zero, handle], out)?;
             }
-            AbiKind::String => {
+            AbiKind::String | AbiKind::List(_) => {
                 let value = value.scalar()?;
-                ensure_diag!(
-                    mir_ty.deref(ctx).is::<perry_mir::StringType>(),
-                    codes::CONTRACT_MISMATCH,
-                    "WIT string needs a TypeScript string"
-                );
-                let data = self.load(ctx, MemKind::I32, value, strings::DATA);
-                let len = self.load(ctx, MemKind::I32, value, strings::LEN);
+                let (data, len) = match &ty.kind {
+                    AbiKind::List(element)
+                        if element.kind != AbiKind::Scalar(Wit::U8)
+                            || !mir_ty.deref(ctx).is::<perry_mir::StringType>() =>
+                    {
+                        self.lower_list(ctx, element, mir_ty, value)?
+                    }
+                    _ => {
+                        expect_string(ctx, mir_ty)?;
+                        (
+                            self.load(ctx, MemKind::I32, value, strings::DATA),
+                            self.load(ctx, MemKind::I32, value, strings::LEN),
+                        )
+                    }
+                };
                 target.write(self, ctx, MemKind::I32, 0, data)?;
-                target.write(self, ctx, MemKind::I32, 4, len)?;
-            }
-            AbiKind::List(element) => {
-                let value = value.scalar()?;
-                let (buffer, len) = self.lower_list(ctx, element, mir_ty, value)?;
-                target.write(self, ctx, MemKind::I32, 0, buffer)?;
                 target.write(self, ctx, MemKind::I32, 4, len)?;
             }
             AbiKind::Record(fields) => {

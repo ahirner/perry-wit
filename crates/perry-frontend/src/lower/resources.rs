@@ -18,9 +18,10 @@ impl<'s> FunctionBuilder<'s, '_> {
             .shapes
             .resolved_binding(self.shapes.specialization.bodies.classes[id].ty)?
             .carrier;
-        let map = self
-            .shapes
-            .map_box_type(ctx, FP64Type::get(ctx).into(), value)?;
+        let map = self.shapes.collection_type(
+            ctx,
+            super::collections::EntryTypes::Map(FP64Type::get(ctx).into(), value),
+        )?;
         Ok((
             self.named_global_slot(ctx, format!("resource_instances_{owner}"), map.into())?,
             value,
@@ -31,7 +32,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         for &owner in self.shapes.specialization.resources.keys() {
             let (slot, _) = self.resource_table(ctx, owner)?;
             let ty = self.slot_type(ctx, slot)?;
-            let table = self.empty_map(ctx, Some(ty))?;
+            let table = self.empty_collection(ctx, crate::source::CollectionKind::Map, Some(ty))?;
             self.store(ctx, slot, table);
         }
         Ok(())

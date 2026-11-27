@@ -40,14 +40,12 @@ impl<'h> Solver<'h, '_> {
         let Some(indexed) = self.index.regions.get(&region) else {
             return;
         };
-        let sites = self.index.sites(indexed.template);
-        let first = sites.partition_point(|s| s.index < indexed.sites.start);
-        for (offset, site) in sites[first..]
-            .iter()
-            .take_while(|s| s.index < indexed.sites.end)
-            .enumerate()
+        for (_, &expr) in self
+            .index
+            .events
+            .range((indexed.template, indexed.sites.start)..(indexed.template, indexed.sites.end))
         {
-            match site.expr {
+            match expr {
                 Expr::LocalSet(id, _) | Expr::Update { id, .. } => write(*id),
                 Expr::Closure { func_id, .. } | Expr::FuncRef(func_id) => {
                     if let Some(t) = self.index.template_of_func(*func_id) {
@@ -56,11 +54,17 @@ impl<'h> Solver<'h, '_> {
                 }
                 _ => {}
             }
-            if let Some(inst) = owner {
-                self.for_each_site_target(&self.inst_sites[inst][first + offset], |id| {
-                    let callee = self.index.view(self.instances[id].template);
-                    call((Some(id), Region::Body(callee.body)));
-                });
+        }
+        if let Some(inst) = owner {
+            for (_, entry) in self.inst_sites[inst].range(indexed.sites.clone()) {
+                self.for_each_site_target(
+                    entry,
+                    |id| {
+                        let callee = self.index.view(self.instances[id].template);
+                        call((Some(id), Region::Body(callee.body)));
+                    },
+                    |_| {},
+                );
             }
         }
     }

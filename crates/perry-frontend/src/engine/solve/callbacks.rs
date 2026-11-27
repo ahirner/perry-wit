@@ -70,7 +70,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(Some(Ok(CallbackSite::new(
                 callback,
                 vec![Ty::STRING, Ty::DYNAMIC],
-                MethodResult::Optional(crate::methods::Kind::String),
+                MethodResult::Signature(&[perry_mir::SignatureType::OptString]),
                 receiver,
             ))));
         }
@@ -176,7 +176,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         return Ok(Some(Ok(CallbackSite::new(
                             first,
                             inputs,
-                            MethodResult::Void,
+                            method.result_rule(),
                             raw_obj,
                         ))));
                     }
@@ -310,7 +310,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         recv_ty: Option<Ty>,
         arg_tys: &[Ty],
         byte_offset: u32,
-    ) -> Result<(DispatchArm, Ty)> {
+    ) -> Result<(DispatchArm, Ty, usize)> {
         let view = self.index.view(identity.template);
         let is_promise_handle =
             self.apply_promise_handle_call(s, identity, arg_tys, None, byte_offset)?;
@@ -334,9 +334,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 identity,
                 target,
                 receiver: recv.is_some(),
-                arguments: call_args.len(),
             },
             ret,
+            call_args.len(),
         ))
     }
 
@@ -359,8 +359,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             self.invalidate_conservative_cell(input);
         }
         for &identity in identities {
-            let (arm, ret) = self.callback_target(s, identity, receiver, inputs, byte_offset)?;
-            width = width.max(arm.arguments);
+            let (arm, ret, count) =
+                self.callback_target(s, identity, receiver, inputs, byte_offset)?;
+            width = width.max(count);
             result = self.types.join(result, ret);
             needs_recv |= arm.receiver;
             arms.push(arm);

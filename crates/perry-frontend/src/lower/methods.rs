@@ -32,7 +32,7 @@ impl Receiver {
 /// Every catalog row carries a recipe, so each `Call` variant has exactly one arm.
 macro_rules! lower_calls {
     ($( $family:pat, $class:literal {
-        $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident $(callback($callback:ident))?
+        $( $variant:ident $($name:literal)|+ $(-> $result:tt)? $preserve:ident $form:ident $(callback($callback:ident))?
             [$($argument:ident $(:$mode:ident)?),*] => $action:ident $recipe:tt, $requirement:literal;
         )*
     } )*) => {
@@ -193,16 +193,19 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     fn string_concat(&mut self, ctx: &mut Context, text: Value, args: &'s [Expr]) -> Result<Value> {
-        let mut segments = Vec::with_capacity(args.len());
-        for argument in args {
-            let value = self.expression(ctx, argument)?;
-            segments.push(self.display(ctx, value)?);
-        }
-        let mut result = text;
-        for segment in segments {
-            result = self.emit_value(ctx, |ctx| ConcatOp::new(ctx, result, segment));
-        }
-        Ok(result)
+        self.concat_strings(ctx, text, Arguments::Plain(args))
+    }
+
+    pub(super) fn concat_strings(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        args: Arguments<'s>,
+    ) -> Result<Value> {
+        self.fold_arguments(ctx, args, text, |b, ctx, previous, item| {
+            let text = b.display(ctx, item)?;
+            Ok(b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, text)))
+        })
     }
 
     fn string_normalize(

@@ -64,7 +64,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             .get(i)
                             .filter(|p| self.index.is_param_annotated(p.id))
                         {
-                            self.index.param_type(p)?
+                            self.index.locals[self.index.param_local(p)?].declared
                         } else {
                             ty
                         };
@@ -114,7 +114,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             .params
             .iter()
             .map(|p| {
-                let declared = self.index.param_type(p)?;
+                let declared = self.index.locals[self.index.param_local(p)?].declared;
                 let ty = self.types.substitute(declared, &bindings);
                 self.instantiate_annotated_class(ty, 0, None)
             })
@@ -435,15 +435,16 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some(owner) = capture_owner.instance() {
             type_bindings.extend_from_slice(&self.type_bindings[owner]);
         }
-        let mut param_loc_buf = Vec::with_capacity(view.params.len());
-        let mut local_slots = Vec::with_capacity(view.params.len() + 4);
+        let activation_slots = self.index.activation_slots(template);
+        let mut local_slots = Vec::with_capacity(activation_slots);
         let fixed_count = view
             .params
             .iter()
             .position(|p| p.is_rest)
             .unwrap_or(view.params.len());
         for (p_idx, param) in view.params.iter().enumerate() {
-            let declared = self.index.param_type(param)?;
+            let local = self.index.param_local(param)?;
+            let declared = self.index.locals[local].declared;
             let declared = self.index.substitute(self.types, declared, &type_bindings);
             let bound_ty = if param.is_rest {
                 let extra_args = args.get(fixed_count..).unwrap_or(&[]);
@@ -482,24 +483,12 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             };
             let loc = self.facts.alloc(bound_ty);
-            param_loc_buf.push(loc);
-            if let Some(local) = self.index.local_idx(param.id) {
-                local_slots.push(InstanceLocalSlot { local, loc });
-                if let Some(cloc) = self.capture_locs.collapsed[local] {
-                    self.write_loc(cloc, bound_ty);
-                }
+            local_slots.push(loc);
+            if let Some(cloc) = self.capture_locs.collapsed[local] {
+                self.write_loc(cloc, bound_ty);
             }
         }
-        for &cap_local in self.index.template_captured_locals(template) {
-            if !local_slots.iter().any(|s| s.local == cap_local) {
-                let loc = self.facts.alloc(Ty::BOTTOM);
-                local_slots.push(InstanceLocalSlot {
-                    local: cap_local,
-                    loc,
-                });
-            }
-        }
-        let param_locs = self.param_locs.extend_from_slice(&param_loc_buf);
+        local_slots.resize_with(activation_slots, || self.facts.alloc(Ty::BOTTOM));
 
         let explicit_return = view
             .explicit_return
@@ -540,6 +529,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             format!("{}_instance_{emitted_func_id}", view.raw_name())
         };
         let inst_id = self.instances.push(Instance {
+            activation: self.capture_locs.slots.extend(local_slots),
             is_witness: witness.is_some(),
             list_result,
             template,
@@ -549,7 +539,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             return_loc,
             partial_record_result: None,
             has_explicit_return: explicit_return.is_some(),
-            param_locs,
             caller,
             call_byte_offset,
             invocation,
@@ -558,26 +547,26 @@ impl<'h, 'a> Solver<'h, 'a> {
         });
         self.type_bindings.push(type_bindings.into_boxed_slice());
         self.instance_index.insert(key, inst_id);
-        self.capture_locs.slots.push(local_slots);
         self.inst_frame_locals
             .push(vec![Ty::BOTTOM; self.index.template_frame_count(template)]);
         self.inst_written.push(BitSet::default());
-        let sites = self
-            .index
-            .sites(template)
-            .iter()
-            .map(|site| SiteEntry {
-                resolution: site.handles.map(|(resolve_tid, reject_tid)| {
-                    SiteResolution::PromiseNew {
+        let mut sites = InstanceSites::new();
+        for &(site, resolve_tid, reject_tid) in
+            self.index.promises.get(&template).into_iter().flatten()
+        {
+            sites.insert(
+                site,
+                SiteEntry {
+                    resolution: Some(SiteResolution::PromiseNew {
                         value_loc: self.facts.alloc(Ty::BOTTOM),
                         resolve_tid,
                         reject_tid,
                         executor: None,
-                    }
-                }),
-                ..SiteEntry::default()
-            })
-            .collect();
+                    }),
+                    ..SiteEntry::default()
+                },
+            );
+        }
         self.inst_sites.push(sites);
         self.subscriptions.inputs.push(Vec::new());
         self.enqueue(inst_id);
@@ -605,7 +594,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     continue;
                 }
                 let resolved_arg = self.types.promise_argument(arg_ty, |loc| read(loc).1);
-                let pat = self.index.param_type(param)?;
+                let pat = self.index.locals[self.index.param_local(param)?].declared;
                 self.types.unify(
                     pat,
                     resolved_arg,

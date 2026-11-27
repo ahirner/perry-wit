@@ -1,21 +1,24 @@
 //! Single-pass boundary indexing over Perry HIR.
 use super::bitset::BitSet;
+use super::plans::ExprIdx;
 use super::solve::SiteResolution;
 pub(crate) use super::types::LocalFlags;
 use super::types::{
-    BindingSpan, CaptureSpan, CapturedLocalSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo,
-    LocalStorage, NameId, Pool, SiteSpan, TemplateId, Ty, TypeTable,
+    BindingSpan, CaptureSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage,
+    NameId, Pool, TemplateId, Ty, TypeTable,
 };
 use crate::hir_compat;
 use crate::narrowing::Region;
-use crate::source::{ConstructorSites, SourceModule};
+use crate::source::{CallerKind, ConstructorSites, SourceModule};
 use perry_hir::{
     ir::{Expr, Function, Param, Stmt},
     types::{FuncId, LocalId},
     walker::{stmt_any_expr, walk_expr_children},
 };
 use pliron::context::Context;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+pub(super) type Origins = IdxVec<TemplateId, Vec<(super::BodyOwner, CallerKind, Option<FuncId>)>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TemplateKind {
@@ -27,9 +30,9 @@ pub(crate) enum TemplateKind {
     ClassStaticMethod(ClassId),
     ClassGetter,
     ClassSetter,
-    Closure,
-    PromiseResolve(usize),
-    PromiseReject(usize),
+    Closure(ExprIdx),
+    PromiseResolve(ExprIdx),
+    PromiseReject(ExprIdx),
 }
 
 impl TemplateKind {
@@ -93,7 +96,7 @@ impl<'h> TemplateView<'h> {
 
             captures_this: false,
             captures_new_target: false,
-            uses_this: stmts_use_this(body),
+            uses_this: false,
             explicit_return,
         }
     }
@@ -133,39 +136,14 @@ pub(super) struct SourceLocal<'h> {
     pub(super) name: &'h str,
     pub(super) ty: &'h perry_hir::types::Type,
 }
-#[derive(Clone, Copy)]
-pub(crate) struct IndexedSite<'h> {
-    pub(super) expr: &'h Expr,
-    pub(super) index: super::plans::ExprIdx,
-    pub(crate) handles: Option<(TemplateId, TemplateId)>,
-}
-
 #[derive(Clone, Copy, Default)]
 struct TemplateLayout {
-    sites: SiteSpan,
     bindings: BindingSpan,
     captures: CaptureSpan,
-    captured_locals: CapturedLocalSpan,
+    references: CaptureSpan,
+    activation_slots: u32,
     closure_owner: Option<TemplateId>,
     frame_slots: u32,
-}
-
-#[derive(Clone, Copy)]
-enum Declaration<'h> {
-    Function,
-    Closure(&'h Expr),
-}
-
-#[derive(Default)]
-pub(crate) struct LexicalFunctions<'h>(Vec<Option<(TemplateId, Declaration<'h>)>>);
-
-impl<'h> LexicalFunctions<'h> {
-    pub(crate) fn closure(&self, id: FuncId) -> Option<&'h Expr> {
-        match self.0.get(id as usize)?.as_ref()?.1 {
-            Declaration::Closure(expr) => Some(expr),
-            Declaration::Function => None,
-        }
-    }
 }
 
 #[derive(Default)]
@@ -212,17 +190,17 @@ pub(super) struct SourceRegion {
 pub(crate) struct ModuleIndex<'h> {
     pub(super) regions: HashMap<Region, SourceRegion>,
     pub(super) type_slots: HashMap<(GenericOwner, crate::shapes::TypeName), usize>,
-    global_uses: std::collections::HashSet<(TemplateId, LocalId)>,
+    external_uses: std::collections::HashSet<(TemplateId, LocalId)>,
     pub(crate) iteration: hir_compat::Iteration<'h>,
     pub(super) annotations: Annotations,
     pub(super) expressions: super::plans::Expressions,
     pub(crate) views: IdxVec<TemplateId, TemplateView<'h>>,
-    pub(super) functions: LexicalFunctions<'h>,
+    pub(super) functions: Vec<Option<TemplateId>>,
     layouts: IdxVec<TemplateId, TemplateLayout>,
-    site_pool: Pool<SiteSpan, IndexedSite<'h>>,
+    pub(super) events: BTreeMap<(TemplateId, ExprIdx), &'h Expr>,
+    pub(super) promises: HashMap<TemplateId, Vec<(ExprIdx, TemplateId, TemplateId)>>,
     bindings: Pool<BindingSpan, SourceLocal<'h>>,
     capture_pool: Pool<CaptureSpan, LocalId>,
-    captured_local_pool: Pool<CapturedLocalSpan, LocalIdx>,
     pub(crate) classes: IdxVec<ClassId, ClassInfo<'h>>,
     pub(crate) class_has_implicit_params: BitSet,
     pub(super) literal_classes: crate::source::LiteralClasses<'h>,
@@ -249,16 +227,8 @@ impl<'h> ModuleIndex<'h> {
     pub(crate) fn closure_owner(&self, t: TemplateId) -> Option<TemplateId> {
         self.layouts[t].closure_owner
     }
-    pub(crate) fn sites(&self, template: TemplateId) -> &[IndexedSite<'h>] {
-        &self.site_pool[self.layouts[template].sites]
-    }
     pub(super) fn bindings(&self, template: TemplateId) -> &[SourceLocal<'h>] {
         &self.bindings[self.layouts[template].bindings]
-    }
-    pub(crate) fn site_of(&self, template: TemplateId, expr: &Expr) -> Option<usize> {
-        self.sites(template)
-            .binary_search_by_key(&self.expressions.index(expr)?, |s| s.index)
-            .ok()
     }
     pub(crate) fn view(&self, id: TemplateId) -> &TemplateView<'h> {
         &self.views[id]
@@ -303,11 +273,15 @@ impl<'h> ModuleIndex<'h> {
     pub(crate) fn template_captures(&self, t: TemplateId) -> &[LocalId] {
         &self.capture_pool[self.layouts[t].captures]
     }
-    pub(crate) fn template_captured_locals(&self, t: TemplateId) -> &[LocalIdx] {
-        &self.captured_local_pool[self.layouts[t].captured_locals]
+    pub(crate) fn closure_references(&self, template: TemplateId) -> &[LocalId] {
+        &self.capture_pool[self.layouts[template].references]
+    }
+
+    pub(super) fn activation_slots(&self, t: TemplateId) -> usize {
+        self.layouts[t].activation_slots as usize
     }
     pub(crate) fn template_of_func(&self, id: FuncId) -> Option<TemplateId> {
-        Some(self.functions.0.get(id as usize)?.as_ref()?.0)
+        self.functions.get(id as usize).copied().flatten()
     }
     pub(super) fn method_template(&self, methods: &[Function], name: &str) -> Option<TemplateId> {
         let method = methods
@@ -319,23 +293,21 @@ impl<'h> ModuleIndex<'h> {
         self.local_to_idx.get(id as usize).copied().flatten()
     }
 
-    fn set_func_template(
-        &mut self,
-        func_id: FuncId,
-        tid: TemplateId,
-        declaration: Declaration<'h>,
-    ) {
-        let idx = func_id as usize;
-        if idx >= self.functions.0.len() {
-            self.functions.0.resize(idx + 1, None);
-        }
-        if let Some(slot) = self.functions.0.get_mut(idx) {
-            *slot = Some((tid, declaration));
+    fn set_func_template(&mut self, id: FuncId, template: TemplateId) {
+        let index = id as usize;
+        if let Some(slot) = self.functions.get_mut(index) {
+            *slot = Some(template);
+        } else {
+            self.functions.resize(index, None);
+            self.functions.push(Some(template));
         }
     }
 
     fn add_template(&mut self, view: TemplateView<'h>) -> TemplateId {
-        self.layouts.push(TemplateLayout::default());
+        self.layouts.push(TemplateLayout {
+            activation_slots: view.params.len() as u32,
+            ..TemplateLayout::default()
+        });
         self.views.push(view)
     }
 
@@ -381,8 +353,7 @@ impl<'h> ModuleIndex<'h> {
         self.annotations.register(scan, &func.return_type, true);
         self.max_func_id = self.max_func_id.max(func.id);
         let tid = self.add_template(TemplateView::from_function(kind, func, explicit_return));
-        scan.raw_sites.resize_with(self.views.len(), Vec::new);
-        self.set_func_template(func.id, tid, Declaration::Function);
+        self.set_func_template(func.id, tid);
         self.scan_params(scan, &func.params, tid, &[]);
         self.scan_stmts(scan, self.view(tid).body, tid, false, false);
         tid
@@ -440,12 +411,10 @@ impl<'h> ModuleIndex<'h> {
             )
     }
 
-    pub(super) fn param_type(&self, param: &Param) -> perry_wit_diagnostics::Result<Ty> {
-        self.local_idx(param.id)
-            .map(|i| self.locals[i].declared)
-            .ok_or_else(|| {
-                perry_wit_diagnostics::internal!("missing indexed parameter {}", param.name)
-            })
+    pub(super) fn param_local(&self, param: &Param) -> perry_wit_diagnostics::Result<LocalIdx> {
+        self.local_idx(param.id).ok_or_else(|| {
+            perry_wit_diagnostics::internal!("missing indexed parameter {}", param.name)
+        })
     }
 
     fn scan_params(
@@ -464,7 +433,7 @@ impl<'h> ModuleIndex<'h> {
             let ty = scan.types.intern_hir(scan.ctx, authored, true);
             self.annotations.0.insert(std::ptr::from_ref(&param.ty), ty);
         }
-        for param in params {
+        for (slot, param) in params.iter().enumerate() {
             let explicit = scan
                 .declarations
                 .locals
@@ -473,6 +442,7 @@ impl<'h> ModuleIndex<'h> {
             let ty = self.annotations.register(scan, &param.ty, explicit);
             let local = self.ensure_local(param.id, owner, ty, scan.declarations);
             self.locals[local].flags.insert(LocalFlags::PARAM);
+            self.locals[local].storage = LocalStorage::Activation(slot as u32);
             scan.defined_locals.insert(param.id as usize);
             if let Some(default) = &param.default {
                 self.scan_expr(scan, default, owner, false);
@@ -550,7 +520,6 @@ impl<'h> ModuleIndex<'h> {
                         let regex = matches!(init, Expr::RegExp { .. })
                             || scan.constructors.regexp(init).is_some();
                         scan.regexes.bind(*id, init, regex, !mutable);
-                        Self::record_site_expr(scan, owner, init);
                         self.scan_expr(scan, init, owner, in_loop);
                     }
                     scan.defined_locals.insert(*id as usize);
@@ -560,7 +529,6 @@ impl<'h> ModuleIndex<'h> {
                     if matches!(val, Expr::Array(items, _) if items.is_empty()) {
                         self.returns_empty_list.insert(owner.index());
                     }
-                    Self::record_site_expr(scan, owner, val);
                     self.scan_expr(scan, val, owner, in_loop);
                     if matches!(val, Expr::Undefined) {
                         RETURN | EMPTY_RETURN
@@ -659,6 +627,10 @@ impl<'h> ModuleIndex<'h> {
                         | (self.scan_stmts(scan, std::slice::from_ref(body), owner, false, in_loop)
                             & EMPTY_RETURN)
                 }
+                Stmt::ReleaseBoxes(ids) => {
+                    self.external_uses.extend(ids.iter().map(|&id| (owner, id)));
+                    FALLTHROUGH
+                }
                 other => {
                     stmt_any_expr(other, &mut |e| {
                         self.scan_expr(scan, e, owner, in_loop);
@@ -673,12 +645,6 @@ impl<'h> ModuleIndex<'h> {
             self.record_region(Region::Body(stmts), owner, start, exits);
         }
         exits
-    }
-
-    fn record_site_expr(scan: &mut ScanCtx<'h, '_>, owner: TemplateId, expr: &'h Expr) {
-        if let Some(list) = scan.raw_sites.get_mut(owner.index()) {
-            list.push(expr);
-        }
     }
 
     fn scan_test(
@@ -719,9 +685,9 @@ impl<'h> ModuleIndex<'h> {
             | Expr::SetAdd { set_id: id, .. } = expr
             && self
                 .local_idx(*id)
-                .is_none_or(|i| self.locals[i].flags.contains(LocalFlags::MODULE))
+                .is_none_or(|i| self.locals[i].owner != owner)
         {
-            self.global_uses.insert((owner, *id));
+            self.external_uses.insert((owner, *id));
         }
         let site = self.expressions.register(expr, scan.constructors);
         match expr {
@@ -756,38 +722,20 @@ impl<'h> ModuleIndex<'h> {
             scan.regexes.sites.push(expr);
         }
         match expr {
-            Expr::Call { args, .. }
-            | Expr::StaticMethodCall { args, .. }
-            | Expr::NativeMethodCall { args, .. }
-            | Expr::New { args, .. } => {
-                Self::record_site_expr(scan, owner, expr);
-                for arg in args {
-                    Self::record_site_expr(scan, owner, arg);
-                }
+            Expr::Call { .. }
+            | Expr::FuncRef(_)
+            | Expr::Closure { .. }
+            | Expr::LocalSet(..)
+            | Expr::Update { .. } => {
+                self.events.insert((owner, site), expr);
             }
-            Expr::ArraySpread(_) | Expr::CallSpread { .. } => {
-                Self::record_site_expr(scan, owner, expr);
-                walk_expr_children(expr, &mut |value| {
-                    Self::record_site_expr(scan, owner, value)
-                });
+            Expr::New { class_name, .. } if class_name == "Promise" => {
+                scan.promise_sites.insert((owner, site));
             }
-            Expr::Array(elems, _) => {
-                Self::record_site_expr(scan, owner, expr);
-                for elem in elems {
-                    Self::record_site_expr(scan, owner, elem);
-                }
-            }
-            Expr::PropertySet { value, .. }
-            | Expr::PutValueSet { value, .. }
-            | Expr::IndexSet { value, .. }
-            | Expr::ArrayPush { value, .. } => {
-                Self::record_site_expr(scan, owner, expr);
-                Self::record_site_expr(scan, owner, value);
-            }
+            _ => {}
+        }
+        match expr {
             Expr::Logical { left, right, .. } => {
-                Self::record_site_expr(scan, owner, expr);
-                Self::record_site_expr(scan, owner, left);
-                Self::record_site_expr(scan, owner, right);
                 self.scan_test(scan, left, owner, in_loop);
                 self.scan_expr(scan, right, owner, in_loop);
                 return;
@@ -797,51 +745,17 @@ impl<'h> ModuleIndex<'h> {
                 then_expr,
                 else_expr,
             } => {
-                Self::record_site_expr(scan, owner, expr);
-                Self::record_site_expr(scan, owner, then_expr);
-                Self::record_site_expr(scan, owner, else_expr);
                 self.scan_test(scan, condition, owner, in_loop);
                 self.scan_expr(scan, then_expr, owner, in_loop);
                 self.scan_expr(scan, else_expr, owner, in_loop);
                 return;
             }
-            Expr::Object(fields) => {
-                Self::record_site_expr(scan, owner, expr);
-                for (_, value) in fields {
-                    Self::record_site_expr(scan, owner, value);
-                }
-            }
-            Expr::ObjectSpread { .. }
-            | Expr::ArrayFrom(..)
-            | Expr::NewDynamic { .. }
-            | Expr::MapNew
-            | Expr::MapNewFromArray(_)
-            | Expr::SetNew
-            | Expr::SetNewFromArray(_)
-            | Expr::Compare { .. }
-            | Expr::TypeOf(_)
-            | Expr::PropertyGet { .. }
-            | Expr::PropertyUpdate { .. }
-            | Expr::StringCoerce(_)
-            | Expr::TemplateStringCoerce(_)
-            | Expr::FuncRef(_) => Self::record_site_expr(scan, owner, expr),
-            expr if let Some((_, _, callback, _)) = crate::methods::Call::array_callback(expr) => {
-                Self::record_site_expr(scan, owner, callback)
-            }
-            Expr::ArrayFromMapped {
-                map_fn: callback, ..
-            }
-            | Expr::MapGroupBy {
-                key_fn: callback, ..
-            } => Self::record_site_expr(scan, owner, callback),
+            Expr::This => self.views[owner].uses_this = true,
             Expr::LocalGet(id) => self.record_local_use(*id, owner, false),
-            Expr::LocalSet(id, value) => {
-                Self::record_site_expr(scan, owner, expr);
-                Self::record_site_expr(scan, owner, value);
+            Expr::LocalSet(id, _) => {
                 self.record_local_use(*id, owner, true);
             }
             Expr::Update { id, .. } => {
-                Self::record_site_expr(scan, owner, expr);
                 self.record_local_use(*id, owner, true);
             }
             Expr::ScopedTemp { id, .. } => {
@@ -856,12 +770,11 @@ impl<'h> ModuleIndex<'h> {
                 mutable_captures,
                 is_async,
                 is_generator,
-
+                is_arrow,
                 captures_this,
                 captures_new_target,
                 ..
             } => {
-                Self::record_site_expr(scan, owner, expr);
                 self.max_func_id = self.max_func_id.max(*func_id);
                 let signature = scan.declarations.closure_signatures.get(func_id);
                 let (result, params_ty) = signature
@@ -876,7 +789,7 @@ impl<'h> ModuleIndex<'h> {
                 );
                 let body = crate::source::authored_body(params, body);
                 let tid = self.add_template(TemplateView {
-                    kind: TemplateKind::Closure,
+                    kind: TemplateKind::Closure(site),
                     name: scan
                         .closure_names
                         .get(func_id)
@@ -893,15 +806,14 @@ impl<'h> ModuleIndex<'h> {
 
                     captures_this: *captures_this,
                     captures_new_target: *captures_new_target,
-                    uses_this: stmts_use_this(body),
+                    uses_this: false,
                     explicit_return: exp_ret,
                 });
-                scan.raw_sites.resize_with(self.views.len(), Vec::new);
                 self.layouts[tid].closure_owner = Some(owner);
                 if in_loop {
                     self.closure_in_loop.insert(tid.index());
                 }
-                self.set_func_template(*func_id, tid, Declaration::Closure(expr));
+                self.set_func_template(*func_id, tid);
                 for &cap in captures {
                     let forward = !scan.defined_locals.contains(cap as usize);
                     scan.pending_captures.push((cap, false, forward));
@@ -912,6 +824,8 @@ impl<'h> ModuleIndex<'h> {
                 }
                 self.scan_params(scan, params, tid, params_ty);
                 self.scan_stmts(scan, body, tid, false, false);
+                self.views[owner].uses_this |=
+                    *captures_this || (*is_arrow && self.views[tid].uses_this);
                 return;
             }
             _ => {}
@@ -924,7 +838,7 @@ impl<'h> ModuleIndex<'h> {
     fn record_local_use(&mut self, id: LocalId, user_template: TemplateId, is_write: bool) {
         if let Some(lidx) = self.local_idx(id) {
             let user_is_closure =
-                is_write && self.view(user_template).kind == TemplateKind::Closure;
+                is_write && matches!(self.view(user_template).kind, TemplateKind::Closure(_));
             let local = &mut self.locals[lidx];
             if is_write {
                 local.flags.insert(LocalFlags::REASSIGNED);
@@ -948,41 +862,8 @@ struct ScanCtx<'h, 'a> {
     declarations: &'h crate::source::ModuleDeclarations,
     closure_names: &'h HashMap<FuncId, String>,
     types: &'a mut TypeTable,
-    raw_sites: &'a mut Vec<Vec<&'h Expr>>,
+    promise_sites: BTreeSet<(TemplateId, ExprIdx)>,
     bindings: Vec<(TemplateId, SourceLocal<'h>)>,
-    defined_locals: &'a mut BitSet,
-    pending_captures: &'a mut Vec<(LocalId, bool, bool)>,
-}
-
-fn stmts_use_this(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(|s| stmt_any_expr(s, &mut expr_uses_this))
-}
-
-fn expr_uses_this(expr: &Expr) -> bool {
-    match expr {
-        Expr::This => true,
-        Expr::Closure {
-            is_arrow,
-            captures_this,
-            body,
-            ..
-        } => {
-            if *captures_this {
-                true
-            } else if *is_arrow {
-                stmts_use_this(body)
-            } else {
-                false
-            }
-        }
-        _ => {
-            let mut found = false;
-            walk_expr_children(expr, &mut |child| {
-                if !found && expr_uses_this(child) {
-                    found = true;
-                }
-            });
-            found
-        }
-    }
+    defined_locals: BitSet,
+    pending_captures: Vec<(LocalId, bool, bool)>,
 }

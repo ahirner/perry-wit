@@ -3,6 +3,11 @@ use crate::hir_compat::Preservation;
 use perry_hir::{ir::Expr, types::LocalId};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_unsupported;
+use pliron::{
+    builtin::types::{FP64Type, IntegerType},
+    context::Context,
+    r#type::TypeHandle,
+};
 /// Source-level value families, their diagnostic labels, optional builtin constructor names,
 /// and corresponding MIR reference types.
 #[macro_export]
@@ -66,6 +71,22 @@ macro_rules! define_kinds {
         }
 
         impl Kind {
+            pub(crate) fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
+                let ty = ty.deref(ctx);
+                if ty.is::<FP64Type>() {
+                    return Some(Self::Number);
+                }
+                if let Some(integer) = ty.downcast_ref::<IntegerType>() {
+                    return match integer.width() {
+                        1 => Some(Self::Boolean),
+                        64 => Some(Self::BigInt),
+                        _ => None,
+                    };
+                }
+                $(if ty.is::<perry_mir::$mir>() { return Some(Self::$refk); })*
+                None
+            }
+
             pub(crate) const fn label(self) -> &'static str {
                 match self {
                     $(Self::$prim => $plabel,)*
@@ -103,6 +124,7 @@ pub(crate) enum Receiver {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MethodResult {
+    Signature(&'static [perry_mir::SignatureType]),
     Mapped,
     FlatMapped,
     Receiver,
@@ -110,26 +132,11 @@ pub(crate) enum MethodResult {
     Element,
     At,
     Reduced,
-    Void,
-    String,
-    Strings,
-    NullableStrings,
-    Number,
-    Boolean,
-    Dynamic,
     Lookup,
     Duration,
-    OptionalNumber,
-    NullableString,
     IteratorKeys,
     IteratorValues,
     IteratorEntries,
-    Native(Kind),
-    Promise(Kind),
-    PromiseVoid,
-    PromiseJson,
-    Nullable(Kind),
-    Optional(Kind),
     StreamReader,
 }
 
@@ -195,10 +202,20 @@ pub(crate) enum Callback {
 }
 
 macro_rules! registry {
+    (@result $action:ident $recipe:tt; [$($kind:ident)?]) => {
+        MethodResult::Signature(&[$(perry_mir::SignatureType::$kind)?])
+    };
+    (@result $action:ident $recipe:tt; $rule:ident) => { MethodResult::$rule };
+    (@result intrinsic ($op:ident, $args:expr, $inputs:tt, Receiver);) => { MethodResult::Receiver };
+    (@result intrinsic ($op:ident, $args:expr, $inputs:tt, Found);) => { MethodResult::Signature(&[perry_mir::SignatureType::Bool]) };
+    (@result intrinsic ($op:ident, $args:expr, $inputs:tt, Undefined);) => { MethodResult::Signature(&[]) };
+    (@result intrinsic ($op:ident $(, $args:expr, $inputs:tt, Value)?);) => {
+        MethodResult::Signature(perry_mir::Intrinsic::$op.result_kinds())
+    };
     (@callback $kind:ident) => { Some(Callback::$kind) };
     (@callback) => { None };
     ($( $family:pat, $class:literal {
-            $( $variant:ident $($name:literal)|+ $result:ident $(($result_arg:expr))? $preserve:ident $form:ident $(callback($callback:ident))?
+            $( $variant:ident $($name:literal)|+ $(-> $result:tt)? $preserve:ident $form:ident $(callback($callback:ident))?
                 [$($argument:ident $(:$mode:ident)?),*] => $action:ident $recipe:tt, $requirement:literal;
             )*
         } )*
@@ -223,13 +240,13 @@ macro_rules! registry {
             }
 
             pub(crate) fn result_rule(self) -> MethodResult {
-                match self { $($(Self::$variant => MethodResult::$result $(($result_arg))?,)*)* }
+                match self { $($(Self::$variant => registry!(@result $action $recipe; $($result)?),)*)* }
             }
 
             pub(crate) fn unique_result_rule(name: &str) -> Option<MethodResult> {
                 let mut result = None;
                 $($(if !registry!(@property $form) && matches!(name, $($name)|+) {
-                    let rule = MethodResult::$result $(($result_arg))?;
+                    let rule = Self::$variant.result_rule();
                     if result.is_some_and(|previous| previous != rule) { return None; }
                     result = Some(rule);
                 })*)*

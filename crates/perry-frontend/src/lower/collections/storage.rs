@@ -7,7 +7,7 @@ use crate::lower::control_flow::Projection;
 /// The entry and payload fields cleared when a live collection member is deleted.
 struct Tombstone<'a> {
     entry: Value,
-    kind: EntryKind,
+    kind: CollectionKind,
     fields: &'a [(&'a str, TypeHandle)],
 }
 
@@ -16,7 +16,7 @@ struct Tombstone<'a> {
 pub(crate) struct LiveCursor {
     box_val: Value,
     cursor: Value,
-    kind: EntryKind,
+    kind: CollectionKind,
     owner: CursorOwner,
 }
 
@@ -35,25 +35,23 @@ impl LiveCursor {
         coll: Value,
         index: Value,
     ) -> Result<Option<Self>> {
-        let Some(box_val) = b.collection_underlying_box(ctx, coll)? else {
-            return Ok(None);
-        };
-        let kind = if map_box_record(ctx, box_val.get_type(ctx)).is_some() {
-            EntryKind::Map
-        } else {
-            EntryKind::Set
-        };
-        let (cursor, owner) = if collection_view_record(ctx, coll.get_type(ctx)).is_some() {
-            (
+        let (kind, box_val, cursor, owner) = match Collection::of(ctx, coll.get_type(ctx)) {
+            Some(Collection::View(view)) => (
+                view.source(),
+                b.storage_field(ctx, coll, Field::ViewBox)?,
                 b.storage_field(ctx, coll, Field::ViewCursor)?,
                 CursorOwner::View,
-            )
-        } else {
-            let start = b.load(ctx, index)?;
-            (
-                b.new_collection_cursor(ctx, box_val, start)?,
-                CursorOwner::Loop,
-            )
+            ),
+            Some(Collection::Box(kind)) => {
+                let start = b.load(ctx, index)?;
+                (
+                    kind,
+                    coll,
+                    b.new_collection_cursor(ctx, coll, start)?,
+                    CursorOwner::Loop,
+                )
+            }
+            None => return Ok(None),
         };
         let live = Self {
             box_val,
@@ -135,7 +133,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         entry: TypedHandle<RecordType>,
-        kind: EntryKind,
+        kind: CollectionKind,
     ) -> Result<Value> {
         let box_rec = self.shapes.collection_box_type(ctx, entry, kind)?;
         let entries = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, entry.into(), vec![]));
@@ -168,14 +166,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         val: Value,
     ) -> Result<Option<Value>> {
-        let ty = val.get_type(ctx);
-        if map_box_record(ctx, ty).is_some() || set_box_record(ctx, ty).is_some() {
-            Ok(Some(val))
-        } else if collection_view_record(ctx, ty).is_some() {
-            Ok(Some(self.storage_field(ctx, val, Field::ViewBox)?))
-        } else {
-            Ok(None)
-        }
+        Ok(match Collection::of(ctx, val.get_type(ctx)) {
+            Some(Collection::Box(_)) => Some(val),
+            Some(Collection::View(_)) => Some(self.storage_field(ctx, val, Field::ViewBox)?),
+            None => None,
+        })
     }
 
     /// Return the entries array of a collection or view, or the array itself for plain arrays.
@@ -275,7 +270,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         box_val: Value,
         cursor: Value,
-        kind: EntryKind,
+        kind: CollectionKind,
     ) -> Result<Value> {
         let idx = self.storage_field(ctx, cursor, Field::CursorIndex)?;
         let inf = self.number(ctx, f64::INFINITY);
@@ -343,7 +338,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         entries: Value,
         entry: Value,
-        kind: EntryKind,
+        kind: CollectionKind,
         cleared: &[(&str, TypeHandle)],
         box_val: Value,
     ) -> Result<()> {
@@ -482,7 +477,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         entry: Value,
     ) -> Result<Option<Value>> {
         let kind = perry_mir::typed::<RecordType>(ctx, entry.get_type(ctx))
-            .and_then(|rec| EntryKind::of_entry(ctx, rec));
+            .and_then(|rec| CollectionKind::of_entry(ctx, rec));
         let Some(kind) = kind else {
             return Ok(None);
         };

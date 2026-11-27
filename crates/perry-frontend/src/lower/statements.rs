@@ -128,7 +128,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 }
             }
             Stmt::Let { id, ty, init, .. } => {
-                if matches!(self.local_storage(*id), Some(Storage::ErasedFunction(_))) {
+                let storage = self.local_storage(*id);
+                if matches!(storage, Some(Storage::ErasedFunction(_))) {
                     if let Some(expr) = init
                         && !crate::source::is_pure_func_expr(expr)
                     {
@@ -140,7 +141,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 if self.shapes.specialization.iteration.is_cursor(*id) {
                     self.frame.cursors.reset(*id);
                 }
-                let storage = self.local_storage(*id);
                 if matches!(
                     storage,
                     Some(Storage::Boxed {
@@ -160,7 +160,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.effect(ctx, expr)?;
             }
             Stmt::Return(value) => {
-                let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.source(id)
+                let erased = matches!(self.frame.owner, BodyOwner::Function(id) if self.signatures.get(&id).and_then(Signature::source)
                     .is_some_and(|s| matches!(s.result, crate::engine::InstanceResult::ErasedFunction)));
                 let value = if erased {
                     if let Some(expr) = value
@@ -461,29 +461,24 @@ impl<'s> FunctionBuilder<'s, '_> {
             };
             let value = self.fit(ctx, value, payload)?;
             let value = self.emit_value(ctx, |ctx| AllocOp::new(ctx, record, vec![value]));
-            let binding = if let Some(global) = self.shapes.globals.get_mut(&id) {
-                let writes = BindingType::plain(record.into());
-                *global = Some(writes);
-                let slot = self.global_slot(ctx, id, writes.carrier)?;
-                self.store(ctx, slot, value);
-                LocalBinding::slot(slot, writes, false)
-            } else {
-                self.initialized_local(ctx, value)
-            };
-            self.variant_guards.assign(id);
-            self.locals.insert(id, binding.captured(payload, deferred));
+            let ty = record.into();
+            let layout =
+                LocalBinding::slot(ty, BindingType::plain(ty), false).captured(payload, deferred);
+            let slot = self.declare_slot(ctx, id, layout)?;
+            self.store(ctx, slot, value);
             return Ok(());
         }
         if let Some(expr) = init {
-            let plans = &self.shapes.specialization.instances;
-            let function = match expr {
-                Expr::Closure { func_id, .. } => Some(*func_id),
-                _ => plans.reference(self.frame.owner, expr),
+            let source = self.shapes.specialization;
+            let site = self.site(expr);
+            let erased = match expr {
+                Expr::Closure { .. } => site.environment().is_none(),
+                _ => source
+                    .instances
+                    .reference_at(self.frame.owner, expr, site.resolution)
+                    .is_some_and(|id| source.closure_value(self.frame.owner, id).is_none()),
             };
-            if function
-                .is_some_and(|id| !plans.closure_values.contains_key(&(self.frame.owner, id)))
-                && plans.site(self.frame.owner, expr).conversion().is_none()
-            {
+            if erased && site.conversion().is_none() {
                 return Ok(());
             }
         }
@@ -527,7 +522,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                     Some(crate::engine::Storage::Value(ty)) => ty,
                     _ => self.shapes.specialization.annotations.get(ty)?,
                 };
-                if self.shapes.is_json_encodable_union(ty) {
+                let facts = self.shapes.specialization;
+                if self.shapes.types.source.is_json_encodable_union(
+                    ty,
+                    &facts.locations,
+                    &facts.dict_reads,
+                ) {
                     (
                         BindingType::plain(perry_mir::JsonType::get(ctx).into()),
                         false,
@@ -570,12 +570,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             binding.carrier = crate::lower::coerce::result_carrier(ctx, declared, &[value]);
         }
         let storage = deferred.unwrap_or(binding.carrier);
-        let slot = if let Some(global) = self.shapes.globals.get_mut(&id) {
-            *global = Some(binding);
-            self.global_slot(ctx, id, storage)?
-        } else {
-            self.entry_slot(ctx, storage)
-        };
+        let slot = self.declare_slot(ctx, id, LocalBinding::slot(storage, binding, is_never))?;
         if let Some(value) = init {
             let value = self.fit_binding(ctx, value, binding)?;
             self.store(ctx, slot, value);
@@ -583,10 +578,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             let undef = self.emit_value(ctx, |ctx| UndefinedOp::with_type(ctx, storage));
             self.store(ctx, slot, undef);
         }
-        // A declaration lowered again (a `finally` body at each exit) binds a new value.
-        self.variant_guards.assign(id);
-        self.locals
-            .insert(id, LocalBinding::slot(slot, binding, is_never));
         Ok(())
     }
 

@@ -1,15 +1,14 @@
 //! Sparse expression and binding decisions in each emitted body.
 use super::{
-    boundary::ModuleIndex,
     solve::{SiteEntry, SiteResolution, Solved},
-    types::{Idx, InstanceId, LocalIdx, LocalPlanSpan, PlanSpan, Pool},
+    types::{InstanceId, LocalIdx, LocalPlanSpan, PlanSpan, Pool},
 };
 use crate::source::{BuiltinConstructor, ConstructorSites};
 use perry_hir::{ir::Expr, types::FuncId};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) struct ExprIdx(usize);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) struct ExprIdx(usize);
 
 #[derive(Default)]
 pub(super) struct Expressions {
@@ -67,23 +66,15 @@ impl Solved {
     }
 }
 
-#[derive(Default)]
-pub(super) struct PendingBody {
-    sites: PlanSpan,
-    pub(super) locals: BTreeMap<LocalIdx, super::Storage>,
-}
-
 struct Body {
     sites: PlanSpan,
     locals: LocalPlanSpan,
 }
 
-pub(super) type Pending = BTreeMap<BodyOwner, PendingBody>;
-
 #[derive(Default)]
 pub(super) struct Decisions {
-    expressions: Expressions,
-    bodies: Vec<(BodyOwner, Body)>,
+    pub(super) expressions: Expressions,
+    bodies: HashMap<BodyOwner, Body>,
     sites: Pool<PlanSpan, (ExprIdx, SiteEntry)>,
     locals: Pool<LocalPlanSpan, (LocalIdx, super::Storage)>,
 }
@@ -94,114 +85,36 @@ fn lookup<K: Ord, V>(rows: &[(K, V)], key: K) -> Option<&V> {
 }
 
 impl Decisions {
-    pub(super) fn from_solver(
-        index: &mut ModuleIndex<'_>,
-        solved: &mut Solved,
-        mut pending: Pending,
-    ) -> Self {
-        let mut sites = Pool::default();
-        for (id, inst) in solved.instances.iter_enumerated() {
-            if !solved.live_instances.contains(id.index()) {
-                continue;
-            }
-            let owner = solved.body_owner(id);
-            let entries = std::mem::take(&mut solved.inst_sites[id]);
-            let resolved =
-                index
-                    .sites(inst.template)
-                    .iter()
-                    .zip(entries)
-                    .filter_map(|(source, mut entry)| {
-                        if matches!(
-                            entry.resolution,
-                            Some(SiteResolution::Cell(_) | SiteResolution::Closure(_))
-                        ) {
-                            entry.resolution = None;
-                        }
-                        (entry.erased || entry.coercion.is_some() || entry.resolution.is_some())
-                            .then_some((source.index, entry))
-                    });
-            pending.entry(owner).or_default().sites = sites.extend(resolved);
-        }
-        let mut locals = Pool::default();
-        let bodies = pending
-            .into_iter()
-            .map(|(owner, row)| {
-                (
-                    owner,
-                    Body {
-                        sites: row.sites,
-                        locals: locals.extend(row.locals),
-                    },
-                )
-            })
-            .collect();
-        Self {
-            expressions: std::mem::take(&mut index.expressions),
-            bodies,
-            sites,
-            locals,
-        }
+    pub(super) fn record_body(
+        &mut self,
+        owner: BodyOwner,
+        sites: impl IntoIterator<Item = (ExprIdx, SiteEntry)>,
+        locals: impl IntoIterator<Item = (LocalIdx, super::Storage)>,
+    ) {
+        let body = Body {
+            sites: self.sites.extend(sites),
+            locals: self.locals.extend(locals),
+        };
+        self.bodies.insert(owner, body);
     }
 
     pub(super) fn site(&self, owner: BodyOwner, expr: &Expr) -> Option<SiteEntry> {
-        let index = self.expressions.index(expr)?;
-        let mut entry = lookup(&self.bodies, owner)
+        Some(self.site_at(owner, self.expressions.index(expr)?))
+    }
+
+    pub(super) fn site_at(&self, owner: BodyOwner, index: ExprIdx) -> SiteEntry {
+        let mut entry = self
+            .bodies
+            .get(&owner)
             .and_then(|b| lookup(&self.sites[b.sites], index))
             .copied()
             .unwrap_or_default();
         entry.resolution = entry
             .resolution
             .or_else(|| self.expressions.declared.get(&index).copied());
-        Some(entry)
+        entry
     }
     pub(super) fn storage(&self, owner: BodyOwner, id: LocalIdx) -> Option<super::Storage> {
-        lookup(&self.locals[lookup(&self.bodies, owner)?.locals], id).copied()
-    }
-}
-
-use super::{
-    EnvironmentField,
-    types::{EnvFieldSpan, EnvId, FuncIdentity, IdxVec},
-};
-use perry_mir::RecordType;
-use pliron::r#type::TypedHandle;
-
-#[derive(Default)]
-pub(crate) struct Environments {
-    ids: HashMap<FuncIdentity, EnvId>,
-    rows: IdxVec<EnvId, (TypedHandle<RecordType>, EnvFieldSpan)>,
-    fields: Pool<EnvFieldSpan, EnvironmentField>,
-}
-
-impl Environments {
-    pub(crate) fn id(&self, identity: FuncIdentity) -> Option<EnvId> {
-        self.ids.get(&identity).copied()
-    }
-
-    pub(super) fn reserve(
-        &mut self,
-        identity: FuncIdentity,
-        record: TypedHandle<RecordType>,
-    ) -> EnvId {
-        let id = self.rows.push((record, self.fields.extend([])));
-        self.ids.insert(identity, id);
-        id
-    }
-
-    pub(super) fn define(&mut self, id: EnvId, fields: Vec<EnvironmentField>) {
-        self.rows[id].1 = self.fields.extend(fields);
-    }
-
-    pub(crate) fn ids(&self) -> impl Iterator<Item = EnvId> + use<> {
-        self.rows.ids()
-    }
-
-    pub(crate) fn record(&self, id: EnvId) -> TypedHandle<RecordType> {
-        self.rows[id].0
-    }
-
-    pub(crate) fn fields(&self, id: EnvId) -> &[EnvironmentField] {
-        &self.fields[self.rows[id].1]
+        lookup(&self.locals[self.bodies.get(&owner)?.locals], id).copied()
     }
 }

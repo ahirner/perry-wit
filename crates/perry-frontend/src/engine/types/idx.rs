@@ -66,7 +66,7 @@ impl<I: Idx + sealed::MintIdx, T> IdxVec<I, T> {
     pub(crate) fn len(&self) -> usize {
         self.data.len()
     }
-    pub(crate) fn ids(&self) -> impl Iterator<Item = I> + use<I, T> {
+    pub(crate) fn ids(&self) -> impl DoubleEndedIterator<Item = I> + use<I, T> {
         (0..self.len()).map(I::from_usize)
     }
     pub(crate) fn filled<U: Clone>(&self, value: U) -> IdxVec<I, U> {
@@ -135,8 +135,6 @@ id_type!(
     InstanceId,
     ClassId,
     ClassInstId,
-    EnvId,
-    EmittedId,
     MemberId,
     LocId,
     LocalIdx,
@@ -233,16 +231,15 @@ macro_rules! span_type {
 span_type!(
     TySpan,
     PropSpan,
-    ParamLocSpan,
     FieldLocSpan,
     DispatchArmSpan,
-    SiteSpan,
     BindingSpan,
     PlanSpan,
     LocalPlanSpan,
     EnvFieldSpan,
+    CaptureConversionSpan,
     CaptureSpan,
-    CapturedLocalSpan,
+    ActivationSpan,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -402,6 +399,7 @@ pub(crate) enum LocalStorage {
     None,
     Module(LocId),
     Frame(u32),
+    Activation(u32),
 }
 
 #[derive(Clone, Copy, Debug)]

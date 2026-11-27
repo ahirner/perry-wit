@@ -326,10 +326,8 @@ impl<'s> FunctionBuilder<'s, '_> {
             Kind::Array => Input::LiveArray(value),
             Kind::String => Input::String(value),
             Kind::Record
-                if crate::lower::collections::is_collection_or_view_record(
-                    ctx,
-                    value.get_type(ctx),
-                ) =>
+                if crate::lower::collections::Collection::of(ctx, value.get_type(ctx))
+                    .is_some() =>
             {
                 Input::Collection(value)
             }

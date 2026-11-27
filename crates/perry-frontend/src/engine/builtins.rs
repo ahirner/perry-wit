@@ -223,34 +223,7 @@ pub(crate) fn apply_method_result(
                 _ => Ty::OPEN,
             }
         }
-        MethodResult::Void => Ty::VOID,
-        MethodResult::String => Ty::STRING,
-        MethodResult::Strings => types.array(Ty::STRING),
-        MethodResult::NullableStrings => {
-            let opt = types.with_absences(Ty::STRING, Absence::Undefined);
-            let arr = types.array(opt);
-            types.with_absences(arr, Absence::Null)
-        }
-        MethodResult::Number => Ty::NUMBER,
-        MethodResult::Boolean => Ty::BOOLEAN,
-        MethodResult::Dynamic => Ty::DYNAMIC,
-        MethodResult::OptionalNumber => types.with_absences(Ty::NUMBER, Absence::Undefined),
-        MethodResult::NullableString => types.with_absences(Ty::STRING, Absence::Null),
-        MethodResult::Native(k) => native_ty(ctx, types, k),
-        MethodResult::Nullable(k) => {
-            let t = native_ty(ctx, types, k);
-            types.with_absences(t, Absence::Null)
-        }
-        MethodResult::Optional(k) => {
-            let t = native_ty(ctx, types, k);
-            types.with_absences(t, Absence::Undefined)
-        }
-        MethodResult::Promise(k) => {
-            let t = native_ty(ctx, types, k);
-            types.promise(t)
-        }
-        MethodResult::PromiseVoid => types.promise(Ty::VOID),
-        MethodResult::PromiseJson => types.promise(Ty::DYNAMIC),
+        MethodResult::Signature(kinds) => signature_result(ctx, types, kinds),
         MethodResult::StreamReader => {
             let byob = arg0_expr.is_some_and(|arg| match arg {
                 Expr::Object(p) => p
@@ -358,43 +331,110 @@ pub(crate) fn unary_result(op: UnaryOp, operand: Ty) -> Ty {
     }
 }
 
-pub(crate) enum NumericOperands<'h> {
-    Nullary,
-    Unary(&'h Expr),
-    Binary(&'h Expr, &'h Expr),
-    Coerce(&'h Expr),
+pub(crate) enum IntrinsicInput<'h> {
+    Number(&'h Expr),
+    CoerceNumber(&'h Expr),
+    Display(&'h Expr),
+    Required(&'h Expr, Kind, &'static str),
+    Literal(&'h str),
 }
 
-pub(crate) fn numeric_builtin(expr: &Expr) -> Option<(perry_mir::Intrinsic, NumericOperands<'_>)> {
-    use NumericOperands::*;
+pub(crate) fn hir_intrinsic(
+    expr: &Expr,
+) -> Option<(
+    perry_mir::Intrinsic,
+    impl Iterator<Item = IntrinsicInput<'_>>,
+)> {
+    use IntrinsicInput::*;
     use perry_mir::Intrinsic;
-    Some(match expr {
-        Expr::MathFloor(value) => (Intrinsic::MathFloor, Unary(value)),
-        Expr::MathCeil(value) => (Intrinsic::MathCeil, Unary(value)),
-        Expr::MathTrunc(value) => (Intrinsic::MathTrunc, Unary(value)),
-        Expr::MathAbs(value) => (Intrinsic::MathAbs, Unary(value)),
-        Expr::MathRound(value) => (Intrinsic::MathRound, Unary(value)),
-        Expr::MathSqrt(value) => (Intrinsic::MathSqrt, Unary(value)),
-        Expr::MathImul(a, b) => (Intrinsic::MathImul, Binary(a, b)),
-        Expr::IsNaN(value) => (Intrinsic::NumberIsNaN, Coerce(value)),
-        Expr::IsFinite(value) => (Intrinsic::NumberIsFinite, Coerce(value)),
-        Expr::NumberIsNaN(value) => (Intrinsic::NumberIsNaN, Unary(value)),
-        Expr::NumberIsFinite(value) => (Intrinsic::NumberIsFinite, Unary(value)),
-        Expr::NumberIsInteger(value) => (Intrinsic::NumberIsInteger, Unary(value)),
-        Expr::NumberIsSafeInteger(value) => (Intrinsic::NumberIsSafeInteger, Unary(value)),
-        Expr::MathRandom => (Intrinsic::MathRandom, Nullary),
-        Expr::DateNow => (Intrinsic::DateNow, Nullary),
+    let one = |a| [Some(a), None];
+    let two = |a, b| [Some(a), Some(b)];
+    let (op, inputs) = match expr {
+        Expr::MathFloor(value) => (Intrinsic::MathFloor, one(Number(value))),
+        Expr::MathCeil(value) => (Intrinsic::MathCeil, one(Number(value))),
+        Expr::MathTrunc(value) => (Intrinsic::MathTrunc, one(Number(value))),
+        Expr::MathAbs(value) => (Intrinsic::MathAbs, one(Number(value))),
+        Expr::MathRound(value) => (Intrinsic::MathRound, one(Number(value))),
+        Expr::MathSqrt(value) => (Intrinsic::MathSqrt, one(Number(value))),
+        Expr::MathImul(a, b) => (Intrinsic::MathImul, two(Number(a), Number(b))),
+        Expr::IsNaN(value) => (Intrinsic::NumberIsNaN, one(CoerceNumber(value))),
+        Expr::IsFinite(value) => (Intrinsic::NumberIsFinite, one(CoerceNumber(value))),
+        Expr::NumberIsNaN(value) => (Intrinsic::NumberIsNaN, one(Number(value))),
+        Expr::NumberIsFinite(value) => (Intrinsic::NumberIsFinite, one(Number(value))),
+        Expr::NumberIsInteger(value) => (Intrinsic::NumberIsInteger, one(Number(value))),
+        Expr::NumberIsSafeInteger(value) => (Intrinsic::NumberIsSafeInteger, one(Number(value))),
+        Expr::MathRandom => (Intrinsic::MathRandom, [None, None]),
+        Expr::DateNow => (Intrinsic::DateNow, [None, None]),
+        Expr::StringFromCodePoint(value) => (Intrinsic::StringFromCodePoint, one(Number(value))),
+        Expr::DateParse(value) => (
+            Intrinsic::DateParse,
+            one(Required(value, Kind::String, "a string")),
+        ),
+        Expr::ParseFloat(value) => (Intrinsic::ParseFloat, one(Display(value))),
+        Expr::EncodeURIComponent(value) => (
+            Intrinsic::EncodeUriComponent,
+            one(Required(value, Kind::String, "a string")),
+        ),
+        Expr::EnvGet(name) => (Intrinsic::EnvGet, one(Literal(name))),
+        Expr::UrlGetSearchParams(value) => (
+            Intrinsic::UrlSearchParams,
+            one(Required(value, Kind::Url, "a URL")),
+        ),
+        Expr::TextDecoderFatal(value) => (
+            Intrinsic::DecoderFatal,
+            one(Required(value, Kind::Decoder, "a TextDecoder")),
+        ),
+        Expr::TextDecoderIgnoreBom(value) => (
+            Intrinsic::DecoderIgnoreBom,
+            one(Required(value, Kind::Decoder, "a TextDecoder")),
+        ),
+        Expr::Uint8ArrayGet { array, index } => (
+            Intrinsic::BytesGet,
+            two(Required(array, Kind::Bytes, "a Uint8Array"), Number(index)),
+        ),
+        Expr::CryptoRandomUUID => (Intrinsic::RandomUuid, [None, None]),
+        Expr::TextEncoderNew => (Intrinsic::EncoderNew, [None, None]),
         _ => return None,
-    })
+    };
+    Some((op, inputs.into_iter().flatten()))
+}
+
+pub(super) fn signature_result(
+    ctx: &Context,
+    types: &mut TypeTable,
+    kinds: &[perry_mir::SignatureType],
+) -> Ty {
+    use perry_mir::SignatureType;
+    match kinds {
+        [] => Ty::VOID,
+        [SignatureType::PromiseVoid] => types.promise(Ty::VOID),
+        [SignatureType::Incoming] => types.named(ctx, "__PerryIncoming"),
+        [kind] => signature_value(ctx, types, kind.canonical(ctx)),
+        _ => Ty::OPEN,
+    }
+}
+
+fn signature_value(ctx: &Context, types: &mut TypeTable, value: pliron::r#type::TypeHandle) -> Ty {
+    let present = perry_mir::present_type(ctx, value);
+    let ty = if let Some(array) = perry_mir::typed::<perry_mir::ArrayType>(ctx, present) {
+        let element = signature_value(ctx, types, array.deref(ctx).element());
+        types.array(element)
+    } else if let Some(promise) = perry_mir::typed::<perry_mir::PromiseType>(ctx, present) {
+        let settled = signature_value(ctx, types, promise.deref(ctx).value());
+        types.promise(settled)
+    } else {
+        match Kind::of(ctx, present) {
+            Some(Kind::Json) => Ty::DYNAMIC,
+            Some(kind) => native_ty(ctx, types, kind),
+            None => Ty::OPEN,
+        }
+    };
+    types.with_absences(ty, perry_mir::absence(ctx, value))
 }
 
 pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) -> Ty {
-    if let Some((intrinsic, _)) = numeric_builtin(expr) {
-        return if intrinsic.returns_bool() {
-            Ty::BOOLEAN
-        } else {
-            Ty::NUMBER
-        };
+    if let Some((op, _)) = hir_intrinsic(expr) {
+        return signature_result(ctx, types, op.result_kinds());
     }
     match expr {
         Expr::Undefined | Expr::Void(_) => Ty::VOID,
@@ -405,7 +445,6 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         Expr::Integer(_) | Expr::Number(_) | Expr::Update { .. } => Ty::NUMBER,
         Expr::BigInt(_) => Ty::BIGINT,
         Expr::String(_) | Expr::WtfString(_) | Expr::TypeOf(_) => Ty::STRING,
-        Expr::Uint8ArrayGet { .. } => types.with_absences(Ty::NUMBER, Absence::Undefined),
         Expr::JsonParse(_) | Expr::JsonParseWithReviver(..) => Ty::DYNAMIC,
         Expr::JsonParseTyped { ty, .. } => {
             let p = types.intern_hir(ctx, ty, true);
@@ -417,36 +456,26 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         | Expr::MathMaxSpread(_)
         | Expr::NumberCoerce(_)
         | Expr::ParseInt { .. }
-        | Expr::ParseFloat(_)
-        | Expr::DateParse(_)
         | Expr::DateUtc(_)
         | Expr::MapSize(_)
         | Expr::SetSize(_)
         | Expr::Uint8ArraySet { .. }
         | Expr::PropertyUpdate { .. } => Ty::NUMBER,
-        Expr::ArrayIsArray(_)
-        | Expr::ObjectIs(..)
-        | Expr::TextDecoderFatal(_)
-        | Expr::TextDecoderIgnoreBom(_) => Ty::BOOLEAN,
+        Expr::ArrayIsArray(_) | Expr::ObjectIs(..) => Ty::BOOLEAN,
         Expr::BigIntCoerce(_) => Ty::BIGINT,
         Expr::StringCoerce(_)
         | Expr::TemplateStringCoerce(_)
         | Expr::StringFromCharCode(_)
         | Expr::StringFromCharCodeSpread(_)
-        | Expr::StringFromCodePoint(_)
         | Expr::PathJoin(..)
         | Expr::PathResolve(_)
         | Expr::TextDecoderEncoding(_)
         | Expr::TextDecoderDecode { .. }
-        | Expr::CryptoRandomUUID
-        | Expr::EncodeURIComponent(_)
         | Expr::UrlSetPathname { .. }
         | Expr::JsonStringify(_)
         | Expr::JsonStringifyFull(..) => Ty::STRING,
-        Expr::EnvGet(_) => types.with_absences(Ty::STRING, Absence::Undefined),
         Expr::ForInKeys(_) | Expr::ObjectKeys(_) => types.array(Ty::STRING),
         Expr::ProcessExit(_) => Ty::NEVER,
-        Expr::TextEncoderNew => types.named(ctx, "TextEncoder"),
         Expr::TextDecoderNew { .. } => types.named(ctx, "TextDecoder"),
         Expr::ErrorNew(_) | Expr::ErrorNewWithCause { .. } | Expr::ErrorNewWithOptions { .. } => {
             types.named(ctx, "Error")
@@ -459,9 +488,7 @@ pub(crate) fn leaf_expr_type(ctx: &Context, types: &mut TypeTable, expr: &Expr) 
         Expr::DateNew(_) => types.named(ctx, "Date"),
         Expr::RegExp { .. } | Expr::RegExpDynamic { .. } => types.named(ctx, "RegExp"),
         Expr::UrlNew { .. } => types.named(ctx, "URL"),
-        Expr::UrlGetSearchParams(_) | Expr::UrlSearchParamsNew(_) => {
-            types.named(ctx, "URLSearchParams")
-        }
+        Expr::UrlSearchParamsNew(_) => types.named(ctx, "URLSearchParams"),
         _ => Ty::OPEN,
     }
 }
@@ -621,17 +648,10 @@ pub(crate) fn index_type(
         TyKind::Dynamic => Some(Ty::DYNAMIC),
         TyKind::Array(elem) => Some(elem),
         TyKind::String => Some(Ty::STRING),
-        TyKind::Tuple(span) => {
-            let pos = match index {
-                Expr::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
-                Expr::Integer(n) => usize::try_from(*n).ok(),
-                _ => None,
-            };
-            match pos {
-                Some(i) => Some(types.ty_slice(span).get(i).copied().unwrap_or(Ty::VOID)),
-                None => Some(types.union_span(span)),
-            }
-        }
+        TyKind::Tuple(span) => match crate::hir_compat::tuple_position(index) {
+            Some(i) => Some(types.ty_slice(span).get(i).copied().unwrap_or(Ty::VOID)),
+            None => Some(types.union_span(span)),
+        },
         TyKind::Named(id) if id.get(ctx) == "Uint8Array" => {
             Some(types.with_absences(Ty::NUMBER, Absence::Undefined))
         }

@@ -76,6 +76,8 @@ export function run() {
  if(select()(...argumentsTuple())!=="1:b,c" || captured(...pair,surplus())!==13 || order!=="CAS")return 13;
  const a:number[]=[1,2];
  const alias=a;
+ const gaps:(number|undefined)[]=[, ...a, , 4, ,];
+ if(gaps.length!==6 || 0 in gaps || 3 in gaps || 5 in gaps || gaps[4]!==4 || a.length!==2)return 15;
  const spread=[...a,...mutateNumbers(a),10];
  if(spread[0]!==1 || spread[2]!==3 || alias[0]!==9)return 9;
  const combined=a.concat(mutateNumbers(a),4,...[5,6]);

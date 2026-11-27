@@ -175,7 +175,10 @@ op_schema! {
     name = "perry.field_get";
     format = "$0 `.` attr($perry_get_field, $StringAttr) ` : ` type($0)";
     attributes = (perry_get_field: StringAttr);
-    constructors { pub new(reference: Value, field: String) => infer(reference, field.as_str()); }
+    constructors {
+        pub new(reference: Value, field: String) => infer(reference, field.as_str());
+        pub with_type(reference: Value, field: String, ty: TypeHandle) => explicit(ty);
+    }
     attribute(field: String, get_attr_perry_get_field, set_attr_perry_get_field) =
         StringAttr::new(field) => MissingProjectionField;
     prepare(_this) { let field = field.as_str(); }

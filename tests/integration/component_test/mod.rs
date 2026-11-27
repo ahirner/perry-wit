@@ -46,7 +46,7 @@ fn interface_object_witness_resolves_its_member_lexically() -> Result<()> {
 #[test]
 fn wit_rooted_class_calls_specialize_methods_and_accessors() -> Result<()> {
     let mut guest = Instance::compile(
-        "package test:members; world boundary { export run:func(n:u32)->u32; }",
+        "package test:members; world boundary { export run:func(n:u32)->u32; export update:func()->u32; }",
         "class Box {
             constructor(value) { this.stored = value; }
             get value() { return this.stored; }
@@ -60,10 +60,24 @@ fn wit_rooted_class_calls_specialize_methods_and_accessors() -> Result<()> {
             set value(v) { this.stored = 2 * v; }
             read() { return this.value; }
         }
+        let trace = 0;
+        class Counter {
+            count = 4;
+            get value() { trace = trace * 10 + 2; return this.count; }
+            set value(x) { trace = trace * 10 + 3; this.count = x; }
+        }
+        function receiver(c) { trace = trace * 10 + 1; return c; }
+        export function update() {
+            const c = new Counter();
+            const before = receiver(c).value++;
+            const after = ++receiver(c).count;
+            return trace * 100 + before * 10 + after;
+        }
         const text = Box.read(new Box(''), 'abcd');
         export function run(n) { return text.length + Box.read(new Box(0), n) + Box.read(new Double(), n); }",
     )?;
-    guest.check("run", (7u32,), &25u32)
+    guest.check("run", (7u32,), &25u32)?;
+    guest.check("update", (), &123146u32)
 }
 
 #[test]

@@ -49,8 +49,11 @@ impl<T> Shapes<'_, T> {
         &self,
         function: FuncIdentity,
     ) -> Option<TypeHandle> {
-        let layouts = &self.specialization.instances.environments;
-        layouts.id(function).map(|id| layouts.record(id).into())
+        self.specialization
+            .instances
+            .environments
+            .get(&function)
+            .map(|layout| layout.record.into())
     }
 }
 

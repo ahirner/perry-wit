@@ -1,9 +1,12 @@
 //! Canonical wasm32 layouts at the WIT binding boundary.
 use perry_codegen::boundary::{AbiKind, AbiType, Flat};
-use perry_contract::names::{canonical_type, to_camel_case};
+use perry_contract::{
+    names::canonical_type,
+    types::{Contract, project},
+};
 use perry_wit_diagnostics::{Diagnostic, Result, diag};
 use wit_parser::{
-    Function, Handle, Int, LiftLowerAbi, ManglingAndAbi, Resolve, SizeAlign, Type, TypeDefKind,
+    Function, Int, LiftLowerAbi, ManglingAndAbi, Resolve, SizeAlign, Type,
     abi::{FlatTypes, WasmSignature, WasmType},
 };
 
@@ -43,6 +46,14 @@ impl<'r> Layouts<'r> {
             .collect()
     }
 
+    fn payload_offset<'a>(
+        &self,
+        tag: Int,
+        types: impl IntoIterator<Item = Option<&'a Type>>,
+    ) -> u32 {
+        self.sizes.payload_offset(tag, types).size_wasm32() as u32
+    }
+
     pub(super) fn signature(&self, function: &Function, imported: bool) -> WasmSignature {
         let abi = ManglingAndAbi::Legacy(LiftLowerAbi::AsyncCallback).for_func(function);
         let variant = if imported {
@@ -70,75 +81,62 @@ impl<'r> Layouts<'r> {
     }
 
     fn value_at(&self, mut ty: Type, offset: u32) -> Result<AbiType> {
-        let resource = |id, owned| AbiKind::Resource {
-            key: canonical_type(self.resolve, id).index() as u32,
-            owned,
-        };
         let payload = |ty: Option<Type>, at| ty.map(|t| self.value_at(t, at)).transpose();
-        let kind = match ty {
-            Type::Char => return Err(unsupported("char")),
-            Type::ErrorContext => return Err(unsupported("error-context")),
-            Type::String => AbiKind::String,
-            Type::Id(id) => match &self.resolve.types[id].kind {
-                TypeDefKind::Type(inner) => return self.value_at(*inner, offset),
-                TypeDefKind::Resource => {
-                    ty = Type::U32;
-                    resource(id, true)
+        let kind = match project(self.resolve, ty, |ty| *ty) {
+            Contract::Alias(inner) => return self.value_at(inner, offset),
+            Contract::Scalar(Type::Char) => return Err(unsupported("char")),
+            Contract::Scalar(Type::ErrorContext) => return Err(unsupported("error-context")),
+            Contract::Scalar(Type::String) => AbiKind::String,
+            Contract::Scalar(scalar) => AbiKind::Scalar(scalar),
+            Contract::Resource { id, owned } => {
+                ty = Type::U32;
+                AbiKind::Resource {
+                    key: canonical_type(self.resolve, id).index() as u32,
+                    owned,
                 }
-                TypeDefKind::Handle(Handle::Own(id)) => resource(*id, true),
-                TypeDefKind::Handle(Handle::Borrow(id)) => resource(*id, false),
-                TypeDefKind::Stream(Some(Type::U8)) => AbiKind::ByteStream,
-                TypeDefKind::List(t) => AbiKind::List(Box::new(self.value(*t)?)),
-                TypeDefKind::Tuple(t) => AbiKind::Record(
-                    self.fields(t.types.iter())?
+            }
+            Contract::ByteStream => AbiKind::ByteStream,
+            Contract::Bytes => AbiKind::List(Box::new(self.value(Type::U8)?)),
+            Contract::List(item) => AbiKind::List(Box::new(self.value(item)?)),
+            Contract::Tuple(types) => {
+                let names = (0..types.len()).map(|i| format!("_{i}"));
+                AbiKind::Record(names.zip(self.fields(types.iter())?).collect())
+            }
+            Contract::Record(fields) => {
+                let layouts = self.fields(fields.iter().map(|(_, ty)| ty))?;
+                AbiKind::Record(
+                    fields
                         .into_iter()
-                        .enumerate()
-                        .map(|(i, t)| (format!("_{i}"), t))
+                        .map(|(name, _)| name)
+                        .zip(layouts)
                         .collect(),
-                ),
-                TypeDefKind::Record(r) => {
-                    let fields = self.fields(r.fields.iter().map(|f| &f.ty))?;
-                    AbiKind::Record(
-                        r.fields
-                            .iter()
-                            .map(|f| to_camel_case(&f.name))
-                            .zip(fields)
-                            .collect(),
-                    )
+                )
+            }
+            Contract::Option(item) => {
+                let at = self.payload_offset(Int::U8, [Some(&item)]);
+                AbiKind::Option(Box::new(self.value_at(item, at)?))
+            }
+            Contract::Result { ok, err } => {
+                let at = self.payload_offset(Int::U8, [ok.as_ref(), err.as_ref()]);
+                AbiKind::Result {
+                    ok: payload(ok, at)?.map(Box::new),
+                    err: payload(err, at)?.map(Box::new),
                 }
-                TypeDefKind::Option(t) => {
-                    let at = self.sizes.payload_offset(Int::U8, [Some(t)]).size_wasm32() as u32;
-                    AbiKind::Option(Box::new(self.value_at(*t, at)?))
-                }
-                TypeDefKind::Result(r) => {
-                    let at = self
-                        .sizes
-                        .payload_offset(Int::U8, [r.ok.as_ref(), r.err.as_ref()])
-                        .size_wasm32() as u32;
-                    AbiKind::Result {
-                        ok: payload(r.ok, at)?.map(Box::new),
-                        err: payload(r.err, at)?.map(Box::new),
-                    }
-                }
-                TypeDefKind::Enum(e) => {
-                    AbiKind::Enum(e.tag(), e.cases.iter().map(|c| c.name.clone()).collect())
-                }
-                TypeDefKind::Variant(v) => {
-                    let at = self
-                        .sizes
-                        .payload_offset(v.tag(), v.cases.iter().map(|c| c.ty.as_ref()))
-                        .size_wasm32() as u32;
-                    AbiKind::Variant(
-                        v.tag(),
-                        v.cases
-                            .iter()
-                            .map(|c| Ok((c.name.clone(), payload(c.ty, at)?)))
-                            .collect::<Result<_>>()?,
-                    )
-                }
-                other => return Err(unsupported(other.as_str())),
-            },
-            scalar => AbiKind::Scalar(scalar),
+            }
+            Contract::Enum(e) => {
+                AbiKind::Enum(e.tag(), e.cases.iter().map(|c| c.name.clone()).collect())
+            }
+            Contract::Variant(tag, cases) => {
+                let at = self.payload_offset(tag, cases.iter().map(|(_, ty)| ty.as_ref()));
+                AbiKind::Variant(
+                    tag,
+                    cases
+                        .into_iter()
+                        .map(|(name, ty)| Ok((name.to_owned(), payload(ty, at)?)))
+                        .collect::<Result<_>>()?,
+                )
+            }
+            Contract::Unsupported(name) => return Err(unsupported(name)),
         };
         let mut abi = self.layout(ty, kind);
         abi.offset = offset;

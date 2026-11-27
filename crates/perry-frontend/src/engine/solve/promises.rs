@@ -79,7 +79,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         for &a in arg_tys {
             self.invalidate_conservative_cell(a);
         }
-        let (arm, ret) = self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
+        let (arm, ret, _) = self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
         let pass_env = self.is_escaping_env(ident.template, s.inst);
         Ok(Some((
             CallTarget::Direct {
@@ -102,7 +102,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         let owner = CaptureOwner::Instance(s.inst);
         let site = self
             .index
-            .site_of(self.instances[s.inst].template, expr)
+            .expressions
+            .index(expr)
             .ok_or_else(|| Diagnostic::internal("missing promise constructor site"))?;
         let Some(SiteResolution::PromiseNew {
             value_loc,
@@ -110,7 +111,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             reject_tid,
             ..
         }) = self.inst_sites[s.inst]
-            .get(site)
+            .get(&site)
             .and_then(|entry| entry.resolution.as_ref())
         else {
             return Err(Diagnostic::internal(
@@ -170,7 +171,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 CallTarget::ThrowTypeError => (false, false),
             };
             let entry = self.inst_sites[s.inst]
-                .get_mut(site)
+                .get_mut(&site)
                 .ok_or_else(|| Diagnostic::internal("missing promise constructor site"))?;
             entry.resolution = Some(SiteResolution::PromiseNew {
                 value_loc,
@@ -329,14 +330,14 @@ impl<'h, 'a> Solver<'h, 'a> {
         let pass_fulfilled = on_fulfilled.is_some_and(|(cb, _)| cb.needs_value());
         let pass_rejected = on_rejected.is_some_and(|(cb, _)| cb.needs_value());
         let helper = self.intern_helper(
-            HelperSpec::PromiseReaction {
+            HelperSpec::PromiseReaction(PromiseReaction {
                 kind,
                 promise_ty,
                 inner_ty: inner_raw,
                 on_fulfilled,
                 on_rejected,
                 ret_ty: ret_settled,
-            },
+            }),
             byte_offset,
         );
         let (site, result, cell) = self.storage_site(s.inst, expr, CellKind::Promise)?;

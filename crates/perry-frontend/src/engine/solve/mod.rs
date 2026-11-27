@@ -17,9 +17,9 @@ use super::bitset::BitSet;
 use super::boundary::{GenericOwner, LocalFlags, ModuleIndex, TemplateKind};
 use super::builtins::{self, MethodResultArgs};
 use super::types::{
-    CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity,
-    HelperId, Idx, IdxVec, InstanceId, LocId, LocalIdx, ObjectProp, ParamLocSpan, Pool, TemplateId,
-    Ty, TyKind, TypeTable,
+    ActivationSpan, CaptureOwner, CellKind, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan,
+    FuncIdentity, HelperId, Idx, IdxVec, InstanceId, LocId, LocalIdx, LocalStorage, ObjectProp,
+    Pool, TemplateId, Ty, TyKind, TypeTable,
 };
 use crate::{
     Absence, hir_compat,
@@ -163,7 +163,7 @@ impl EvalState<'_> {
 }
 
 pub(super) struct CaptureLocations {
-    slots: IdxVec<InstanceId, Vec<InstanceLocalSlot>>,
+    pub(super) slots: Pool<ActivationSpan, LocId>,
     collapsed: IdxVec<LocalIdx, Option<LocId>>,
 }
 
@@ -175,14 +175,19 @@ impl CaptureLocations {
         mut owner: CaptureOwner,
         local: LocalIdx,
     ) -> Option<LocId> {
-        if let Some(loc) = index.locals[local].module_loc() {
+        let info = index.locals[local];
+        if let Some(loc) = info.module_loc() {
             return Some(loc);
         }
         loop {
             match owner {
                 CaptureOwner::Instance(id) => {
-                    if let Some(slot) = self.slots[id].iter().find(|s| s.local == local) {
-                        return Some(slot.loc);
+                    if instances[id].template == info.owner
+                        && let LocalStorage::Activation(slot) = info.storage
+                    {
+                        return self.slots[instances[id].activation]
+                            .get(slot as usize)
+                            .copied();
                     }
                     owner = instances[id].capture_owner;
                 }
@@ -191,11 +196,6 @@ impl CaptureLocations {
             }
         }
     }
-}
-
-struct InstanceLocalSlot {
-    local: LocalIdx,
-    loc: LocId,
 }
 
 pub(crate) fn solve<'h>(
@@ -208,12 +208,12 @@ pub(crate) fn solve<'h>(
     let mut solver = Solver::new(ctx, hir, index, decls, types);
     let init_inst = solver.seed_roots()?;
     solver.run_worklist()?;
-    let live = solver.compute_live_instances();
+    let live = solver.live_instances(|_| {});
     if !solver.instances.iter_enumerated().any(|(id, inst)| {
         live.contains(id.index())
             && matches!(
                 index.view(inst.template).kind,
-                TemplateKind::Function | TemplateKind::Closure
+                TemplateKind::Function | TemplateKind::Closure(_)
             )
     }) {
         for (tid, view) in index.views.iter_enumerated() {
@@ -251,7 +251,6 @@ struct Solver<'h, 'a> {
     witness_instances: Vec<Option<ExportRoot>>,
     instance_index: HashMap<InstanceKey, InstanceId>,
     template_counts: IdxVec<TemplateId, u16>,
-    param_locs: Pool<ParamLocSpan, LocId>,
     field_locs: Pool<FieldLocSpan, LocId>,
     dispatch_arms: Pool<DispatchArmSpan, DispatchArm>,
     dispatch_arm_spans: Vec<DispatchArmSpan>,
@@ -260,7 +259,7 @@ struct Solver<'h, 'a> {
     capture_locs: CaptureLocations,
     inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
     inst_written: IdxVec<InstanceId, BitSet>,
-    inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
+    inst_sites: IdxVec<InstanceId, InstanceSites>,
     inst_superseded: BitSet,
     collapsed_closures: BitSet,
 
@@ -339,14 +338,13 @@ impl<'h, 'a> Solver<'h, 'a> {
             witness_instances: Vec::with_capacity(hir.exports.functions.len()),
             instance_index: HashMap::with_capacity(64),
             template_counts: index.views.filled(0),
-            param_locs: Pool::default(),
             field_locs: Pool::default(),
             dispatch_arms: Pool::default(),
             dispatch_arm_spans: Vec::new(),
             helpers: IdxVec::default(),
             helper_index: HashMap::with_capacity(16),
             capture_locs: CaptureLocations {
-                slots: IdxVec::default(),
+                slots: Pool::default(),
                 collapsed: index.locals.filled(None),
             },
             inst_frame_locals: IdxVec::default(),
@@ -373,11 +371,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         expr: &Expr,
         kind: CellKind,
     ) -> Result<(&mut SiteEntry, LocId, Ty)> {
-        let entry = self
+        let index = self
             .index
-            .site_of(self.instances[inst].template, expr)
-            .and_then(|site| self.inst_sites[inst].get_mut(site))
+            .expressions
+            .index(expr)
             .ok_or_else(|| Diagnostic::internal("missing storage site for expression"))?;
+        let entry = self.inst_sites[inst].entry(index).or_default();
         let loc = match entry.resolution {
             Some(
                 SiteResolution::Cell(loc) | SiteResolution::PromiseReaction { result: loc, .. },
@@ -417,72 +416,71 @@ impl<'h, 'a> Solver<'h, 'a> {
             )
     }
 
-    fn for_each_callback_target(&self, cb: CallTarget, mut f: impl FnMut(InstanceId)) {
-        match cb {
-            CallTarget::Direct { target, .. } => f(target),
-            CallTarget::Dispatch { helper, .. } => {
-                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[helper].spec {
+    fn for_each_site_target(
+        &self,
+        entry: &SiteEntry,
+        mut instance: impl FnMut(InstanceId),
+        mut helper: impl FnMut(HelperId),
+    ) {
+        let mut callback = |target| match target {
+            CallTarget::Direct { target, .. } => instance(target),
+            CallTarget::Dispatch { helper: id, .. } => {
+                helper(id);
+                if let HelperSpec::Dispatcher { arms, .. } = self.helpers[id].spec {
                     for arm in &self.dispatch_arms[arms] {
-                        f(arm.target);
+                        instance(arm.target);
                     }
                 }
             }
             CallTarget::ThrowTypeError => {}
-        }
-    }
-
-    fn for_each_site_target(&self, entry: &SiteEntry, mut f: impl FnMut(InstanceId)) {
+        };
         if let Some(FuncCoercion::Callback { target, .. }) = entry.coercion {
-            self.for_each_callback_target(target, &mut f);
+            callback(target);
         }
         let Some(resolution) = entry.resolution else {
             return;
         };
         match resolution {
-            SiteResolution::Call { target, .. } => self.for_each_callback_target(target, f),
+            SiteResolution::Call { target, .. } => callback(target),
             SiteResolution::ReadMember(target)
             | SiteResolution::WriteMember(target)
-            | SiteResolution::Callback { target } => f(target),
+            | SiteResolution::Callback { target } => instance(target),
             SiteResolution::UpdateMember { get, set } => {
-                get.into_iter().chain(set).for_each(f);
+                get.into_iter().chain(set).for_each(instance);
             }
             SiteResolution::ClassNew(class_inst, _) => {
-                let instance = &self.class_insts[class_inst];
-                for target in instance.field_init.into_iter().chain(instance.ctor_inst) {
-                    f(target);
-                }
+                let class = &self.class_insts[class_inst];
+                class
+                    .field_init
+                    .into_iter()
+                    .chain(class.ctor_inst)
+                    .for_each(instance);
             }
             SiteResolution::PromiseNew {
                 executor: Some(executor),
                 ..
             } => {
-                self.for_each_callback_target(executor.call, f);
+                callback(executor.call);
             }
-            SiteResolution::PromiseReaction { helper, .. } => {
-                if let HelperSpec::PromiseReaction {
-                    on_fulfilled,
-                    on_rejected,
-                    ..
-                } = self.helpers[helper].spec
-                {
-                    if let Some((cb, _)) = on_fulfilled {
-                        self.for_each_callback_target(cb, &mut f);
-                    }
-                    if let Some((cb, _)) = on_rejected {
-                        self.for_each_callback_target(cb, &mut f);
+            SiteResolution::PromiseReaction { helper: id, .. } => {
+                if let HelperSpec::PromiseReaction(reaction) = self.helpers[id].spec {
+                    for (call, _) in reaction.callbacks() {
+                        callback(call);
                     }
                 }
+                helper(id);
             }
-            SiteResolution::TimerStart { helper, .. } => {
-                if let HelperSpec::TimerRunner { cb_call, .. } = self.helpers[helper].spec {
-                    self.for_each_callback_target(cb_call, f);
+            SiteResolution::TimerStart { helper: id } => {
+                if let HelperSpec::TimerRunner { cb_call, .. } = self.helpers[id].spec {
+                    callback(cb_call);
                 }
+                helper(id);
             }
             _ => {}
         }
     }
 
-    fn compute_live_instances(&self) -> BitSet {
+    fn live_instances(&self, mut helper: impl FnMut(HelperId)) -> BitSet {
         let mut live = BitSet::default();
         let mut queue = Vec::new();
         let roots = self
@@ -499,26 +497,30 @@ impl<'h, 'a> Solver<'h, 'a> {
         let mut head = 0usize;
         while let Some(&caller) = queue.get(head) {
             head += 1;
-            for entry in &self.inst_sites[caller] {
-                self.for_each_site_target(entry, |target| {
-                    if live.insert(target.index()) {
-                        queue.push(target);
-                    }
-                });
+            for entry in self.inst_sites[caller].values() {
+                self.for_each_site_target(
+                    entry,
+                    |target| {
+                        if live.insert(target.index()) {
+                            queue.push(target);
+                        }
+                    },
+                    &mut helper,
+                );
             }
         }
         live
     }
 
     fn prune_unreachable(&mut self) {
-        let live = self.compute_live_instances();
+        let live = self.live_instances(|_| {});
         self.template_counts.as_mut_slice().fill(0);
         for (id, inst) in self.instances.iter_enumerated() {
             let idx = id.index();
             if live.contains(idx) {
                 bump_count(&mut self.template_counts, inst.template);
             } else if self.inst_superseded.insert(idx) {
-                self.inst_sites[id].fill(SiteEntry::default());
+                self.inst_sites[id].clear();
                 self.subscriptions.forget(id);
             }
         }
@@ -566,7 +568,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if !cfg!(any(test, debug_assertions)) {
             return Ok(());
         }
-        let live = self.compute_live_instances();
+        let live = self.live_instances(|_| {});
         let live_ids: Vec<InstanceId> = self
             .instances
             .iter_enumerated()

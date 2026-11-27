@@ -38,14 +38,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         expr: &'s Expr,
     ) -> Result<Option<Value>> {
         match expr {
-            Expr::UrlGetSearchParams(url) => {
-                let url = self.typed_operand(ctx, url, Kind::Url, "a URL")?;
-                Ok(Some(self.intrinsic(
-                    ctx,
-                    Intrinsic::UrlSearchParams,
-                    vec![url],
-                )))
-            }
             Expr::UrlNew { url, base } => {
                 let input = self.url_string(ctx, url)?;
                 let base = match base {
@@ -65,10 +57,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let value = self.string_operand(ctx, value)?;
                 self.intrinsic_void(ctx, Intrinsic::UrlSetPathname, vec![url, value]);
                 Ok(Some(value))
-            }
-            Expr::EncodeURIComponent(value) => {
-                let value = self.string_operand(ctx, value)?;
-                Ok(self.call_intrinsic(ctx, Intrinsic::EncodeUriComponent, vec![value]))
             }
             _ => Ok(None),
         }

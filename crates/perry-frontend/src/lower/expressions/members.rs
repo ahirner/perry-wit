@@ -1,8 +1,97 @@
 //! Member access: `object.property`, `object[index]` and `++object.field`.
 use super::*;
-use crate::lower::collections::{
-    dict_entry_types, is_collection_or_view_record, map_box_record, set_box_record,
-};
+use crate::lower::collections::{Collection, dict_entry_types};
+
+#[derive(Clone, Copy)]
+pub(in crate::lower) enum Member<'p> {
+    Field(Value, &'p str, TypeHandle),
+    Accessor(Value, FuncId),
+}
+
+pub(in crate::lower) enum Assigned<'s> {
+    Expression(&'s Expr),
+    Value(Value),
+}
+
+impl<'s> Assigned<'s> {
+    fn lower(
+        self,
+        b: &mut FunctionBuilder<'s, '_>,
+        ctx: &mut Context,
+        ty: TypeHandle,
+    ) -> Result<Value> {
+        match self {
+            Self::Expression(expr) => b.expression_with(ctx, expr, Some(ty)),
+            Self::Value(value) => Ok(value),
+        }
+    }
+}
+
+impl<'p> Member<'p> {
+    pub(in crate::lower) fn field(
+        ctx: &Context,
+        object: Value,
+        name: &'p str,
+        kind: Option<RecordKind>,
+    ) -> Result<Self> {
+        let record = perry_mir::typed::<RecordType>(ctx, object.get_type(ctx))
+            .filter(|record| kind.is_none_or(|kind| record.deref(ctx).kind() == kind))
+            .ok_or_else(|| unsupported!("property access requires a record"))?;
+        let (_, ty) = record.deref(ctx).field(name).ok_or_else(|| {
+            diag!(
+                codes::TYPE_MISMATCH,
+                "property {name} does not exist on this shape (subset rule R1)"
+            )
+        })?;
+        Ok(Self::Field(object, name, ty))
+    }
+
+    pub(in crate::lower) fn read(
+        self,
+        b: &mut FunctionBuilder,
+        ctx: &mut Context,
+    ) -> Result<Value> {
+        match self {
+            Self::Field(object, name, ty) => {
+                let get = FieldGetOp::with_type(ctx, object, name.to_owned(), ty).to_diag(ctx)?;
+                b.field_read(ctx, &get)
+            }
+            Self::Accessor(object, get) => b
+                .call_values(ctx, get, std::iter::once(object))?
+                .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "class member produced no value")),
+        }
+    }
+
+    pub(in crate::lower) fn write<'s>(
+        self,
+        b: &mut FunctionBuilder<'s, '_>,
+        ctx: &mut Context,
+        rhs: Assigned<'s>,
+    ) -> Result<Option<Value>> {
+        match self {
+            Self::Accessor(object, set) => {
+                let value = if let Some(param) = b.signature(set)?.params.get(1) {
+                    Some(rhs.lower(b, ctx, param.base.carrier)?)
+                } else {
+                    if let Assigned::Expression(expr) = rhs {
+                        b.discard_function_operand(ctx, expr)?;
+                    }
+                    None
+                };
+                b.call_values(ctx, set, std::iter::once(object).chain(value))?;
+                Ok(value)
+            }
+            Self::Field(object, name, ty) => {
+                let value = rhs.lower(b, ctx, ty)?;
+                let value = b.fit(ctx, value, ty)?;
+                b.emit(ctx, |ctx| {
+                    FieldSetOp::new(ctx, object, name.to_owned(), value)
+                });
+                Ok(Some(b.bigint_view(ctx, value)))
+            }
+        }
+    }
+}
 
 impl<'s> FunctionBuilder<'s, '_> {
     /// `++object.field` and its relatives, on a numeric record field.
@@ -17,48 +106,26 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
             let id = self.shapes.static_field(class_name, property)?;
-            let update_op = match op {
-                BinaryOp::Add => UpdateOp::Increment,
-                BinaryOp::Sub => UpdateOp::Decrement,
-                _ => bail_internal!("invalid property update"),
-            };
-            return self.update(ctx, id, &update_op, prefix);
+            return self.update(ctx, id, op, prefix);
         }
         let object = self.expression(ctx, object)?;
         let object = self.defined(ctx, object)?;
-        let previous = if let Some(get) = get {
-            self.read_member(ctx, get, object)?
-        } else {
-            let get = FieldGetOp::new(ctx, object, property.to_string()).map_err(|_| {
-                Diagnostic::new(
-                    codes::TYPE_MISMATCH,
-                    "property update needs a declared numeric field",
-                )
-            })?;
-            self.append_value(ctx, &get)
+        let (read, write) = match (get, set) {
+            (None, None) => {
+                let field = Member::field(ctx, object, property, None)?;
+                (field, field)
+            }
+            (Some(get), Some(set)) => {
+                (Member::Accessor(object, get), Member::Accessor(object, set))
+            }
+            _ => bail_diag!(
+                codes::TYPE_MISMATCH,
+                "updating {property} requires both a getter and a setter"
+            ),
         };
-        let field_type = previous.get_type(ctx);
-        let old = self.arithmetic(ctx, previous);
-        ensure_diag!(
-            kind(ctx, old)? == Kind::Number,
-            codes::TYPE_MISMATCH,
-            "property update needs a numeric field"
-        );
-        let one = self.number(ctx, 1.0);
-        let kind = match op {
-            BinaryOp::Add => BinaryKind::Add,
-            BinaryOp::Sub => BinaryKind::Sub,
-            _ => bail_internal!("invalid property update"),
-        };
-        let next = self.binary(ctx, kind, old, one);
-        let stored = self.fit(ctx, next, field_type)?;
-        if let Some(set) = set {
-            self.call_values(ctx, set, [object, stored].into_iter())?;
-        } else {
-            self.emit(ctx, |ctx| {
-                FieldSetOp::new(ctx, object, property.to_string(), stored)
-            });
-        }
+        let previous = read.read(self, ctx)?;
+        let (old, next) = self.numeric_update(ctx, previous, op)?;
+        write.write(self, ctx, Assigned::Value(next))?;
         Ok(if prefix { next } else { old })
     }
 
@@ -76,11 +143,15 @@ impl<'s> FunctionBuilder<'s, '_> {
         object: &'s Expr,
         property: &str,
         byte_offset: u32,
+        get: Option<FuncId>,
     ) -> Result<Value> {
         if let Expr::ClassRef(class_name) = object {
             return self.load_local(ctx, self.shapes.static_field(class_name, property)?);
         }
         let value = self.expression(ctx, object)?;
+        if let Some(id) = get {
+            return Member::Accessor(self.defined(ctx, value)?, id).read(self, ctx);
+        }
         self.property_of_value(ctx, object, value, property, byte_offset)
     }
 
@@ -139,25 +210,26 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             (Kind::Variant, field) => self.variant_member(ctx, object, value, field)?,
             (Kind::Record, "size")
-                if map_box_record(ctx, ty).is_some() || set_box_record(ctx, ty).is_some() =>
+                if matches!(Collection::of(ctx, ty), Some(Collection::Box(_))) =>
             {
                 self.collection_size(ctx, value)?
             }
-            (Kind::Record, "length") if is_collection_or_view_record(ctx, ty) => {
+            (Kind::Record, "length") if Collection::of(ctx, ty).is_some() => {
                 self.collection_backing_length(ctx, value)?
             }
-            (Kind::Record, "length") if let Some(len) = tuple_length(ctx, ty)? => {
+            (Kind::Record, "length")
+                if let Some(record) = perry_mir::typed::<RecordType>(ctx, ty)
+                    && record.deref(ctx).kind() == RecordKind::Tuple =>
+            {
+                let len = record.deref(ctx).fields().to_diag(ctx)?.len();
                 self.number(ctx, len as f64)
             }
-            (Kind::Record, field) => match FieldGetOp::new(ctx, value, field.to_string()) {
-                Ok(op) => self.field_read(ctx, &op)?,
+            (Kind::Record, field) => match Member::field(ctx, value, field, None) {
+                Ok(member) => member.read(self, ctx)?,
                 Err(_) if self.frame.rest_excluded_keys.iter().any(|k| k == field) => {
                     self.absent_literal(ctx, false, None)?
                 }
-                Err(_) => bail_diag!(
-                    codes::TYPE_MISMATCH,
-                    "property {field} does not exist on this shape (subset rule R1)"
-                ),
+                Err(error) => return Err(error),
             },
             (receiver_kind, property) => {
                 if let Some(call) = crate::lower::methods::Call::member(
@@ -217,17 +289,16 @@ impl<'s> FunctionBuilder<'s, '_> {
                 };
                 Ok(self.intrinsic(ctx, intrinsic, vec![array, index]))
             }
-            Kind::Record if is_collection_or_view_record(ctx, ty) => {
+            Kind::Record if Collection::of(ctx, ty).is_some() => {
                 let idx = self.number_operand(ctx, index)?;
                 self.collection_view_element_at(ctx, array, idx)
             }
             Kind::Record => {
-                let field = match (index, self.frame.cursors.index(index)) {
+                let field = match (
+                    index,
+                    hir_compat::tuple_position(index).or_else(|| self.frame.cursors.index(index)),
+                ) {
                     (Expr::String(name), _) => name.clone(),
-                    (Expr::Number(n), _) if n.fract() == 0.0 && *n >= 0.0 => {
-                        format!("_{}", *n as u64)
-                    }
-                    (Expr::Integer(n), _) if *n >= 0 => format!("_{n}"),
                     (_, Some(position)) => format!("_{position}"),
                     _ => {
                         let Some(rec) = perry_mir::typed::<RecordType>(ctx, ty) else {
@@ -253,19 +324,5 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             _ => bail_unsupported!("indexing is only supported on arrays so far"),
         }
-    }
-}
-
-/// Return the arity of a tuple record type, or `None` for other types.
-fn tuple_length(ctx: &Context, ty: TypeHandle) -> Result<Option<usize>> {
-    match perry_mir::typed::<RecordType>(ctx, ty) {
-        Some(record) if record.deref(ctx).kind() == RecordKind::Tuple => Ok(Some(
-            record
-                .deref(ctx)
-                .fields()
-                .map_err(|_| Diagnostic::internal("tuple without fields"))?
-                .len(),
-        )),
-        _ => Ok(None),
     }
 }

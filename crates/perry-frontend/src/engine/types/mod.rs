@@ -527,6 +527,48 @@ impl TypeTable {
         })
     }
 
+    pub(crate) fn is_json_encodable_union(
+        &self,
+        ty: Ty,
+        locations: &IdxVec<LocId, Ty>,
+        dict_reads: &BitSet,
+    ) -> bool {
+        let TyKind::Union(span) = self.kind(ty) else {
+            return false;
+        };
+        self.ty_slice(span)
+            .iter()
+            .filter(|&&m| !matches!(m, Ty::NULL | Ty::VOID))
+            .nth(1)
+            .is_some()
+            && !self.any_with_cells(
+                ty,
+                &mut |loc| (loc, locations[loc]),
+                &mut Vec::new(),
+                &mut BitSet::default(),
+                &|loc, kind, elem| match kind {
+                    CellKind::Promise => Some(true),
+                    CellKind::Dict => (!self
+                        .is_valid_dict_value(elem, dict_reads.contains(loc.index())))
+                    .then_some(true),
+                    _ => None,
+                },
+                &|kind| {
+                    use TyKind::*;
+                    match kind {
+                        Object { props, index } => {
+                            self.object_slice(props).is_empty() && index.is_none()
+                        }
+                        Null | Void | Boolean | Number | Int32 | String | Dynamic | Literal(_) => {
+                            false
+                        }
+                        Array(_) | Cell { .. } | Tuple(_) | Union(_) => false,
+                        _ => true,
+                    }
+                },
+            )
+    }
+
     pub(crate) fn is_open_with(
         &self,
         ty: Ty,
@@ -698,6 +740,18 @@ impl TypeTable {
             self.kind(ty),
             TyKind::Func(id) if id.capture_owner.is_none() && capture_free.contains(id.template.index())
         )
+    }
+
+    pub(crate) fn runtime_arguments<'a>(
+        &'a self,
+        tuple: Ty,
+        escaping: &'a BitSet,
+    ) -> impl Iterator<Item = (usize, Ty)> + Clone + 'a {
+        self.tuple_slice(tuple)
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|&(_, ty)| self.erased_function(ty, escaping).is_none())
     }
 
     pub(super) fn erased_function(&self, ty: Ty, escaping_env: &BitSet) -> Option<FuncIdentity> {

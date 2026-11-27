@@ -1,16 +1,20 @@
 //! Lower a solved operation at its lexical expression.
 use super::*;
-use crate::engine::solve::SiteResolution;
+use crate::engine::solve::{OperandUse, SiteEntry, SiteResolution};
 use crate::engine::types::Ty;
 
 impl<'s> FunctionBuilder<'s, '_> {
-    pub(in crate::lower) fn erased_operand(&self, expr: &Expr) -> bool {
+    pub(in crate::lower) fn site(&self, expr: &Expr) -> SiteEntry {
         self.shapes
             .specialization
             .instances
             .site(self.frame.owner, expr)
-            .erased
     }
+
+    pub(in crate::lower) fn erased_operand(&self, expr: &Expr) -> bool {
+        self.site(expr).operand == OperandUse::Erased
+    }
+
     pub(in crate::lower) fn instance_operand(
         &mut self,
         ctx: &mut Context,
@@ -18,8 +22,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         expected: Option<TypeHandle>,
         required: bool,
     ) -> Result<Option<Value>> {
-        let plans = &self.shapes.specialization.instances;
-        let site = plans.site(self.frame.owner, expr);
+        let site = self.site(expr);
         let Some(conversion) = site.conversion() else {
             return self.instance_value(ctx, expr, expected, site.resolution, required);
         };
@@ -42,34 +45,85 @@ impl<'s> FunctionBuilder<'s, '_> {
         required: bool,
     ) -> Result<Option<Value>> {
         let plans = &self.shapes.specialization.instances;
-        let reference = match site {
-            Some(SiteResolution::Callback { target }) => Some(plans.function(target)),
-            _ => match expr {
-                Expr::LocalGet(id) => plans.erased_parameter_declaration(self.frame.owner, *id),
-                _ => None,
-            },
-        };
-        if let Some(id) = reference {
-            let plan = plans
-                .closure_values
-                .get(&(self.frame.owner, id))
+        if let Some(id) = plans.reference_at(self.frame.owner, expr, site) {
+            let value = self
+                .shapes
+                .specialization
+                .closure_value(self.frame.owner, id)
                 .ok_or_else(|| unsupported!("this expression form is not supported yet"))?;
-            return self.closure_value(ctx, plan, expected).map(Some);
+            return self.closure_value(ctx, value, expected).map(Some);
         }
         use SiteResolution::*;
-        let value = match site {
-            None | Some(Cell(_)) => None,
-            Some(TypedArray(_)) if expected.is_some() => None,
-            other => other,
+        let (get, set) = match site {
+            Some(ReadMember(id)) => (Some(plans.function(id)), None),
+            Some(WriteMember(id)) => (None, Some(plans.function(id))),
+            Some(UpdateMember { get, set }) => (
+                get.map(|id| plans.function(id)),
+                set.map(|id| plans.function(id)),
+            ),
+            None | Some(Cell(_)) => (None, None),
+            Some(TypedArray(_)) if expected.is_some() => (None, None),
+            Some(site) => return self.solved_value(ctx, expr, expected, site, required),
         };
-        let Some(site) = value else {
-            return if required {
-                self.source_expression(ctx, expr, expected).map(Some)
-            } else {
-                self.source_operand(ctx, expr, expected)
-            };
+        let value = match expr {
+            Expr::PropertyUpdate {
+                object,
+                property,
+                op,
+                prefix,
+                ..
+            } => self.property_update(ctx, object, property, op, *prefix, (get, set))?,
+            Expr::PropertyGet {
+                object,
+                property,
+                byte_offset,
+                ..
+            } => self
+                .property_get(ctx, object, property, *byte_offset, get)
+                .map_err(|error| self.shapes.annotate_member(error, *byte_offset))?,
+            Expr::PropertySet {
+                object,
+                property,
+                value,
+                ..
+            } => return self.set_field(ctx, object, property, value, set),
+            Expr::PutValueSet {
+                target,
+                key,
+                value,
+                element_offset,
+                ..
+            } => {
+                return match key.as_ref() {
+                    Expr::String(field) => self.set_field(ctx, target, field, value, set),
+                    index => self.set_index(ctx, target, index, value).map(Some),
+                }
+                .map_err(|error| self.shapes.annotate_member(error, *element_offset));
+            }
+            Expr::StringCoerce(object) | Expr::TemplateStringCoerce(object)
+                if let Some(id) = get =>
+            {
+                let object = self.expression(ctx, object)?;
+                Member::Accessor(self.defined(ctx, object)?, id).read(self, ctx)?
+            }
+            _ if required => self.source_expression(ctx, expr, expected)?,
+            _ => return self.source_operand(ctx, expr, expected),
         };
+        Ok(Some(value))
+    }
+
+    fn solved_value(
+        &mut self,
+        ctx: &mut Context,
+        expr: &'s Expr,
+        expected: Option<TypeHandle>,
+        site: SiteResolution,
+        required: bool,
+    ) -> Result<Option<Value>> {
+        use SiteResolution::*;
+        let plans = &self.shapes.specialization.instances;
         let result = match (site, expr) {
+            (Environment(value), _) => self.closure_value(ctx, value, expected)?,
             (ObjectSpread(ty), Expr::ObjectSpread { parts }) => {
                 self.object_spread(ctx, parts, expected, Some(ty))?
             }
@@ -188,57 +242,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.absent_literal(ctx, false, expected)?
             }
             (
-                ReadMember(id),
-                Expr::PropertyGet { object, .. }
-                | Expr::StringCoerce(object)
-                | Expr::TemplateStringCoerce(object),
-            ) => {
-                let value = self.expression(ctx, object)?;
-                let value = self.defined(ctx, value)?;
-                self.read_member(ctx, plans.function(id), value)?
-            }
-            (
-                WriteMember(id),
-                Expr::PropertySet { object, value, .. }
-                | Expr::PutValueSet {
-                    target: object,
-                    value,
-                    ..
-                },
-            ) => {
-                let receiver = self.expression(ctx, object)?;
-                let receiver = self.defined(ctx, receiver)?;
-                let id = plans.function(id);
-                let value = if let Some(param) = self.signature(id)?.params.get(1) {
-                    Some(self.expression_with(ctx, value, Some(param.base.carrier))?)
-                } else {
-                    self.discard_function_operand(ctx, value)?;
-                    None
-                };
-                self.call_values(ctx, id, std::iter::once(receiver).chain(value))?;
-                return Ok(value);
-            }
-            (
-                UpdateMember { get, set },
-                Expr::PropertyUpdate {
-                    object,
-                    property,
-                    op,
-                    prefix,
-                    ..
-                },
-            ) => self.property_update(
-                ctx,
-                object,
-                property,
-                op,
-                *prefix,
-                (
-                    get.map(|id| plans.function(id)),
-                    set.map(|id| plans.function(id)),
-                ),
-            )?,
-            (
                 Builtin(method),
                 Expr::Call {
                     callee,
@@ -285,7 +288,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 },
             ) => {
                 let class = &self.shapes.specialization.bodies.classes[id];
-                self.class_new(ctx, class, args, Some(plans.arguments(arguments)?))
+                self.class_new(ctx, class, args, Some(arguments))
                     .map_err(|e| self.shapes.annotate_call(e, *byte_offset))?
             }
             (

@@ -163,23 +163,24 @@ impl<'s> FunctionBuilder<'s, '_> {
         let callback = self.prepare_callback(ctx, callback)?;
         let initial = if let Some(init_expr) = initial {
             let expected_acc = match callback {
-                crate::lower::callable::Callback::Bound { params, .. } => params
-                    .first()
-                    .and_then(|&(i, ty)| (i == 0).then_some(ty))
+                crate::lower::callable::Callback::Bound { inputs, .. } => self
+                    .shapes
+                    .runtime_arguments(inputs)
+                    .next()
+                    .and_then(|(i, ty)| (i == 0).then_some(ty))
                     .map(|ty| self.shapes.resolved_binding(ty).map(|b| b.carrier))
                     .transpose()?,
-                crate::lower::callable::Callback::Lexical(_, signature) => {
+                crate::lower::callable::Callback::Function(signature) => {
                     signature.params.first().map(|p| p.base.carrier)
                 }
-                crate::lower::callable::Callback::Source(Expr::Closure { params, .. }) => {
-                    params.first().and_then(|param| {
+                crate::lower::callable::Callback::Source(decl) => {
+                    decl.params.first().and_then(|param| {
                         self.shapes
-                            .param_type(None, &param.ty)
+                            .source_binding(&param.ty)
                             .ok()
-                            .map(|(ty, _)| ty.carrier)
+                            .map(|ty| ty.carrier)
                     })
                 }
-                _ => None,
             };
             Some(self.expression_with(ctx, init_expr, expected_acc)?)
         } else {
@@ -413,7 +414,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let expected_elem = expected
             .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, ty))
             .map(|array| array.deref(ctx).element());
-        let input = if crate::lower::collections::is_collection_or_view_record(ctx, src_ty)
+        let input = if crate::lower::collections::Collection::of(ctx, src_ty).is_some()
             || perry_mir::typed::<ArrayType>(ctx, src_ty).is_some()
         {
             if map_fn.is_none() && src_ty.deref(ctx).is::<ArrayType>() {

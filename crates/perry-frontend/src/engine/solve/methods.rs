@@ -37,13 +37,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         if rule == MethodResult::Receiver && self.arrays.contains(self.types, call.receiver) {
             return call.receiver;
         }
-        if !matches!(
-            rule,
-            MethodResult::Number
-                | MethodResult::Boolean
-                | MethodResult::String
-                | MethodResult::Void
-        ) {
+        use perry_mir::SignatureType::{Bool, Number, String};
+        if !matches!(rule, MethodResult::Signature([] | [Number | Bool | String])) {
             call.receiver = self.resolve_cell_read(inst, call.receiver);
         }
         if call.receiver == Ty::BOTTOM {

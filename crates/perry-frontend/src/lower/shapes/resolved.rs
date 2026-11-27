@@ -18,62 +18,6 @@ impl Shapes<'_, Preparing<'_>> {
 }
 
 impl Shapes<'_> {
-    pub(in crate::lower) fn is_json_encodable_union(&self, ty: Ty) -> bool {
-        fn encodable(
-            facts: &crate::engine::Specialization,
-            types: &crate::engine::types::TypeTable,
-            ty: Ty,
-            visiting: &mut Vec<LocId>,
-        ) -> bool {
-            match types.kind(ty) {
-                TyKind::Null
-                | TyKind::Void
-                | TyKind::Boolean
-                | TyKind::Number
-                | TyKind::Int32
-                | TyKind::String
-                | TyKind::Dynamic
-                | TyKind::Literal(_) => true,
-                TyKind::Array(elem) => encodable(facts, types, elem, visiting),
-                TyKind::Cell { kind, loc }
-                    if kind != CellKind::Promise && !visiting.contains(&loc) =>
-                {
-                    let elem = facts.locations[loc];
-                    visiting.push(loc);
-                    let yes = (kind != CellKind::Dict
-                        || types.is_valid_dict_value(elem, facts.dict_reads.contains(loc.index())))
-                        && encodable(facts, types, elem, visiting);
-                    visiting.pop();
-                    yes
-                }
-                TyKind::Tuple(span) | TyKind::Union(span) => types
-                    .ty_slice(span)
-                    .iter()
-                    .all(|&member| encodable(facts, types, member, visiting)),
-                TyKind::Object { props, index } => {
-                    let fields = types.object_slice(props);
-                    (!fields.is_empty() || index.is_some())
-                        && fields
-                            .iter()
-                            .all(|p| encodable(facts, types, p.ty, visiting))
-                        && index.is_none_or(|v| encodable(facts, types, v, visiting))
-                }
-                _ => false,
-            }
-        }
-        let types = &self.types.source;
-        let TyKind::Union(span) = types.kind(ty) else {
-            return false;
-        };
-        types
-            .ty_slice(span)
-            .iter()
-            .filter(|&&m| !matches!(m, Ty::NULL | Ty::VOID))
-            .count()
-            >= 2
-            && encodable(self.specialization, types, ty, &mut Vec::new())
-    }
-
     pub(in crate::lower) fn source_closure_result(
         &self,
         source: &HirType,
@@ -83,18 +27,6 @@ impl Shapes<'_> {
             .transpose()
     }
 
-    pub(in crate::lower) fn param_type(
-        &self,
-        solved: Option<Ty>,
-        ty: &HirType,
-    ) -> Result<(BindingType, bool)> {
-        let ty = match solved {
-            Some(ty) => ty,
-            None => self.specialization.annotations.get(ty)?,
-        };
-        self.native_param(crate::engine::NativeParam::Value(ty))
-    }
-
     pub(in crate::lower) fn native_param(
         &self,
         param: crate::engine::NativeParam,
@@ -102,7 +34,7 @@ impl Shapes<'_> {
         Ok(match param {
             crate::engine::NativeParam::Value(ty) => (self.resolved_binding(ty)?, ty == Ty::NEVER),
             crate::engine::NativeParam::Environment(id) => (
-                BindingType::plain(self.environment_record(id)?.into()),
+                BindingType::plain(self.environment(id)?.record.into()),
                 false,
             ),
         })

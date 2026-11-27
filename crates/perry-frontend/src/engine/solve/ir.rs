@@ -1,8 +1,10 @@
 //! Solved inference tables, call-site resolutions, and synthesized helper specs.
 use super::super::bitset::BitSet;
+use super::super::plans::ExprIdx;
 use super::super::types::{
-    CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan, FuncIdentity, HelperId, Idx,
-    IdxVec, InstanceId, LocId, ParamLocSpan, Pool, TemplateId, Ty, TyKind, TypeTable,
+    ActivationSpan, CaptureOwner, ClassId, ClassInstId, DispatchArmSpan, FieldLocSpan,
+    FuncIdentity, HelperId, Idx, IdxVec, InstanceId, LocId, Pool, TemplateId, Ty, TyKind,
+    TypeTable,
 };
 use crate::hir_compat;
 use perry_wit_diagnostics::{Diagnostic, Result};
@@ -31,6 +33,7 @@ pub(crate) enum Invocation {
 }
 
 pub(crate) struct Instance {
+    pub(in crate::engine) activation: ActivationSpan,
     pub(crate) is_witness: bool,
     pub(crate) list_result: Option<Ty>,
     pub(crate) template: TemplateId,
@@ -40,7 +43,6 @@ pub(crate) struct Instance {
     pub(crate) return_loc: LocId,
     pub(crate) partial_record_result: Option<Ty>,
     pub(crate) has_explicit_return: bool,
-    pub(crate) param_locs: ParamLocSpan,
     pub(crate) caller: Option<InstanceId>,
     pub(crate) call_byte_offset: u32,
     pub(crate) invocation: Invocation,
@@ -110,7 +112,30 @@ pub(crate) struct DispatchArm {
     pub(crate) identity: FuncIdentity,
     pub(crate) target: InstanceId,
     pub(crate) receiver: bool,
-    pub(crate) arguments: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct PromiseReaction {
+    pub(crate) kind: ReactionKind,
+    pub(crate) promise_ty: Ty,
+    pub(crate) inner_ty: Ty,
+    pub(crate) on_fulfilled: Option<(CallTarget, Ty)>,
+    pub(crate) on_rejected: Option<(CallTarget, Ty)>,
+    pub(crate) ret_ty: Ty,
+}
+
+impl PromiseReaction {
+    pub(crate) fn callbacks(self) -> impl Iterator<Item = (CallTarget, Ty)> {
+        self.on_fulfilled.into_iter().chain(self.on_rejected)
+    }
+
+    pub(crate) fn result(self) -> Ty {
+        if self.ret_ty == Ty::BOTTOM {
+            Ty::VOID
+        } else {
+            self.ret_ty
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -122,14 +147,7 @@ pub(crate) enum HelperSpec {
         arg_tys: Ty,
         recv_ty: Option<Ty>,
     },
-    PromiseReaction {
-        kind: ReactionKind,
-        promise_ty: Ty,
-        inner_ty: Ty,
-        on_fulfilled: Option<(CallTarget, Ty)>,
-        on_rejected: Option<(CallTarget, Ty)>,
-        ret_ty: Ty,
-    },
+    PromiseReaction(PromiseReaction),
     TimerRunner {
         kind: crate::engine::TimerKind,
         timer_ty: Ty,
@@ -224,6 +242,7 @@ pub(crate) enum SiteResolution {
     },
     ClassNew(ClassInstId, Ty),
     Closure(FuncIdentity),
+    Environment(super::super::ClosureValue),
     BranchResult(Ty),
     ObjectSpread(Ty),
     TypedArray(Ty),
@@ -254,14 +273,31 @@ pub(crate) enum SiteResolution {
     },
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) enum OperandUse {
+    #[default]
+    Value,
+    Erased,
+    Spread(Ty),
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct SiteEntry {
-    pub(crate) erased: bool,
+    pub(crate) operand: OperandUse,
     pub(crate) resolution: Option<SiteResolution>,
     pub(crate) coercion: Option<FuncCoercion>,
 }
 
+pub(crate) type InstanceSites = std::collections::BTreeMap<ExprIdx, SiteEntry>;
+
 impl SiteEntry {
+    pub(crate) fn environment(self) -> Option<super::super::ClosureValue> {
+        match self.resolution {
+            Some(SiteResolution::Environment(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     pub(crate) fn conversion(self) -> Option<ValueCoercion> {
         match self.coercion {
             Some(FuncCoercion::Value(value)) => Some(value),
@@ -270,11 +306,11 @@ impl SiteEntry {
     }
 
     pub(crate) fn promise(
-        sites: &IdxVec<InstanceId, Vec<Self>>,
+        sites: &IdxVec<InstanceId, InstanceSites>,
         owner: CaptureOwner,
-        site: usize,
+        site: ExprIdx,
     ) -> Result<LocId> {
-        let entry = owner.instance().and_then(|inst| sites[inst].get(site));
+        let entry = owner.instance().and_then(|inst| sites[inst].get(&site));
         match entry.and_then(|e| e.resolution.as_ref()) {
             Some(SiteResolution::PromiseNew { value_loc, .. }) => Ok(*value_loc),
             _ => Err(Diagnostic::internal(
@@ -312,14 +348,14 @@ pub(crate) struct Solved {
     pub(crate) instances: IdxVec<InstanceId, Instance>,
     pub(crate) class_insts: IdxVec<ClassInstId, ClassInst>,
     pub(crate) locations: IdxVec<LocId, Ty>,
-    pub(crate) param_locs: Pool<ParamLocSpan, LocId>,
     pub(crate) field_locs: Pool<FieldLocSpan, LocId>,
     pub(crate) dispatch_arms: Pool<DispatchArmSpan, DispatchArm>,
     pub(crate) helpers: IdxVec<HelperId, HelperEntry>,
     pub(in crate::engine) capture_locs: super::CaptureLocations,
     pub(crate) inst_frame_locals: IdxVec<InstanceId, Vec<Ty>>,
-    pub(crate) inst_sites: IdxVec<InstanceId, Vec<SiteEntry>>,
+    pub(crate) inst_sites: IdxVec<InstanceId, InstanceSites>,
     pub(crate) live_instances: BitSet,
+    pub(crate) live_helpers: BitSet,
     pub(crate) escaping_env_templates: BitSet,
 
     pub(crate) boxed_locals: BitSet,

@@ -1,7 +1,10 @@
 //! Calls: module functions, WIT imports, imported built-ins and `Promise` statics.
 use super::*;
-use crate::engine::{solve::CallTarget, types::Ty};
-use crate::lower::{builder::LocalBinding, hir_compat::RuntimeCall};
+use crate::engine::{
+    solve::{CallTarget, OperandUse},
+    types::{Ty, TyKind},
+};
+use crate::lower::{builder::LocalBinding, hir_compat::RuntimeCall, inline::InlineResult};
 
 enum SpreadInput {
     Tuple(Value, usize),
@@ -58,13 +61,9 @@ impl CallTarget {
         };
         let prefix = callee.into_iter().chain(receiver);
         match args {
-            CallArguments::Expressions(args, types) => b.invoke_arguments(
-                ctx,
-                b.signature(id)?,
-                prefix,
-                args,
-                Some(b.shapes.specialization.instances.arguments(types)?),
-            ),
+            CallArguments::Expressions(args, types) => {
+                b.invoke_arguments(ctx, b.signature(id)?, prefix, args, Some(types), None)
+            }
             CallArguments::Values(args) => {
                 b.call_values(ctx, id, prefix.chain(args.iter().copied()))
             }
@@ -166,11 +165,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.frame.this_slot = Some(self.initialized_local(ctx, value).slot);
             }
             program::Parameter::Environment(identity) => {
-                let layouts = &self.shapes.specialization.instances.environments;
-                let id = layouts
-                    .id(identity)
-                    .ok_or_else(|| internal!("missing capture environment"))?;
-                for (slot, field) in layouts.fields(id).iter().enumerate() {
+                let layout = self.shapes.environment(identity)?;
+                for (slot, field) in self.shapes.specialization.instances.environment_fields
+                    [layout.fields]
+                    .iter()
+                    .enumerate()
+                {
                     let &crate::engine::EnvironmentField::Capture {
                         local, ty, cell, ..
                     } = field
@@ -199,16 +199,29 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<SpreadInput> {
         let source = self.spread_operand(ctx, expr, element)?;
         let source = self.defined(ctx, source)?;
+        if let OperandUse::Spread(ty) = self.site(expr).operand {
+            match self.shapes.types.source.kind(ty) {
+                TyKind::Tuple(span) => {
+                    return Ok(SpreadInput::Tuple(
+                        source,
+                        self.shapes.types.source.ty_slice(span).len(),
+                    ));
+                }
+                TyKind::Array(_) | TyKind::String => {
+                    return Ok(SpreadInput::Items(self.spread_items(ctx, source, element)?));
+                }
+                _ => {}
+            }
+        }
         if let Some(record) = perry_mir::typed::<RecordType>(ctx, source.get_type(ctx))
             && record.deref(ctx).kind() == RecordKind::Tuple
         {
-            Ok(SpreadInput::Tuple(
+            return Ok(SpreadInput::Tuple(
                 source,
                 record.deref(ctx).fields().to_diag(ctx)?.len(),
-            ))
-        } else {
-            Ok(SpreadInput::Items(self.spread_items(ctx, source, element)?))
+            ));
         }
+        Ok(SpreadInput::Items(self.spread_items(ctx, source, element)?))
     }
 
     pub(super) fn invoke_site(
@@ -278,7 +291,8 @@ impl<'s> FunctionBuilder<'s, '_> {
         signature: &'s Signature<'s>,
         implicit: impl Iterator<Item = Value>,
         args: Arguments<'s>,
-        arguments: Option<&[(usize, Ty)]>,
+        arguments: Option<Ty>,
+        result: Option<InlineResult>,
     ) -> Result<Option<Value>> {
         let (fixed, rest) = signature.parameters();
         let rest_element = rest
@@ -299,10 +313,13 @@ impl<'s> FunctionBuilder<'s, '_> {
             .shapes
             .locations
             .display_function_name(signature.name.as_ref());
+        let mut remaining = arguments.map(|tuple| self.shapes.runtime_arguments(tuple).peekable());
         if let Arguments::Plain(args) = args
             && rest.is_none()
         {
-            let count = arguments.map_or(args.len(), |slots| slots.len());
+            let count = remaining
+                .as_ref()
+                .map_or(args.len(), |slots| slots.clone().count());
             if count > fixed.len() {
                 bail_diag!(
                     codes::TYPE_MISMATCH,
@@ -311,11 +328,10 @@ impl<'s> FunctionBuilder<'s, '_> {
                 );
             }
         }
-        let mut remaining = arguments.map(|slots| slots.iter().peekable());
         let mut passed = |index| {
             remaining
                 .as_mut()
-                .is_none_or(|slots| slots.next_if(|&&(pos, _)| pos == index).is_some())
+                .is_none_or(|slots| slots.next_if(|&(pos, _)| pos == index).is_some())
         };
         let mut argument_index = 0;
         let mut rest_array = None;
@@ -390,7 +406,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, rest_values))
             }));
         }
-        self.emit_signature_call(ctx, signature, values)
+        self.emit_signature_call(ctx, signature, values, result)
     }
 
     pub(super) fn clear_timer_args(
@@ -445,7 +461,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.discard_function_operand(ctx, arg)?;
             }
         }
-        self.emit_signature_call(ctx, signature, values)
+        self.emit_signature_call(ctx, signature, values, None)
     }
     pub(super) fn call(
         &mut self,
@@ -600,42 +616,62 @@ impl<'s> FunctionBuilder<'s, '_> {
             // Module initialization of a named built-in import (`Writable`): nothing to run.
             return Ok(None);
         }
-        if let Expr::ExternFuncRef { name, .. } = callee
-            && let Some(builtin) = self.builtins.get(name.as_str())
-        {
-            return match builtin {
-                Builtin::SetTimeout => self.timer(ctx, args).map(Some),
-                Builtin::Writable => {
+        if let Expr::ExternFuncRef { name, .. } = callee {
+            match self.shapes.decls.imports.get(name.as_str()).copied() {
+                Some(Imported::TimeoutPromise) => return self.timer(ctx, args).map(Some),
+                Some(Imported::Writable) => {
                     bail_unsupported!("Writable is a class; only Writable.toWeb is supported")
                 }
-                Builtin::Serve(intrinsic) => {
+                Some(Imported::Service(intrinsic)) => {
                     let mut operands = Vec::with_capacity(args.len());
                     for arg in args {
                         let value = self.expression(ctx, arg)?;
                         operands.push(self.defined(ctx, value)?);
                     }
-                    Ok(Some(match self.call_intrinsic(ctx, *intrinsic, operands) {
+                    return Ok(Some(match self.call_intrinsic(ctx, intrinsic, operands) {
                         Some(value) => value,
                         None => {
                             let number = FP64Type::get(ctx).into();
                             self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, number))
                         }
-                    }))
+                    }));
                 }
-                Builtin::ReadFile => {
+                Some(Imported::ReadFile) => {
                     let text = hir_compat::read_file_text(
                         args.get(1),
                         &self.shapes.specialization.literal_classes,
                     )?;
-                    self.read_file(ctx, args, text).map(Some)
+                    return self.read_file(ctx, args, text).map(Some);
                 }
-                fs => self.fs(ctx, *fs, args).map(Some),
-            };
-        }
-        if let Expr::ExternFuncRef { name, .. } = callee
-            && let Some((binding, signature)) = self.shapes.foreign_function(name)
-        {
-            return self.import_call(ctx, binding, signature, args, foreign::CallKind::Function);
+                Some(Imported::WriteFile) => return self.write_file(ctx, args).map(Some),
+                Some(Imported::Path(op, label)) => {
+                    let path = self.fs_path(ctx, args)?;
+                    ensure_unsupported!(
+                        args.len() == 1,
+                        "{label} options are not supported yet (recursive, withFileTypes)"
+                    );
+                    return Ok(Some(self.intrinsic(ctx, op, vec![path])));
+                }
+                Some(Imported::Foreign(binding, signature)) => {
+                    return self.import_call(
+                        ctx,
+                        binding,
+                        signature,
+                        args,
+                        foreign::CallKind::Function,
+                    );
+                }
+                _ if let Some((binding, signature)) = self.shapes.decls.world.function(name) => {
+                    return self.import_call(
+                        ctx,
+                        binding,
+                        signature,
+                        args,
+                        foreign::CallKind::Function,
+                    );
+                }
+                _ => {}
+            }
         }
         if let Expr::ExternFuncRef { name, .. } = callee
             && name == "structuredClone"
@@ -649,25 +685,15 @@ impl<'s> FunctionBuilder<'s, '_> {
             let val = self.expression(ctx, arg)?;
             return self.clone_structured_value(ctx, val).map(Some);
         }
-        let callee = match callee {
-            Expr::FuncRef(id) => match self.shapes.specialization.lexical.closure(*id) {
-                Some(closure) => closure,
-                None if self.signatures.get(id).is_some() => callee,
-                None => return Err(internal!("unknown function {}", *id)),
-            },
-            expr => expr,
-        };
-        if let Expr::Closure { return_type, .. } = callee {
-            let prepared = self.prepare_callback(ctx, callee)?;
-            let mut arg_vals = Vec::with_capacity(args.len());
-            for arg in args {
-                arg_vals.push(self.expression(ctx, arg)?);
-            }
-            if self.shapes.source_closure_result(return_type)?.is_none() {
-                self.effect_callback(ctx, prepared, &arg_vals)?;
-                return Ok(None);
-            }
-            return self.array_callback(ctx, prepared, &arg_vals).map(Some);
+        if matches!(callee, Expr::Closure { .. })
+            || matches!(callee, Expr::FuncRef(id) if self.signatures.get(id).is_none())
+        {
+            let callback = self.prepare_callback(ctx, callee)?;
+            let values = args
+                .iter()
+                .map(|arg| self.expression(ctx, arg))
+                .collect::<Result<Vec<_>>>()?;
+            return self.invoke_callback(ctx, callback, &values, None);
         }
         let Expr::FuncRef(id) = callee else {
             return Err(match callee {
@@ -697,6 +723,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             signature,
             std::iter::empty(),
             Arguments::Plain(args),
+            None,
             None,
         )
     }
@@ -753,8 +780,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         signature: &'s Signature<'s>,
         values: Vec<Value>,
+        expected: Option<InlineResult>,
     ) -> Result<Option<Value>> {
-        if let Some(function) = signature.inline {
+        if let Body::Inline(function) = signature.body {
             ensure_unsupported!(
                 !signature.is_async && !self.inline_functions.contains(&function.id),
                 "recursive or async calls to capturing function '{}' require a persistent environment",
@@ -766,11 +794,11 @@ impl<'s> FunctionBuilder<'s, '_> {
                     for (param, value) in signature.params.iter().zip(values) {
                         this.bind_argument(ctx, param, value)?;
                     }
-                    let result = signature
-                        .result
-                        .map_or(crate::lower::inline::InlineResult::Void, |ty| {
-                            crate::lower::inline::InlineResult::Declared(ty.carrier)
-                        });
+                    let result = expected.unwrap_or_else(|| {
+                        signature
+                            .result
+                            .map_or(InlineResult::Void, |ty| InlineResult::Declared(ty.carrier))
+                    });
                     let slot = this.inline_body(
                         ctx,
                         this.shapes.specialization.templates[function.template].body,

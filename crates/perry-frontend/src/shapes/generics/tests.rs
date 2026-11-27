@@ -30,7 +30,8 @@ fn unproductive_alias_expansion_is_bounded() -> std::result::Result<(), Box<dyn 
         &module.imports,
         &module.classes,
         &foreign,
-    );
+        &crate::hir_compat::Locations::default(),
+    )?;
     let mut types = TypeTable::new();
     let mut resolver = Resolver::new(&ctx, &decls, &mut types);
     for name in ["Cycle", "Chain0"] {

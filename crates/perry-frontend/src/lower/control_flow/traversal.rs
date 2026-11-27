@@ -2,7 +2,7 @@ use super::*;
 use crate::lower::array_methods::Direction;
 use crate::lower::builder::insert_before_terminator;
 use crate::lower::collections::{
-    CollectionViewKind, collection_view_record, map_entry_types, set_entry_type,
+    Collection, CollectionKind, CollectionViewKind, StorageField, tuple_pair,
 };
 
 #[derive(Clone, Copy)]
@@ -27,6 +27,24 @@ pub(crate) enum Input {
 pub(crate) enum ArrayOutput {
     Item(Value),
     Items(Value),
+}
+
+impl ArrayOutput {
+    pub(crate) fn append_to(
+        self,
+        builder: &mut FunctionBuilder<'_, '_>,
+        ctx: &mut Context,
+        array: Value,
+    ) {
+        match self {
+            Self::Item(value) => {
+                builder.emit(ctx, |ctx| ArrayPushOp::new(ctx, array, value));
+            }
+            Self::Items(items) => {
+                builder.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, items));
+            }
+        }
+    }
 }
 
 impl<'s> FunctionBuilder<'s, '_> {
@@ -159,14 +177,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let allocation = ArrayNewOp::new(ctx, element, vec![]);
             insert_before_terminator(ctx, prepare, [allocation.get_operation()])?;
             let result = allocation.get_result(ctx);
-            match output {
-                ArrayOutput::Item(value) => {
-                    b.emit(ctx, |ctx| ArrayPushOp::new(ctx, result, value));
-                }
-                ArrayOutput::Items(array) => {
-                    b.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, result, array));
-                }
-            }
+            output.append_to(b, ctx, result);
             Ok(result)
         })
     }
@@ -184,28 +195,22 @@ impl Projection {
         if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {
             return Ok(Self::Item(array.deref(ctx).element()));
         }
-        let (view, box_type) = if let Some((view, record)) = collection_view_record(ctx, ty) {
-            (
-                view,
-                record
-                    .deref(ctx)
-                    .field("_0")
-                    .ok_or_else(|| Diagnostic::internal("collection view missing box"))?
-                    .1,
-            )
-        } else if set_entry_type(ctx, ty).is_some() {
-            (CollectionViewKind::SetValues, ty)
-        } else {
-            ensure_unsupported!(
-                map_entry_types(ctx, ty).is_some(),
-                "expected an array or collection iterable"
-            );
-            (CollectionViewKind::MapEntries, ty)
+        let (view, box_type) = match Collection::of(ctx, ty) {
+            Some(Collection::View(view)) => {
+                let boxed = perry_mir::typed::<RecordType>(ctx, ty)
+                    .and_then(|r| r.deref(ctx).field(StorageField::ViewBox.name()))
+                    .ok_or_else(|| internal!("collection view missing box"))?
+                    .1;
+                (view, boxed)
+            }
+            Some(Collection::Box(CollectionKind::Map)) => (CollectionViewKind::MapEntries, ty),
+            Some(Collection::Box(CollectionKind::Set)) => (CollectionViewKind::SetValues, ty),
+            None => bail_unsupported!("expected an array or collection iterable"),
         };
-        let record = map_entry_types(ctx, box_type)
-            .map(|(_, _, record)| record)
-            .or_else(|| set_entry_type(ctx, box_type).map(|(_, record)| record))
-            .ok_or_else(|| Diagnostic::internal("collection view requires a Map or Set box"))?;
+        let record = view
+            .source()
+            .entry(ctx, box_type)
+            .ok_or_else(|| internal!("collection view requires a Map or Set box"))?;
         let field = |name| {
             record
                 .deref(ctx)
@@ -233,12 +238,7 @@ impl Projection {
             return Some((element, element));
         }
         let record = perry_mir::typed::<RecordType>(ctx, ty)?;
-        let record = record.deref(ctx);
-        let fields = record.fields().ok()?;
-        (record.is_tuple()
-            && (fields.len() == 2
-                || (record.kind() == perry_mir::RecordKind::MapEntry && fields.len() == 4)))
-            .then_some((record.field("_0")?.1, record.field("_1")?.1))
+        tuple_pair(ctx, record)
     }
 
     pub(crate) fn output_type(

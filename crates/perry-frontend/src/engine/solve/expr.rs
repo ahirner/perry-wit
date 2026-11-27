@@ -4,51 +4,6 @@ use crate::methods::MethodResult;
 use crate::source::ConstructorSites;
 
 impl<'h, 'a> Solver<'h, 'a> {
-    #[allow(clippy::too_many_arguments)]
-    fn record_field_write(
-        &mut self,
-        s: &EvalState<'h>,
-        site: &'h Expr,
-        obj_def: Ty,
-        property: &str,
-        value: &'h Expr,
-        val_ty: Ty,
-        byte_offset: u32,
-    ) -> Result<()> {
-        self.check_escaping_func(s.inst, val_ty, byte_offset, s.current_span)?;
-        let objlit_prop = self.check_objlit_func_write(
-            s.inst,
-            obj_def,
-            property,
-            val_ty,
-            byte_offset,
-            s.current_span,
-        )?;
-        if let Some(setter) =
-            self.write_class_or_setter(s.inst, obj_def, property, value, val_ty)?
-        {
-            self.record_site(s.inst, site, SiteResolution::WriteMember(setter));
-            return Ok(());
-        }
-        let field_ty = if let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def)
-            && let Some(loc) = self.class_field_loc(cinst_id, property)
-        {
-            self.read_loc(loc, s.inst)
-        } else {
-            objlit_prop.unwrap_or(val_ty)
-        };
-        if self
-            .types
-            .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
-        {
-            self.record_site(s.inst, site, SiteResolution::ZeroSizedFieldSet);
-        } else {
-            self.clear_site(s.inst, site);
-            self.record_coercion(s.inst, value, val_ty, field_ty);
-        }
-        Ok(())
-    }
-
     fn static_field_loc(&mut self, class: &str, field: &str) -> Option<LocId> {
         let class = self.index.class_by_name_id(self.types.intern_name(class))?;
         self.index
@@ -126,7 +81,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                                 0,
                                 s.current_span.or(local_span),
                             )?;
-                            self.write_local_value(s, lidx, val_ty);
+                            self.write_local_value(s, lidx, val_ty)?;
                         } else if let TyKind::Cell { loc, kind } = self.types.kind(existing) {
                             if kind == CellKind::Array {
                                 let (def, _) = self.types.strip_nullish(val_ty);
@@ -159,7 +114,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             let norm = self
                                 .types
                                 .normalize_for_storage(self.ctx, self.decls, val_ty);
-                            self.write_local_value(s, lidx, norm);
+                            self.write_local_value(s, lidx, norm)?;
                         }
                     }
                     if let Some(cur) = self.read_local_value(s.inst, lidx) {
@@ -203,23 +158,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                         })
                     }))
             }
-            Expr::Closure {
-                func_id,
-                captures,
-                params,
-                body,
-                ..
-            } => {
-                let mut refs = captures.clone();
-                let mut defined = std::collections::HashSet::new();
-                let stmts = self.index.template_of_func(*func_id).map_or_else(
-                    || crate::source::authored_body(params, body),
-                    |t| self.index.view(t).body,
-                );
-                for stmt in stmts {
-                    perry_hir::analysis::collect_local_refs_stmt(stmt, &mut refs, &mut defined);
-                }
-                for lid in refs {
+            Expr::Closure { func_id, .. } => {
+                let Some(template) = self.index.template_of_func(*func_id) else {
+                    return Ok(Ty::OPEN);
+                };
+                for &lid in self.index.closure_references(template) {
                     if let Some(ty) = self
                         .index
                         .local_idx(lid)
@@ -228,9 +171,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                         self.invalidate_conservative_cell(ty);
                     }
                 }
-                let Some(template) = self.index.template_of_func(*func_id) else {
-                    return Ok(Ty::OPEN);
-                };
                 let identity = self.closure_identity(s.inst, template);
                 self.record_site(s.inst, expr, SiteResolution::Closure(identity));
                 if self.is_escaping_env(template, s.inst) {
@@ -312,7 +252,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             Expr::ScopedTemp { id, value, body } => {
                 let val_ty = self.eval_expr(s, value)?;
                 if let Some(lidx) = self.index.local_idx(*id) {
-                    self.write_local_value(s, lidx, val_ty);
+                    self.write_local_value(s, lidx, val_ty)?;
                     self.mark_written(s.inst, lidx);
                 }
                 self.eval_expr(s, body)
@@ -505,7 +445,9 @@ impl<'h, 'a> Solver<'h, 'a> {
             } => {
                 let ty = self.eval_expr(s, object)?;
                 let receiver = self.types.strip_nullish(ty).0;
-                if let Some(class) = self.resolve_class_inst(s.inst, receiver, *byte_offset)? {
+                if let Some(class) = self.resolve_class_inst(s.inst, receiver, *byte_offset)?
+                    && self.class_field_loc(class, property).is_none()
+                {
                     let get = self.request_accessor(s.inst, class, property, None)?;
                     let set = self.request_accessor(s.inst, class, property, Some(Ty::NUMBER))?;
                     if get.is_some() || set.is_some() {
@@ -529,7 +471,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             } => {
                 let (obj_ty, val_ty) = (self.eval_expr(s, object)?, self.eval_expr(s, value)?);
                 let (obj_def, _) = self.types.strip_nullish(obj_ty);
-                self.record_field_write(s, expr, obj_def, property, value, val_ty, *byte_offset)?;
+                self.assign_property(s, expr, obj_def, property, value, val_ty, *byte_offset)?;
                 if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
                     if kind == CellKind::Dict {
                         self.write_cell(loc, val_ty);
@@ -593,7 +535,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Expr::PutValueSet { byte_offset, .. } = expr
                     && let Expr::String(field_name) = index.as_ref()
                 {
-                    self.record_field_write(
+                    self.assign_property(
                         s,
                         expr,
                         obj_def,

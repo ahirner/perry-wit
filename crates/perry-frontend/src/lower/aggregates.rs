@@ -2,6 +2,7 @@
 mod records;
 
 use super::*;
+use expressions::{Assigned, Member};
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn set_byte_index(
@@ -33,27 +34,11 @@ impl<'s> FunctionBuilder<'s, '_> {
         if let Some(record) = perry_mir::typed::<RecordType>(ctx, array.get_type(ctx))
             && record.deref(ctx).kind() == RecordKind::Tuple
         {
-            let field = match index {
-                Expr::Number(index) if *index >= 0.0 && index.fract() == 0.0 => {
-                    format!("_{}", *index as u64)
-                }
-                Expr::Integer(index) if *index >= 0 => format!("_{index}"),
-                _ => bail_unsupported!("tuples require literal positions"),
-            };
-            let ty = record
-                .deref(ctx)
-                .field(&field)
-                .map(|(_, ty)| ty)
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        codes::TYPE_MISMATCH,
-                        "tuple index is outside its declared shape",
-                    )
-                })?;
-            let value = self.expression_with(ctx, value, Some(ty))?;
-            let value = self.fit(ctx, value, ty)?;
-            self.emit(ctx, |ctx| FieldSetOp::new(ctx, array, field, value));
-            return Ok(self.bigint_view(ctx, value));
+            let position = hir_compat::tuple_position(index)
+                .ok_or_else(|| unsupported!("tuples require literal positions"))?;
+            return Member::field(ctx, array, &format!("_{position}"), None)?
+                .write(self, ctx, Assigned::Expression(value))?
+                .ok_or_else(|| internal!("missing tuple field value"));
         }
         ensure_unsupported!(
             kind(ctx, array)? == Kind::Array,
@@ -113,21 +98,27 @@ impl<'s> FunctionBuilder<'s, '_> {
         object: &'s Expr,
         field: &str,
         value: &'s Expr,
-    ) -> Result<Value> {
+        setter: Option<FuncId>,
+    ) -> Result<Option<Value>> {
         if let Expr::ClassRef(class_name) = object {
-            return self.local_set(ctx, self.shapes.static_field(class_name, field)?, value);
+            return self
+                .local_set(ctx, self.shapes.static_field(class_name, field)?, value)
+                .map(Some);
         }
         let record = self.expression(ctx, object)?;
         let record = self.defined(ctx, record)?;
+        if let Some(id) = setter {
+            return Member::Accessor(record, id).write(self, ctx, Assigned::Expression(value));
+        }
         let record = if crate::lower::value_unions::is_value_union(ctx, record.get_type(ctx)) {
             let payload = perry_mir::variant_cases(ctx, record.get_type(ctx))
                 .to_diag(ctx)?
                 .into_iter()
                 .find_map(|(tag, payload)| (tag == "object").then_some(payload).flatten())
                 .ok_or_else(|| {
-                    Diagnostic::new(
+                    diag!(
                         codes::TYPE_MISMATCH,
-                        "property write requires a record alternative",
+                        "property write requires a record alternative"
                     )
                 })?;
             self.emit_value(ctx, |ctx| {
@@ -144,29 +135,13 @@ impl<'s> FunctionBuilder<'s, '_> {
             let val = self.expression_with(ctx, value, Some(v_ty))?;
             let val = self.fit(ctx, val, v_ty)?;
             self.kv_set(ctx, record, key, val)?;
-            return Ok(val);
+            return Ok(Some(val));
         }
-        let rec_ty = perry_mir::typed::<RecordType>(ctx, record.get_type(ctx))
-            .filter(|rec| rec.deref(ctx).kind() == RecordKind::Object)
-            .ok_or_else(|| {
-                Diagnostic::unsupported("property writes are only supported on records so far")
-            })?;
-        let field_type = rec_ty
-            .deref(ctx)
-            .field(field)
-            .map(|(_, ty)| ty)
-            .ok_or_else(|| {
-                diag!(
-                    codes::TYPE_MISMATCH,
-                    "property {field} does not exist on this shape (subset rule R1)"
-                )
-            })?;
-        let value = self.expression_with(ctx, value, Some(field_type))?;
-        let value = self.fit(ctx, value, field_type)?;
-        self.emit(ctx, |ctx| {
-            FieldSetOp::new(ctx, record, field.to_string(), value)
-        });
-        Ok(self.bigint_view(ctx, value))
+        Member::field(ctx, record, field, Some(RecordKind::Object))?.write(
+            self,
+            ctx,
+            Assigned::Expression(value),
+        )
     }
 
     /// `new C(…)` of a class that Perry HIR made from an object literal.

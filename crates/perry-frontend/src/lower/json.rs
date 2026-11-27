@@ -53,13 +53,16 @@ impl<'s> FunctionBuilder<'s, '_> {
             let json = JsonType::get(ctx).into();
             let json =
                 perry_mir::OptionalType::get_with(ctx, json, perry_mir::Absence::Both).into();
-            let value = self.inline_callback(
+            let value = self.invoke_callback(
                 ctx,
                 callback,
                 &[key, value],
                 Some(crate::lower::inline::InlineResult::Declared(json)),
             )?;
-            self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value))
+            match value {
+                Some(value) => self.emit_value(ctx, |ctx| perry_mir::JsonBoxOp::new(ctx, value)),
+                None => self.intrinsic(ctx, Intrinsic::JsonUndefined, vec![]),
+            }
         } else {
             value
         };

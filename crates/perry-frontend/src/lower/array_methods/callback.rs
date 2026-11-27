@@ -12,7 +12,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         callback: Callback<'s>,
         arguments: &[Value],
     ) -> Result<Value> {
-        self.inline_callback(ctx, callback, arguments, None)
+        match self.invoke_callback(ctx, callback, arguments, None)? {
+            Some(value) => Ok(value),
+            None => self.absent_literal(ctx, false, None),
+        }
     }
 
     /// Apply a callback whose result the caller discards, as `forEach` does.
@@ -22,28 +25,27 @@ impl<'s> FunctionBuilder<'s, '_> {
         callback: Callback<'s>,
         arguments: &[Value],
     ) -> Result<()> {
-        self.inline_callback(ctx, callback, arguments, Some(InlineResult::Void))
+        self.invoke_callback(ctx, callback, arguments, Some(InlineResult::Void))
             .map(|_| ())
     }
 
     /// Apply `callback` to `arguments`. An inline closure stores the `expected` result, or else
     /// the result type the frontend inferred for it.
-    pub(in crate::lower) fn inline_callback(
+    pub(in crate::lower) fn invoke_callback(
         &mut self,
         ctx: &mut Context,
         callback: Callback<'s>,
         arguments: &[Value],
         expected: Option<InlineResult>,
-    ) -> Result<Value> {
-        let (func_id, source, body, return_type, is_async, is_generator, signature) = match callback
-        {
+    ) -> Result<Option<Value>> {
+        let value = match callback {
             Callback::Bound {
                 call,
-                params,
+                inputs: tuple,
                 callee,
             } => {
                 let mut inputs = Vec::new();
-                for &(index, ty) in params {
+                for (index, ty) in self.shapes.runtime_arguments(tuple) {
                     let ty = self.shapes.resolved_binding(ty)?.carrier;
                     let value = match arguments.get(index) {
                         Some(&value) => self.fit(ctx, value, ty)?,
@@ -51,112 +53,59 @@ impl<'s> FunctionBuilder<'s, '_> {
                     };
                     inputs.push(value);
                 }
-                let result = call.invoke(self, ctx, Some(callee), None, Values(&inputs))?;
-                return match (result, expected) {
-                    (Some(value), Some(InlineResult::Declared(ty))) => self.fit(ctx, value, ty),
-                    (Some(value), _) => Ok(value),
-                    (None, _) => self.absent_literal(ctx, false, None),
-                };
+                call.invoke(self, ctx, Some(callee), None, Values(&inputs))?
             }
-            Callback::Function(id) => {
-                let signature = self.signature(id)?;
+            Callback::Function(signature) => {
                 ensure_unsupported!(
-                    !signature.is_async && signature.params.iter().all(|p| !p.is_rest),
+                    !signature.is_async && signature.parameters().1.is_none(),
                     "array callbacks require synchronous functions without rest parameters"
                 );
-                return Ok(
-                    match self.call_values(ctx, id, arguments.iter().copied())? {
-                        Some(value) => value,
-                        None => {
-                            let ty = FP64Type::get(ctx).into();
-                            self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty))
-                        }
-                    },
+                self.invoke_arguments(
+                    ctx,
+                    signature,
+                    arguments.iter().copied(),
+                    Arguments::Plain(&[]),
+                    None,
+                    expected,
+                )?
+            }
+            Callback::Source(decl) => {
+                ensure_unsupported!(
+                    !decl.is_async && !decl.is_generator && decl.params.iter().all(|p| !p.is_rest),
+                    "array callbacks require synchronous functions without rest parameters"
                 );
-            }
-            Callback::Lexical(function, signature) => {
-                let declaration = &self.shapes.specialization.templates[function.template];
-                (
-                    function.id,
-                    &[][..],
-                    declaration.body,
-                    declaration.return_type,
-                    declaration.is_async,
-                    declaration.is_generator,
-                    Some(signature),
-                )
-            }
-            Callback::Source(Expr::Closure {
-                func_id,
-                params,
-                body,
-                return_type,
-                is_async,
-                is_generator,
-                ..
-            }) => (
-                *func_id,
-                params.as_slice(),
-                crate::source::authored_body(params, body),
-                return_type,
-                *is_async,
-                *is_generator,
-                None,
-            ),
-            Callback::Source(_) => {
-                bail_unsupported!("array callbacks require an inline closure or named function")
-            }
-        };
-        let params = source.iter().map(|p| (p, None)).chain(
-            signature
-                .into_iter()
-                .flat_map(|s| &s.params)
-                .filter_map(|p| match p.origin {
-                    crate::lower::program::Parameter::Source(_, param) => {
-                        Some((param, Some((p.base, p.is_never))))
-                    }
-                    _ => None,
-                }),
-        );
-        ensure_unsupported!(
-            !is_async && !is_generator && params.clone().all(|(p, _)| !p.is_rest),
-            "array callbacks must be synchronous; rest parameters are not supported"
-        );
-        let result_type = match expected {
-            Some(result) => result,
-            None if let Some(signature) = signature => {
-                signature.result.map_or(InlineResult::Void, |result| {
-                    InlineResult::Declared(result.carrier)
-                })
-            }
-            None => self
-                .shapes
-                .source_closure_result(return_type)?
-                .map_or(InlineResult::Void, InlineResult::Declared),
-        };
-        let slot = self.with_inline_scope(ctx, func_id, self.frame.this_slot, |this, ctx| {
-            for (index, (param, projected)) in params.enumerate() {
-                let (binding, is_never) = match projected {
-                    Some(binding) => binding,
-                    None => this.shapes.param_type(None, &param.ty)?,
+                let result = match expected {
+                    Some(result) => result,
+                    None => self
+                        .shapes
+                        .source_closure_result(decl.return_type)?
+                        .map_or(InlineResult::Void, InlineResult::Declared),
                 };
-                let ty = binding.carrier;
-                let value = arguments.get(index).copied();
-                ensure_diag!(
-                    value.is_some() || param.default.is_some() || admits_undefined(ctx, ty),
-                    codes::TYPE_MISMATCH,
-                    "missing required callback argument"
-                );
-                this.bind_parameter(ctx, param, value, binding, is_never)?;
+                let slot =
+                    self.with_inline_scope(ctx, decl.func_id, self.frame.this_slot, |b, ctx| {
+                        for (index, param) in decl.params.iter().enumerate() {
+                            let ty = b.shapes.specialization.annotations.get(&param.ty)?;
+                            let (binding, is_never) = b
+                                .shapes
+                                .native_param(crate::engine::NativeParam::Value(ty))?;
+                            let value = arguments.get(index).copied();
+                            ensure_diag!(
+                                value.is_some()
+                                    || param.default.is_some()
+                                    || admits_undefined(ctx, binding.carrier),
+                                codes::TYPE_MISMATCH,
+                                "missing required callback argument"
+                            );
+                            b.bind_parameter(ctx, param, value, binding, is_never)?;
+                        }
+                        b.inline_body(ctx, decl.body, result)
+                    })?;
+                slot.map(|s| self.load(ctx, s)).transpose()?
             }
-            this.inline_body(ctx, body, result_type)
-        })?;
-        match slot {
-            Some(slot) => self.load(ctx, slot),
-            None => {
-                let ty = FP64Type::get(ctx).into();
-                Ok(self.emit_value(ctx, |ctx| UndefinedOp::new(ctx, ty)))
-            }
+        };
+        match (value, expected) {
+            (Some(value), Some(InlineResult::Declared(ty))) => self.fit(ctx, value, ty).map(Some),
+            (value, _) => Ok(value),
         }
     }
 }

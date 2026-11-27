@@ -37,6 +37,7 @@ mod regex;
 mod scalar;
 mod semantics;
 mod signatures;
+pub use signatures::Ty as SignatureType;
 mod types;
 mod unwraps;
 mod variants;
@@ -144,4 +145,4 @@ pub use types::*;
 pub use variants::{
     VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, value_tag, variant_cases,
 };
-pub use views::{AggregateViewOp, can_widen};
+pub use views::{AggregateViewOp, accepts_import_input, can_widen};

@@ -1,9 +1,9 @@
-//! Emission of guest-settled promises (`new Promise`, `then`/`catch`/`finally`) and global timers.
+//! Signatures for promise handles and specialized runtime helpers.
 use super::InstancePlanner;
 use crate::engine::boundary::TemplateKind;
-use crate::engine::solve::{CallTarget, Instance, ReactionKind};
-use crate::engine::types::Ty;
-use perry_hir::types::FuncId;
+use crate::engine::solve::{HelperSpec, Instance, ReactionKind};
+use crate::engine::types::{HelperId, Ty};
+use crate::engine::{NativeBody, NativeFunction, NativeParam, TimerKind};
 use perry_wit_diagnostics::Result;
 
 impl<'h> InstancePlanner<'h, '_, '_> {
@@ -12,12 +12,10 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         inst: &Instance,
         kind: TemplateKind,
     ) -> Result<()> {
-        use crate::engine::{NativeBody, NativeFunction, NativeParam};
         let identity = inst.identity();
         self.environment(identity)?;
         let mut params = vec![NativeParam::Environment(identity)];
         if let [ty] = self.types.tuple_slice(inst.args) {
-            self.prepare_layouts(*ty)?;
             params.push(NativeParam::Value(*ty));
         }
         let settle = if matches!(kind, TemplateKind::PromiseResolve(_)) {
@@ -38,100 +36,95 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn promise_reaction(
-        &mut self,
-        fid: FuncId,
-        kind: ReactionKind,
-        promise: Ty,
-        inner: Ty,
-        fulfilled: Option<(CallTarget, Ty)>,
-        rejected: Option<(CallTarget, Ty)>,
-        result: Ty,
-    ) -> Result<crate::engine::NativeFunction> {
-        use crate::engine::{NativeBody, NativeFunction, NativeParam, Reaction};
-        self.prepare_layouts(promise)?;
-        let mut params = vec![NativeParam::Value(promise)];
-        let mut bind = |(call, ty): (CallTarget, Ty)| {
-            if call.needs_value() {
-                self.prepare_layouts(ty)?;
-                params.push(NativeParam::Value(ty));
+    pub(super) fn prepare_helper(&mut self, id: HelperId) -> Result<()> {
+        let entry = self.solved.helpers[id];
+        let fid = self.fresh_func_id()?;
+        self.plans.helpers[id] = Some(fid);
+        let (label, params, result, is_async) = match entry.spec {
+            HelperSpec::Dispatcher {
+                result,
+                callee_ty,
+                arms,
+                arg_tys,
+                recv_ty,
+            } => {
+                let args = self
+                    .types
+                    .runtime_arguments(arg_tys, &self.solved.escaping_env_templates);
+                let params = std::iter::once(callee_ty)
+                    .chain(recv_ty)
+                    .chain(args.map(|(_, ty)| ty))
+                    .map(NativeParam::Value)
+                    .collect();
+                let erased =
+                    matches!(result, Ty::BOTTOM | Ty::NEVER) || self.is_zero_sized_func(result);
+                let is_async = self.solved.dispatch_arms[arms]
+                    .iter()
+                    .any(|arm| self.index.view(arm.identity.template).is_async);
+                if crate::hir_compat::has_source_offset(entry.byte_offset) {
+                    self.locations.record_instantiation(
+                        format!("__dispatch_{fid}"),
+                        "dispatch".into(),
+                        entry.byte_offset,
+                        None,
+                    );
+                }
+                (
+                    "dispatch",
+                    params,
+                    if erased { Ty::VOID } else { result },
+                    is_async,
+                )
             }
-            self.prepare_call(call)?;
-            Result::Ok(call)
-        };
-        let fulfilled = fulfilled.map(&mut bind).transpose()?;
-        let rejected = rejected.map(bind).transpose()?;
-        let result = if result == Ty::BOTTOM {
-            Ty::VOID
-        } else {
-            result
-        };
-        self.prepare_layouts(result)?;
-        let reaction = match (kind, fulfilled) {
-            (ReactionKind::Finally, Some(call)) => Reaction::Finally(call),
-            _ => Reaction::Chain {
-                fulfilled,
-                rejected,
-                rejects_only: matches!(inner, Ty::BOTTOM | Ty::NEVER),
-            },
-        };
-        let label = match kind {
-            ReactionKind::Then => "then",
-            ReactionKind::Catch => "catch",
-            ReactionKind::Finally => "finally",
-        };
-        Ok(NativeFunction {
-            name: format!("__{label}_{fid}"),
-            params,
-            result,
-            is_async: true,
-            body: NativeBody::Reaction {
-                reaction,
-                returns_void: result == Ty::VOID,
-            },
-        })
-    }
-
-    pub(super) fn prepare_call(&mut self, call: CallTarget) -> Result<()> {
-        if let CallTarget::Dispatch { helper, .. } = call {
-            self.helper_function(helper)?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn timer_runner(
-        &mut self,
-        id: FuncId,
-        kind: crate::engine::TimerKind,
-        timer: Ty,
-        cb_call: CallTarget,
-        callback_type: Ty,
-        extra: Ty,
-    ) -> Result<crate::engine::NativeFunction> {
-        use crate::engine::{NativeBody, NativeFunction, NativeParam, TimerKind};
-        let mut params = vec![NativeParam::Value(timer)];
-        if cb_call.needs_value() {
-            self.prepare_layouts(callback_type)?;
-            params.push(NativeParam::Value(callback_type));
-        }
-        if kind != TimerKind::Immediate {
-            params.push(NativeParam::Value(Ty::NUMBER));
-        }
-        for &ty in self.types.tuple_slice(extra) {
-            self.prepare_layouts(ty)?;
-            params.push(NativeParam::Value(ty));
-        }
-        self.prepare_call(cb_call)?;
-        Ok(NativeFunction {
-            name: format!("__timer_{id}"),
-            params,
-            result: Ty::VOID,
-            is_async: true,
-            body: NativeBody::Timer {
+            HelperSpec::PromiseReaction(reaction) => {
+                let mut params = vec![NativeParam::Value(reaction.promise_ty)];
+                params.extend(
+                    reaction
+                        .callbacks()
+                        .filter(|(call, _)| call.needs_value())
+                        .map(|(_, ty)| NativeParam::Value(ty)),
+                );
+                let label = match reaction.kind {
+                    ReactionKind::Then => "then",
+                    ReactionKind::Catch => "catch",
+                    ReactionKind::Finally => "finally",
+                };
+                (label, params, reaction.result(), true)
+            }
+            HelperSpec::TimerRunner {
                 kind,
-                callback: cb_call,
+                timer_ty,
+                cb_call,
+                cb_ty,
+                extra_arg_tys,
+            } => {
+                let mut params = vec![NativeParam::Value(timer_ty)];
+                if cb_call.needs_value() {
+                    params.push(NativeParam::Value(cb_ty));
+                }
+                if kind != TimerKind::Immediate {
+                    params.push(NativeParam::Value(Ty::NUMBER));
+                }
+                params.extend(
+                    self.types
+                        .tuple_slice(extra_arg_tys)
+                        .iter()
+                        .copied()
+                        .map(NativeParam::Value),
+                );
+                ("timer", params, Ty::VOID, true)
+            }
+        };
+        self.native.push((
+            fid,
+            NativeFunction {
+                name: format!("__{label}_{fid}"),
+                params,
+                result,
+                is_async,
+                body: NativeBody::Helper(entry.spec),
             },
-        })
+        ));
+        Ok(())
     }
 }

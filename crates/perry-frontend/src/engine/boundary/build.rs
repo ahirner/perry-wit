@@ -46,7 +46,7 @@ impl<'h> ModuleIndex<'h> {
     ) -> Self {
         let max_local_hint = declarations.locals.keys().copied().max().unwrap_or(0);
         let mut idx = Self {
-            functions: LexicalFunctions(Vec::with_capacity(bodies.functions.len() + 1)),
+            functions: Vec::with_capacity(bodies.functions.len() + 1),
             local_to_idx: vec![None; max_local_hint as usize + 1],
             max_local_id: max_local_hint,
             ..Self::default()
@@ -69,9 +69,6 @@ impl<'h> ModuleIndex<'h> {
             explicit_return: false,
         });
         debug_assert_eq!(init_tid, TemplateId::INIT);
-        let mut raw_sites: Vec<Vec<&'h Expr>> = vec![Vec::new()];
-        let mut defined_locals = BitSet::default();
-        let mut pending_captures: Vec<(LocalId, bool, bool)> = Vec::new();
         let mut scan = ScanCtx {
             constructors,
             decls,
@@ -81,10 +78,10 @@ impl<'h> ModuleIndex<'h> {
             declarations,
             closure_names,
             types,
-            raw_sites: &mut raw_sites,
+            promise_sites: BTreeSet::new(),
             bindings: Vec::new(),
-            defined_locals: &mut defined_locals,
-            pending_captures: &mut pending_captures,
+            defined_locals: BitSet::default(),
+            pending_captures: Vec::new(),
         };
         idx.scan_stmts(&mut scan, &bodies.init, init_tid, true, false);
 
@@ -128,9 +125,7 @@ impl<'h> ModuleIndex<'h> {
                 let owner =
                     idx.add_synthetic_template(TemplateKind::FieldInitializers, &class.name);
                 idx.classes[cid].field_init = Some(owner);
-                scan.raw_sites.resize_with(idx.views.len(), Vec::new);
                 for init in initializers {
-                    Self::record_site_expr(&mut scan, owner, init);
                     idx.scan_expr(&mut scan, init, owner, false);
                 }
             }
@@ -192,30 +187,16 @@ impl<'h> ModuleIndex<'h> {
                     idx.bindings.extend(group.iter().map(|(_, local)| *local));
             }
         }
-        raw_sites.resize_with(idx.views.len(), Vec::new);
-        for (template, list) in idx.views.ids().zip(raw_sites) {
-            let mut sites: Vec<_> = list
-                .into_iter()
-                .map(|expr| IndexedSite {
-                    expr,
-                    index: idx.expressions.register(expr, constructors),
-                    handles: None,
-                })
-                .collect();
-            sites.sort_unstable_by_key(|site| site.index);
-            sites.dedup_by_key(|site| site.index);
-            for (site, entry) in sites.iter_mut().enumerate() {
-                if matches!(entry.expr, Expr::New { class_name, .. } if class_name == "Promise") {
-                    entry.handles = Some((
-                        idx.add_synthetic_template(TemplateKind::PromiseResolve(site), "resolve"),
-                        idx.add_synthetic_template(TemplateKind::PromiseReject(site), "reject"),
-                    ));
-                }
-            }
-            idx.layouts[template].sites = idx.site_pool.extend_from_slice(&sites);
+        for (owner, site) in scan.promise_sites {
+            let resolve = idx.add_synthetic_template(TemplateKind::PromiseResolve(site), "resolve");
+            let reject = idx.add_synthetic_template(TemplateKind::PromiseReject(site), "reject");
+            idx.promises
+                .entry(owner)
+                .or_default()
+                .push((site, resolve, reject));
         }
 
-        for (cap_id, written, forward) in pending_captures {
+        for (cap_id, written, forward) in scan.pending_captures {
             if let Some(lidx) = idx.local_idx(cap_id) {
                 let flags = &mut idx.locals[lidx].flags;
                 flags.insert(LocalFlags::CAPTURED);
@@ -227,63 +208,52 @@ impl<'h> ModuleIndex<'h> {
                 }
             }
         }
-        let mut captured_locals = idx.views.filled(Vec::new());
-        for lidx in idx.locals.ids() {
-            let local = &mut idx.locals[lidx];
-            if !local.flags.intersects(LocalFlags::MODULE_OR_PARAM) {
-                if !local.flags.contains(LocalFlags::CAPTURED) {
-                    let count = &mut idx.layouts[local.owner].frame_slots;
-                    local.storage = LocalStorage::Frame(*count);
-                    *count += 1;
-                } else {
-                    captured_locals[local.owner].push(lidx);
-                }
+        for local in idx.locals.as_mut_slice() {
+            if local.flags.intersects(LocalFlags::MODULE_OR_PARAM) {
+                continue;
+            }
+            let layout = &mut idx.layouts[local.owner];
+            if local.flags.contains(LocalFlags::CAPTURED) {
+                local.storage = LocalStorage::Activation(layout.activation_slots);
+                layout.activation_slots += 1;
+            } else {
+                local.storage = LocalStorage::Frame(layout.frame_slots);
+                layout.frame_slots += 1;
             }
         }
-        for (tid, list) in captured_locals.iter_enumerated() {
-            if !list.is_empty() {
-                idx.layouts[tid].captured_locals = idx.captured_local_pool.extend_from_slice(list);
-            }
+        let mut references = idx.views.filled(BTreeMap::new());
+        for &(template, id) in &idx.external_uses {
+            references[template].insert(id, false);
         }
-        let mut template_captures = idx.views.map(|v| {
-            v.captures
+        for tid in idx.views.ids().rev() {
+            let view = &idx.views[tid];
+            let mut free = std::mem::take(&mut references[tid]);
+            free.extend(
+                view.captures
+                    .iter()
+                    .map(|&id| (id, idx.is_non_global_local(id))),
+            );
+            free.retain(|&id, _| {
+                idx.local_idx(id)
+                    .is_some_and(|local| idx.locals[local].owner != tid)
+            });
+            let mut captures = free
                 .iter()
-                .copied()
-                .filter(|&c| idx.is_non_global_local(c))
-                .collect::<Vec<_>>()
-        });
-        for (tid, view) in idx.views.iter_enumerated() {
-            for &cap_id in view.captures {
-                let Some(lidx) = idx.local_idx(cap_id) else {
-                    continue;
-                };
-                let local = idx.locals[lidx];
-                if local.flags.contains(LocalFlags::MODULE) {
-                    continue;
-                }
-                let cap_owner = local.owner;
-                let mut cur = idx.layouts[tid].closure_owner;
-                while let Some(parent) = cur {
-                    if parent == cap_owner || parent == TemplateId::INIT {
-                        break;
-                    }
-                    template_captures[parent].push(cap_id);
-                    cur = idx.layouts[parent].closure_owner;
-                }
-            }
-        }
-        for (tid, view) in idx.views.iter_enumerated() {
-            let caps = &mut template_captures[tid];
-            caps.sort_unstable();
-            caps.dedup();
-            let is_promise_handle = matches!(
+                .filter_map(|(&id, &captured)| captured.then_some(id))
+                .peekable();
+            if captures.peek().is_some() {
+                idx.layouts[tid].captures = idx.capture_pool.extend(captures);
+            } else if !matches!(
                 view.kind,
                 TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_)
-            );
-            if caps.is_empty() && !is_promise_handle {
+            ) {
                 idx.capture_free_templates.insert(tid.index());
-            } else if !caps.is_empty() {
-                idx.layouts[tid].captures = idx.capture_pool.extend_from_slice(caps);
+            }
+            if let Some(parent) = idx.closure_owner(tid) {
+                idx.layouts[tid].references = idx.capture_pool.extend(free.keys().copied());
+                for (id, captured) in free {
+                    *references[parent].entry(id).or_default() |= captured;
+                }
             }
         }
         idx
@@ -294,87 +264,49 @@ impl ModuleIndex<'_> {
     pub(crate) fn emitted_uses(
         &self,
         bodies: &crate::source::InstanceBodies<'_>,
-        solved: &super::super::solve::Solved,
+        mut origins: Origins,
         plans: &super::super::InstancePlans,
         locations: &mut hir_compat::Locations,
     ) -> std::collections::HashSet<LocalId> {
         use crate::engine::BodyOwner;
-        use crate::source::CallerKind;
-        let mut origins = self.views.filled(Vec::new());
-        for (id, inst) in solved
-            .instances
-            .iter_enumerated()
-            .filter(|(id, _)| solved.live_instances.contains(id.index()))
-        {
-            let (kind, name) = match self.view(inst.template).kind {
-                TemplateKind::ModuleInit => (CallerKind::Initializer, None),
-                TemplateKind::Closure | TemplateKind::Function => (
-                    if inst.is_witness {
-                        CallerKind::Export
-                    } else {
-                        CallerKind::Function
-                    },
-                    Some(inst.emitted_name.as_str()),
-                ),
-                _ => (CallerKind::Class, None),
-            };
-            origins[inst.template].push((solved.body_owner(id), kind, name));
-        }
-        let mut source = |id, kind, name| {
-            if let Some(tid) = self.template_of_func(id) {
-                origins[tid].push((BodyOwner::Function(id), kind, name));
-            }
-        };
-        let mut field_initializers = std::collections::HashSet::new();
-        for c in bodies.classes.iter() {
-            if c.initializer.is_none() {
-                field_initializers.insert(c.declaration.name.as_str());
-            }
-            for m in &c.declaration.computed_members {
-                source(m.function.id, CallerKind::Class, None);
-            }
-        }
-        let names: HashMap<_, _> = bodies
-            .functions
-            .iter()
-            .filter(|_| locations.has_imports())
-            .map(|f| (f.id, f.name.as_ref()))
-            .collect();
         for (tid, view) in self.views.iter_enumerated() {
-            if origins[tid].is_empty() {
-                if view.kind == TemplateKind::FieldInitializers
-                    && field_initializers.contains(view.name.as_ref())
-                {
-                    origins[tid].push((BodyOwner::Initializer, CallerKind::Class, None));
-                } else if let Some(parent) = self.closure_owner(tid)
-                    && let Some(&(_, kind, name)) = origins[parent].first()
-                {
-                    origins[tid].push((BodyOwner::Function(view.func_id), kind, name));
-                }
+            if origins[tid].is_empty()
+                && let Some(parent) = self.closure_owner(tid)
+                && let Some(&(_, kind, name)) = origins[parent].first()
+            {
+                origins[tid].push((BodyOwner::Function(view.func_id), kind, name));
             }
-            if !names.is_empty() {
+        }
+        if locations.has_imports() {
+            let functions: HashMap<_, _> = bodies.functions.iter().map(|f| (f.id, f)).collect();
+            for (&(tid, _), &expr) in &self.events {
+                let Expr::Call { byte_offset, .. } = expr else {
+                    continue;
+                };
                 for &(owner, kind, caller) in &origins[tid] {
-                    for site in self.sites(tid) {
-                        if let Expr::Call { byte_offset, .. } = site.expr
-                            && let Some(callee) = plans
-                                .call_target(owner, site.expr)
-                                .and_then(|id| names.get(&id))
-                        {
-                            locations.record_cross_file_call(callee, *byte_offset, caller, kind);
-                        }
+                    if let Some(callee) = plans
+                        .call_target(owner, expr)
+                        .and_then(|id| functions.get(&id))
+                    {
+                        locations.record_cross_file_call(
+                            (&callee.name, &self.view(callee.template).name),
+                            *byte_offset,
+                            caller
+                                .and_then(|id| functions.get(&id))
+                                .map(|f| f.name.as_ref()),
+                            kind,
+                        );
                     }
                 }
             }
         }
-        self.global_uses
+        self.external_uses
             .iter()
             .filter_map(|&(template, id)| {
                 (origins[template]
                     .iter()
                     .any(|(_, kind, _)| *kind != CallerKind::Initializer)
-                    && self
-                        .local_idx(id)
-                        .is_some_and(|i| self.locals[i].flags.contains(LocalFlags::MODULE)))
+                    && plans.binding_has_any(id, LocalFlags::MODULE))
                 .then_some(id)
             })
             .collect()

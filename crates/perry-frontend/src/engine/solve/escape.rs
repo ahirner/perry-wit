@@ -74,10 +74,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if let Some(slot) = self.local_frame_slot_in(id, lidx) {
                         self.inst_frame_locals[id].get(slot).copied()
                     } else {
-                        self.capture_locs.slots[id]
-                            .iter()
-                            .find(|s| s.local == lidx)
-                            .map(|s| self.facts[s.loc])
+                        self.local_loc_in_instance(id, lidx)
+                            .map(|loc| self.facts[loc])
                     }
                 })
                 .collect();
@@ -152,27 +150,18 @@ impl<'h, 'a> Solver<'h, 'a> {
         expr: &Expr,
         c: FuncCoercion,
     ) {
-        let template = self.instances[inst_id].template;
-        let Some(local_site) = self.index.site_of(template, expr) else {
-            debug_assert!(
-                false,
-                "unindexed coercion site in template {}",
-                template.index()
-            );
-            return;
-        };
-        if let Some(slot) = self.inst_sites[inst_id].get_mut(local_site) {
-            slot.coercion = Some(c);
+        if let Some(site) = self.index.expressions.index(expr) {
+            self.inst_sites[inst_id].entry(site).or_default().coercion = Some(c);
+        } else {
+            debug_assert!(false, "unindexed coercion site");
         }
     }
 
-    pub(super) fn clear_site(&mut self, inst_id: InstanceId, expr: &Expr) {
-        let template = self.instances[inst_id].template;
-        let Some(local_site) = self.index.site_of(template, expr) else {
-            return;
-        };
-        if let Some(slot) = self.inst_sites[inst_id].get_mut(local_site) {
-            slot.resolution = None;
+    pub(super) fn clear_site(&mut self, inst: InstanceId, expr: &Expr) {
+        if let Some(site) = self.index.expressions.index(expr)
+            && let Some(entry) = self.inst_sites[inst].get_mut(&site)
+        {
+            entry.resolution = None;
         }
     }
 

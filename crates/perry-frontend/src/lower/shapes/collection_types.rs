@@ -1,6 +1,8 @@
 //! MIR records of `Map`, `Set`, their live views, dictionaries and pairs.
 use super::*;
-use crate::lower::collections::{CollectionViewKind, EntryKind, StorageField as Field};
+use crate::lower::collections::{
+    CollectionKind, CollectionViewKind, EntryTypes, StorageField as Field,
+};
 
 impl<T> Shapes<'_, T> {
     /// The `tuple` record `[first, second]`: iterated entries and `[key, value]` pairs.
@@ -16,44 +18,29 @@ impl<T> Shapes<'_, T> {
         )
     }
 
-    /// A `Map` entry `{ _0: key, _1: value, _2: live, _3: seq }`.
-    pub(crate) fn map_tuple_type(
+    pub(in crate::lower) fn entry_type(
         &mut self,
         ctx: &Context,
-        k_ty: TypeHandle,
-        v_ty: TypeHandle,
+        types: EntryTypes,
     ) -> Result<TypedHandle<RecordType>> {
-        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let f64_ty = FP64Type::get(ctx).into();
-        self.mir_record_kind(
-            ctx,
-            RecordKind::MapEntry,
-            vec![
-                ("_0".to_string(), k_ty),
-                ("_1".to_string(), v_ty),
-                ("_2".to_string(), i1_ty),
-                ("_3".to_string(), f64_ty),
-            ],
-        )
-    }
-
-    /// A `Set` entry `{ _0: value, _1: live, _2: seq }`.
-    pub(crate) fn set_tuple_type(
-        &mut self,
-        ctx: &Context,
-        elem_ty: TypeHandle,
-    ) -> Result<TypedHandle<RecordType>> {
-        let i1_ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
-        let f64_ty = FP64Type::get(ctx).into();
-        self.mir_record_kind(
-            ctx,
-            RecordKind::SetEntry,
-            vec![
-                ("_0".to_string(), elem_ty),
-                ("_1".to_string(), i1_ty),
-                ("_2".to_string(), f64_ty),
-            ],
-        )
+        let (kind, record, mut fields) = match types {
+            EntryTypes::Map(key, value) => (
+                CollectionKind::Map,
+                RecordKind::MapEntry,
+                vec![("_0".into(), key), ("_1".into(), value)],
+            ),
+            EntryTypes::Set(element) => (
+                CollectionKind::Set,
+                RecordKind::SetEntry,
+                vec![("_0".into(), element)],
+            ),
+        };
+        fields.push((
+            kind.live_field().into(),
+            IntegerType::get(ctx, 1, Signedness::Signless).into(),
+        ));
+        fields.push((kind.seq_field().into(), FP64Type::get(ctx).into()));
+        self.mir_record_kind(ctx, record, fields)
     }
 
     /// The `{ _0: index, _1: min_seq, _2: epoch }` cursor of a live iterator.
@@ -74,7 +61,7 @@ impl<T> Shapes<'_, T> {
         &mut self,
         ctx: &Context,
         entry: TypedHandle<RecordType>,
-        kind: EntryKind,
+        kind: CollectionKind,
     ) -> Result<TypedHandle<RecordType>> {
         let entries_arr = ArrayType::get(ctx, entry.into()).into();
         let f64_ty: TypeHandle = FP64Type::get(ctx).into();
@@ -110,23 +97,17 @@ impl<T> Shapes<'_, T> {
 }
 
 impl<T> Shapes<'_, T> {
-    pub(in crate::lower) fn map_box_type(
+    pub(in crate::lower) fn collection_type(
         &mut self,
         ctx: &Context,
-        k_ty: TypeHandle,
-        v_ty: TypeHandle,
+        types: EntryTypes,
     ) -> Result<TypedHandle<RecordType>> {
-        let entry = self.map_tuple_type(ctx, k_ty, v_ty)?;
-        self.collection_box_type(ctx, entry, EntryKind::Map)
-    }
-
-    pub(super) fn set_box_type(
-        &mut self,
-        ctx: &Context,
-        elem_ty: TypeHandle,
-    ) -> Result<TypedHandle<RecordType>> {
-        let entry = self.set_tuple_type(ctx, elem_ty)?;
-        self.collection_box_type(ctx, entry, EntryKind::Set)
+        let entry = self.entry_type(ctx, types)?;
+        let kind = match types {
+            EntryTypes::Map(..) => CollectionKind::Map,
+            EntryTypes::Set(_) => CollectionKind::Set,
+        };
+        self.collection_box_type(ctx, entry, kind)
     }
 
     /// A `Record<K, V>` dictionary entry `{ _0: K, _1: V }`.
@@ -159,26 +140,26 @@ impl Shapes<'_, Preparing<'_>> {
         }
         let view = CollectionViewKind::from_type_name(name);
         let collection = match name {
-            "Map" | "ReadonlyMap" => Some(EntryKind::Map),
-            "Set" | "ReadonlySet" => Some(EntryKind::Set),
+            "Map" | "ReadonlyMap" => Some(CollectionKind::Map),
+            "Set" | "ReadonlySet" => Some(CollectionKind::Set),
             _ => view.map(CollectionViewKind::source),
         };
         if let Some(collection) = collection {
             let storage = match (collection, arguments) {
-                (EntryKind::Map, [key, value]) => {
+                (CollectionKind::Map, [key, value]) => {
                     let key = carrier(self, key)?;
                     let value = carrier(self, value)?;
-                    self.map_box_type(ctx, key, value)?
+                    self.collection_type(ctx, EntryTypes::Map(key, value))?
                 }
-                (EntryKind::Set, [element]) => {
+                (CollectionKind::Set, [element]) => {
                     let element = carrier(self, element)?;
-                    self.set_box_type(ctx, element)?
+                    self.collection_type(ctx, EntryTypes::Set(element))?
                 }
-                (EntryKind::Map, _) => bail_diag!(
+                (CollectionKind::Map, _) => bail_diag!(
                     codes::TYPE_MISMATCH,
                     "{name} needs key and value type arguments"
                 ),
-                (EntryKind::Set, _) => bail_diag!(
+                (CollectionKind::Set, _) => bail_diag!(
                     codes::TYPE_MISMATCH,
                     "{name} needs one element type argument"
                 ),

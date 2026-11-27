@@ -14,8 +14,6 @@ mod dates;
 mod expressions;
 mod foreign;
 mod frame;
-mod functions;
-use functions::{Callee, Functions};
 mod host;
 mod inline;
 mod json;
@@ -80,10 +78,11 @@ use pliron::{
 use shapes::{BindingType, Shapes, identifier};
 use std::collections::{HashMap, HashSet};
 
+use crate::shapes::Imported;
 use builder::{EXIT_STATUS, FunctionBuilder, LocalBinding};
 use coerce::{Kind, is_integer64, kind, void_type};
 use frame::{Control, Handler, Jump};
-use program::{Builtin, Signature};
+use program::{Body, Functions, Signature};
 
 /// The function `wasi:cli/run` binds to: the top-level statements of a module without exported
 /// functions, otherwise an entry point awaiting module initialization.

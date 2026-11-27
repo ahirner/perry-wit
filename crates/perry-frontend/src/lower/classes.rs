@@ -7,14 +7,15 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         class: &'s crate::source::InstanceClass<'s>,
         args: &'s [Expr],
-        slots: Option<&[(usize, crate::engine::types::Ty)]>,
+        arguments: Option<crate::engine::types::Ty>,
     ) -> Result<Value> {
         self.invoke_arguments(
             ctx,
             self.signature(class.factory()?)?,
             std::iter::empty(),
             Arguments::Constructor(args),
-            slots,
+            arguments,
+            None,
         )?
         .ok_or_else(|| internal!("class constructor has no result"))
     }
@@ -134,15 +135,5 @@ impl<'s> FunctionBuilder<'s, '_> {
             .and_then(|slot| self.slot_type(ctx, slot).ok())
             .and_then(|ty| self.shapes.class_of_type(ctx, ty))
             == Some(class_name)
-    }
-
-    pub(super) fn read_member(
-        &mut self,
-        ctx: &mut Context,
-        id: FuncId,
-        receiver: Value,
-    ) -> Result<Value> {
-        self.call_values(ctx, id, std::iter::once(receiver))?
-            .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "class member produced no value"))
     }
 }

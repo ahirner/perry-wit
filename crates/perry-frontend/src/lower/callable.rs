@@ -6,12 +6,11 @@ use perry_mir::{VariantNewOp, VariantPayloadOp, VariantTagOp, VariantType};
 
 #[derive(Clone, Copy)]
 pub(in crate::lower) enum Callback<'s> {
-    Source(&'s Expr),
-    Function(FuncId),
-    Lexical(&'s Function<'s>, &'s Signature<'s>),
+    Source(&'s crate::engine::boundary::TemplateView<'s>),
+    Function(&'s Signature<'s>),
     Bound {
         call: CallTarget,
-        params: &'s [(usize, Ty)],
+        inputs: Ty,
         callee: Value,
     },
 }
@@ -33,7 +32,7 @@ impl ValueCoercion {
             Self::Tag(id, to) | Self::BoxEnv(id, to) => {
                 let payload = if self.reads_operand() {
                     let value = read(b, ctx, None)?;
-                    let env = b.shapes.environment_record(id)?.into();
+                    let env = b.shapes.environment(id)?.record.into();
                     Some(b.callable_field(ctx, value, "val", env)?)
                 } else {
                     None
@@ -76,9 +75,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Callback<'s>> {
-        Ok(self
-            .optional_callback(ctx, expr)?
-            .unwrap_or(Callback::Source(expr)))
+        self.optional_callback(ctx, expr)?.ok_or_else(|| {
+            unsupported!("array callbacks require an inline closure or named function")
+        })
     }
 
     pub(in crate::lower) fn optional_callback(
@@ -86,37 +85,36 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         expr: &'s Expr,
     ) -> Result<Option<Callback<'s>>> {
-        let plans = &self.shapes.specialization.instances;
-        let site = plans.site(self.frame.owner, expr);
+        let site = self.site(expr);
         let callback =
             if let Some(crate::engine::solve::FuncCoercion::Callback { target, inputs }) =
                 site.coercion
             {
                 Callback::Bound {
                     call: target,
-                    params: plans.arguments(inputs)?,
+                    inputs,
                     callee: self
                         .instance_value(ctx, expr, None, site.resolution, true)?
                         .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "a void call has no value"))?,
                 }
-            } else if let Some(id) = plans.reference_at(self.frame.owner, expr, site.resolution) {
-                if self.signatures.source(id).and_then(|f| f.inline)
-                    == Some(crate::engine::solve::Invocation::Lexical)
-                {
-                    let signature = self.signature(id)?;
-                    let function = signature
-                        .inline
-                        .ok_or_else(|| internal!("missing lexical callback body"))?;
-                    Callback::Lexical(function, signature)
-                } else if let Some(expr) = self.shapes.specialization.lexical.closure(id) {
-                    Callback::Source(expr)
-                } else {
-                    Callback::Function(id)
-                }
-            } else if matches!(expr, Expr::Closure { .. }) {
-                Callback::Source(expr)
             } else {
-                return Ok(None);
+                let id = self
+                    .shapes
+                    .specialization
+                    .instances
+                    .reference_at(self.frame.owner, expr, site.resolution)
+                    .or(match expr {
+                        Expr::Closure { func_id, .. } => Some(*func_id),
+                        _ => None,
+                    });
+                let Some(id) = id else { return Ok(None) };
+                if let Some(signature) = self.signatures.get(&id) {
+                    Callback::Function(signature)
+                } else if let Some((declaration, _)) = self.shapes.specialization.closure(id) {
+                    Callback::Source(declaration)
+                } else {
+                    return Err(internal!("unknown callback function {id}"));
+                }
             };
         Ok(Some(callback))
     }
@@ -128,7 +126,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         inputs: impl Iterator<Item = Value>,
     ) -> Result<Option<Value>> {
         let signature = self.signature(target)?;
-        self.invoke_arguments(ctx, signature, inputs, Arguments::Plain(&[]), None)
+        self.invoke_arguments(ctx, signature, inputs, Arguments::Plain(&[]), None, None)
     }
 
     pub(super) fn dispatch_body(
@@ -136,12 +134,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         receiver: bool,
         arms: crate::engine::types::DispatchArmSpan,
-        inputs: Ty,
         args: &[Value],
     ) -> Result<()> {
         let plans = &self.shapes.specialization.instances;
         let arms = &plans.dispatch_arms[arms];
-        let slots = plans.arguments(inputs)?;
         let (&callee, args) = args
             .split_first()
             .ok_or_else(|| internal!("missing dispatcher callee"))?;
@@ -183,11 +179,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let inputs = env
                 .into_iter()
                 .chain(receiver.filter(|_| arm.receiver))
-                .chain(
-                    args.iter()
-                        .copied()
-                        .take(slots.partition_point(|&(index, _)| index < arm.arguments)),
-                );
+                .chain(args.iter().copied());
             let value = self.call_values(ctx, plans.function(arm.target), inputs)?;
             self.return_callback(ctx, value, false)?;
             if let Some(next) = next {

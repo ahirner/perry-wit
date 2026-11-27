@@ -2,7 +2,7 @@
 //!
 //! Frontend record identities map to carriers; object construction evaluates fields in source order.
 use crate::lower::{
-    Diagnostic, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
+    Diagnostic, LocalBinding, Result, bail_diag, codes, diag, ensure_diag, ensure_unsupported,
     missing_type_annotation, unsupported,
 };
 use perry_hir::types::Type as HirType;
@@ -97,7 +97,7 @@ pub(super) struct Shapes<'h, T = Prepared<'h>> {
     pub(super) types: T,
     pub(super) module: pliron::builtin::ops::ModuleOp,
     pub(super) foreign_wrappers: HashMap<(&'h str, Vec<TypeHandle>), Identifier>,
-    pub(super) globals: BTreeMap<perry_hir::types::LocalId, Option<BindingType>>,
+    pub(super) globals: BTreeMap<perry_hir::types::LocalId, Option<LocalBinding<TypeHandle>>>,
     pub(super) decls: &'h Declarations<'h>,
     callables: crate::engine::bitset::BitSet,
     pub(super) class_records: HashMap<TypeHandle, std::rc::Rc<ClassLayout<'h>>>,
@@ -122,7 +122,7 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             perry_mir::RecordLayouts,
         ),
     ) -> Self {
-        let global_ids = specialization.globals.iter().copied().chain(
+        let global_ids = specialization.instances.globals.iter().copied().chain(
             specialization
                 .bodies
                 .static_fields
@@ -241,17 +241,6 @@ impl<'h, T> Shapes<'h, T> {
             .functions
             .iter()
             .any(|f| f.name == name)
-    }
-
-    pub(super) fn foreign_function(
-        &self,
-        local: &str,
-    ) -> Option<(&'h str, &'h crate::wit::ImportSignature<'h>)> {
-        self.decls
-            .foreign_functions
-            .get(local)
-            .copied()
-            .or_else(|| self.decls.world.function(local))
     }
 }
 
@@ -376,7 +365,16 @@ impl Shapes<'_, Preparing<'_>> {
     }
 }
 
-impl Shapes<'_> {
+impl<'h> Shapes<'h> {
+    pub(super) fn runtime_arguments(
+        &self,
+        tuple: Ty,
+    ) -> impl Iterator<Item = (usize, Ty)> + Clone + 'h {
+        self.types
+            .source
+            .runtime_arguments(tuple, &self.specialization.escaping_env_templates)
+    }
+
     pub(super) fn resolved_binding(&self, ty: Ty) -> Result<BindingType> {
         self.types.bindings[ty].clone()
     }
@@ -421,26 +419,25 @@ impl Shapes<'_> {
     }
 }
 
-impl<T> Shapes<'_, T> {
-    pub(super) fn environment_record(
+impl<'h, T> Shapes<'h, T> {
+    pub(super) fn environment(
         &self,
         identity: crate::engine::types::FuncIdentity,
-    ) -> Result<TypedHandle<RecordType>> {
-        let layouts = &self.specialization.instances.environments;
-        layouts
-            .id(identity)
-            .map(|id| layouts.record(id))
+    ) -> Result<&'h crate::engine::Environment> {
+        self.specialization
+            .instances
+            .environments
+            .get(&identity)
             .ok_or_else(|| Diagnostic::internal("missing closure environment layout"))
     }
 }
 
 impl Shapes<'_> {
     pub(super) fn define_environments(&mut self, ctx: &Context) -> Result<()> {
-        let layouts = &self.specialization.instances.environments;
-        for id in layouts.ids() {
-            let record = layouts.record(id);
-            let fields = layouts
-                .fields(id)
+        let plans = &self.specialization.instances;
+        for layout in plans.environments.values() {
+            let record = layout.record;
+            let fields = plans.environment_fields[layout.fields]
                 .iter()
                 .enumerate()
                 .map(|(slot, field)| {

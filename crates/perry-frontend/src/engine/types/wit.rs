@@ -65,6 +65,7 @@ impl TypeTable {
                 }
             },
             &|table, contract| match contract {
+                Contract::Alias(ty) => ty,
                 Contract::Scalar(scalar) => {
                     let ty = match scalar {
                         Type::Bool => Ty::BOOLEAN,
@@ -117,10 +118,14 @@ impl TypeTable {
                     table.object(&props, None)
                 }
                 Contract::Enum(tags) => {
-                    let tags: Vec<_> = tags.map(|tag| table.literal(ctx, tag)).collect();
+                    let tags: Vec<_> = tags
+                        .cases
+                        .iter()
+                        .map(|case| table.literal(ctx, &case.name))
+                        .collect();
                     table.union(&tags)
                 }
-                Contract::Variant(cases) => {
+                Contract::Variant(_, cases) => {
                     let cases: Vec<_> = cases
                         .into_iter()
                         .map(|(tag, value)| {

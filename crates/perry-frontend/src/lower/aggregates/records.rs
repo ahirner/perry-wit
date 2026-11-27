@@ -280,39 +280,49 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(in crate::lower) fn closure_value(
         &mut self,
         ctx: &mut Context,
-        closure: &crate::engine::ClosureValue,
+        closure: crate::engine::ClosureValue,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        use crate::engine::CaptureOperand;
-        let record = self.shapes.environment_record(closure.identity)?;
-        let field_types = record
-            .deref(ctx)
-            .fields()
-            .to_diag(ctx)?
+        use crate::engine::EnvironmentField;
+        let layout = self.shapes.environment(closure.identity)?;
+        let record = layout.record;
+        let plans = &self.shapes.specialization.instances;
+        let mut conversions = plans.capture_conversions[closure.conversions]
             .iter()
-            .map(|field| field.1)
-            .collect::<Vec<_>>();
-        let mut values = Vec::with_capacity(field_types.len());
-        if closure.operands.is_empty() {
-            values.push(self.number(ctx, 0.0));
-        } else {
-            ensure_internal!(
-                field_types.len() == closure.operands.len(),
-                "wrong number of closure captures"
-            );
-            for (ty, &operand) in field_types.into_iter().zip(&closure.operands) {
-                let value = match operand {
-                    CaptureOperand::Local(id) => {
-                        let value = self.load_local(ctx, id)?;
-                        self.narrow_value(ctx, || Some(crate::narrowing::Path::local(id)), value)?
+            .copied()
+            .peekable();
+        let fields = &plans.environment_fields[layout.fields];
+        let mut values = Vec::with_capacity(fields.len());
+        for &field in fields {
+            let ty = self
+                .shapes
+                .storage_binding(ctx, field.storage())?
+                .expected_type(ctx);
+            let value = match field {
+                EnvironmentField::Unit => self.number(ctx, 0.0),
+                EnvironmentField::Settler(_) => {
+                    bail_internal!("promise settlement handle in a source closure")
+                }
+                EnvironmentField::Capture {
+                    local,
+                    cell: Some(_),
+                    ..
+                } => self.load(ctx, self.local(local)?)?,
+                EnvironmentField::Capture { local, .. } => {
+                    if let Some((_, conversion)) = conversions.next_if(|&(id, _)| id == local) {
+                        conversion
+                            .emit(self, ctx, Some(ty), |b, ctx, _| b.load_local(ctx, local))?
+                    } else {
+                        let value = self.load_local(ctx, local)?;
+                        self.narrow_value(
+                            ctx,
+                            || Some(crate::narrowing::Path::local(local)),
+                            value,
+                        )?
                     }
-                    CaptureOperand::Cell(id) => self.load(ctx, self.local(id)?)?,
-                    CaptureOperand::Coerce(id, conversion) => {
-                        conversion.emit(self, ctx, Some(ty), |b, ctx, _| b.load_local(ctx, id))?
-                    }
-                };
-                values.push(self.fit(ctx, value, ty)?);
-            }
+                }
+            };
+            values.push(self.fit(ctx, value, ty)?);
         }
         let env = self.emit_value(ctx, |ctx| {
             let order = perry_mir::FieldOrder((0..values.len() as u32).collect());

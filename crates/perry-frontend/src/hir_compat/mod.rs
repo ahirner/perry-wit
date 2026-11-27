@@ -257,3 +257,12 @@ pub(crate) fn error_class(code: u32) -> Result<ErrorClass> {
 
 mod objects;
 pub(crate) use objects::{literal_option, object_literal_pairs, read_file_text};
+
+pub(crate) fn tuple_position(index: &perry_hir::ir::Expr) -> Option<usize> {
+    use perry_hir::ir::Expr;
+    match index {
+        Expr::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as usize),
+        Expr::Integer(n) => usize::try_from(*n).ok(),
+        _ => None,
+    }
+}

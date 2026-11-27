@@ -2,67 +2,6 @@
 use super::*;
 use perry_mir::{ForeignOp, Phase};
 
-/// Whether `actual` is structurally compatible with outbound import parameter type `expected`.
-pub(super) fn accepts_input(ctx: &Context, expected: TypeHandle, actual: TypeHandle) -> bool {
-    fn accepts(
-        ctx: &Context,
-        expected: TypeHandle,
-        actual: TypeHandle,
-        seen: &mut HashSet<(TypeHandle, TypeHandle)>,
-    ) -> bool {
-        if expected == actual || !seen.insert((expected, actual)) {
-            return true;
-        }
-        let expected = expected.deref(ctx);
-        let actual = actual.deref(ctx);
-        if expected.is::<perry_mir::ByteInputType>() {
-            return actual.is::<BytesType>() || actual.is::<StringType>();
-        }
-        if let (Some(a), Some(b)) = (
-            expected.downcast_ref::<perry_mir::OptionalType>(),
-            actual.downcast_ref::<perry_mir::OptionalType>(),
-        ) {
-            return (!b.absence().admits_null() || a.absence().admits_null())
-                && (!b.absence().admits_undefined() || a.absence().admits_undefined())
-                && accepts(ctx, a.value(), b.value(), seen);
-        }
-        if let (Some(a), Some(b)) = (
-            expected.downcast_ref::<ArrayType>(),
-            actual.downcast_ref::<ArrayType>(),
-        ) {
-            return accepts(ctx, a.element(), b.element(), seen);
-        }
-        if let (Some(a), Some(b)) = (
-            expected.downcast_ref::<RecordType>(),
-            actual.downcast_ref::<RecordType>(),
-        ) {
-            let (Ok(a), Ok(b)) = (a.fields(), b.fields()) else {
-                return false;
-            };
-            return a.len() == b.len()
-                && a.iter()
-                    .zip(b)
-                    .all(|((an, at), (bn, bt))| an == bn && accepts(ctx, *at, *bt, seen));
-        }
-        if let (Some(a), Some(b)) = (
-            expected.downcast_ref::<perry_mir::VariantType>(),
-            actual.downcast_ref::<perry_mir::VariantType>(),
-        ) {
-            return a.cases().len() == b.cases().len()
-                && a.cases().iter().zip(b.cases()).all(|((an, at), (bn, bt))| {
-                    an == bn
-                        && match (at, bt) {
-                            (Some(a), Some(b)) => accepts(ctx, *a, *b, seen),
-                            (None, None) => true,
-                            _ => false,
-                        }
-                });
-        }
-        false
-    }
-    accepts(ctx, expected, actual, &mut HashSet::new())
-}
-
 pub(super) fn wrapper<'h>(
     ctx: &mut Context,
     shapes: &mut Shapes<'h>,
@@ -213,16 +152,16 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.expression_with(ctx, arg, Some(ty))?
             };
             let actual = value.get_type(ctx);
-            let value = if foreign::accepts_input(ctx, ty, actual) {
+            let value = if perry_mir::accepts_import_input(ctx, actual, ty) {
                 value
             } else if optional_value(ctx, ty).is_none()
                 && optional_value(ctx, actual)
-                    .is_some_and(|inner| foreign::accepts_input(ctx, ty, inner))
+                    .is_some_and(|inner| perry_mir::accepts_import_input(ctx, inner, ty))
             {
                 self.defined(ctx, value)?
             } else if optional_value(ctx, actual).is_none()
                 && let Some((inner, states)) = optional_parts(ctx, ty)
-                && foreign::accepts_input(ctx, inner, actual)
+                && perry_mir::accepts_import_input(ctx, actual, inner)
             {
                 let wrapped = perry_mir::OptionalType::get_with(ctx, actual, states).into();
                 self.emit_value(ctx, |ctx| WrapOp::with_type(ctx, value, wrapped))

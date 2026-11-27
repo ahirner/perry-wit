@@ -215,7 +215,7 @@ impl<'s> Locations<'s> {
 
     pub(crate) fn record_cross_file_call(
         &mut self,
-        callee: &str,
+        (callee, declaration): (&str, &str),
         offset: u32,
         caller: Option<&str>,
         priority: crate::source::CallerKind,
@@ -234,7 +234,7 @@ impl<'s> Locations<'s> {
         }
         let Some(declaration) = self
             .functions
-            .get(callee)
+            .get(declaration)
             .filter(|info| info.label.is_none())
         else {
             return;

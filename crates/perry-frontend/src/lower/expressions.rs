@@ -6,6 +6,7 @@ use crate::source::ConstructorSites;
 
 mod instances;
 mod members;
+pub(super) use members::{Assigned, Member};
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn expression(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
@@ -115,33 +116,25 @@ impl<'s> FunctionBuilder<'s, '_> {
             return self.narrow_value(ctx, || crate::narrowing::path(expr), value);
         }
         let value = match expr {
-            expr if let Some((intrinsic, operands)) =
-                crate::engine::builtins::numeric_builtin(expr) =>
-            {
-                use crate::engine::builtins::NumericOperands::*;
-                let values = match operands {
-                    Nullary => vec![],
-                    Unary(v) => vec![self.number_operand(ctx, v)?],
-                    Binary(l, r) => {
-                        vec![self.number_operand(ctx, l)?, self.number_operand(ctx, r)?]
-                    }
-                    Coerce(v) => vec![self.number_coerce(ctx, v)?],
-                };
-                self.intrinsic(ctx, intrinsic, values)
+            expr if let Some((op, inputs)) = crate::engine::builtins::hir_intrinsic(expr) => {
+                use crate::engine::builtins::IntrinsicInput::*;
+                let values = inputs
+                    .map(|input| match input {
+                        Number(expr) => self.number_operand(ctx, expr),
+                        CoerceNumber(expr) => self.number_coerce(ctx, expr),
+                        Required(expr, kind, label) => self.typed_operand(ctx, expr, kind, label),
+                        Display(expr) => {
+                            let value = self.expression(ctx, expr)?;
+                            self.display(ctx, value)
+                        }
+                        Literal(text) => Ok(self.string(ctx, text)),
+                    })
+                    .collect::<Result<_>>()?;
+                self.intrinsic(ctx, op, values)
             }
             Expr::PrivateGuard {
                 kind: 0, object, ..
             } => self.expression_with(ctx, object, expected)?,
-            Expr::Closure { func_id: id, .. } | Expr::FuncRef(id)
-                if let Some(closure) = self
-                    .shapes
-                    .specialization
-                    .instances
-                    .closure_values
-                    .get(&(self.frame.owner, *id)) =>
-            {
-                self.closure_value(ctx, closure, expected)?
-            }
             Expr::RegExp { pattern, flags } => {
                 self.emit_value(ctx, |ctx| perry_mir::RegexConstOp::new(ctx, pattern, flags))
             }
@@ -172,16 +165,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                 .map_err(|error| self.shapes.annotate_local(error, *id))?,
             Expr::Update { id, op, prefix } => {
                 self.frame.cursors.advance(*id);
-                self.update(ctx, *id, op, *prefix)
+                let op = match op {
+                    UpdateOp::Increment => BinaryOp::Add,
+                    UpdateOp::Decrement => BinaryOp::Sub,
+                };
+                self.update(ctx, *id, &op, *prefix)
                     .map_err(|error| self.shapes.annotate_local(error, *id))?
             }
-            Expr::PropertyUpdate {
-                object,
-                property,
-                op,
-                prefix,
-                ..
-            } => self.property_update(ctx, object, property, op, *prefix, (None, None))?,
             Expr::Binary { op, left, right } => self.binary_expression(ctx, op, left, right)?,
             Expr::Compare { op, left, right } => self.comparison(ctx, op, left, right)?,
             Expr::Logical { op, left, right } => self.logical(ctx, op, left, right, expected)?,
@@ -201,10 +191,8 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let array = self.load_local(ctx, *array_id)?;
                 let array = self.defined(ctx, array)?;
                 let elem = self.array_element(ctx, array)?;
-                let values = self.spread_value(ctx, source, Some(elem))?;
-                let values = self.defined(ctx, values)?;
-                let values = self.fit(ctx, values, ArrayType::get(ctx, elem).into())?;
-                self.emit(ctx, |ctx| perry_mir::ArrayExtendOp::new(ctx, array, values));
+                self.array_argument(ctx, elem, (source, true))?
+                    .append_to(self, ctx, array);
                 self.array_length(ctx, array)
             }
             Expr::CallSpread { callee, args, .. } => self.array_push_spread(ctx, callee, args)?,
@@ -216,17 +204,13 @@ impl<'s> FunctionBuilder<'s, '_> {
                     )
                 })?
             }
-            Expr::MathMin(values) => {
-                self.math_extremum(ctx, Intrinsic::MathMin, f64::INFINITY, values)?
-            }
-            Expr::MathMax(values) => {
-                self.math_extremum(ctx, Intrinsic::MathMax, f64::NEG_INFINITY, values)?
-            }
+            Expr::MathMin(values) => self.math_extremum(ctx, false, Arguments::Plain(values))?,
+            Expr::MathMax(values) => self.math_extremum(ctx, true, Arguments::Plain(values))?,
             Expr::MathMinSpread(array) => {
-                self.math_extremum_spread(ctx, false, Arguments::OneSpread(array))?
+                self.math_extremum(ctx, false, Arguments::OneSpread(array))?
             }
             Expr::MathMaxSpread(array) => {
-                self.math_extremum_spread(ctx, true, Arguments::OneSpread(array))?
+                self.math_extremum(ctx, true, Arguments::OneSpread(array))?
             }
             Expr::StructuredClone { value, .. } => {
                 let val = self.expression_with(ctx, value, expected)?;
@@ -238,11 +222,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let radix = self.number_or(ctx, radix.as_deref(), 0.0)?;
                 self.intrinsic(ctx, Intrinsic::ParseInt, vec![text, radix])
             }
-            Expr::ParseFloat(string) => {
-                let value = self.expression(ctx, string)?;
-                let text = self.display(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::ParseFloat, vec![text])
-            }
             Expr::Uint8ArrayNew(None) => {
                 let zero = self.number(ctx, 0.0);
                 self.intrinsic(ctx, Intrinsic::BytesNew, vec![zero])
@@ -251,11 +230,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.bytes_from(ctx, BytesCreation::Construct, source)?
             }
             Expr::Uint8ArrayFrom(source) => self.bytes_from(ctx, BytesCreation::From, source)?,
-            Expr::Uint8ArrayGet { array, index } => {
-                let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
-                let index = self.number_operand(ctx, index)?;
-                self.intrinsic(ctx, Intrinsic::BytesGet, vec![bytes, index])
-            }
             Expr::Uint8ArraySet {
                 array,
                 index,
@@ -264,7 +238,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let bytes = self.typed_operand(ctx, array, Kind::Bytes, "a Uint8Array")?;
                 self.set_byte_index(ctx, bytes, index, value)?
             }
-            Expr::TextEncoderNew => self.intrinsic(ctx, Intrinsic::EncoderNew, vec![]),
             Expr::TextDecoderNew {
                 label,
                 fatal,
@@ -278,23 +251,9 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
                 self.string(ctx, "utf-8")
             }
-            Expr::TextDecoderFatal(decoder) | Expr::TextDecoderIgnoreBom(decoder) => {
-                let decoder = self.typed_operand(ctx, decoder, Kind::Decoder, "a TextDecoder")?;
-                let intrinsic = if matches!(expr, Expr::TextDecoderFatal(_)) {
-                    Intrinsic::DecoderFatal
-                } else {
-                    Intrinsic::DecoderIgnoreBom
-                };
-                self.intrinsic(ctx, intrinsic, vec![decoder])
-            }
             Expr::StringFromCharCode(_) | Expr::StringFromCharCodeSpread(_) => {
                 bail_unsupported!("fromCharCode uses UTF-16 code units; use fromCodePoint")
             }
-            Expr::StringFromCodePoint(value) => {
-                let value = self.number_operand(ctx, value)?;
-                self.intrinsic(ctx, Intrinsic::StringFromCodePoint, vec![value])
-            }
-
             Expr::JsonParse(text) => {
                 let text = self.string_operand(ctx, text)?;
                 self.parse_json_text(ctx, text, expected)?
@@ -330,14 +289,9 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let text = self.string_operand(ctx, text)?;
                 self.parse_json_text(ctx, text, expected)?
             }
-            Expr::CryptoRandomUUID => self.intrinsic(ctx, Intrinsic::RandomUuid, vec![]),
             Expr::TypeOf(value) => {
                 let value = self.expression(ctx, value)?;
                 self.type_of(ctx, value)?
-            }
-            Expr::EnvGet(name) => {
-                let name = self.string(ctx, name);
-                self.intrinsic(ctx, Intrinsic::EnvGet, vec![name])
             }
             Expr::ErrorNew(message) => {
                 let message = match message {
@@ -372,31 +326,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 expr: value, ty, ..
             } => self.instance_of(ctx, value, ty)?,
             Expr::Await(promise) => self.await_(ctx, promise)?,
-            Expr::PropertyGet {
-                object,
-                property,
-                byte_offset,
-                ..
-            } => self
-                .property_get(ctx, object, property, *byte_offset)
-                .map_err(|error| self.shapes.annotate_member(error, *byte_offset))?,
-            Expr::PropertySet {
-                object,
-                property,
-                value,
-                ..
-            } => self.set_field(ctx, object, property, value)?,
-            Expr::PutValueSet {
-                target,
-                key,
-                value,
-                element_offset,
-                ..
-            } => match key.as_ref() {
-                Expr::String(field) => self.set_field(ctx, target, field, value),
-                index => self.set_index(ctx, target, index, value),
-            }
-            .map_err(|error| self.shapes.annotate_member(error, *element_offset))?,
             Expr::New {
                 class_name,
                 args,
@@ -649,26 +578,36 @@ impl<'s> FunctionBuilder<'s, '_> {
         &mut self,
         ctx: &mut Context,
         id: LocalId,
-        op: &UpdateOp,
+        op: &BinaryOp,
         prefix: bool,
     ) -> Result<Value> {
         let local = self.local_binding(id)?;
         let old = self.load_local(ctx, id)?;
-        let old = self.arithmetic(ctx, old);
+        let (old, new) = self.numeric_update(ctx, old, op)?;
+        let stored = self.assign_local(ctx, local, new)?;
+        self.variant_guards.assign(id);
+        Ok(if prefix { stored } else { old })
+    }
+
+    fn numeric_update(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        op: &BinaryOp,
+    ) -> Result<(Value, Value)> {
+        let old = self.arithmetic(ctx, value);
         ensure_diag!(
             kind(ctx, old)? == Kind::Number,
             codes::TYPE_MISMATCH,
             "++/-- needs a number"
         );
-        let one = self.number(ctx, 1.0);
-        let kind = match op {
-            UpdateOp::Increment => BinaryKind::Add,
-            UpdateOp::Decrement => BinaryKind::Sub,
+        let op = match op {
+            BinaryOp::Add => BinaryKind::Add,
+            BinaryOp::Sub => BinaryKind::Sub,
+            _ => bail_internal!("invalid property update"),
         };
-        let new = self.binary(ctx, kind, old, one);
-        let stored = self.assign_local(ctx, local, new)?;
-        self.variant_guards.assign(id);
-        Ok(if prefix { stored } else { old })
+        let one = self.number(ctx, 1.0);
+        Ok((old, self.binary(ctx, op, old, one)))
     }
 
     pub(super) fn branch_operand(

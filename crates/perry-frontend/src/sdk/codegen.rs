@@ -3,9 +3,7 @@
 //! Generates idiomatic, strongly-typed TypeScript definitions for WIT worlds,
 //! exported functions, records, variants, enums, and imported interfaces.
 
-use perry_contract::names::{
-    TsNames, collect_types, to_camel_case, to_pascal_case, visit_type_children,
-};
+use perry_contract::names::{TsNames, to_camel_case, to_pascal_case};
 use perry_contract::types::{Contract, Input, convert};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, codes};
@@ -19,6 +17,7 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
         &mut (),
         &|(), id| names.name(id),
         &|(), contract| match contract {
+            Contract::Alias(ty) => ty,
             Contract::Scalar(ty) => scalar_type(ty).into(),
             Contract::Resource { id, .. } => names.name(id).unwrap_or_else(|| "unknown".into()),
             Contract::Bytes => "Uint8Array".into(),
@@ -41,11 +40,13 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
                 out.push('}');
                 out
             }
-            Contract::Enum(cases) => cases
-                .map(|name| format!("\"{name}\""))
+            Contract::Enum(e) => e
+                .cases
+                .iter()
+                .map(|case| format!("\"{}\"", case.name))
                 .collect::<Vec<_>>()
                 .join(" | "),
-            Contract::Variant(cases) => {
+            Contract::Variant(_, cases) => {
                 let mut out = String::new();
                 for (name, payload) in cases {
                     let _ = write!(out, "\n  | {{ tag: \"{name}\"");
@@ -62,15 +63,10 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
 }
 
 fn has_bytes(resolve: &Resolve, ty: &Type) -> bool {
-    let Type::Id(id) = ty else { return false };
-    if matches!(resolve.types[*id].kind, TypeDefKind::List(Type::U8)) {
-        return true;
-    }
-    let mut found = false;
-    visit_type_children(&resolve.types[*id].kind, |ty| {
-        found = found || has_bytes(resolve, ty);
-    });
-    found
+    let mut live = wit_parser::LiveTypes::default();
+    live.add_type(resolve, ty);
+    live.iter()
+        .any(|id| matches!(resolve.types[id].kind, TypeDefKind::List(Type::U8)))
 }
 fn outbound_ts(names: &TsNames<'_>, ty: &Type) -> String {
     let ordinary = type_to_ts(names, Input::Reference(*ty));
@@ -265,19 +261,9 @@ pub(super) fn generate_import_declarations(resolve: &Resolve, world: &World) -> 
         }
         let module = serde_json::Value::String(resolve.name_world_key(key));
         let interface = &resolve.interfaces[*id];
-        let mut ids = HashSet::new();
-        for id in interface.types.values() {
-            collect_types(resolve, &Type::Id(*id), &mut ids);
-        }
-        for function in interface.functions.values() {
-            for param in &function.params {
-                collect_types(resolve, &param.ty, &mut ids);
-            }
-            if let Some(ty) = function.result {
-                collect_types(resolve, &ty, &mut ids);
-            }
-        }
-        let mut declarations: Vec<_> = ids.into_iter().filter_map(|id| names.name(id)).collect();
+        let mut live = wit_parser::LiveTypes::default();
+        live.add_interface(resolve, *id);
+        let mut declarations: Vec<_> = live.iter().filter_map(|id| names.name(id)).collect();
         declarations.sort();
         declarations.dedup();
         // A JSON string literal is a valid TypeScript module specifier.

@@ -232,7 +232,13 @@ const holder = { f: twice };
 const counter = {
   n: 0,
   bump(by) { this.n += by; return this.n; },
-  offsets(xs: number[]) { return xs.map(x => x + this.n).join(","); },
+  offsets(xs: number[]) {
+    let calls = 0;
+    return xs.map((x, i, a, step = this.n) => {
+      calls++;
+      return x + step + calls;
+    }).join(",");
+  },
 };
 const greeter = { greet(name) { return "hi " + name; } };
 function getFn() { return twice; }
@@ -253,7 +259,7 @@ console.log(
   fs[0](1),
 );
 "#,
-            "3,6\n8 10 12 5 hi a 14 true 16 2\n",
+            "4,8\n8 10 12 5 hi a 14 true 16 2\n",
         ),
         (
             "tagged_function_unions_dispatch_and_callbacks",
@@ -355,6 +361,10 @@ console.log(filtered[1](4), joined[0](4), joined[1](4), src.length);
 function scale(k) {
   return (x) => x * k;
 }
+function slot(k) {
+  let current = scale(k);
+  return { read: () => current, replace: (n) => { current = scale(n); } };
+}
 function counter() {
   let n = 0;
   return () => ++n;
@@ -390,6 +400,10 @@ function nestedInline(start) {
   });
 }
 
+const holder = slot(2);
+const first = holder.read();
+holder.replace(3);
+console.log(first(5), holder.read()(5), first === holder.read());
 const s3 = scale(3);
 const s3b = scale(3);
 const c1 = counter();
@@ -432,7 +446,7 @@ console.log(
   ni([1, 2, 3]).join(","),
 );
 "#,
-            "6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
+            "10 15 false\n6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
         ),
         (
             "erased_function_values_preserve_evaluation_order",
@@ -681,6 +695,15 @@ console.log(await first.promise, await second.promise);
             r#"
 type __PerryTimer = { label: string };
 function readLabel(value: __PerryTimer) { return value.label; }
+async function dispatch(flag) {
+  const transform = flag ? (value) => value + 2 : (value) => value * 2;
+  const result = await Promise.resolve(5).then(transform);
+  const timer = await new Promise(resolve => {
+    const done = flag ? () => resolve(3) : () => resolve(7);
+    setImmediate(done);
+  });
+  return result + timer;
+}
 async function main() {
   const immediate = await new Promise((resolve) => resolve(41 + 1));
   const delayed = await new Promise((resolve) => {
@@ -757,11 +780,12 @@ async function main() {
     thisMatches,
     imm,
     readLabel({label: "user"}),
+    await dispatch(true), await dispatch(false),
   );
 }
 await main();
 "#,
-            "42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm user\n",
+            "42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm user 10 17\n",
         ),
     ];
     for &(name, source, expected) in cases {

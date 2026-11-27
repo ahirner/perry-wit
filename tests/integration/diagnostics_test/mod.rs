@@ -208,6 +208,25 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
         assert_caller_note(&err, "src/lib.ts", needle);
     }
 
+    let exported = program_with(
+        WORKFLOW,
+        "import {helper} from './lib'; export {helper}; export function run(n:number):number { return helper(n); }",
+        &[(
+            "src/lib.ts",
+            "export function helper(n:number):number { return n ** 2; }",
+        )],
+    );
+    let wit = Wit {
+        application: b"package test:origins; world app { export helper: func(n:f64) -> f64; export run: func(n:f64) -> f64; }".as_slice().into(),
+        dependencies: vec![],
+    };
+    for error in [
+        api::compile(&exported, &wit, &Options::default()).unwrap_err(),
+        api::compile_core(&exported).unwrap_err(),
+    ] {
+        assert_caller_note(&error, "src/lib.ts", "called from here ('helper')");
+    }
+
     // Nested chain: workflow.ts -> generic mid<T> in mid.ts -> helper leaf in leaf.ts.
     let chain_err = api::compile_core(&program_with(
         WORKFLOW,

@@ -1,8 +1,9 @@
 //! Borrowed WIT traversal with constructors for each contract representation.
-use wit_parser::{Handle, Resolve, Type, TypeDefKind, TypeId};
+use wit_parser::{Enum, Handle, Int, Resolve, Type, TypeDefKind, TypeId};
 
 pub enum Contract<'a, T> {
     Scalar(Type),
+    Alias(T),
     Resource { id: TypeId, owned: bool },
     Bytes,
     ByteStream,
@@ -11,8 +12,8 @@ pub enum Contract<'a, T> {
     Result { ok: Option<T>, err: Option<T> },
     Tuple(Vec<T>),
     Record(Vec<(String, T)>),
-    Enum(&'a mut dyn Iterator<Item = &'a str>),
-    Variant(Vec<(&'a str, Option<T>)>),
+    Enum(&'a Enum),
+    Variant(Int, Vec<(&'a str, Option<T>)>),
     Unsupported(&'static str),
 }
 
@@ -28,20 +29,28 @@ pub fn convert<S, T>(
     reference: &impl Fn(&mut S, TypeId) -> Option<T>,
     construct: &impl Fn(&mut S, Contract<'_, T>) -> T,
 ) -> T {
-    let id = match input {
-        Input::Reference(Type::Id(id)) => {
-            if let Some(named) = reference(state, id) {
-                return named;
-            }
-            id
-        }
-        Input::Reference(ty) => return construct(state, Contract::Scalar(ty)),
-        Input::Definition(id) => id,
+    let ty = match input {
+        Input::Reference(Type::Id(id)) if let Some(named) = reference(state, id) => return named,
+        Input::Reference(ty) => ty,
+        Input::Definition(id) => Type::Id(id),
     };
-    let mut child =
-        |ty: &Type| convert(resolve, Input::Reference(*ty), state, reference, construct);
-    let contract = match &resolve.types[id].kind {
-        TypeDefKind::Type(ty) => return child(ty),
+    let contract = project(resolve, ty, |ty| {
+        convert(resolve, Input::Reference(*ty), state, reference, construct)
+    });
+    construct(state, contract)
+}
+
+/// Classify one WIT node, mapping its immediate children in declaration order.
+pub fn project<T>(
+    resolve: &Resolve,
+    ty: Type,
+    mut child: impl FnMut(&Type) -> T,
+) -> Contract<'_, T> {
+    let Type::Id(id) = ty else {
+        return Contract::Scalar(ty);
+    };
+    match &resolve.types[id].kind {
+        TypeDefKind::Type(ty) => Contract::Alias(child(ty)),
         TypeDefKind::Resource => Contract::Resource { id, owned: true },
         TypeDefKind::Handle(handle) => Contract::Resource {
             id: match handle {
@@ -65,20 +74,15 @@ pub fn convert<S, T>(
                 .collect(),
         ),
         TypeDefKind::Variant(variant) => Contract::Variant(
+            variant.tag(),
             variant
                 .cases
                 .iter()
                 .map(|case| (case.name.as_str(), case.ty.as_ref().map(&mut child)))
                 .collect(),
         ),
-        TypeDefKind::Enum(enumeration) => {
-            return construct(
-                state,
-                Contract::Enum(&mut enumeration.cases.iter().map(|case| case.name.as_str())),
-            );
-        }
+        TypeDefKind::Enum(e) => Contract::Enum(e),
         TypeDefKind::Stream(Some(Type::U8)) => Contract::ByteStream,
         other => Contract::Unsupported(other.as_str()),
-    };
-    construct(state, contract)
+    }
 }

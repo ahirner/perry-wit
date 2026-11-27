@@ -42,39 +42,51 @@ impl<'s> ParamSig<'s> {
     }
 }
 
+pub(super) type Functions<'s> = indexmap::IndexMap<FuncId, Signature<'s>>;
+
+#[derive(Clone, Copy)]
+pub(super) enum Body<'s> {
+    Initializer(&'s [Stmt]),
+    Command,
+    Source(&'s Function<'s>),
+    Inline(&'s Function<'s>),
+    Constructor(&'s crate::source::InstanceClass<'s>, &'s Function<'s>),
+    Native(&'s crate::engine::NativeBody),
+}
+
 pub(super) struct Signature<'s> {
-    pub(super) inline: Option<&'s Function<'s>>,
+    pub(super) body: Body<'s>,
     pub(super) name: Identifier,
     /// `async`: callers start it with `perry.async_call` and get a promise of `result`.
     pub(super) is_async: bool,
     pub(super) await_initialization: bool,
-    /// Runs the module's top-level statements and static field initializers.
-    pub(super) top_level: bool,
     pub(super) params: Vec<ParamSig<'s>>,
     pub(super) returns_never: bool,
     pub(super) result: Option<BindingType>,
 }
 
-impl Signature<'_> {
-    fn native(
-        shapes: &Shapes<'_>,
-        name: &str,
-        params: impl Iterator<Item = crate::engine::NativeParam>,
-        result: crate::engine::types::Ty,
-        is_async: bool,
-    ) -> Result<Self> {
+impl<'s> Signature<'s> {
+    fn native(shapes: &Shapes<'_>, function: &'s crate::engine::NativeFunction) -> Result<Self> {
         Ok(Self {
-            name: identifier(name)?,
-            inline: None,
-            top_level: false,
+            name: identifier(&function.name)?,
+            body: Body::Native(&function.body),
             await_initialization: false,
             returns_never: false,
-            is_async,
-            params: params
-                .map(|p| ParamSig::native(shapes, p, Parameter::Native))
+            is_async: function.is_async,
+            params: function
+                .params
+                .iter()
+                .map(|&p| ParamSig::native(shapes, p, Parameter::Native))
                 .collect::<Result<_>>()?,
-            result: shapes.solved_result(result, is_async)?,
+            result: shapes.solved_result(function.result, function.is_async)?,
         })
+    }
+
+    pub(super) fn source(&self) -> Option<&'s Function<'s>> {
+        match self.body {
+            Body::Source(f) | Body::Inline(f) | Body::Constructor(_, f) => Some(f),
+            _ => None,
+        }
     }
 
     pub(super) fn parameters(&self) -> (&[ParamSig<'_>], Option<&ParamSig<'_>>) {
@@ -138,64 +150,16 @@ pub(crate) fn build_module(
         specialization,
         (&mut types, records),
     );
-    // Imported built-ins by local name: `setTimeout` from `node:timers/promises`, and the
-    // functions of `node:fs/promises`.
-    let mut builtins: HashMap<&str, Builtin> = HashMap::new();
-    for import in &declarations.imports {
-        let source = import.source.as_str();
-        if hir_compat::is_timer_module(source) {
-            continue;
-        }
-        let module = match source {
-            "timers/promises" | "node:timers/promises" => Some(BuiltinModule::Timers),
-            "fs/promises" | "node:fs/promises" => Some(BuiltinModule::Fs),
-            "stream" | "node:stream" => Some(BuiltinModule::Stream),
-            "perry:http-server" => Some(BuiltinModule::HttpServer),
-            _ => None,
-        };
-        let builtin = source.starts_with("node:")
-            || matches!(
-                source,
-                "timers" | "fs" | "fs/promises" | "stream" | "process" | "crypto"
-            );
-        if matches!(source, "fs" | "node:fs") {
-            return Err(unsupported!(
-                "Unsupported filesystem import {source}: synchronous and callback APIs are not supported; use node:fs/promises"
-            )
-            .with_fallback_span(locations.import_span(source)));
-        }
-        if module.is_none() && builtin {
-            return Err(unsupported!(
-                "Unsupported capability import {source}: supported Node imports are callback timers from node:timers, setTimeout from node:timers/promises, asynchronous filesystem operations from node:fs/promises and Writable from node:stream"
-            )
-            .with_fallback_span(locations.import_span(source)));
-        }
-        let Some(module) = module else { continue };
-        for specifier in &import.specifiers {
-            let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
-                return Err(
-                    unsupported!("only named imports from {source} are supported yet")
-                        .with_fallback_span(locations.import_span(source)),
-                );
-            };
-            let builtin = Builtin::from_import(module, imported).ok_or_else(|| {
-                unsupported!("{imported} from {source} is not supported yet")
-                    .with_fallback_span(locations.import_span(source))
-            })?;
-            builtins.insert(local.as_str(), builtin);
-        }
-    }
     locations.set_mir_frames(ctx, &module);
     let mut shapes = shapes.prepare(ctx);
     shapes.define_environments(ctx)?;
     let mut signatures = Functions::default();
-    let source_functions = bodies.functions.iter().map(|f| (f, None)).chain(
+    for (function, class) in bodies.functions.iter().map(|f| (f, None)).chain(
         bodies
             .classes
             .iter()
             .filter_map(|class| Some((class.constructor.as_ref()?, Some(class)))),
-    );
-    for (function, class) in source_functions.clone() {
+    ) {
         let display_name = locations.display_function_name(&function.name);
         let declaration = &specialization.templates[function.template];
         if declaration.is_generator {
@@ -206,7 +170,7 @@ pub(crate) fn build_module(
             ));
         }
 
-        let mut params = Vec::with_capacity(function.params.len());
+        let mut params = Vec::with_capacity(declaration.params.len());
         if let Some(env) = function.environment {
             params.push(ParamSig::native(
                 &shapes,
@@ -221,8 +185,17 @@ pub(crate) fn build_module(
                 Parameter::Receiver,
             )?);
         }
-        for (idx, &(param, solved)) in function.params.iter().enumerate() {
-            if param.is_rest && idx + 1 != function.params.len() {
+        for (idx, param) in declaration.params.iter().enumerate() {
+            use crate::engine::Storage;
+            let ty = match specialization
+                .instances
+                .storage(BodyOwner::Function(function.id), param.id)
+            {
+                Some(Storage::ErasedFunction(_)) => continue,
+                Some(Storage::Value(ty) | Storage::Boxed { ty, .. }) => ty,
+                _ => bail_internal!("missing parameter layout for {display_name}"),
+            };
+            if param.is_rest && idx + 1 != declaration.params.len() {
                 return Err(locations.annotate_caller(
                     shapes.annotate_local(
                         diag!(
@@ -234,21 +207,23 @@ pub(crate) fn build_module(
                     &function.name,
                 ));
             }
-            let (base, is_never) = shapes.param_type(solved, &param.ty).map_err(|error| {
-                let source = declarations
-                    .locals
-                    .get(&param.id)
-                    .and_then(|span| locations.source_at(span.span.lo.0));
-                let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
-                    format!("{}", idx + 1)
-                } else {
-                    format!("'{}'", param.name)
-                };
-                let error = shapes
-                    .annotate_local(error, param.id)
-                    .with_note(format!("in parameter {label} of '{display_name}'"));
-                locations.annotate_caller(error, &function.name)
-            })?;
+            let (base, is_never) = shapes
+                .native_param(crate::engine::NativeParam::Value(ty))
+                .map_err(|error| {
+                    let source = declarations
+                        .locals
+                        .get(&param.id)
+                        .and_then(|span| locations.source_at(span.span.lo.0));
+                    let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
+                        format!("{}", idx + 1)
+                    } else {
+                        format!("'{}'", param.name)
+                    };
+                    let error = shapes
+                        .annotate_local(error, param.id)
+                        .with_note(format!("in parameter {label} of '{display_name}'"));
+                    locations.annotate_caller(error, &function.name)
+                })?;
 
             let carrier = if param.default.is_some() && !function.is_exported {
                 crate::lower::coerce::admitting(ctx, base.carrier, perry_mir::Absence::Undefined)
@@ -277,31 +252,30 @@ pub(crate) fn build_module(
             };
             locations.annotate_caller(error, &function.name)
         })?;
-        signatures.insert(
-            function.id,
-            Callee::Source(
-                function,
-                Signature {
-                    inline: (class.is_none()
-                        && (function.inline.is_some()
-                            || (function.environment.is_none()
-                                && declaration
-                                    .captures
-                                    .iter()
-                                    .any(|id| !shapes.globals.contains_key(id)))))
-                    .then_some(function),
-                    is_async: declaration.is_async,
-                    await_initialization: function.is_exported
-                        && declaration.is_async
-                        && declarations.has_top_level_await,
-                    top_level: false,
-                    name: identifier(&function.name)?,
-                    params,
-                    returns_never,
-                    result,
-                },
-            ),
-        );
+        let body = if let Some(class) = class {
+            Body::Constructor(class, function)
+        } else if function.inline.is_some()
+            || (function.environment.is_none()
+                && declaration
+                    .captures
+                    .iter()
+                    .any(|id| !shapes.globals.contains_key(id)))
+        {
+            Body::Inline(function)
+        } else {
+            Body::Source(function)
+        };
+        signatures.entry(function.id).or_insert(Signature {
+            body,
+            is_async: declaration.is_async,
+            await_initialization: function.is_exported
+                && declaration.is_async
+                && declarations.has_top_level_await,
+            name: identifier(&function.name)?,
+            params,
+            returns_never,
+            result,
+        });
     }
     for &(id, ref function) in &bodies.native {
         let annotate = |err: Diagnostic| {
@@ -310,15 +284,9 @@ pub(crate) fn build_module(
                 &function.name,
             )
         };
-        let signature = Signature::native(
-            &shapes,
-            &function.name,
-            function.params.iter().copied(),
-            function.result,
-            function.is_async,
-        )
-        .map_err(annotate)?;
-        signatures.insert(id, Callee::Native(function, signature));
+        signatures
+            .entry(id)
+            .or_insert(Signature::native(&shapes, function).map_err(annotate)?);
     }
     // Module initialization of named built-in imports (`Writable` from `node:stream`) has
     // nothing to run (calls lower it to nothing); without other statements there is no main
@@ -337,104 +305,67 @@ pub(crate) fn build_module(
             !specialization.resources.is_empty() || bodies.functions.iter().any(|f| f.is_exported);
         let async_init = declarations.has_top_level_await;
         let settled = BindingType::plain(void_type(ctx));
-        let mut entries = vec![(
-            Signature {
-                inline: None,
-                name: identifier(if persistent {
-                    perry_mir::INITIALIZER
-                } else {
-                    MAIN
-                })?,
-                is_async: !persistent || async_init,
-                await_initialization: false,
-                top_level: true,
+        let mut entries = vec![Signature {
+            body: Body::Initializer(bodies.init),
+            name: identifier(if persistent {
+                perry_mir::INITIALIZER
+            } else {
+                MAIN
+            })?,
+            is_async: !persistent || async_init,
+            await_initialization: false,
+            params: vec![],
+            returns_never: false,
+            result: (!persistent || async_init).then_some(settled),
+        }];
+        if persistent {
+            entries.push(Signature {
+                body: Body::Command,
+                name: identifier(MAIN)?,
+                is_async: true,
+                await_initialization: async_init,
                 params: vec![],
                 returns_never: false,
-                result: (!persistent || async_init).then_some(settled),
-            },
-            bodies.init,
-        )];
-        if persistent {
-            entries.push((
-                Signature {
-                    inline: None,
-                    name: identifier(MAIN)?,
-                    is_async: true,
-                    await_initialization: async_init,
-                    top_level: false,
-                    params: vec![],
-                    returns_never: false,
-                    result: Some(settled),
-                },
-                &[],
-            ));
+                result: Some(settled),
+            });
         }
-        for (signature, body) in &entries {
-            let func = FunctionBuilder::lower_body(
-                ctx,
-                signature,
-                builder::Body::Statements(BodyOwner::Initializer, body),
-                &signatures,
-                &mut shapes,
-                &builtins,
-            )
-            .map_err(|err| err.with_internal_context("lowering top-level statements"))?;
+        for signature in &entries {
+            let func = FunctionBuilder::lower_body(ctx, signature, &signatures, &mut shapes)
+                .map_err(|err| err.with_internal_context("lowering top-level statements"))?;
             if signature.is_async {
                 set_async(ctx, &func);
             }
-            if !persistent || !signature.top_level {
+            if !persistent || matches!(signature.body, Body::Command) {
                 command = Some(func);
             }
             module.append_operation(ctx, func.get_operation(), 0);
         }
     }
-    let source = source_functions.map(|(f, class)| {
-        let declaration = &specialization.templates[f.template];
-        (
-            f.id,
-            class.map_or(
-                builder::Body::Statements(BodyOwner::Function(f.id), declaration.body),
-                |c| builder::Body::Constructor(c, f),
-            ),
-            f.is_exported,
-            if f.environment.is_some() {
-                &[]
-            } else {
-                declaration.captures
-            },
-        )
-    });
-    let native = bodies.native.iter().map(|(id, f)| {
-        (
-            *id,
-            builder::Body::Native(&f.body),
-            matches!(f.body, crate::engine::NativeBody::Resource(_)),
-            &[][..],
-        )
-    });
-    for (id, body, exported, captures) in source.chain(native) {
-        let signature = signatures
-            .get(&id)
-            .ok_or_else(|| internal!("unknown function {id}"))?;
-        if signature.inline.is_some() {
-            continue;
-        }
+    for (&id, signature) in &signatures {
         let name = signature.name.as_ref();
-        ensure_unsupported!(
-            captures
-                .iter()
-                .all(|id| shapes.globals.get(id).is_some_and(Option::is_some)),
-            "closures capturing activation-local values are unsupported: {name}"
-        );
+        let exported = match signature.body {
+            Body::Source(f) | Body::Constructor(_, f) => {
+                ensure_unsupported!(
+                    f.environment.is_some()
+                        || specialization.templates[f.template]
+                            .captures
+                            .iter()
+                            .all(|id| shapes.globals.get(id).is_some_and(Option::is_some)),
+                    "closures capturing activation-local values are unsupported: {name}"
+                );
+                f.is_exported
+            }
+            Body::Native(body) => matches!(body, crate::engine::NativeBody::Resource(_)),
+            Body::Inline(_) | Body::Initializer(_) | Body::Command => continue,
+        };
         let func =
-            FunctionBuilder::lower_body(ctx, signature, body, &signatures, &mut shapes, &builtins)
-                .map_err(|e| {
-                    locations.annotate_caller(
-                        e.with_fallback_span(locations.function_span(name))
-                            .with_internal_context(format!("lowering function {name}")),
-                        name,
-                    )
-                })?;
+            FunctionBuilder::lower_body(ctx, signature, &signatures, &mut shapes).map_err(|e| {
+                locations.annotate_caller(
+                    e.with_fallback_span(locations.function_span(name))
+                        .with_internal_context(format!("lowering function {name}")),
+                    name,
+                )
+            })?;
         locations.set_mir_location(ctx, &func, name);
         if let Some((params, results)) = signature.wit_constraints() {
             perry_mir::constrain_signature(ctx, &func, params, results);
@@ -495,65 +426,5 @@ fn module_name(name: &str) -> String {
         format!("m_{name}")
     } else {
         name
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BuiltinModule {
-    Timers,
-    Fs,
-    Stream,
-    /// `perry:http-server`: the services the compiler's `wasi:http/handler` adapter uses.
-    HttpServer,
-}
-
-/// A function imported from a built-in module.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Builtin {
-    SetTimeout,
-    ReadFile,
-    WriteFile,
-    Stat,
-    Readdir,
-    Mkdir,
-    Unlink,
-    Rmdir,
-    /// The `Writable` class, for `Writable.toWeb`.
-    Writable,
-    /// A service of `perry:http-server`.
-    Serve(Intrinsic),
-}
-
-impl Builtin {
-    fn from_import(module: BuiltinModule, name: &str) -> Option<Self> {
-        Some(match (module, name) {
-            (BuiltinModule::Timers, "setTimeout") => Builtin::SetTimeout,
-            (BuiltinModule::Fs, "readFile") => Builtin::ReadFile,
-            (BuiltinModule::Fs, "writeFile") => Builtin::WriteFile,
-            (BuiltinModule::Fs, "stat") => Builtin::Stat,
-            (BuiltinModule::Fs, "readdir") => Builtin::Readdir,
-            (BuiltinModule::Fs, "mkdir") => Builtin::Mkdir,
-            (BuiltinModule::Fs, "unlink") => Builtin::Unlink,
-            (BuiltinModule::Fs, "rmdir") => Builtin::Rmdir,
-            (BuiltinModule::Stream, "Writable") => Builtin::Writable,
-            (BuiltinModule::HttpServer, name) => Builtin::Serve(match name {
-                "request" => Intrinsic::ServeRequest,
-                "body" => Intrinsic::ServeBody,
-                "method" => Intrinsic::ServeMethod,
-                "methodOther" => Intrinsic::ServeMethodOther,
-                "hasScheme" => Intrinsic::ServeHasScheme,
-                "scheme" => Intrinsic::ServeScheme,
-                "schemeOther" => Intrinsic::ServeSchemeOther,
-                "authority" => Intrinsic::ServeAuthority,
-                "path" => Intrinsic::ServePath,
-                "headerCount" => Intrinsic::ServeHeaderCount,
-                "headerName" => Intrinsic::ServeHeaderName,
-                "headerValue" => Intrinsic::ServeHeaderValue,
-                "addHeader" => Intrinsic::ServeAddHeader,
-                "respond" => Intrinsic::ServeRespond,
-                _ => return None,
-            }),
-            _ => return None,
-        })
     }
 }

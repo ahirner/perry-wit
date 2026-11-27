@@ -126,8 +126,12 @@ macro_rules! intrinsics {
 crate::intrinsic_catalog!(intrinsics);
 
 impl Intrinsic {
-    pub fn returns_bool(self) -> bool {
-        matches!(self.types().1, [Ty::Bool])
+    pub fn result_kinds(self) -> &'static [Ty] {
+        self.types().1
+    }
+
+    pub fn result_types(self, ctx: &Context) -> impl Iterator<Item = TypeHandle> + '_ {
+        self.result_kinds().iter().map(|ty| ty.get(ctx))
     }
 
     /// Whether the service may throw (as an ECMAScript exception).
@@ -233,7 +237,7 @@ op_schema! {
     attributes = (perry_intrinsic: Intrinsic);
     constructors {
         pub new(intrinsic: Intrinsic, args: Vec<Value>) operands(args)
-            => results(intrinsic.types().1.iter().map(|ty| ty.get(ctx)).collect());
+            => results(intrinsic.result_types(ctx).collect());
     }
     attribute(intrinsic: Intrinsic, get_attr_perry_intrinsic, set_attr_perry_intrinsic) =
         intrinsic => IntrinsicErr::Missing;

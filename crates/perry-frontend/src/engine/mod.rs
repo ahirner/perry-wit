@@ -12,7 +12,6 @@ use boundary::ModuleIndex;
 use perry_wit_diagnostics::Result;
 pub(crate) use plans::BodyOwner;
 use pliron::context::Context;
-use std::collections::HashMap;
 use types::TypeTable;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,31 +55,10 @@ pub(crate) enum TimerKind {
     Interval,
 }
 
-pub(crate) enum Reaction {
-    Chain {
-        fulfilled: Option<solve::CallTarget>,
-        rejected: Option<solve::CallTarget>,
-        rejects_only: bool,
-    },
-    Finally(solve::CallTarget),
-}
-
 pub(crate) enum NativeBody {
     Resource(crate::hir_compat::Target<perry_hir::types::FuncId>),
-    Dispatch {
-        receiver: bool,
-        arms: types::DispatchArmSpan,
-        inputs: types::Ty,
-    },
     Settle(perry_mir::SettleKind),
-    Reaction {
-        reaction: Reaction,
-        returns_void: bool,
-    },
-    Timer {
-        kind: TimerKind,
-        callback: solve::CallTarget,
-    },
+    Helper(solve::HelperSpec),
 }
 
 pub(crate) struct NativeFunction {
@@ -115,28 +93,32 @@ impl EnvironmentField {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum CaptureOperand {
-    Local(perry_hir::types::LocalId),
-    Cell(perry_hir::types::LocalId),
-    Coerce(perry_hir::types::LocalId, solve::ValueCoercion),
+pub(crate) struct Environment {
+    pub(crate) record: pliron::r#type::TypedHandle<perry_mir::RecordType>,
+    pub(crate) fields: types::EnvFieldSpan,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct ClosureValue {
     pub(crate) identity: types::FuncIdentity,
-    pub(crate) operands: Vec<CaptureOperand>,
+    pub(crate) conversions: types::CaptureConversionSpan,
 }
 
 #[derive(Default)]
 pub(crate) struct InstancePlans {
+    pub(crate) globals: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) dispatch_arms: types::Pool<types::DispatchArmSpan, solve::DispatchArm>,
     decisions: plans::Decisions,
-    arguments: HashMap<types::Ty, Box<[(usize, types::Ty)]>>,
     functions: types::IdxVec<types::InstanceId, perry_hir::types::FuncId>,
     helpers: types::IdxVec<types::HelperId, Option<perry_hir::types::FuncId>>,
     pub(super) local_ids: Vec<Option<types::LocalIdx>>,
     local_flags: types::IdxVec<types::LocalIdx, types::LocalFlags>,
-    pub(crate) closure_values: HashMap<(BodyOwner, perry_hir::types::FuncId), ClosureValue>,
-    pub(crate) environments: plans::Environments,
+    pub(crate) capture_conversions: types::Pool<
+        types::CaptureConversionSpan,
+        (perry_hir::types::LocalId, solve::ValueCoercion),
+    >,
+    pub(crate) environment_fields: types::Pool<types::EnvFieldSpan, EnvironmentField>,
+    pub(crate) environments: indexmap::IndexMap<types::FuncIdentity, Environment>,
 }
 
 pub(crate) struct Specialization<'s> {
@@ -144,20 +126,46 @@ pub(crate) struct Specialization<'s> {
     pub(crate) iteration: crate::hir_compat::Iteration<'s>,
     pub(crate) literal_classes: crate::source::LiteralClasses<'s>,
     pub(crate) annotations: boundary::Annotations,
-    pub(crate) lexical: boundary::LexicalFunctions<'s>,
+    function_templates: Vec<Option<types::TemplateId>>,
     pub(crate) writes: crate::narrowing::WriteEffects,
     pub(crate) receiver_members: crate::wit::ReceiverMembers<'s>,
     pub(crate) regexes: crate::source::RegexSites<'s>,
-    pub(crate) globals: std::collections::HashSet<perry_hir::types::LocalId>,
     pub(crate) bodies: crate::source::InstanceBodies<'s>,
     pub(crate) sparse_arrays: bool,
     pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
     pub(crate) dict_reads: bitset::BitSet,
     pub(crate) capture_free: bitset::BitSet,
+    pub(crate) escaping_env_templates: bitset::BitSet,
 
     pub(crate) instances: InstancePlans,
     pub(crate) resources:
         std::collections::BTreeMap<u32, crate::hir_compat::ResourceClass<types::ClassInstId>>,
+}
+
+impl<'s> Specialization<'s> {
+    pub(crate) fn closure(
+        &self,
+        id: perry_hir::types::FuncId,
+    ) -> Option<(&boundary::TemplateView<'s>, plans::ExprIdx)> {
+        let template = self
+            .function_templates
+            .get(id as usize)
+            .copied()
+            .flatten()?;
+        let view = &self.templates[template];
+        let boundary::TemplateKind::Closure(site) = view.kind else {
+            return None;
+        };
+        Some((view, site))
+    }
+    pub(crate) fn closure_value(
+        &self,
+        owner: BodyOwner,
+        id: perry_hir::types::FuncId,
+    ) -> Option<ClosureValue> {
+        let (_, index) = self.closure(id)?;
+        self.instances.decisions.site_at(owner, index).environment()
+    }
 }
 
 pub(crate) fn lower_module(
@@ -172,7 +180,8 @@ pub(crate) fn lower_module(
         &source.declarations.imports,
         &source.bodies.classes,
         world,
-    );
+        &source.locations,
+    )?;
     let mut index = ModuleIndex::build(
         ctx,
         &source.bodies,
@@ -182,22 +191,19 @@ pub(crate) fn lower_module(
         (&source.constructors, &decls),
         &mut types,
     );
-    let mut solved = solve::solve(ctx, &source, &index, &decls, &mut types)?;
+    let solved = solve::solve(ctx, &source, &index, &decls, &mut types)?;
     let mut records = perry_mir::RecordLayouts::default();
-    let (bodies, mut instances, decisions) = instances::build(
+    let (bodies, mut instances) = instances::build(
         &source.bodies,
         &source.declarations,
         &mut source.locations,
-        &index,
+        &mut index,
         &types,
         &solved,
         (ctx, &mut records),
     )?;
-    instances.decisions = plans::Decisions::from_solver(&mut index, &mut solved, decisions);
-    let globals = index.emitted_uses(&bodies, &solved, &instances, &mut source.locations);
+    drop(solved.inst_sites);
     instances.dispatch_arms = solved.dispatch_arms;
-    instances.local_ids = index.local_to_idx;
-    instances.local_flags = index.locals.map(|local| local.flags);
     let capture_free = index.capture_free_templates;
     let specialization = Specialization {
         resources: source
@@ -221,16 +227,16 @@ pub(crate) fn lower_module(
         iteration: index.iteration,
         literal_classes: index.literal_classes,
         annotations: index.annotations,
-        lexical: index.functions,
+        function_templates: index.functions,
         writes: solved.writes,
         regexes: index.regexes,
         receiver_members: index.receiver_members,
         bodies,
-        globals,
         sparse_arrays: source.sparse_arrays || solved.deletes_array_elements,
         locations: solved.locations,
         dict_reads: solved.dict_reads,
         capture_free,
+        escaping_env_templates: solved.escaping_env_templates,
 
         instances,
     };
@@ -246,13 +252,6 @@ pub(crate) fn lower_module(
 }
 
 impl InstancePlans {
-    pub(crate) fn arguments(&self, tuple: types::Ty) -> Result<&[(usize, types::Ty)]> {
-        self.arguments
-            .get(&tuple)
-            .map(AsRef::as_ref)
-            .ok_or_else(|| perry_wit_diagnostics::internal!("missing runtime argument layout"))
-    }
-
     pub(crate) fn function(&self, id: types::InstanceId) -> perry_hir::types::FuncId {
         self.functions[id]
     }

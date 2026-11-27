@@ -1395,6 +1395,7 @@ source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf
 name = "perry-frontend"
 version = "0.1.0"
 dependencies = [
+ "indexmap",
  "perry-contract",
  "perry-hir",
  "perry-mir",

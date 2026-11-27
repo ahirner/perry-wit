@@ -15,22 +15,22 @@ impl<'s> FunctionBuilder<'s, '_> {
             .params
             .split_first()
             .ok_or_else(|| internal!("missing timer handle parameter"))?;
-        let Some(Callee::Native(runner, _)) = self.signatures.callee(id) else {
-            bail_internal!("expected a timer runner")
-        };
-        let crate::engine::NativeBody::Timer { kind, callback } = runner.body else {
+        let Body::Native(crate::engine::NativeBody::Helper(
+            crate::engine::solve::HelperSpec::TimerRunner { kind, cb_call, .. },
+        )) = signature.body
+        else {
             bail_internal!("expected a timer runner")
         };
         let (callback_arg, remaining) = args
             .split_first()
             .ok_or_else(|| internal!("missing timer callback"))?;
-        let retained = if callback.needs_value() {
+        let retained = if cb_call.needs_value() {
             args
         } else {
             self.discard_function_operand(ctx, callback_arg)?;
             remaining
         };
-        let default_delay = kind != TimerKind::Immediate && remaining.is_empty();
+        let default_delay = *kind != TimerKind::Immediate && remaining.is_empty();
         ensure_internal!(
             retained.len() + usize::from(default_delay) == params.len(),
             "timer runner argument count mismatch"
@@ -50,7 +50,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             AllocOp::new(ctx, record, vec![cancelled, controller])
         });
         operands.insert(0, timer);
-        self.emit_signature_call(ctx, signature, operands)?;
+        self.emit_signature_call(ctx, signature, operands, None)?;
         Ok(timer)
     }
 

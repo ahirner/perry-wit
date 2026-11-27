@@ -45,10 +45,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let val = self.defined(ctx, val)?;
             return Ok(self.string_characters(ctx, val));
         }
-        if crate::lower::collections::is_collection_or_view_record(ctx, val_ty)
-            || crate::lower::collections::set_entry_type(ctx, val_ty).is_some()
-            || crate::lower::collections::map_entry_types(ctx, val_ty).is_some()
-        {
+        if crate::lower::collections::Collection::of(ctx, val_ty).is_some() {
             let val = self.defined(ctx, val)?;
             return self.collect_items(ctx, Input::Collection(val), |_, _, item, _, _| {
                 Ok(ArrayOutput::Item(item))
@@ -135,63 +132,34 @@ impl<'s> FunctionBuilder<'s, '_> {
                 )
             })?;
         let mut result = None;
-        // Holes evaluate nothing, so each run is appended once the element type is known.
-        let mut holes = 0;
         for item in items {
-            let (expression, spread) = match item {
-                perry_hir::ArrayElement::Expr(expression) => (expression, false),
-                perry_hir::ArrayElement::Spread(expression) => (expression, true),
+            let arg = match item {
+                perry_hir::ArrayElement::Expr(expr) => (expr, false),
+                perry_hir::ArrayElement::Spread(expr) => (expr, true),
                 perry_hir::ArrayElement::Hole => {
-                    holes += 1;
+                    let array = *result.get_or_insert_with(|| {
+                        self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]))
+                    });
+                    let end = self.array_length(ctx, array);
+                    self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, array, end));
                     continue;
                 }
             };
-            let value = if spread {
-                self.spread_value(ctx, expression, Some(element))?
-            } else {
-                self.expression_with(ctx, expression, Some(element))?
+            let segment = match self.array_argument(ctx, element, arg)? {
+                ArrayOutput::Items(items) => items,
+                ArrayOutput::Item(value) => {
+                    self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value]))
+                }
             };
-            let source = if spread {
-                let target = ArrayType::get(ctx, element).into();
-                self.fit(ctx, value, target)?
-            } else {
-                let value = self.fit(ctx, value, element)?;
-                self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![value]))
-            };
-            result = self.append_holes(ctx, result, element, std::mem::take(&mut holes));
-            let sources = result.map_or_else(|| vec![source], |prefix| vec![prefix, source]);
+            let sources = result.into_iter().chain([segment]).collect();
             result = Some(self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, sources)));
         }
-        if holes > 0 {
-            result = self.append_holes(ctx, result, element, holes);
-        }
         result.ok_or_else(|| {
-            Diagnostic::new(
+            diag!(
                 codes::MISSING_TYPE_ANNOTATION,
-                "an empty spread array needs an element type",
+                "an empty spread array needs an element type"
             )
         })
-    }
-
-    /// `prefix` followed by `count` holes.
-    fn append_holes(
-        &mut self,
-        ctx: &mut Context,
-        prefix: Option<Value>,
-        element: TypeHandle,
-        count: u32,
-    ) -> Option<Value> {
-        if count == 0 {
-            return prefix;
-        }
-        let holes = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
-        for index in 0..count {
-            let index = self.number(ctx, f64::from(index));
-            self.emit(ctx, |ctx| perry_mir::ArrayHoleOp::new(ctx, holes, index));
-        }
-        Some(prefix.map_or(holes, |prefix| {
-            self.emit_value(ctx, |ctx| ConcatOp::from_sources(ctx, vec![prefix, holes]))
-        }))
     }
 
     /// `array.push(…)` with spread arguments: all values are collected before the receiver
@@ -210,6 +178,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 std::iter::empty(),
                 Arguments::Spread(args),
                 None,
+                None,
             )?;
             return result.map_or_else(|| self.absent_literal(ctx, false, None), Ok);
         }
@@ -221,7 +190,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         };
         let method_name = hir_compat::method(property).name();
         if matches!(method_name, "max" | "min") {
-            return self.math_extremum_spread(ctx, method_name == "max", Arguments::Spread(args));
+            return self.math_extremum(ctx, method_name == "max", Arguments::Spread(args));
         }
         ensure_unsupported!(
             matches!(method_name, "push" | "concat"),
@@ -237,12 +206,16 @@ impl<'s> FunctionBuilder<'s, '_> {
             "push requires a dense array receiver"
         );
         let element = self.array_element(ctx, receiver)?;
-        let values = self.collect_spread_args(ctx, args, element)?;
+        let values = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, element, vec![]));
+        for arg in Arguments::Spread(args) {
+            self.array_argument(ctx, element, arg)?
+                .append_to(self, ctx, values);
+        }
         self.emit(ctx, |ctx| ArrayExtendOp::new(ctx, receiver, values));
         Ok(self.array_length(ctx, receiver))
     }
 
-    pub(super) fn math_extremum_spread(
+    pub(super) fn math_extremum(
         &mut self,
         ctx: &mut Context,
         maximum: bool,
@@ -253,18 +226,36 @@ impl<'s> FunctionBuilder<'s, '_> {
         } else {
             (f64::INFINITY, Intrinsic::MathMin)
         };
-        let number = FP64Type::get(ctx).into();
-        let result = self.entry_slot(ctx, number);
         let init = self.number(ctx, init);
-        self.store(ctx, result, init);
-        self.for_each_spread_arg(ctx, args, number, "math_spread", |b, ctx, item| {
-            let value = b.arithmetic(ctx, item);
-            let previous = b.load(ctx, result)?;
-            let next = b.intrinsic(ctx, op, vec![previous, value]);
-            b.store(ctx, result, next);
+        self.fold_arguments(ctx, args, init, |b, ctx, previous, item| {
+            let value = b.require_number(ctx, item)?;
+            Ok(b.intrinsic(ctx, op, vec![previous, value]))
+        })
+    }
+
+    pub(super) fn fold_arguments(
+        &mut self,
+        ctx: &mut Context,
+        args: Arguments<'s>,
+        initial: Value,
+        mut step: impl FnMut(&mut Self, &mut Context, Value, Value) -> Result<Value>,
+    ) -> Result<Value> {
+        if let Arguments::Plain(args) = args {
+            return args.iter().try_fold(initial, |previous, arg| {
+                let value = self.expression(ctx, arg)?;
+                step(self, ctx, previous, value)
+            });
+        }
+        let ty = initial.get_type(ctx);
+        let slot = self.entry_slot(ctx, ty);
+        self.store(ctx, slot, initial);
+        self.for_each_spread_arg(ctx, args, ty, |b, ctx, item| {
+            let previous = b.load(ctx, slot)?;
+            let value = step(b, ctx, previous, item)?;
+            b.store(ctx, slot, value);
             Ok(())
         })?;
-        self.load(ctx, result)
+        self.load(ctx, slot)
     }
 
     fn for_each_spread_arg(
@@ -272,7 +263,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         ctx: &mut Context,
         args: Arguments<'s>,
         hint: TypeHandle,
-        label: &str,
         mut on_value: impl FnMut(&mut Self, &mut Context, Value) -> Result<()>,
     ) -> Result<()> {
         for (expression, spread) in args {
@@ -285,7 +275,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 self.array_element(ctx, source)?;
                 let limit = self.array_length(ctx, source);
                 let zero = self.number(ctx, 0.0);
-                self.index_loop(ctx, label, zero, limit, |b, ctx, current, _, _| {
+                self.index_loop(ctx, "spread", zero, limit, |b, ctx, current, _, _| {
                     let value = b.element_at(ctx, source, current)?;
                     on_value(b, ctx, value)
                 })?;
@@ -303,64 +293,36 @@ impl<'s> FunctionBuilder<'s, '_> {
         let receiver = self.expression(ctx, object)?;
         let receiver = self.defined(ctx, receiver)?;
         if receiver.get_type(ctx).deref(ctx).is::<StringType>() {
-            let text = StringType::get(ctx).into();
-            let result = self.entry_slot(ctx, text);
-            self.store(ctx, result, receiver);
-            self.for_each_spread_arg(
-                ctx,
-                Arguments::Spread(args),
-                text,
-                "string_concat_arguments",
-                |b, ctx, value| {
-                    let value = b.display(ctx, value)?;
-                    let previous = b.load(ctx, result)?;
-                    let joined = b.emit_value(ctx, |ctx| ConcatOp::new(ctx, previous, value));
-                    b.store(ctx, result, joined);
-                    Ok(())
-                },
-            )?;
-            return self.load(ctx, result);
+            return self.concat_strings(ctx, receiver, Arguments::Spread(args));
         }
         let element = self.array_element(ctx, receiver)?;
         let array = ArrayType::get(ctx, element).into();
         let sources = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, array, vec![receiver]));
-        self.for_each_spread_arg(
-            ctx,
-            Arguments::Spread(args),
-            element,
-            "concat_arguments",
-            |b, ctx, value| {
-                let segment = b.concat_segment(ctx, value, element)?;
-                b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
-                Ok(())
-            },
-        )?;
+        self.for_each_spread_arg(ctx, Arguments::Spread(args), element, |b, ctx, value| {
+            let segment = b.concat_segment(ctx, value, element)?;
+            b.emit(ctx, |ctx| ArrayPushOp::new(ctx, sources, segment));
+            Ok(())
+        })?;
         Ok(self.emit_value(ctx, |ctx| ConcatSegmentsOp::new(ctx, sources)))
     }
 
-    fn collect_spread_args(
+    pub(super) fn array_argument(
         &mut self,
         ctx: &mut Context,
-        args: &'s [perry_hir::CallArg],
-        elem_ty: TypeHandle,
-    ) -> Result<Value> {
-        let arr = self.emit_value(ctx, |ctx| ArrayNewOp::new(ctx, elem_ty, vec![]));
-        for argument in args {
-            match argument {
-                perry_hir::CallArg::Expr(expr) => {
-                    let v = self.expression_with(ctx, expr, Some(elem_ty))?;
-                    let v = self.fit(ctx, v, elem_ty)?;
-                    self.emit(ctx, |ctx| ArrayPushOp::new(ctx, arr, v));
-                }
-                perry_hir::CallArg::Spread(expr) => {
-                    let src = self.spread_value(ctx, expr, Some(elem_ty))?;
-                    let src = self.defined(ctx, src)?;
-                    let target_arr_ty = ArrayType::get(ctx, elem_ty).into();
-                    let src = self.fit(ctx, src, target_arr_ty)?;
-                    self.emit(ctx, |ctx| ArrayExtendOp::new(ctx, arr, src));
-                }
-            }
+        element: TypeHandle,
+        (expr, spread): (&'s Expr, bool),
+    ) -> Result<ArrayOutput> {
+        if spread {
+            let items = self.spread_value(ctx, expr, Some(element))?;
+            let items = self.defined(ctx, items)?;
+            Ok(ArrayOutput::Items(self.fit(
+                ctx,
+                items,
+                ArrayType::get(ctx, element).into(),
+            )?))
+        } else {
+            let value = self.expression_with(ctx, expr, Some(element))?;
+            Ok(ArrayOutput::Item(self.fit(ctx, value, element)?))
         }
-        Ok(arr)
     }
 }

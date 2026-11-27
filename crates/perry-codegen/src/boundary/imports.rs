@@ -258,10 +258,7 @@ impl FunctionLowering<'_, '_> {
                 let data = self.load(ctx, MemKind::I32, area, offset);
                 if let AbiKind::List(element) = &abi.kind {
                     let len = self.load(ctx, MemKind::I32, area, offset + 4);
-                    self.counted_loop(ctx, len, |b, ctx, index| {
-                        let stride = b.i32_const(ctx, element.size as i32);
-                        let position = b.num(ctx, NumOpcode::I32Mul, vec![index, stride]);
-                        let element_area = b.num(ctx, NumOpcode::I32Add, vec![data, position]);
+                    self.list_elements(ctx, element, data, len, |b, ctx, _, element_area| {
                         b.discard_canonical(ctx, element, element_area, 0)
                     })?;
                 }

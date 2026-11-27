@@ -4,7 +4,9 @@ use perry_wit_diagnostics::Result;
 use pliron::{builtin::types::Signedness, context::Context};
 use std::collections::{HashMap, HashSet};
 pub(crate) mod generics;
+mod imports;
 mod records;
+pub(crate) use imports::Imported;
 pub(crate) use records::ClassShape;
 pub(crate) type TypeName = pliron::uniqued_any::Uniqued<String>;
 
@@ -19,7 +21,7 @@ pub(crate) struct Declarations<'h> {
     >,
     integer_imports: HashMap<&'h str, (u32, Signedness)>,
     pub(crate) imported_types: HashMap<&'h str, &'h crate::wit::Foreign<'h>>,
-    pub(crate) foreign_functions: HashMap<&'h str, (&'h str, &'h crate::wit::ImportSignature<'h>)>,
+    pub(crate) imports: HashMap<&'h str, Imported<'h>>,
 }
 
 impl<'h> Declarations<'h> {
@@ -29,7 +31,8 @@ impl<'h> Declarations<'h> {
         imports: &'h [perry_hir::ir::Import],
         classes: &'h [perry_hir::ir::Class],
         world: &'h crate::wit::WorldTypes<'h>,
-    ) -> Self {
+        locations: &crate::hir_compat::Locations,
+    ) -> Result<Self> {
         let foreign = world.foreign();
         let interfaces = interfaces
             .iter()
@@ -41,38 +44,47 @@ impl<'h> Declarations<'h> {
             .collect();
         let mut integer_imports = HashMap::new();
         let mut imported_types = HashMap::new();
-        let mut foreign_functions = HashMap::new();
+        let mut bindings = HashMap::new();
         for import in imports {
-            let source = import
-                .source
-                .strip_prefix("wit:")
-                .unwrap_or(import.source.as_str());
+            let source = import.source.as_str();
+            let annotate = |e: perry_wit_diagnostics::Diagnostic| {
+                e.with_fallback_span(locations.import_span(source))
+            };
+            let module = imports::Module::classify(source).map_err(annotate)?;
             for specifier in &import.specifiers {
-                let perry_hir::ir::ImportSpecifier::Named { imported, local } = specifier else {
-                    continue;
+                use perry_hir::ir::ImportSpecifier::*;
+                let (local, name) = match specifier {
+                    Named { imported, local } => (local.as_str(), Some(imported.as_str())),
+                    Default { local } | Namespace { local } => (local.as_str(), None),
                 };
+                let value = module.resolve(source, name).map_err(annotate)?;
+                bindings.insert(local, value);
+                let Some(imported) = name else { continue };
                 if import.source == "perry:types"
                     && let Some(&(_, _, spec)) = crate::wit::INTEGERS
                         .iter()
-                        .find(|(name, _, _)| name == imported)
+                        .find(|(name, _, _)| *name == imported)
                 {
-                    integer_imports.insert(local.as_str(), spec);
+                    integer_imports.insert(local, spec);
                     continue;
                 }
+                let source = source.strip_prefix("wit:").unwrap_or(source);
                 let binding = format!("{source}#{imported}");
-                if let Some(function) = world.function(&binding) {
-                    foreign_functions.insert(local.as_str(), function);
+                if matches!(value, Imported::Other)
+                    && let Some((function, sig)) = world.function(&binding)
+                {
+                    bindings.insert(local, Imported::Foreign(function, sig));
                 }
-                if let Some(entry) = [binding.as_str(), imported.as_str()]
+                if let Some(entry) = [binding.as_str(), imported]
                     .into_iter()
                     .find_map(|key| foreign.get(key))
                     .filter(|entry| !matches!(entry, crate::wit::Foreign::Function(_)))
                 {
-                    imported_types.insert(local.as_str(), entry);
+                    imported_types.insert(local, entry);
                 }
             }
         }
-        Self {
+        Ok(Self {
             interfaces,
             type_aliases,
             classes: HashMap::new(),
@@ -84,9 +96,9 @@ impl<'h> Declarations<'h> {
             }),
             integer_imports,
             imported_types,
-            foreign_functions,
+            imports: bindings,
         }
-        .with_classes(classes.iter().map(ClassShape::Source))
+        .with_classes(classes.iter().map(ClassShape::Source)))
     }
 
     pub(crate) fn with_classes(mut self, classes: impl Iterator<Item = ClassShape<'h>>) -> Self {

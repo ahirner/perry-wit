@@ -17,44 +17,66 @@ impl<'h, 'a> Solver<'h, 'a> {
         result
     }
 
-    pub(super) fn check_objlit_func_write(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assign_property(
         &mut self,
-        inst_id: InstanceId,
+        s: &EvalState<'h>,
+        site: &'h Expr,
         obj_def: Ty,
         property: &str,
+        value: &'h Expr,
         val_ty: Ty,
         byte_offset: u32,
-        span: Option<swc_common::Span>,
-    ) -> Result<Option<Ty>> {
-        if !matches!(self.types.kind(obj_def), TyKind::Object { .. }) {
-            return Ok(None);
-        }
-        let prop_ty = builtins::property_type(self.ctx, self.decls, self.types, obj_def, property);
-        let touches_func =
-            self.types.has_func(val_ty) || prop_ty.is_some_and(|p| self.types.has_func(p));
-        if touches_func
-            && val_ty != Ty::BOTTOM
-            && !prop_ty.is_some_and(|p| self.types.accepts(p, val_ty))
-        {
-            let mut err = Diagnostic::unsupported(format!(
-                "reassigning function property '{property}' on an object literal is not supported yet"
-            ));
-            if hir_compat::has_source_offset(byte_offset) {
-                if let Some(sp) = self.hir.locations.member_span(byte_offset) {
-                    err = err.with_span(sp);
+    ) -> Result<()> {
+        self.check_escaping_func(s.inst, val_ty, byte_offset, s.current_span)?;
+        let field_ty = match self.types.kind(obj_def) {
+            TyKind::Object { .. } => {
+                let declared =
+                    builtins::property_type(self.ctx, self.decls, self.types, obj_def, property);
+                let touches_func =
+                    self.types.has_func(val_ty) || declared.is_some_and(|p| self.types.has_func(p));
+                if touches_func
+                    && val_ty != Ty::BOTTOM
+                    && !declared.is_some_and(|p| self.types.accepts(p, val_ty))
+                {
+                    let mut err = Diagnostic::unsupported(format!(
+                        "reassigning function property '{property}' on an object literal is not supported yet"
+                    ));
+                    if hir_compat::has_source_offset(byte_offset) {
+                        err = err.with_fallback_span(self.hir.locations.member_span(byte_offset));
+                    }
+                    return Err(self.annotate_expr_error(s, err, byte_offset));
                 }
-            } else if let Some(sp) = span {
-                err = self.hir.locations.annotate(err, sp);
+                declared.unwrap_or(val_ty)
             }
-            return Err(attach_inst_chain(
-                &self.instances,
-                self.index,
-                &self.hir.locations,
-                err,
-                inst_id,
-            ));
+            TyKind::ClassInst(class) => {
+                let norm = self
+                    .types
+                    .normalize_for_storage(self.ctx, self.decls, val_ty);
+                if let Some(loc) = self.class_field_loc(class, property) {
+                    self.write_class_field(s.inst, loc, value, norm)?
+                } else if norm != Ty::BOTTOM
+                    && let Some(setter) =
+                        self.request_accessor(s.inst, class, property, Some(norm))?
+                {
+                    self.record_site(s.inst, site, SiteResolution::WriteMember(setter));
+                    return Ok(());
+                } else {
+                    val_ty
+                }
+            }
+            _ => val_ty,
+        };
+        if self
+            .types
+            .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
+        {
+            self.record_site(s.inst, site, SiteResolution::ZeroSizedFieldSet);
+        } else {
+            self.clear_site(s.inst, site);
+            self.record_coercion(s.inst, value, val_ty, field_ty);
         }
-        Ok(prop_ty)
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -88,7 +110,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .collect();
             for tid in shared {
                 if !self.is_escaping_env(tid, inst_id)
-                    && self.index.view(tid).kind == TemplateKind::Closure
+                    && matches!(self.index.view(tid).kind, TemplateKind::Closure(_))
                     && (self.index.closure_in_loop.contains(tid.index())
                         || self
                             .index
@@ -174,42 +196,30 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn write_class_or_setter(
+    pub(super) fn write_class_field(
         &mut self,
         inst_id: InstanceId,
-        obj_def: Ty,
-        property: &str,
+        loc: LocId,
         value: &Expr,
-        val_ty: Ty,
-    ) -> Result<Option<InstanceId>> {
-        let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def) else {
-            return Ok(None);
-        };
-        let norm = self
-            .types
-            .normalize_for_storage(self.ctx, self.decls, val_ty);
-        if let Some(loc) = self.class_field_loc(cinst_id, property) {
-            let existing = self.facts[loc];
-            if matches!(value, Expr::Array(items, _) if items.is_empty()) {
-                if !matches!(
-                    self.types.kind(existing),
-                    TyKind::Cell {
-                        kind: CellKind::Array,
-                        ..
-                    }
-                ) && self.types.is_open(existing)
-                {
-                    let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array)?;
-                    self.write_loc(loc, cell);
+        norm: Ty,
+    ) -> Result<Ty> {
+        let existing = self.facts[loc];
+        if matches!(value, Expr::Array(items, _) if items.is_empty()) {
+            if !matches!(
+                self.types.kind(existing),
+                TyKind::Cell {
+                    kind: CellKind::Array,
+                    ..
                 }
-            } else if !self.types.is_open(norm) || self.types.is_open(existing) {
-                self.write_loc(loc, norm);
+            ) && self.types.is_open(existing)
+            {
+                let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array)?;
+                self.write_loc(loc, cell);
             }
+        } else if !self.types.is_open(norm) || self.types.is_open(existing) {
+            self.write_loc(loc, norm);
         }
-        if norm == Ty::BOTTOM {
-            return Ok(None);
-        }
-        self.request_accessor(inst_id, cinst_id, property, Some(norm))
+        Ok(self.read_loc(loc, inst_id))
     }
 
     pub(super) fn request_accessor(

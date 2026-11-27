@@ -4,20 +4,24 @@ use perry_mir::{absence, optional_value, present_type};
 use perry_wit_diagnostics::Diagnostic;
 
 impl AbiType {
+    fn is_error_record(&self) -> bool {
+        let AbiKind::Record(fields) = &self.kind else {
+            return false;
+        };
+        fields.len() == 2
+            && ["name", "message"].iter().all(|name| {
+                fields
+                    .iter()
+                    .any(|(field, ty)| field == name && ty.kind == AbiKind::String)
+            })
+    }
+
     pub(crate) fn accepts_exception(&self) -> bool {
         match &self.kind {
-            AbiKind::Result { err, .. } => err.as_deref().is_none_or(|err| match &err.kind {
-                _ if err.is_scalar() => true,
-                AbiKind::String | AbiKind::Enum(_, _) => true,
-                AbiKind::Record(fields) => {
-                    fields.len() == 2
-                        && ["name", "message"].iter().all(|name| {
-                            fields
-                                .iter()
-                                .any(|(field, ty)| field == name && ty.kind == AbiKind::String)
-                        })
-                }
-                _ => false,
+            AbiKind::Result { err, .. } => err.as_deref().is_none_or(|err| {
+                err.is_scalar()
+                    || matches!(err.kind, AbiKind::String | AbiKind::Enum(..))
+                    || err.is_error_record()
             }),
             AbiKind::OkHandle { .. } => true,
             _ => false,
@@ -70,8 +74,8 @@ impl AbiType {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum BoundaryValue {
-    Native(TypeHandle, Carriers<Value>),
+pub(super) enum BoundaryValue<T = TypeHandle> {
+    Native(T, Carriers<Value>),
     Completion {
         case: usize,
         payload: Option<(TypeHandle, Carriers<Value>)>,
@@ -81,6 +85,54 @@ pub(super) enum BoundaryValue {
 struct NativePayload {
     mir: TypeHandle,
     slot: Option<(u32, TypeHandle)>,
+}
+
+enum NativeSum {
+    Optional { mir: TypeHandle, inner: TypeHandle },
+    Enum,
+    Variant(TypedHandle<perry_mir::VariantType>),
+    Result(std::rc::Rc<RecordLayout>),
+}
+
+impl NativeSum {
+    fn payload(
+        &self,
+        ctx: &Context,
+        case: usize,
+        name: &str,
+        abi: &AbiType,
+    ) -> Result<NativePayload> {
+        let (mir, slot) = match self {
+            Self::Optional { inner, .. } => (*inner, None),
+            Self::Result(layout) => {
+                let field = layout
+                    .result_fields()?
+                    .payloads
+                    .get(case)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "result payload is missing"))?;
+                let mir = if matches!(abi.kind, AbiKind::Option(_)) {
+                    field.ty
+                } else {
+                    present_type(ctx, field.ty)
+                };
+                (mir, Some((field.offset, field.ty)))
+            }
+            Self::Variant(variant) => {
+                let field = variant
+                    .deref(ctx)
+                    .cases()
+                    .iter()
+                    .find(|(tag, _)| tag == name)
+                    .and_then(|(_, payload)| *payload)
+                    .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "variant payload is missing"))?;
+                (field, Some((perry_abi::layout::variant::VALUE, field)))
+            }
+            Self::Enum => bail_internal!("enum has no payload"),
+        };
+        Ok(NativePayload { mir, slot })
+    }
 }
 
 impl FunctionLowering<'_, '_> {
@@ -98,12 +150,9 @@ impl FunctionLowering<'_, '_> {
         let Some(err) = err.as_deref() else {
             return Ok(None);
         };
-        if let AbiKind::Record(fields) = &err.kind {
+        if matches!(err.kind, AbiKind::Record(_)) {
             ensure_diag!(
-                fields.len() == 2
-                    && ["name", "message"].iter().all(|name| fields
-                        .iter()
-                        .any(|(field, ty)| field == name && ty.kind == AbiKind::String)),
+                err.is_error_record(),
                 codes::CONTRACT_MISMATCH,
                 "completion-style Error objects require a {{name: string, message: string}} WIT error; return an explicit tagged result for {err:?}"
             );
@@ -194,100 +243,55 @@ impl FunctionLowering<'_, '_> {
         Ok(join.deref(ctx).arguments().collect())
     }
 
-    fn native_payload(
-        &mut self,
-        ctx: &Context,
-        ty: &AbiType,
-        mir: TypeHandle,
-        (case, name): (usize, &str),
-        abi: &AbiType,
-    ) -> Result<NativePayload> {
-        let (offset, field) = match &ty.kind {
-            AbiKind::Option(_) => {
-                return Ok(NativePayload {
-                    mir: optional_value(ctx, mir).ok_or_else(|| {
-                        Diagnostic::new(
-                            codes::CONTRACT_MISMATCH,
-                            "WIT option needs a nullable TypeScript value",
-                        )
-                    })?,
-                    slot: None,
-                });
-            }
-            AbiKind::Result { .. } if perry_mir::typed::<RecordType>(ctx, mir).is_some() => {
-                let layout = self.boundary_record(ctx, mir)?;
-                let field = layout
-                    .result_fields()?
-                    .payloads
-                    .get(case)
-                    .copied()
-                    .flatten()
-                    .ok_or_else(|| diag!(codes::CONTRACT_MISMATCH, "result payload is missing"))?;
-                return Ok(NativePayload {
-                    mir: if matches!(abi.kind, AbiKind::Option(_)) {
-                        field.ty
-                    } else {
-                        present_type(ctx, field.ty)
-                    },
-                    slot: Some((field.offset, field.ty)),
-                });
-            }
-            AbiKind::Variant(_, _) | AbiKind::Result { .. } => {
-                let variant = TypedHandle::<perry_mir::VariantType>::from_handle(mir, ctx)
-                    .map_err(|_| {
-                        Diagnostic::new(
-                            codes::CONTRACT_MISMATCH,
-                            "variant needs a closed tagged union",
-                        )
-                    })?;
-                let field = variant
-                    .deref(ctx)
-                    .cases()
-                    .iter()
-                    .find(|(tag, _)| tag == name)
-                    .and_then(|(_, payload)| *payload)
-                    .ok_or_else(|| {
-                        Diagnostic::new(codes::CONTRACT_MISMATCH, "variant payload is missing")
-                    })?;
-                (perry_abi::layout::variant::VALUE, field)
-            }
-            _ => bail_internal!("sum has no payload"),
-        };
-        Ok(NativePayload {
-            mir: field,
-            slot: Some((offset, field)),
-        })
-    }
-
-    fn lift_case(
-        &mut self,
-        ctx: &mut Context,
-        ty: &AbiType,
-        mir: TypeHandle,
-        (case, name): (usize, &str),
-        payload: Option<(TypeHandle, Value)>,
-    ) -> Result<Value> {
-        match &ty.kind {
-            AbiKind::Variant(_, _) | AbiKind::Result { .. }
-                if mir.deref(ctx).is::<perry_mir::VariantType>() =>
-            {
-                self.variant_new(ctx, name, payload)
-            }
+    fn native_sum(&mut self, ctx: &Context, ty: &AbiType, mir: TypeHandle) -> Result<NativeSum> {
+        Ok(match &ty.kind {
+            AbiKind::Option(_) => NativeSum::Optional {
+                mir,
+                inner: optional_value(ctx, mir).ok_or_else(|| {
+                    diag!(
+                        codes::CONTRACT_MISMATCH,
+                        "WIT option needs a nullable TypeScript value"
+                    )
+                })?,
+            },
             AbiKind::Enum(..) => {
                 ensure_diag!(
                     mir.deref(ctx).is::<perry_mir::StringType>(),
                     codes::CONTRACT_MISMATCH,
                     "WIT enum needs a string literal union"
                 );
+                NativeSum::Enum
+            }
+            AbiKind::Result { .. } if mir.deref(ctx).is::<RecordType>() => {
+                NativeSum::Result(self.boundary_record(ctx, mir)?)
+            }
+            AbiKind::Variant(..) | AbiKind::Result { .. } => {
+                NativeSum::Variant(perry_mir::typed(ctx, mir).ok_or_else(|| {
+                    diag!(
+                        codes::CONTRACT_MISMATCH,
+                        "variant needs a closed tagged union"
+                    )
+                })?)
+            }
+            other => bail_internal!("WIT {other:?} is not a sum type"),
+        })
+    }
+
+    fn lift_case(
+        &mut self,
+        ctx: &mut Context,
+        sum: &NativeSum,
+        (case, name): (usize, &str),
+        payload: Option<(TypeHandle, Value)>,
+    ) -> Result<Value> {
+        match sum {
+            NativeSum::Variant(_) => self.variant_new(ctx, name, payload),
+            NativeSum::Enum => {
                 let text = self.state.data.string(name);
                 Ok(self.i32_const(ctx, text as i32))
             }
-            AbiKind::Option(_) => {
-                ensure_diag!(
-                    optional_value(ctx, mir).is_some(),
-                    codes::CONTRACT_MISMATCH,
-                    "WIT option needs a nullable TypeScript value"
-                );
+            NativeSum::Optional { mir, .. } => {
+                let mir = *mir;
                 match payload {
                     Some((_, value)) => Ok(value),
                     None if absence(ctx, mir).is_some_and(|a| a.admits_null()) => {
@@ -296,8 +300,7 @@ impl FunctionLowering<'_, '_> {
                     None => self.undefined(ctx, mir),
                 }
             }
-            AbiKind::Result { .. } => {
-                let layout = self.boundary_record(ctx, mir)?;
+            NativeSum::Result(layout) => {
                 let fields = layout.result_fields()?;
                 let mut values = Vec::with_capacity(layout.fields.len());
                 for (name, field) in &layout.fields {
@@ -329,9 +332,8 @@ impl FunctionLowering<'_, '_> {
                     };
                     values.push((*field, value));
                 }
-                self.build_record(ctx, &layout, values)
+                self.build_record(ctx, layout, values)
             }
-            other => bail_internal!("WIT {other:?} is not a sum type"),
         }
     }
 
@@ -381,6 +383,7 @@ impl FunctionLowering<'_, '_> {
         mir: TypeHandle,
         mut source: Canonical<'_>,
     ) -> Result<Value> {
+        let sum = self.native_sum(ctx, ty, mir)?;
         let tag = source.read(self, ctx, ty.discriminant_kind(), 0)?;
         let flat = if matches!(source, Canonical::Memory(..)) {
             None
@@ -406,7 +409,7 @@ impl FunctionLowering<'_, '_> {
             vec![result],
             |b, ctx, case, (name, abi)| {
                 let payload = if let Some(abi) = abi {
-                    let payload_mir = b.native_payload(ctx, ty, mir, (case, name), abi)?.mir;
+                    let payload_mir = sum.payload(ctx, case, name, abi)?.mir;
                     let lift_mir = scalar_mir_type(ctx, payload_mir);
                     let mut index = 0;
                     let source = match &flat {
@@ -417,7 +420,7 @@ impl FunctionLowering<'_, '_> {
                 } else {
                     None
                 };
-                Ok(vec![b.lift_case(ctx, ty, mir, (case, name), payload)?])
+                Ok(vec![b.lift_case(ctx, &sum, (case, name), payload)?])
             },
         )?[0])
     }
@@ -426,46 +429,25 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         ty: &AbiType,
-        mir: TypeHandle,
+        sum: &NativeSum,
         value: Carriers<Value>,
     ) -> Result<Value> {
-        Ok(match &ty.kind {
-            AbiKind::Option(_) => {
-                ensure_diag!(
-                    optional_value(ctx, mir).is_some(),
-                    codes::CONTRACT_MISMATCH,
-                    "WIT option needs a nullable TypeScript value"
-                );
-                let absent = self.is_absent(ctx, value, mir)?;
+        let names = ty.cases().map(|(name, _)| name);
+        Ok(match sum {
+            NativeSum::Optional { mir, .. } => {
+                let absent = self.is_absent(ctx, value, *mir)?;
                 self.num(ctx, NumOpcode::I32Eqz, vec![absent])
             }
-            AbiKind::Result { .. } if mir.deref(ctx).is::<RecordType>() => {
-                let value = value.scalar()?;
-                let layout = self.boundary_record(ctx, mir)?;
+            NativeSum::Result(layout) => {
                 let field = layout.result_fields()?.tag;
-                let ok = self.load(ctx, MemKind::I32, value, field.offset);
+                let ok = self.load(ctx, MemKind::I32, value.scalar()?, field.offset);
                 self.num(ctx, NumOpcode::I32Eqz, vec![ok])
             }
-            AbiKind::Variant(_, _) | AbiKind::Result { .. } => {
-                let value = value.scalar()?;
-                ensure_diag!(
-                    mir.deref(ctx).is::<perry_mir::VariantType>(),
-                    codes::CONTRACT_MISMATCH,
-                    "variant needs a closed tagged union"
-                );
-                let tag = self.load(ctx, MemKind::I32, value, 0);
-                self.string_tag(ctx, ty.cases().map(|(name, _)| name), tag)
+            NativeSum::Variant(_) => {
+                let tag = self.load(ctx, MemKind::I32, value.scalar()?, 0);
+                self.string_tag(ctx, names, tag)
             }
-            AbiKind::Enum(_, names) => {
-                let value = value.scalar()?;
-                ensure_diag!(
-                    mir.deref(ctx).is::<perry_mir::StringType>(),
-                    codes::CONTRACT_MISMATCH,
-                    "WIT enum needs a string literal union"
-                );
-                self.string_tag(ctx, names.iter().map(String::as_str), value)
-            }
-            other => bail_internal!("WIT {other:?} is not a sum type"),
+            NativeSum::Enum => self.string_tag(ctx, names, value.scalar()?),
         })
     }
 
@@ -517,6 +499,14 @@ impl FunctionLowering<'_, '_> {
         } else {
             ty.direct()?
         };
+        let source = match source {
+            BoundaryValue::Native(mir, value) => {
+                BoundaryValue::Native(self.native_sum(ctx, ty, mir)?, value)
+            }
+            BoundaryValue::Completion { case, payload } => {
+                BoundaryValue::Completion { case, payload }
+            }
+        };
         let write_case = |b: &mut Self,
                           ctx: &mut Context,
                           case,
@@ -536,8 +526,8 @@ impl FunctionLowering<'_, '_> {
                             "WIT result payload requires a return value",
                         )
                     })?,
-                    BoundaryValue::Native(mir, value) => {
-                        let payload = b.native_payload(ctx, ty, mir, (case, name), payload_abi)?;
+                    BoundaryValue::Native(ref sum, value) => {
+                        let payload = sum.payload(ctx, case, name, payload_abi)?;
                         b.read_native_payload(ctx, payload, value)?
                     }
                 };
@@ -563,8 +553,8 @@ impl FunctionLowering<'_, '_> {
                 ty.case(case)
                     .ok_or_else(|| internal!("missing WIT completion case"))?,
             )?,
-            BoundaryValue::Native(mir, value) => {
-                let tag = self.sum_tag(ctx, ty, mir, value)?;
+            BoundaryValue::Native(ref sum, value) => {
+                let tag = self.sum_tag(ctx, ty, sum, value)?;
                 let results = layout.iter().map(|ty| flat_type(ctx, *ty)).collect();
                 self.sum_switch(ctx, tag, ty.cases(), results, write_case)?
             }

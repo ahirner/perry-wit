@@ -35,10 +35,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 };
                 Ok(self.call_intrinsic(ctx, Intrinsic::DateFromTime, vec![time]))
             }
-            Expr::DateParse(text) => {
-                let text = self.string_operand(ctx, text)?;
-                Ok(self.call_intrinsic(ctx, Intrinsic::DateParse, vec![text]))
-            }
             Expr::DateUtc(args) => self.date_utc(ctx, args).map(Some),
             _ => Ok(None),
         }

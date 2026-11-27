@@ -243,22 +243,6 @@ impl<'s> FunctionBuilder<'s, '_> {
         })
     }
 
-    /// `Math.min(…)` or `Math.max(…)`: `intrinsic` folded over `values` from `empty`.
-    pub(super) fn math_extremum(
-        &mut self,
-        ctx: &mut Context,
-        intrinsic: Intrinsic,
-        empty: f64,
-        values: &'s [Expr],
-    ) -> Result<Value> {
-        let mut result = self.number(ctx, empty);
-        for value in values {
-            let value = self.number_operand(ctx, value)?;
-            result = self.intrinsic(ctx, intrinsic, vec![result, value]);
-        }
-        Ok(result)
-    }
-
     pub(super) fn data_view(&mut self, ctx: &mut Context, args: &'s [Expr]) -> Result<Value> {
         let Some((buffer, rest)) = args.split_first() else {
             bail_diag!(codes::TYPE_MISMATCH, "DataView requires an ArrayBuffer");

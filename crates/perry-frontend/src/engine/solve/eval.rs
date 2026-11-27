@@ -7,12 +7,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.subscriptions.forget(inst_id);
         let inst = &self.instances[inst_id];
         let is_witness = inst.is_witness;
-        let (template, receiver, return_loc, has_explicit_return, param_locs_span, args_ty) = (
+        let activation = inst.activation;
+        let (template, receiver, return_loc, has_explicit_return, args_ty) = (
             inst.template,
             inst.receiver,
             inst.return_loc,
             inst.has_explicit_return,
-            inst.param_locs,
             inst.args,
         );
         let view = self.index.view(template);
@@ -37,7 +37,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     || incoming == Ty::BOTTOM
                     || abs.is_some_and(Absence::admits_undefined);
                 let def_ty = self.eval_expr(&mut s, default_expr)?;
-                if default_runs && let Some(&ploc) = self.param_locs[param_locs_span].get(p_idx) {
+                if default_runs && let Some(&ploc) = self.capture_locs.slots[activation].get(p_idx)
+                {
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, def_ty);
@@ -169,7 +170,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         Some(self.read_loc(loc, inst_id))
     }
 
-    pub(super) fn write_local_value(&mut self, s: &mut EvalState<'h>, local: LocalIdx, value: Ty) {
+    pub(super) fn write_local_value(
+        &mut self,
+        s: &mut EvalState<'h>,
+        local: LocalIdx,
+        value: Ty,
+    ) -> Result<()> {
         if let Some(cloc) = self.capture_locs.collapsed[local] {
             self.write_loc(cloc, value);
         }
@@ -184,11 +190,14 @@ impl<'h, 'a> Solver<'h, 'a> {
                     s.local_changed = true;
                 }
             }
-            return;
+            return Ok(());
         }
-        let loc = self
-            .local_loc_in_instance(s.inst, local)
-            .unwrap_or_else(|| self.ensure_instance_local(s.inst, local, Ty::BOTTOM));
+        let loc = self.local_loc_in_instance(s.inst, local).ok_or_else(|| {
+            perry_wit_diagnostics::internal!(
+                "missing capture location for local {}",
+                self.index.locals[local].id
+            )
+        })?;
         self.write_loc(loc, value);
         if self
             .facts
@@ -197,6 +206,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         {
             self.self_nested_locals.insert(local.index());
         }
+        Ok(())
     }
 
     pub(super) fn local_loc_in_instance(
@@ -210,26 +220,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             CaptureOwner::Instance(inst_id),
             local,
         )
-    }
-
-    pub(super) fn ensure_instance_local(
-        &mut self,
-        inst_id: InstanceId,
-        local: LocalIdx,
-        initial: Ty,
-    ) -> LocId {
-        if let Some(loc) = self.index.locals[local].module_loc() {
-            return loc;
-        }
-        if let Some(slot) = self.capture_locs.slots[inst_id]
-            .iter()
-            .find(|s| s.local == local)
-        {
-            return slot.loc;
-        }
-        let loc = self.facts.alloc(initial);
-        self.capture_locs.slots[inst_id].push(InstanceLocalSlot { local, loc });
-        loc
     }
 
     pub(super) fn invalidate_conservative_cell(&mut self, ty: Ty) {
@@ -496,21 +486,19 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn site_mut(&mut self, inst: InstanceId, expr: &Expr) -> Result<&mut SiteEntry> {
-        let template = self.instances[inst].template;
-        self.index
-            .site_of(template, expr)
-            .and_then(|site| self.inst_sites[inst].get_mut(site))
-            .ok_or_else(|| Diagnostic::internal("operand missing from lexical site index"))
+        let site = self
+            .index
+            .expressions
+            .index(expr)
+            .ok_or_else(|| Diagnostic::internal("operand missing from lexical site index"))?;
+        Ok(self.inst_sites[inst].entry(site).or_default())
     }
 
-    pub(super) fn record_site(&mut self, inst_id: InstanceId, expr: &Expr, res: SiteResolution) {
-        let template = self.instances[inst_id].template;
-        let Some(local_site) = self.index.site_of(template, expr) else {
-            debug_assert!(false, "unindexed site in template {}", template.index());
-            return;
-        };
-        if let Some(slot) = self.inst_sites[inst_id].get_mut(local_site) {
-            slot.resolution = Some(res);
+    pub(super) fn record_site(&mut self, inst: InstanceId, expr: &Expr, res: SiteResolution) {
+        if let Some(site) = self.index.expressions.index(expr) {
+            self.inst_sites[inst].entry(site).or_default().resolution = Some(res);
+        } else {
+            debug_assert!(false, "unindexed resolution site");
         }
     }
 
@@ -535,7 +523,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     }
                     let ty = self.eval_expr(s, value)?;
                     if let Some(lidx) = self.index.local_idx(*id) {
-                        self.write_local_value(s, lidx, ty);
+                        self.write_local_value(s, lidx, ty)?;
                         self.mark_written(s.inst, lidx);
                     }
                     handled = true;
@@ -551,7 +539,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     };
                     if let Some(lidx) = self.index.local_idx(el.id) {
-                        self.write_local_value(s, lidx, ty);
+                        self.write_local_value(s, lidx, ty)?;
                         self.mark_written(s.inst, lidx);
                     }
                     handled = true;
@@ -585,12 +573,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                     declared
                 };
                 let needs_context = is_inferred || self.types.is_open(declared);
-                let initial = if !needs_context { declared } else { Ty::BOTTOM };
-                if self.local_frame_slot_in(s.inst, lidx).is_none() {
-                    let _ = self.ensure_instance_local(s.inst, lidx, initial);
-                }
                 if !needs_context {
-                    self.write_local_value(s, lidx, declared);
+                    self.write_local_value(s, lidx, declared)?;
                 }
                 let is_i64_cast = is_inferred
                     && self
@@ -598,7 +582,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         .integer_domain(self.ctx, self.decls, declared)
                         .is_some_and(|domain| domain.deref(self.ctx).width() == 64);
                 if is_i64_cast {
-                    self.write_local_value(s, lidx, declared);
+                    self.write_local_value(s, lidx, declared)?;
                 }
 
                 if let Some(init_expr) = init {
@@ -622,7 +606,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     };
                     if let Some(kind) = cell_kind {
                         let cell = self.alloc_expr_cell(s.inst, init_expr, kind)?;
-                        self.write_local_value(s, lidx, cell);
+                        self.write_local_value(s, lidx, cell)?;
                         self.mark_written(s.inst, lidx);
                         return Ok(());
                     }
@@ -649,7 +633,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if matches!(self.types.kind(init_ty), TyKind::Func(_))
                         || self.is_tagged_func_union_in(init_ty, s.inst)
                     {
-                        self.write_local_value(s, lidx, init_ty);
+                        self.write_local_value(s, lidx, init_ty)?;
                     } else if !is_i64_cast && needs_context {
                         let is_kind = |t, k| matches!(self.types.kind(t), TyKind::Named(id) if crate::methods::Kind::builtin(id.get(self.ctx)) == Some(k));
                         let keep_declared = (init_ty == Ty::DYNAMIC
@@ -664,7 +648,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             self.types
                                 .normalize_for_storage(self.ctx, self.decls, init_ty)
                         };
-                        self.write_local_value(s, lidx, stored);
+                        self.write_local_value(s, lidx, stored)?;
                     }
                     if let Some(cur) = self.read_local_value(s.inst, lidx) {
                         self.record_coercion(s.inst, init_expr, init_ty, cur);
@@ -783,7 +767,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         .index
                         .local_idx(id)
                         .ok_or_else(|| Diagnostic::internal("missing iteration binding"))?;
-                    self.write_local_value(s, local, element);
+                    self.write_local_value(s, local, element)?;
                     self.mark_written(s.inst, local);
                 } else if let Some(init) = init {
                     self.eval_stmt(s, init)?;
@@ -816,7 +800,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         && let Some(lidx) = self.index.local_idx(*id)
                     {
                         let err_ty = self.types.named(self.ctx, "Error");
-                        self.write_local_value(s, lidx, err_ty);
+                        self.write_local_value(s, lidx, err_ty)?;
                     }
                     self.eval_stmts(s, &catch.body)?;
                 }
@@ -848,7 +832,10 @@ impl<'h, 'a> Solver<'h, 'a> {
     }
 
     pub(super) fn finish(self, init_inst: InstanceId) -> Solved {
-        let live_instances = self.compute_live_instances();
+        let mut live_helpers = BitSet::default();
+        let live_instances = self.live_instances(|id| {
+            live_helpers.insert(id.index());
+        });
         let writes = self.write_effects(init_inst, &live_instances);
         let (locations, self_nested_locs, escaping_env_templates) = self.facts.finish();
         Solved {
@@ -859,7 +846,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             instances: self.instances,
             class_insts: self.class_insts,
             locations,
-            param_locs: self.param_locs,
             field_locs: self.field_locs,
             dispatch_arms: self.dispatch_arms,
             helpers: self.helpers,
@@ -867,6 +853,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             inst_frame_locals: self.inst_frame_locals,
             inst_sites: self.inst_sites,
             live_instances,
+            live_helpers,
             escaping_env_templates,
 
             boxed_locals: self.boxed_locals,

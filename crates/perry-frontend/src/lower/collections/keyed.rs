@@ -241,7 +241,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             let arr = self.collection_entries_array(ctx, coll)?;
             return self.find_live_match(ctx, "map_delete", arr, key, |b, ctx, _, entry| {
                 let cleared = [("_0", k_ty), ("_1", v_ty)];
-                b.tombstone_entry(ctx, arr, entry, EntryKind::Map, &cleared, coll)
+                b.tombstone_entry(ctx, arr, entry, CollectionKind::Map, &cleared, coll)
             });
         }
         self.retain_array(ctx, coll, |b, ctx, entry| {
@@ -265,7 +265,10 @@ impl<'s> FunctionBuilder<'s, '_> {
         callback: &'s Expr,
     ) -> Result<Value> {
         let callback = self.prepare_callback(ctx, callback)?;
-        let is_set = set_box_record(ctx, arr.get_type(ctx)).is_some();
+        let is_set = matches!(
+            Collection::of(ctx, arr.get_type(ctx)),
+            Some(Collection::Box(CollectionKind::Set))
+        );
         self.iterate(ctx, Input::Collection(arr), |b, ctx, entry, _, _, _| {
             let (k, v) = if is_set {
                 (entry, entry)
@@ -303,7 +306,14 @@ impl<'s> FunctionBuilder<'s, '_> {
         let arr = self.collection_entries_array(ctx, coll)?;
         let val = self.fit(ctx, val, elem_ty)?;
         self.find_live_match(ctx, "set_delete", arr, val, |b, ctx, _, entry| {
-            b.tombstone_entry(ctx, arr, entry, EntryKind::Set, &[("_0", elem_ty)], coll)
+            b.tombstone_entry(
+                ctx,
+                arr,
+                entry,
+                CollectionKind::Set,
+                &[("_0", elem_ty)],
+                coll,
+            )
         })
     }
 
@@ -317,7 +327,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Value> {
         let other = self.expression(ctx, other_expr)?;
         let other = self.defined(ctx, other)?;
-        let out = self.empty_set(ctx, Some(receiver.get_type(ctx)))?;
+        let out = self.empty_collection(ctx, CollectionKind::Set, Some(receiver.get_type(ctx)))?;
         let (first, second) = match operation {
             SetOperation::Difference => (SetSelection::AbsentFrom(other), None),
             SetOperation::Intersection => {
@@ -451,12 +461,14 @@ impl<'s> FunctionBuilder<'s, '_> {
             let tuple_rec =
                 match expected.and_then(|exp| map_entry_types(ctx, exp).map(|(_, _, r)| r)) {
                     Some(r) => r,
-                    None => b.shapes.map_tuple_type(ctx, k_ty, group_arr_ty)?,
+                    None => b
+                        .shapes
+                        .entry_type(ctx, EntryTypes::Map(k_ty, group_arr_ty))?,
                 };
 
             let body_bb = b.block;
             b.switch_to(alloc_bb);
-            let out_map = b.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)?;
+            let out_map = b.alloc_collection_box(ctx, tuple_rec, CollectionKind::Map)?;
             b.jump(ctx, loop_start_bb);
             b.switch_to(body_bb);
 

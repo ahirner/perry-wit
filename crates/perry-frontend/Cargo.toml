@@ -13,6 +13,7 @@ perry-wit-diagnostics.workspace = true
 perry-contract.workspace = true
 wit-parser.workspace = true
 pliron.workspace = true
+indexmap = "2"
 serde_json.workspace = true
 swc_ecma_utils = "35.1"
 swc_ecma_visit = "29.0"

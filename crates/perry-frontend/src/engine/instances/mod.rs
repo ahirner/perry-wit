@@ -1,22 +1,19 @@
 //! Bind solved instances to borrowed source declarations and native MIR operation plans.
-use crate::source::{
-    Bodies, InstanceBodies, InstanceClass, InstanceFunction, ModuleDeclarations, is_pure_func_expr,
-};
+use crate::source::{Bodies, InstanceBodies, InstanceClass, InstanceFunction, ModuleDeclarations};
 mod async_helpers;
 mod expressions;
 mod funcs;
 mod stmts;
+use super::BodyOwner;
 use super::bitset::BitSet;
-use super::boundary::{LocalFlags, ModuleIndex, TemplateKind};
+use super::boundary::{LocalFlags, ModuleIndex, Origins, TemplateKind};
 use super::solve::Invocation;
-use super::solve::{ClassInst, FuncCoercion, Receiver, SiteEntry, Solved};
+use super::solve::{ClassInst, Receiver, SiteEntry, Solved};
 use super::types::{
     CaptureOwner, CellKind, ClassId, Idx, IdxVec, InstanceId, Ty, TyKind, TypeTable,
 };
-use perry_hir::{
-    ir::Expr,
-    types::{FuncId, LocalId, Type as HirType},
-};
+use crate::source::CallerKind;
+use perry_hir::types::{FuncId, LocalId, Type as HirType};
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 use pliron::context::Context;
 
@@ -24,15 +21,11 @@ pub(super) fn build<'h>(
     bodies: &'h Bodies,
     declarations: &ModuleDeclarations,
     locations: &mut crate::hir_compat::Locations<'_>,
-    index: &ModuleIndex<'h>,
+    index: &mut ModuleIndex<'h>,
     types: &TypeTable,
     solved: &Solved,
     layouts: (&Context, &mut perry_mir::RecordLayouts),
-) -> Result<(
-    InstanceBodies<'h>,
-    super::InstancePlans,
-    super::plans::Pending,
-)> {
+) -> Result<(InstanceBodies<'h>, super::InstancePlans)> {
     let max_inst_fid = solved
         .instances
         .iter()
@@ -49,16 +42,25 @@ pub(super) fn build<'h>(
         next_func_id: index.max_func_id.max(max_inst_fid).saturating_add(1),
         layouts,
 
+        origins: index.views.filled(Vec::new()),
         native: Default::default(),
         plans: super::InstancePlans {
             functions: solved.instances.map(|inst| inst.emitted_func_id),
             helpers: solved.helpers.filled(None),
             ..Default::default()
         },
-        decisions: Default::default(),
+        locals: solved.instances.filled(Default::default()),
     };
     let bodies = planner.build_all()?;
-    Ok((bodies, planner.plans, planner.decisions))
+    planner.finalize_sites()?;
+    let InstancePlanner {
+        mut plans, origins, ..
+    } = planner;
+    plans.decisions.expressions = std::mem::take(&mut index.expressions);
+    plans.local_ids = std::mem::take(&mut index.local_to_idx);
+    plans.local_flags = index.locals.map(|local| local.flags);
+    plans.globals = index.emitted_uses(&bodies, origins, &plans, locations);
+    Ok((bodies, plans))
 }
 
 struct InstancePlanner<'h, 'a, 's> {
@@ -68,12 +70,13 @@ struct InstancePlanner<'h, 'a, 's> {
     index: &'a ModuleIndex<'h>,
     types: &'a TypeTable,
     solved: &'a Solved,
+    origins: Origins,
     next_func_id: FuncId,
     layouts: (&'a Context, &'a mut perry_mir::RecordLayouts),
 
     native: Vec<(FuncId, super::NativeFunction)>,
     plans: super::InstancePlans,
-    decisions: super::plans::Pending,
+    locals: IdxVec<InstanceId, std::collections::BTreeMap<super::types::LocalIdx, super::Storage>>,
 }
 
 impl<'h> InstancePlanner<'h, '_, '_> {
@@ -102,33 +105,45 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         )
     }
 
-    fn local_ty(&self, inst_id: InstanceId, id: LocalId) -> Option<Ty> {
-        let lidx = self.index.local_idx(id)?;
+    fn local_ty(&self, inst_id: InstanceId, lidx: super::types::LocalIdx) -> Option<Ty> {
         let info = self.index.locals[lidx];
         if let Some(slot) = info.frame_slot()
             && info.owner == self.solved.instances[inst_id].template
         {
             return self.solved.inst_frame_locals[inst_id].get(slot).copied();
         }
-        self.local_ty_in_owner(CaptureOwner::Instance(inst_id), id)
+        self.local_ty_in_owner(CaptureOwner::Instance(inst_id), lidx)
     }
 
     fn build_all(&mut self) -> Result<InstanceBodies<'h>> {
         let init_inst = self.solved.init_inst;
-        self.prepare_instance(init_inst)?;
+        self.prepare_bindings(init_inst)?;
 
         let mut new_functions = Vec::new();
-        for (inst_id, inst) in self.solved.instances.iter_enumerated().skip(1) {
+        for (inst_id, inst) in self.solved.instances.iter_enumerated() {
             if !self.solved.live_instances.contains(inst_id.index()) {
                 continue;
             }
             let view = self.index.view(inst.template);
+            let (kind, caller) = match view.kind {
+                TemplateKind::ModuleInit => (CallerKind::Initializer, None),
+                TemplateKind::Closure(_) | TemplateKind::Function => (
+                    if inst.is_witness {
+                        CallerKind::Export
+                    } else {
+                        CallerKind::Function
+                    },
+                    Some(inst.emitted_func_id),
+                ),
+                _ => (CallerKind::Class, None),
+            };
+            self.origins[inst.template].push((self.solved.body_owner(inst_id), kind, caller));
             match view.kind {
                 TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_) => {
                     self.promise_handle_function(inst, view.kind)?
                 }
                 TemplateKind::Function
-                | TemplateKind::Closure
+                | TemplateKind::Closure(_)
                 | TemplateKind::ClassStaticMethod(_)
                 | TemplateKind::ClassMethod
                 | TemplateKind::ClassGetter
@@ -151,9 +166,6 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             for (field, loc) in class.static_fields() {
                 let value = self.solved.locations[loc];
                 let ty = self.is_resolved(value).then_some(value);
-                if let Some(ty) = ty {
-                    self.prepare_layouts(ty)?;
-                }
                 let id = 0x8000_0000 + static_fields.len() as LocalId;
                 static_fields
                     .entry((class.declaration.name.as_str(), field.name.as_str()))
@@ -172,6 +184,11 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 && (!decl.static_fields.is_empty() || decl.extends_name.is_some())
             {
                 new_classes.push(self.plan_class(id, None)?);
+            }
+        }
+        for id in self.solved.helpers.ids() {
+            if self.solved.live_helpers.contains(id.index()) {
+                self.prepare_helper(id)?;
             }
         }
         let mut exports = Vec::with_capacity(self.solved.witness_instances.len());
@@ -240,6 +257,18 @@ impl<'h> InstancePlanner<'h, '_, '_> {
     ) -> Result<InstanceClass<'h>> {
         let class = self.index.class(cid);
         let orig = class.declaration;
+        if instantiated.and_then(|i| i.field_init).is_none()
+            && let Some(tid) = class.field_init
+            && self.origins[tid].is_empty()
+        {
+            self.origins[tid].push((BodyOwner::Initializer, CallerKind::Class, None));
+        }
+        for member in &orig.computed_members {
+            let id = member.function.id;
+            if let Some(tid) = self.index.template_of_func(id) {
+                self.origins[tid].push((BodyOwner::Function(id), CallerKind::Class, None));
+            }
+        }
         let name = instantiated
             .as_ref()
             .map_or(orig.name.as_str(), |instance| {
@@ -272,15 +301,15 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 continue;
             }
             let ty = self.is_resolved(resolved).then_some(resolved);
-            if let Some(resolved) = ty {
-                self.prepare_layouts(resolved)?;
-            } else if matches!(
-                self.types.kind(resolved),
-                TyKind::Cell {
-                    kind: CellKind::Array,
-                    ..
-                }
-            ) {
+            if ty.is_none()
+                && matches!(
+                    self.types.kind(resolved),
+                    TyKind::Cell {
+                        kind: CellKind::Array,
+                        ..
+                    }
+                )
+            {
                 return Err(diag!(
                     codes::MISSING_TYPE_ANNOTATION,
                     "an empty array literal needs a declared element type"
@@ -303,7 +332,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             cls.fields.push((field, ty));
         }
         if let (Some(initializer), Some(_)) = (cinst.field_init, cinst.ctor_inst) {
-            self.prepare_instance(initializer)?;
+            self.prepare_bindings(initializer)?;
         }
         cls.constructor = cinst
             .ctor_inst
@@ -314,22 +343,6 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         Ok(cls)
     }
 
-    fn prepare_arguments(&mut self, tuple: Ty) {
-        self.plans.arguments.entry(tuple).or_insert_with(|| {
-            self.types
-                .tuple_slice(tuple)
-                .iter()
-                .copied()
-                .enumerate()
-                .filter(|&(_, ty)| {
-                    self.types
-                        .erased_function(ty, &self.solved.escaping_env_templates)
-                        .is_none()
-                })
-                .collect()
-        });
-    }
-
     fn plan_function(
         &mut self,
         inst_id: InstanceId,
@@ -337,7 +350,6 @@ impl<'h> InstancePlanner<'h, '_, '_> {
     ) -> Result<InstanceFunction<'h>> {
         let inst = &self.solved.instances[inst_id];
         let view = self.index.view(inst.template);
-        let mut params = Vec::with_capacity(view.params.len());
         let lexical = inst.invocation == Invocation::Lexical;
         let is_env_fn = !lexical && self.is_env_template(inst.template);
         let self_ident = inst.identity();
@@ -349,36 +361,31 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             Some(Receiver::Class(id)) if !lexical && constructed.is_none() => {
                 Some(self.solved.class_insts[id].ty)
             }
-            Some(Receiver::Object(ty)) if !lexical => {
-                self.prepare_layouts(ty)?;
-                Some(ty)
-            }
+            Some(Receiver::Object(ty)) if !lexical => Some(ty),
             _ => None,
         };
 
-        for (p_idx, param) in view.params.iter().enumerate() {
-            let param_loc = *self.solved.param_locs[inst.param_locs]
-                .get(p_idx)
-                .ok_or_else(|| {
-                    Diagnostic::internal("emitted function missing parameter location slot")
-                })?;
+        for (param, &param_loc) in view
+            .params
+            .iter()
+            .zip(&self.solved.capture_locs.slots[inst.activation])
+        {
+            let local = self.index.param_local(param)?;
             let param_ty = self.solved.locations[param_loc];
             if !lexical
                 && let Some(ident) = self
                     .types
                     .erased_function(param_ty, &self.solved.escaping_env_templates)
             {
-                self.local_storage(
-                    inst_id,
-                    param.id,
+                self.locals[inst_id].insert(
+                    local,
                     super::Storage::ErasedFunction(Some(self.index.view(ident.template).func_id)),
-                )?;
+                );
                 continue;
             }
             let resolved = self.is_resolved(param_ty).then_some(param_ty);
-            if resolved.is_some() {
-                self.prepare_layouts(param_ty)?;
-            } else if !self.index.is_param_annotated(param.id)
+            if resolved.is_none()
+                && !self.index.is_param_annotated(param.id)
                 && !inst.is_witness
                 && matches!(param.ty, HirType::Any | HirType::Unknown)
             {
@@ -387,18 +394,16 @@ impl<'h> InstancePlanner<'h, '_, '_> {
                 let err = self.annotate_local(err, param.id);
                 return Err(self.attach_inst_chain(err, inst_id));
             }
-            if self.is_boxed_local(param.id) {
-                let ty = self.boxed_type(param.id, resolved)?;
-                self.local_storage(
-                    inst_id,
-                    param.id,
-                    super::Storage::Boxed {
-                        ty,
-                        init: super::CellInit::AtDeclaration,
-                    },
-                )?;
-            }
-            params.push((param, resolved));
+            let ty = resolved.unwrap_or(self.index.locals[local].declared);
+            let storage = if self.solved.boxed_locals.contains(local.index()) {
+                super::Storage::Boxed {
+                    ty,
+                    init: super::CellInit::AtDeclaration,
+                }
+            } else {
+                super::Storage::Value(ty)
+            };
+            self.locals[inst_id].insert(local, storage);
         }
 
         let ret_ty = self.solved.locations[inst.return_loc];
@@ -408,7 +413,6 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         } else if void_return {
             super::InstanceResult::ErasedFunction
         } else if self.is_resolved(ret_ty) {
-            self.prepare_layouts(ret_ty)?;
             super::InstanceResult::Value(ret_ty)
         } else if self
             .solved
@@ -431,7 +435,7 @@ impl<'h> InstancePlanner<'h, '_, '_> {
         } else {
             super::InstanceResult::Source
         };
-        self.prepare_instance(inst_id)?;
+        self.prepare_bindings(inst_id)?;
         if !inst.is_witness
             && let Some(caller) = inst.caller
         {
@@ -465,7 +469,6 @@ impl<'h> InstancePlanner<'h, '_, '_> {
             } else {
                 inst.emitted_name.clone().into()
             },
-            params,
             is_exported: inst.is_witness,
         })
     }

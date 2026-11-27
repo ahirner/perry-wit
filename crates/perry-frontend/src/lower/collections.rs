@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::lower::control_flow::{ArrayOutput, Holes, Input, Projection};
-use crate::source::CollectionKind;
+pub(super) use crate::source::CollectionKind;
 use crate::source::ConstructorSites;
 use perry_mir::{OptionalType, RecordKind};
 
@@ -40,16 +40,15 @@ impl StorageField {
     }
 }
 
-/// The entry records of a live `Map` or `Set`, which carry a liveness flag for tombstones.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum EntryKind {
-    Map,
-    Set,
+#[derive(Clone, Copy)]
+pub(super) enum EntryTypes {
+    Map(TypeHandle, TypeHandle),
+    Set(TypeHandle),
 }
 
-impl EntryKind {
+impl CollectionKind {
     /// The entry record's liveness flag.
-    fn live_field(self) -> &'static str {
+    pub(super) fn live_field(self) -> &'static str {
         match self {
             Self::Map => "_2",
             Self::Set => "_1",
@@ -57,7 +56,7 @@ impl EntryKind {
     }
 
     /// The entry record's monotonic insertion sequence number.
-    fn seq_field(self) -> &'static str {
+    pub(super) fn seq_field(self) -> &'static str {
         match self {
             Self::Map => "_3",
             Self::Set => "_2",
@@ -96,46 +95,65 @@ impl CollectionViewKind {
     }
 
     /// The collection the view reads.
-    pub(super) fn source(self) -> EntryKind {
+    pub(super) fn source(self) -> CollectionKind {
         match self {
-            Self::MapKeys | Self::MapValues | Self::MapEntries => EntryKind::Map,
-            Self::SetValues | Self::SetEntries => EntryKind::Set,
+            Self::MapKeys | Self::MapValues | Self::MapEntries => CollectionKind::Map,
+            Self::SetValues | Self::SetEntries => CollectionKind::Set,
         }
     }
 }
 
-/// The record behind `ty` (optional or not) with the requested role.
-fn record_of_kind(
+#[derive(Clone, Copy)]
+pub(super) enum Collection {
+    Box(CollectionKind),
+    View(CollectionViewKind),
+}
+
+impl Collection {
+    pub(super) fn of(ctx: &Context, ty: TypeHandle) -> Option<Self> {
+        let record = perry_mir::typed::<RecordType>(ctx, present_type(ctx, ty))?;
+        let kind = record.deref(ctx).kind();
+        match kind {
+            RecordKind::Map => Some(Self::Box(CollectionKind::Map)),
+            RecordKind::Set => Some(Self::Box(CollectionKind::Set)),
+            _ => CollectionViewKind::ALL
+                .into_iter()
+                .find(|view| view.record_kind() == kind)
+                .map(Self::View),
+        }
+    }
+}
+
+fn array_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
+    let array = perry_mir::typed::<ArrayType>(ctx, present_type(ctx, ty))?;
+    perry_mir::typed(ctx, array.deref(ctx).element())
+}
+
+impl CollectionKind {
+    pub(super) fn entry(self, ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
+        let record = perry_mir::typed::<RecordType>(ctx, present_type(ctx, ty))?;
+        let record = record.deref(ctx);
+        if record.kind() != self.box_kind() {
+            return None;
+        }
+        array_record(ctx, record.field(StorageField::BoxEntries.name())?.1)
+    }
+}
+
+pub(super) fn tuple_pair(
     ctx: &Context,
-    ty: TypeHandle,
-    kind: RecordKind,
-) -> Option<TypedHandle<RecordType>> {
-    let ty = present_type(ctx, ty);
-    let rec = perry_mir::typed::<RecordType>(ctx, ty)?;
-    (rec.deref(ctx).kind() == kind).then_some(rec)
-}
-
-pub(super) fn map_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
-    record_of_kind(ctx, ty, RecordKind::Map)
-}
-
-pub(super) fn set_box_record(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<RecordType>> {
-    record_of_kind(ctx, ty, RecordKind::Set)
-}
-
-pub(super) fn collection_view_record(
-    ctx: &Context,
-    ty: TypeHandle,
-) -> Option<(CollectionViewKind, TypedHandle<RecordType>)> {
-    CollectionViewKind::ALL
-        .into_iter()
-        .find_map(|view| Some((view, record_of_kind(ctx, ty, view.record_kind())?)))
-}
-
-pub(super) fn is_collection_or_view_record(ctx: &Context, ty: TypeHandle) -> bool {
-    map_box_record(ctx, ty).is_some()
-        || set_box_record(ctx, ty).is_some()
-        || collection_view_record(ctx, ty).is_some()
+    rec: TypedHandle<RecordType>,
+) -> Option<(TypeHandle, TypeHandle)> {
+    let record = rec.deref(ctx);
+    if !record.is_tuple()
+        || !matches!(
+            (record.fields().ok()?.len(), record.kind()),
+            (2, _) | (4, RecordKind::MapEntry)
+        )
+    {
+        return None;
+    }
+    Some((record.field("_0")?.1, record.field("_1")?.1))
 }
 
 /// Extract `(K, V, tuple_rec)` if `ty` is an `ArrayType` whose element is a key-value tuple `RecordType`.
@@ -143,22 +161,9 @@ pub(super) fn tuple_kv_types(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypeHandle, TypedHandle<RecordType>)> {
-    let ty = present_type(ctx, ty);
-    let arr = perry_mir::typed::<ArrayType>(ctx, ty)?;
-    let elem = arr.deref(ctx).element();
-    let rec = perry_mir::typed::<RecordType>(ctx, elem)?;
-    let rec_ref = rec.deref(ctx);
-    if !rec_ref.is_tuple() {
-        return None;
-    }
-    let fields = rec_ref.fields().ok()?;
-    let is_map_tuple = rec_ref.kind() == RecordKind::MapEntry;
-    if !(fields.len() == 2 || (is_map_tuple && fields.len() == 4)) {
-        return None;
-    }
-    let (_, k_ty) = fields.iter().find(|(n, _)| n == "_0")?;
-    let (_, v_ty) = fields.iter().find(|(n, _)| n == "_1")?;
-    Some((*k_ty, *v_ty, rec))
+    let rec = array_record(ctx, ty)?;
+    let (key, value) = tuple_pair(ctx, rec)?;
+    Some((key, value, rec))
 }
 
 /// The key, value and entry types of a `Map<K, V>` box.
@@ -166,9 +171,9 @@ pub(super) fn map_entry_types(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypeHandle, TypedHandle<RecordType>)> {
-    let box_rec = map_box_record(ctx, ty)?;
-    let (_, entries_ty) = box_rec.deref(ctx).field(StorageField::BoxEntries.name())?;
-    tuple_kv_types(ctx, entries_ty)
+    let rec = CollectionKind::Map.entry(ctx, ty)?;
+    let (key, value) = tuple_pair(ctx, rec)?;
+    Some((key, value, rec))
 }
 
 /// Extract `(K, V, tuple_rec)` if `ty` is a `Record<K, V>` / dictionary (`dict_tuple_*` element).
@@ -201,21 +206,10 @@ pub(super) fn set_entry_type(
     ctx: &Context,
     ty: TypeHandle,
 ) -> Option<(TypeHandle, TypedHandle<RecordType>)> {
-    let box_rec = set_box_record(ctx, ty)?;
-    let entries_ty = box_rec.deref(ctx).field(StorageField::BoxEntries.name())?.1;
-    let arr = perry_mir::typed::<ArrayType>(ctx, entries_ty)?;
-    let elem = arr.deref(ctx).element();
-    let rec = perry_mir::typed::<RecordType>(ctx, elem)?;
-    let rec_ref = rec.deref(ctx);
-    if rec_ref.kind() != RecordKind::SetEntry {
-        return None;
-    }
-    let fields = rec_ref.fields().ok()?;
-    if fields.len() != 3 {
-        return None;
-    }
-    let (_, elem_ty) = fields.iter().find(|(n, _)| n == "_0")?;
-    Some((*elem_ty, rec))
+    let rec = CollectionKind::Set.entry(ctx, ty)?;
+    let record = rec.deref(ctx);
+    (record.kind() == RecordKind::SetEntry && record.fields().ok()?.len() == 3)
+        .then_some((record.field("_0")?.1, rec))
 }
 
 /// Check if a closed `RecordType` has fields that can all be unified or read as values.
@@ -247,15 +241,14 @@ impl<'s> FunctionBuilder<'s, '_> {
     pub(super) fn new_collection(
         &mut self,
         ctx: &mut Context,
-        is_map: bool,
+        kind: CollectionKind,
         init: Option<&'s Expr>,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        match (is_map, init) {
-            (true, Some(entries)) => self.map_from_entries(ctx, entries, expected),
-            (true, None) => self.empty_map(ctx, expected),
-            (false, Some(elements)) => self.set_from_array(ctx, elements, expected),
-            (false, None) => self.empty_set(ctx, expected),
+        match (kind, init) {
+            (CollectionKind::Map, Some(entries)) => self.map_from_entries(ctx, entries, expected),
+            (kind, None) => self.empty_collection(ctx, kind, expected),
+            (CollectionKind::Set, Some(elements)) => self.set_from_array(ctx, elements, expected),
         }
     }
 
@@ -267,16 +260,13 @@ impl<'s> FunctionBuilder<'s, '_> {
     ) -> Result<Option<Value>> {
         if let Some(constructor) = self.shapes.specialization.instances.collection(expr) {
             return self
-                .new_collection(
-                    ctx,
-                    constructor.kind == CollectionKind::Map,
-                    constructor.init,
-                    expected,
-                )
+                .new_collection(ctx, constructor.kind, constructor.init, expected)
                 .map(Some);
         }
         match expr {
-            Expr::MapNew => self.empty_map(ctx, expected).map(Some),
+            Expr::MapNew => self
+                .empty_collection(ctx, CollectionKind::Map, expected)
+                .map(Some),
             Expr::MapSize(map) | Expr::SetSize(map) => {
                 let m = self.expression(ctx, map)?;
                 let m = self.defined(ctx, m)?;
@@ -351,11 +341,12 @@ impl<'s> FunctionBuilder<'s, '_> {
         method: IteratorMethod,
     ) -> Result<Value> {
         let ty = receiver.get_type(ctx);
-        if set_box_record(ctx, ty).is_some() {
-            return self.alloc_collection_view(ctx, receiver, method.set_view());
-        }
-        if map_box_record(ctx, ty).is_some() {
-            return self.alloc_collection_view(ctx, receiver, method.map_view());
+        if let Some(Collection::Box(kind)) = Collection::of(ctx, ty) {
+            let view = match kind {
+                CollectionKind::Map => method.map_view(),
+                CollectionKind::Set => method.set_view(),
+            };
+            return self.alloc_collection_view(ctx, receiver, view);
         }
         let keyed = tuple_kv_types(ctx, ty);
         if keyed.is_none() && method == IteratorMethod::Values {
@@ -382,21 +373,29 @@ impl<'s> FunctionBuilder<'s, '_> {
         })
     }
 
-    pub(super) fn empty_map(
+    pub(super) fn empty_collection(
         &mut self,
         ctx: &mut Context,
+        kind: CollectionKind,
         expected: Option<TypeHandle>,
     ) -> Result<Value> {
-        let Some(expected) = expected else {
-            bail_diag!(
-                codes::MISSING_TYPE_ANNOTATION,
-                "an empty Map requires a type annotation (e.g. Map<K, V>)"
-            );
+        let example = match kind {
+            CollectionKind::Map => "Map<K, V>",
+            CollectionKind::Set => "Set<T>",
         };
-        let expected = present_type(ctx, expected);
-        let (_, _, tuple_rec) = kv_entry_types(ctx, expected)
-            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "expected a Map<K, V> type"))?;
-        self.alloc_collection_box(ctx, tuple_rec, EntryKind::Map)
+        let expected = expected.ok_or_else(|| {
+            diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "an empty {} requires a type annotation (e.g. {example})",
+                kind.name()
+            )
+        })?;
+        let entry = match kind {
+            CollectionKind::Map => kv_entry_types(ctx, expected).map(|(_, _, entry)| entry),
+            CollectionKind::Set => set_entry_type(ctx, expected).map(|(_, entry)| entry),
+        }
+        .ok_or_else(|| diag!(codes::TYPE_MISMATCH, "expected a {example} type"))?;
+        self.alloc_collection_box(ctx, entry, kind)
     }
 
     fn map_from_entries(
@@ -424,9 +423,9 @@ impl<'s> FunctionBuilder<'s, '_> {
             })?;
         let map_tuple = match expected.and_then(|e| map_entry_types(ctx, e).map(|(_, _, r)| r)) {
             Some(r) => r,
-            None => self.shapes.map_tuple_type(ctx, k_ty, v_ty)?,
+            None => self.shapes.entry_type(ctx, EntryTypes::Map(k_ty, v_ty))?,
         };
-        let map = self.alloc_collection_box(ctx, map_tuple, EntryKind::Map)?;
+        let map = self.alloc_collection_box(ctx, map_tuple, CollectionKind::Map)?;
         self.populate_from_entries(ctx, entries_val, map)
     }
 
@@ -442,19 +441,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             Ok(())
         })?;
         Ok(target)
-    }
-
-    fn empty_set(&mut self, ctx: &mut Context, expected: Option<TypeHandle>) -> Result<Value> {
-        let Some(expected) = expected else {
-            bail_diag!(
-                codes::MISSING_TYPE_ANNOTATION,
-                "an empty Set requires a type annotation (e.g. Set<T>)"
-            );
-        };
-        let expected = present_type(ctx, expected);
-        let (_, tuple_rec) = set_entry_type(ctx, expected)
-            .ok_or_else(|| Diagnostic::new(codes::TYPE_MISMATCH, "expected a Set<T> type"))?;
-        self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)
     }
 
     fn set_from_array(
@@ -475,12 +461,12 @@ impl<'s> FunctionBuilder<'s, '_> {
                     .output_type(ctx, self.shapes)?;
                 let r = match expected.and_then(|exp| set_entry_type(ctx, exp).map(|(_, r)| r)) {
                     Some(r) => r,
-                    None => self.shapes.set_tuple_type(ctx, e)?,
+                    None => self.shapes.entry_type(ctx, EntryTypes::Set(e))?,
                 };
                 (e, r)
             }
         };
-        let set = self.alloc_collection_box(ctx, tuple_rec, EntryKind::Set)?;
+        let set = self.alloc_collection_box(ctx, tuple_rec, CollectionKind::Set)?;
         self.iterate(ctx, Input::Collection(arr), |b, ctx, item, _, _, _| {
             b.set_add(ctx, set, item, elem_ty)?;
             Ok(())

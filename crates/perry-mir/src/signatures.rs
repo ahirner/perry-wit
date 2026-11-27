@@ -32,12 +32,16 @@ macro_rules! type_kinds {
     ) => {
         /// Operand and result kinds of intrinsic signatures.
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-        pub(super) enum Ty { $($(#[$meta])* $kind),* }
+        pub enum Ty { $($(#[$meta])* $kind),* }
 
-        impl ResultType for Ty {
-            fn get(self, $ctx: &Context) -> TypeHandle {
+        impl Ty {
+            pub fn canonical(self, $ctx: &Context) -> TypeHandle {
                 match self { $(Ty::$kind => $canonical),* }
             }
+        }
+
+        impl ResultType for Ty {
+            fn get(self, ctx: &Context) -> TypeHandle { self.canonical(ctx) }
             /// Whether `ty` is the canonical type or an explicitly accepted alternative:
             /// indices and intrinsic booleans admit any signedness, readers include BYOB,
             /// and optional numbers and bytes (including `Promise<void>`) admit any absence.

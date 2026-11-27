@@ -34,7 +34,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             let erased = self
                 .types
                 .is_zero_sized_func(ty, &self.index.capture_free_templates);
-            self.site_mut(s.inst, expr)?.erased = erased;
+            self.site_mut(s.inst, expr)?.operand = if erased {
+                OperandUse::Erased
+            } else {
+                OperandUse::Value
+            };
             let ty = self.types.normalize_for_storage(self.ctx, self.decls, ty);
             props.push(self.types.property(name, ty, false));
         }
@@ -239,24 +243,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             name, return_type, ..
         } = callee
         {
-            use perry_hir::ir::ImportSpecifier;
-            let binding = self.hir.declarations.imports.iter().find_map(|import| {
-                import.specifiers.iter().find_map(|specifier| {
-                    let local = match specifier {
-                        ImportSpecifier::Named { local, .. }
-                        | ImportSpecifier::Default { local }
-                        | ImportSpecifier::Namespace { local } => local,
-                    };
-                    (local == name).then_some((import.source.as_str(), specifier))
-                })
-            });
-            let named = binding.and_then(|(source, specifier)| match specifier {
-                ImportSpecifier::Named { imported, .. } => Some((source, imported.as_str())),
-                _ => None,
-            });
-            let builtin = match named {
-                Some((source, imported)) if hir_compat::is_timer_module(source) => Some(imported),
-                _ if binding.is_none() => Some(name.as_str()),
+            use crate::shapes::Imported;
+            let binding = self.decls.imports.get(name.as_str()).copied();
+            let builtin = match binding {
+                Some(Imported::Timer(imported)) => Some(imported),
+                None => Some(name.as_str()),
                 _ => None,
             };
             if let Some(builtin) = builtin {
@@ -280,24 +271,47 @@ impl<'h, 'a> Solver<'h, 'a> {
                 }
             }
             let arg_tys = self.eval_args(s, args)?;
-            if matches!(
-                named,
-                Some(("fs/promises" | "node:fs/promises", "readFile"))
-            ) {
-                let text = hir_compat::read_file_text(args.get(1), &self.index.literal_classes)
-                    .map_err(|e| self.annotate_expr_error(s, e, byte_offset))?;
-                self.record_site(s.inst, expr, SiteResolution::ReadFile { text });
-                let inner = if text {
-                    Ty::STRING
-                } else {
-                    self.types.named(self.ctx, "Uint8Array")
-                };
-                return Ok(self.types.promise(inner));
-            }
-            if let Some((source, imported)) = named
-                && let Some(res) = self.eval_builtin_import_call(source, imported, &arg_tys)
-            {
-                return Ok(res);
+            match binding {
+                Some(Imported::ReadFile) => {
+                    let text = hir_compat::read_file_text(args.get(1), &self.index.literal_classes)
+                        .map_err(|e| self.annotate_expr_error(s, e, byte_offset))?;
+                    self.record_site(s.inst, expr, SiteResolution::ReadFile { text });
+                    let inner = if text {
+                        Ty::STRING
+                    } else {
+                        self.types.named(self.ctx, "Uint8Array")
+                    };
+                    return Ok(self.types.promise(inner));
+                }
+                Some(Imported::TimeoutPromise) => {
+                    let value = arg_tys.get(1).copied().unwrap_or(Ty::VOID);
+                    return Ok(if value == Ty::BOTTOM {
+                        value
+                    } else {
+                        self.types.promise(value)
+                    });
+                }
+                Some(Imported::Path(op, _) | Imported::Service(op)) => {
+                    return Ok(builtins::signature_result(
+                        self.ctx,
+                        self.types,
+                        op.result_kinds(),
+                    ));
+                }
+                Some(Imported::WriteFile) => return Ok(self.types.promise(Ty::VOID)),
+                Some(Imported::Foreign(_, sig)) => {
+                    let ret = sig.result.map_or(Ty::VOID, |ty| {
+                        self.types.wit_type(self.ctx, ty, WitView::Reference)
+                    });
+                    return Ok(
+                        if sig.is_async && !matches!(self.types.kind(ret), TyKind::Promise(_)) {
+                            self.types.promise(ret)
+                        } else {
+                            ret
+                        },
+                    );
+                }
+                _ => {}
             }
             if binding.is_none()
                 && hir_compat::is_source_extern(name, byte_offset)
@@ -309,18 +323,6 @@ impl<'h, 'a> Solver<'h, 'a> {
                     )),
                     byte_offset,
                 ));
-            }
-            if let Some((_, sig)) = self.decls.foreign_functions.get(name.as_str()) {
-                let ret = sig.result.map_or(Ty::VOID, |ty| {
-                    self.types.wit_type(self.ctx, ty, WitView::Reference)
-                });
-                return Ok(
-                    if sig.is_async && !matches!(self.types.kind(ret), TyKind::Promise(_)) {
-                        self.types.promise(ret)
-                    } else {
-                        ret
-                    },
-                );
             }
             return Ok(self.types.intern_hir(self.ctx, return_type, true));
         }
@@ -513,6 +515,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             if spread && ty != Ty::BOTTOM {
                 let (ty, _) = self.types.strip_nullish(ty);
                 let ty = self.resolve_cell_read(s.inst, ty);
+                self.site_mut(s.inst, expr)?.operand = OperandUse::Spread(ty);
                 match self.types.kind(ty) {
                     TyKind::Tuple(span) => expanded.extend_from_slice(self.types.ty_slice(span)),
                     _ => expanded.push(
@@ -640,47 +643,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
         Ok(())
-    }
-
-    fn eval_builtin_import_call(
-        &mut self,
-        source: &str,
-        imported: &str,
-        arg_tys: &[Ty],
-    ) -> Option<Ty> {
-        match (source, imported) {
-            ("timers/promises" | "node:timers/promises", "setTimeout") => {
-                match arg_tys.get(1).copied() {
-                    Some(Ty::BOTTOM) => Some(Ty::BOTTOM),
-                    other => Some(self.types.promise(other.unwrap_or(Ty::VOID))),
-                }
-            }
-            ("fs/promises" | "node:fs/promises", "stat") => {
-                let s = self.types.named(self.ctx, "Stats");
-                Some(self.types.promise(s))
-            }
-            ("fs/promises" | "node:fs/promises", "readdir") => {
-                let a = self.types.array(Ty::STRING);
-                Some(self.types.promise(a))
-            }
-            ("fs/promises" | "node:fs/promises", "writeFile" | "mkdir" | "unlink" | "rmdir") => {
-                Some(self.types.promise(Ty::VOID))
-            }
-            ("perry:http-server", "request") => Some(self.types.named(self.ctx, "__PerryIncoming")),
-            ("perry:http-server", "body") => {
-                let b = self.types.named(self.ctx, "Uint8Array");
-                Some(self.types.promise(b))
-            }
-            ("perry:http-server", "method" | "scheme" | "headerName") => Some(Ty::STRING),
-            ("perry:http-server", "methodOther" | "schemeOther" | "authority" | "path") => {
-                Some(self.types.with_absences(Ty::STRING, Absence::Undefined))
-            }
-            ("perry:http-server", "hasScheme") => Some(Ty::BOOLEAN),
-            ("perry:http-server", "headerCount" | "respond") => Some(Ty::NUMBER),
-            ("perry:http-server", "headerValue") => Some(self.types.named(self.ctx, "Uint8Array")),
-            ("perry:http-server", "addHeader") => Some(Ty::VOID),
-            _ => None,
-        }
     }
 
     pub(super) fn check_escaping_unannotated_func(

@@ -83,11 +83,11 @@ pub(crate) fn supported(resolve: &Resolve, input: Input) -> bool {
         &|(), id| NamedType::get(resolve, id).map(|_| true),
         &|(), contract| match contract {
             Contract::Unsupported(_) | Contract::Scalar(Type::ErrorContext) => false,
-            Contract::List(ok) | Contract::Option(ok) => ok,
+            Contract::Alias(ok) | Contract::List(ok) | Contract::Option(ok) => ok,
             Contract::Result { ok, err } => ok.unwrap_or(true) && err.unwrap_or(true),
             Contract::Record(fields) => fields.into_iter().all(|(_, ok)| ok),
             Contract::Tuple(items) => items.into_iter().all(|ok| ok),
-            Contract::Variant(cases) => cases.into_iter().all(|(_, ok)| ok.unwrap_or(true)),
+            Contract::Variant(_, cases) => cases.into_iter().all(|(_, ok)| ok.unwrap_or(true)),
             _ => true,
         },
     )
