@@ -304,7 +304,7 @@ impl ProgramFacts {
         let mut interference = self.interference(
             ctx,
             function.get_operation(),
-            site.source_value,
+            site.source(ctx),
             Observed::Contents,
         );
         // Walking backwards, the state is whether `op` runs after a parse that may throw.

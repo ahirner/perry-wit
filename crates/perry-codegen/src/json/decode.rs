@@ -1,5 +1,5 @@
 use crate::{function::FunctionLowering, runtime::Runtime};
-use perry_mir::{CopySlot, JsonCopyPlan};
+use perry_mir::{CopySlot, JsonCopyPlan, PlironResultExt};
 use perry_wit_diagnostics::{Result, internal};
 use pliron::{
     context::Context,
@@ -34,12 +34,11 @@ impl FunctionLowering<'_, '_> {
         let schema = self.layout_descriptor(ctx, ty)?;
         let (bits, failed, tag) = if copy {
             let pair = (operand.get_type(ctx), ty);
-            let layout = self
-                .state
-                .program_facts
-                .json_copy_plan(ctx, pair)
-                .ok_or_else(|| internal!("incompatible JSON copy types"))?;
-            let plan = self.json_copy_plan(ctx, layout, pair)?;
+            let plan = JsonCopyPlan::with(ctx, pair, |ctx, layout| {
+                self.json_copy_plan(ctx, layout, pair)
+            })
+            .to_diag(ctx)?
+            .ok_or_else(|| internal!("incompatible JSON copy types"))??;
             let plan = self.i32_const(ctx, plan as i32);
             let (bits, tag) = self.json_carrier_bits(ctx, operand.get_type(ctx), source);
             let position = self.i32_const(ctx, 0);

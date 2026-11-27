@@ -500,26 +500,21 @@ fn json_copy_analysis_retries_a_forward_declaration() -> Result<()> {
     assert!(verify_operation(root, ctx).is_err());
     assert!(analyses.get_analysis::<ProgramFacts>(root, ctx).is_err());
 
+    let record = crate::RecordType::get(ctx, pliron::ident!("Forward"), None)?.into();
+    let pair = (record, record);
+    assert!(crate::JsonCopyPlan::with(ctx, pair, |_, _| ())?.is_none());
     let number = FP64Type::get(ctx).into();
-    let record = crate::RecordType::get(
+    crate::RecordType::get(
         ctx,
         pliron::ident!("Forward"),
         Some(vec![("value".into(), number)]),
-    )?
-    .into();
-    crate::json_copy::normalize_json_copy(root, ctx, &mut analyses)?;
+    )?;
     verify_operation(root, ctx)?;
-    let rebuilt = facts(ctx, root)?;
-    let cached = analyses.get_analysis::<ProgramFacts>(root, ctx)?;
-    let pair = (record, record);
-    let plan = cached
-        .json_copy_plan(ctx, pair)
-        .expect("completed copy plan");
-    assert_eq!(plan.slots(pair).unwrap().len(), 1);
-    assert!(std::ptr::eq(
-        plan,
-        rebuilt.json_copy_plan(ctx, pair).unwrap()
-    ));
+    analyses.compute_analysis::<ProgramFacts>(root, ctx)?;
+    assert_eq!(
+        crate::JsonCopyPlan::with(ctx, pair, |_, plan| plan.slots(pair).unwrap().len())?,
+        Some(1)
+    );
     Ok(())
 }
 

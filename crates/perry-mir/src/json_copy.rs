@@ -29,38 +29,36 @@ pub(crate) fn normalize_json_copy(
     ctx: &mut Context,
     analyses: &mut AnalysisManager,
 ) -> Result<PassResult> {
-    let mut facts = analyses.get_analysis_mut::<crate::ProgramFacts>(root, ctx)?;
-    let mut plans = std::mem::take(&mut facts.json_copies);
-    let mut rewrites = 0u64;
-    let mut missed = 0u64;
+    let facts = analyses.get_analysis::<crate::ProgramFacts>(root, ctx)?;
+    let mut rewrites = Vec::new();
+    let mut missed = 0;
 
     for func in crate::functions(root, ctx) {
-        let sites: Vec<_> = crate::operations(ctx, &func)
-            .into_iter()
-            .filter_map(|op| parse_stringify_site(ctx, op))
-            .collect();
-        for site in sites {
-            if can_rewrite_parse_stringify(ctx, &facts, func, &site, &mut plans) {
-                rewrite_site(ctx, &site);
-                rewrites += 1;
+        for op in crate::operations(ctx, &func) {
+            let Some(site) = ParseStringifySite::at(ctx, op) else {
+                continue;
+            };
+            if can_rewrite_parse_stringify(ctx, &facts, func, &site)? {
+                rewrites.push(site);
             } else {
                 missed += 1;
             }
         }
     }
 
-    plans.publish(ctx)?;
-    if rewrites > 0 || missed > 0 {
+    let mut result = PassResult::default();
+    result.ir_changed = (!rewrites.is_empty()).into();
+    if !rewrites.is_empty() || missed > 0 {
         let mut stats = crate::pipeline::optimization_statistics(root, ctx);
-        stats.parse_stringify_rewrites += rewrites;
+        stats.parse_stringify_rewrites += rewrites.len() as u64;
         stats.parse_stringify_missed += missed;
         root.deref_mut(ctx)
             .attributes
             .set(crate::pipeline::STATISTICS.clone(), stats);
     }
-
-    let mut result = PassResult::default();
-    result.ir_changed = (rewrites != 0).into();
+    for site in rewrites {
+        rewrite_site(ctx, &site);
+    }
     Ok(result)
 }
 
@@ -71,36 +69,67 @@ pub(crate) struct ParseStringifySite {
     pub(crate) unwrap_op: Option<Ptr<Operation>>,
     pub(crate) consumer_op: Ptr<Operation>,
     pub(crate) intermediate_parse_op: Option<Ptr<Operation>>,
-    pub(crate) source_value: Value,
     target_ty: TypeHandle,
     /// Whether the stringify or its unwrap may throw.
     pub(crate) text_may_throw: bool,
 }
 
 impl ParseStringifySite {
-    pub(crate) fn new(
-        ctx: &Context,
-        source_value: Value,
-        (stringify_op, unwrap_op): (Ptr<Operation>, Option<Ptr<Operation>>),
-        intermediate_parse_op: Option<Ptr<Operation>>,
-        consumer_op: Ptr<Operation>,
-    ) -> Self {
-        let source_ty = source_value.get_type(ctx);
+    pub(crate) fn source(&self, ctx: &Context) -> Value {
+        self.stringify_op.deref(ctx).get_operand(0)
+    }
+
+    pub(crate) fn at(ctx: &Context, op: Ptr<Operation>) -> Option<Self> {
+        if !is_unary(ctx, op) {
+            return None;
+        }
+        let arg = op.deref(ctx).get_operand(0);
+        let (intermediate_parse_op, text) = if is_value_decoder(ctx, op) {
+            let parse_op = arg.defining_op()?;
+            let parses = intrinsic_of(ctx, parse_op) == Some(Intrinsic::JsonParse);
+            (parses && parse_op.deref(ctx).get_num_operands() == 1)
+                .then(|| (Some(parse_op), parse_op.deref(ctx).get_operand(0)))?
+        } else if is_text_decoder(ctx, op)
+            || intrinsic_of(ctx, op) == Some(Intrinsic::JsonParse)
+            // A parse a value decoder consumes is matched from that decoder instead.
+            && !op.deref(ctx).get_result(0).uses(ctx).iter().any(|use_site| {
+                let user = use_site.user_op();
+                is_unary(ctx, user) && is_value_decoder(ctx, user)
+            })
+        {
+            (None, arg)
+        } else {
+            return None;
+        };
+        let def_op = text.defining_op()?;
+        let (stringify_op, unwrap_op) = if Operation::is_op::<UnwrapOp>(def_op, ctx)
+            && def_op.deref(ctx).get_num_operands() == 1
+        {
+            (
+                def_op.deref(ctx).get_operand(0).defining_op()?,
+                Some(def_op),
+            )
+        } else {
+            (def_op, None)
+        };
+        if !Operation::is_op::<JsonStringifyOp>(stringify_op, ctx) || !is_unary(ctx, stringify_op) {
+            return None;
+        }
+        let source_ty = stringify_op.deref(ctx).get_operand(0).get_type(ctx);
         // Stringification throws on a cycle; its result is undefined only for an absent value.
         let stringify_throws =
             crate::may_throw(ctx, stringify_op) && may_be_cyclic(ctx, source_ty, &mut Vec::new());
         let unwrap_throws = unwrap_op.is_some_and(|unwrap| crate::may_throw(ctx, unwrap))
             && (absence(ctx, source_ty).is_some()
                 || source_ty.deref(ctx).is::<crate::types::JsonType>());
-        Self {
+        Some(Self {
             stringify_op,
             unwrap_op,
-            consumer_op,
+            consumer_op: op,
             intermediate_parse_op,
-            source_value,
-            target_ty: consumer_op.deref(ctx).get_result(0).get_type(ctx),
+            target_ty: op.deref(ctx).get_result(0).get_type(ctx),
             text_may_throw: stringify_throws || unwrap_throws,
-        }
+        })
     }
 }
 
@@ -119,40 +148,6 @@ fn may_be_cyclic(ctx: &Context, ty: TypeHandle, path: &mut Vec<TypeHandle>) -> b
         .is_none_or(|mut children| children.any(|child| may_be_cyclic(ctx, child, path)));
     path.pop();
     cyclic
-}
-
-/// The site `op` consumes, when it decodes `JSON.parse(JSON.stringify(value))`: a decoder of
-/// text directly, or a value decoder of the parsed JSON.
-fn parse_stringify_site(ctx: &Context, op: Ptr<Operation>) -> Option<ParseStringifySite> {
-    if !is_unary(ctx, op) {
-        return None;
-    }
-    let arg = op.deref(ctx).get_operand(0);
-    let (intermediate_parse_op, text) = if is_value_decoder(ctx, op) {
-        let parse_op = arg.defining_op()?;
-        let parses = intrinsic_of(ctx, parse_op) == Some(Intrinsic::JsonParse);
-        (parses && parse_op.deref(ctx).get_num_operands() == 1)
-            .then(|| (Some(parse_op), parse_op.deref(ctx).get_operand(0)))?
-    } else if is_text_decoder(ctx, op)
-        || intrinsic_of(ctx, op) == Some(Intrinsic::JsonParse)
-            // A parse a value decoder consumes is matched from that decoder instead.
-            && !op.deref(ctx).get_result(0).uses(ctx).iter().any(|use_site| {
-                let user = use_site.user_op();
-                is_unary(ctx, user) && is_value_decoder(ctx, user)
-            })
-    {
-        (None, arg)
-    } else {
-        return None;
-    };
-    let (stringify_op, unwrap_op, source_value) = match_unwrapped_stringify(ctx, text)?;
-    Some(ParseStringifySite::new(
-        ctx,
-        source_value,
-        (stringify_op, unwrap_op),
-        intermediate_parse_op,
-        op,
-    ))
 }
 
 fn is_unary(ctx: &Context, op: Ptr<Operation>) -> bool {
@@ -176,38 +171,12 @@ fn is_value_decoder(ctx: &Context, op: Ptr<Operation>) -> bool {
         || intrinsic_of(ctx, op) == Some(Intrinsic::JsonToNumber)
 }
 
-fn match_unwrapped_stringify(
-    ctx: &Context,
-    text_val: Value,
-) -> Option<(Ptr<Operation>, Option<Ptr<Operation>>, Value)> {
-    let def_op = text_val.defining_op()?;
-    let (stringify_op, unwrap_op) =
-        if Operation::is_op::<UnwrapOp>(def_op, ctx) && def_op.deref(ctx).get_num_operands() == 1 {
-            (
-                def_op.deref(ctx).get_operand(0).defining_op()?,
-                Some(def_op),
-            )
-        } else {
-            (def_op, None)
-        };
-    (Operation::is_op::<JsonStringifyOp>(stringify_op, ctx)
-        && stringify_op.deref(ctx).get_num_operands() == 1)
-        .then(|| {
-            (
-                stringify_op,
-                unwrap_op,
-                stringify_op.deref(ctx).get_operand(0),
-            )
-        })
-}
-
 fn can_rewrite_parse_stringify(
-    ctx: &Context,
-    facts: &crate::facts::ProgramFacts,
+    ctx: &mut Context,
+    facts: &crate::ProgramFacts,
     func: FuncOp,
     site: &ParseStringifySite,
-    plans: &mut JsonCopyPlans,
-) -> bool {
+) -> Result<bool> {
     if [
         Some(site.stringify_op),
         site.unwrap_op,
@@ -217,22 +186,24 @@ fn can_rewrite_parse_stringify(
     .flatten()
     .any(|op| op.deref(ctx).get_result(0).uses(ctx).len() != 1)
     {
-        return false;
+        return Ok(false);
     }
 
-    let pair = (site.source_value.get_type(ctx), site.target_ty);
-    let Some(plan) = plans.resolve(ctx, pair) else {
-        return false;
+    let source = site.source(ctx);
+    let pair = (source.get_type(ctx), site.target_ty);
+    let Some((adds_fields, drops_fields)) =
+        JsonCopyPlan::with(ctx, pair, |_, plan| (plan.adds_fields, plan.drops_fields))?
+    else {
+        return Ok(false);
     };
     let consumer = site.consumer_op.deref(ctx).get_result(0);
     let stringify = value_reaches_stringify(ctx, consumer);
-    if stringify && plan.drops_fields
-        || (stringify || plan.adds_fields)
-            && facts.may_have_json_residue(ctx, &func, site.source_value)
+    if stringify && drops_fields
+        || (stringify || adds_fields) && facts.may_have_json_residue(ctx, &func, source)
     {
-        return false;
+        return Ok(false);
     }
-    !facts.may_prevent_json_copy_between(ctx, &func, site)
+    Ok(!facts.may_prevent_json_copy_between(ctx, &func, site))
 }
 
 /// Whether a `ty` value may hold a record. `seen` holds the types already visited, so a
@@ -310,74 +281,7 @@ impl CopySlot {
 }
 
 pliron::dict_key!(COPY_PLANS, "perry_json_copy_plans");
-
-/// Type-pair plans shared by the module analysis and the context-only op verifier.
-#[derive(Default)]
-pub(crate) struct JsonCopyPlans(HashMap<TypePair, JsonCopyPlan>);
-
-impl JsonCopyPlans {
-    pub(crate) fn get<'a>(&'a self, ctx: &'a Context, pair: TypePair) -> Option<&'a JsonCopyPlan> {
-        Self::published(ctx, pair).or_else(|| self.0.get(&pair))
-    }
-
-    fn published(ctx: &Context, pair: TypePair) -> Option<&JsonCopyPlan> {
-        let index = *ctx.aux_data_map.get(&COPY_PLANS)?;
-        ctx.aux_data
-            .get(index)?
-            .downcast_ref::<Self>()?
-            .0
-            .get(&pair)
-    }
-
-    fn publish(self, ctx: &mut Context) -> Result<()> {
-        if !self.0.is_empty() {
-            if let Some(&index) = ctx.aux_data_map.get(&COPY_PLANS) {
-                let Some(plans) = ctx
-                    .aux_data
-                    .get_mut(index)
-                    .and_then(|value| value.downcast_mut::<Self>())
-                else {
-                    return pliron::input_err_noloc!(perry_wit_diagnostics::Diagnostic::internal(
-                        "invalid JSON copy analysis"
-                    ));
-                };
-                plans.0.extend(self.0);
-            } else {
-                let index = ctx.aux_data.insert(Box::new(self));
-                ctx.aux_data_map.insert(COPY_PLANS.clone(), index);
-            }
-        }
-        Ok(())
-    }
-
-    fn resolve<'a>(&'a mut self, ctx: &'a Context, pair: TypePair) -> Option<&'a JsonCopyPlan> {
-        use std::collections::hash_map::Entry;
-        if let Some(plan) = Self::published(ctx, pair) {
-            return Some(plan);
-        }
-        Some(match self.0.entry(pair) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(JsonCopyPlan::analyze(ctx, pair)?),
-        })
-    }
-
-    pub(crate) fn require(&mut self, ctx: &Context, op: Ptr<Operation>) -> Result<()> {
-        let copy = op.deref(ctx);
-        if is_unary(ctx, op) {
-            let pair = (
-                copy.get_operand(0).get_type(ctx),
-                copy.get_result(0).get_type(ctx),
-            );
-            if self.resolve(ctx, pair).is_some() {
-                return Ok(());
-            }
-        }
-        pliron::verify_err!(
-            copy.loc().clone(),
-            crate::intrinsics::IntrinsicErr::Signature("json_copy".into())
-        )
-    }
-}
+type CopyPlans = HashMap<TypePair, JsonCopyPlan>;
 
 #[derive(Default)]
 pub struct JsonCopyPlan {
@@ -387,8 +291,46 @@ pub struct JsonCopyPlan {
 }
 
 impl JsonCopyPlan {
+    fn cached(ctx: &Context, pair: TypePair) -> Option<&Self> {
+        let index = *ctx.aux_data_map.get(&COPY_PLANS)?;
+        ctx.aux_data
+            .get(index)?
+            .downcast_ref::<CopyPlans>()?
+            .get(&pair)
+    }
+
+    /// Share completed plans for the lifetime of their MIR types. Opaque records can be retried.
+    pub fn with<R>(
+        ctx: &mut Context,
+        pair: TypePair,
+        read: impl FnOnce(&Context, &Self) -> R,
+    ) -> Result<Option<R>> {
+        if let Some(plan) = Self::cached(ctx, pair) {
+            return Ok(Some(read(ctx, plan)));
+        }
+        let Some(plan) = Self::analyze(ctx, pair) else {
+            return Ok(None);
+        };
+        let result = read(ctx, &plan);
+        let index = *ctx
+            .aux_data_map
+            .entry(COPY_PLANS.clone())
+            .or_insert_with(|| ctx.aux_data.insert(Box::new(CopyPlans::new())));
+        let Some(plans) = ctx
+            .aux_data
+            .get_mut(index)
+            .and_then(|data| data.downcast_mut::<CopyPlans>())
+        else {
+            return pliron::input_err_noloc!(perry_wit_diagnostics::Diagnostic::internal(
+                "invalid JSON copy plan table"
+            ));
+        };
+        plans.insert(pair, plan);
+        Ok(Some(result))
+    }
+
     pub(crate) fn compatible(ctx: &Context, pair: TypePair) -> bool {
-        JsonCopyPlans::published(ctx, pair).is_some() || Self::analyze(ctx, pair).is_some()
+        Self::cached(ctx, pair).is_some() || Self::analyze(ctx, pair).is_some()
     }
 
     fn analyze(ctx: &Context, pair: TypePair) -> Option<Self> {
@@ -542,7 +484,7 @@ impl PayloadShape {
 fn rewrite_site(ctx: &mut Context, site: &ParseStringifySite) {
     let mut rewriter = IRRewriter::<DummyListener>::default();
     rewriter.set_insertion_point(OpInsertionPoint::BeforeOperation(site.consumer_op));
-    let call = crate::JsonCopyOp::new(ctx, site.source_value, site.target_ty);
+    let call = crate::JsonCopyOp::new(ctx, site.source(ctx), site.target_ty);
     rewriter.insert_operation(ctx, call.get_operation());
     // Keep any CaughtOp immediately following `site.consumer_op` intact so it now
     // checks whether normalization raised an exception inside a try block.
@@ -616,14 +558,14 @@ mod tests {
         )?
         .into();
         let node: TypeHandle = RecordType::get(ctx, pliron::ident!("Node"), None)?.into();
-        assert!(!JsonCopyPlan::compatible(ctx, (node, node)));
+        assert!(JsonCopyPlan::analyze(ctx, (node, node)).is_none());
         let next = OptionalType::get(ctx, ArrayType::get(ctx, node).into()).into();
         RecordType::get(
             ctx,
             pliron::ident!("Node"),
             Some(vec![("next".into(), next)]),
         )?;
-        assert!(JsonCopyPlan::compatible(ctx, (node, node)));
+        assert!(JsonCopyPlan::analyze(ctx, (node, node)).is_some());
         let leaves = ArrayType::get(ctx, leaf).into();
         for (ty, cyclic) in [(leaf, false), (leaves, false), (node, true), (next, true)] {
             assert_eq!(may_be_cyclic(ctx, ty, &mut Vec::new()), cyclic);

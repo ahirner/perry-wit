@@ -470,22 +470,10 @@ builtin.module @paths { ^module():
         let module = parse(ctx, &input);
         verify_operation(module, ctx)?;
         let run = function(ctx, module, "run");
-        let stringify = first::<crate::JsonStringifyOp>(ctx, &run);
-        let intrinsic = |kind| {
-            crate::aggregates::operations(ctx, &run)
-                .into_iter()
-                .find(|&op| crate::intrinsics::intrinsic_of(ctx, op) == Some(kind))
-                .expect("fixture intrinsic")
-        };
-        let parse_op = intrinsic(crate::Intrinsic::JsonParse);
-        let consumer = intrinsic(crate::Intrinsic::JsonToNumber);
-        let site = crate::json_copy::ParseStringifySite::new(
-            ctx,
-            stringify.deref(ctx).get_operand(0),
-            (stringify, None),
-            Some(parse_op),
-            consumer,
-        );
+        let site = crate::operations(ctx, &run)
+            .into_iter()
+            .find_map(|op| crate::json_copy::ParseStringifySite::at(ctx, op))
+            .expect("parse of stringify");
         assert_eq!(
             facts(ctx, module)?.may_prevent_json_copy_between(ctx, &run, &site),
             blocks,
