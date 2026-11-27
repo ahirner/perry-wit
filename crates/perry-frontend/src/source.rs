@@ -122,10 +122,7 @@ pub(crate) fn analyze(
     struct AstScanner<'a, 's> {
         locations: &'a mut Locations<'s>,
         top_level: swc_common::SyntaxContext,
-        mark_spans: bool,
         analysis: Analysis,
-        closures: HashSet<ast::Id>,
-        enclosing_depth: u32,
     }
 
     impl AstScanner<'_, '_> {
@@ -157,45 +154,6 @@ pub(crate) fn analyze(
                 }
             });
         }
-        fn is_closure_expr(&self, expr: &ast::Expr) -> bool {
-            match expr {
-                ast::Expr::Ident(id) => self.closures.contains(&id.to_id()),
-                ast::Expr::Paren(p) => self.is_closure_expr(&p.expr),
-                other => matches!(other, ast::Expr::Arrow(_) | ast::Expr::Fn(_)),
-            }
-        }
-        fn needs_location(&self, expr: &ast::Expr) -> bool {
-            use ast::{BinaryOp::*, Expr::*};
-            let dynamic = |e: &ast::Expr| matches!(e, Ident(_) | Call(_) | Member(_));
-            let undefined = |e: &ast::Expr| matches!(e, Ident(id) if id.sym == "undefined");
-            match expr {
-                TsNonNull(_) | Cond(_) => true,
-                Assign(a) => {
-                    matches!(
-                        &a.left,
-                        ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(_))
-                    ) && (dynamic(&a.right) || self.is_closure_expr(&a.right))
-                }
-                Bin(b) => match b.op {
-                    Exp | BitAnd | BitOr | BitXor | LShift | RShift | ZeroFillRShift => true,
-                    EqEqEq | NotEqEq | EqEq | NotEq => {
-                        !undefined(&b.left)
-                            && !undefined(&b.right)
-                            && (self.is_closure_expr(&b.left)
-                                || self.is_closure_expr(&b.right)
-                                || dynamic(&b.left) && dynamic(&b.right))
-                    }
-                    _ => false,
-                },
-                Call(call) if let ast::Callee::Expr(callee) = &call.callee => {
-                    matches!(&**callee, Ident(id) if id.sym == "queueMicrotask")
-                        || matches!(&**callee, Member(m) if matches!(&*m.obj, Ident(id) if id.sym == "process") &&
-                            matches!(&m.prop, ast::MemberProp::Ident(id) if matches!(id.sym.as_ref(), "nextTick" | "on" | "once")))
-                        || call.args.iter().any(|arg| self.is_closure_expr(&arg.expr))
-                }
-                _ => false,
-            }
-        }
     }
 
     impl VisitMut for AstScanner<'_, '_> {
@@ -220,20 +178,7 @@ pub(crate) fn analyze(
             for pat in &arrow.params {
                 self.record_param(pat);
             }
-            self.enclosing_depth += 1;
             arrow.visit_mut_children_with(self);
-            self.enclosing_depth -= 1;
-        }
-        fn visit_mut_fn_decl(&mut self, decl: &mut ast::FnDecl) {
-            if self.enclosing_depth > 0 {
-                self.closures.insert(decl.ident.to_id());
-            }
-            decl.visit_mut_children_with(self);
-        }
-        fn visit_mut_function(&mut self, function: &mut ast::Function) {
-            self.enclosing_depth += 1;
-            function.visit_mut_children_with(self);
-            self.enclosing_depth -= 1;
         }
         fn visit_mut_for_stmt(&mut self, stmt: &mut ast::ForStmt) {
             if let Some(ast::VarDeclOrExpr::VarDecl(var)) = &stmt.init
@@ -263,7 +208,6 @@ pub(crate) fn analyze(
             }
         }
         fn visit_mut_var_decl(&mut self, declaration: &mut ast::VarDecl) {
-            let is_const = declaration.kind == ast::VarDeclKind::Const;
             for decl in &mut declaration.decls {
                 if decl.init.is_none()
                     && let ast::Pat::Ident(b) = &decl.name
@@ -276,40 +220,19 @@ pub(crate) fn analyze(
                         .insert(LocalFlags::DEFERRED);
                 }
                 self.infer_pattern(&decl.name);
-                decl.name.visit_mut_with(self);
-                if let Some(init) = &mut decl.init {
-                    if is_const
-                        && let ast::Pat::Ident(b) = &decl.name
-                        && self.is_closure_expr(init)
-                    {
-                        self.closures.insert(b.id.to_id());
-                    }
-                    init.visit_mut_with(self);
-                }
+                decl.visit_mut_children_with(self);
             }
         }
-        fn visit_mut_ts_enum_decl(&mut self, decl: &mut ast::TsEnumDecl) {
-            let previous = std::mem::replace(&mut self.mark_spans, false);
-            decl.visit_mut_children_with(self);
-            self.mark_spans = previous;
-        }
-
         fn visit_mut_expr(&mut self, expr: &mut ast::Expr) {
-            let preserve = self.mark_spans && self.needs_location(expr);
             expr.visit_mut_children_with(self);
-            if preserve {
-                self.locations.preserve_expression(expr);
-            }
+            self.locations.bind_expression(expr);
         }
     }
 
     let mut scanner = AstScanner {
         locations,
         top_level,
-        mark_spans: true,
         analysis: Analysis::default(),
-        closures: HashSet::new(),
-        enclosing_depth: 0,
     };
     module.visit_mut_with(&mut scanner);
     scanner.analysis

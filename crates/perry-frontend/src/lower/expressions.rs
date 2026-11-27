@@ -142,11 +142,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                 let Some((last, effects)) = parts.split_last() else {
                     return Ok(None);
                 };
-                if let Some(span) = self.shapes.locations.operator_span(parts) {
-                    return self
-                        .instance_operand(ctx, last, expected, required)
-                        .map_err(|error| error.with_fallback_span(Some(span)));
-                }
                 for part in effects {
                     self.effect(ctx, part)?;
                 }

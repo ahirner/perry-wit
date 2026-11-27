@@ -17,7 +17,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn assign_property(
         &mut self,
         s: &EvalState<'h>,
@@ -26,9 +25,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         property: &str,
         value: &'h Expr,
         val_ty: Ty,
-        byte_offset: u32,
     ) -> Result<()> {
-        self.check_escaping_func(s.inst, val_ty, byte_offset, s.current_span)?;
+        self.check_escaping_func(s.inst, val_ty, 0, s.current_span)?;
         let field_ty = match self.types.kind(obj_def) {
             TyKind::Object { .. } => {
                 let declared =
@@ -39,13 +37,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                     && val_ty != Ty::BOTTOM
                     && !declared.is_some_and(|p| self.types.accepts(p, val_ty))
                 {
-                    let mut err = Diagnostic::unsupported(format!(
+                    let err = Diagnostic::unsupported(format!(
                         "reassigning function property '{property}' on an object literal is not supported yet"
                     ));
-                    if hir_compat::has_source_offset(byte_offset) {
-                        err = err.with_fallback_span(self.hir.locations.member_span(byte_offset));
-                    }
-                    return Err(self.annotate_expr_error(s, err, byte_offset));
+                    return Err(self.annotate_expr_error(s, err, 0));
                 }
                 declared.unwrap_or(val_ty)
             }

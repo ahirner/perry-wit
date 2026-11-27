@@ -110,16 +110,13 @@ pub(crate) fn map_group_by(expr: &Expr) -> Result<Option<(&Expr, &Expr)>> {
 }
 
 pub(crate) fn call_arguments(expr: &Expr) -> Option<(&[Expr], u32)> {
-    match expr {
-        Expr::New {
-            args, byte_offset, ..
+    let args = match expr {
+        Expr::New { args, .. } | Expr::Call { args, .. } | Expr::StaticMethodCall { args, .. } => {
+            args
         }
-        | Expr::Call {
-            args, byte_offset, ..
-        } => Some((args, *byte_offset)),
-        Expr::StaticMethodCall { args, .. } => Some((args, 0)),
-        _ => None,
-    }
+        _ => return None,
+    };
+    Some((args, expr.byte_offset()?))
 }
 
 pub(crate) enum RuntimeCall<'a> {

@@ -236,17 +236,21 @@ impl<'h, 'a> Solver<'h, 'a> {
                 Some((Expr::GlobalGet(_), hir_compat::MemberKey::Named(name, _))) => {
                     Some(hir_compat::method(name).name())
                 }
+                Some((
+                    Expr::NativeModuleRef(module),
+                    hir_compat::MemberKey::Named("nextTick", _),
+                )) if module == "process" => Some("process.nextTick"),
                 _ => None,
             },
         };
         if let (Some(builtin), Some(args)) = (builtin, call.args.plain()) {
             match builtin {
-                "queueMicrotask" => {
+                "queueMicrotask" | "process.nextTick" => {
                     return Err(self.annotate_expr_error(
                         s,
-                        Diagnostic::unsupported(
-                            "queueMicrotask is not supported: this runtime has no microtask queue",
-                        ),
+                        Diagnostic::unsupported(format!(
+                            "{builtin} is not supported: this runtime has no microtask queue"
+                        )),
                         byte_offset,
                     ));
                 }

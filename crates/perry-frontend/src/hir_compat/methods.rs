@@ -1,6 +1,6 @@
 //! Normalize array and string method calls into uniform AST call shapes before HIR lowering.
 use perry_parser::swc_ecma_ast as ast;
-use swc_common::{DUMMY_SP, util::take::Take};
+use swc_common::{DUMMY_SP, Spanned, util::take::Take};
 use swc_ecma_utils::ExprFactory;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
@@ -86,23 +86,32 @@ pub(super) fn preserve_arguments(module: &mut ast::Module, analysis: &mut crate:
 
         fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
             call.visit_mut_children_with(self);
-            if let ast::Callee::Expr(callee) = &mut call.callee
-                && let ast::Expr::Member(member) = &mut **callee
-                && let ast::MemberProp::Ident(method) = &mut member.prop
-                && ((call.type_args.is_some()
-                    && matches!(member.obj.as_ref(), ast::Expr::Ident(id) if self.analysis.classes.contains(&id.to_id())))
-                    || crate::methods::Method::preserve_arguments(
-                        method.sym.as_ref(),
-                        call.args.len(),
-                        call.args.iter().any(|argument| argument.spread.is_some()),
-                    ))
-            {
-                // A parenthesized member retains its receiver and arguments when Perry
-                // would otherwise replace the call with a fixed-arity builtin.
-                **callee = ast::Expr::Paren(ast::ParenExpr {
-                    span: member.span,
+            let ast::Callee::Expr(callee) = &mut call.callee else {
+                return;
+            };
+            // Perry's microtask intrinsics discard the call site. An ordinary call retains it.
+            let preserve = match &**callee {
+                ast::Expr::Ident(id) => id.sym == "queueMicrotask",
+                ast::Expr::Member(member) if let ast::MemberProp::Ident(method) = &member.prop => {
+                    method.sym == "nextTick"
+                        && matches!(&*member.obj, ast::Expr::Ident(_))
+                        && !call.args.is_empty()
+                        || call.type_args.is_some()
+                            && matches!(member.obj.as_ref(), ast::Expr::Ident(id) if self.analysis.classes.contains(&id.to_id()))
+                        || crate::methods::Method::preserve_arguments(
+                            method.sym.as_ref(),
+                            call.args.len(),
+                            call.args.iter().any(|arg| arg.spread.is_some()),
+                        )
+                }
+                _ => false,
+            };
+            if preserve {
+                **callee = ast::ParenExpr {
+                    span: callee.span(),
                     expr: callee.take(),
-                });
+                }
+                .into();
             }
         }
     }

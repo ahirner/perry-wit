@@ -55,10 +55,6 @@ pub(crate) fn direct_constructor(class: &Class) -> bool {
 
 fn assigned_parameter(class: &Class, stmt: &Stmt, field: &ClassField) -> Option<super::LocalId> {
     let Stmt::Expr(expr) = stmt else { return None };
-    let expr = match expr {
-        Expr::Sequence(parts) if let [Expr::String(_), assignment] = parts.as_slice() => assignment,
-        expr => expr,
-    };
     if matches!(expr, Expr::PutValueSet { receiver, .. } if !matches!(receiver.as_ref(), Expr::This))
     {
         return None;
