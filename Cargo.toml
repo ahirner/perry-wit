@@ -82,6 +82,7 @@ perry-frontend.workspace = true
 perry-codegen = { path = "crates/perry-codegen" }
 perry-mir.workspace = true
 perry-wit-diagnostics.workspace = true
+pliron-control.workspace = true
 pliron.workspace = true
 wasm-encoder = { workspace = true, features = ["wasmparser"] }
 wasmparser.workspace = true

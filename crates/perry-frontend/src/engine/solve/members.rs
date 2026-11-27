@@ -429,7 +429,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         let class = self.resolve_class_inst(s.inst, stripped, byte_offset)?;
         Ok(self
             .member_type(s.inst, site, stripped, property, class)?
-            .unwrap_or(Ty::OPEN))
+            .unwrap_or_else(|| {
+                if self.types.closed_record(stripped).is_some()
+                    && self.index.iteration.object_pattern_offset(object).is_some()
+                {
+                    Ty::VOID
+                } else {
+                    Ty::OPEN
+                }
+            }))
     }
 
     pub(super) fn member_type(

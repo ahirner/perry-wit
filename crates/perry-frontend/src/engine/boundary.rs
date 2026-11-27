@@ -597,6 +597,7 @@ impl<'h> ModuleIndex<'h> {
             exits = sequence(exits, next);
         }
         if !stmts.is_empty() {
+            self.iteration.index_elements(stmts);
             self.record_region(Region::Body(stmts), owner, start, exits);
         }
         exits

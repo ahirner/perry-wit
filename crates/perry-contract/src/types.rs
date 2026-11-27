@@ -1,8 +1,62 @@
 //! Borrowed WIT traversal with constructors for each contract representation.
 use wit_parser::{Enum, Handle, Int, Resolve, Type, TypeDefKind, TypeId};
 
+pub use perry_abi::layout::numeric::Integer;
+
+macro_rules! wit_integers {
+    ($($ty:ident => $name:literal, $domain:ident);* $(;)?) => {
+        pub const INTEGERS: &[(&str, Type, Integer)] = &[$(($name, Type::$ty, Integer::$domain)),*];
+
+        fn primitive<T>(ty: Type) -> Result<Contract<'static, T>, TypeId> {
+            Ok(match ty {
+                $(Type::$ty => Contract::Scalar(Scalar::Integer(Integer::$domain)),)*
+                Type::Bool => Contract::Scalar(Scalar::Bool),
+                Type::F32 => Contract::Scalar(Scalar::F32),
+                Type::F64 => Contract::Scalar(Scalar::F64),
+                Type::String => Contract::String,
+                Type::Char => Contract::Char,
+                Type::ErrorContext => Contract::ErrorContext,
+                Type::Id(id) => return Err(id),
+            })
+        }
+    };
+}
+wit_integers! {
+    U8 => "u8", U8; S8 => "s8", I8;
+    U16 => "u16", U16; S16 => "s16", I16;
+    U32 => "u32", U32; S32 => "s32", I32;
+    U64 => "u64", U64; S64 => "s64", I64;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scalar {
+    Bool,
+    Integer(Integer),
+    F32,
+    F64,
+}
+
+impl std::fmt::Display for Scalar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bool => f.write_str("bool"),
+            Self::F32 => f.write_str("f32"),
+            Self::F64 => f.write_str("f64"),
+            Self::Integer(domain) => write!(
+                f,
+                "{}{}",
+                if domain.signed() { "s" } else { "u" },
+                domain.bits()
+            ),
+        }
+    }
+}
+
 pub enum Contract<'a, T> {
-    Scalar(Type),
+    Scalar(Scalar),
+    String,
+    Char,
+    ErrorContext,
     Alias(T),
     Resource { id: TypeId, owned: bool },
     Bytes,
@@ -46,8 +100,9 @@ pub fn project<T>(
     ty: Type,
     mut child: impl FnMut(&Type) -> T,
 ) -> Contract<'_, T> {
-    let Type::Id(id) = ty else {
-        return Contract::Scalar(ty);
+    let id = match primitive(ty) {
+        Ok(contract) => return contract,
+        Err(id) => id,
     };
     match &resolve.types[id].kind {
         TypeDefKind::Type(ty) => Contract::Alias(child(ty)),

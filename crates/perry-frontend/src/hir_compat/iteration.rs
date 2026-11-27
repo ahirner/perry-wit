@@ -3,7 +3,10 @@ use super::*;
 use std::collections::HashMap;
 
 #[derive(Default)]
-pub(crate) struct Iteration<'h>(HashMap<LocalId, (Binding<'h>, bool)>);
+pub(crate) struct Iteration<'h> {
+    bindings: HashMap<LocalId, (Binding<'h>, bool)>,
+    elements: HashMap<LocalId, Element<'h>>,
+}
 
 enum Binding<'h> {
     Guard(Option<&'h Expr>),
@@ -19,11 +22,13 @@ pub(crate) enum RecordExpr<'a> {
     Close,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum Availability<'a> {
     Test(&'a Expr),
     Known(bool),
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Element<'a> {
     pub(crate) ty: &'a perry_hir::types::Type,
     pub(crate) id: LocalId,
@@ -33,7 +38,6 @@ pub(crate) struct Element<'a> {
     pub(crate) condition: &'a Expr,
     pub(crate) missing: &'a Expr,
     pub(crate) available: Availability<'a>,
-    pub(crate) rest: &'a [Stmt],
 }
 
 const RUNTIME: &str = "__perry_runtime";
@@ -52,6 +56,17 @@ fn runtime(expr: &Expr) -> Option<(&str, &[Expr])> {
             method,
             args,
         } if module == RUNTIME => Some((method, args)),
+        _ => None,
+    }
+}
+
+fn compared_to_true(expr: &Expr) -> Option<&Expr> {
+    match expr {
+        Expr::Compare {
+            op: CompareOp::Eq,
+            left,
+            right,
+        } if matches!(&**right, Expr::Bool(true)) => Some(left),
         _ => None,
     }
 }
@@ -75,39 +90,34 @@ impl<'h> Iteration<'h> {
             _ if released => Binding::Temporary,
             _ => return,
         };
-        self.0.insert(id, (role, released));
+        self.bindings.insert(id, (role, released));
     }
 
     pub(crate) fn object_pattern_offset(&self, receiver: &Expr) -> Option<u32> {
         let Expr::LocalGet(id) = receiver else {
             return None;
         };
-        match self.0.get(id)? {
+        match self.bindings.get(id)? {
             (Binding::ObjectPattern(offset), _) => Some(*offset),
             _ => None,
         }
     }
 
     pub(crate) fn guard(&self, id: LocalId) -> Option<Option<&'h Expr>> {
-        match self.0.get(&id)? {
+        match self.bindings.get(&id)? {
             (Binding::Guard(source), _) => Some(*source),
             _ => None,
         }
     }
 
     pub(crate) fn is_cursor(&self, id: LocalId) -> bool {
-        matches!(self.0.get(&id), Some((Binding::Cursor, _)))
+        matches!(self.bindings.get(&id), Some((Binding::Cursor, _)))
     }
 
     pub(crate) fn is_guard(&self, expr: &Expr) -> bool {
         match expr {
             Expr::LocalGet(id) => self.guard(*id).is_some(),
-            Expr::Compare {
-                op: CompareOp::Eq,
-                left,
-                right,
-            } if matches!(&**right, Expr::Bool(true)) => self.is_guard(left),
-            _ => false,
+            _ => compared_to_true(expr).is_some_and(|left| self.is_guard(left)),
         }
     }
 
@@ -132,10 +142,26 @@ impl<'h> Iteration<'h> {
     }
 
     pub(crate) fn is_release(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::LocalSet(id, value) if self.0.get(id).is_some_and(|(_, released)| *released) && matches!(&**value, Expr::Undefined))
+        matches!(expr, Expr::LocalSet(id, value) if self.bindings.get(id).is_some_and(|(_, released)| *released) && matches!(&**value, Expr::Undefined))
     }
 
-    pub(crate) fn element<'a>(&self, statements: &'a [Stmt]) -> Option<Element<'a>> {
+    pub(crate) fn index_elements(&mut self, statements: &'h [Stmt]) {
+        for pair in statements.array_windows::<2>() {
+            if let Some(element) = self.recognize_element(pair) {
+                self.elements.insert(element.id, element);
+            }
+        }
+    }
+
+    pub(crate) fn element<'a>(&self, statements: &'a [Stmt]) -> Option<(Element<'h>, &'a [Stmt])> {
+        let [Stmt::Let { id, .. }, Stmt::If { condition, .. }, rest @ ..] = statements else {
+            return None;
+        };
+        let element = self.elements.get(id)?;
+        std::ptr::eq(condition, element.condition).then_some((*element, rest))
+    }
+
+    fn recognize_element(&self, pair: &'h [Stmt; 2]) -> Option<Element<'h>> {
         let [
             Stmt::Let {
                 id,
@@ -148,25 +174,13 @@ impl<'h> Iteration<'h> {
                 then_branch,
                 else_branch: Some(pull),
             },
-            rest @ ..,
-        ] = statements
+        ] = pair
         else {
             return None;
         };
-        let Expr::Compare {
-            op: CompareOp::Eq,
-            left,
-            right,
-        } = condition
-        else {
+        let Expr::LocalGet(done) = compared_to_true(condition)? else {
             return None;
         };
-        let Expr::LocalGet(done) = &**left else {
-            return None;
-        };
-        if !matches!(&**right, Expr::Bool(true)) {
-            return None;
-        }
         let [Stmt::Expr(Expr::LocalSet(target, missing))] = then_branch.as_slice() else {
             return None;
         };
@@ -216,7 +230,6 @@ impl<'h> Iteration<'h> {
             id: *id,
             value,
             advance,
-            rest,
             done: *done,
             condition,
             missing,

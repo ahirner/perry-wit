@@ -16,7 +16,15 @@ fn string_only_split_rejects_an_optimized_away_capture() -> Result<()> {
         re = perry.regex_const "(y){0}x", "" : perry.regex;
         parts = perry.intrinsic RegexSplitStrings (text, re) : perry.array <perry.string>;
     "#;
-    let module = parse(ctx, &single_block(body));
+    let parsed = parse(ctx, &single_block(body));
+    let destination = &mut Context::new();
+    crate::RegexLiteral::intern(destination, "unrelated".into(), "g".into());
+    let module = pliron::irbuild::cloning::clone_operation_into_context(
+        parsed, ctx, destination,
+        &mut pliron::irbuild::rewriter::IRRewriter::<pliron::irbuild::listener::DummyListener>::default(),
+        &mut Default::default(),
+    )?;
+    let ctx = destination;
     verify_operation(module, ctx)?;
     let error = crate::receivers::prove_receivers(module, ctx, &mut AnalysisManager::default())
         .err()

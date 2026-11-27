@@ -104,14 +104,26 @@ fn witness_instances_preserve_function_identity_and_internal_results() -> Result
 
 #[test]
 fn witness_context_types_empty_list_returns() -> Result<()> {
-    for compiler in [Standard, crate::world::Compiler::MemoryChecked] {
-        let bytes = compiler.component(
+    for (compiler, tier) in [
+        (Standard, "task"),
+        (crate::world::Compiler::MemoryChecked, "instance"),
+    ] {
+        let compiled = compiler.compile(
             "package test:empty; world api {export empty:func()->list<string>; export numbers:func()->list<u32>;}",
             "api",
             "empty.js",
             "export function empty() {return [];} export {empty as numbers};",
         )?;
-        let (mut store, instance) = crate::world::instantiate(&Engine::default(), &bytes)?;
+        assert!(
+            compiled
+                .allocation_report
+                .lines()
+                .next()
+                .unwrap()
+                .contains(tier)
+        );
+        let (mut store, instance) =
+            crate::world::instantiate(&Engine::default(), &compiled.component.unwrap().stripped)?;
         let empty = instance.get_typed_func::<(), (Vec<String>,)>(&mut store, "empty")?;
         assert!(empty.call(&mut store, ())?.0.is_empty());
         let numbers = instance.get_typed_func::<(), (Vec<u32>,)>(&mut store, "numbers")?;

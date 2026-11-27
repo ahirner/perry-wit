@@ -92,7 +92,7 @@ impl FunctionLowering<'_, '_> {
             let address = if let Some(&address) = self.state.data.regexes.get(&key) {
                 address
             } else {
-                let table = regex::compile(key.get(ctx))?;
+                let table = regex::compile(&mut self.state.data, ctx, key)?;
                 let address = self.state.data.append(4, &table);
                 self.state.data.regexes.insert(key, address);
                 address
@@ -117,7 +117,7 @@ impl FunctionLowering<'_, '_> {
             let extra_len = u32::try_from((bytes.len() - 16) / 4)
                 .map_err(|_| Diagnostic::internal("BigInt literal exceeds maximum length"))?;
             bytes[12..16].copy_from_slice(&extra_len.to_le_bytes());
-            let address = self.state.data.append(8, &bytes);
+            let address = self.state.data.constant(8, bytes);
             let value = self.i32_const(ctx, address as i32);
             self.define(ctx, op, value);
             return Ok(());

@@ -1,4 +1,5 @@
 use super::*;
+use crate::methods::ReplacementArg;
 
 impl<'s> FunctionBuilder<'s, '_> {
     pub(in crate::lower) fn search_shape(
@@ -13,33 +14,49 @@ impl<'s> FunctionBuilder<'s, '_> {
         }
     }
 
-    pub(super) fn replace_callback(
+    pub(in crate::lower) fn replace_string(
         &mut self,
         ctx: &mut Context,
         text: Value,
-        (source, search): (&'s Expr, Value),
-        callback: crate::lower::callable::Callback<'s>,
+        pattern: &'s Expr,
+        replacement: &'s Expr,
         all: bool,
     ) -> Result<Value> {
-        let regex = kind(ctx, search)? == Kind::Regex;
-        ensure_unsupported!(
-            regex || kind(ctx, search)? == Kind::String,
-            "string replacement requires a string or literal regex pattern"
-        );
-        let (global, captures, named) = if regex {
-            let shape = self.search_shape(ctx, source, search);
-            let global = global_flag(shape)?;
-            ensure_unsupported!(
-                !all || global,
-                "String.prototype.replaceAll called with a non-global RegExp argument"
-            );
-            let (captures, named) = shape.captures.ok_or_else(|| {
-                unsupported!("replacement callbacks require statically known capture arity")
-            })?;
-            (global, captures as usize, named)
-        } else {
-            (all, 0, false)
+        let search = self.expression(ctx, pattern)?;
+        let search = self.defined(ctx, search)?;
+        let callback = self.optional_callback(ctx, replacement)?;
+        let (intrinsic, regex) = match kind(ctx, search)? {
+            Kind::Regex => (
+                Intrinsic::RegexReplace,
+                (all || callback.is_some()).then(|| self.search_shape(ctx, pattern, search)),
+            ),
+            Kind::String if all => (Intrinsic::StringReplaceAll, None),
+            Kind::String => (Intrinsic::StringReplace, None),
+            _ => bail_unsupported!("string replacement requires a string or regex search pattern"),
         };
+        let global = regex
+            .map_or(Some(all), |shape| shape.global)
+            .ok_or_else(|| Diagnostic::unsupported(perry_mir::RegexShape::UNKNOWN_FLAGS))?;
+        ensure_unsupported!(
+            !all || global,
+            "String.prototype.replaceAll called with a non-global RegExp argument"
+        );
+        let Some(callback) = callback else {
+            let replacement = self.string_operand(ctx, replacement)?;
+            return Ok(self.intrinsic(ctx, intrinsic, vec![text, search, replacement]));
+        };
+        self.replace_matches(ctx, text, search, regex, callback, global)
+    }
+
+    fn replace_matches(
+        &mut self,
+        ctx: &mut Context,
+        text: Value,
+        search: Value,
+        regex: Option<perry_mir::RegexShape>,
+        callback: crate::lower::callable::Callback<'s>,
+        global: bool,
+    ) -> Result<Value> {
         let zero = self.number(ctx, 0.0);
         let one = self.number(ctx, 1.0);
         let empty = self.string(ctx, "");
@@ -48,14 +65,17 @@ impl<'s> FunctionBuilder<'s, '_> {
         let (done, [suffix_start, result]) = self.block_with_args(ctx, [number, string]);
         self.emit(BrOp::new(ctx, head, vec![zero, zero, empty]), ctx);
         self.switch_to(head);
-        let (found, offset, matched) = if regex {
+        let (captures, offset, matched) = if let Some(regex) = regex {
+            let shape = regex.captures.ok_or_else(|| {
+                unsupported!("replacement callbacks require statically known capture arity")
+            })?;
             let found = self.intrinsic(ctx, Intrinsic::RegexExecFrom, vec![text, search, from]);
             let missing = self.emit_value(IsNullOp::new(ctx, found), ctx);
             self.yield_if(ctx, done, missing, [end, output]);
             let found = self.defined(ctx, found)?;
             let offset = self.intrinsic(ctx, Intrinsic::RegexIndex, vec![found]);
             let matched = self.element_at(ctx, found, zero)?;
-            (found, offset, self.defined(ctx, matched)?)
+            (Some((found, shape)), offset, self.defined(ctx, matched)?)
         } else {
             // indexOf clamps out-of-range positions, including the position after an empty match.
             let length = self.string_length(ctx, text);
@@ -64,20 +84,22 @@ impl<'s> FunctionBuilder<'s, '_> {
             let index = self.intrinsic(ctx, Intrinsic::StringIndexOf, vec![text, search, from]);
             let missing = self.compare(ctx, CompareKind::Lt, index, zero);
             self.yield_if(ctx, done, missing, [end, output]);
-            (index, index, search)
+            (None, index, search)
         };
         let length = self.string_length(ctx, matched);
         let match_end = self.binary(ctx, BinaryKind::Add, offset, length);
-        let mut arguments = Vec::with_capacity(captures + 3 + usize::from(named));
-        arguments.push(matched);
-        for index in 1..=captures {
-            let index = self.number(ctx, index as f64);
-            arguments.push(self.element_at(ctx, found, index)?);
-        }
-        arguments.extend([offset, text]);
-        if named {
-            arguments.push(self.intrinsic(ctx, Intrinsic::RegexGroups, vec![found]));
-        }
+        let arguments = ReplacementArg::layout(matched, offset, text, captures)
+            .map(|arg| match arg {
+                ReplacementArg::Value(value) => Ok(value),
+                ReplacementArg::Capture(found, index) => {
+                    let index = self.number(ctx, index.into());
+                    self.element_at(ctx, found, index)
+                }
+                ReplacementArg::Groups(found) => {
+                    Ok(self.intrinsic(ctx, Intrinsic::RegexGroups, vec![found]))
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
         let replacement = self.array_callback(ctx, callback, &arguments)?;
         let replacement = self.display(ctx, replacement)?;
         let prefix = self.intrinsic(ctx, Intrinsic::StringSlice, vec![text, end, offset]);
@@ -99,10 +121,4 @@ impl<'s> FunctionBuilder<'s, '_> {
         );
         Ok(self.emit_value(ConcatOp::new(ctx, result, suffix), ctx))
     }
-}
-
-pub(super) fn global_flag(shape: perry_mir::RegexShape) -> Result<bool> {
-    shape
-        .global
-        .ok_or_else(|| Diagnostic::unsupported(perry_mir::RegexShape::UNKNOWN_FLAGS))
 }

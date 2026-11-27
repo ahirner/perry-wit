@@ -17,9 +17,7 @@ use crate::{
 use pliron::{
     builtin::{
         attributes::{IdentifierAttr, IntegerAttr, TypeAttr},
-        op_interfaces::{
-            BranchOpInterface, OneRegionInterface, OneResultInterface, SymbolOpInterface,
-        },
+        op_interfaces::{OneResultInterface, SymbolOpInterface},
         ops::{ConstantOp, FuncOp},
         type_interfaces::FunctionTypeInterface,
         types::{FunctionType, IntegerType},
@@ -32,8 +30,7 @@ use pliron::{
         listener::DummyListener,
         rewriter::{IRRewriter, Rewriter},
     },
-    linked_list::ContainsLinkedList,
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
     pass::{AnalysisManager, PassResult},
     result::Result,
@@ -386,24 +383,9 @@ pub(crate) fn verify_lossless_module(
 /// (`perry.numeric` or 64-bit integer) result or field/element projection was degraded
 /// to a `builtin.fp64` carrier after all MIR passes complete.
 pub(crate) fn verify_lossless_operations(root: Ptr<Operation>, ctx: &Context) -> Result<()> {
-    let functions = crate::aggregates::functions(root, ctx);
-    let by_name: HashMap<Identifier, FuncOp> = functions
-        .iter()
-        .map(|&f| (f.get_symbol_name(ctx), f))
-        .collect();
-    let entries = functions.iter().filter_map(|func| {
+    let active = crate::reachable_functions(ctx, root, |func| {
         (super::wit_signature(ctx, func).is_some() || super::is_entry(ctx, func))
-            .then(|| {
-                by_name
-                    .get(&super::specialized_implementation(ctx, func))
-                    .copied()
-            })
-            .flatten()
-    });
-    let active = crate::reachable(entries, |func| {
-        crate::aggregates::operations(ctx, &func)
-            .into_iter()
-            .filter_map(|op| by_name.get(&crate::calls::callee(ctx, op)?).copied())
+            .then(|| super::specialized_implementation(ctx, func))
     });
     active
         .into_iter()
@@ -525,13 +507,7 @@ fn verify_lossless_context(
         }
     }
     if let Some(mapping) = mapping {
-        let mut live_values = HashSet::new();
-        for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-            live_values.extend(block.deref(ctx).arguments());
-        }
-        for op in crate::aggregates::operations(ctx, &function) {
-            live_values.extend(op.deref(ctx).results());
-        }
+        let live_values: HashSet<_> = crate::function_values(ctx, &function);
         let values = state.values.keys().chain(
             state
                 .heap_values

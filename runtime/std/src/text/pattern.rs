@@ -12,8 +12,8 @@ pub(crate) fn next_boundary(text: &[u8], pos: usize) -> usize {
 
 pub(crate) fn matches<'a>(
     text: &'a [u8],
-    find: impl Fn(usize) -> Option<(usize, usize)> + Clone + 'a,
-) -> impl Iterator<Item = (usize, usize)> + Clone + 'a {
+    find: impl Fn(usize) -> Option<(usize, usize)> + 'a,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
     let mut from = 0;
     core::iter::from_fn(move || {
         if from > text.len() {
@@ -42,35 +42,29 @@ impl View {
         }
     }
 
-    pub(crate) fn split(
+    pub(crate) fn split<C: IntoIterator<Item = *mut u8>>(
         &self,
-        mut matches: impl Iterator<Item = (usize, usize)> + Clone,
-        captures: usize,
-        mut write_captures: impl FnMut(usize, usize, &mut [u64]),
+        mut matches: impl Iterator<Item = (usize, usize)>,
+        capacity: usize,
+        mut captures: impl FnMut(usize, usize) -> C,
     ) -> *mut u8 {
         if self.text.is_empty() && matches.next().is_some() {
-            return runtime::array_storage(0).0;
+            return runtime::array([]);
         }
-        let mut last_end = 0;
-        let separators = matches
-            .take_while(|&(start, _)| start < self.text.len())
-            .filter(move |&(_, end)| core::mem::replace(&mut last_end, end) != end);
-        let width = 1 + captures;
-        let count = separators.clone().count();
-        let len = count
-            .checked_mul(width)
-            .and_then(|n| n.checked_add(1))
-            .expect("split array length");
-        let (array, slots) = runtime::array_storage(len);
-        let (suffix, pieces) = slots.split_last_mut().expect("split suffix");
+        let mut pieces = runtime::ReferenceArray::with_capacity(capacity);
         let mut previous = 0;
-        for (chunk, (start, end)) in pieces.chunks_exact_mut(width).zip(separators) {
-            chunk[0] = self.piece(previous, start) as u64;
-            write_captures(start, end, &mut chunk[1..]);
+        for (start, end) in matches.take_while(|&(start, _)| start < self.text.len()) {
+            if end == previous {
+                continue;
+            }
+            pieces.push(self.piece(previous, start));
+            for capture in captures(start, end) {
+                pieces.push(capture);
+            }
             previous = end;
         }
-        *suffix = self.piece(previous, self.text.len()) as u64;
-        array
+        pieces.push(self.piece(previous, self.text.len()));
+        pieces.finish()
     }
 
     pub(crate) fn replace(

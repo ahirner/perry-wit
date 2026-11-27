@@ -24,7 +24,6 @@ const _: () = {
 
 trait ElementStorage {
     fn bytes(self, cap: u32) -> u32;
-    fn doubled(self, cap: u32) -> (u32, u32);
     fn shape(self) -> *const u32;
 }
 
@@ -32,12 +31,6 @@ impl ElementStorage for Elements {
     /// Compute the byte size of `cap` slots, trapping if it exceeds the 32-bit address space.
     fn bytes(self, cap: u32) -> u32 {
         crate::byte_size(cap, self.stride(), 0)
-    }
-
-    /// Compute twice `cap` and the byte size of that many slots, trapping if either overflows.
-    fn doubled(self, cap: u32) -> (u32, u32) {
-        let cap = cap.checked_mul(2).expect("array capacity overflow");
-        (cap, self.bytes(cap))
     }
 
     /// The element shape of a collectible array: precise reference slots or opaque numbers.
@@ -185,20 +178,16 @@ fn allocate<const COLLECTIBLE: bool>(capacity: u32, elements: Elements) -> *mut 
     let cap = capacity.max(MIN_CAPACITY);
     // SAFETY: both blocks are fresh with sufficient size, alignment, and matching shapes.
     unsafe {
-        let (array, data) = if COLLECTIBLE {
-            (
-                crate::roots::perry_gc_alloc(
-                    core::mem::size_of::<Array>() as u32,
-                    ARRAY_SHAPE.as_ptr(),
-                ) as *mut Array,
-                crate::roots::perry_gc_alloc(elements.bytes(cap), elements.shape()) as *mut u64,
-            )
-        } else {
-            (
-                perry_alloc(core::mem::size_of::<Array>() as u32) as *mut Array,
-                perry_alloc(elements.bytes(cap)) as *mut u64,
-            )
+        let alloc = |bytes, shape| {
+            if COLLECTIBLE {
+                crate::roots::perry_gc_alloc(bytes, shape)
+            } else {
+                perry_alloc(bytes)
+            }
         };
+        let array =
+            alloc(core::mem::size_of::<Array>() as u32, ARRAY_SHAPE.as_ptr()).cast::<Array>();
+        let data = alloc(elements.bytes(cap), elements.shape()).cast();
         array.write(Array {
             len: 0,
             cap,
@@ -217,28 +206,11 @@ unsafe fn grow<const COLLECTIBLE: bool>(array: *mut u8, elements: Elements) {
     let array = array as *mut Array;
     // SAFETY: the caller passes a live array; the new block holds every old element.
     unsafe {
-        let (cap, bytes) = elements.doubled((*array).cap);
-        let data = if COLLECTIBLE {
-            let stride = elements.stride();
-            crate::roots::resize_buffer(
-                (*array).data.cast(),
-                (*array).cap * stride,
-                bytes,
-                (*array).len * stride,
-                elements.shape(),
-            ) as *mut u64
-        } else {
-            let data = perry_alloc(bytes) as *mut u64;
-            core::ptr::copy_nonoverlapping(
-                (*array).data,
-                data,
-                (*array).len as usize * elements.words(),
-            );
-            data
-        };
-        (*array).data = data;
-        resize_holes(array, cap);
-        (*array).cap = cap;
+        let cap = (*array)
+            .cap
+            .checked_mul(2)
+            .expect("array capacity overflow");
+        resize::<COLLECTIBLE>(array, cap, elements);
     }
 }
 
@@ -379,7 +351,13 @@ unsafe fn reserve(array: *mut Array, len: u32, elements: Elements) {
                 .saturating_mul(2)
                 .min(u32::MAX / elements.stride()),
         );
-        let data = crate::region::perry_buffer_resize(
+        resize::<{ cfg!(feature = "collectible") }>(array, cap, elements);
+    }
+}
+
+unsafe fn resize<const COLLECTIBLE: bool>(array: *mut Array, cap: u32, elements: Elements) {
+    unsafe {
+        let data = crate::region::resize_buffer::<COLLECTIBLE>(
             (*array).data.cast(),
             elements.bytes((*array).cap),
             elements.bytes(cap),

@@ -1,17 +1,13 @@
 //! Canonical built-ins and host functions that compiled code imports directly, outside the
 //! runtime's helper module.
-use crate::{
-    MONOTONIC_CLOCK,
-    boundary::{self, Flat},
-    repr::i32_type,
-};
+use crate::{MONOTONIC_CLOCK, boundary::core_types};
 use pliron::{
-    builtin::types::{IntegerType, Signedness},
     context::Context,
     ident,
     identifier::{Identifier, Legaliser},
     r#type::TypeHandle,
 };
+use wit_parser::abi::WasmType;
 
 /// An import of the module. Whether its call yields a value is part of its type, so a call
 /// site cannot read a result the import does not declare.
@@ -29,7 +25,7 @@ pub(crate) enum ValueHost {
     /// `wait-for` of the monotonic clock, lowered asynchronously: a subtask status.
     WaitFor,
     /// A component import with one flat result.
-    Foreign(Foreign, Flat),
+    Foreign(Foreign, WasmType),
 }
 
 /// Imports called for their effect only.
@@ -40,7 +36,7 @@ pub(crate) enum EffectHost {
     /// A component import without flat results.
     Foreign(Foreign),
     /// `task.return` of an async export: (module, function, flat result types).
-    TaskReturn(String, String, Vec<Flat>),
+    TaskReturn(String, String, Vec<WasmType>),
 }
 
 /// A component import: its module, field and flat parameter types.
@@ -48,7 +44,7 @@ pub(crate) enum EffectHost {
 pub(crate) struct Foreign {
     pub(crate) module: String,
     pub(crate) name: String,
-    pub(crate) params: Vec<Flat>,
+    pub(crate) params: Vec<WasmType>,
 }
 
 impl Host {
@@ -90,34 +86,19 @@ impl Host {
 
     /// Wasm parameter and result types of the import: one result exactly for [Host::Value].
     pub(crate) fn signature(&self, ctx: &mut Context) -> (Vec<TypeHandle>, Vec<TypeHandle>) {
-        let flat = |ctx: &mut Context, flat: &[Flat]| -> Vec<TypeHandle> {
-            flat.iter().map(|f| boundary::flat_type(ctx, *f)).collect()
+        use WasmType::{I32, I64};
+        let (params, result): (&[WasmType], &[WasmType]) = match self {
+            Host::Value(ValueHost::ContextGet0) => (&[], &[I32]),
+            Host::Value(ValueHost::WaitFor) => (&[I64], &[I32]),
+            Host::Value(ValueHost::Foreign(foreign, ty)) => {
+                (&foreign.params, std::slice::from_ref(ty))
+            }
+            Host::Effect(EffectHost::ContextSet0) => (&[I32], &[]),
+            Host::Effect(EffectHost::TaskCancel) => (&[], &[]),
+            Host::Effect(EffectHost::Foreign(foreign)) => (&foreign.params, &[]),
+            Host::Effect(EffectHost::TaskReturn(_, _, results)) => (results, &[]),
         };
-        match self {
-            Host::Value(host) => {
-                let (params, result) = match host {
-                    ValueHost::ContextGet0 => (vec![], i32_type(ctx)),
-                    ValueHost::WaitFor => (
-                        vec![IntegerType::get(ctx, 64, Signedness::Signless).into()],
-                        i32_type(ctx),
-                    ),
-                    ValueHost::Foreign(foreign, result) => (
-                        flat(ctx, &foreign.params),
-                        boundary::flat_type(ctx, *result),
-                    ),
-                };
-                (params, vec![result])
-            }
-            Host::Effect(host) => {
-                let params = match host {
-                    EffectHost::ContextSet0 => vec![i32_type(ctx)],
-                    EffectHost::TaskCancel => vec![],
-                    EffectHost::Foreign(foreign) => flat(ctx, &foreign.params),
-                    EffectHost::TaskReturn(_, _, results) => flat(ctx, results),
-                };
-                (params, vec![])
-            }
-        }
+        (core_types(ctx, params), core_types(ctx, result))
     }
 }
 

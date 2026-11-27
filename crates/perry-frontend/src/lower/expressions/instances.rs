@@ -129,7 +129,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 {
                     self.effect(ctx, arg)?;
                 }
-                literal.get(ctx).parsed()?;
+                literal.parsed(ctx)?;
                 self.emit_value(perry_mir::RegexConstOp::from_literal(ctx, literal), ctx)
             }
             (Environment(value), _) => self.closure_value(ctx, value, expected)?,

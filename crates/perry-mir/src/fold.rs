@@ -150,7 +150,8 @@ impl MatchRewrite for Canonicalize {
                 cast.deref(ctx).get_result(0)
             }
             Replacement::Bool(flag) => {
-                let constant = crate::constants::integer_constant(ctx, 1, u64::from(flag));
+                let constant =
+                    crate::constants::integer_constant(ctx, 1, u64::from(flag)).get_operation();
                 rewriter.insert_operation(ctx, constant);
                 constant.deref(ctx).get_result(0)
             }

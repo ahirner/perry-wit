@@ -95,7 +95,8 @@ fn lower_compare_operand(
     match operand {
         CompareOperand::Character => scalar,
         CompareOperand::Literal(value) => {
-            let constant = crate::constants::integer_constant(ctx, 32, value as u32 as u64);
+            let constant =
+                crate::constants::integer_constant(ctx, 32, value as u32 as u64).get_operation();
             rewriter.insert_operation(ctx, constant);
             constant.deref(ctx).get_result(0)
         }

@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{parsed::ParsedModule, wasm_err};
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, ensure_internal, internal};
-use pliron::graph::{ControlFlowGraph, HasLabel, traversals::region::sccs_in_topological_order};
 use wasm_encoder::Instruction;
 use wasm_encoder::reencode::{self, Reencode};
 use wasmparser::{Dylink0Subsection, ElementItems, ElementKind, ExternalKind, Operator, TypeRef};
@@ -163,57 +162,6 @@ pub(crate) struct Library<'a> {
     pub(crate) elements: Vec<(u32, u32)>,
     pub(crate) table_size: u32,
     pub(crate) table_alignment: u32,
-}
-
-struct HelperCalls<'a> {
-    successors: &'a [Vec<usize>],
-    predecessors: Vec<Vec<usize>>,
-}
-
-impl<'a> HelperCalls<'a> {
-    fn new(successors: &'a [Vec<usize>]) -> Self {
-        let mut predecessors = vec![Vec::new(); successors.len()];
-        for (caller, calls) in successors.iter().enumerate() {
-            for &callee in calls {
-                predecessors[callee].push(caller);
-            }
-        }
-        Self {
-            successors,
-            predecessors,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct FunctionIndex(usize);
-
-impl HasLabel<()> for FunctionIndex {
-    fn label(&self, _: &()) -> String {
-        self.0.to_string()
-    }
-}
-
-impl ControlFlowGraph<()> for HelperCalls<'_> {
-    type Node = FunctionIndex;
-    fn num_successors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.successors[node.0].len()
-    }
-    fn get_successor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(self.successors[node.0][index])
-    }
-    fn num_predecessors(&self, _: &(), node: &FunctionIndex) -> usize {
-        self.predecessors[node.0].len()
-    }
-    fn get_predecessor(&self, _: &(), node: &FunctionIndex, index: usize) -> FunctionIndex {
-        FunctionIndex(self.predecessors[node.0][index])
-    }
-    fn entry_node(&self, _: &()) -> Option<FunctionIndex> {
-        (!self.successors.is_empty()).then_some(FunctionIndex(0))
-    }
-    fn nodes<'a>(&'a self, _: &'a ()) -> Box<dyn Iterator<Item = FunctionIndex> + 'a> {
-        Box::new((0..self.successors.len()).map(FunctionIndex))
-    }
 }
 
 impl<'a> Library<'a> {
@@ -388,23 +336,20 @@ impl<'a> Library<'a> {
             graph.push(calls);
             frames.push(frame_bytes);
         }
-        let graph = HelperCalls::new(&graph);
         let mut depths = vec![0_u32; frames.len()];
-        for component in sccs_in_topological_order(&(), &graph).into_iter().rev() {
-            if component.is_cyclic && component.nodes.iter().any(|node| frames[node.0] != 0) {
+        for component in pliron_control::graph::components(&graph).into_iter().rev() {
+            if component.is_cyclic && component.nodes.iter().any(|node| frames[*node] != 0) {
                 return None;
             }
             let mut depth = 0_u32;
             for node in &component.nodes {
-                let callee_depth = graph.successors[node.0]
-                    .iter()
-                    .try_fold(0_u32, |deepest, &callee| {
-                        Some(deepest.max(*depths.get(callee)?))
-                    })?;
-                depth = depth.max(frames[node.0].checked_add(callee_depth)?);
+                let callee_depth = graph[*node].iter().try_fold(0_u32, |deepest, &callee| {
+                    Some(deepest.max(*depths.get(callee)?))
+                })?;
+                depth = depth.max(frames[*node].checked_add(callee_depth)?);
             }
             for node in component.nodes {
-                depths[node.0] = depth;
+                depths[node] = depth;
             }
         }
         let deepest = depths.into_iter().max().unwrap_or(0);

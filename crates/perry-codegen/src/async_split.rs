@@ -28,7 +28,7 @@ use pliron::{
     builtin::{
         op_interfaces::{SingleBlockRegionInterface, SymbolOpInterface},
         ops::FuncOp,
-        types::{FP64Type, FunctionType, IntegerType},
+        types::FunctionType,
     },
     context::{Context, Ptr},
     identifier::Identifier,
@@ -69,26 +69,19 @@ fn live_across_awaits(
     function: &FuncOp,
     liveness: &perry_mir::LiveValues,
 ) -> Vec<Value> {
-    let order = crate::analysis::value_order(ctx, function);
     let mut across: Vec<Value> = Vec::new();
     let mut seen = HashSet::new();
-    for op in crate::analysis::function_ops(ctx, function) {
+    for op in perry_mir::operations(ctx, function) {
         if Operation::get_op::<AwaitOp>(op, ctx).is_none() {
             continue;
         }
         let result = op.deref(ctx).get_result(0);
-        let mut live: Vec<_> = liveness
-            .after(op)
-            .values()
-            .filter(|value| *value != result)
-            .collect();
-        // Order by definition position for deterministic frame layouts.
-        live.sort_unstable_by_key(|value| order[value]);
-        for value in live {
-            if seen.insert(value) {
-                across.push(value);
-            }
-        }
+        across.extend(
+            liveness
+                .after(op)
+                .values()
+                .filter(|v| *v != result && seen.insert(*v)),
+        );
     }
     across
 }
@@ -151,7 +144,7 @@ pub(crate) fn lower(
         let mut b = FunctionLowering::glue(state, ctx, &ramp);
         let size = b.i32_const(ctx, frame_size as i32);
         let frame = if let Some(offsets) = pointers {
-            let shape = b.pointer_shape(&offsets);
+            let shape = b.state.data.pointer_shape(&offsets);
             let shape = b.i32_const(ctx, shape as i32);
             let frame = b.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
             let pin = b.runtime(ctx, Runtime::GcPin, vec![frame]);
@@ -269,22 +262,6 @@ pub(crate) fn resume(ctx: &mut Context, state: &mut ModuleState) {
 }
 
 impl FunctionLowering<'_, '_> {
-    /// The 8-byte slot bits of a value, as promises store it.
-    pub(crate) fn slot_bits(&mut self, ctx: &mut Context, value: Value) -> Value {
-        if value.get_type(ctx).deref(ctx).is::<FP64Type>() {
-            self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value])
-        } else if value
-            .get_type(ctx)
-            .deref(ctx)
-            .downcast_ref::<IntegerType>()
-            .is_some_and(|ty| ty.width() == 64)
-        {
-            value
-        } else {
-            self.num(ctx, NumOpcode::I64ExtendI32U, vec![value])
-        }
-    }
-
     /// Pack a MIR value into the promise's eight-byte slot, boxing register pairs.
     pub(crate) fn promise_value_bits(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
         let ty = value.get_type(ctx);

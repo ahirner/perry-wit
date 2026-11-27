@@ -277,9 +277,9 @@ fn integer_attr(ctx: &Context, bits: u32, value: u64) -> IntegerAttr {
 }
 
 /// Build a signless integer `ConstantOp` of `bits` width.
-pub(crate) fn integer_constant(ctx: &mut Context, bits: u32, value: u64) -> Ptr<Operation> {
+pub fn integer_constant(ctx: &mut Context, bits: u32, value: u64) -> ConstantOp {
     let attr = integer_attr(ctx, bits, value);
-    ConstantOp::new(ctx, Box::new(attr)).get_operation()
+    ConstantOp::new(ctx, Box::new(attr))
 }
 
 /// The folded `i1` of a comparison.

@@ -10,16 +10,11 @@ use crate::{
 use perry_wit_diagnostics::{Diagnostic, Result};
 use pliron::{
     basic_block::BasicBlock,
-    builtin::{
-        attributes::{FPDoubleAttr, IntegerAttr},
-        ops::ConstantOp,
-        types::{IntegerType, Signedness},
-    },
+    builtin::{attributes::FPDoubleAttr, ops::ConstantOp},
     context::{Context, Ptr},
     op::Op,
     operation::Operation,
     r#type::TypeHandle,
-    utils::apint::APInt,
     value::Value,
 };
 use pliron_wasm::{
@@ -27,7 +22,6 @@ use pliron_wasm::{
     control::{BrOp, BrTableOp, CondBrOp, ReturnOp, UnreachableOp},
     ops::{CallOp, LoadOp, NumOp, SelectOp, StoreOp},
 };
-use std::num::NonZeroUsize;
 
 impl FunctionLowering<'_, '_> {
     pub(crate) fn new_block(
@@ -59,26 +53,19 @@ impl FunctionLowering<'_, '_> {
     }
 
     pub(crate) fn i32_const(&mut self, ctx: &mut Context, value: i32) -> Value {
-        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-        let attr = IntegerAttr::new(
-            ty,
-            APInt::from_u64(
-                value as u32 as u64,
-                const { NonZeroUsize::new(32).unwrap() },
-            ),
-        );
-        let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+        let op = perry_mir::integer_constant(ctx, 32, u64::from(value as u32)).get_operation();
         self.result(ctx, op)
     }
 
     pub(crate) fn i64_const(&mut self, ctx: &mut Context, value: u64) -> Value {
-        let ty = IntegerType::get(ctx, 64, Signedness::Signless);
-        let attr = IntegerAttr::new(
-            ty,
-            APInt::from_u64(value, const { NonZeroUsize::new(64).unwrap() }),
-        );
-        let op = ConstantOp::new(ctx, Box::new(attr)).get_operation();
+        let op = perry_mir::integer_constant(ctx, 64, value).get_operation();
         self.result(ctx, op)
+    }
+
+    /// The zero of Wasm type `ty`.
+    pub(crate) fn zero(&mut self, ctx: &mut Context, ty: TypeHandle) -> Value {
+        let zero = pliron_wasm::zero_constant(ctx, ty);
+        self.result(ctx, zero.get_operation())
     }
 
     pub(crate) fn f64_const(&mut self, ctx: &mut Context, value: f64) -> Value {

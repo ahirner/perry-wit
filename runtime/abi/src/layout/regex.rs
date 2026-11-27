@@ -5,13 +5,14 @@ pub const MAX_THREADS: usize = 24;
 pub const MAX_PENDING: usize = 64;
 // The program header precedes the forward DFA. Offsets are relative to the program.
 pub const CAPTURE_PROGRAM: usize = 0;
+/// Nonnegative offsets locate the reverse DFA. A negative value is the complement of the fixed match width in bytes.
 pub const REVERSE_OFFSET: usize = 4;
 pub const NAMES_OFFSET: usize = 8;
 pub const GROUP_COUNT: usize = 12;
 pub const PROGRAM_HEADER: usize = 16;
-pub const DFA_HEADER: usize = 8;
-pub const DFA_ROWS: usize = DFA_HEADER + 256;
-pub const GLOBAL: u32 = 1 << 31;
+pub const DFA_CLASSES: usize = 8;
+pub const DFA_ROWS: usize = DFA_CLASSES + 4;
+pub const GLOBAL: usize = 14;
 pub const NFA_HEADER: usize = 4;
 
 codes!(NfaOp { Fail = 0, Ranges = 1, Look = 2, Union = 3, Capture = 4, Match = 5 });

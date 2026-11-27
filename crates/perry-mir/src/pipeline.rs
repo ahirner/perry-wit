@@ -188,7 +188,12 @@ pub fn canonicalize(root: Ptr<Operation>, ctx: &mut Context) -> Result<AnalysisM
     rounds += run_to_fixpoint(&mut cleanup, root, ctx, &mut analyses)?;
 
     let mut ownership = Passes::default();
-    ownership.add_pass(FnPass("owned-append", crate::append::run));
+    ownership.add_pass(FnPass("fuse-array-concats", |root, ctx, _| {
+        let mut result = PassResult::default();
+        result.ir_changed = crate::append::fuse_arrays(root, ctx).into();
+        Ok(result)
+    }));
+    ownership.add_pass(FnPass("owned-append", crate::append::reuse));
     ownership.add_pass(PassWrapper::new(
         "scalar-characters",
         crate::characters::ScalarizeCharacters::default(),

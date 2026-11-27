@@ -22,7 +22,7 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
-use std::{collections::hash_map::Entry, rc::Rc};
+use std::{cell::OnceCell, collections::hash_map::Entry, rc::Rc};
 
 #[derive(Clone, Copy)]
 pub(crate) struct RecordField {
@@ -35,9 +35,36 @@ pub(crate) struct RecordLayout {
     pub(crate) record: TypedHandle<RecordType>,
     pub(crate) fields: IndexMap<String, RecordField>,
     pub(crate) size: u32,
+    pointer_shapes: [OnceCell<u32>; 2],
+    json_names: OnceCell<u32>,
 }
 
 impl RecordLayout {
+    pub(crate) fn pointer_shape(
+        &self,
+        ctx: &Context,
+        data: &mut crate::module::Data,
+        retains_json: bool,
+    ) -> u32 {
+        *self.pointer_shapes[usize::from(retains_json)].get_or_init(|| {
+            let offsets: Vec<_> = self
+                .fields
+                .values()
+                .filter(|field| repr(ctx, field.ty).is_ok_and(|kind| kind == Repr::Ref))
+                .map(|field| field.offset)
+                .chain(retains_json.then_some(record::JSON))
+                .collect();
+            data.pointer_shape(&offsets)
+        })
+    }
+
+    pub(super) fn json_fields(&self, data: &mut crate::module::Data) -> (u32, usize) {
+        let names = self
+            .json_names
+            .get_or_init(|| data.field_names(self.fields.keys().map(String::as_str)));
+        (*names, self.fields.len())
+    }
+
     pub(crate) fn field(&self, ctx: &Context, name: &str) -> Result<RecordField> {
         self.fields.get(name).copied().ok_or_else(|| {
             diag!(
@@ -82,6 +109,8 @@ impl RecordLayouts {
                     record,
                     fields,
                     size,
+                    pointer_shapes: Default::default(),
+                    json_names: OnceCell::new(),
                 }))
             }
         };
@@ -186,14 +215,10 @@ impl FunctionLowering<'_, '_> {
                 (sources, None)
             };
             let count = self.i32_const(ctx, operands.len() as i32);
-            let indices = reuse
-                .iter()
-                .flat_map(|index| index.to_le_bytes())
-                .collect::<Vec<_>>();
-            let address = if indices.is_empty() {
+            let address = if reuse.is_empty() {
                 0
             } else {
-                self.state.data.append(4, &indices)
+                self.state.data.words(reuse.iter().copied())
             };
             let candidates = self.i32_const(ctx, address as i32);
             let candidate_count = self.i32_const(ctx, reuse.len() as i32);
@@ -242,7 +267,6 @@ impl FunctionLowering<'_, '_> {
             let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
                 .map_err(|_| Diagnostic::internal("expected a record"))?;
             let layout = self.state.record_layouts.get(ctx, record)?;
-            let size = self.i32_const(ctx, layout.size as i32);
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
                 let base = self.local_frame.ok_or_else(|| {
                     Diagnostic::internal("frame-resident record without frame storage")
@@ -250,7 +274,7 @@ impl FunctionLowering<'_, '_> {
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
-                self.record_storage(ctx, record_ty, size)?
+                self.record_storage(ctx, &layout)
             };
             let order = {
                 let order = allocation.get_attr_perry_field_order(ctx);
@@ -716,12 +740,9 @@ impl FunctionLowering<'_, '_> {
         if count <= perry_abi::json::PACKED_FIELDS {
             fields.fold(0, perry_abi::json::append_field)
         } else {
-            let mut bytes = Vec::with_capacity(4 * (length + 1));
-            bytes.extend_from_slice(&(length as u32).to_le_bytes());
-            for field in fields {
-                bytes.extend_from_slice(&field.to_le_bytes());
-            }
-            self.state.data.append(4, &bytes)
+            self.state
+                .data
+                .words(std::iter::once(length as u32).chain(fields))
         }
     }
 

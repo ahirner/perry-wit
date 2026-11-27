@@ -5,6 +5,7 @@ use pliron::{
     context::Context,
     irfmt::parsers::spaced,
     linked_list::ContainsLinkedList,
+    op::Op,
     operation::{Operation, verify_operation},
     parsable::parse_from_str,
     printable::Printable,
@@ -18,13 +19,7 @@ fn compile_with(input: &str, options: &EmitOptions) -> Vec<u8> {
     verify_operation(module, ctx).unwrap_or_else(|error| panic!("{}", error.disp(ctx)));
     let module = Operation::get_op::<ModuleOp>(module, ctx).expect("module");
     // Export every function under its symbol name.
-    let body = module.get_body(ctx, 0);
-    let functions: Vec<_> = body
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .collect();
-    for function in functions {
+    for function in pliron_control::functions(module.get_operation(), ctx) {
         use pliron::builtin::op_interfaces::SymbolOpInterface;
         let name = function.get_symbol_name(ctx).to_string();
         crate::ops::set_export(ctx, &function, &name);
@@ -275,7 +270,7 @@ fn imports_and_imported_memory_link() {
         r#"
 builtin.module @m {{
   ^module():
-    wasm.import_func @twice: builtin.function <({I32}) -> ({I32})> from "host" "twice";
+    wasm.import_func @twice: builtin.function <({I32}) -> ({I32})> from "hôte" "twice !42\"quoted";
     builtin.func @quad: builtin.function <({I32}) -> ({I32})> {{
       ^entry(x: {I32}):
         a = wasm.call twice (x) : {I32};
@@ -286,8 +281,11 @@ builtin.module @m {{
 }}
 "#
     );
+    let ctx = &mut Context::new();
+    let parsed = parse_from_str(spaced(Operation::top_level_parser()), ctx, &input).unwrap();
+    let printed = parsed.deref(ctx).disp(ctx).to_string();
     let wasm = compile_with(
-        &input,
+        &printed,
         &EmitOptions {
             memory: Memory::Import {
                 module: "host".into(),
@@ -300,6 +298,11 @@ builtin.module @m {{
     );
     let engine = Engine::default();
     let module = wasmtime::Module::new(&engine, &wasm).unwrap();
+    let import = module.imports().next().unwrap();
+    assert_eq!(
+        (import.module(), import.name()),
+        ("hôte", "twice !42\"quoted")
+    );
     let mut store = Store::new(&engine, ());
     let memory = wasmtime::Memory::new(&mut store, wasmtime::MemoryType::new(1, None)).unwrap();
     let twice = wasmtime::Func::wrap(&mut store, |x: i32| x * 2);
@@ -483,6 +486,17 @@ builtin.module @m {{
         wasm.cond_br if more ^outer(left, w) else ^exit(w)
       ^exit(r: {I32}):
         wasm.return r
+    }};
+    builtin.func @table: builtin.function <({I32}) -> ({I32})> {{
+      ^entry(x: {I32}):
+        one = builtin.constant <builtin.integer <1: i32>> : {I32};
+        ten = builtin.constant <builtin.integer <10: i32>> : {I32};
+        wasm.br_table x [^a, ^a, ^start_b, ^c]
+      ^start_b(): wasm.br ^b(x)
+      ^a(): wasm.cond_br if x ^exit(one) else ^b(one)
+      ^b(k: {I32}): wasm.cond_br if k ^exit(k) else ^c()
+      ^c(): wasm.cond_br if x ^exit(ten) else ^a()
+      ^exit(out: {I32}): wasm.return out
     }}
 }}
 "#
@@ -539,26 +553,22 @@ builtin.module @m {{
     let ctx = &mut Context::new();
     let module = parse_from_str(spaced(Operation::top_level_parser()), ctx, &input).unwrap();
     let module = Operation::get_op::<ModuleOp>(module, ctx).unwrap();
-    let body = module.get_body(ctx, 0);
-    let functions: Vec<_> = body
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .collect();
     let mut guards = Vec::new();
-    for function in functions {
+    for function in pliron_control::functions(module.get_operation(), ctx) {
         use pliron::builtin::op_interfaces::SymbolOpInterface;
         let name = function.get_symbol_name(ctx).to_string();
         crate::ops::set_export(ctx, &function, &name);
         guards.push(crate::reducible::make_reducible(ctx, &function));
     }
-    assert_eq!(guards, vec![1, 1]);
-    verify_operation(pliron::op::Op::get_operation(&module), ctx)
-        .unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
+    assert_eq!(guards, [1, 1, 1]);
+    verify_operation(module.get_operation(), ctx).unwrap_or_else(|e| panic!("{}", e.disp(ctx)));
     let wasm = emit_module(ctx, &module, &EmitOptions::default()).unwrap_or_else(|e| panic!("{e}"));
     wasmparser::Validator::new()
         .validate_all(&wasm)
         .unwrap_or_else(|error| panic!("{error}\n{}", wat(&wasm)));
+    for (x, expected) in [(0, 1), (1, 1), (2, 2), (3, 10), (-1, 10)] {
+        assert_eq!(i32_of(call(&wasm, "table", &[Val::I32(x)])), expected);
+    }
     for x in [1, 2, 5, 8] {
         assert_eq!(
             i32_of(call(&wasm, "twice", &[Val::I32(x)])),
@@ -577,7 +587,7 @@ builtin.module @m {{
 fn dialect_round_trips_through_text() {
     let ctx = &mut Context::new();
     let module = parse_from_str(spaced(Operation::top_level_parser()), ctx, &loops()).unwrap();
-    let printed = Operation::get_op_dyn(module, ctx).disp(ctx).to_string();
+    let printed = module.deref(ctx).disp(ctx).to_string();
     for expected in [
         "wasm.num I32LtS",
         "wasm.cond_br if",
@@ -587,12 +597,8 @@ fn dialect_round_trips_through_text() {
         assert!(printed.contains(expected), "{printed}");
     }
     let ctx2 = &mut Context::new();
-    let reparsed = parse_from_str(
-        spaced(Operation::top_level_parser()),
-        ctx2,
-        &regex_lite(&printed),
-    )
-    .unwrap_or_else(|error| panic!("{}", error.disp(ctx2)));
+    let reparsed = parse_from_str(spaced(Operation::top_level_parser()), ctx2, &printed)
+        .unwrap_or_else(|error| panic!("{}", error.disp(ctx2)));
     verify_operation(reparsed, ctx2).unwrap();
     let invalid = loops().replace(
         "negative = wasm.num I32LtS x, zero : builtin.integer i32;",
@@ -606,27 +612,6 @@ fn dialect_round_trips_through_text() {
             .to_string()
             .contains("condition must be a signless i32")
     );
-}
-
-/// Drop printer-only location references (` !N`).
-fn regex_lite(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == ' ' && chars.peek() == Some(&'!') {
-            let mut lookahead = chars.clone();
-            lookahead.next();
-            if lookahead.peek().is_some_and(char::is_ascii_digit) {
-                chars.next();
-                while chars.peek().is_some_and(char::is_ascii_digit) {
-                    chars.next();
-                }
-                continue;
-            }
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// `wasm.br_table`: targets in and out of range (the default), a shared target, and a target

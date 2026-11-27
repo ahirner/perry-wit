@@ -2,7 +2,7 @@
 use super::calls::CallOrigin;
 use super::*;
 use crate::engine::boundary::TemplateView;
-use crate::methods::{Callback as Cb, Method, MethodResult};
+use crate::methods::{Callback as Cb, Method, MethodResult, ReplacementArg};
 
 #[derive(Clone, Copy)]
 pub(super) enum DispatchSite<'h> {
@@ -119,7 +119,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         let (stripped, _) = self.types.strip_nullish(obj_ty);
         let mut result_args = MethodResultArgs::receiver_only(raw_obj);
-        let mut replacement = Vec::new();
+        let replacement: Vec<_>;
         let (callback, inputs): (_, &[Ty]) = if matches!(cb_kind, Cb::Collection) {
             let TyKind::Generic { base, args } = self.types.kind(stripped) else {
                 return Ok(None);
@@ -137,27 +137,26 @@ impl<'h, 'a> Solver<'h, 'a> {
             };
             let search = self.eval_expr(s, first_arg)?;
             let search = self.search_pattern(s.inst, first_arg, search);
-            let cb_ty = self.eval_expr(s, cb)?;
-            if search == TyKind::Bottom || cb_ty == Ty::BOTTOM {
+            if search == TyKind::Bottom {
+                self.eval_expr(s, cb)?;
                 return Ok(Some(Ty::BOTTOM));
             }
-            if !matches!(self.types.kind(cb_ty), TyKind::Func(_)) {
-                return Ok(None);
-            }
-            replacement.push(Ty::STRING);
             let captures = match search {
                 TyKind::String | TyKind::Literal(_) => Some((0, false)),
                 TyKind::Regex(shape) => shape.captures,
                 _ => None,
             };
-            if let Some((count, named)) = captures {
-                let opt = self.types.with_absences(Ty::STRING, Absence::Undefined);
-                replacement.extend(std::iter::repeat_n(opt, count as usize));
-                replacement.extend([Ty::NUMBER, Ty::STRING]);
-                if named {
-                    replacement.push(self.types.object(&[], Some(opt)));
-                }
-            }
+            replacement = if let Some(shape) = captures {
+                let slot = self.types.with_absences(Ty::STRING, Absence::Undefined);
+                ReplacementArg::layout(Ty::STRING, Ty::NUMBER, Ty::STRING, Some((slot, shape)))
+                    .map(|arg| match arg {
+                        ReplacementArg::Value(ty) | ReplacementArg::Capture(ty, _) => ty,
+                        ReplacementArg::Groups(ty) => self.types.object(&[], Some(ty)),
+                    })
+                    .collect()
+            } else {
+                vec![Ty::STRING]
+            };
             (cb, replacement.as_slice())
         } else {
             if matches!(cb_kind, Cb::Comparator) && matches!(first_arg, Expr::Undefined) {

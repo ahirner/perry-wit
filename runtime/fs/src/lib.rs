@@ -578,28 +578,19 @@ fn advance(op: &mut Op, mut code: Option<u32>) {
                         return succeed(op, UNDEFINED_BITS);
                     }
                     _ => {
-                        let entries = op.contents.as_slice();
-                        let mut names = Buffer::new();
-                        for entry in entries.as_chunks::<{ wasi::ENTRY_SIZE }>().0 {
+                        let entries = op.contents.as_slice().as_chunks::<{ wasi::ENTRY_SIZE }>().0;
+                        let mut names = perry_rt_sys::ReferenceArray::with_capacity(entries.len());
+                        for entry in entries {
                             let at = entry.as_ptr() as *mut u8;
                             let (data, len) =
                                 (word(at, wasi::ENTRY_NAME), word(at, wasi::ENTRY_NAME + 4));
-                            // SAFETY: the host lowered the name into this task's region as UTF-8.
+                            // SAFETY: the host lowered the name as UTF-8 into this task's region.
                             let name = unsafe { adopt(data as usize as *mut u8, len) };
-                            if matches!(unsafe { bytes(name) }, b"." | b"..") {
-                                continue;
+                            if !matches!(unsafe { bytes(name) }, b"." | b"..") {
+                                names.push(name);
                             }
-                            names.extend_from_slice(&(name as usize as u64).to_le_bytes());
                         }
-                        let slots = names.as_slice();
-                        // SAFETY: 8-byte slots written above, in a block from the task region.
-                        let slots = unsafe {
-                            core::slice::from_raw_parts(
-                                slots.as_ptr() as *const u64,
-                                slots.len() / 8,
-                            )
-                        };
-                        return succeed(op, perry_rt_sys::array(slots) as usize as u64);
+                        return succeed(op, names.finish() as u64);
                     }
                 }
             }

@@ -7,7 +7,6 @@ pub(super) struct Frame<'s> {
     pub(super) controls: Vec<Control<'s>>,
     pub(super) return_to: Option<Ptr<BasicBlock>>,
     pub(super) cursors: hir_compat::CursorPositions,
-    pub(super) rest_excluded_keys: &'s [String],
 }
 
 impl<'s> Frame<'s> {
@@ -18,7 +17,6 @@ impl<'s> Frame<'s> {
             controls: Vec::new(),
             return_to: None,
             cursors: Default::default(),
-            rest_excluded_keys: &[],
         }
     }
     pub(super) fn jump_target(

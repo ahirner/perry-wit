@@ -42,7 +42,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(s, arg)?;
             }
             let shape = literal
-                .map(|literal| literal.get(self.ctx).shape())
+                .map(|literal| literal.shape(self.ctx))
                 .transpose()
                 .map_err(|error| {
                     let template = self.index.view(self.instances[s.inst].template);

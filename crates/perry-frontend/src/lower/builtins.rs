@@ -74,54 +74,6 @@ impl<'s> FunctionBuilder<'s, '_> {
             .lower(self, ctx, receiver, byte_offset)
     }
 
-    pub(super) fn replace_string(
-        &mut self,
-        ctx: &mut Context,
-        receiver: Value,
-        search: &'s Expr,
-        replacement: &'s Expr,
-        all: bool,
-    ) -> Result<Option<Value>> {
-        let method = if all { "replaceAll" } else { "replace" };
-        Ok({
-            let search_val = self.expression(ctx, search)?;
-            let search_val = self.defined(ctx, search_val)?;
-            if let Some(callback) = self.optional_callback(ctx, replacement)? {
-                return self
-                    .replace_callback(ctx, receiver, (search, search_val), callback, all)
-                    .map(Some);
-            }
-            let repl_val = self.string_operand(ctx, replacement)?;
-            match kind(ctx, search_val)? {
-                Kind::String => {
-                    let intrinsic = if all {
-                        Intrinsic::StringReplaceAll
-                    } else {
-                        Intrinsic::StringReplace
-                    };
-                    self.call_intrinsic(ctx, intrinsic, vec![receiver, search_val, repl_val])
-                }
-                Kind::Regex => {
-                    if all && !regex::global_flag(self.search_shape(ctx, search, search_val))? {
-                        bail_unsupported!(
-                            "String.prototype.replaceAll called with a non-global RegExp argument"
-                        );
-                    }
-                    self.call_intrinsic(
-                        ctx,
-                        Intrinsic::RegexReplace,
-                        vec![receiver, search_val, repl_val],
-                    )
-                }
-                _ => {
-                    bail_unsupported!(
-                        "string.{method} requires a string or literal regex search pattern"
-                    )
-                }
-            }
-        })
-    }
-
     /// Construct an Error with a supported scalar or reference cause.
     pub(super) fn error_with_cause(
         &mut self,

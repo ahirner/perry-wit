@@ -26,7 +26,7 @@ mod intrinsics;
 mod json_copy;
 mod json_schema;
 mod lifetimes;
-mod liveness;
+use pliron_control::liveness;
 mod locals;
 mod operation_schema;
 mod optional;
@@ -97,7 +97,7 @@ where
     seen
 }
 
-pub use aggregates::{functions, operations};
+pub use aggregates::{function_values, functions, operations, reachable_functions};
 pub use attrs::{Absence, BinaryKind, CompareKind, ErrorKind, FieldOrder, NumericConstant, Tier};
 pub use calls::{
     AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported, set_async, set_exported,
@@ -107,6 +107,7 @@ pub use collections::{
     ArrayPresentOp, ArrayPushOp, ArraySetOp, ArrayStoreOp, ArrayTruncateOp, ConcatOp,
     ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp, StringConstOp, StringLenOp,
 };
+pub use constants::integer_constant;
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{
     CallerFrame, CallerRelation, PlironResultExt, SourceSpan, attach_caller_notes,
@@ -123,14 +124,14 @@ pub use facts::{
 pub use foreign::{ForeignOp, Phase};
 pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};
 pub use heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp, RecordOrderOp};
-pub use integers::BigIntConstOp;
+pub use integers::{BigIntConstOp, integer_type};
 pub use intrinsics::{
     Combinator, Intrinsic, IntrinsicOp, JsonCopyOp, JsonDecodeOp, JsonStringifyOp,
     PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp, PromiseResolvedOp, PromiseSettleOp,
     SettleKind, SettledField, SettledFieldOp, may_throw,
 };
 pub use json_schema::JsonSchema;
-pub use liveness::{LiveAfter, LiveValues};
+pub use liveness::{LiveSet, LiveValues};
 pub use locals::{LoadOp, LocalOp, StoreOp, UndefOp};
 pub use optional::{
     IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,

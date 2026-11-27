@@ -183,8 +183,8 @@ pub(super) fn emit_component(
         bindings,
         resources,
     };
-    let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &exports, analyses)?;
-    let core = perry_codegen::compile(ctx, mir, &exports, analyses)?;
+    let mut allocation_report = String::new();
+    let core = perry_codegen::compile(ctx, mir, &exports, analyses, Some(&mut allocation_report))?;
     let (core, helpers) = finish(
         core,
         streams.as_ref(),
@@ -232,7 +232,7 @@ pub(crate) fn compile_core_sources(
     } else {
         Exports::Raw
     };
-    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses, None)?;
     let (core, _) = finish(
         core,
         None,

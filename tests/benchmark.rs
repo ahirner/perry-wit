@@ -624,13 +624,9 @@ fn raw_module(workload: String, source: &str) -> Result<(Vec<u8>, Row)> {
     let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
     let exports = perry_codegen::Exports::Raw;
-    let optimization = optimization_statistics(&perry_codegen::explain_tiers(
-        ctx,
-        &mir,
-        &exports,
-        &mut analyses,
-    )?)?;
-    let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let mut report = String::new();
+    let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses, Some(&mut report))?;
+    let optimization = optimization_statistics(&report)?;
     let bytes = stripped_core_size(&wasm)?;
     let row = Row {
         workload,

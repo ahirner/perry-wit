@@ -7,7 +7,7 @@ use pliron::{
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
 };
-use pliron_wasm::attrs::{MemKind, NumOpcode};
+use pliron_wasm::attrs::MemKind;
 
 impl FunctionLowering<'_, '_> {
     pub(crate) fn json_decode(
@@ -62,11 +62,6 @@ impl FunctionLowering<'_, '_> {
             failed
         };
         self.throw_status_if(ctx, status, status);
-        let value = match crate::repr::repr(ctx, ty)? {
-            crate::repr::Repr::F64 => self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits]),
-            crate::repr::Repr::I64 => bits,
-            _ => self.num(ctx, NumOpcode::I32WrapI64, vec![bits]),
-        };
         if crate::values::is_numeric_type(ctx, ty) {
             self.define_value(
                 ctx,
@@ -74,6 +69,7 @@ impl FunctionLowering<'_, '_> {
                 crate::repr::Carriers::Numeric { tag, payload: bits },
             );
         } else {
+            let value = self.repack_bits(ctx, bits, crate::repr::wasm_type(ctx, ty)?);
             self.define(ctx, op, value);
         }
         Ok(())

@@ -236,7 +236,14 @@ impl<'s> FunctionBuilder<'s, '_> {
             }
             (Kind::Record, field) => match Member::field(ctx, value, field, None) {
                 Ok(member) => member.read(self, ctx)?,
-                Err(_) if self.frame.rest_excluded_keys.iter().any(|k| k == field) => {
+                Err(_)
+                    if self
+                        .shapes
+                        .specialization
+                        .iteration
+                        .object_pattern_offset(object)
+                        .is_some() =>
+                {
                     self.absent_literal(ctx, false, None)?
                 }
                 Err(error) => return Err(error),

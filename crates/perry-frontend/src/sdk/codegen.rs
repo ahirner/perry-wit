@@ -4,7 +4,7 @@
 //! exported functions, records, variants, enums, and imported interfaces.
 
 use perry_contract::names::{TsNames, to_camel_case, to_pascal_case};
-use perry_contract::types::{Contract, Input, convert};
+use perry_contract::types::{Contract, Input, Scalar, convert};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::{Diagnostic, codes};
 use std::{collections::HashSet, fmt::Write as _};
@@ -18,7 +18,11 @@ fn type_to_ts(names: &TsNames<'_>, input: Input) -> String {
         &|(), id| names.name(id),
         &|(), contract| match contract {
             Contract::Alias(ty) => ty,
-            Contract::Scalar(ty) => scalar_type(ty).into(),
+            Contract::Scalar(Scalar::Bool) => "boolean".into(),
+            Contract::Scalar(Scalar::Integer(domain)) if domain.bits() == 64 => "bigint".into(),
+            Contract::Scalar(_) => "number".into(),
+            Contract::String | Contract::Char => "string".into(),
+            Contract::ErrorContext => "Error | unknown".into(),
             Contract::Resource { id, .. } => names.name(id).unwrap_or_else(|| "unknown".into()),
             Contract::Bytes => "Uint8Array".into(),
             Contract::ByteStream => "ReadableStream<Uint8Array>".into(),
@@ -375,24 +379,6 @@ fn emit_type_def(names: &TsNames<'_>, type_id: wit_parser::TypeId, out: &mut Str
             out.push_str("}\n\n");
         }
         _ => {}
-    }
-}
-
-fn scalar_type(ty: Type) -> &'static str {
-    match ty {
-        Type::Bool => "boolean",
-        Type::U8
-        | Type::S8
-        | Type::U16
-        | Type::S16
-        | Type::U32
-        | Type::S32
-        | Type::F32
-        | Type::F64 => "number",
-        Type::U64 | Type::S64 => "bigint",
-        Type::Char | Type::String => "string",
-        Type::ErrorContext => "Error | unknown",
-        Type::Id(_) => "unknown",
     }
 }
 

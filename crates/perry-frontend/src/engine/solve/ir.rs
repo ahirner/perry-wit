@@ -279,7 +279,7 @@ pub(crate) enum SiteResolution {
     ResourceCall(crate::wit::MemberId),
     Static(crate::methods::StaticMethod),
     Builtin(crate::methods::Method),
-    Regex(Option<pliron::uniqued_any::Uniqued<perry_mir::RegexLiteral>>),
+    Regex(Option<perry_mir::RegexLiteral>),
     ReadMember(InstanceId),
     WriteMember(InstanceId),
     UpdateMember {

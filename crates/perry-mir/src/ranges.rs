@@ -34,16 +34,15 @@ use crate::{
         ArrayAtOp, ArrayGetOp, ArrayIsDenseOp, ArrayLenOp, ArrayPresentOp, ArraySetOp,
         ArrayStoreOp, StringLenOp,
     },
-    facts::guards::{GuardedFacts, orders},
+    facts::guards::GuardedFacts,
     intrinsics::{Intrinsic, IntrinsicOp, intrinsic_of as intrinsic},
     optional::WrapOp,
     scalar::NumericCastOp,
     types::ArrayType,
 };
 use pliron::{
-    basic_block::BasicBlock,
     builtin::{
-        op_interfaces::{OneRegionInterface, OneResultInterface},
+        op_interfaces::{OneOpdInterface, OneRegionInterface, OneResultInterface},
         ops::FuncOp,
         types::{FP64Type, IntegerType, Signedness},
     },
@@ -57,19 +56,8 @@ use pliron::{
     r#type::{Typed, TypedHandle},
     value::Value,
 };
-use std::collections::HashMap;
 
 mod bytes;
-
-/// What a length is the length of.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Length {
-    Array(Value, Ptr<Operation>),
-    /// A view, and the operation that read its length.
-    Bytes(Value, Ptr<Operation>),
-    /// A string's scalar count.
-    String(Value),
-}
 
 /// Facts and indexed accesses match by kind and object.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -79,49 +67,29 @@ enum Object {
     String,
 }
 
-impl Length {
-    fn object(self) -> Value {
+impl Object {
+    fn length_read(self, ctx: &Context, value: Value) -> Option<Ptr<Operation>> {
+        let op = value.defining_op()?;
+        if self == Self::Bytes {
+            return (intrinsic(ctx, op) == Some(Intrinsic::BytesLength)).then_some(op);
+        }
+        let cast = Operation::get_op::<NumericCastOp>(op, ctx)?;
+        if !value.get_type(ctx).deref(ctx).is::<FP64Type>() {
+            return None;
+        }
+        let read = cast.get_operand(ctx).defining_op()?;
         match self {
-            Length::Array(value, _) | Length::Bytes(value, _) | Length::String(value) => value,
+            Self::Array if Operation::is_op::<ArrayLenOp>(read, ctx) => Some(read),
+            Self::String if Operation::is_op::<StringLenOp>(read, ctx) => Some(read),
+            _ => None,
         }
     }
-
-    fn kind(self) -> Object {
-        match self {
-            Length::Array(..) => Object::Array,
-            Length::Bytes(..) => Object::Bytes,
-            Length::String(_) => Object::String,
-        }
-    }
-}
-
-/// Recognize array/string lengths converted to numbers and byte-view lengths.
-fn length(ctx: &Context, value: Value) -> Option<Length> {
-    let op = value.defining_op()?;
-    if Operation::get_op::<NumericCastOp>(op, ctx).is_some()
-        && value.get_type(ctx).deref(ctx).is::<FP64Type>()
-    {
-        let len = op.deref(ctx).get_operand(0).defining_op()?;
-        if Operation::get_op::<StringLenOp>(len, ctx).is_some() {
-            return Some(Length::String(len.deref(ctx).get_operand(0)));
-        }
-        Operation::get_op::<ArrayLenOp>(len, ctx)?;
-        return Some(Length::Array(len.deref(ctx).get_operand(0), len));
-    }
-    (intrinsic(ctx, op) == Some(Intrinsic::BytesLength))
-        .then(|| Length::Bytes(op.deref(ctx).get_operand(0), op))
 }
 
 /// Operations during which a view may be detached: calls, awaits and BYOB reads.
 fn may_detach(ctx: &Context, op: Ptr<Operation>) -> bool {
     crate::is_any::<(crate::foreign::ForeignOp, CallOp, AsyncCallOp, AwaitOp)>(ctx, op)
         || intrinsic(ctx, op) == Some(Intrinsic::ReaderReadByob)
-}
-
-/// A proof that `index < length` holds in the blocks `target` dominates.
-struct Fact {
-    target: Ptr<BasicBlock>,
-    length: Length,
 }
 
 /// Fold stable array lengths and replace accesses proven in bounds with unchecked operations.
@@ -133,7 +101,6 @@ pub(crate) fn prove_bounds(
 ) -> Result<IRStatus> {
     let mut status = IRStatus::Unchanged;
     for function in functions(root, ctx) {
-        let facts = facts(ctx, numeric, &function);
         let mut intervals = GuardedFacts::new(ctx, numeric, &function);
         let mut lengths = Vec::new();
         let mut accesses = Vec::new();
@@ -187,9 +154,8 @@ pub(crate) fn prove_bounds(
             } else {
                 None
             };
-            if !numeric.is_count(ctx, &function, index)
-                && !index_bounds.is_some_and(|(lower, _)| lower >= 0)
-            {
+            let count = numeric.is_count(ctx, &function, index);
+            if !count && !index_bounds.is_some_and(|(lower, _)| lower >= 0) {
                 continue;
             }
             let proven = (kind == Object::Array
@@ -205,15 +171,15 @@ pub(crate) fn prove_bounds(
                             && bytes::extent(ctx, numeric, object, op, 32)
                                 .is_some_and(|(length, _)| upper < length)
                     }))
-                || facts
-                    .get(&(object, index, kind))
-                    .into_iter()
-                    .flatten()
-                    .any(|fact| {
-                        (fact.target == block
-                            || dominance.block_strictly_dominates_block(ctx, fact.target, block))
-                            && stable_length(ctx, numeric, &function, fact, op)
-                    });
+                || (count
+                    && intervals
+                        .orders_at(dominance, block, index)
+                        .filter(|order| order.strict && order.smaller == index)
+                        .filter_map(|order| kind.length_read(ctx, order.larger))
+                        .any(|read| {
+                            read.deref(ctx).get_operand(0) == object
+                                && stable_length(ctx, numeric, &function, kind, read, op)
+                        }));
             if proven {
                 accesses.push((op, object, index, kind));
             }
@@ -227,7 +193,7 @@ pub(crate) fn prove_bounds(
             status = IRStatus::Changed;
         }
         let mut replace_int = |ctx: &mut Context, op: Ptr<Operation>, bits: u32, value: u64| {
-            let constant = crate::constants::integer_constant(ctx, bits, value);
+            let constant = crate::constants::integer_constant(ctx, bits, value).get_operation();
             constant.insert_before(ctx, op);
             let result = op.deref(ctx).get_result(0);
             let replacement = constant.deref(ctx).get_result(0);
@@ -250,47 +216,20 @@ pub(crate) fn prove_bounds(
     Ok(status)
 }
 
-fn facts(
-    ctx: &Context,
-    numeric: &crate::facts::ProgramFacts,
-    function: &FuncOp,
-) -> HashMap<(Value, Value, Object), Vec<Fact>> {
-    let mut facts: HashMap<_, Vec<_>> = HashMap::new();
-    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-        // Counts and lengths are never NaN, so false edges order them too.
-        for order in orders(ctx, block).into_iter().flatten() {
-            if !order.strict || !numeric.is_count(ctx, function, order.smaller) {
-                continue;
-            }
-            let Some(length) = length(ctx, order.larger) else {
-                continue;
-            };
-            facts
-                .entry((length.object(), order.smaller, length.kind()))
-                .or_default()
-                .push(Fact {
-                    target: order.target,
-                    length,
-                });
-        }
-    }
-    facts
-}
-
 /// Array shrinking and byte detachment invalidate the length observed by a branch.
 fn stable_length(
     ctx: &Context,
     numeric: &crate::facts::ProgramFacts,
     function: &FuncOp,
-    fact: &Fact,
+    kind: Object,
+    read: Ptr<Operation>,
     consumer: Ptr<Operation>,
 ) -> bool {
-    let read = match fact.length {
-        Length::Array(_, read) | Length::Bytes(_, read) => read,
-        Length::String(_) => return true,
-    };
-    let mut array_invalidated = matches!(fact.length, Length::Array(..))
-        .then(|| numeric.array_length_invalidation(ctx, function, fact.length.object()));
+    if kind == Object::String {
+        return true;
+    }
+    let mut array_invalidated = (kind == Object::Array)
+        .then(|| numeric.array_length_invalidation(ctx, function, read.deref(ctx).get_operand(0)));
     crate::facts::paths::preserves(ctx, read, consumer, (), |op, ()| {
         let invalidated = array_invalidated
             .as_mut()
@@ -370,6 +309,6 @@ mod tests {
         let attr = IntegerAttr::new(ty, APInt::from_u64(3, bw(32)));
         let integer = ConstantOp::new(ctx, Box::new(attr)).get_result(ctx);
         let number = NumericCastOp::new(ctx, integer, FP64Type::get(ctx).into()).get_result(ctx);
-        assert!(length(ctx, number).is_none());
+        assert!(Object::Array.length_read(ctx, number).is_none());
     }
 }

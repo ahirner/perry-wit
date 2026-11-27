@@ -23,7 +23,7 @@ impl<'s> FunctionBuilder<'s, '_> {
         let mut loop_cells = Vec::new();
         while let Some((first, tail)) = rest.split_first() {
             rest = match self.shapes.specialization.iteration.element(rest) {
-                Some(element) => {
+                Some((element, rest)) => {
                     let element_ty = self
                         .declared_local(ctx, self.local_storage(element.id), element.ty)?
                         .0
@@ -62,31 +62,14 @@ impl<'s> FunctionBuilder<'s, '_> {
                     self.locals.insert(element.id, binding);
                     let done = self.not(ctx, available);
                     self.store(ctx, self.local(element.done)?, done);
-                    element.rest
+                    rest
                 }
                 None => {
-                    let prev_rest_keys = self.frame.rest_excluded_keys;
-                    if matches!(first, Stmt::Let { .. }) {
-                        self.frame.rest_excluded_keys = tail
-                            .iter()
-                            .take_while(|s| matches!(s, Stmt::Let { .. }))
-                            .find_map(|s| match s {
-                                Stmt::Let {
-                                    init: Some(Expr::ObjectRest { exclude_keys, .. }),
-                                    ..
-                                } => Some(exclude_keys.as_slice()),
-                                _ => None,
-                            })
-                            .unwrap_or(&[]);
-                    }
-                    let res = self
-                        .statement(ctx, first, None, &loop_cells)
+                    self.statement(ctx, first, None, &loop_cells)
                         .map_err(|error| match first {
                             Stmt::Let { id, .. } => self.shapes.annotate_local(error, *id),
                             _ => error,
-                        });
-                    self.frame.rest_excluded_keys = prev_rest_keys;
-                    res?;
+                        })?;
                     tail
                 }
             };

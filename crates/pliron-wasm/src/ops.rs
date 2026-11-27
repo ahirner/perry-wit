@@ -8,27 +8,19 @@ use pliron::{
         attributes::{IdentifierAttr, IntegerAttr, StringAttr, TypeAttr, VecAttr},
         op_interfaces::{
             NOpdsInterface, NRegionsInterface, NResultsInterface, OneResultInterface,
-            SymbolOpInterface, SymbolTableInterface,
+            SymbolOpInterface,
         },
         ops::FuncOp,
         type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
-    combine::{Parser, parser::char::string, token},
     common_traits::Verify,
     context::{Context, Ptr},
     derive::{op_interface_impl, pliron_op},
     identifier::Identifier,
-    input_err,
-    irfmt::{
-        parsers::{spaced, type_parser},
-        printers::op::typed_symb_op_header,
-    },
-    op::{Op, OpObj, op_cast},
+    op::Op,
     operation::Operation,
     opts::dce::SideEffects,
-    parsable::{Parsable, ParseResult, StateStream, StreamLocation},
-    printable::Printable,
     result::Result,
     r#type::{TypeHandle, Typed, TypedHandle},
     utils::apint::APInt,
@@ -247,6 +239,7 @@ impl Verify for StoreOp {
 /// A function imported from the host as `module`.`name` and callable with [CallOp].
 #[pliron_op(
     name = "wasm.import_func",
+    format = "`@` attr($builtin_sym_name, $IdentifierAttr) `: ` attr($wasm_import_type, $TypeAttr) ` from ` attr($wasm_import_module, $StringAttr) ` ` attr($wasm_import_name, $StringAttr)",
     interfaces = [SymbolOpInterface, NOpdsInterface<0>, NResultsInterface<0>, NRegionsInterface<0>],
     attributes = (wasm_import_type: TypeAttr, wasm_import_module: StringAttr, wasm_import_name: StringAttr)
 )]
@@ -263,91 +256,29 @@ impl ImportFuncOp {
         let op = Operation::new_op::<Self>(ctx, vec![], vec![], vec![], 0);
         op.set_symbol_name(ctx, symbol);
         op.set_attr_wasm_import_type(ctx, TypeAttr::new(ty.into()));
-        op.set_attr_wasm_import_module(ctx, StringAttr::new(module.to_string()));
-        op.set_attr_wasm_import_name(ctx, StringAttr::new(name.to_string()));
+        op.set_attr_wasm_import_module(ctx, module.into());
+        op.set_attr_wasm_import_name(ctx, name.into());
         op
     }
-
-    pub(crate) fn module(&self, ctx: &Context) -> String {
-        self.get_attr_wasm_import_module(ctx)
-            .expect(IMPORT_ATTRS_SET)
-            .clone()
-            .into()
-    }
-
-    pub(crate) fn name(&self, ctx: &Context) -> String {
-        self.get_attr_wasm_import_name(ctx)
-            .expect(IMPORT_ATTRS_SET)
-            .clone()
-            .into()
-    }
 }
-
-/// Why [ImportFuncOp]'s attributes are present: both its constructor and its parser set all three.
-const IMPORT_ATTRS_SET: &str = "ImportFuncOp::new and ImportFuncOp::parse set every attribute";
 
 impl Typed for ImportFuncOp {
     fn get_type(&self, ctx: &Context) -> TypeHandle {
         self.get_attr_wasm_import_type(ctx)
-            .expect(IMPORT_ATTRS_SET)
+            .expect("verified import signature")
             .get_type(ctx)
     }
 }
 
 impl Verify for ImportFuncOp {
     fn verify(&self, ctx: &Context) -> Result<()> {
-        if TypedHandle::<FunctionType>::from_handle(self.get_type(ctx), ctx).is_err() {
+        if !self
+            .get_attr_wasm_import_type(ctx)
+            .is_some_and(|ty| ty.get_type(ctx).deref(ctx).is::<FunctionType>())
+        {
             verify_err!(self.loc(ctx), OpErr::ValueType("wasm.import_func".into()))?
         }
         Ok(())
-    }
-}
-
-impl Printable for ImportFuncOp {
-    fn fmt(
-        &self,
-        ctx: &Context,
-        state: &pliron::printable::State,
-        f: &mut core::fmt::Formatter<'_>,
-    ) -> core::fmt::Result {
-        typed_symb_op_header(self).fmt(ctx, state, f)?;
-        write!(f, " from {:?} {:?}", self.module(ctx), self.name(ctx))
-    }
-}
-
-impl Parsable for ImportFuncOp {
-    type Arg = Vec<(Identifier, pliron::location::Location)>;
-    type Parsed = OpObj;
-
-    fn parse<'a>(
-        state_stream: &mut StateStream<'a>,
-        results: Self::Arg,
-    ) -> ParseResult<'a, Self::Parsed> {
-        if !results.is_empty() {
-            input_err!(
-                state_stream.loc(),
-                pliron::builtin::op_interfaces::NResultsVerifyErr(0, results.len())
-            )?
-        }
-        let mut parser = (
-            spaced(token('@').with(Identifier::parser(()))).skip(spaced(token(':'))),
-            spaced(type_parser()),
-            spaced(string("from")),
-            spaced(StringAttr::parser(())),
-            spaced(StringAttr::parser(())),
-        );
-        parser
-            .parse_stream(state_stream)
-            .map(|(symbol, ty, _, module, name)| -> OpObj {
-                let ctx = &mut state_stream.state.ctx;
-                let op = Operation::new_op::<Self>(ctx, vec![], vec![], vec![], 0);
-                op.set_symbol_name(ctx, symbol);
-                op.set_attr_wasm_import_type(ctx, TypeAttr::new(ty));
-                op.set_attr_wasm_import_module(ctx, module);
-                op.set_attr_wasm_import_name(ctx, name);
-                OpObj::new(op)
-            })
-            .into()
     }
 }
 
@@ -357,21 +288,12 @@ fn callee_type(
     op: Ptr<Operation>,
     callee: &Identifier,
 ) -> Option<TypedHandle<FunctionType>> {
-    let mut parent = op.deref(ctx).get_parent_op(ctx);
-    while let Some(candidate) = parent {
-        let candidate_op = Operation::get_op_dyn(candidate, ctx);
-        if let Some(table) = op_cast::<dyn SymbolTableInterface>(candidate_op.as_ref())
-            && let Some(symbol) = table.lookup(ctx, callee)
-        {
-            let ty = match Operation::get_op::<FuncOp>(symbol, ctx) {
-                Some(function) => function.get_type(ctx),
-                None => Operation::get_op::<ImportFuncOp>(symbol, ctx)?.get_type(ctx),
-            };
-            return TypedHandle::<FunctionType>::from_handle(ty, ctx).ok();
-        }
-        parent = candidate.deref(ctx).get_parent_op(ctx);
-    }
-    None
+    let symbol = pliron_control::enclosing_symbols(ctx, op, callee).next()?;
+    let ty = match Operation::get_op::<FuncOp>(symbol, ctx) {
+        Some(function) => function.get_type(ctx),
+        None => Operation::get_op::<ImportFuncOp>(symbol, ctx)?.get_type(ctx),
+    };
+    TypedHandle::<FunctionType>::from_handle(ty, ctx).ok()
 }
 
 /// A direct call of a function or import of the enclosing module.

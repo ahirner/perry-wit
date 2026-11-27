@@ -364,6 +364,8 @@ export function replace(n: number) {
   if ('éa_b é'.replace(/\b\w+\b/g, 'x') !== 'éx é') return -18;
   if ('ba🙂c'.split(/a|(?:)/u).join('|') !== 'b|🙂|c') return -19;
   if ('é🙂b'.replace(/(?:)/gu, (_, offset) => String(offset)) !== '0é1🙂2b3') return -20;
+  const pick = n > 0 ? (s: string) => s.toUpperCase() : (_: string, offset: number) => String(offset);
+  if ('aba'.replaceAll('a', pick) !== (n > 0 ? 'AbA' : '0b2')) return -21;
   return n;
 }
 export function named(n: number) {
@@ -414,6 +416,13 @@ export function named(n: number) {
   const parts = splitBy('x', skipped);
   if (parts.length !== 4 || parts[1] !== undefined || parts.join('|') !== '||x|') return -24;
   if (splitBy('ax', /x/)[0].toUpperCase() !== 'A') return -25;
+  const many = splitBy('x'.repeat(32), skipped);
+  if (many.length !== 97 || many[1] !== undefined || many[94] !== undefined || many[95] !== 'x' || many[96] !== '') return -26;
+  const fixed = /aé|猫/u.exec('é猫');
+  if (fixed === null || fixed.index !== 1 || fixed[0] !== '猫') return -27;
+  const variable = /[a猫]/u.exec('é猫');
+  if (variable === null || variable.index !== 1 || variable[0] !== '猫') return -28;
+  if (/$/.exec('é')?.index !== 1) return -29;
   return n;
 }
 "#,

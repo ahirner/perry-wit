@@ -30,6 +30,48 @@ pub fn typed<T: Type>(ctx: &Context, ty: TypeHandle) -> Option<TypedHandle<T>> {
     }
 }
 
+/// Each reachable MIR storage type once, including roots and opaque record declarations.
+pub fn nested_types(
+    ctx: &Context,
+    roots: impl IntoIterator<Item = TypeHandle>,
+) -> impl Iterator<Item = TypeHandle> + '_ {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending: Vec<_> = roots.into_iter().filter(|ty| seen.insert(*ty)).collect();
+    std::iter::from_fn(move || {
+        let ty = pending.pop()?;
+        if let Some(children) = type_children(&*ty.deref(ctx)) {
+            pending.extend(children.filter(|child| seen.insert(*child)));
+        }
+        Some(ty)
+    })
+}
+
+/// Immediate storage types. A forward-declared record has unknown children.
+pub(crate) fn type_children(ty: &dyn Type) -> Option<impl Iterator<Item = TypeHandle> + '_> {
+    let fields = match ty.downcast_ref::<RecordType>() {
+        Some(record) => record.fields.as_deref()?,
+        None => &[],
+    };
+    let cases = ty
+        .downcast_ref::<VariantType>()
+        .map_or(&[][..], VariantType::cases);
+    let payload = ty
+        .downcast_ref::<ValueUnionType>()
+        .map(ValueUnionType::variants)
+        .or_else(|| ty.downcast_ref::<OptionalType>().map(OptionalType::value))
+        .or_else(|| ty.downcast_ref::<ArrayType>().map(ArrayType::element))
+        .or_else(|| ty.downcast_ref::<PromiseType>().map(PromiseType::value))
+        .or_else(|| ty.downcast_ref::<SettledType>().map(SettledType::value))
+        .or_else(|| ty.downcast_ref::<SlotType>().map(SlotType::value));
+    Some(
+        fields
+            .iter()
+            .map(|(_, field)| *field)
+            .chain(cases.iter().filter_map(|(_, payload)| *payload))
+            .chain(payload),
+    )
+}
+
 macro_rules! record_kinds {
     ($($kind:ident => $name:literal),+ $(,)?) => {
         /// Logical record role, preserved when numeric storage is specialized.

@@ -257,7 +257,7 @@ fn array_element(value: *mut u8, index: u32) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
     if !checked(value) {
-        return crate::runtime::array(&[]);
+        return crate::runtime::array([]);
     }
     unsafe {
         if word(value, 0) == VIEW || view::array_length(value).is_some() {
@@ -266,17 +266,11 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
         let value = view::std_json_snapshot(value);
         if word(value, 0) == OBJECT {
             let value = canonical(value);
-            let count = children(value)
-                .filter(|&child| word(node(child), 0) != ABSENT)
-                .count();
-            let (array, slots) = crate::runtime::array_storage(count);
-            for (slot, child) in slots
-                .iter_mut()
-                .zip(children(value).filter(|&child| word(node(child), 0) != ABSENT))
-            {
-                *slot = std_json_to_string(node(word(node(child), 24))) as u64;
-            }
-            return array;
+            return crate::runtime::array(
+                children(value)
+                    .filter(|&child| word(node(child), 0) != ABSENT)
+                    .map(|child| std_json_to_string(node(word(node(child), 24)))),
+            );
         }
         let count = match word(value, 0) {
             ARRAY => word(value, MEMBER_COUNT),
@@ -288,13 +282,7 @@ pub(crate) extern "C" fn std_json_keys(value: *mut u8) -> *mut u8 {
 }
 
 fn index_keys(count: u32) -> *mut u8 {
-    let (array, slots) = crate::runtime::array_storage(count as usize);
-    for (index, slot) in slots.iter_mut().enumerate() {
-        let mut text = [0; 40];
-        let len = crate::runtime::number_format(index as f64, &mut text);
-        *slot = crate::runtime::from_bytes(&text[..len]) as u64;
-    }
-    array
+    crate::runtime::array((0..count).map(index_text))
 }
 
 /// `value.length`: a string's Unicode scalar count or an array's count, else `undefined` (bits).
@@ -480,7 +468,7 @@ fn key_bytes(member: u32) -> &'static [u8] {
 /// position and takes its last value. Reordered members are allocated in a fresh traced object.
 fn canonical(object: *mut u8) -> *mut u8 {
     unsafe {
-        if word(object, CANONICAL) != 0 {
+        if object.is_null() || word(object, CANONICAL) != 0 {
             return object;
         }
         let count = word(object, MEMBER_COUNT) as usize;
@@ -597,17 +585,19 @@ fn append(object: *mut u8, value: *mut u8, key: *mut u8) {
     }
 }
 
-/// A key node for array index `index`.
+fn index_digits(index: u32, digits: &mut [u8; 66]) -> &[u8] {
+    perry_rt_sys::number::format_integer(u64::from(index), false, 10, digits)
+}
+
+fn index_text(index: u32) -> *mut u8 {
+    crate::runtime::from_bytes(index_digits(index, &mut [0; 66]))
+}
+
 fn index_key(index: u32) -> *mut u8 {
-    let mut digits = [0u8; 66];
-    let slice = perry_rt_sys::number::format_integer(u64::from(index), false, 10, &mut digits);
-    let data = crate::runtime::alloc(slice.len() as u32);
-    // SAFETY: a fresh block of the digits' length.
-    let text = unsafe {
-        core::ptr::copy_nonoverlapping(slice.as_ptr(), data, slice.len());
-        core::slice::from_raw_parts(data, slice.len())
-    };
-    string_node(text)
+    let mut digits = [0; 66];
+    let bytes = index_digits(index, &mut digits);
+    let owned = crate::runtime::copy_bytes(bytes);
+    string_node_counted(owned, bytes.len() as u32)
 }
 
 /// `{}`: the object a spread literal starts from.

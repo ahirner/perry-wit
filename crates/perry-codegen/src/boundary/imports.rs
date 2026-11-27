@@ -77,7 +77,10 @@ impl FunctionLowering<'_, '_> {
         let transfer = if import.asynchronous {
             let owners = self.runtime(ctx, Runtime::RootsCapture, vec![mark]);
             let size = self.i32_const(ctx, transfer::SIZE as i32);
-            let shape = self.pointer_shape(&[transfer::AREA, transfer::OWNERS]);
+            let shape = self
+                .state
+                .data
+                .pointer_shape(&[transfer::AREA, transfer::OWNERS]);
             let shape = self.i32_const(ctx, shape as i32);
             let transfer = self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]);
             let index = self
@@ -109,13 +112,13 @@ impl FunctionLowering<'_, '_> {
         let foreign = Foreign {
             module: import.module.clone(),
             name,
-            params: signature.params.iter().copied().map(Flat::from).collect(),
+            params: signature.params.clone(),
         };
         self.commit_resources(ctx);
         if let Some(transfer) = transfer {
             // An async lowering returns its subtask status.
             let status = self.preserving_task(ctx, |b, ctx| {
-                b.host(ctx, ValueHost::Foreign(foreign, Flat::I32), args)
+                b.host(ctx, ValueHost::Foreign(foreign, WasmType::I32), args)
             });
             self.canonical_borrows = false;
             self.resource_scope = None;
@@ -145,7 +148,7 @@ impl FunctionLowering<'_, '_> {
             // A synchronous lowering returns one flat result directly; none, or more through
             // `area`.
             let result = self.preserving_task(ctx, |b, ctx| match signature.results.as_slice() {
-                &[flat] => Some(b.host(ctx, ValueHost::Foreign(foreign, flat.into()), args)),
+                &[flat] => Some(b.host(ctx, ValueHost::Foreign(foreign, flat), args)),
                 _ => {
                     b.host_void(ctx, EffectHost::Foreign(foreign), args);
                     None
@@ -269,12 +272,9 @@ impl FunctionLowering<'_, '_> {
                     self.discard_canonical(ctx, field, area, offset + at)?;
                 }
             }
-            AbiKind::Option(_)
-            | AbiKind::Result { .. }
-            | AbiKind::Enum(_, _)
-            | AbiKind::Variant(_, _) => {
-                let tag = self.load(ctx, abi.discriminant_kind(), area, offset);
-                self.sum_switch(ctx, tag, abi.cases(), vec![], |b, ctx, _, (_, payload)| {
+            AbiKind::Sum(sum) => {
+                let tag = self.load(ctx, sum.discriminant(), area, offset);
+                self.sum_switch(ctx, tag, sum.cases(), vec![], |b, ctx, _, (_, payload)| {
                     if let Some(payload) = payload {
                         b.discard_canonical(ctx, payload, area, offset + payload.offset)?;
                     }

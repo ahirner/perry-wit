@@ -12,9 +12,12 @@ use regex_automata::{
     util::{look::Look, primitives::StateID, start},
 };
 
-pub(super) fn compile(literal: &perry_mir::RegexLiteral) -> Result<Vec<u8>> {
-    let parsed = literal.parsed()?;
-    let is_global = literal.global();
+pub(super) fn compile(
+    data: &mut crate::module::Data,
+    ctx: &pliron::context::Context,
+    literal: perry_mir::RegexLiteral,
+) -> Result<Vec<u8>> {
+    let parsed = literal.parsed(ctx)?;
     let group_count = table_len::<u16>(1 + parsed.captures.count as usize)?;
     let config = thompson::Config::new().nfa_size_limit(Some(1024 * 1024));
     let nfa = |config| {
@@ -23,35 +26,27 @@ pub(super) fn compile(literal: &perry_mir::RegexLiteral) -> Result<Vec<u8>> {
             .build_from_hir(&parsed.hir)
             .map_err(|err| perry_mir::RegexLiteral::build_error(&err))
     };
-    let tables = dense::Config::new()
-        .minimize(true)
-        .dfa_size_limit(Some(4 * 1024 * 1024))
-        .determinize_size_limit(Some(8 * 1024 * 1024));
     let mut bytes = vec![0; PROGRAM_HEADER];
     bytes[GROUP_COUNT..GROUP_COUNT + 2].copy_from_slice(&group_count.to_le_bytes());
     let forward = nfa(config.clone())?;
-    let reverse = nfa(config
-        .reverse(true)
-        .which_captures(thompson::WhichCaptures::None))?;
-    for (automaton, anchored, start_kind, match_kind) in [
-        (
-            &forward,
-            Anchored::No,
-            StartKind::Unanchored,
-            MatchKind::LeftmostFirst,
-        ),
-        (&reverse, Anchored::Yes, StartKind::Anchored, MatchKind::All),
-    ] {
-        if anchored == Anchored::Yes {
-            let offset = table_len::<u32>(bytes.len())? | if is_global { GLOBAL } else { 0 };
-            bytes[REVERSE_OFFSET..REVERSE_OFFSET + 4].copy_from_slice(&offset.to_le_bytes());
-        }
-        let dfa = dense::Builder::new()
-            .configure(tables.clone().start_kind(start_kind).match_kind(match_kind))
-            .build_from_nfa(automaton)
-            .map_err(|err| perry_mir::RegexLiteral::build_error(&err))?;
-        write_dfa(&mut bytes, &dfa, anchored)?;
-    }
+    write_dfa(data, &mut bytes, &forward, Anchored::No)?;
+    let props = parsed.hir.properties();
+    let reverse = if let Some(width) = props
+        .minimum_len()
+        .filter(|w| Some(*w) == props.maximum_len())
+        .and_then(|w| i32::try_from(w).ok())
+    {
+        !width
+    } else {
+        let offset = table_len::<i32>(bytes.len())?;
+        let reverse = nfa(config
+            .reverse(true)
+            .which_captures(thompson::WhichCaptures::None))?;
+        write_dfa(data, &mut bytes, &reverse, Anchored::Yes)?;
+        offset
+    };
+    bytes[REVERSE_OFFSET..REVERSE_OFFSET + 4].copy_from_slice(&reverse.to_le_bytes());
+    bytes[GLOBAL] = u8::from(literal.global(ctx));
     if group_count > 1 {
         let offset = table_len::<u32>(bytes.len())?;
         bytes[CAPTURE_PROGRAM..CAPTURE_PROGRAM + 4].copy_from_slice(&offset.to_le_bytes());
@@ -75,7 +70,27 @@ pub(super) fn compile(literal: &perry_mir::RegexLiteral) -> Result<Vec<u8>> {
 }
 
 /// Append rows in discovery order. Transitions are 16-bit byte offsets from the first row.
-fn write_dfa(bytes: &mut Vec<u8>, dfa: &dense::DFA<Vec<u32>>, anchored: Anchored) -> Result<()> {
+fn write_dfa(
+    data: &mut crate::module::Data,
+    bytes: &mut Vec<u8>,
+    nfa: &thompson::NFA,
+    anchored: Anchored,
+) -> Result<()> {
+    let (start, kind) = if anchored == Anchored::Yes {
+        (StartKind::Anchored, MatchKind::All)
+    } else {
+        (StartKind::Unanchored, MatchKind::LeftmostFirst)
+    };
+    let config = dense::Config::new()
+        .minimize(true)
+        .dfa_size_limit(Some(4 * 1024 * 1024))
+        .determinize_size_limit(Some(8 * 1024 * 1024))
+        .start_kind(start)
+        .match_kind(kind);
+    let dfa = dense::Builder::new()
+        .configure(config)
+        .build_from_nfa(nfa)
+        .map_err(|err| perry_mir::RegexLiteral::build_error(&err))?;
     let classes = dfa.byte_classes();
     let end_column = table_len::<u16>(classes.alphabet_len() * 2)?;
     bytes.extend(end_column.to_le_bytes());
@@ -105,7 +120,8 @@ fn write_dfa(bytes: &mut Vec<u8>, dfa: &dense::DFA<Vec<u32>>, anchored: Anchored
             })?;
         bytes.extend(offset(&mut states, start)?.to_le_bytes());
     }
-    bytes.extend((0..=u8::MAX).map(|byte| classes.get(byte)));
+    let alphabet = data.constant(1, (0..=u8::MAX).map(|byte| classes.get(byte)).collect());
+    bytes.extend(alphabet.to_le_bytes());
     let mut index = 0;
     while let Some(&state) = states.get_index(index) {
         index += 1;

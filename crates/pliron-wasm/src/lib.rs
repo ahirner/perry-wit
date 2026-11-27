@@ -19,6 +19,7 @@ pub mod emit;
 pub mod ops;
 pub mod reducible;
 mod types;
+pub use types::zero_constant;
 
 #[cfg(test)]
 mod tests;

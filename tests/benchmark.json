@@ -24,10 +24,10 @@
   },
   {
     "workload": "io (64 KiB)",
-    "bytes": 47282,
-    "core_bytes": 40753,
-    "defined_functions": 122,
-    "helper_functions": 111,
+    "bytes": 47567,
+    "core_bytes": 41038,
+    "defined_functions": 124,
+    "helper_functions": 113,
     "optimization": {
       "cleanup_rounds": 2,
       "constraint_visits": 13,
@@ -40,15 +40,15 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 2131,
-    "invocation_fuel": 647882,
-    "warm_fuel": 629226,
+    "invocation_fuel": 647953,
+    "warm_fuel": 629224,
     "initial_memory": 65536,
     "memory": 327680
   },
   {
     "workload": "incoming-stream (4 MiB)",
-    "bytes": 39142,
-    "core_bytes": 37295,
+    "bytes": 39135,
+    "core_bytes": 37288,
     "defined_functions": 122,
     "helper_functions": 111,
     "optimization": {
@@ -70,8 +70,8 @@
   },
   {
     "workload": "bounded-http-exact (4 MiB)",
-    "bytes": 66247,
-    "core_bytes": 59889,
+    "bytes": 66240,
+    "core_bytes": 59882,
     "defined_functions": 144,
     "helper_functions": 136,
     "optimization": {
@@ -86,15 +86,15 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5659,
-    "invocation_fuel": 13648623,
-    "warm_fuel": 13617542,
+    "invocation_fuel": 13648624,
+    "warm_fuel": 13617543,
     "initial_memory": 65536,
     "memory": 4325376
   },
   {
     "workload": "bounded-http-overflow",
-    "bytes": 66247,
-    "core_bytes": 59889,
+    "bytes": 66240,
+    "core_bytes": 59882,
     "defined_functions": 144,
     "helper_functions": 136,
     "optimization": {
@@ -109,15 +109,15 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5659,
-    "invocation_fuel": 13637690,
-    "warm_fuel": 13606965,
+    "invocation_fuel": 13637691,
+    "warm_fuel": 13606966,
     "initial_memory": 65536,
     "memory": 4325376
   },
   {
     "workload": "unbounded-http-bytes (4 MiB)",
-    "bytes": 64994,
-    "core_bytes": 57912,
+    "bytes": 64987,
+    "core_bytes": 57905,
     "defined_functions": 152,
     "helper_functions": 141,
     "optimization": {
@@ -132,8 +132,8 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 5629,
-    "invocation_fuel": 15999795,
-    "warm_fuel": 11447584,
+    "invocation_fuel": 15999801,
+    "warm_fuel": 11447588,
     "initial_memory": 65536,
     "memory": 8519680
   },
@@ -209,8 +209,8 @@
   },
   {
     "workload": "push records, then sum (n = 10⁶)",
-    "bytes": 18192,
-    "core_bytes": 18192,
+    "bytes": 18232,
+    "core_bytes": 18232,
     "defined_functions": 51,
     "helper_functions": 49,
     "optimization": {
@@ -225,7 +225,7 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 433,
-    "invocation_fuel": 719942117,
+    "invocation_fuel": 719942387,
     "initial_memory": 65536,
     "memory": 49479680,
     "counters": [
@@ -244,8 +244,8 @@
   },
   {
     "workload": "push numbers, then sum (n = 10⁶)",
-    "bytes": 18026,
-    "core_bytes": 18026,
+    "bytes": 18066,
+    "core_bytes": 18066,
     "defined_functions": 50,
     "helper_functions": 48,
     "optimization": {
@@ -260,7 +260,7 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 433,
-    "invocation_fuel": 128489454,
+    "invocation_fuel": 128489702,
     "initial_memory": 65536,
     "memory": 15990784,
     "counters": [
@@ -702,10 +702,10 @@
   },
   {
     "workload": "1,024 adjacent global regex matches",
-    "bytes": 16294,
-    "core_bytes": 16203,
-    "defined_functions": 52,
-    "helper_functions": 49,
+    "bytes": 16685,
+    "core_bytes": 16593,
+    "defined_functions": 57,
+    "helper_functions": 54,
     "optimization": {
       "cleanup_rounds": 3,
       "constraint_visits": 193,
@@ -717,8 +717,8 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 2510,
-    "invocation_fuel": 1005144,
+    "initialization_fuel": 2210,
+    "invocation_fuel": 417327,
     "initial_memory": 65536,
     "memory": 65536
   },

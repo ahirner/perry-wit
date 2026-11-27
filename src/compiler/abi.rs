@@ -1,5 +1,5 @@
 //! Canonical wasm32 layouts at the WIT binding boundary.
-use perry_codegen::boundary::{AbiKind, AbiType, Flat};
+use perry_codegen::boundary::{AbiKind, AbiType, SumLayout};
 use perry_contract::{
     names::canonical_type,
     types::{Contract, project},
@@ -23,18 +23,18 @@ impl<'r> Layouts<'r> {
             .map_err(|e| Diagnostic::internal(e.to_string()))?;
         Ok(Self { resolve, sizes })
     }
-    fn layout(&self, ty: Type, kind: AbiKind) -> AbiType {
+    fn layout(&self, ty: Type, kind: AbiKind, offset: u32) -> AbiType {
         let mut space = [WasmType::I32; Resolve::MAX_FLAT_PARAMS];
         let mut slots = FlatTypes::new(&mut space);
         let flat = self
             .resolve
             .push_flat(&ty, &mut slots)
-            .then(|| slots.to_vec().into_iter().map(Flat::from).collect());
+            .then(|| slots.to_vec().into_boxed_slice());
         AbiType {
             kind,
             flat,
             size: self.sizes.size(&ty).size_wasm32() as u32,
-            offset: 0,
+            offset,
         }
     }
 
@@ -46,12 +46,13 @@ impl<'r> Layouts<'r> {
             .collect()
     }
 
-    fn payload_offset<'a>(
+    fn payloads<'a>(
         &self,
         tag: Int,
-        types: impl IntoIterator<Item = Option<&'a Type>>,
-    ) -> u32 {
-        self.sizes.payload_offset(tag, types).size_wasm32() as u32
+        cases: impl IntoIterator<Item = Option<&'a Type>>,
+    ) -> impl Fn(Option<Type>) -> Result<Option<AbiType>> + '_ {
+        let offset = self.sizes.payload_offset(tag, cases).size_wasm32() as u32;
+        move |ty| ty.map(|ty| self.value_at(ty, offset)).transpose()
     }
 
     pub(super) fn signature(&self, function: &Function, imported: bool) -> WasmSignature {
@@ -81,12 +82,11 @@ impl<'r> Layouts<'r> {
     }
 
     fn value_at(&self, mut ty: Type, offset: u32) -> Result<AbiType> {
-        let payload = |ty: Option<Type>, at| ty.map(|t| self.value_at(t, at)).transpose();
         let kind = match project(self.resolve, ty, |ty| *ty) {
             Contract::Alias(inner) => return self.value_at(inner, offset),
-            Contract::Scalar(Type::Char) => return Err(unsupported("char")),
-            Contract::Scalar(Type::ErrorContext) => return Err(unsupported("error-context")),
-            Contract::Scalar(Type::String) => AbiKind::String,
+            Contract::Char => return Err(unsupported("char")),
+            Contract::ErrorContext => return Err(unsupported("error-context")),
+            Contract::String => AbiKind::String,
             Contract::Scalar(scalar) => AbiKind::Scalar(scalar),
             Contract::Resource { id, owned } => {
                 ty = Type::U32;
@@ -113,34 +113,34 @@ impl<'r> Layouts<'r> {
                 )
             }
             Contract::Option(item) => {
-                let at = self.payload_offset(Int::U8, [Some(&item)]);
-                AbiKind::Option(Box::new(self.value_at(item, at)?))
+                let offset = self
+                    .sizes
+                    .payload_offset(Int::U8, [Some(&item)])
+                    .size_wasm32() as u32;
+                AbiKind::Sum(SumLayout::Option(Box::new(self.value_at(item, offset)?)))
             }
             Contract::Result { ok, err } => {
-                let at = self.payload_offset(Int::U8, [ok.as_ref(), err.as_ref()]);
-                AbiKind::Result {
-                    ok: payload(ok, at)?.map(Box::new),
-                    err: payload(err, at)?.map(Box::new),
-                }
+                let payload = self.payloads(Int::U8, [ok.as_ref(), err.as_ref()]);
+                AbiKind::Sum(SumLayout::Result([
+                    payload(ok)?.map(Box::new),
+                    payload(err)?.map(Box::new),
+                ]))
             }
-            Contract::Enum(e) => {
-                AbiKind::Enum(e.tag(), e.cases.iter().map(|c| c.name.clone()).collect())
-            }
+            Contract::Enum(e) => AbiKind::Sum(SumLayout::Enum(
+                e.tag(),
+                e.cases.iter().map(|c| c.name.clone()).collect(),
+            )),
             Contract::Variant(tag, cases) => {
-                let at = self.payload_offset(tag, cases.iter().map(|(_, ty)| ty.as_ref()));
-                AbiKind::Variant(
-                    tag,
-                    cases
-                        .into_iter()
-                        .map(|(name, ty)| Ok((name.to_owned(), payload(ty, at)?)))
-                        .collect::<Result<_>>()?,
-                )
+                let payload = self.payloads(tag, cases.iter().map(|(_, ty)| ty.as_ref()));
+                let cases = cases
+                    .into_iter()
+                    .map(|(name, ty)| Ok((name.to_owned(), payload(ty)?)))
+                    .collect::<Result<_>>()?;
+                AbiKind::Sum(SumLayout::Variant(tag, cases))
             }
             Contract::Unsupported(name) => return Err(unsupported(name)),
         };
-        let mut abi = self.layout(ty, kind);
-        abi.offset = offset;
-        Ok(abi)
+        Ok(self.layout(ty, kind, offset))
     }
 }
 

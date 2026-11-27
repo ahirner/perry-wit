@@ -56,8 +56,7 @@ fn property_list(value: *mut u8) -> *mut u8 {
     let Some(length) = view::array_length(value) else {
         return core::ptr::null_mut();
     };
-    let (keys, slots) = crate::runtime::array_storage(length as usize);
-    let mut count = 0;
+    let mut keys = crate::runtime::ReferenceArray::with_capacity(length as usize);
     unsafe {
         let mut member = if word(value, 0) == ARRAY {
             node(word(value, 16))
@@ -65,24 +64,19 @@ fn property_list(value: *mut u8) -> *mut u8 {
             core::ptr::null_mut()
         };
         for index in 0..length {
-            let item = next_member(value, &mut member, string_bytes(index_key(index)));
+            let item = next_member(value, &mut member, index_digits(index, &mut [0; 66]));
             if item.is_null() || !matches!(word(item, 0), STRING | NUMBER | INT64 | UINT64) {
                 continue;
             }
             let text = reflection::std_json_display(item);
             let bytes = crate::runtime::bytes(text);
-            if slots[..count]
-                .iter()
-                .any(|&key| crate::runtime::bytes(node(key as u32)) == bytes)
-            {
+            if keys.values().any(|key| crate::runtime::bytes(key) == bytes) {
                 continue;
             }
-            slots[count] = text as u64;
-            count += 1;
+            keys.push(text);
         }
-        set_word(keys, array::LEN as usize, count as u32);
     }
-    keys
+    keys.finish()
 }
 
 #[unsafe(no_mangle)]
@@ -205,7 +199,7 @@ pub(crate) extern "C" fn std_json_replacer_next(state: *mut u8, value: *mut u8) 
             let frame = &mut *state.frame;
             if frame.index < frame.length {
                 state.key = if frame.array {
-                    std_json_to_string(index_key(frame.index))
+                    index_text(frame.index)
                 } else {
                     key_at(frame.keys, frame.index)
                 };

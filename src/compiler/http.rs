@@ -9,7 +9,7 @@
 //! export runs until the host has read it.
 use super::{Compiled, emit_component, lower};
 use crate::component;
-use perry_codegen::boundary::{AbiKind, AsyncCompletion, Export, ExportKind};
+use perry_codegen::boundary::{AbiKind, AsyncCompletion, Export, ExportKind, SumLayout};
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal};
 use pliron::context::Context;
 use wit_parser::{Resolve, Type, WorldId};
@@ -128,14 +128,16 @@ pub(crate) fn compile(
         .ok_or_else(|| Diagnostic::internal("handle returns a result"))?;
     let layouts = super::abi::Layouts::new(&resolve)?;
     let mut result = layouts.value(result)?;
-    let AbiKind::Result { ok: Some(ok), .. } = &mut result.kind else {
+    let AbiKind::Sum(SumLayout::Result([Some(ok), _])) = &mut result.kind else {
         bail_internal!("HTTP handler must return a result with a response");
     };
     // The HTTP runtime has already transferred the response and returns its canonical handle.
     if !matches!(ok.kind, AbiKind::Resource { owned: true, .. }) {
         bail_internal!("HTTP handler must return an owned response");
     }
-    ok.kind = AbiKind::Scalar(Type::U32);
+    ok.kind = AbiKind::Scalar(perry_contract::types::Scalar::Integer(
+        perry_contract::types::Integer::U32,
+    ));
     let exports = vec![Export {
         source_name: None,
         annotations: Vec::new(),

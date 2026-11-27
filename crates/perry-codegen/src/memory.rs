@@ -1,11 +1,10 @@
 //! Precise compiled roots and closed-aggregate pointer maps.
 use crate::{
-    analysis::{ModuleAnalyses, module_analyses},
     function::FunctionLowering,
     repr::{Repr, i32_type, repr},
     runtime::Runtime,
 };
-use perry_abi::layout::{array, record, roots as root_stack};
+use perry_abi::layout::{array, roots as root_stack};
 use perry_mir::{AsyncCallOp, CallOp, PlironResultExt as _, RecordType};
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::bail_internal;
@@ -13,12 +12,10 @@ use pliron::{
     context::{Context, Ptr},
     op::Op,
     operation::Operation,
-    pass::AnalysisManager,
     r#type::{TypeHandle, Typed, TypedHandle},
     value::Value,
 };
 use pliron_wasm::attrs::MemKind;
-use std::collections::HashMap;
 
 pub(super) fn export_checks(ctx: &mut Context, state: &mut crate::module::ModuleState) {
     use pliron::{
@@ -90,28 +87,21 @@ pub(crate) fn needs_collector(
 }
 
 /// Explain the conservative allocation decisions for the optimized MIR actually emitted.
-pub fn explain_tiers(
+pub(super) fn explain_tiers(
     ctx: &Context,
     module: &pliron::builtin::ops::ModuleOp,
-    exports: &crate::Exports,
-    analyses: &mut AnalysisManager,
-) -> Result<String> {
+    functions: &[pliron::builtin::ops::FuncOp],
+    state: &crate::module::ModuleState,
+    report: &mut String,
+) -> Result<()> {
     use pliron::builtin::op_interfaces::SymbolOpInterface;
     use std::fmt::Write;
-    let functions = crate::analysis::reachable_functions(ctx, module, exports);
-    let ModuleAnalyses {
-        facts: effects,
-        live,
-    } = module_analyses(ctx, module, analyses)?;
-    let summaries = &*effects;
-    let collectible = !crate::boundary::used_keys(ctx, &functions).is_empty()
-        || needs_collector(ctx, &functions, summaries)?;
-    let tier = if collectible {
+    let tier = if state.collectible {
         "instance (precise collection)"
     } else {
         "task (bounded calls)"
     };
-    let mut report = format!("Allocation tiers after MIR optimization: {tier}\n");
+    let _ = writeln!(report, "Allocation tiers after MIR optimization: {tier}");
     let stats = perry_mir::optimization_statistics(module.get_operation(), ctx);
     let _ = writeln!(
         report,
@@ -126,19 +116,23 @@ pub fn explain_tiers(
         stats.parse_stringify_rewrites,
         stats.parse_stringify_missed
     );
-    for function in &functions {
+    for function in functions {
         let name = function.get_symbol_name(ctx);
-        let summary = summaries.function_summary(ctx, function).to_diag(ctx)?;
+        let summary = state
+            .program_facts
+            .function_summary(ctx, function)
+            .to_diag(ctx)?;
         let mut sites = 0;
         let mut frames = 0;
-        for op in crate::analysis::function_ops(ctx, function) {
+        let mut leases = 0;
+        for op in perry_mir::operations(ctx, function) {
+            leases += usize::from(state.leased.contains(&op));
             sites += usize::from(perry_mir::allocates(ctx, op));
             frames += usize::from(
                 Operation::get_op::<perry_mir::AllocOp>(op, ctx)
                     .is_some_and(|allocation| allocation.tier(ctx) == perry_mir::Tier::Frame),
             );
         }
-        let leases = crate::lease::leased(ctx, function, &live).len();
         let _ = writeln!(
             report,
             "  {name}: {sites} allocation sites; {frames} frame sites; repeated allocations={}; unknown builtin bound={}; escaping parameters={:?}; {leases} reusable stream operations",
@@ -148,7 +142,7 @@ pub fn explain_tiers(
         );
     }
     report.push_str("  scalar: eliminated closed aggregates have no allocation site\n  frame: proven nonescaping scalar records reuse bounded activation storage; other aggregates use the selected task or instance storage\n  buffer: host operations pin owners until acknowledgement\n");
-    Ok(report)
+    Ok(())
 }
 
 impl FunctionLowering<'_, '_> {
@@ -411,8 +405,6 @@ impl FunctionLowering<'_, '_> {
         &mut self,
         ctx: &mut Context,
         op: Ptr<Operation>,
-        after: perry_mir::LiveAfter<'_>,
-        order: &HashMap<Value, usize>,
     ) -> Result<Option<Value>> {
         if self.atomic_construction {
             return Ok(None);
@@ -430,22 +422,14 @@ impl FunctionLowering<'_, '_> {
         {
             return Ok(None);
         }
-        self.clear_dead_frame_slots(ctx, op, after);
-        let mut live: Vec<Value> = {
-            let operation = op.deref(ctx);
-            after
-                .values()
-                .filter(|value| !operation.results().any(|result| result == *value))
-                .chain(operation.operands())
-                .filter(|value| repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
-                .collect()
-        };
-        live.sort_unstable_by_key(|value| order[value]);
-        live.dedup();
-        let values = live
-            .into_iter()
-            .map(|value| self.mapped(ctx, value))
-            .collect::<Result<Vec<_>>>()?;
+        let live = self.state.live.before(op);
+        self.clear_dead_frame_slots(ctx, live);
+        let mut values = Vec::new();
+        for value in live.values() {
+            if repr(ctx, value.get_type(ctx))? == Repr::Ref {
+                values.push(self.mapped(ctx, value)?);
+            }
+        }
         let atomic = self.state.resources.is_empty()
             && (perry_mir::allocation(ctx, op) == perry_mir::Allocation::Atomic || atomic_call);
         let resume = atomic.then(|| {
@@ -473,8 +457,7 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn clear_dead_frame_slots(
         &mut self,
         ctx: &mut Context,
-        op: Ptr<Operation>,
-        after: perry_mir::LiveAfter<'_>,
+        live: perry_mir::LiveSet<'_>,
     ) {
         if !self.state.collectible {
             return;
@@ -482,19 +465,15 @@ impl FunctionLowering<'_, '_> {
         let Some(frame) = &self.frame else {
             return;
         };
-        let live = |value: &Value| {
-            op.deref(ctx).operands().any(|operand| operand == *value)
-                || (after.contains(value)
-                    && !op.deref(ctx).results().any(|result| result == *value))
-        };
         let pointer = frame.frame;
         let mut dead: Vec<_> = frame
             .slots
             .iter()
             .filter_map(|(value, slot)| {
-                (!live(value) && repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
-                    .then(|| slot.scalar().ok().map(|(offset, _)| offset))
-                    .flatten()
+                (!live.contains(value)
+                    && repr(ctx, value.get_type(ctx)).is_ok_and(|kind| kind == Repr::Ref))
+                .then(|| slot.scalar().ok().map(|(offset, _)| offset))
+                .flatten()
             })
             .collect();
         dead.sort_unstable();
@@ -504,20 +483,6 @@ impl FunctionLowering<'_, '_> {
                 self.store(ctx, MemKind::I32, pointer, offset, zero);
             }
         }
-    }
-
-    pub(super) fn pointer_shape(&mut self, offsets: &[u32]) -> u32 {
-        if offsets.is_empty() {
-            return 0;
-        }
-        let address = self.state.data.align(4);
-        for word in [0, offsets.len() as u32]
-            .into_iter()
-            .chain(offsets.iter().copied())
-        {
-            self.state.data.bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        address
     }
 
     pub(super) fn new_promise(&mut self, ctx: &mut Context, payload: TypeHandle) -> Result<Value> {
@@ -534,36 +499,15 @@ impl FunctionLowering<'_, '_> {
     pub(super) fn record_storage(
         &mut self,
         ctx: &mut Context,
-        ty: TypeHandle,
-        size: Value,
-    ) -> Result<Value> {
+        layout: &crate::aggregates::RecordLayout,
+    ) -> Value {
+        let size = self.i32_const(ctx, layout.size as i32);
         if !self.state.collectible {
-            return Ok(self.alloc(ctx, size));
+            return self.alloc(ctx, size);
         }
-        let shape = if let Some(&shape) = self.state.pointer_maps.get(&ty) {
-            shape
-        } else {
-            let record = TypedHandle::<RecordType>::from_handle(ty, ctx).to_diag(ctx)?;
-            let layout = self.state.record_layouts.get(ctx, record)?;
-            let mut offsets: Vec<_> = layout
-                .fields
-                .values()
-                .filter(|field| repr(ctx, field.ty).is_ok_and(|kind| kind == Repr::Ref))
-                .map(|field| field.offset)
-                .collect();
-            if self.state.retains_json {
-                offsets.push(record::JSON);
-            }
-            let shape = if offsets.is_empty() {
-                0
-            } else {
-                self.pointer_shape(&offsets)
-            };
-            self.state.pointer_maps.insert(ty, shape);
-            shape
-        };
+        let shape = layout.pointer_shape(ctx, &mut self.state.data, self.state.retains_json);
         let shape = self.i32_const(ctx, shape as i32);
-        Ok(self.runtime(ctx, Runtime::GcAlloc, vec![size, shape]))
+        self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
     }
 
     pub(super) fn new_array(

@@ -198,16 +198,11 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
                 let origin = node(word(value, 8));
                 let schema = node(word(value, 12));
                 if word(schema, 0) == d::ARRAY && word(origin, array::HOLES as usize) != 0 {
-                    let (result, slots) = crate::runtime::array_storage(length as usize);
-                    let mut count = 0;
-                    for index in 0..length {
-                        if array_present(origin, index) {
-                            slots[count] = std_json_to_string(index_key(index)) as u64;
-                            count += 1;
-                        }
-                    }
-                    set_word(result, array::LEN as usize, count as u32);
-                    return result;
+                    return crate::runtime::array(
+                        (0..length)
+                            .filter(|&index| array_present(origin, index))
+                            .map(index_text),
+                    );
                 }
             }
         }
@@ -236,55 +231,44 @@ pub(super) fn keys(value: *mut u8) -> *mut u8 {
             }
             d::JSON_VARIANT => {
                 let Some(case) = variant_case(origin, schema) else {
-                    return crate::runtime::array(&[]);
+                    return crate::runtime::array([]);
                 };
                 let payload = word(case, 4) != 0;
-                let graph = variant_graph(origin, schema);
-                let graph = if graph.is_null() {
-                    graph
-                } else {
-                    canonical(graph)
-                };
-                let retained = if graph.is_null() {
+                let graph = canonical(variant_graph(origin, schema));
+                let mut members = children(graph).peekable();
+                let key = |member| node(word(node(member), 24));
+                let capacity = if graph.is_null() {
                     0
                 } else {
                     word(graph, MEMBER_COUNT) as usize
                 };
-                let (keys, slots) =
-                    crate::runtime::array_storage(retained + 1 + usize::from(payload));
-                let mut member = if graph.is_null() { 0 } else { word(graph, 16) };
-                let mut length = 0;
-                while member != 0 && array_index(key_bytes(member)).is_some() {
-                    slots[length] = std_json_to_string(node(word(node(member), 24))) as u64;
-                    length += 1;
-                    member = word(node(member), 4);
+                let mut keys = crate::runtime::ReferenceArray::with_capacity(
+                    capacity + 1 + usize::from(payload),
+                );
+                while let Some(member) =
+                    members.next_if(|&member| array_index(key_bytes(member)).is_some())
+                {
+                    keys.push(std_json_to_string(key(member)));
                 }
-                slots[length] = from_static(perry_rt_sys::static_text!("tag")) as u64;
-                length += 1;
+                keys.push(from_static(perry_rt_sys::static_text!("tag")));
                 if payload {
-                    slots[length] = from_static(perry_rt_sys::static_text!("val")) as u64;
-                    length += 1;
+                    keys.push(from_static(perry_rt_sys::static_text!("val")));
                 }
-                while member != 0 {
-                    let key = node(word(node(member), 24));
+                for member in members {
+                    let key = key(member);
                     let name = string_bytes(key);
                     if name != b"tag" && !(payload && name == b"val") {
-                        slots[length] = std_json_to_string(key) as u64;
-                        length += 1;
+                        keys.push(std_json_to_string(key));
                     }
-                    member = word(node(member), 4);
                 }
-                set_word(keys, array::LEN as usize, length as u32);
-                return keys;
+                return keys.finish();
             }
-            _ => return crate::runtime::array(&[]),
+            _ => return crate::runtime::array([]),
         };
         let graph = canonical(graph);
-        let (keys, slots) = crate::runtime::array_storage(word(graph, MEMBER_COUNT) as usize);
-        for (slot, member) in slots.iter_mut().zip(children(graph)) {
-            *slot = std_json_to_string(node(word(node(member), 24))) as u64;
-        }
-        keys
+        crate::runtime::array(
+            children(graph).map(|member| std_json_to_string(node(word(node(member), 24)))),
+        )
     }
 }
 

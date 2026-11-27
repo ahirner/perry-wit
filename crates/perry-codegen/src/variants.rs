@@ -85,7 +85,10 @@ impl FunctionLowering<'_, '_> {
         );
         let object = if self.state.collectible {
             let pointers = [variant::OWNER, variant::JSON];
-            let shape = self.pointer_shape(&pointers[..1 + usize::from(self.state.retains_json)]);
+            let shape = self
+                .state
+                .data
+                .pointer_shape(&pointers[..1 + usize::from(self.state.retains_json)]);
             let shape = self.i32_const(ctx, shape as i32);
             self.runtime(ctx, Runtime::GcAlloc, vec![size, shape])
         } else {

@@ -23,6 +23,7 @@ use std::collections::HashMap;
 
 /// `smaller < larger` (`strict`) or `smaller <= larger` in `target`, a branch successor
 /// without other predecessors. False edges hold only for operands that are not NaN.
+#[derive(Clone, Copy)]
 pub(crate) struct Order {
     pub(crate) target: Ptr<BasicBlock>,
     pub(crate) smaller: Value,
@@ -50,13 +51,12 @@ impl Order {
     }
 }
 
-/// The orders both successors of a branch on `block`'s `<`, `<=`, `>` or `>=` comparison establish.
-pub(crate) fn orders(ctx: &Context, block: Ptr<BasicBlock>) -> [Option<Order>; 2] {
-    let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
-        return [None, None];
-    };
-    let Some(compare) = Operation::get_op::<CondBrOp>(terminator, ctx)
-        .and_then(|branch| branch.get_operand_condition(ctx).defining_op())
+/// The comparisons established by the two arms of a conditional branch.
+pub(super) fn orders(ctx: &Context, branch: &CondBrOp) -> [Option<Order>; 2] {
+    let terminator = branch.get_operation();
+    let Some(compare) = branch
+        .get_operand_condition(ctx)
+        .defining_op()
         .and_then(|op| Operation::get_op::<CompareOp>(op, ctx))
     else {
         return [None, None];
@@ -71,9 +71,6 @@ pub(crate) fn orders(ctx: &Context, block: Ptr<BasicBlock>) -> [Option<Order>; 2
         CompareKind::Eq | CompareKind::Ne => return [None, None],
     };
     let [taken, fallthrough] = [0, 1].map(|edge| terminator.deref(ctx).get_successor(edge));
-    if taken == fallthrough {
-        return [None, None];
-    }
     [
         (taken, smaller, larger, strict),
         (fallthrough, larger, smaller, !strict),
@@ -97,7 +94,7 @@ pub(crate) struct GuardedFacts<'a> {
     ctx: &'a Context,
     facts: &'a ProgramFacts,
     cache: HashMap<(Ptr<BasicBlock>, Value), Range>,
-    guards: HashMap<Value, Vec<(Ptr<BasicBlock>, Range)>>,
+    orders: HashMap<Value, Vec<Order>>,
     /// Branch successors with a single predecessor, and the condition truth holding there.
     branches: Vec<(Ptr<BasicBlock>, Value, bool)>,
     states: HashMap<(Ptr<BasicBlock>, Value, u8), Presence>,
@@ -106,54 +103,52 @@ pub(crate) struct GuardedFacts<'a> {
 
 impl<'a> GuardedFacts<'a> {
     pub(crate) fn new(ctx: &'a Context, facts: &'a ProgramFacts, function: &FuncOp) -> Self {
-        let mut guards: HashMap<_, Vec<_>> = HashMap::new();
+        let mut by_operand: HashMap<_, Vec<_>> = HashMap::new();
         let mut branches = Vec::new();
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
-            if let Some(branch) = block
+            let Some(branch) = block
                 .deref(ctx)
                 .get_terminator(ctx)
                 .and_then(|op| Operation::get_op::<CondBrOp>(op, ctx))
-            {
-                let operation = branch.get_operation().deref(ctx);
-                if operation.get_successor(0) != operation.get_successor(1) {
-                    for (index, target) in operation.successors().enumerate() {
-                        if target.num_preds(ctx) == 1 {
-                            let (condition, truth) = predicate(
-                                ctx,
-                                facts,
-                                branch.get_operand_condition(ctx),
-                                index == 0,
-                            );
-                            branches.push((target, condition, truth));
-                        }
-                    }
+            else {
+                continue;
+            };
+            for (index, target) in branch.get_operation().deref(ctx).successors().enumerate() {
+                if target.num_preds(ctx) == 1 {
+                    let (condition, truth) =
+                        predicate(ctx, facts, branch.get_operand_condition(ctx), index == 0);
+                    branches.push((target, condition, truth));
                 }
             }
-            for order in orders(ctx, block).into_iter().flatten() {
-                // Both operands must exclude NaN before the false edge can order them.
-                let (Range::Bounds(a), Range::Bounds(b)) = (
-                    facts.range(ctx, order.smaller),
-                    facts.range(ctx, order.larger),
-                ) else {
-                    continue;
-                };
-                for (value, interval, bound) in [(order.smaller, a, b), (order.larger, b, a)] {
-                    guards.entry(value).or_default().push((
-                        order.target,
-                        order.constrain(value, Range::Bounds(interval), bound),
-                    ));
+            for order in orders(ctx, &branch).into_iter().flatten() {
+                for value in [order.smaller, order.larger] {
+                    by_operand.entry(value).or_default().push(order);
                 }
             }
         }
         Self {
             ctx,
             facts,
-            guards,
+            orders: by_operand,
             cache: HashMap::new(),
             branches,
             states: HashMap::new(),
             restrictions: HashMap::new(),
         }
+    }
+
+    pub(crate) fn orders_at<'b>(
+        &'b self,
+        dominance: &'b mut DomInfo,
+        block: Ptr<BasicBlock>,
+        value: Value,
+    ) -> impl Iterator<Item = Order> + 'b {
+        self.orders
+            .get(&value)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |order| dominates(self.ctx, dominance, order.target, block))
     }
 
     /// Possible states of the operand at a particular use.
@@ -187,10 +182,7 @@ impl<'a> GuardedFacts<'a> {
         if let Some(source) = passed_through(ctx, value) {
             states = states.intersect(self.states(dominance, block, source, next));
         }
-        if let Some(definition) = value.defining_block()
-            && definition.num_preds(ctx) != 0
-            && let Some(edges) = incoming(ctx, definition, value.find_index(ctx))
-        {
+        if let Some(edges) = incoming(ctx, value) {
             let mut joined = Presence::default();
             for (predecessor, terminator, index, operand) in edges {
                 let incoming = self.states(dominance, predecessor, operand, next);
@@ -270,13 +262,7 @@ impl<'a> GuardedFacts<'a> {
         mut allowed: impl FnMut(&mut Self, &mut DomInfo, Value, Ptr<BasicBlock>, u8) -> Presence,
     ) -> Presence {
         let ctx = self.ctx;
-        let (Some(edges), Some(next)) = (
-            argument
-                .defining_block()
-                .filter(|b| b.num_preds(ctx) != 0)
-                .and_then(|block| incoming(ctx, block, argument.find_index(ctx))),
-            depth.checked_sub(1),
-        ) else {
+        let (Some(next), Some(edges)) = (depth.checked_sub(1), incoming(ctx, argument)) else {
             return Presence::ANY;
         };
         let mut joined = Presence::default();
@@ -395,9 +381,17 @@ impl<'a> GuardedFacts<'a> {
                 range = range.intersect(derived);
             }
         }
-        for &(target, interval) in self.guards.get(&value).into_iter().flatten() {
-            if target == block || dominance.block_strictly_dominates_block(ctx, target, block) {
-                range = range.intersect(interval);
+        // Bounds for both operands exclude NaN, including on a false edge.
+        if matches!(self.facts.range(ctx, value), Range::Bounds(_)) {
+            for order in self.orders_at(dominance, block, value) {
+                let other = if value == order.smaller {
+                    order.larger
+                } else {
+                    order.smaller
+                };
+                if let Range::Bounds(bound) = self.facts.range(ctx, other) {
+                    range = order.constrain(value, range, bound);
+                }
             }
         }
         self.cache.insert((block, value), range);
@@ -491,23 +485,29 @@ fn absence_test(ctx: &Context, condition: Value) -> Option<(Value, crate::Absenc
 /// An edge into a block: predecessor, its terminator, the successor index, and the operand.
 type Edge = (Ptr<BasicBlock>, Ptr<Operation>, usize, Value);
 
-/// The edges into `block` with the operand each passes to
-/// `argument`; `None` when a predecessor does not end in a branch whose operands can be read,
-/// so the caller proves nothing from the edges.
-fn incoming(ctx: &Context, block: Ptr<BasicBlock>, argument: usize) -> Option<Vec<Edge>> {
-    let mut incoming = Vec::new();
-    for predecessor in block.preds(ctx) {
-        let terminator = predecessor.deref(ctx).get_terminator(ctx)?;
-        let operation = Operation::get_op_dyn(terminator, ctx);
-        let branch = op_cast::<dyn BranchOpInterface>(&*operation)?;
-        for (index, successor) in terminator.deref(ctx).successors().enumerate() {
-            if successor == block {
-                let operand = *branch.successor_operands(ctx, index).get(argument)?;
-                incoming.push((predecessor, terminator, index, operand));
-            }
-        }
+/// Operands reaching a block argument. A function parameter or unknown branch supplies no proof.
+fn incoming(ctx: &Context, value: Value) -> Option<Vec<Edge>> {
+    let uses = value.defining_block()?.uses(ctx);
+    if uses.is_empty() {
+        return None;
     }
-    Some(incoming)
+    let argument = value.find_index(ctx);
+    uses.into_iter()
+        .map(|edge| {
+            let terminator = edge.user_op();
+            let operation = Operation::get_op_dyn(terminator, ctx);
+            let branch = op_cast::<dyn BranchOpInterface>(&*operation)?;
+            let index = edge.find_index(ctx);
+            let position = branch.successor_operand_range(ctx, index).nth(argument)?;
+            let op = terminator.deref(ctx);
+            Some((
+                op.get_parent_block()?,
+                terminator,
+                index,
+                op.get_operand(position),
+            ))
+        })
+        .collect()
 }
 
 /// Join properties of definitions reachable before slot promotion.
@@ -524,11 +524,8 @@ pub(crate) fn join_origins<T>(
         if !seen.insert(value) {
             continue;
         }
-        if let Some(block) = value.defining_block() {
-            let edges = incoming(ctx, block, value.find_index(ctx))?;
-            if edges.is_empty() {
-                return None;
-            }
+        if value.defining_block().is_some() {
+            let edges = incoming(ctx, value)?;
             pending.extend(edges.into_iter().map(|(_, _, _, operand)| operand));
             continue;
         }

@@ -6,25 +6,14 @@ use indexmap::IndexMap;
 pub(crate) struct MemberId(usize);
 pub(crate) use types::supported;
 
+use perry_contract::types::Integer;
 use perry_contract::{
     names::{canonical_type, to_camel_case},
     types::Input,
 };
 use perry_hir::ir::Expr;
-use pliron::builtin::types::Signedness;
 use std::collections::HashMap;
 use wit_parser::{FunctionKind, Handle, Resolve, Type, TypeDefKind, TypeId, WorldId};
-
-pub(crate) const INTEGERS: [(&str, Type, (u32, Signedness)); 8] = [
-    ("u8", Type::U8, (8, Signedness::Unsigned)),
-    ("s8", Type::S8, (8, Signedness::Signed)),
-    ("u16", Type::U16, (16, Signedness::Unsigned)),
-    ("s16", Type::S16, (16, Signedness::Signed)),
-    ("u32", Type::U32, (32, Signedness::Unsigned)),
-    ("s32", Type::S32, (32, Signedness::Signed)),
-    ("u64", Type::U64, (64, Signedness::Unsigned)),
-    ("s64", Type::S64, (64, Signedness::Signed)),
-];
 
 #[derive(Clone, Copy)]
 pub(crate) struct WitValue<'r> {
@@ -37,13 +26,13 @@ impl<'r> WitValue<'r> {
         perry_contract::result_type(self.resolve, self.ty)
     }
 
-    pub(crate) fn integer(self) -> Option<(u32, Signedness)> {
+    pub(crate) fn integer(self) -> Option<Integer> {
         let ty = match perry_contract::type_kind(self.resolve, self.ty) {
             Some(TypeDefKind::Type(ty)) => *ty,
             Some(_) => return None,
             None => self.ty,
         };
-        INTEGERS
+        perry_contract::types::INTEGERS
             .iter()
             .find(|(_, wit, _)| *wit == ty)
             .map(|&(_, _, domain)| domain)

@@ -8,14 +8,14 @@ use crate::{calls::AwaitOp, scalar::NumericCastOp, semantics::OperationKind, typ
 use pliron::{
     builtin::{
         attributes::{IdentifierAttr, TypeAttr},
-        op_interfaces::{BranchOpInterface, SymbolOpInterface},
+        op_interfaces::SymbolOpInterface,
         ops::FuncOp,
         type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
     context::{Context, Ptr},
     identifier::Identifier,
-    op::{Op, op_cast},
+    op::Op,
     operation::Operation,
     pass::{Analysis, AnalysisManager},
     result::Result,
@@ -235,21 +235,12 @@ impl Body {
             for value in op.deref(ctx).operands().chain(op.deref(ctx).results()) {
                 dependents.entry(value).or_default().push(index);
             }
-            let dynamic = Operation::get_op_dyn(op, ctx);
-            if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
-                for successor in 0..op.deref(ctx).get_num_successors() {
-                    let block = op.deref(ctx).get_successor(successor);
-                    for (to, from) in block
-                        .deref(ctx)
-                        .arguments()
-                        .zip(branch.successor_operands(ctx, successor))
-                    {
-                        let index = constraints.len();
-                        constraints.push(Constraint::Edge { from, to });
-                        dependents.entry(from).or_default().push(index);
-                        dependents.entry(to).or_default().push(index);
-                    }
-                }
+            for (position, to) in pliron_control::forwarded_arguments(ctx, op) {
+                let from = op.deref(ctx).get_operand(position);
+                let index = constraints.len();
+                constraints.push(Constraint::Edge { from, to });
+                dependents.entry(from).or_default().push(index);
+                dependents.entry(to).or_default().push(index);
             }
         }
         let (declared_args, declared_results) = match signature {

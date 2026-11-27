@@ -298,11 +298,7 @@ impl<'s> FunctionBuilder<'s, '_> {
     }
 
     pub(super) fn i32(&mut self, ctx: &mut Context, value: u64) -> Value {
-        let ty = IntegerType::get(ctx, 32, Signedness::Signless);
-        let attr = IntegerAttr::new(ty, APInt::from_u64(value, bw(32)));
-        let op = ConstantOp::new(ctx, Box::new(attr));
-        self.ins.append_op(ctx, &op);
-        op.get_result(ctx)
+        self.emit_value(perry_mir::integer_constant(ctx, 32, value), ctx)
     }
 
     /// A new block named `label` and a counter. Labels only make printed MIR readable, so the
@@ -548,17 +544,7 @@ impl FunctionBuilder<'_, '_> {
         self.emit(CondBrOp::new(ctx, condition, yes, vec![], no, vec![]), ctx);
     }
     pub(super) fn boolean(&mut self, ctx: &mut Context, value: bool) -> Value {
-        let ty = IntegerType::get(ctx, 1, Signedness::Signless);
-        self.emit_value(
-            ConstantOp::new(
-                ctx,
-                Box::new(IntegerAttr::new(
-                    ty,
-                    APInt::from_u64(u64::from(value), bw(1)),
-                )),
-            ),
-            ctx,
-        )
+        self.emit_value(perry_mir::integer_constant(ctx, 1, u64::from(value)), ctx)
     }
 
     pub(super) fn number(&mut self, ctx: &mut Context, value: f64) -> Value {

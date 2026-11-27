@@ -195,6 +195,14 @@ impl NumericConstant {
         })
     }
 
+    pub(crate) fn integer(self) -> Option<i128> {
+        match self {
+            Self::Signed(value) => Some(value.into()),
+            Self::Unsigned(value) => Some(value.into()),
+            Self::Float(_) => None,
+        }
+    }
+
     /// The value as the ABI's number.
     pub(crate) fn number(self) -> perry_abi::number::Number {
         match self {

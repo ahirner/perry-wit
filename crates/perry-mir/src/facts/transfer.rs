@@ -212,15 +212,13 @@ impl Solver {
             if block.num_preds(ctx) != 1 {
                 return ranges;
             }
-            let Some(predecessor) = block.preds(ctx).into_iter().next() else {
-                return ranges;
-            };
+            let predecessor = block.get_pred(ctx, 0);
             let Some(terminator) = predecessor.deref(ctx).get_terminator(ctx) else {
                 return ranges;
             };
             let operation = terminator.deref(ctx);
-            if Operation::get_op::<CondBrOp>(terminator, ctx).is_some() {
-                let Some(order) = orders(ctx, predecessor)
+            if let Some(branch) = Operation::get_op::<CondBrOp>(terminator, ctx) {
+                let Some(order) = orders(ctx, &branch)
                     .into_iter()
                     .flatten()
                     .find(|order| order.target == block)
@@ -391,25 +389,30 @@ impl Solver {
                 } else {
                     Fact::Original
                 };
-                let parsed = (intrinsic == Intrinsic::ParseInt)
-                    .then(|| super::domains::const_parsed_int(ctx, op));
-                match parsed {
-                    Some(Some(super::domains::ConstParsedInt::Integer {
-                        interval,
-                        needs_i64,
-                        ..
-                    })) => {
-                        let fact = if needs_i64 {
-                            numeric
-                        } else {
-                            Fact::Literal {
-                                negative: interval.lower < 0,
-                            }
-                        };
-                        (fact, Range::Bounds(interval))
+                if intrinsic != Intrinsic::ParseInt {
+                    (Fact::Original, Range::Unknown)
+                } else if let Some(parsed) = super::domains::const_parsed_int(ctx, op) {
+                    match parsed.integer() {
+                        Some(value) => {
+                            let fact = if value as f64 as i128 == value {
+                                Fact::Literal {
+                                    negative: value < 0,
+                                }
+                            } else {
+                                numeric
+                            };
+                            (
+                                fact,
+                                Range::Bounds(Interval {
+                                    lower: value,
+                                    upper: value,
+                                }),
+                            )
+                        }
+                        None => (Fact::Original, Range::Unknown),
                     }
-                    Some(None) => (numeric, Range::Unknown),
-                    _ => (Fact::Original, Range::Unknown),
+                } else {
+                    (numeric, Range::Unknown)
                 }
             }
         })
@@ -550,13 +553,9 @@ impl Solver {
             }
         }
         let heap_facts = self.heap_operation(ctx, id, index, op, kind)?;
-        if let Some(branch) = branch {
+        if branch.is_some() {
             for (position, input) in operation.operands().enumerate() {
-                if !(0..operation.get_num_successors()).any(|successor| {
-                    branch
-                        .successor_operand_range(ctx, successor)
-                        .contains(&position)
-                }) {
+                if pliron_control::forwarded_operand(ctx, op, position).is_none() {
                     self.require(id, input, Demand::Observed(None));
                 }
             }
@@ -700,7 +699,7 @@ impl Solver {
         for result in operation.results() {
             let mut facts = self.result_facts(ctx, id, op, result, (kind, heap_facts), arithmetic);
             facts.regex = if let Some(re) = dynamic.downcast_ref::<crate::RegexConstOp>() {
-                match re.literal(ctx).get(ctx).shape() {
+                match re.literal(ctx).shape(ctx) {
                     Ok(shape) => RegexOrigin::Pattern(shape),
                     Err(error) => return pliron::input_err_noloc!(error),
                 }

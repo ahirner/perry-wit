@@ -149,11 +149,16 @@ pub fn emit_module(ctx: &Context, module: &ModuleOp, options: &EmitOptions) -> E
         let symbol = import.get_symbol_name(ctx);
         let sig = signature(ctx, import.get_type(ctx), symbol.as_ref())?;
         let ty = intern(&sig);
-        import_section.import(
-            &import.module(ctx),
-            &import.name(ctx),
-            EntityType::Function(ty),
-        );
+        let (Some(module), Some(name)) = (
+            import.get_attr_wasm_import_module(ctx),
+            import.get_attr_wasm_import_name(ctx),
+        ) else {
+            return Err(EmitError::Malformed {
+                function: symbol.to_string(),
+                message: "missing import module or field name".into(),
+            });
+        };
+        import_section.import(module.as_str(), name.as_str(), EntityType::Function(ty));
         names.append(index as u32, symbol.as_ref());
         function_index.insert(symbol, index as u32);
     }

@@ -1,36 +1,29 @@
 //! Shared final-use analysis for owned strings and mutable dense arrays.
 use crate::aggregates::{functions, operations};
 use pliron::{
-    basic_block::BasicBlock,
     context::{Context, Ptr},
     irbuild::{
-        inserter::Inserter,
-        match_rewrite::{MatchRewrite, MatchRewriter, PassWrapper},
-        rewriter::Rewriter,
+        listener::DummyListener,
+        rewriter::{IRRewriter, Rewriter},
     },
-    linked_list::{ContainsLinkedList, LinkedList},
+    linked_list::LinkedList,
     op::Op,
     operation::Operation,
-    pass::{AnalysisManager, Pass, PassResult, Passes},
+    pass::{AnalysisManager, PassResult},
     result::Result,
     r#type::Typed,
+    utils::union_find::UnionFind,
     value::Value,
 };
 use std::collections::{HashMap, HashSet};
 
-struct Transfer {
-    block: Ptr<BasicBlock>,
-    argument: Value,
-}
-
 struct FunctionCfg {
     name: pliron::identifier::Identifier,
-    blocks: Vec<Ptr<BasicBlock>>,
     ops: Vec<Ptr<Operation>>,
     returns: Vec<Ptr<Operation>>,
     incoming: HashMap<Value, Vec<Value>>,
-    passed: HashMap<(Ptr<Operation>, Value), Vec<Transfer>>,
-    aliases: HashMap<Value, HashSet<Value>>,
+    aliases: UnionFind<Value>,
+    owned: HashSet<Value>,
 }
 
 /// Analyze exclusive sequence headers and their final observations across the module.
@@ -39,7 +32,7 @@ fn reuse_candidates(
     root: Ptr<Operation>,
     ctx: &Context,
     live: &crate::liveness::LiveValues,
-) -> HashMap<Ptr<Operation>, crate::attrs::ReuseOperands> {
+) -> Vec<(Ptr<Operation>, crate::attrs::ReuseOperands)> {
     use crate::{calls::CallOp, views::AggregateViewOp};
     use crate::{
         collections::{
@@ -51,9 +44,7 @@ fn reuse_candidates(
         scalar::CompareOp,
         types::{ArrayType, StringType},
     };
-    use pliron::builtin::op_interfaces::{
-        BranchOpInterface, OneRegionInterface, SymbolOpInterface,
-    };
+    use pliron::builtin::op_interfaces::SymbolOpInterface;
     let is_sequence = |ctx: &Context, v: Value| {
         let ty = v.get_type(ctx).deref(ctx);
         ty.is::<StringType>() || ty.is::<ArrayType>()
@@ -100,48 +91,23 @@ fn reuse_candidates(
                 )
             )
     };
-    let cfgs: Vec<FunctionCfg> = functions(root, ctx)
+    let mut cfgs: Vec<FunctionCfg> = functions(root, ctx)
         .into_iter()
         .map(|function| {
-            let blocks: Vec<Ptr<BasicBlock>> =
-                function.get_region(ctx).deref(ctx).iter(ctx).collect();
             let ops = operations(ctx, &function);
             let mut incoming: HashMap<Value, Vec<Value>> = HashMap::new();
-            let mut passed: HashMap<(Ptr<Operation>, Value), Vec<Transfer>> = HashMap::new();
-            for &block in &blocks {
-                let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
-                    continue;
-                };
-                let dests: Vec<Ptr<BasicBlock>> = terminator.deref(ctx).successors().collect();
-                let dyn_op = Operation::get_op_dyn(terminator, ctx);
-                if let Some(branch) = pliron::op::op_cast::<dyn BranchOpInterface>(dyn_op.as_ref())
-                {
-                    for (succ, &dest) in dests.iter().enumerate() {
-                        for (index, value) in
-                            branch.successor_operands(ctx, succ).into_iter().enumerate()
-                        {
-                            let argument = dest.deref(ctx).get_argument(index);
-                            incoming.entry(argument).or_default().push(value);
-                            passed
-                                .entry((terminator, value))
-                                .or_default()
-                                .push(Transfer {
-                                    block: dest,
-                                    argument,
-                                });
-                        }
-                    }
-                }
-            }
-            let mut aliases: HashMap<Value, HashSet<Value>> = HashMap::new();
+            let mut aliases = UnionFind::default();
             let mut returns = Vec::new();
             for &op in &ops {
+                for (position, argument) in pliron_control::forwarded_arguments(ctx, op) {
+                    let input = op.deref(ctx).get_operand(position);
+                    incoming.entry(argument).or_default().push(input);
+                }
                 if Operation::get_op::<AggregateViewOp>(op, ctx).is_some() {
                     let (source, view) =
                         (op.deref(ctx).get_operand(0), op.deref(ctx).get_result(0));
                     if is_sequence(ctx, view) {
-                        aliases.entry(source).or_default().insert(view);
-                        aliases.entry(view).or_default().insert(source);
+                        aliases.union(source, view);
                     }
                 } else if Operation::get_op::<ReturnOp>(op, ctx).is_some() {
                     returns.push(op);
@@ -149,30 +115,19 @@ fn reuse_candidates(
             }
             FunctionCfg {
                 name: function.get_symbol_name(ctx),
-                blocks,
                 ops,
                 returns,
                 incoming,
-                passed,
+                owned: HashSet::new(),
                 aliases,
             }
         })
         .collect();
-    let alias_set = |aliases: &HashMap<Value, HashSet<Value>>, value: Value| {
-        let mut seen = HashSet::new();
-        let mut work = vec![value];
-        while let Some(next) = work.pop() {
-            if seen.insert(next) {
-                work.extend(aliases.get(&next).into_iter().flatten().copied());
-            }
-        }
-        seen
-    };
     let mut fresh_returns = HashSet::new();
-    let mut owned_by_fn = vec![HashSet::new(); cfgs.len()];
     loop {
         let mut gained = false;
-        for (cfg, owned) in cfgs.iter().zip(owned_by_fn.iter_mut()) {
+        for cfg in &mut cfgs {
+            let owned = &mut cfg.owned;
             owned.clear();
             let fresh_header = |ctx: &Context, op: Ptr<Operation>| {
                 Operation::get_op::<CallOp>(op, ctx)
@@ -190,13 +145,12 @@ fn reuse_candidates(
                         )
                     )
             };
-            for &block in &cfg.blocks {
-                for argument in block.deref(ctx).arguments() {
-                    if cfg.incoming.contains_key(&argument) && is_sequence(ctx, argument) {
-                        owned.insert(argument);
-                    }
-                }
-            }
+            owned.extend(
+                cfg.incoming
+                    .keys()
+                    .copied()
+                    .filter(|&arg| is_sequence(ctx, arg)),
+            );
             for &op in &cfg.ops {
                 if fresh_header(ctx, op)
                     || (Operation::get_op::<AggregateViewOp>(op, ctx).is_some()
@@ -232,23 +186,23 @@ fn reuse_candidates(
                                 return true;
                             }
                             // Transfer the header only after its final direct observation.
-                            let Some(arguments) = cfg.passed.get(&(user, value)) else {
-                                return !alias_set(&cfg.aliases, value)
+                            let aliases = cfg.aliases.set_members(value);
+                            let Some(edge) =
+                                pliron_control::forwarded_operand(ctx, user, use_.find_index(ctx))
+                            else {
+                                return !aliases
                                     .iter()
-                                    .any(|&alias| live.after(user).contains(&alias));
+                                    .any(|alias| live.after(user).contains(alias));
                             };
-                            let aliases = alias_set(&cfg.aliases, value);
-                            arguments.len() == 1
-                                && owned.contains(&arguments[0].argument)
-                                && aliases
-                                    .iter()
-                                    .filter_map(|&alias| cfg.passed.get(&(user, alias)))
-                                    .map(Vec::len)
-                                    .sum::<usize>()
+                            owned.contains(&edge.argument)
+                                && edge
+                                    .arm_operands
+                                    .filter(|&i| aliases.contains(&user.deref(ctx).get_operand(i)))
+                                    .count()
                                     == 1
                                 && !aliases
                                     .iter()
-                                    .any(|&alias| live.on_entry(arguments[0].block, alias))
+                                    .any(|&alias| live.on_entry(edge.block, alias))
                         })
                     })
                     .collect();
@@ -256,8 +210,8 @@ fn reuse_candidates(
                     break;
                 }
                 for value in removed {
-                    for alias in alias_set(&cfg.aliases, value) {
-                        owned.remove(&alias);
+                    for alias in cfg.aliases.set_members(value) {
+                        owned.remove(alias);
                     }
                 }
             }
@@ -274,8 +228,8 @@ fn reuse_candidates(
             break;
         }
     }
-    let mut candidates = HashMap::new();
-    for (cfg, owned) in cfgs.iter().zip(owned_by_fn.iter()) {
+    let mut candidates = Vec::new();
+    for cfg in &mut cfgs {
         for &op in &cfg.ops {
             if Operation::get_op::<ConcatOp>(op, ctx).is_none() {
                 continue;
@@ -286,10 +240,10 @@ fn reuse_candidates(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, &value)| {
-                    if !(array || index == 0) || !owned.contains(&value) {
+                    if !(array || index == 0) || !cfg.owned.contains(&value) {
                         return None;
                     }
-                    let aliases = alias_set(&cfg.aliases, value);
+                    let aliases = cfg.aliases.set_members(value);
                     (operands
                         .iter()
                         .filter(|&&other| aliases.contains(&other))
@@ -303,14 +257,14 @@ fn reuse_candidates(
                 continue;
             }
             let reuse = crate::attrs::ReuseOperands(indices);
-            candidates.insert(op, reuse);
+            candidates.push((op, reuse));
         }
     }
     candidates
 }
 
 /// Fuse unobserved array combinations while their snapshots remain unchanged.
-fn fuse_arrays(root: Ptr<Operation>, ctx: &mut Context) -> bool {
+pub(crate) fn fuse_arrays(root: Ptr<Operation>, ctx: &mut Context) -> bool {
     use crate::{collections::ConcatOp, types::ArrayType};
     use pliron::opts::dce::has_side_effects;
     let mut changed = false;
@@ -377,58 +331,22 @@ fn fuse_arrays(root: Ptr<Operation>, ctx: &mut Context) -> bool {
     changed
 }
 
-struct ReusableSequences {
-    candidates: HashMap<Ptr<Operation>, crate::attrs::ReuseOperands>,
-}
-
-impl MatchRewrite for ReusableSequences {
-    fn r#match(&mut self, ctx: &Context, op: Ptr<Operation>) -> bool {
-        self.candidates.contains_key(&op)
-            && Operation::get_op::<crate::collections::ConcatOp>(op, ctx).is_some()
-    }
-    fn rewrite(
-        &mut self,
-        ctx: &mut Context,
-        rewriter: &mut MatchRewriter,
-        op: Ptr<Operation>,
-    ) -> Result<()> {
-        let operands = op.deref(ctx).operands().collect();
-        let reuse = self
-            .candidates
-            .remove(&op)
-            .expect("matched reuse candidate");
-        let append =
-            crate::collections::ConcatReuseOp::from_sources(ctx, operands, reuse).get_operation();
-        rewriter.insert_operation(ctx, append);
-        rewriter.replace_operation(ctx, op, append);
-        Ok(())
-    }
-}
-
-pub(crate) fn run(
+pub(crate) fn reuse(
     root: Ptr<Operation>,
     ctx: &mut Context,
     analyses: &mut AnalysisManager,
 ) -> Result<PassResult> {
-    let mut passes = Passes::default();
-    passes.add_pass(crate::pipeline::FnPass(
-        "fuse-array-concats",
-        |root, ctx, _| {
-            let mut result = PassResult::default();
-            result.ir_changed = fuse_arrays(root, ctx).into();
-            Ok(result)
-        },
-    ));
-    passes.add_pass(crate::pipeline::FnPass(
-        "owned-append",
-        |root, ctx, analyses| {
-            let candidates = {
-                let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
-                reuse_candidates(root, ctx, &live)
-            };
-            PassWrapper::new("owned-append", ReusableSequences { candidates })
-                .run(root, ctx, analyses)
-        },
-    ));
-    passes.run(root, ctx, analyses)
+    let live = analyses.get_analysis::<crate::liveness::LiveValues>(root, ctx)?;
+    let candidates = reuse_candidates(root, ctx, &live);
+    let mut result = PassResult::default();
+    result.ir_changed = (!candidates.is_empty()).into();
+    let mut rewriter = IRRewriter::<DummyListener>::default();
+    for (op, reuse) in candidates {
+        let operands = op.deref(ctx).operands().collect();
+        let append =
+            crate::collections::ConcatReuseOp::from_sources(ctx, operands, reuse).get_operation();
+        append.insert_before(ctx, op);
+        rewriter.replace_operation(ctx, op, append);
+    }
+    Ok(result)
 }

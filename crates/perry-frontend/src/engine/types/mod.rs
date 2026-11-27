@@ -334,10 +334,10 @@ impl TypeTable {
     ) -> Option<TypedHandle<IntegerType>> {
         match self.kind(ty) {
             TyKind::Integer(domain) => Some(domain),
-            TyKind::Named(name) => {
-                let (width, signedness) = decls.integer_spec(ctx, name.get(ctx))?;
-                Some(IntegerType::get(ctx, width, signedness))
-            }
+            TyKind::Named(name) => Some(perry_mir::integer_type(
+                ctx,
+                decls.integer_spec(ctx, name.get(ctx))?,
+            )),
             _ => None,
         }
     }

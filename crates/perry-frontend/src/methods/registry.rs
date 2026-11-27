@@ -129,8 +129,8 @@ macro_rules! method_catalog {
                 StringNormalize "normalize" -> [String] Always Method [form:optional] => optional(string_normalize(form)), "accepts at most one form argument";
                 StringLocaleCompare "localeCompare" -> [Number] Upstream Method [other] => value(locale_compare(other)), "requires one string";
                 StringSplit "split" -> [StringArray] Always Method [separator] => optional(string_split(separator)), "requires one string or regex separator";
-                StringReplace "replace" -> [String] Always Method callback(Replacement) [search, replacement] => optional(replace_string(search, replacement, false)), "requires a search pattern and replacement string";
-                StringReplaceAll "replaceAll" -> [String] Always Method callback(Replacement) [search, replacement] => optional(replace_string(search, replacement, true)), "requires a search pattern and replacement string";
+                StringReplace "replace" -> [String] Always Method callback(Replacement) [search, replacement] => value(replace_string(search, replacement, false)), "requires a search pattern and replacement string";
+                StringReplaceAll "replaceAll" -> [String] Always Method callback(Replacement) [search, replacement] => value(replace_string(search, replacement, true)), "requires a search pattern and replacement string";
                 StringMatch "match" -> [NullOptStringArray] Always Method [regex] => optional(string_match(regex)), "requires one literal regex";
                 StringSearch "search" -> [Number] Upstream Method [regex] => located(string_search(regex)), "requires one literal regex";
                 StringToString "toString" -> [String] Upstream Method [args:rest] => receiver(args), "accepts method arguments";

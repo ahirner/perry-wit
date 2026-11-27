@@ -5,6 +5,14 @@ use crate::core_program::{Counter, Program};
 mod arrays;
 
 #[test]
+fn missing_destructured_fields_apply_defaults_on_closed_records() {
+    let mut program = Program::new(
+        "export function run(n: number) { const item = {n}; const {a = 3} = item; const {b = 5, ...rest} = item; return a + b + rest.n; }",
+    );
+    assert_eq!(program.number("run", 4.0), 12.0);
+}
+
+#[test]
 fn unchanged_module_graph_does_not_collect_on_every_export() {
     let source = r#"
 interface Cell { value: number; next: Cell | null }

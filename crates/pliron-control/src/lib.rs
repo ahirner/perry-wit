@@ -2,6 +2,101 @@
 //!
 //! Adapted from `pliron-llvm` (Apache-2.0, The pliron contributors).
 
+pub mod graph;
+pub mod liveness;
+
+use pliron::{
+    basic_block::BasicBlock,
+    builtin::{
+        op_interfaces::{BranchOpInterface, SingleBlockRegionInterface, SymbolTableInterface},
+        ops::{FuncOp, ModuleOp},
+    },
+    context::{Context, Ptr},
+    identifier::Identifier,
+    linked_list::ContainsLinkedList,
+    op::op_cast,
+    operation::Operation,
+    value::Value,
+};
+use std::ops::Range;
+
+/// The destination and operand segment of each branch arm, in successor order.
+fn branch_segments(
+    ctx: &Context,
+    op: Ptr<Operation>,
+) -> impl Iterator<Item = (Ptr<BasicBlock>, Range<usize>)> + '_ {
+    (0..op.deref(ctx).get_num_successors()).filter_map(move |index| {
+        let dynamic = Operation::get_op_dyn(op, ctx);
+        let branch = op_cast::<dyn BranchOpInterface>(dynamic.as_ref())?;
+        Some((
+            op.deref(ctx).get_successor(index),
+            branch.successor_operand_range(ctx, index),
+        ))
+    })
+}
+
+/// Pair each forwarded operand position with the block argument it defines.
+pub fn forwarded_arguments(
+    ctx: &Context,
+    op: Ptr<Operation>,
+) -> impl Iterator<Item = (usize, Value)> + '_ {
+    branch_segments(ctx, op).flat_map(move |(block, range)| {
+        range
+            .enumerate()
+            .map(move |(index, position)| (position, block.deref(ctx).get_argument(index)))
+    })
+}
+
+pub struct ForwardedOperand {
+    pub block: Ptr<BasicBlock>,
+    pub argument: Value,
+    pub arm_operands: Range<usize>,
+}
+
+/// The branch arm and destination argument for this operand position.
+pub fn forwarded_operand(
+    ctx: &Context,
+    op: Ptr<Operation>,
+    position: usize,
+) -> Option<ForwardedOperand> {
+    let (block, arm_operands) =
+        branch_segments(ctx, op).find(|(_, range)| range.contains(&position))?;
+    let argument = block.deref(ctx).get_argument(position - arm_operands.start);
+    Some(ForwardedOperand {
+        block,
+        argument,
+        arm_operands,
+    })
+}
+
+/// Matching symbols in enclosing tables, nearest scope first.
+pub fn enclosing_symbols<'a>(
+    ctx: &'a Context,
+    op: Ptr<Operation>,
+    name: &'a Identifier,
+) -> impl Iterator<Item = Ptr<Operation>> + 'a {
+    std::iter::successors(op.deref(ctx).get_parent_op(ctx), move |parent| {
+        parent.deref(ctx).get_parent_op(ctx)
+    })
+    .filter_map(move |parent| {
+        let dynamic = Operation::get_op_dyn(parent, ctx);
+        op_cast::<dyn SymbolTableInterface>(dynamic.as_ref())?.lookup(ctx, name)
+    })
+}
+
+/// Direct function declarations of a module in source order.
+pub fn functions(module: Ptr<Operation>, ctx: &Context) -> Vec<FuncOp> {
+    let Some(module) = Operation::get_op::<ModuleOp>(module, ctx) else {
+        return Vec::new();
+    };
+    module
+        .get_body(ctx, 0)
+        .deref(ctx)
+        .iter(ctx)
+        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
+        .collect()
+}
+
 /// Define `BrOp`, `CondBrOp`, and `ReturnOp` in a module importing pliron.
 /// The predicate checks the dialect's condition type, while operation names and errors remain local.
 #[macro_export]

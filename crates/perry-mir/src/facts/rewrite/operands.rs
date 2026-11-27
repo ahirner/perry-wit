@@ -137,39 +137,20 @@ fn replace_with_scalar(
 fn parsed_constant(
     ctx: &Context,
     res_ty: TypeHandle,
-    parsed: super::super::domains::ConstParsedInt,
+    parsed: crate::attrs::NumericConstant,
 ) -> Box<dyn pliron::builtin::attr_interfaces::TypedAttrInterface> {
-    use super::super::domains::ConstParsedInt;
     if let Some(int_ty) = crate::typed::<IntegerType>(ctx, res_ty) {
-        let bits = match parsed {
-            ConstParsedInt::Integer { bits, .. } => bits,
-            ConstParsedInt::Float(bits) => f64::from_bits(bits) as i64 as u64,
-        };
+        let bits = parsed
+            .integer()
+            .map_or_else(|| parsed.number().as_f64() as i64 as u64, |n| n as u64);
         let width = int_ty.deref(ctx).width() as usize;
         Box::new(IntegerAttr::new(int_ty, APInt::from_u64(bits, bw(width))))
     } else if res_ty.deref(ctx).is::<crate::types::NumericType>() {
-        match parsed {
-            ConstParsedInt::Integer { bits, domain, .. } => {
-                if domain.signed() {
-                    Box::new(crate::attrs::NumericConstant::Signed(bits as i64))
-                } else {
-                    Box::new(crate::attrs::NumericConstant::Unsigned(bits))
-                }
-            }
-            ConstParsedInt::Float(bits) => Box::new(crate::attrs::NumericConstant::Float(bits)),
-        }
+        Box::new(parsed)
     } else {
-        let f = match parsed {
-            ConstParsedInt::Integer { bits, domain, .. } => {
-                if domain.signed() {
-                    (bits as i64) as f64
-                } else {
-                    bits as f64
-                }
-            }
-            ConstParsedInt::Float(bits) => f64::from_bits(bits),
-        };
-        Box::new(pliron::builtin::attributes::FPDoubleAttr::from(f))
+        Box::new(pliron::builtin::attributes::FPDoubleAttr::from(
+            parsed.number().as_f64(),
+        ))
     }
 }
 
@@ -412,18 +393,8 @@ fn operand_types(
     } else if Operation::get_op::<ReturnOp>(original, ctx).is_some() {
         expected.clone_from(&implementation.results);
     } else {
-        let dynamic = Operation::get_op_dyn(op, ctx);
-        if let Some(branch) = op_cast::<dyn BranchOpInterface>(&*dynamic) {
-            for successor in 0..op.deref(ctx).get_num_successors() {
-                let block = op.deref(ctx).get_successor(successor);
-                for (argument, index) in block
-                    .deref(ctx)
-                    .arguments()
-                    .zip(branch.successor_operand_range(ctx, successor))
-                {
-                    expected[index] = argument.get_type(ctx);
-                }
-            }
+        for (position, argument) in pliron_control::forwarded_arguments(ctx, op) {
+            expected[position] = argument.get_type(ctx);
         }
     }
     Ok(())

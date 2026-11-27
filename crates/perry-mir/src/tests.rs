@@ -379,7 +379,10 @@ builtin.module @m {
 }
 "#;
     let ctx = &mut Context::new();
+    let node = crate::RecordType::get(ctx, pliron::ident!("Node"), None)?.into();
+    assert!(!crate::JsonSchema::supports_descriptor(ctx, node));
     let module = parse(ctx, input);
+    assert!(crate::JsonSchema::supports_descriptor(ctx, node));
     verify_operation(module, ctx)?;
     let printed = print(ctx, module);
     assert!(

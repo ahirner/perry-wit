@@ -4,8 +4,15 @@ mod syntax;
 use crate::operation_schema::op_schema;
 use crate::signatures::Ty;
 use pliron::{
-    builtin::attributes::StringAttr, common_traits::Verify, context::Context, op::Op,
-    operation::Operation, result::Result,
+    builtin::attributes::StringAttr,
+    common_traits::Verify,
+    context::Context,
+    derive::{format, pliron_attr},
+    op::Op,
+    operation::Operation,
+    parsable::{Parsable, ParseResult, StateStream},
+    printable::{Printable, State},
+    result::Result,
 };
 
 use perry_wit_diagnostics::{Diagnostic, codes, diag};
@@ -16,20 +23,49 @@ use std::{
     sync::OnceLock,
 };
 
-pub struct RegexLiteral {
-    spelling: (String, String),
+#[format("$0 `, ` $1")]
+#[derive(PartialEq, Eq, Hash)]
+struct Spelling(StringAttr, StringAttr);
+
+#[pliron_attr(name = "perry.regex_literal", verifier = "succ")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RegexLiteral(Uniqued<CachedRegex>);
+
+struct CachedRegex {
+    spelling: Spelling,
     parsed: OnceLock<perry_wit_diagnostics::Result<ParsedRegex>>,
 }
 
-impl PartialEq for RegexLiteral {
+impl PartialEq for CachedRegex {
     fn eq(&self, other: &Self) -> bool {
         self.spelling == other.spelling
     }
 }
-impl Eq for RegexLiteral {}
-impl Hash for RegexLiteral {
+impl Eq for CachedRegex {}
+impl Hash for CachedRegex {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.spelling.hash(state);
+    }
+}
+
+impl Printable for RegexLiteral {
+    fn fmt(
+        &self,
+        ctx: &Context,
+        state: &State,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        self.0.get(ctx).spelling.fmt(ctx, state, f)
+    }
+}
+
+impl Parsable for RegexLiteral {
+    type Arg = ();
+    type Parsed = Self;
+
+    fn parse<'a>(stream: &mut StateStream<'a>, (): ()) -> ParseResult<'a, Self> {
+        Spelling::parse(stream, ())
+            .map(|(spelling, rest)| (Self::from_spelling(stream.state.ctx, spelling), rest))
     }
 }
 
@@ -59,7 +95,7 @@ impl RegexShape {
             value,
             |op| {
                 let regex = Operation::get_op::<RegexConstOp>(op, ctx)?;
-                regex.literal(ctx).get(ctx).shape().ok()
+                regex.literal(ctx).shape(ctx).ok()
             },
             |a, b| Some(a.join(b)),
         )
@@ -82,32 +118,38 @@ impl RegexShape {
 }
 
 impl RegexLiteral {
-    pub fn intern(ctx: &Context, pattern: String, flags: String) -> Uniqued<Self> {
-        Uniqued::new(
+    pub fn intern(ctx: &Context, pattern: String, flags: String) -> Self {
+        Self::from_spelling(ctx, Spelling(pattern.into(), flags.into()))
+    }
+
+    fn from_spelling(ctx: &Context, spelling: Spelling) -> Self {
+        Self(Uniqued::new(
             ctx,
-            Self {
-                spelling: (pattern, flags),
+            CachedRegex {
+                spelling,
                 parsed: OnceLock::new(),
             },
-        )
+        ))
     }
 
-    pub fn global(&self) -> bool {
-        self.spelling.1.contains('g')
+    pub fn global(self, ctx: &Context) -> bool {
+        self.0.get(ctx).spelling.1.as_str().contains('g')
     }
 
-    pub fn parsed(&self) -> perry_wit_diagnostics::Result<&ParsedRegex> {
-        self.parsed
-            .get_or_init(|| syntax::parse(&self.spelling.0, &self.spelling.1))
+    pub fn parsed(self, ctx: &Context) -> perry_wit_diagnostics::Result<&ParsedRegex> {
+        let cached = self.0.get(ctx);
+        cached
+            .parsed
+            .get_or_init(|| syntax::parse(cached.spelling.0.as_str(), cached.spelling.1.as_str()))
             .as_ref()
             .map_err(Clone::clone)
     }
 
-    pub fn shape(&self) -> perry_wit_diagnostics::Result<RegexShape> {
+    pub fn shape(self, ctx: &Context) -> perry_wit_diagnostics::Result<RegexShape> {
         const { assert!(perry_abi::layout::regex::MAX_CAPTURES <= u8::MAX as usize) };
-        let captures = &self.parsed()?.captures;
+        let captures = &self.parsed(ctx)?.captures;
         Ok(RegexShape {
-            global: Some(self.global()),
+            global: Some(self.global(ctx)),
             captures: Some((captures.count as u8, !captures.names.is_empty())),
         })
     }
@@ -121,26 +163,14 @@ impl RegexLiteral {
     }
 }
 
-impl RegexConstOp {
-    pub fn literal(&self, ctx: &Context) -> Uniqued<RegexLiteral> {
-        RegexLiteral::intern(ctx, self.pattern(ctx), self.flags(ctx))
-    }
-    pub fn new(ctx: &mut Context, pattern: &str, flags: &str) -> Self {
-        let literal = RegexLiteral::intern(ctx, pattern.to_owned(), flags.to_owned());
-        Self::from_literal(ctx, literal)
-    }
-}
-
 op_schema! {
     pub RegexConstOp() -> infallible;
     name = "perry.regex_const";
-    format = "attr($perry_regex_pattern, $StringAttr) `, ` attr($perry_regex_flags, $StringAttr) ` : ` type($0)";
-    attributes = (perry_regex_pattern: StringAttr, perry_regex_flags: StringAttr);
-    constructors { pub from_literal(literal: Uniqued<RegexLiteral>) => infer(); }
-    attribute(pattern: String, get_attr_perry_regex_pattern, set_attr_perry_regex_pattern) =
-        StringAttr::new(literal.get(ctx).spelling.0.clone()) => InvalidConstant;
-    attribute(flags: String, get_attr_perry_regex_flags, set_attr_perry_regex_flags) =
-        StringAttr::new(literal.get(ctx).spelling.1.clone()) => InvalidConstant;
+    format = "attr($perry_regex_literal, $RegexLiteral) ` : ` type($0)";
+    attributes = (perry_regex_literal: RegexLiteral);
+    constructors { pub from_literal(literal: RegexLiteral) => infer(); }
+    attribute(literal: RegexLiteral, get_attr_perry_regex_literal, set_attr_perry_regex_literal) =
+        literal => InvalidConstant;
     result(ctx): Ty = Ty::Regex;
     error = InvalidConstant;
 }

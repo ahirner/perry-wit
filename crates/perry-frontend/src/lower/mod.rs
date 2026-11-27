@@ -71,7 +71,6 @@ use pliron::{
     op::Op,
     operation::Operation,
     r#type::{TypeHandle, Typed, TypedHandle},
-    utils::apint::{APInt, bw},
     value::Value,
 };
 use shapes::{BindingType, Shapes, identifier};

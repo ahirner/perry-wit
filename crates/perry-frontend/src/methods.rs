@@ -59,6 +59,32 @@ pub(crate) enum Callback {
     Collection,
 }
 
+pub(crate) enum ReplacementArg<T> {
+    Value(T),
+    Capture(T, u8),
+    Groups(T),
+}
+
+impl<T: Copy> ReplacementArg<T> {
+    pub(crate) fn layout(
+        matched: T,
+        offset: T,
+        input: T,
+        captures: Option<(T, (u8, bool))>,
+    ) -> impl Iterator<Item = Self> {
+        let numbered = captures.into_iter().flat_map(|(source, (count, _))| {
+            (1..=count).map(move |index| Self::Capture(source, index))
+        });
+        let groups =
+            captures.and_then(|(source, (_, named))| named.then_some(Self::Groups(source)));
+        [Self::Value(matched)]
+            .into_iter()
+            .chain(numbered)
+            .chain([Self::Value(offset), Self::Value(input)])
+            .chain(groups)
+    }
+}
+
 macro_rules! registry {
     (@result value (iterator_method(IteratorMethod::$method:ident));) => {
         MethodResult::Iterator(crate::collections::IteratorMethod::$method)

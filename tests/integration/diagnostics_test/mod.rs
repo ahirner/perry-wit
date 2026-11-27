@@ -299,6 +299,10 @@ fn type_errors_preserve_source_spans_and_field_names() {
 
     for (source, code) in [
         (
+            "export function run(): number { const item = {x: 4}; const other = {y: 3}; const bad: number | undefined = other.x; const {x, ...rest} = item; return bad === undefined ? x : -1; }",
+            codes::TYPE_MISMATCH,
+        ),
+        (
             "interface Item { value:number|null } export function run():number { const item:Item={};return 0; }",
             codes::MISSING_REQUIRED_FIELD,
         ),

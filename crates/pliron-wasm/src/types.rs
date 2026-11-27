@@ -1,7 +1,9 @@
 //! Mapping between pliron builtin types and Wasm value types.
 use pliron::{
     builtin::{
-        attributes::IntegerAttr,
+        attr_interfaces::TypedAttrInterface,
+        attributes::{FPDoubleAttr, FPSingleAttr, IntegerAttr},
+        ops::ConstantOp,
         types::{FP32Type, FP64Type, IntegerType, Signedness},
     },
     context::Context,
@@ -55,4 +57,15 @@ pub(crate) const I64_BITS: NonZeroUsize = NonZeroUsize::new(64).expect("64 is no
 pub(crate) fn integer_attr(ctx: &mut Context, bits: NonZeroUsize, value: u64) -> IntegerAttr {
     let ty = IntegerType::get(ctx, bits.get() as u32, Signedness::Signless);
     IntegerAttr::new(ty, APInt::from_u64(value, bits))
+}
+
+/// Construct the zero value of a core Wasm numeric type.
+pub fn zero_constant(ctx: &mut Context, ty: TypeHandle) -> ConstantOp {
+    let attr: Box<dyn TypedAttrInterface> = match val_type(ctx, ty) {
+        Some(ValType::I64) => Box::new(integer_attr(ctx, I64_BITS, 0)),
+        Some(ValType::F32) => Box::new(FPSingleAttr::from(0.0f32)),
+        Some(ValType::F64) => Box::new(FPDoubleAttr::from(0.0f64)),
+        _ => Box::new(integer_attr(ctx, I32_BITS, 0)),
+    };
+    ConstantOp::new(ctx, attr)
 }

@@ -1,10 +1,6 @@
 //! Canonical export wrappers, async callbacks and reallocation.
 use super::*;
 
-fn core_types(ctx: &mut Context, types: &[WasmType]) -> Vec<TypeHandle> {
-    types.iter().map(|&ty| flat_type(ctx, ty.into())).collect()
-}
-
 /// Emit the export function and its post-return function for `export`.
 pub(crate) fn export(
     ctx: &mut Context,
@@ -35,7 +31,7 @@ pub(crate) fn export(
         export.params.len()
     );
     let completion =
-        if let Some(AbiKind::Result { ok, err }) = export.result.as_ref().map(|ty| &ty.kind) {
+        if let Some(payloads) = export.result.as_ref().and_then(AbiType::result_payloads) {
             let layout = mir_results
                 .first()
                 .and_then(|&ty| perry_mir::typed::<RecordType>(ctx, ty))
@@ -46,7 +42,7 @@ pub(crate) fn export(
                 .is_some_and(|result| {
                     perry_mir::RESULT_PAYLOADS
                         .into_iter()
-                        .zip([ok, err])
+                        .zip(payloads)
                         .all(|(name, payload)| {
                             payload.is_none() || result.layout.fields.contains_key(name)
                         })
@@ -220,7 +216,7 @@ fn async_export(
     // `task.return` takes the result flat, or through memory beyond MAX_FLAT_PARAMS.
     let command = matches!(mode, AsyncCompletion::Command);
     let result = if command {
-        Some([Flat::I32].as_slice())
+        Some([WasmType::I32].as_slice())
     } else {
         export
             .result
@@ -231,7 +227,7 @@ fn async_export(
     let task_return = EffectHost::TaskReturn(
         module.clone(),
         wit_name.clone(),
-        result.unwrap_or(&[Flat::I32]).to_vec(),
+        result.unwrap_or(&[WasmType::I32]).to_vec(),
     );
     let i32 = i32_type(ctx);
 

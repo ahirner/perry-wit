@@ -5,6 +5,7 @@
 extern crate std;
 
 use core::ptr;
+use layout::array::{Elements::References, Header as ArrayHeader};
 pub use perry_abi::*;
 pub mod guest_memory;
 pub mod json;
@@ -47,6 +48,7 @@ mod imports {
     );
     crate::wasm_imports!("__perry_helper" => perry_runtime::array;
         fn perry_array_new_typed(capacity: u32, references: u32) -> *mut u8;
+        fn perry_array_grow_typed(array: *mut u8, references: u32);
     );
     crate::wasm_imports!("__perry_helper" => perry_runtime::io;
         fn perry_task_join(waitable: u32);
@@ -113,14 +115,19 @@ pub fn alloc(size: u32) -> *mut u8 {
     unsafe { imports::perry_alloc(size) }
 }
 
-/// Allocate `len` fresh, uninitialized bytes in the task region for the caller's exclusive use.
-///
-/// Like every task allocation, the block lives until the task ends, which `'static` represents.
-fn alloc_uninit(len: usize) -> &'static mut [core::mem::MaybeUninit<u8>] {
+/// Copy bytes into fresh task storage.
+pub fn copy_bytes(bytes: &[u8]) -> &'static mut [u8] {
+    let len = bytes.len();
     let len32 = u32::try_from(len).expect("allocation size overflow");
     // SAFETY: a fresh, 8-aligned block of `len` bytes that nothing else references; any
     // byte pattern (including none) is a valid `MaybeUninit<u8>`.
-    unsafe { core::slice::from_raw_parts_mut(alloc(len32.max(1)).cast(), len) }
+    let storage = unsafe {
+        core::slice::from_raw_parts_mut(
+            alloc(len32.max(1)).cast::<core::mem::MaybeUninit<u8>>(),
+            len,
+        )
+    };
+    storage.write_copy_of_slice(bytes)
 }
 
 /// Release the host pin after a canonical payload is adopted or discarded.
@@ -259,7 +266,7 @@ pub fn from_bytes(bytes: &[u8]) -> *mut u8 {
     if bytes.is_empty() {
         return from_static(static_text!(""));
     }
-    let data = alloc_uninit(bytes.len()).write_copy_of_slice(bytes);
+    let data = copy_bytes(bytes);
     // SAFETY: copied UTF-8 in task storage; the string takes ownership of the allocation.
     unsafe { adopt(data.as_mut_ptr(), data.len() as u32) }
 }
@@ -392,35 +399,49 @@ pub fn reject_with(promise: *mut u8, kind: u32, message: *mut u8) {
     }
 }
 
-/// Allocate a reference array and its writable slots.
-#[allow(unused_unsafe)]
-pub fn array_storage(len: usize) -> (*mut u8, &'static mut [u64]) {
-    array_storage_typed(len, true)
-}
+/// An exclusively owned dense array of guest references, traced through its live storage.
+pub struct ReferenceArray(&'static mut ArrayHeader);
 
-/// Typed array slots whose pointer map follows their representation.
-#[allow(unused_unsafe)]
-pub fn array_storage_typed(len: usize, references: bool) -> (*mut u8, &'static mut [u64]) {
-    // SAFETY: a fresh array with capacity for `len` (layout of `perry_runtime::array`).
-    unsafe {
-        let len = u32::try_from(len).expect("array length overflow");
-        let array = imports::perry_array_new_typed(len, u32::from(references));
-        let header = &mut *array.cast::<layout::array::Header>();
-        header.len = len;
-        // Task-region storage may be recycled. Initialize the elements before borrowing them.
-        core::ptr::write_bytes(header.data, 0, len as usize);
-        (
-            array,
-            core::slice::from_raw_parts_mut(header.data, len as usize),
-        )
+impl ReferenceArray {
+    pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = u32::try_from(capacity).expect("array capacity overflow");
+        // SAFETY: the runtime returns a fresh header with aligned storage and length zero.
+        unsafe { Self(&mut *imports::perry_array_new_typed(capacity, References as u32).cast()) }
+    }
+
+    pub fn push(&mut self, value: *mut u8) {
+        // SAFETY: growth preserves the initialized prefix. The next slot is exclusively owned.
+        unsafe {
+            if self.0.len == self.0.cap {
+                imports::perry_array_grow_typed(
+                    core::ptr::from_mut(self.0).cast(),
+                    References as u32,
+                );
+            }
+            self.0.data.add(self.0.len as usize).write(value as u64);
+            self.0.len += 1;
+        }
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = *mut u8> {
+        // SAFETY: push initialized these slots, and the borrow prevents growth.
+        unsafe { core::slice::from_raw_parts(self.0.data, self.0.len as usize) }
+            .iter()
+            .map(|&slot| slot as *mut u8)
+    }
+
+    pub fn finish(self) -> *mut u8 {
+        core::ptr::from_mut(self.0).cast()
     }
 }
 
-/// An array of reference slot bits, retaining their owners through the array shape.
-pub fn array(values: &[u64]) -> *mut u8 {
-    let (array, slots) = array_storage(values.len());
-    slots.copy_from_slice(values);
-    array
+pub fn array(values: impl IntoIterator<Item = *mut u8>) -> *mut u8 {
+    let values = values.into_iter();
+    let mut result = ReferenceArray::with_capacity(values.size_hint().0);
+    for value in values {
+        result.push(value);
+    }
+    result.finish()
 }
 
 /// Append `bytes` to the task's output `fd` (0 for stdout, 1 for stderr) and settle `promise`

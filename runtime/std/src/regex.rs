@@ -2,7 +2,7 @@
 use crate::runtime;
 use perry_rt_sys::layout::array;
 use perry_rt_sys::layout::regex::{
-    CAPTURE_PROGRAM, DFA_HEADER, DFA_ROWS, GLOBAL, GROUP_COUNT, LookCode, MAX_CAPTURES,
+    CAPTURE_PROGRAM, DFA_CLASSES, DFA_ROWS, GLOBAL, GROUP_COUNT, LookCode, MAX_CAPTURES,
     MAX_PENDING, MAX_STATES, MAX_THREADS, NAMES_OFFSET, NfaState, NfaTable, PROGRAM_HEADER,
     REVERSE_OFFSET,
 };
@@ -170,23 +170,25 @@ unsafe fn extract_captures(program: *const u8, text: &[u8], start: usize, end: u
 /// # Safety
 /// `program` must be a compiler-generated regex table.
 unsafe fn is_global(program: *const u8) -> bool {
-    (unsafe { read_u32(program.add(REVERSE_OFFSET)) } & GLOBAL) != 0
+    unsafe { *program.add(GLOBAL) != 0 }
 }
 
 /// One direction of a compiled table: rows are `[flags: u16, next row offset per class: u16...]`.
 #[derive(Clone, Copy)]
 struct Dfa {
     base: *const u8,
+    classes: *const u8,
     end_column: usize,
 }
 
 impl Dfa {
     /// # Safety
-    /// `base` heads a compiler-generated DFA with a class map followed by state rows.
+    /// `base` heads a compiler-generated DFA with a static byte-class map and state rows.
     unsafe fn new(base: *const u8) -> Self {
         unsafe {
             Self {
                 base,
+                classes: read_u32(base.add(DFA_CLASSES)) as *const u8,
                 end_column: usize::from(read_u16(base)),
             }
         }
@@ -195,7 +197,7 @@ impl Dfa {
     /// # Safety
     /// `state` is a row of this table.
     unsafe fn step(self, state: *const u8, byte: u8) -> *const u8 {
-        let class = unsafe { *self.base.add(DFA_HEADER + usize::from(byte)) };
+        let class = unsafe { *self.classes.add(usize::from(byte)) };
         unsafe { self.goto(state, 2 + usize::from(class) * 2) }
     }
 
@@ -265,11 +267,13 @@ unsafe fn next_match(text: &[u8], mut pos: usize, program: *const u8) -> Option<
             pos = crate::text::pattern::next_boundary(text, end);
             continue;
         }
-        let start = if end == pos {
+        let reverse = unsafe { read_u32(program.add(REVERSE_OFFSET)) } as i32;
+        let start = if reverse < 0 {
+            end - (!reverse) as usize
+        } else if end == pos {
             pos
         } else {
-            let offset = unsafe { read_u32(program.add(REVERSE_OFFSET)) } & !GLOBAL;
-            let reverse = unsafe { Dfa::new(program.add(offset as usize)) };
+            let reverse = unsafe { Dfa::new(program.add(reverse as usize)) };
             unsafe { reverse.find::<true>(text, pos, end) }?
         };
         return Some((start, end));
@@ -277,7 +281,7 @@ unsafe fn next_match(text: &[u8], mut pos: usize, program: *const u8) -> Option<
     None
 }
 
-unsafe fn matches(text: &[u8], program: *const u8) -> impl Iterator<Item = (usize, usize)> + Clone {
+unsafe fn matches(text: &[u8], program: *const u8) -> impl Iterator<Item = (usize, usize)> {
     crate::text::pattern::matches(text, move |from| unsafe { next_match(text, from, program) })
 }
 
@@ -450,21 +454,23 @@ pub(crate) unsafe extern "C" fn std_regex_replace(
     )
 }
 
-unsafe fn write_captures(
+unsafe fn capture_values(
     view: &crate::text::View,
     program: *const u8,
     start: usize,
     end: usize,
-    output: &mut [u64],
-) {
-    if output.is_empty() {
-        return;
-    }
-    let captures = unsafe { extract_captures(program, view.text.as_bytes(), start, end) };
-    for (index, slot) in output.iter_mut().enumerate() {
-        *slot = capture(&captures, index + 1)
-            .map_or(0, |range| view.piece(range.start, range.end) as u64);
-    }
+    count: usize,
+) -> impl Iterator<Item = *mut u8> {
+    let slots = if count == 0 {
+        [0; MAX_SLOTS]
+    } else {
+        unsafe { extract_captures(program, view.text.as_bytes(), start, end) }
+    };
+    (1..=count).map(move |group| {
+        capture(&slots, group).map_or(core::ptr::null_mut(), |range| {
+            view.piece(range.start, range.end)
+        })
+    })
 }
 
 #[repr(C)]
@@ -522,7 +528,12 @@ pub(crate) unsafe extern "C" fn std_regex_exec_from(
     }
     let slots = unsafe { core::slice::from_raw_parts_mut(data, group_count) };
     slots[0] = view.piece(start, end) as u64;
-    unsafe { write_captures(&view, program, start, end, &mut slots[1..]) };
+    for (slot, value) in slots[1..]
+        .iter_mut()
+        .zip(unsafe { capture_values(&view, program, start, end, group_count - 1) })
+    {
+        *slot = value as u64;
+    }
     let mut groups = core::ptr::null_mut();
     if let Some(names) = unsafe { names(program) } {
         groups = crate::json::std_json_object();
@@ -568,16 +579,11 @@ pub(crate) unsafe extern "C" fn std_regex_match(string: *mut u8, program: *const
         return unsafe { std_regex_exec(string, program) };
     }
     let view = crate::text::view(string);
-    let text = view.text.as_bytes();
-    let count = unsafe { matches(text, program) }.count();
-    if count == 0 {
+    let mut ranges = unsafe { matches(view.text.as_bytes(), program) }.peekable();
+    if ranges.peek().is_none() {
         return core::ptr::null_mut();
     }
-    let (array, slots) = runtime::array_storage(count);
-    for (slot, (start, end)) in slots.iter_mut().zip(unsafe { matches(text, program) }) {
-        *slot = view.piece(start, end) as u64;
-    }
-    array
+    runtime::array(ranges.map(|(start, end)| view.piece(start, end)))
 }
 
 /// `s.split(regex)`.
@@ -588,11 +594,8 @@ pub(crate) unsafe extern "C" fn std_regex_match(string: *mut u8, program: *const
 pub(crate) unsafe extern "C" fn std_regex_split(string: *mut u8, program: *const u8) -> *mut u8 {
     let view = crate::text::view(string);
     let ranges = unsafe { matches(view.text.as_bytes(), program) };
-    view.split(
-        ranges,
-        unsafe { group_count(program) - 1 },
-        |start, end, slots| {
-            unsafe { write_captures(&view, program, start, end, slots) };
-        },
-    )
+    let count = unsafe { group_count(program) - 1 };
+    view.split(ranges, 0, |start, end| unsafe {
+        capture_values(&view, program, start, end, count)
+    })
 }

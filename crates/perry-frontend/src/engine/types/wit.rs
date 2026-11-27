@@ -3,7 +3,7 @@ use super::*;
 use crate::wit::{WitValue, WorldTypes};
 use perry_contract::{
     names::NamedType,
-    types::{Contract, Input, convert},
+    types::{Contract, Scalar, project},
 };
 use wit_parser::Type;
 
@@ -48,7 +48,7 @@ impl TypeTable {
 
     pub(crate) fn export_type(&mut self, ctx: &Context, value: WitValue<'_>) -> Ty {
         match value.integer() {
-            Some((64, _)) => Ty::BIGINT,
+            Some(domain) if domain.bits() == 64 => Ty::BIGINT,
             Some(_) => Ty::NUMBER,
             None => self.wit_type(ctx, value, WitView::Reference),
         }
@@ -65,14 +65,25 @@ impl TypeTable {
             self.wit_shapes.insert(key, ty);
             return ty;
         }
-        let input = match value.ty {
-            Type::Id(id) if view != WitView::Reference => Input::Definition(id),
-            ty => Input::Reference(ty),
-        };
         let named = |table: &mut Self, id| {
             let name = NamedType::get(value.resolve, id)?.qualified();
             Some(table.named(ctx, &name))
         };
+        if view == WitView::Reference
+            && let Type::Id(id) = value.ty
+            && let Some(ty) = named(self, id)
+        {
+            self.wit_shapes.insert(key, ty);
+            return ty;
+        }
+        let child_view = if view == WitView::Definition {
+            WitView::Reference
+        } else {
+            view
+        };
+        let contract = project(value.resolve, value.ty, |&ty| {
+            self.wit_type(ctx, WitValue { ty, ..value }, child_view)
+        });
         let case = |table: &mut Self, name, ty, payload, value: Option<Ty>| {
             let tag = table.property(name, ty, false);
             match value {
@@ -83,116 +94,87 @@ impl TypeTable {
                 }
             }
         };
-        let ty = convert(
-            value.resolve,
-            input,
-            self,
-            &|table, id| {
+        let ty = match contract {
+            Contract::Alias(ty) => ty,
+            Contract::Scalar(Scalar::Bool) => Ty::BOOLEAN,
+            Contract::Scalar(Scalar::F32 | Scalar::F64) => Ty::NUMBER,
+            Contract::Scalar(Scalar::Integer(domain)) => {
+                self.intern_kind(TyKind::Integer(perry_mir::integer_type(ctx, domain)))
+            }
+            Contract::String | Contract::Char => Ty::STRING,
+            Contract::ErrorContext => Ty::OPEN,
+            Contract::Resource { id, .. } => {
+                let id = perry_contract::names::canonical_type(value.resolve, id);
                 if view == WitView::Boundary {
-                    Some(table.wit_type(
-                        ctx,
-                        WitValue {
-                            ty: Type::Id(id),
-                            ..value
-                        },
-                        view,
+                    self.intern_kind(TyKind::WitCarrier(
+                        perry_mir::ResourceType::get(ctx, id.index() as u32).into(),
                     ))
                 } else {
-                    named(table, id)
+                    named(self, id).unwrap_or(Ty::OPEN)
                 }
-            },
-            &|table, contract| match contract {
-                Contract::Alias(ty) => ty,
-                Contract::Scalar(scalar) => {
-                    let ty = match scalar {
-                        Type::Bool => Ty::BOOLEAN,
-                        Type::String | Type::Char => Ty::STRING,
-                        Type::F64 | Type::F32 => Ty::NUMBER,
-                        ty => (WitValue { ty, ..value }).integer().map_or(
-                            Ty::OPEN,
-                            |(width, sign)| {
-                                table.intern_kind(TyKind::Integer(IntegerType::get(
-                                    ctx, width, sign,
-                                )))
-                            },
-                        ),
-                    };
-                    table.wit_shapes.insert((value.resolve, scalar, view), ty);
-                    ty
-                }
-                Contract::Resource { id, .. } => {
-                    let id = perry_contract::names::canonical_type(value.resolve, id);
-                    if view == WitView::Boundary {
-                        table.intern_kind(TyKind::WitCarrier(
-                            perry_mir::ResourceType::get(ctx, id.index() as u32).into(),
-                        ))
-                    } else {
-                        named(table, id).unwrap_or(Ty::OPEN)
-                    }
-                }
-                Contract::Bytes if view == WitView::Boundary => {
-                    table.intern_kind(TyKind::WitCarrier(perry_mir::BytesType::get(ctx).into()))
-                }
-                Contract::ByteStream if view == WitView::Boundary => {
-                    table.intern_kind(TyKind::WitCarrier(perry_mir::ReadableType::get(ctx).into()))
-                }
-                Contract::Bytes => table.named(ctx, "Uint8Array"),
-                Contract::ByteStream => {
-                    let bytes = table.named(ctx, "Uint8Array");
-                    table.generic(
-                        shapes::TypeName::new(ctx, "ReadableStream".into()),
-                        &[bytes],
-                    )
-                }
-                Contract::List(item) => table.array(item),
-                Contract::Option(item) => table.with_absences(item, crate::Absence::Null),
-                Contract::Tuple(items) => table.tuple(&items),
-                Contract::Record(fields) => {
-                    let props = fields
-                        .iter()
-                        .map(|(name, ty)| table.property(name, *ty, false))
-                        .collect::<Vec<_>>();
-                    table.object(&props, None)
-                }
-                Contract::Enum(tags) => {
-                    let tags: Vec<_> = tags
-                        .cases
-                        .iter()
-                        .map(|case| table.literal(ctx, &case.name))
-                        .collect();
-                    table.union(&tags)
-                }
-                Contract::Variant(_, cases) if view == WitView::Boundary => {
-                    let cases: Vec<_> = cases
-                        .into_iter()
-                        .map(|(tag, payload)| (shapes::TypeName::new(ctx, tag.into()), payload))
-                        .collect();
-                    let cases = CasesId::intern(&mut table.cases, &cases);
-                    table.intern_kind(TyKind::Variant(cases))
-                }
-                Contract::Variant(_, cases) => {
-                    let cases: Vec<_> = cases
-                        .into_iter()
-                        .map(|(tag, value)| {
-                            let tag = table.literal(ctx, tag);
-                            case(table, "tag", tag, "val", value)
-                        })
-                        .collect();
-                    table.union(&cases)
-                }
-                Contract::Result { ok, err } if view == WitView::Boundary => {
-                    table.result_record([ok, err])
-                }
-                Contract::Result { ok, err } => {
-                    use perry_mir::{RESULT_PAYLOADS, RESULT_TAG};
-                    let [value, error] = RESULT_PAYLOADS;
-                    let cases = [(value, ok), (error, err)]
-                        .map(|(name, payload)| case(table, RESULT_TAG, Ty::BOOLEAN, name, payload));
-                    table.union(&cases)
-                }
-                Contract::Unsupported(_) => Ty::OPEN,
-            },
-        );
+            }
+            Contract::Bytes if view == WitView::Boundary => {
+                self.intern_kind(TyKind::WitCarrier(perry_mir::BytesType::get(ctx).into()))
+            }
+            Contract::ByteStream if view == WitView::Boundary => {
+                self.intern_kind(TyKind::WitCarrier(perry_mir::ReadableType::get(ctx).into()))
+            }
+            Contract::Bytes => self.named(ctx, "Uint8Array"),
+            Contract::ByteStream => {
+                let bytes = self.named(ctx, "Uint8Array");
+                self.generic(
+                    shapes::TypeName::new(ctx, "ReadableStream".into()),
+                    &[bytes],
+                )
+            }
+            Contract::List(item) => self.array(item),
+            Contract::Option(item) => self.with_absences(item, crate::Absence::Null),
+            Contract::Tuple(items) => self.tuple(&items),
+            Contract::Record(fields) => {
+                let props = fields
+                    .iter()
+                    .map(|(name, ty)| self.property(name, *ty, false))
+                    .collect::<Vec<_>>();
+                self.object(&props, None)
+            }
+            Contract::Enum(tags) => {
+                let tags: Vec<_> = tags
+                    .cases
+                    .iter()
+                    .map(|case| self.literal(ctx, &case.name))
+                    .collect();
+                self.union(&tags)
+            }
+            Contract::Variant(_, cases) if view == WitView::Boundary => {
+                let cases: Vec<_> = cases
+                    .into_iter()
+                    .map(|(tag, payload)| (shapes::TypeName::new(ctx, tag.into()), payload))
+                    .collect();
+                let cases = CasesId::intern(&mut self.cases, &cases);
+                self.intern_kind(TyKind::Variant(cases))
+            }
+            Contract::Variant(_, cases) => {
+                let cases: Vec<_> = cases
+                    .into_iter()
+                    .map(|(tag, value)| {
+                        let tag = self.literal(ctx, tag);
+                        case(self, "tag", tag, "val", value)
+                    })
+                    .collect();
+                self.union(&cases)
+            }
+            Contract::Result { ok, err } if view == WitView::Boundary => {
+                self.result_record([ok, err])
+            }
+            Contract::Result { ok, err } => {
+                use perry_mir::{RESULT_PAYLOADS, RESULT_TAG};
+                let [value, error] = RESULT_PAYLOADS;
+                let cases = [(value, ok), (error, err)]
+                    .map(|(name, payload)| case(self, RESULT_TAG, Ty::BOOLEAN, name, payload));
+                self.union(&cases)
+            }
+            Contract::Unsupported(_) => Ty::OPEN,
+        };
         self.wit_shapes.insert(key, ty);
         ty
     }

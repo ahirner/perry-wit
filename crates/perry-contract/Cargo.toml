@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+perry-abi.workspace = true
 thiserror.workspace = true
 wit-parser.workspace = true
 

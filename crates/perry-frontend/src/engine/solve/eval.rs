@@ -419,46 +419,35 @@ impl<'h, 'a> Solver<'h, 'a> {
         let depth = s.guards.depth();
         let mut remaining = stmts;
         while let Some((stmt, rest)) = remaining.split_first() {
-            let mut handled = false;
-            if let Stmt::Let {
-                id,
-                init: Some(init),
-                ..
-            } = stmt
-            {
-                if let Some(hir_compat::RecordExpr::Value(mut value)) =
-                    self.index.iteration.expression(init)
+            let inferred = match stmt {
+                Stmt::Let {
+                    id,
+                    init: Some(init),
+                    ..
+                } if let Some(hir_compat::RecordExpr::Value(value)) =
+                    self.index.iteration.expression(init) =>
                 {
-                    while let Some(hir_compat::RecordExpr::Value(inner)) =
-                        self.index.iteration.expression(value)
-                    {
-                        value = inner;
-                    }
-                    let ty = self.eval_expr(s, value)?;
-                    if let Some(lidx) = self.index.local_idx(*id) {
-                        self.write_local_value(s, lidx, ty)?;
-                        self.mark_written(s.inst, lidx);
-                    }
-                    handled = true;
-                } else if matches!(init, Expr::Undefined)
-                    && let Some(el) = self.index.iteration.element(remaining)
-                {
-                    let ty = self.eval_expr(s, el.value)?;
-                    let ty = match el.available {
+                    Some((*id, self.eval_expr(s, value)?))
+                }
+                _ if let Some((element, _)) = self.index.iteration.element(remaining) => {
+                    let ty = self.eval_expr(s, element.value)?;
+                    let ty = match element.available {
                         hir_compat::Availability::Known(true) => ty,
                         hir_compat::Availability::Known(false) => Ty::VOID,
                         hir_compat::Availability::Test(_) => {
                             self.types.with_absences(ty, Absence::Undefined)
                         }
                     };
-                    if let Some(lidx) = self.index.local_idx(el.id) {
-                        self.write_local_value(s, lidx, ty)?;
-                        self.mark_written(s.inst, lidx);
-                    }
-                    handled = true;
+                    Some((element.id, ty))
                 }
-            }
-            if !handled {
+                _ => None,
+            };
+            if let Some((id, ty)) = inferred {
+                if let Some(local) = self.index.local_idx(id) {
+                    self.write_local_value(s, local, ty)?;
+                    self.mark_written(s.inst, local);
+                }
+            } else {
                 self.eval_stmt(s, stmt)?;
             }
             remaining = rest;

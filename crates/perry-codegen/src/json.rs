@@ -5,10 +5,10 @@ use crate::{
     repr::{Carriers, optional_inner, slot_size},
     runtime::Runtime,
 };
+use perry_abi::layout::descriptor;
 use perry_abi::layout::descriptor::{
     JSON_DICTIONARY, JSON_TUPLE, JSON_VARIANT, NULL_ALLOWED, UNDEFINED_ALLOWED,
 };
-use perry_abi::layout::{descriptor, record};
 use perry_mir::{ArrayType, JsonSchema, JsonType, PlironResultExt as _, RecordType};
 use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal, unsupported};
 use pliron::{
@@ -38,6 +38,19 @@ fn json_key(name: &str) -> String {
     out
 }
 
+impl crate::module::Data {
+    pub(super) fn field_names<'a>(&mut self, names: impl Iterator<Item = &'a str>) -> u32 {
+        let mut fields: Vec<_> = names.enumerate().collect();
+        fields.sort_unstable_by(|(_, a), (_, b)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+        let bytes = fields
+            .into_iter()
+            .flat_map(|(index, name)| [self.string(name), index as u32])
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        self.constant(4, bytes)
+    }
+}
+
 impl FunctionLowering<'_, '_> {
     /// Share the indexed name table between cursor decoding and retained record graphs.
     pub(super) fn json_field_table(
@@ -45,30 +58,9 @@ impl FunctionLowering<'_, '_> {
         ctx: &Context,
         ty: TypeHandle,
     ) -> Result<(u32, usize)> {
-        if let Some(&table) = self.state.json_fields.get(&ty) {
-            return Ok(table);
-        }
         let record = TypedHandle::<RecordType>::from_handle(ty, ctx).to_diag(ctx)?;
-        let record = record.deref(ctx);
-        let mut names = record
-            .fields()
-            .to_diag(ctx)?
-            .iter()
-            .enumerate()
-            .collect::<Vec<_>>();
-        names.sort_unstable_by(|(_, (a, _)), (_, (b, _))| {
-            a.len()
-                .cmp(&b.len())
-                .then_with(|| a.as_bytes().cmp(b.as_bytes()))
-        });
-        let mut bytes = Vec::with_capacity(names.len() * 8);
-        for (index, (name, _)) in &names {
-            bytes.extend_from_slice(&self.state.data.string(name).to_le_bytes());
-            bytes.extend_from_slice(&(*index as u32).to_le_bytes());
-        }
-        let table = (self.state.data.append(4, &bytes), names.len());
-        self.state.json_fields.insert(ty, table);
-        Ok(table)
+        let layout = self.state.record_layouts.get(ctx, record)?;
+        Ok(layout.json_fields(&mut self.state.data))
     }
 
     pub(crate) fn layout_descriptor(&mut self, ctx: &Context, ty: TypeHandle) -> Result<u32> {
@@ -118,7 +110,6 @@ impl FunctionLowering<'_, '_> {
             let tuple = layout.record.deref(ctx).is_tuple();
             let mut words = Vec::with_capacity(bytes / 4);
             words.extend([if tuple { JSON_TUPLE } else { RECORD }, count as u32]);
-            let mut offsets = Vec::with_capacity(count + 1);
             let mut required = 0u32;
             let mut numeric = Vec::new();
             for (name, slot) in &layout.fields {
@@ -126,9 +117,6 @@ impl FunctionLowering<'_, '_> {
                 let name_addr = self.state.data.string(name);
                 let field = self.layout_descriptor(ctx, field_ty)?;
                 words.extend([name_addr, field, slot.offset]);
-                if crate::repr::repr(ctx, field_ty).ok() == Some(crate::repr::Repr::Ref) {
-                    offsets.push(slot.offset);
-                }
                 if !perry_mir::admits_undefined(ctx, field_ty)
                     && !field_ty.deref(ctx).is::<JsonType>()
                 {
@@ -138,9 +126,8 @@ impl FunctionLowering<'_, '_> {
                     numeric.push((number, slot.index as usize));
                 }
             }
-            offsets.push(record::JSON);
-            let shape = self.pointer_shape(&offsets);
-            let (table, _) = self.json_field_table(ctx, ty)?;
+            let shape = layout.pointer_shape(ctx, &mut self.state.data, true);
+            let (table, _) = layout.json_fields(&mut self.state.data);
             words.extend([layout.size, shape, table, required]);
             numeric.sort_unstable();
             let mut next = vec![u32::MAX; count];
@@ -177,16 +164,11 @@ impl FunctionLowering<'_, '_> {
                 });
                 words.extend([name, child, u32::from(reference)]);
             }
-            let shape = self.pointer_shape(&[
+            let shape = self.state.data.pointer_shape(&[
                 perry_abi::layout::variant::OWNER,
                 perry_abi::layout::variant::JSON,
             ]);
-            let mut table = Vec::with_capacity(16);
-            for (index, name) in ["tag", "val"].into_iter().enumerate() {
-                table.extend_from_slice(&self.state.data.string(name).to_le_bytes());
-                table.extend_from_slice(&(index as u32).to_le_bytes());
-            }
-            let table = self.state.data.append(4, &table);
+            let table = self.state.data.field_names(["tag", "val"].into_iter());
             words.extend([shape, table, u32::from(self.state.retains_json)]);
             words
         } else if let Some(array) = perry_mir::typed::<ArrayType>(ctx, ty) {

@@ -1,10 +1,22 @@
 //! Arbitrary-width integer magnitudes. Negation is represented as an ordinary `BigInt` operation.
 use crate::operation_schema::op_schema;
 use crate::signatures::Ty;
+use perry_abi::layout::numeric::Integer;
+use pliron::builtin::types::{IntegerType, Signedness};
+use pliron::r#type::TypedHandle;
 use pliron::{
     builtin::attributes::IntegerAttr, common_traits::Verify, context::Context, op::Op,
     operation::Operation, result::Result,
 };
+
+pub fn integer_type(ctx: &Context, domain: Integer) -> TypedHandle<IntegerType> {
+    let sign = if domain.signed() {
+        Signedness::Signed
+    } else {
+        Signedness::Unsigned
+    };
+    IntegerType::get(ctx, domain.bits(), sign)
+}
 
 op_schema! {
     pub BigIntConstOp() -> infallible;

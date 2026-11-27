@@ -1343,6 +1343,7 @@ dependencies = [
  "perry-mir",
  "perry-wit-diagnostics",
  "pliron",
+ "pliron-control",
  "pliron-wasm",
  "regex-automata",
  "wit-parser 0.261.0",
@@ -1375,6 +1376,7 @@ dependencies = [
 name = "perry-contract"
 version = "0.1.0"
 dependencies = [
+ "perry-abi 0.1.0",
  "thiserror",
  "wit-parser 0.261.0",
 ]
@@ -1532,6 +1534,7 @@ dependencies = [
  "perry-rt-build",
  "perry-wit-diagnostics",
  "pliron",
+ "pliron-control",
  "serde",
  "serde_json",
  "tempfile",
@@ -1629,6 +1632,9 @@ dependencies = [
 [[package]]
 name = "pliron-control"
 version = "0.1.0"
+dependencies = [
+ "pliron",
+]
 
 [[package]]
 name = "pliron-derive"

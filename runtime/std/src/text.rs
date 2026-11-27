@@ -103,7 +103,7 @@ fn substring(view: &View, start: u64, end: u64) -> *mut u8 {
 fn literal_matches<'a>(
     text: &'a [u8],
     needle: &'a [u8],
-) -> impl Iterator<Item = (usize, usize)> + Clone + 'a {
+) -> impl Iterator<Item = (usize, usize)> + 'a {
     pattern::matches(text, move |from| {
         let start = from + find(&text[from..], needle)?;
         Some((start, start + needle.len()))
@@ -115,8 +115,17 @@ fn literal_matches<'a>(
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_string_split(string: *mut u8, separator: *mut u8) -> *mut u8 {
     let view = view(string);
-    let ranges = literal_matches(view.text.as_bytes(), unsafe { bytes(separator) });
-    view.split(ranges, 0, |_, _, _| {})
+    let separator = unsafe { bytes(separator) };
+    let capacity = if separator.is_empty() {
+        view.scalars as usize
+    } else {
+        0
+    };
+    view.split(
+        literal_matches(view.text.as_bytes(), separator),
+        capacity,
+        |_, _| [],
+    )
 }
 
 /// Read a character by scalar index, returning `undefined` for invalid, fractional, or out-of-range indices.

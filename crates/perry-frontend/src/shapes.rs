@@ -1,7 +1,8 @@
 //! Source declarations used by type inference and MIR lowering.
+use perry_contract::types::{INTEGERS, Integer};
 use perry_hir::types::Type as HirType;
 use perry_wit_diagnostics::Result;
-use pliron::{builtin::types::Signedness, context::Context};
+use pliron::context::Context;
 use std::collections::{HashMap, HashSet};
 pub(crate) mod generics;
 mod imports;
@@ -15,7 +16,7 @@ pub(crate) struct Declarations<'h> {
     pub(crate) type_aliases: HashMap<&'h str, &'h perry_hir::ir::TypeAlias>,
     pub(crate) classes: HashMap<&'h str, ClassShape<'h>>,
     pub(crate) world: &'h crate::wit::WorldTypes<'h>,
-    integer_imports: HashMap<&'h str, (u32, Signedness)>,
+    integer_imports: HashMap<&'h str, Integer>,
     pub(crate) imported_types: HashMap<&'h str, &'h crate::wit::Foreign<'h>>,
     pub(crate) imports: HashMap<&'h str, Imported<'h>>,
 }
@@ -57,9 +58,8 @@ impl<'h> Declarations<'h> {
                 bindings.insert(local, value);
                 let Some(imported) = name else { continue };
                 if import.source == "perry:types"
-                    && let Some(&(_, _, spec)) = crate::wit::INTEGERS
-                        .iter()
-                        .find(|(name, _, _)| *name == imported)
+                    && let Some(&(_, _, spec)) =
+                        INTEGERS.iter().find(|(name, _, _)| *name == imported)
                 {
                     integer_imports.insert(local, spec);
                     continue;
@@ -102,11 +102,7 @@ impl<'h> Declarations<'h> {
             || self.classes.contains_key(name)
     }
 
-    pub(crate) fn integer_spec<'a>(
-        &'a self,
-        ctx: &Context,
-        mut name: &'a str,
-    ) -> Option<(u32, Signedness)> {
+    pub(crate) fn integer_spec<'a>(&'a self, ctx: &Context, mut name: &'a str) -> Option<Integer> {
         let mut seen = HashSet::new();
         while self.is_user_type(name) {
             let alias = self.type_aliases.get(name)?;

@@ -5,7 +5,7 @@ use perry_hir::{
     types::LocalId,
 };
 use perry_mir::RegexLiteral;
-use pliron::{context::Context, uniqued_any::Uniqued};
+use pliron::context::Context;
 use std::collections::HashMap;
 
 enum Constant<'s> {
@@ -27,7 +27,7 @@ impl<'s> ConstantStrings<'s> {
         &mut self,
         ctx: &Context,
         args: RegExpArguments<'_>,
-    ) -> Option<Uniqued<RegexLiteral>> {
+    ) -> Option<RegexLiteral> {
         Some(RegexLiteral::intern(
             ctx,
             self.operand(args.pattern)?,

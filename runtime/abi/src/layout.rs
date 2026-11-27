@@ -297,6 +297,8 @@ pub mod numeric {
     impl Integer {
         pub const U8: Self = Self(U8 as u8);
         pub const I8: Self = Self(S8 as u8);
+        pub const U16: Self = Self(U16 as u8);
+        pub const I16: Self = Self(S16 as u8);
         pub const U32: Self = Self(U32 as u8);
         pub const I32: Self = Self(S32 as u8);
         pub const U64: Self = Self(U64 as u8);

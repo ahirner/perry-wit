@@ -67,7 +67,7 @@ pub(super) fn foreign(resolve: &Resolve, world: Option<WorldId>) -> HashMap<Stri
             }
         }
     }
-    for (key, ty, _) in super::INTEGERS {
+    for &(key, ty, _) in perry_contract::types::INTEGERS {
         types
             .entry(key.into())
             .or_insert(Foreign::Type(WitValue { resolve, ty }));
@@ -82,7 +82,7 @@ pub(crate) fn supported(resolve: &Resolve, input: Input) -> bool {
         &mut (),
         &|(), id| NamedType::get(resolve, id).map(|_| true),
         &|(), contract| match contract {
-            Contract::Unsupported(_) | Contract::Scalar(Type::ErrorContext) => false,
+            Contract::Unsupported(_) | Contract::ErrorContext => false,
             Contract::Alias(ok) | Contract::List(ok) | Contract::Option(ok) => ok,
             Contract::Result { ok, err } => ok.unwrap_or(true) && err.unwrap_or(true),
             Contract::Record(fields) => fields.into_iter().all(|(_, ok)| ok),

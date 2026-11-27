@@ -12,7 +12,7 @@ use pliron::{
     },
     context::{Context, Ptr},
     operation::Operation,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
     utils::apint::{APInt, bw},
     value::Value,
 };
@@ -23,7 +23,6 @@ pub(super) trait MirInteger: Sized {
     fn bounds(self) -> Interval;
     fn from_type(ctx: &Context, ty: TypeHandle) -> Option<Self>;
     fn ty(self, ctx: &Context) -> TypeHandle;
-    fn integer_type(self, ctx: &Context) -> TypedHandle<IntegerType>;
     fn constant(self, ctx: &mut Context, bits: u64) -> ConstantOp;
 }
 
@@ -51,21 +50,12 @@ impl MirInteger for Integer {
     }
 
     fn ty(self, ctx: &Context) -> TypeHandle {
-        self.integer_type(ctx).into()
-    }
-
-    fn integer_type(self, ctx: &Context) -> TypedHandle<IntegerType> {
-        let signedness = if self.signed() {
-            Signedness::Signed
-        } else {
-            Signedness::Unsigned
-        };
-        IntegerType::get(ctx, self.bits(), signedness)
+        crate::integer_type(ctx, self).into()
     }
 
     /// The constant of this domain holding the two's-complement `bits`.
     fn constant(self, ctx: &mut Context, bits: u64) -> ConstantOp {
-        let ty = self.integer_type(ctx);
+        let ty = crate::integer_type(ctx, self);
         let value = APInt::from_u64(bits, bw(self.bits() as usize));
         ConstantOp::new(ctx, Box::new(IntegerAttr::new(ty, value)))
     }
@@ -320,70 +310,27 @@ impl From<Option<Integer>> for ResultDomain {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum ConstParsedInt {
-    Integer {
-        bits: u64,
-        domain: Integer,
-        interval: Interval,
-        needs_i64: bool,
-    },
-    Float(u64),
-}
-
-pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<ConstParsedInt> {
+pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<NumericConstant> {
+    use perry_abi::number::{Number, parse_integer};
     if crate::intrinsics::intrinsic_of(ctx, op) != Some(crate::intrinsics::Intrinsic::ParseInt) {
         return None;
     }
     let operation = op.deref(ctx);
-    let str_op = operation.get_operand(0).defining_op()?;
-    let str_const = Operation::get_op::<crate::collections::StringConstOp>(str_op, ctx)?;
-    let text_attr = str_const.get_attr_perry_string_value(ctx)?;
-    let text: &str = text_attr.as_ref();
-    let radix_op = operation.get_operand(1).defining_op()?;
-    let radix_const = Operation::get_op::<ConstantOp>(radix_op, ctx)?;
-    let radix_attr = radix_const.get_attr_builtin_constant_value(ctx)?;
-    let radix = NumericConstant::of(ctx, &**radix_attr)?.number();
-    match perry_abi::number::parse_integer(text, radix) {
-        perry_abi::number::Number::Signed(value) => {
-            let magnitude = value.unsigned_abs();
-            let needs_i64 =
-                magnitude > 0 && (64 - magnitude.leading_zeros() - magnitude.trailing_zeros() > 53);
-            Some(ConstParsedInt::Integer {
-                bits: value as u64,
-                domain: Integer::I64,
-                interval: Interval {
-                    lower: value as i128,
-                    upper: value as i128,
-                },
-                needs_i64,
-            })
-        }
-        perry_abi::number::Number::Unsigned(value) => {
-            let needs_i64 = value > 0 && (64 - value.leading_zeros() - value.trailing_zeros() > 53);
-            Some(ConstParsedInt::Integer {
-                bits: value,
-                domain: if value <= i64::MAX as u64 {
-                    Integer::I64
-                } else {
-                    Integer::U64
-                },
-                interval: Interval {
-                    lower: value as i128,
-                    upper: value as i128,
-                },
-                needs_i64,
-            })
-        }
-        perry_abi::number::Number::Float(f) => Some(ConstParsedInt::Float(f.to_bits())),
-    }
+    let string = operation.get_operand(0).defining_op()?;
+    let string = Operation::get_op::<crate::collections::StringConstOp>(string, ctx)?;
+    let text = string.get_attr_perry_string_value(ctx)?;
+    let radix = constant(ctx, operation.get_operand(1).defining_op()?)?;
+    Some(match parse_integer(text.as_ref(), radix.number()) {
+        Number::Signed(value) => NumericConstant::Signed(value),
+        Number::Unsigned(value) => NumericConstant::Unsigned(value),
+        Number::Float(value) => NumericConstant::Float(value.to_bits()),
+    })
 }
 
 pub(super) fn constant_range(ctx: &Context, op: Ptr<Operation>) -> Option<Interval> {
-    if let Some(ConstParsedInt::Integer { interval, .. }) = const_parsed_int(ctx, op) {
-        return Some(interval);
-    }
-    let value = if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
+    let value = if let Some(parsed) = const_parsed_int(ctx, op) {
+        parsed.integer()?
+    } else if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         constant.magnitude(ctx)? as i128
     } else {
         match constant(ctx, op)? {
@@ -519,8 +466,8 @@ pub(super) fn comparison_domain(ctx: &Context, state: &State, inputs: &[Value]) 
 }
 
 pub(super) fn literal(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
-    if let Some(ConstParsedInt::Integer { bits, .. }) = const_parsed_int(ctx, op) {
-        return Some(bits);
+    if let Some(parsed) = const_parsed_int(ctx, op) {
+        return parsed.integer().map(|value| value as u64);
     }
     if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         return constant.magnitude(ctx);

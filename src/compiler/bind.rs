@@ -59,10 +59,10 @@ fn constrain_numbers(
         .chain(results.iter_mut().zip(export.result.iter()))
         .enumerate()
     {
-        let Some(integer) = abi.integer_type(ctx) else {
+        let AbiKind::Scalar(perry_contract::types::Scalar::Integer(domain)) = abi.kind else {
             continue;
         };
-        let wide = matches!(abi.kind, AbiKind::Scalar(Type::S64 | Type::U64));
+        let wide = domain.bits() == 64;
         let is_wide_int = source
             .deref(ctx)
             .downcast_ref::<IntegerType>()
@@ -81,7 +81,7 @@ fn constrain_numbers(
         if common_domain
             && (wide || source.deref(ctx).is::<FP64Type>() || source.deref(ctx).is::<IntegerType>())
         {
-            *source = integer;
+            *source = perry_mir::integer_type(ctx, domain).into();
             constrained = true;
         }
     }

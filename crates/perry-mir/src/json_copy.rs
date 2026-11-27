@@ -106,20 +106,12 @@ fn may_be_cyclic(ctx: &Context, ty: TypeHandle, path: &mut Vec<TypeHandle>) -> b
     if path.contains(&ty) {
         return true;
     }
-    let Some(schema) = JsonSchema::of(ctx, ty) else {
-        return true;
-    };
-    if matches!(schema, JsonSchema::Value) {
-        return true;
-    }
-    let mut children = Vec::new();
-    if !schema.push_children(ctx, &mut children) {
+    if matches!(JsonSchema::of(ctx, ty), None | Some(JsonSchema::Value)) {
         return true;
     }
     path.push(ty);
-    let cyclic = children
-        .into_iter()
-        .any(|child| may_be_cyclic(ctx, child, path));
+    let cyclic = crate::types::type_children(&*ty.deref(ctx))
+        .is_none_or(|mut children| children.any(|child| may_be_cyclic(ctx, child, path)));
     path.pop();
     cyclic
 }
@@ -255,19 +247,16 @@ fn type_may_contain_record(ctx: &Context, ty: TypeHandle, seen: &mut HashSet<Typ
     if !seen.insert(ty) {
         return false;
     }
-    let Some(schema) = JsonSchema::of(ctx, present_type(ctx, ty)) else {
+    let ty = present_type(ctx, ty);
+    let Some(schema) = JsonSchema::of(ctx, ty) else {
         return false;
     };
     match schema {
         JsonSchema::Value => true,
         JsonSchema::Record(rec) if !rec.deref(ctx).is_tuple() => true,
-        _ => {
-            let mut children = Vec::new();
-            !schema.push_children(ctx, &mut children)
-                || children
-                    .into_iter()
-                    .any(|child| type_may_contain_record(ctx, child, seen))
-        }
+        _ => crate::types::type_children(&*ty.deref(ctx)).is_none_or(|mut children| {
+            children.any(|child| type_may_contain_record(ctx, child, seen))
+        }),
     }
 }
 
