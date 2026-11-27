@@ -15,6 +15,7 @@ pub(crate) struct Locals<'h> {
 pub(crate) enum Binding<'h> {
     Guard(Option<&'h Expr>),
     Temporary,
+    YieldedValue,
 }
 
 pub(crate) enum RecordExpr<'a> {
@@ -200,14 +201,24 @@ impl<'h> Locals<'h> {
         matches!(expr, Expr::LocalSet(id, value) if self.row(*id).and_then(|r| r.iteration).is_some() && matches!(&**value, Expr::Undefined))
     }
 
-    pub(crate) fn index_rest_value(&mut self, expr: &Expr) {
-        if let Some(RecordExpr::RestAppend(_, Expr::LocalGet(id))) = self.expression(expr)
-            && let Some(local) = self.index(*id)
+    pub(crate) fn initializer<'a>(&self, id: LocalId, init: Option<&'a Expr>) -> Option<&'a Expr> {
+        match (self.row(id).and_then(|row| row.iteration), init) {
+            (Some(Binding::YieldedValue), Some(Expr::Undefined)) => None,
+            (_, init) => init,
+        }
+    }
+
+    pub(crate) fn index_iterator_value(&mut self, expr: &Expr) {
+        let id = match runtime(expr) {
+            Some(("iteratorRestAppend", [_, Expr::LocalGet(id)]))
+            | Some(("arrayRecordForValue", [_, Expr::LocalGet(id), _])) => *id,
+            _ => return,
+        };
+        if let Some(local) = self.index(id)
             && self.rows[local].flags.contains(LocalFlags::GENERATED)
         {
-            // Exhaustion writes undefined and exits before appending this item.
-            self.rows[local].flags.insert(LocalFlags::DEFERRED);
-            self.rows[local].iteration = Some(Binding::Temporary);
+            // Initialization and release write undefined outside the yielded value's lifetime.
+            self.rows[local].iteration = Some(Binding::YieldedValue);
         }
     }
 

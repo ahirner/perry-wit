@@ -259,19 +259,19 @@ export function callbacks() {
  return small.filter(nothing).length;
 }
 function tail(values: string[]):string[] { const [, ...rest] = values; return rest; }
-export function literalLoop() {
- let calls=0;
- function next(){ return ++calls; }
- const functions=[];
- for (let x of [next(), next()]) { functions.push(()=>x); x+=10; }
- let visits=0;
- for (const value of [1,,3]) { visits+=value ?? 5; }
- for (const [a,b] of [[1,2],[3,4]]) { visits+=a+b; }
- if (tail(['a','rest'])[0] !== 'rest') return -1;
- return calls*1000 + functions[0]()*10 + functions[1]() + visits;
-}
 class IterationName { $$perryIteration(): number { return 13; } }
 export function iteration() {
+ let calls=0;
+ const functions=[];
+ for (let x of [++calls, ++calls]) { functions.push(()=>x); x+=10; }
+ if (calls!==2 || functions[0]()!==11 || functions[1]()!==12) return 9;
+ let sum=0;
+ for (const value of [1,,3]) { sum+=value ?? 5; }
+ for (const [a,b] of [[1,2],[3,4]]) { sum+=a+b; }
+ for (const text of [...tail(['unused','1970-01-01T00:00:00.001Z'])]) {
+   sum += new Date(text).getTime();
+ }
+ if (sum!==20) return 10;
  if (new IterationName().$$perryIteration() !== 13) return 6;
  let steps = 0;
  outer: for (const row of [[1, 2], [3]]) {
@@ -307,7 +307,6 @@ export function iteration() {
 "#;
     let mut program = Program::checked(source, "array-callbacks.ts");
     program.stress_collection(true);
-    assert_eq!(program.call("literalLoop", &[]).0[0].unwrap_f64(), 2141.0);
     assert_eq!(program.outcome("callbacks", &[]), (0.0, 0));
     assert_eq!(program.call("iteration", &[]).0[0].unwrap_f64(), 0.0);
 }

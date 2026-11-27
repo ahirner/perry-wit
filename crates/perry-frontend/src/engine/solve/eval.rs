@@ -457,6 +457,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     return Ok(());
                 };
                 let local = self.index.locals.rows[lidx];
+                let init = self.index.locals.initializer(*id, init.as_ref());
                 let is_inferred = !local.flags.is_explicit();
                 let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
                 let declared = local.declared;

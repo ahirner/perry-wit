@@ -83,17 +83,13 @@ struct SourceFile<'s> {
     positions: std::ops::RangeInclusive<u32>,
 }
 
-enum MemberSyntax {
-    Access,
-    Pattern,
-}
-
 #[derive(Default)]
 pub(crate) struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
     calls: HashMap<u32, Span>,
-    members: HashMap<u32, (Span, MemberSyntax)>,
+    members: HashMap<u32, Span>,
+    pattern_keys: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: HashMap<u32, Span>,
@@ -378,8 +374,15 @@ impl<'s> Locations<'s> {
             .get(..(span.hi.0.checked_sub(span.lo.0)?) as usize)
     }
 
+    fn member_source(&self, offset: u32) -> Option<Span> {
+        self.members
+            .get(&offset)
+            .or_else(|| self.pattern_keys.get(&offset))
+            .copied()
+    }
+
     pub(crate) fn member_text(&self, offset: u32) -> Option<&'s str> {
-        self.source_text(self.members.get(&offset)?.0)
+        self.source_text(self.member_source(offset)?)
     }
 
     pub(crate) fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
@@ -397,16 +400,12 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn is_pattern_key(&self, byte_offset: u32) -> bool {
-        matches!(
-            self.members.get(&byte_offset),
-            Some((_, MemberSyntax::Pattern))
-        )
+        self.pattern_keys.contains_key(&byte_offset)
     }
 
     pub(crate) fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
-        self.members
-            .get(&byte_offset)
-            .and_then(|(span, _)| self.span(*span))
+        self.member_source(byte_offset)
+            .and_then(|span| self.span(span))
             .or_else(|| self.call_span(byte_offset))
     }
 
@@ -519,16 +518,14 @@ impl<'s> Locations<'s> {
                     ast::ObjectPatProp::Rest(_) => None,
                 };
                 if let Some(span) = key {
-                    self.locations
-                        .members
-                        .insert(span.lo.0, (span, MemberSyntax::Pattern));
+                    self.locations.pattern_keys.insert(span.lo.0, span);
                 }
                 prop.visit_children_with(self);
             }
             fn visit_member_expr(&mut self, member: &ast::MemberExpr) {
                 self.locations
                     .members
-                    .insert(member.prop.span().lo.0, (member.span, MemberSyntax::Access));
+                    .insert(member.prop.span().lo.0, member.span);
                 member.visit_children_with(self);
             }
             fn visit_new_expr(&mut self, new_expr: &ast::NewExpr) {

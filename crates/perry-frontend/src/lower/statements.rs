@@ -105,6 +105,7 @@ impl<'s> FunctionBuilder<'s, '_> {
                 }
             }
             Stmt::Let { id, init, .. } => {
+                let init = locals.initializer(*id, init.as_ref());
                 let storage = self.local_storage(*id);
                 if matches!(storage, Some(Storage::ErasedFunction(_))) {
                     if let Some(expr) = init {
@@ -112,7 +113,6 @@ impl<'s> FunctionBuilder<'s, '_> {
                     }
                     return Ok(());
                 }
-                let init = init.as_ref();
                 if matches!(
                     storage,
                     Some(Storage::Boxed {

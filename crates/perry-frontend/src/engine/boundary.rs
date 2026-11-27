@@ -642,7 +642,7 @@ impl<'h> ModuleIndex<'h> {
                     SiteResolution::CollectionNew(scan.types.generic(base, &args)),
                 );
             }
-            Expr::NativeMethodCall { .. } => self.locals.index_rest_value(expr),
+            Expr::NativeMethodCall { .. } => self.locals.index_iterator_value(expr),
             _ => {}
         }
         if let Some(method) = crate::methods::StaticMethod::select(expr, scan.types) {
