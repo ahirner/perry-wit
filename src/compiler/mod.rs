@@ -1,5 +1,6 @@
 //! TypeScript → MIR → core Wasm → WASI 0.3 component.
 
+mod abi;
 mod bind;
 mod http;
 mod imports;
@@ -85,10 +86,19 @@ pub fn compile_typescript(
         file_name,
         &resolve,
         world,
-        !options.core_only,
-        false,
+        WorldOptions {
+            componentize: !options.core_only,
+            ..Default::default()
+        },
     )
     .map_err(Into::into)
+}
+
+#[derive(Default, Clone, Copy)]
+pub(crate) struct WorldOptions {
+    pub(crate) componentize: bool,
+    pub(crate) memory_checks: bool,
+    pub(crate) limits: perry_mir::FactLimits,
 }
 
 fn compile_world(
@@ -96,19 +106,10 @@ fn compile_world(
     file_name: &str,
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
-    componentize: bool,
-    memory_checks: bool,
+    options: WorldOptions,
 ) -> Result<Compiled> {
     let modules = perry_frontend::source_files::load(source, file_name)?;
-    compile_sources(
-        source,
-        file_name,
-        &modules,
-        resolve,
-        world,
-        componentize,
-        memory_checks,
-    )
+    compile_sources(source, file_name, &modules, resolve, world, options)
 }
 
 pub(crate) fn compile_sources(
@@ -117,40 +118,30 @@ pub(crate) fn compile_sources(
     modules: &BTreeMap<String, String>,
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
-    componentize: bool,
-    memory_checks: bool,
+    options: WorldOptions,
 ) -> Result<Compiled> {
     audit::audit_no_llvm(include_str!("../../Cargo.lock"))
         .map_err(|err| err.with_internal_context("LLVM audit verification failed"))?;
     if http::is_handler_world(resolve, world) {
-        return http::compile(
-            source,
-            identity,
-            modules,
-            resolve,
-            world,
-            componentize,
-            memory_checks,
-        );
+        return http::compile(source, identity, modules, resolve, world, options);
     }
     let ctx = &mut Context::new();
-    let mut foreign = perry_frontend::wit::WorldTypes::new(resolve, Some(world));
-    let mut bindings = imports::bindings(resolve, world, &mut foreign);
+    let mut layouts = abi::Layouts::new(resolve)?;
+    let (mut foreign, mut bindings) = imports::bindings(&mut layouts, world);
     let resources = resources::definitions(resolve, world, &mut foreign, &mut bindings)?;
-    let program = perry_frontend::load_world(
+    let perry_frontend::LoweredProgram {
+        module: mir,
+        exports: targets,
+    } = perry_frontend::lower_world(
         ctx,
         source,
         identity,
         modules,
-        foreign.foreign(),
+        &foreign,
         Some((resolve, world)),
     )?;
-    let perry_lower::LoweredProgram {
-        module: mir,
-        exports: targets,
-    } = perry_lower::lower_with_exports(ctx, &program)?;
-    let mut exports = bind::exports(ctx, &targets, resolve, world, program.metadata())?;
-    let mut analyses = optimize(ctx, &mir)?;
+    let mut exports = bind::exports(&mut layouts, ctx, targets)?;
+    let mut analyses = optimize(ctx, &mir, options.limits)?;
     bind::finalize_exports(ctx, &mir, &mut exports)?;
     emit_component(
         ctx,
@@ -158,8 +149,8 @@ pub(crate) fn compile_sources(
         &mut analyses,
         resolve,
         world,
-        memory_checks,
-        componentize,
+        options.memory_checks,
+        options.componentize,
         exports,
         bindings,
         resources,
@@ -192,8 +183,8 @@ pub(super) fn emit_component(
         bindings,
         resources,
     };
-    let mut allocation_report = perry_codegen::explain_tiers(ctx, mir, &exports, analyses)?;
-    let core = perry_codegen::compile(ctx, mir, &exports, analyses)?;
+    let mut allocation_report = String::new();
+    let core = perry_codegen::compile(ctx, mir, &exports, analyses, Some(&mut allocation_report))?;
     let (core, helpers) = finish(
         core,
         streams.as_ref(),
@@ -228,13 +219,20 @@ pub(crate) fn compile_core_sources(
     memory_checks: bool,
 ) -> Result<Vec<u8>> {
     let ctx = &mut Context::new();
-    let (mir, mut analyses) = lower(ctx, source, identity, modules, &Default::default())?;
+    let (mir, mut analyses) = lower(
+        ctx,
+        source,
+        identity,
+        modules,
+        &Default::default(),
+        Default::default(),
+    )?;
     let exports = if memory_checks {
         Exports::RawChecked
     } else {
         Exports::Raw
     };
-    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let core = perry_codegen::compile(ctx, &mir, &exports, &mut analyses, None)?;
     let (core, _) = finish(
         core,
         None,
@@ -257,14 +255,21 @@ fn lower(
     file_name: &str,
     modules: &BTreeMap<String, String>,
     foreign: &perry_frontend::wit::WorldTypes,
+    limits: perry_mir::FactLimits,
 ) -> Result<(pliron::builtin::ops::ModuleOp, AnalysisManager)> {
-    let program = perry_frontend::load_sources(ctx, source, file_name, modules, foreign.foreign())?;
-    let mir = perry_lower::lower_program(ctx, &program)?;
-    let analyses = optimize(ctx, &mir)?;
+    let mir = perry_frontend::lower_sources(ctx, source, file_name, modules, foreign)?;
+    let analyses = optimize(ctx, &mir, limits)?;
     Ok((mir, analyses))
 }
 
-fn optimize(ctx: &mut Context, mir: &pliron::builtin::ops::ModuleOp) -> Result<AnalysisManager> {
+fn optimize(
+    ctx: &mut Context,
+    mir: &pliron::builtin::ops::ModuleOp,
+    limits: perry_mir::FactLimits,
+) -> Result<AnalysisManager> {
+    if limits != Default::default() {
+        limits.set(ctx, mir.get_operation());
+    }
     perry_mir::canonicalize(mir.get_operation(), ctx)
         .to_diag(ctx)
         .map_err(|err| err.with_internal_context("optimizing MIR"))
@@ -278,8 +283,6 @@ fn finish(
 ) -> Result<(Vec<u8>, u32)> {
     let (core, helpers) = link::link_helpers_with(core, streams, canonical, stub_runtime_import)
         .map_err(|err| err.with_internal_context("linking perry-runtime and helpers"))?;
-    let core = link::compact(&core)
-        .map_err(|err| err.with_internal_context("interning core function signatures"))?;
     audit::validate_guest(&core)
         .map_err(|err| err.with_internal_context("validating stackless core Wasm"))?;
     Ok((core, helpers))
@@ -308,8 +311,37 @@ pub fn compile_for_world(
     world: wit_parser::WorldId,
     componentize: bool,
 ) -> Result<Compiled, crate::CompileError> {
-    compile_world(source, file_name, resolve, world, componentize, false)
-        .map_err(crate::CompileError::from)
+    compile_for_world_with_limits(
+        source,
+        file_name,
+        resolve,
+        world,
+        componentize,
+        Default::default(),
+    )
+}
+
+/// Compile a resolved world with explicit alias and specialization budgets.
+pub fn compile_for_world_with_limits(
+    source: &str,
+    file_name: &str,
+    resolve: &wit_parser::Resolve,
+    world: wit_parser::WorldId,
+    componentize: bool,
+    limits: perry_mir::FactLimits,
+) -> Result<Compiled, crate::CompileError> {
+    compile_world(
+        source,
+        file_name,
+        resolve,
+        world,
+        WorldOptions {
+            componentize,
+            limits,
+            ..Default::default()
+        },
+    )
+    .map_err(Into::into)
 }
 
 /// Compile a component test with forced safe-point collection and reclaimed-memory poisoning.
@@ -320,7 +352,18 @@ pub fn compile_for_world_with_memory_checks(
     resolve: &wit_parser::Resolve,
     world: wit_parser::WorldId,
 ) -> Result<Compiled, crate::CompileError> {
-    compile_world(source, file_name, resolve, world, true, true).map_err(crate::CompileError::from)
+    compile_world(
+        source,
+        file_name,
+        resolve,
+        world,
+        WorldOptions {
+            componentize: true,
+            memory_checks: true,
+            ..Default::default()
+        },
+    )
+    .map_err(crate::CompileError::from)
 }
 
 /// Build a linked core module exporting every exported TypeScript function with its raw core

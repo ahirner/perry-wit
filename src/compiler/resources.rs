@@ -1,15 +1,15 @@
 //! Canonical resource identities and the SDK's explicit ownership helpers.
 use perry_codegen::boundary::{Import, ImportKind, ResourceDefinition, ResourceOperation};
-use perry_contract::names::canonical_type;
-use perry_frontend::wit::{ResourceOperation as SourceResourceOperation, WorldTypes};
+use perry_contract::interface_resources;
+use perry_frontend::wit::WorldTypes;
 use perry_wit_diagnostics::{Result, ensure_diag};
 use std::collections::BTreeMap;
-use wit_parser::{Resolve, TypeDefKind, WorldId, WorldItem};
+use wit_parser::{Resolve, WorldId};
 
-pub(super) fn definitions(
-    resolve: &Resolve,
+pub(super) fn definitions<'r>(
+    resolve: &'r Resolve,
     world: WorldId,
-    types: &mut WorldTypes,
+    types: &mut WorldTypes<'r>,
     bindings: &mut Vec<Import>,
 ) -> Result<Vec<ResourceDefinition>> {
     let mut definitions = BTreeMap::new();
@@ -17,16 +17,10 @@ pub(super) fn definitions(
         (false, &resolve.worlds[world].imports),
         (true, &resolve.worlds[world].exports),
     ] {
-        for (key, item) in interfaces {
-            let WorldItem::Interface { id, .. } = item else {
-                continue;
-            };
+        for (key, id) in perry_contract::world_interfaces(interfaces) {
             let module = resolve.name_world_key(key);
-            for (name, id) in &resolve.interfaces[*id].types {
-                if !matches!(resolve.types[*id].kind, TypeDefKind::Resource) {
-                    continue;
-                }
-                let key = canonical_type(resolve, *id).index() as u32;
+            for (name, id) in interface_resources(resolve, id) {
+                let key = id.index() as u32;
                 ensure_diag!(
                     !definitions.contains_key(&key),
                     crate::codes::CONTRACT_MISMATCH,
@@ -37,26 +31,22 @@ pub(super) fn definitions(
                     ResourceDefinition {
                         key,
                         module: module.clone(),
-                        name: name.clone(),
+                        name: name.to_owned(),
                         exported,
                     },
                 );
-                for helper in types.resource_helpers(resolve, *id, &module, name, exported)? {
-                    let operation = match helper.operation {
-                        SourceResourceOperation::Drop => ResourceOperation::Drop,
-                        SourceResourceOperation::New => ResourceOperation::New,
-                        SourceResourceOperation::Representation => {
-                            ResourceOperation::Representation
-                        }
-                    };
-                    let binding = helper.binding;
-                    let name = helper.name;
+                for &operation in ResourceOperation::for_interface(exported) {
+                    let (_, param, result) = operation.signature(id);
+                    let name = operation.name(name);
+                    let binding =
+                        types.import_function(resolve, &module, &name, [param], result, false);
                     bindings.retain(|old| old.binding != binding);
                     bindings.push(Import {
                         binding,
                         module: module.clone(),
                         name,
                         params: vec![],
+                        indirect_size: None,
                         result: None,
                         asynchronous: false,
                         kind: ImportKind::Resource { key, operation },

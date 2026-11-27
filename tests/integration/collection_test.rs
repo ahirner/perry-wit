@@ -3,6 +3,10 @@ use crate::node_oracle::assert_numbers;
 
 #[test]
 fn collections_preserve_evaluation_order_and_key_semantics() -> anyhow::Result<()> {
+    perry_wit::compile_core(
+        "function unused(): number { return new Map<string, boolean>().size + new Set<string>().size; }",
+        "unspecialized-collections.ts",
+    )?;
     let error = perry_wit::compile_core(
         "export function run():number { const row={value:1,extra:2}; const mixed:(number|{value:number})[]=[row]; return mixed.length; }",
         "union-layout.ts",
@@ -49,6 +53,9 @@ export function argumentOrder() {
  if(reverseTotal!==16 || reverse!=='2:3;1:2;0:1;' || right.length!==4)return 5;
  const empty:number[]=[];
  if(empty.reduce((acc,n)=>acc+n,append(empty,7,1))!==8)return 6;
+ const extra=left.length;
+ const collect=(acc:number[],n:number)=>{acc.push(n+extra);return acc;};
+ if([1,2].reduce(collect,[]).join(',')!=='5,6')return 7;
  return 0;
 }
 
@@ -104,7 +111,7 @@ export function canonicalKeys() {
  const map=new Map<number,number>([[-0,1],[2,2]]);
  map.set(-0,3);
  let trace='';
- map.forEach((value,key)=>{trace+=String(1/key)+':'+String(value)+';';});
+ map.forEach((value,key,receiver)=>{if(receiver!==map)throw new Error('map receiver');trace+=String(1/key)+':'+String(value)+';';});
  if(map.size!==2 || trace!=='Infinity:3;0.5:2;')return 1;
  const updates=new Map<number,number>([[0,1]]);
  updates.set(-0,2);
@@ -115,7 +122,7 @@ export function canonicalKeys() {
  const set=new Set<number>([-0,2]);
  set.add(-0);
  trace='';
- set.forEach((value,key)=>{trace+=String(1/value)+':'+String(1/key)+';';});
+ set.forEach((value,key,receiver)=>{if(receiver!==set)throw new Error('set receiver');trace+=String(1/value)+':'+String(1/key)+';';});
  if(set.size!==2 || trace!=='Infinity:Infinity;0.5:0.5;')return 4;
  const inserted=new Set<number>();
  inserted.add(-0);
@@ -128,6 +135,8 @@ export function canonicalKeys() {
  for(const key of mixed.keys())if(typeof key==='number' && 1/key!==Infinity)return 9;
  const numbers=new Set<number>([NaN,NaN,-0,0]);
  if(numbers.size!==2 || !numbers.has(NaN) || !numbers.has(-0))return 10;
+ for(const [a,b] of inserted.entries())if(1/a!==Infinity || 1/b!==Infinity)return 11;
+ if(Array.from(updates.values()).join(',')!=='4')return 12;
  return 0;
 }
 
@@ -185,6 +194,11 @@ export function liveGrouping() {
  if(visits!==2 || missing===undefined || missing.length!==1 || missing[0]!==undefined)return 6;
  const empty:number[]=[];
  if(Map.groupBy(empty,(value,index)=>{throw new Error('empty callback');return 0;}).size!==0)return 7;
+ const numbers=new Set<number>([10,20,30]);
+ numbers.delete(10);
+ trace='';
+ Map.groupBy(numbers,(value,index)=>{trace+=String(index)+':'+String(value)+';';return 0;});
+ if(trace!=='0:20;1:30;')return 8;
  return 0;
 }
 

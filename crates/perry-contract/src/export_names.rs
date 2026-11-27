@@ -71,21 +71,12 @@ pub(crate) fn interface_implementation_name(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "WIT exports '{first}' and '{second}' both require TypeScript implementation '{implementation}'"
+)]
 pub struct ImplementationNameCollision {
     first: String,
     second: String,
     implementation: String,
 }
-
-impl std::fmt::Display for ImplementationNameCollision {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "WIT exports '{}' and '{}' both require TypeScript implementation '{}'",
-            self.first, self.second, self.implementation,
-        )
-    }
-}
-
-impl std::error::Error for ImplementationNameCollision {}

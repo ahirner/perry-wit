@@ -195,7 +195,7 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
             "export class Box<T> {\n  constructor(public value: T) {}\n  asNumber(): number {\n    return this.value;\n  }\n}",
             "import { Box } from './lib';\nexport function run(): number {\n  return new Box('bad').asNumber();\n}",
             codes::TYPE_MISMATCH,
-            "called from here",
+            "while instantiating 'Box::asNumber'",
         ),
     ] {
         let err = api::compile_core(&program_with(
@@ -206,6 +206,25 @@ fn imported_helpers_report_the_call_chain_across_compiler_phases() {
         .unwrap_err();
         assert_eq!(err.primary().code(), expected_code, "{err}");
         assert_caller_note(&err, "src/lib.ts", needle);
+    }
+
+    let exported = program_with(
+        WORKFLOW,
+        "import {helper} from './lib'; export {helper}; export function run(n:number):number { return helper(n); }",
+        &[(
+            "src/lib.ts",
+            "export function helper(n:number):number { return n ** 2; }",
+        )],
+    );
+    let wit = Wit {
+        application: b"package test:origins; world app { export helper: func(n:f64) -> f64; export run: func(n:f64) -> f64; }".as_slice().into(),
+        dependencies: vec![],
+    };
+    for error in [
+        api::compile(&exported, &wit, &Options::default()).unwrap_err(),
+        api::compile_core(&exported).unwrap_err(),
+    ] {
+        assert_caller_note(&error, "src/lib.ts", "called from here ('helper')");
     }
 
     // Nested chain: workflow.ts -> generic mid<T> in mid.ts -> helper leaf in leaf.ts.
@@ -271,7 +290,18 @@ fn nullable_property_access_requires_narrowing() {
 
 #[test]
 fn type_errors_preserve_source_spans_and_field_names() {
+    let source = "export function run() { const cause = new TypeError('cause'); const aggregate = new AggregateError([cause], 'aggregate'); return { message: cause.message, aggregateCount: aggregate.errors.length }; }";
+    let error = perry_wit::compile_core(source, "fields.ts").unwrap_err();
+    assert!(
+        error.to_string().contains("in field 'aggregateCount'"),
+        "{error}"
+    );
+
     for (source, code) in [
+        (
+            "export function run(): number { const item = {x: 4}; const other = {y: 3}; const bad: number | undefined = other.x; const {x, ...rest} = item; return bad === undefined ? x : -1; }",
+            codes::TYPE_MISMATCH,
+        ),
         (
             "interface Item { value:number|null } export function run():number { const item:Item={};return 0; }",
             codes::MISSING_REQUIRED_FIELD,
@@ -437,9 +467,13 @@ fn unsupported_forms_have_exact_diagnostics() {
         (iteration("new URLSearchParams()"), "case.ts:1:8: error[unsupported-construct]: synchronous for...of requires a dense typed array or string; URLSearchParams iteration is unsupported".into()),
         ("export function run(): string { return 'a'.replaceAll(/a/, 'b'); }".into(), "case.ts:1:40: error[unsupported-construct]: String.prototype.replaceAll called with a non-global RegExp argument".into()),
         ("class A {} class B extends A {} export function run(): number { return 0; }".into(), "error[unsupported-construct]: class B extends A: class inheritance is not supported yet".into()),
+        ("export function run(change: boolean): string { let pattern = /a/; if (change) pattern = /(a)/; return 'a'.replace(pattern, () => 'x'); }".into(), "case.ts:1:103: error[unsupported-construct]: replacement callbacks require statically known capture arity".into()),
+        ("function match(s: string) { return s.match(/x/g); } export function run(s: string) { const hit = match(s); return hit ? hit.index : 0; }".into(), "case.ts:1:121: error[unsupported-construct]: regex result metadata requires an exec result or a non-global match result".into()),
+        ("export function run(s: string) { let hit = /x/.exec(s); if (!hit) return 0; let copy = hit; let n = 0; for (let i = 0; i < 2; i++) { n += copy.index; copy = copy.slice(); } return n; }".into(), "case.ts:1:139: error[unsupported-construct]: regex result metadata requires an exec result or a non-global match result".into()),
         (regex("/a/g"), "case.ts:1:55: error[unsupported-construct]: Regex search supports only the u and s flags".into()),
         (regex("/\\u{61}/"), format!("{REGEX_CONST}Braced Unicode regex escapes require the u flag")),
         (regex("/(?=a)/"), format!("{REGEX_CONST}Regex lookaround and inline flags are unsupported")),
+        ("export function run(input: string): string { return input.replace(/(?=x)/, () => 'x'); }".into(), format!("{REGEX_CONST}Regex lookaround and inline flags are unsupported")),
         (regex("/(a)\\1/"), format!("{REGEX_CONST}Unsupported regex escape: \\1")),
         (regex("/(a)(b)(c)(d)(e)(f)(g)(h)(i)/"), format!("{REGEX_CONST}Regex has 9 capture groups; at most 8 are supported")),
         (regex("/(a{300})/"), format!("{REGEX_CONST}Regex capture program exceeds 256 states")),

@@ -18,8 +18,8 @@ use pliron::{
     basic_block::BasicBlock,
     builtin::{
         attributes::TypeAttr,
-        op_interfaces::{OneResultInterface, SymbolOpInterface},
-        ops::{FuncOp, ModuleOp},
+        op_interfaces::{OneRegionInterface, OneResultInterface, SymbolOpInterface},
+        ops::FuncOp,
         type_interfaces::FunctionTypeInterface,
         types::FunctionType,
     },
@@ -48,27 +48,51 @@ const SMALL: usize = 25;
 /// No callee above this size is inlined.
 const LIMIT: usize = 64;
 
-pub fn functions(module: Ptr<Operation>, ctx: &Context) -> Vec<FuncOp> {
-    let Some(module) = Operation::get_op::<ModuleOp>(module, ctx) else {
-        return Vec::new();
-    };
-    use pliron::builtin::op_interfaces::SingleBlockRegionInterface;
-    module
-        .get_body(ctx, 0)
-        .deref(ctx)
-        .iter(ctx)
-        .filter_map(|op| Operation::get_op::<FuncOp>(op, ctx))
-        .collect()
+pub use pliron_control::functions;
+
+/// Functions reachable from the selected implementation names, in declaration order.
+pub fn reachable_functions(
+    ctx: &Context,
+    module: Ptr<Operation>,
+    entry: impl FnMut(&FuncOp) -> Option<Identifier>,
+) -> Vec<FuncOp> {
+    let mut functions = functions(module, ctx);
+    let by_name: HashMap<_, _> = functions
+        .iter()
+        .map(|&f| (f.get_symbol_name(ctx), f))
+        .collect();
+    let roots = functions
+        .iter()
+        .filter_map(entry)
+        .filter_map(|name| by_name.get(&name).copied());
+    let active = crate::reachable(roots, |func| {
+        operations(ctx, &func)
+            .into_iter()
+            .filter_map(|op| by_name.get(&crate::calls::callee(ctx, op)?).copied())
+    });
+    functions.retain(|func| active.contains(func));
+    functions
 }
 
 pub fn operations(ctx: &Context, function: &FuncOp) -> Vec<Ptr<Operation>> {
-    use pliron::builtin::op_interfaces::OneRegionInterface;
     let region = function.get_region(ctx);
     let mut operations = Vec::new();
     for block in region.deref(ctx).iter(ctx) {
         operations.extend(block.deref(ctx).iter(ctx));
     }
     operations
+}
+
+pub fn function_values<C: Default + Extend<Value>>(ctx: &Context, function: &FuncOp) -> C {
+    let mut values = C::default();
+    for block in function.get_region(ctx).deref(ctx).iter(ctx) {
+        let block = block.deref(ctx);
+        values.extend(block.arguments());
+        for op in block.iter(ctx) {
+            values.extend(op.deref(ctx).results());
+        }
+    }
+    values
 }
 
 /// A function that can be inlined: synchronous, at most [LIMIT] operations, and calling
@@ -171,7 +195,6 @@ pub(crate) fn inline_leaves(root: Ptr<Operation>, ctx: &mut Context) -> IRStatus
 /// call, the copy is entered with the call's operands, and its returns branch to the
 /// continuation with their values.
 fn inline_call(ctx: &mut Context, call: Ptr<Operation>, callee: &FuncOp) {
-    use pliron::builtin::op_interfaces::OneRegionInterface;
     let block = call.deref(ctx).get_parent_block().expect("call in a block");
     let region = block
         .deref(ctx)

@@ -1,33 +1,31 @@
 //! Lower array/string iteration and byte-stream async iteration before HIR erases types.
-use super::names::FreshNames;
+use crate::source::Analysis;
 use perry_parser::swc_ecma_ast as ast;
 use perry_wit_diagnostics::{Diagnostic, Result};
-use perry_wit_diagnostics::{
-    bail_internal, bail_unsupported, ensure_internal, ensure_unsupported, internal,
-};
+use perry_wit_diagnostics::{bail_unsupported, ensure_unsupported};
 use std::collections::HashSet;
-use swc_common::{DUMMY_SP, Span, SyntaxContext};
+use swc_common::{DUMMY_SP, SyntaxContext};
+use swc_ecma_utils::ExprFactory;
 use swc_ecma_visit::{VisitMut, VisitMutWith};
 
-pub fn is_writable_to_web(expr: &perry_hir::ir::Expr) -> bool {
+pub(crate) fn is_writable_to_web(expr: &perry_hir::ir::Expr) -> bool {
     matches!(expr, perry_hir::ir::Expr::NativeMethodCall {
         module, class_name: Some(class), object: None, method, ..
     } if matches!(module.as_str(), "stream" | "node:stream") && class == "Writable" && method == "toWeb")
 }
 
-/// The synthetic method a synchronous `for...of` calls on its source: lowering checks that
-/// the receiver is an array or string and yields it unchanged.
-pub(super) const ITERATION: &str = "$$perryIteration";
-
-/// Rewrite every `for...of` and `for await...of` into the indexed or reader loop it means.
-pub(super) fn lower(module: &mut ast::Module, names: &mut FreshNames) -> Result<()> {
-    let mut lower = Loops { names, error: None };
+/// Keep the iteration source, binding pattern, and body together through lexical name resolution.
+pub(super) fn lower(module: &mut ast::Module, analysis: &mut Analysis) -> Result<()> {
+    let mut lower = Loops {
+        analysis,
+        error: None,
+    };
     module.visit_mut_with(&mut lower);
     lower.error.map_or(Ok(()), Err)
 }
 
 struct Loops<'n> {
-    names: &'n mut FreshNames,
+    analysis: &'n mut Analysis,
     error: Option<Diagnostic>,
 }
 
@@ -44,60 +42,111 @@ impl Loops<'_> {
             bail_unsupported!("{ONE_BINDING}");
         };
         let binding = declarator.name;
-        let prefix = self.names.prefix("loop");
-        let template = if asynchronous {
-            format!(
-                r#"{{
-            const {prefix}reader = {prefix}source.getReader();
-            let {prefix}done = false;
-            try {{
-                while (true) {{
-                    const {prefix}step = await {prefix}reader.read();
-                    if ({prefix}step.done) {{ {prefix}done = true; break; }}
-                    const {prefix}item = {prefix}step.value;
-                    {prefix}body();
-                }}
-            }} finally {{
-                try {{ if (!{prefix}done) await {prefix}reader.cancel(); }}
-                finally {{ {prefix}reader.releaseLock(); }}
-            }}
-        }}"#
-            )
+        let prefix = self.analysis.names.prefix("loop");
+        let ident = |suffix| ast::Ident::new_no_ctxt(format!("{prefix}{suffix}").into(), DUMMY_SP);
+        let source = iteration.right;
+        let body = *iteration.body;
+        let statements = if asynchronous {
+            let reader = ident("reader");
+            let done = ident("done");
+            let step = ident("step");
+            let acquired = method(source, "getReader")
+                .into_var_decl(ast::VarDeclKind::Const, reader.clone().into());
+            let exhausted = false.into_var_decl(ast::VarDeclKind::Let, done.clone().into());
+            let read = awaited(method(reader.clone(), "read"))
+                .into_var_decl(ast::VarDeclKind::Const, step.clone().into());
+            let finish = ast::IfStmt {
+                span: DUMMY_SP,
+                test: step.clone().make_member("done".into()).into(),
+                cons: Box::new(
+                    block(vec![
+                        true.make_assign_to(ast::AssignOp::Assign, done.clone().into())
+                            .into_stmt(),
+                        ast::BreakStmt::default().into(),
+                    ])
+                    .into(),
+                ),
+                alt: None,
+            };
+            let item = step
+                .make_member("value".into())
+                .into_var_decl(kind, binding);
+            let read_loop = ast::WhileStmt {
+                span: DUMMY_SP,
+                test: true.into(),
+                body: Box::new(block(vec![read.into(), finish.into(), item.into(), body]).into()),
+            };
+            let cancel = ast::IfStmt {
+                span: DUMMY_SP,
+                test: ast::UnaryExpr {
+                    span: DUMMY_SP,
+                    op: ast::UnaryOp::Bang,
+                    arg: done.into(),
+                }
+                .into(),
+                cons: Box::new(awaited(method(reader.clone(), "cancel")).into_stmt()),
+                alt: None,
+            };
+            let cleanup = try_finally(cancel.into(), method(reader, "releaseLock").into_stmt());
+            vec![
+                acquired.into(),
+                exhausted.into(),
+                try_finally(read_loop.into(), cleanup),
+            ]
         } else {
-            format!(
-                r#"{{
-            const {prefix}items = {prefix}source.{ITERATION}();
-            for (let {prefix}index = 0; {prefix}index < {prefix}items.length; {prefix}index++) {{
-                const {prefix}item = {prefix}items[{prefix}index];
-                {prefix}body();
-            }}
-        }}"#
-            )
-        };
-        let mut parsed = perry_parser::parse_typescript(&template, "iteration.ts")
-            .map_err(|e| internal!("{e:?}"))?;
-        struct SyntheticSpans;
-        impl VisitMut for SyntheticSpans {
-            fn visit_mut_span(&mut self, span: &mut Span) {
-                *span = DUMMY_SP;
+            // Perry resolves the lexical scope and destructuring pattern. MIR supplies
+            // the current element and owns the loop bounds, cursor, and control flow.
+            let element =
+                ast::Ident::new_no_ctxt(format!("{prefix}element").into(), iteration.span);
+            self.analysis.record_iteration(iteration.span);
+            let init = source.into_var_decl(ast::VarDeclKind::Const, element.clone().into());
+            let item = element.into_var_decl(kind, binding);
+            return Ok(ast::ForStmt {
+                span: iteration.span,
+                init: Some(ast::VarDeclOrExpr::VarDecl(Box::new(init))),
+                test: None,
+                update: None,
+                body: Box::new(block(vec![item.into(), body]).into()),
             }
+            .into());
+        };
+        Ok(ast::BlockStmt {
+            span: iteration.span,
+            stmts: statements,
+            ..Default::default()
         }
-        parsed.visit_mut_with(&mut SyntheticSpans);
-        let Some(ast::ModuleItem::Stmt(mut statement)) = parsed.body.pop() else {
-            bail_internal!("the iteration template is one block statement");
-        };
-        let mut fill = Fill {
-            prefix,
-            source: Some(iteration.right),
-            body: Some(*iteration.body),
-            binding: Some(binding),
-            kind,
-            repeated: false,
-        };
-        statement.visit_mut_with(&mut fill);
-        fill.check()?;
-        Ok(statement)
+        .into())
     }
+}
+
+fn block(stmts: Vec<ast::Stmt>) -> ast::BlockStmt {
+    ast::BlockStmt {
+        stmts,
+        ..Default::default()
+    }
+}
+
+fn method(receiver: impl ExprFactory, name: &str) -> ast::Expr {
+    receiver
+        .make_member(name.into())
+        .as_call(DUMMY_SP, Vec::new())
+}
+
+fn awaited(call: ast::Expr) -> ast::AwaitExpr {
+    ast::AwaitExpr {
+        span: DUMMY_SP,
+        arg: call.into(),
+    }
+}
+
+fn try_finally(body: ast::Stmt, finalizer: ast::Stmt) -> ast::Stmt {
+    ast::TryStmt {
+        span: DUMMY_SP,
+        block: block(vec![body]),
+        handler: None,
+        finalizer: Some(block(vec![finalizer])),
+    }
+    .into()
 }
 
 impl VisitMut for Loops<'_> {
@@ -113,87 +162,6 @@ impl VisitMut for Loops<'_> {
         };
     }
 }
-
-/// Fills a parsed loop template's placeholders (`<prefix>source`, `<prefix>item`, and
-/// `<prefix>body()`) with the loop's parts in a single pass.
-/// [Fill::check] verifies that every placeholder was substituted exactly once.
-struct Fill {
-    prefix: String,
-    source: Option<Box<ast::Expr>>,
-    body: Option<ast::Stmt>,
-    binding: Option<ast::Pat>,
-    kind: ast::VarDeclKind,
-    /// A placeholder appeared after its part was already placed.
-    repeated: bool,
-}
-
-impl Fill {
-    /// Whether `ident` is the template placeholder `<prefix><name>`.
-    fn is_placeholder(&self, ident: &ast::Ident, name: &str) -> bool {
-        ident.sym.strip_prefix(self.prefix.as_str()) == Some(name)
-    }
-
-    /// Every part was placed exactly once.
-    fn check(&self) -> Result<()> {
-        ensure_internal!(
-            !self.repeated
-                && self.source.is_none()
-                && self.body.is_none()
-                && self.binding.is_none(),
-            "the iteration template names each placeholder exactly once"
-        );
-        Ok(())
-    }
-}
-
-impl VisitMut for Fill {
-    fn visit_mut_expr(&mut self, expression: &mut ast::Expr) {
-        if let ast::Expr::Ident(id) = expression
-            && self.is_placeholder(id, "source")
-        {
-            match self.source.take() {
-                Some(source) => *expression = *source,
-                None => self.repeated = true,
-            }
-        } else {
-            expression.visit_mut_children_with(self);
-        }
-    }
-
-    fn visit_mut_var_decl(&mut self, declaration: &mut ast::VarDecl) {
-        if let Some(item) = declaration.decls.iter_mut().find(
-            |decl| matches!(&decl.name, ast::Pat::Ident(id) if self.is_placeholder(&id.id, "item")),
-        ) {
-            match self.binding.take() {
-                Some(binding) => {
-                    item.name = binding;
-                    declaration.kind = self.kind;
-                }
-                None => self.repeated = true,
-            }
-        } else {
-            declaration.visit_mut_children_with(self);
-        }
-    }
-
-    fn visit_mut_stmt(&mut self, statement: &mut ast::Stmt) {
-        if let ast::Stmt::Expr(expr) = statement
-            && let ast::Expr::Call(call) = &*expr.expr
-            && let ast::Callee::Expr(callee) = &call.callee
-            && let ast::Expr::Ident(id) = &**callee
-            && self.is_placeholder(id, "body")
-        {
-            match self.body.take() {
-                Some(body) => *statement = body,
-                None => self.repeated = true,
-            }
-        } else {
-            statement.visit_mut_children_with(self);
-        }
-    }
-}
-
-pub(super) const DECODE: &str = "$$perryDecodeOptions";
 
 pub(super) fn preserve_options(
     module: &mut ast::Module,
@@ -213,17 +181,6 @@ pub(super) fn preserve_options(
                 && self.error.is_none()
             {
                 self.error = Some(error);
-            }
-        }
-        fn visit_mut_call_expr(&mut self, call: &mut ast::CallExpr) {
-            call.visit_mut_children_with(self);
-            if call.args.len() > 1
-                && let ast::Callee::Expr(callee) = &mut call.callee
-                && let ast::Expr::Member(member) = &mut **callee
-                && let ast::MemberProp::Ident(method) = &mut member.prop
-                && method.sym == "decode"
-            {
-                method.sym = DECODE.into();
             }
         }
     }

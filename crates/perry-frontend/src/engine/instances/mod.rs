@@ -1,0 +1,477 @@
+//! Bind solved instances to borrowed source declarations and native MIR operation plans.
+use crate::source::{Bodies, InstanceBodies, InstanceClass, InstanceFunction};
+mod async_helpers;
+mod expressions;
+mod funcs;
+mod stmts;
+use super::BodyOwner;
+use super::boundary::{ModuleIndex, Origins, TemplateKind};
+use super::solve::Invocation;
+use super::solve::{ClassInst, Receiver, SiteEntry, Solved};
+use super::types::{
+    CaptureOwner, CellKind, ClassId, Idx, IdxVec, InstanceId, LocId, LocalFlags, LocalStorage, Ty,
+    TyKind, TypeTable,
+};
+use crate::source::CallerKind;
+use perry_hir::types::{FuncId, LocalId, Type as HirType};
+use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
+use pliron::context::Context;
+
+use crate::hir_compat::Witnesses;
+
+pub(super) fn build<'h, 'r>(
+    bodies: &'h Bodies,
+    locations: &mut crate::hir_compat::Locations<'_>,
+    index: &mut ModuleIndex<'h>,
+    types: &TypeTable,
+    (solved, exports): (&Solved, Witnesses<'r, super::solve::ExportRoot>),
+    layouts: (&Context, &mut perry_mir::RecordLayouts),
+) -> Result<(
+    InstanceBodies<'h>,
+    super::InstancePlans<'h>,
+    Witnesses<'r, FuncId>,
+)> {
+    let max_inst_fid = solved
+        .instances
+        .iter()
+        .map(|i| i.emitted_func_id)
+        .max()
+        .unwrap_or(0);
+    let mut planner = InstancePlanner {
+        bodies,
+        locations,
+        index,
+        types,
+        solved,
+        next_func_id: index.max_func_id.max(max_inst_fid).saturating_add(1),
+        layouts,
+
+        origins: index.views.filled(Vec::new()),
+        native: Default::default(),
+        plans: super::InstancePlans {
+            targets: super::CallTargets {
+                instances: solved.instances.filled(None),
+                helpers: solved.helpers.filled(None),
+            },
+            ..Default::default()
+        },
+        locals: solved.instances.filled(Default::default()),
+    };
+    let (bodies, exports) = planner.build_all(exports)?;
+    planner.finalize_sites()?;
+    let InstancePlanner {
+        mut plans, origins, ..
+    } = planner;
+    plans.decisions.expressions = std::mem::take(&mut index.expressions);
+    plans.locals = std::mem::take(&mut index.locals);
+    index.emitted_uses(&bodies, origins, &mut plans, locations)?;
+    Ok((bodies, plans, exports))
+}
+
+struct InstancePlanner<'h, 'a, 's> {
+    bodies: &'h Bodies,
+    locations: &'a mut crate::hir_compat::Locations<'s>,
+    index: &'a ModuleIndex<'h>,
+    types: &'a TypeTable,
+    solved: &'a Solved,
+    origins: Origins,
+    next_func_id: FuncId,
+    layouts: (&'a Context, &'a mut perry_mir::RecordLayouts),
+
+    native: Vec<(FuncId, super::NativeFunction)>,
+    plans: super::InstancePlans<'h>,
+    locals: IdxVec<InstanceId, Vec<(super::types::LocalIdx, super::Storage)>>,
+}
+
+impl<'h> InstancePlanner<'h, '_, '_> {
+    fn is_resolved(&self, ty: Ty) -> bool {
+        !self.types.is_open_with(
+            ty,
+            |loc| (loc, self.solved.locations[loc]),
+            &self.solved.dict_reads,
+        )
+    }
+
+    fn annotate_local(&self, err: Diagnostic, id: LocalId) -> Diagnostic {
+        match self.index.locals.row(id).and_then(|r| r.span) {
+            Some(span) => self.locations.annotate(err, span),
+            None => err,
+        }
+    }
+
+    fn attach_inst_chain(&self, err: Diagnostic, inst_id: InstanceId) -> Diagnostic {
+        super::solve::attach_inst_chain(
+            &self.solved.instances,
+            self.index,
+            self.locations,
+            err,
+            inst_id,
+        )
+    }
+
+    fn build_all<'r>(
+        &mut self,
+        roots: Witnesses<'r, super::solve::ExportRoot>,
+    ) -> Result<(InstanceBodies<'h>, Witnesses<'r, FuncId>)> {
+        let init_inst = self.solved.init_inst;
+        self.prepare_bindings(init_inst)?;
+
+        let mut new_functions = indexmap::IndexMap::new();
+        for (inst_id, inst) in self.solved.instances.iter_enumerated() {
+            if !self.solved.live_instances.contains(inst_id.index()) {
+                continue;
+            }
+            let view = self.index.view(inst.template);
+            let (kind, caller) = match view.kind {
+                TemplateKind::ModuleInit => (CallerKind::Initializer, None),
+                TemplateKind::Closure(_) | TemplateKind::Function => (
+                    if inst.is_witness {
+                        CallerKind::Export
+                    } else {
+                        CallerKind::Function
+                    },
+                    Some(inst.emitted_func_id),
+                ),
+                _ => (CallerKind::Class, None),
+            };
+            self.origins[inst.template].push((self.solved.body_owner(inst_id), kind, caller));
+            match view.kind {
+                TemplateKind::PromiseResolve(_) | TemplateKind::PromiseReject(_) => {
+                    self.promise_handle_function(inst, view.kind)?;
+                    self.plans.targets.instances[inst_id] = Some(inst.emitted_func_id);
+                }
+                TemplateKind::Function
+                | TemplateKind::Closure(_)
+                | TemplateKind::ClassStaticMethod(_)
+                | TemplateKind::ClassMethod
+                | TemplateKind::ClassGetter
+                | TemplateKind::ClassSetter => {
+                    let function = self.plan_function(inst_id, None)?;
+                    new_functions.insert(function.id, function);
+                }
+                _ => {}
+            }
+        }
+        if let Some(f) = self.bodies.functions.iter().find(|f| f.is_generator) {
+            let name = self.locations.display_function_name(&f.name);
+            return Err(self.locations.annotate_caller(
+                Diagnostic::unsupported(format!("generator function {name} is not supported yet"))
+                    .with_fallback_span(self.locations.function_span(&f.name)),
+                &f.name,
+            ));
+        }
+        let static_fields = self
+            .index
+            .locals
+            .rows
+            .iter()
+            .filter(|local| local.flags.contains(LocalFlags::STATIC_FIELD))
+            .filter_map(|local| match local.storage {
+                LocalStorage::Module(loc) => {
+                    let ty = self.solved.locations[loc];
+                    Some((local.id, self.is_resolved(ty).then_some(ty)))
+                }
+                LocalStorage::Activation(_) => None,
+            })
+            .collect();
+        let mut new_classes = IdxVec::default();
+        let mut emitted_classes = std::collections::HashSet::new();
+        for cinst in self.solved.class_insts.iter() {
+            emitted_classes.insert(cinst.class);
+            new_classes.push(self.plan_class(cinst.class, Some(cinst))?);
+        }
+        for (&id, class) in &self.index.classes {
+            let decl = class.declaration;
+            if !emitted_classes.contains(&id)
+                && (!decl.static_fields.is_empty() || decl.extends_name.is_some())
+            {
+                new_classes.push(self.plan_class(id, None)?);
+            }
+        }
+        for id in self.solved.helpers.ids() {
+            if self.solved.live_helpers.contains(id.index()) {
+                self.prepare_helper(id)?;
+            }
+        }
+        let mut exports = Vec::with_capacity(roots.len());
+        for (i, witness) in roots.into_iter().enumerate() {
+            use crate::engine::{NativeBody, NativeFunction, NativeParam, solve::ExportRoot};
+            let id = match &witness.target {
+                None => None,
+                Some(ExportRoot::Function(id)) => Some(self.plans.targets.instance(*id)?),
+                Some(ExportRoot::Adapter {
+                    target,
+                    params,
+                    result,
+                }) => {
+                    let id = self.fresh_func_id()?;
+                    let name = crate::hir_compat::adapter_name(i);
+                    if let crate::hir_compat::Target::Function(id) = target {
+                        let template = self
+                            .index
+                            .view(self.solved.instances[*id].template)
+                            .raw_name();
+                        self.locations
+                            .record_instantiation(name.clone(), template, 0, None);
+                    }
+                    self.native.push((
+                        id,
+                        NativeFunction {
+                            name,
+                            params: self
+                                .types
+                                .tuple_slice(*params)
+                                .iter()
+                                .copied()
+                                .map(NativeParam::Value)
+                                .collect(),
+                            result: match *result {
+                                super::solve::AdapterResult::Declared(ty) => ty,
+                                super::solve::AdapterResult::Inferred(loc) => {
+                                    self.solved.locations[loc]
+                                }
+                            },
+                            is_async: false,
+                            body: NativeBody::Resource(*target),
+                        },
+                    ));
+                    Some(id)
+                }
+            };
+            exports.push(witness.with_target(id));
+        }
+        self.native.sort_unstable_by_key(|&(id, _)| id);
+        Ok((
+            InstanceBodies {
+                static_fields,
+                native: std::mem::take(&mut self.native),
+                init: &self.bodies.init,
+                functions: new_functions,
+                classes: new_classes,
+            },
+            exports,
+        ))
+    }
+
+    fn plan_class(
+        &mut self,
+        cid: ClassId,
+        instantiated: Option<&ClassInst>,
+    ) -> Result<InstanceClass<'h>> {
+        let class = self.index.class(cid);
+        let orig = class.declaration;
+        if instantiated.and_then(|i| i.field_init).is_none()
+            && let Some(tid) = class.field_init
+            && self.origins[tid].is_empty()
+        {
+            self.origins[tid].push((BodyOwner::Initializer, CallerKind::Class, None));
+        }
+        for member in &orig.computed_members {
+            let id = member.function.id;
+            if let Some(tid) = self.index.template_of_func(id) {
+                self.origins[tid].push((BodyOwner::Function(id), CallerKind::Class, None));
+            }
+        }
+        let mut cls = InstanceClass {
+            ty: instantiated.map_or(class.ty, |instance| instance.ty),
+            declaration: orig,
+            name: instantiated.map_or(&orig.name, |i| &i.emitted_name).clone(),
+            field_overrides: Vec::new(),
+            initializer: None,
+            constructor: None,
+            direct_constructor: false,
+        };
+        let Some(cinst) = instantiated else {
+            return Ok(cls);
+        };
+        cls.initializer = cinst
+            .field_init
+            .map(|id| self.solved.instances[id].emitted_func_id);
+        let field_locs = &self.solved.field_locs[cinst.field_locs];
+        use crate::source::FieldOverride;
+        cls.direct_constructor = class.direct_constructor;
+        for (index, ((field, &annotation), &loc)) in orig
+            .fields
+            .iter()
+            .zip(&class.field_types)
+            .zip(field_locs)
+            .enumerate()
+        {
+            let resolved = self.solved.locations[loc];
+            let storage = if self.is_zero_sized_func(resolved) {
+                cls.direct_constructor = false;
+                FieldOverride::Erased
+            } else if self.is_resolved(resolved) {
+                if resolved == annotation {
+                    continue;
+                }
+                FieldOverride::Solved(resolved)
+            } else if matches!(
+                self.types.kind(resolved),
+                TyKind::Cell {
+                    kind: CellKind::Array,
+                    ..
+                }
+            ) {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "an empty array literal needs a declared element type"
+                )
+                .with_help(format!(
+                    "Add a concrete element type annotation to field '{}'.",
+                    field.name
+                )));
+            } else if resolved == Ty::BOTTOM && matches!(field.ty, HirType::Any | HirType::Unknown)
+            {
+                return Err(diag!(
+                    codes::MISSING_TYPE_ANNOTATION,
+                    "the value type cannot be inferred in field '{}'",
+                    field.name
+                )
+                .with_help(
+                    "Add a concrete type annotation to this binding, parameter, or function return.",
+                ));
+            } else {
+                continue;
+            };
+            cls.field_overrides.push((index, storage));
+        }
+        if let (Some(initializer), Some(_)) = (cinst.field_init, cinst.ctor_inst) {
+            self.prepare_bindings(initializer)?;
+        }
+        cls.constructor = cinst
+            .ctor_inst
+            .or(cinst.field_init)
+            .map(|id| self.plan_function(id, Some(cls.ty)))
+            .transpose()?;
+        Ok(cls)
+    }
+
+    fn plan_function(
+        &mut self,
+        inst_id: InstanceId,
+        constructed: Option<Ty>,
+    ) -> Result<InstanceFunction<'h>> {
+        let inst = &self.solved.instances[inst_id];
+        let view = self.index.view(inst.template);
+        let lexical = inst.invocation == Invocation::Lexical;
+        let is_env_fn = !lexical && self.is_env_template(inst.template);
+        let self_ident = inst.identity();
+        let environment = is_env_fn.then_some(self_ident);
+        if let Some(identity) = environment {
+            self.environment(identity)?;
+        }
+        let receiver = match inst.receiver.filter(|_| !view.captures_this) {
+            Some(Receiver::Class(id)) if !lexical && constructed.is_none() => {
+                Some(self.solved.class_insts[id].ty)
+            }
+            Some(Receiver::Object(ty)) if !lexical => Some(ty),
+            _ => None,
+        };
+
+        for (param, param_loc) in view.params.iter().zip(inst.activation.locations()) {
+            let local = self.index.param_local(param)?;
+            let param_ty = self.solved.locations[param_loc];
+            if !lexical
+                && let Some(ident) = self
+                    .types
+                    .erased_function(param_ty, &self.solved.escaping_env_templates)
+            {
+                self.locals[inst_id].push((
+                    local,
+                    super::Storage::ErasedFunction(Some(self.index.view(ident.template).func_id)),
+                ));
+                continue;
+            }
+            let resolved = self.is_resolved(param_ty).then_some(param_ty);
+            if resolved.is_none()
+                && !inst.is_witness
+                && self.index.locals.rows[local]
+                    .flags
+                    .implicit_parameter(param)
+            {
+                let err = diag!(codes::MISSING_TYPE_ANNOTATION, "cannot infer the type of parameter '{}' of '{}'", param.name, view.display_name(self.locations))
+                    .with_help("Add a concrete type annotation to this binding, parameter, or function return.");
+                let err = self.annotate_local(err, param.id);
+                return Err(self.attach_inst_chain(err, inst_id));
+            }
+            let ty = resolved.unwrap_or(self.index.locals.rows[local].declared);
+            let storage = if self.solved.boxed_locals.contains(local.index()) {
+                super::Storage::Boxed {
+                    ty,
+                    init: super::CellInit::AtDeclaration,
+                }
+            } else {
+                super::Storage::Value(ty)
+            };
+            self.locals[inst_id].push((local, storage));
+        }
+
+        let ret_ty = self.solved.locations[inst.return_loc];
+        let void_return = !lexical && self.is_zero_sized_func(ret_ty);
+        let result = if let Some(class) = constructed {
+            super::InstanceResult::Value(class)
+        } else if void_return {
+            super::InstanceResult::ErasedFunction
+        } else if self.is_resolved(ret_ty) {
+            super::InstanceResult::Value(ret_ty)
+        } else if self
+            .solved
+            .self_nested_locs
+            .contains(inst.return_loc.index())
+        {
+            let err = diag!(
+                codes::MISSING_TYPE_ANNOTATION,
+                "cannot infer return type of '{}': inferred type nests itself",
+                view.display_name(self.locations)
+            )
+            .with_help("Add a concrete return type annotation to this function.");
+            let err = match self.locations.declaration_span(&view.raw_name()) {
+                Some(span) => err.with_span(span),
+                None => err,
+            };
+            return Err(self.attach_inst_chain(err, inst_id));
+        } else if let Some(partial) = inst.partial_record_result {
+            super::InstanceResult::Value(partial)
+        } else {
+            super::InstanceResult::Source
+        };
+        self.prepare_bindings(inst_id)?;
+        if !inst.is_witness
+            && let Some(caller) = inst.caller
+        {
+            let caller = &self.solved.instances[caller];
+            self.locations.record_instantiation(
+                inst.emitted_name.clone(),
+                view.raw_name(),
+                inst.call_byte_offset,
+                (caller.template != super::types::TemplateId::INIT)
+                    .then(|| caller.emitted_name.clone()),
+            );
+        }
+
+        let captures_frame = inst.capture_owner.is_some() || self.types.tuple_slice(inst.args).iter().any(|&arg| {
+            matches!(self.types.kind(arg), TyKind::Func(id) if !self.index.template_captures(id.template).is_empty())
+        });
+        let inline = (constructed.is_none()
+            && (inst.invocation == Invocation::Lexical
+                || (!self.is_env_template(inst.template)
+                    && (inst.invocation == Invocation::Inline || captures_frame))))
+            .then_some(inst.invocation);
+        self.plans.targets.instances[inst_id] = Some(inst.emitted_func_id);
+        Ok(InstanceFunction {
+            template: inst.template,
+            inline,
+            environment,
+            receiver,
+            result,
+            id: inst.emitted_func_id,
+            name: if inst.emitted_name == view.name {
+                view.name.clone()
+            } else {
+                inst.emitted_name.clone().into()
+            },
+            is_exported: inst.is_witness,
+        })
+    }
+}

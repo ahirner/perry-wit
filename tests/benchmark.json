@@ -24,10 +24,10 @@
   },
   {
     "workload": "io (64 KiB)",
-    "bytes": 47265,
-    "core_bytes": 40736,
-    "defined_functions": 122,
-    "helper_functions": 111,
+    "bytes": 47526,
+    "core_bytes": 40997,
+    "defined_functions": 123,
+    "helper_functions": 112,
     "optimization": {
       "cleanup_rounds": 2,
       "constraint_visits": 13,
@@ -40,20 +40,20 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 2131,
-    "invocation_fuel": 647878,
-    "warm_fuel": 629222,
+    "invocation_fuel": 647953,
+    "warm_fuel": 629224,
     "initial_memory": 65536,
     "memory": 327680
   },
   {
     "workload": "incoming-stream (4 MiB)",
-    "bytes": 39162,
-    "core_bytes": 37315,
+    "bytes": 39135,
+    "core_bytes": 37288,
     "defined_functions": 122,
     "helper_functions": 111,
     "optimization": {
       "cleanup_rounds": 5,
-      "constraint_visits": 126,
+      "constraint_visits": 124,
       "numeric_contexts": 1,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -62,21 +62,21 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5307,
-    "invocation_fuel": 159615406,
+    "initialization_fuel": 5287,
+    "invocation_fuel": 159615449,
     "warm_fuel": 159601054,
     "initial_memory": 65536,
     "memory": 65536
   },
   {
     "workload": "bounded-http-exact (4 MiB)",
-    "bytes": 66295,
-    "core_bytes": 59937,
+    "bytes": 66240,
+    "core_bytes": 59882,
     "defined_functions": 144,
     "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 340,
+      "constraint_visits": 331,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -85,21 +85,21 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5695,
-    "invocation_fuel": 13648690,
-    "warm_fuel": 13617542,
+    "initialization_fuel": 5659,
+    "invocation_fuel": 13648624,
+    "warm_fuel": 13617543,
     "initial_memory": 65536,
     "memory": 4325376
   },
   {
     "workload": "bounded-http-overflow",
-    "bytes": 66295,
-    "core_bytes": 59937,
+    "bytes": 66240,
+    "core_bytes": 59882,
     "defined_functions": 144,
     "helper_functions": 136,
     "optimization": {
       "cleanup_rounds": 3,
-      "constraint_visits": 340,
+      "constraint_visits": 331,
       "numeric_contexts": 2,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -108,16 +108,16 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5695,
-    "invocation_fuel": 13637757,
-    "warm_fuel": 13606945,
+    "initialization_fuel": 5659,
+    "invocation_fuel": 13637691,
+    "warm_fuel": 13606966,
     "initial_memory": 65536,
     "memory": 4325376
   },
   {
     "workload": "unbounded-http-bytes (4 MiB)",
-    "bytes": 65042,
-    "core_bytes": 57960,
+    "bytes": 64987,
+    "core_bytes": 57905,
     "defined_functions": 152,
     "helper_functions": 141,
     "optimization": {
@@ -131,16 +131,16 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 5665,
-    "invocation_fuel": 15999743,
-    "warm_fuel": 11447584,
+    "initialization_fuel": 5629,
+    "invocation_fuel": 15999801,
+    "warm_fuel": 11447588,
     "initial_memory": 65536,
     "memory": 8519680
   },
   {
     "workload": "scalar % loop (n = 10⁶)",
-    "bytes": 2838,
-    "core_bytes": 2838,
+    "bytes": 2843,
+    "core_bytes": 2843,
     "defined_functions": 11,
     "helper_functions": 10,
     "optimization": {
@@ -154,7 +154,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 240,
+    "initialization_fuel": 250,
     "invocation_fuel": 28000010,
     "initial_memory": 65536,
     "memory": 65536,
@@ -174,8 +174,8 @@
   },
   {
     "workload": "temporary record per iteration (n = 10⁶)",
-    "bytes": 2841,
-    "core_bytes": 2841,
+    "bytes": 2846,
+    "core_bytes": 2846,
     "defined_functions": 11,
     "helper_functions": 10,
     "optimization": {
@@ -189,7 +189,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 240,
+    "initialization_fuel": 250,
     "invocation_fuel": 30000010,
     "initial_memory": 65536,
     "memory": 65536,
@@ -209,10 +209,10 @@
   },
   {
     "workload": "push records, then sum (n = 10⁶)",
-    "bytes": 18173,
-    "core_bytes": 18173,
-    "defined_functions": 49,
-    "helper_functions": 47,
+    "bytes": 18192,
+    "core_bytes": 18192,
+    "defined_functions": 50,
+    "helper_functions": 48,
     "optimization": {
       "cleanup_rounds": 4,
       "constraint_visits": 112,
@@ -225,7 +225,7 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 433,
-    "invocation_fuel": 719942041,
+    "invocation_fuel": 719942383,
     "initial_memory": 65536,
     "memory": 49479680,
     "counters": [
@@ -244,10 +244,10 @@
   },
   {
     "workload": "push numbers, then sum (n = 10⁶)",
-    "bytes": 18007,
-    "core_bytes": 18007,
-    "defined_functions": 48,
-    "helper_functions": 46,
+    "bytes": 18026,
+    "core_bytes": 18026,
+    "defined_functions": 49,
+    "helper_functions": 47,
     "optimization": {
       "cleanup_rounds": 4,
       "constraint_visits": 95,
@@ -260,7 +260,7 @@
       "summarized_heap_sets": 0
     },
     "initialization_fuel": 433,
-    "invocation_fuel": 128489378,
+    "invocation_fuel": 128489698,
     "initial_memory": 65536,
     "memory": 15990784,
     "counters": [
@@ -384,8 +384,8 @@
   },
   {
     "workload": "compile: property chain, depth 32",
-    "bytes": 2368,
-    "core_bytes": 2368,
+    "bytes": 2373,
+    "core_bytes": 2373,
     "defined_functions": 14,
     "helper_functions": 12,
     "optimization": {
@@ -402,13 +402,13 @@
   },
   {
     "workload": "example: merge_task",
-    "bytes": 20625,
-    "core_bytes": 20233,
+    "bytes": 21227,
+    "core_bytes": 20835,
     "defined_functions": 56,
-    "helper_functions": 49,
+    "helper_functions": 50,
     "optimization": {
       "cleanup_rounds": 5,
-      "constraint_visits": 322,
+      "constraint_visits": 269,
       "numeric_contexts": 3,
       "parse_stringify_missed": 0,
       "parse_stringify_rewrites": 0,
@@ -420,8 +420,8 @@
   },
   {
     "workload": "example: template task",
-    "bytes": 3506,
-    "core_bytes": 3374,
+    "bytes": 3511,
+    "core_bytes": 3379,
     "defined_functions": 27,
     "helper_functions": 24,
     "optimization": {
@@ -570,8 +570,8 @@
   },
   {
     "workload": "WIT s64 addition",
-    "bytes": 6584,
-    "core_bytes": 6490,
+    "bytes": 6589,
+    "core_bytes": 6495,
     "defined_functions": 28,
     "helper_functions": 25,
     "optimization": {
@@ -585,15 +585,15 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 1837,
+    "initialization_fuel": 1847,
     "invocation_fuel": 2769,
     "initial_memory": 65536,
     "memory": 65536
   },
   {
     "workload": "WIT u64 addition",
-    "bytes": 6542,
-    "core_bytes": 6448,
+    "bytes": 6547,
+    "core_bytes": 6453,
     "defined_functions": 28,
     "helper_functions": 25,
     "optimization": {
@@ -607,7 +607,7 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 1837,
+    "initialization_fuel": 1847,
     "invocation_fuel": 2755,
     "initial_memory": 65536,
     "memory": 65536
@@ -680,10 +680,10 @@
   },
   {
     "workload": "successful unwrap reuse",
-    "bytes": 2951,
-    "core_bytes": 2860,
-    "defined_functions": 23,
-    "helper_functions": 20,
+    "bytes": 2935,
+    "core_bytes": 2844,
+    "defined_functions": 21,
+    "helper_functions": 18,
     "optimization": {
       "cleanup_rounds": 3,
       "constraint_visits": 35,
@@ -695,15 +695,37 @@
       "summarized_contexts": 0,
       "summarized_heap_sets": 0
     },
-    "initialization_fuel": 240,
-    "invocation_fuel": 2327,
+    "initialization_fuel": 250,
+    "invocation_fuel": 2323,
+    "initial_memory": 65536,
+    "memory": 65536
+  },
+  {
+    "workload": "1,024 adjacent global regex matches",
+    "bytes": 16716,
+    "core_bytes": 16624,
+    "defined_functions": 55,
+    "helper_functions": 52,
+    "optimization": {
+      "cleanup_rounds": 3,
+      "constraint_visits": 193,
+      "numeric_contexts": 2,
+      "parse_stringify_missed": 0,
+      "parse_stringify_rewrites": 0,
+      "range_widenings": 0,
+      "specializations": 1,
+      "summarized_contexts": 0,
+      "summarized_heap_sets": 0
+    },
+    "initialization_fuel": 2210,
+    "invocation_fuel": 417155,
     "initial_memory": 65536,
     "memory": 65536
   },
   {
     "workload": "async frame liveness",
-    "bytes": 20894,
-    "core_bytes": 19939,
+    "bytes": 20889,
+    "core_bytes": 19934,
     "defined_functions": 69,
     "helper_functions": 61,
     "optimization": {

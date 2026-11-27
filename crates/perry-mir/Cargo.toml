@@ -6,6 +6,8 @@ publish = false
 description = "Typed middle IR for perry-wit, built on pliron"
 
 [dependencies]
+regex-syntax = "0.8"
+thiserror.workspace = true
 perry-abi.workspace = true
 perry-wit-diagnostics.workspace = true
 pliron.workspace = true

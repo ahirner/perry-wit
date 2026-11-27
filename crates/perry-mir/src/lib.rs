@@ -11,6 +11,7 @@ mod characters;
 mod collections;
 mod constants;
 mod control;
+mod counted_loops;
 mod diagnostics;
 mod effects;
 mod exceptions;
@@ -25,7 +26,7 @@ mod intrinsics;
 mod json_copy;
 mod json_schema;
 mod lifetimes;
-mod liveness;
+use pliron_control::liveness;
 mod locals;
 mod operation_schema;
 mod optional;
@@ -36,6 +37,7 @@ mod regex;
 mod scalar;
 mod semantics;
 mod signatures;
+pub use signatures::Ty as SignatureType;
 mod types;
 mod unwraps;
 mod variants;
@@ -95,7 +97,7 @@ where
     seen
 }
 
-pub use aggregates::{functions, operations};
+pub use aggregates::{function_values, functions, operations, reachable_functions};
 pub use attrs::{Absence, BinaryKind, CompareKind, ErrorKind, FieldOrder, NumericConstant, Tier};
 pub use calls::{
     AsyncCallOp, AwaitOp, CallOp, TimerOp, is_async, is_exported, set_async, set_exported,
@@ -105,10 +107,11 @@ pub use collections::{
     ArrayPresentOp, ArrayPushOp, ArraySetOp, ArrayStoreOp, ArrayTruncateOp, ConcatOp,
     ConcatReuseOp, ConcatSegmentsOp, JsonBoxOp, NativeJsonOp, StringConstOp, StringLenOp,
 };
+pub use constants::integer_constant;
 pub use control::{BrOp, CondBrOp, ReturnOp};
 pub use diagnostics::{
-    PlironResultExt, SourceSpan, attach_caller_notes, set_caller_notes, set_source_span,
-    source_span,
+    CallerFrame, CallerRelation, PlironResultExt, SourceSpan, attach_caller_notes,
+    set_caller_frames, set_caller_notes, set_caller_origin, set_source_span, source_span,
 };
 pub use effects::{Allocation, Effects, Failure, Summary, allocates, allocation};
 pub use exceptions::{
@@ -116,19 +119,20 @@ pub use exceptions::{
     set_exit_only,
 };
 pub use facts::{
-    ProgramFacts, constrain_signature, specialized_implementation, wit_signature, with_fact_limits,
+    FactLimits, ProgramFacts, constrain_signature, specialized_implementation, wit_signature,
 };
 pub use foreign::{ForeignOp, Phase};
 pub use globals::{GlobalLoadOp, GlobalOp, INITIALIZER};
 pub use heap::{AllocOp, FieldGetOp, FieldPresentOp, FieldSetOp, RecordOrderOp};
-pub use integers::BigIntConstOp;
+pub use integers::{BigIntConstOp, integer_type};
 pub use intrinsics::{
     Combinator, Intrinsic, IntrinsicOp, JsonCopyOp, JsonDecodeOp, JsonStringifyOp,
     PromiseCombinatorOp, PromisePendingOp, PromiseRejectedOp, PromiseResolvedOp, PromiseSettleOp,
     SettleKind, SettledField, SettledFieldOp, may_throw,
 };
+pub use json_copy::{CopySlot, JsonCopyPlan};
 pub use json_schema::JsonSchema;
-pub use liveness::{LiveAfter, LiveValues};
+pub use liveness::{LiveSet, LiveValues};
 pub use locals::{LoadOp, LocalOp, StoreOp, UndefOp};
 pub use optional::{
     IsNullOp, IsUndefinedOp, NullOp, OmittedOp, OptionalCastOp, ToNumberOp, ToStringOp,
@@ -137,10 +141,10 @@ pub use optional::{
 };
 pub use perry_abi::layout::time::{DatePart, DurationPart, Overflow, Unit as CalendarUnit};
 pub use pipeline::{canonicalize, optimization_statistics};
-pub use regex::RegexConstOp;
+pub use regex::{RegexConstOp, RegexLiteral, RegexShape};
 pub use scalar::{BinaryOp, CompareOp, NumericCastOp};
 pub use types::*;
 pub use variants::{
     VariantNewOp, VariantPayloadOp, VariantTagOp, admits_payload, value_tag, variant_cases,
 };
-pub use views::{AggregateViewOp, can_widen};
+pub use views::{AggregateViewOp, accepts_import_input, can_widen};

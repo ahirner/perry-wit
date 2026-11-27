@@ -2,7 +2,7 @@
 //!
 //! Views share a detachable owner, subarrays preserve offsets, and transfer reuses the payload.
 use crate::{
-    runtime::{ARRAY_DATA, RANGE_ERROR, alloc, bytes as string_bytes, raise},
+    runtime::{ARRAY_DATA, RANGE_ERROR, alloc, bytes as string_bytes},
     text::{integer, relative},
 };
 use core::ptr;
@@ -30,16 +30,20 @@ fn slice(bytes: *mut u8) -> &'static mut [u8] {
     }
 }
 
-fn attached(bytes: *mut u8) -> bool {
-    if unsafe { (*bytes.cast::<Bytes>()).detached() } {
-        raise(
+fn attached_buffer(buffer: *mut perry_rt_sys::ByteBuffer) -> bool {
+    if unsafe { (*buffer).detached } {
+        perry_rt_sys::raise_static!(
             crate::runtime::TYPE_ERROR,
-            perry_rt_sys::static_text!("Cannot use a detached ArrayBuffer"),
+            "Cannot use a detached ArrayBuffer"
         );
         false
     } else {
         true
     }
+}
+
+fn attached(bytes: *mut u8) -> bool {
+    attached_buffer(unsafe { (*bytes.cast::<Bytes>()).owner })
 }
 
 /// The canonical boundary reads refreshed bounds after observing detachment.
@@ -92,16 +96,10 @@ pub(crate) unsafe extern "C" fn std_buffer_length(buffer: *mut u8) -> f64 {
 #[unsafe(no_mangle)]
 pub(crate) unsafe extern "C" fn std_bytes_from_buffer(buffer: *mut u8) -> *mut u8 {
     let buffer = buffer.cast::<perry_rt_sys::ByteBuffer>();
-    unsafe {
-        if (*buffer).detached {
-            raise(
-                crate::runtime::TYPE_ERROR,
-                perry_rt_sys::static_text!("Cannot use a detached ArrayBuffer"),
-            );
-            return core::ptr::null_mut();
-        }
-        perry_rt_sys::buffer_view(buffer, 0, (*buffer).len)
+    if !attached_buffer(buffer) {
+        return core::ptr::null_mut();
     }
+    unsafe { perry_rt_sys::buffer_view(buffer, 0, (*buffer).len) }
 }
 
 /// A DataView shares the same traced owner and view header as Uint8Array.
@@ -115,11 +113,7 @@ pub(crate) unsafe extern "C" fn std_data_view_new(
     let Some(offset) = view_index(offset) else {
         return ptr::null_mut();
     };
-    if unsafe { (*buffer).detached } {
-        raise(
-            crate::runtime::TYPE_ERROR,
-            perry_rt_sys::static_text!("Cannot use a detached ArrayBuffer"),
-        );
+    if !attached_buffer(buffer) {
         return ptr::null_mut();
     }
     let remaining = i64::from(buffer_len) - offset;
@@ -146,10 +140,7 @@ fn view_index(number: f64) -> Option<i64> {
 }
 
 fn offset_out_of_bounds() {
-    raise(
-        RANGE_ERROR,
-        perry_rt_sys::static_text!("offset is out of bounds"),
-    );
+    perry_rt_sys::raise_static!(RANGE_ERROR, "offset is out of bounds");
 }
 
 #[unsafe(no_mangle)]
@@ -241,10 +232,7 @@ fn index(index: f64, len: usize) -> Option<usize> {
 pub(crate) extern "C" fn std_bytes_new(length: f64) -> *mut u8 {
     let length = integer(length);
     if !(0..=MAX as i64).contains(&length) {
-        raise(
-            RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid typed array length"),
-        );
+        perry_rt_sys::raise_static!(RANGE_ERROR, "Invalid typed array length");
         return zeroed(0);
     }
     zeroed(length as u32)

@@ -59,14 +59,6 @@ pub(super) struct FunctionEmitter<'a> {
     pub(super) code: Vec<Instruction<'static>>,
 }
 
-pub(super) fn successors(ctx: &Context, block: Ptr<BasicBlock>) -> Vec<Ptr<BasicBlock>> {
-    block
-        .deref(ctx)
-        .get_terminator(ctx)
-        .map(|t| t.deref(ctx).successors().collect())
-        .unwrap_or_default()
-}
-
 impl<'a> FunctionEmitter<'a> {
     pub(super) fn new(
         ctx: &'a Context,
@@ -98,7 +90,7 @@ impl<'a> FunctionEmitter<'a> {
                 .deref(ctx)
                 .get_terminator(ctx)
                 .is_some_and(|t| Operation::get_op::<BrTableOp>(t, ctx).is_some());
-            for succ in successors(ctx, block) {
+            for succ in block.deref(ctx).succs(ctx) {
                 if order[&succ] > order[&block] {
                     *forward_preds.entry(succ).or_default() += 1;
                     if is_table {

@@ -1337,12 +1337,16 @@ source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf
 name = "perry-codegen"
 version = "0.1.0"
 dependencies = [
+ "indexmap",
  "perry-abi 0.1.0",
+ "perry-contract",
  "perry-mir",
  "perry-wit-diagnostics",
  "pliron",
+ "pliron-control",
  "pliron-wasm",
  "regex-automata",
+ "wit-parser 0.261.0",
 ]
 
 [[package]]
@@ -1372,6 +1376,8 @@ dependencies = [
 name = "perry-contract"
 version = "0.1.0"
 dependencies = [
+ "perry-abi 0.1.0",
+ "thiserror",
  "wit-parser 0.261.0",
 ]
 
@@ -1393,8 +1399,11 @@ source = "git+https://github.com/PerryTS/perry?rev=9a1ed5a85eb4f915644eb9f5e75bf
 name = "perry-frontend"
 version = "0.1.0"
 dependencies = [
+ "bit-set",
+ "indexmap",
  "perry-contract",
  "perry-hir",
+ "perry-mir",
  "perry-parser",
  "perry-wit-diagnostics",
  "pliron",
@@ -1403,6 +1412,7 @@ dependencies = [
  "swc_common",
  "swc_ecma_parser",
  "swc_ecma_transforms_base",
+ "swc_ecma_utils",
  "swc_ecma_visit",
  "wit-parser 0.261.0",
 ]
@@ -1439,16 +1449,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "perry-lower"
-version = "0.1.0"
-dependencies = [
- "perry-frontend",
- "perry-mir",
- "perry-wit-diagnostics",
- "pliron",
-]
-
-[[package]]
 name = "perry-mir"
 version = "0.1.0"
 dependencies = [
@@ -1457,6 +1457,8 @@ dependencies = [
  "pliron",
  "pliron-control",
  "regex",
+ "regex-syntax",
+ "thiserror",
 ]
 
 [[package]]
@@ -1528,11 +1530,11 @@ dependencies = [
  "perry-contract",
  "perry-frontend",
  "perry-json",
- "perry-lower",
  "perry-mir",
  "perry-rt-build",
  "perry-wit-diagnostics",
  "pliron",
+ "pliron-control",
  "serde",
  "serde_json",
  "tempfile",
@@ -1630,6 +1632,9 @@ dependencies = [
 [[package]]
 name = "pliron-control"
 version = "0.1.0"
+dependencies = [
+ "pliron",
+]
 
 [[package]]
 name = "pliron-derive"
@@ -1651,6 +1656,7 @@ version = "0.1.0"
 dependencies = [
  "pliron",
  "pliron-control",
+ "thiserror",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
  "wasmprinter",

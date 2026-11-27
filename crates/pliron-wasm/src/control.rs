@@ -73,27 +73,15 @@ impl BrTableOp {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum BrTableErr {
+    #[error("wasm.br_table needs a default successor")]
     Default,
+    #[error("wasm.br_table index must be a signless i32")]
     Index,
+    #[error("wasm.br_table needs one index and no successor operands, found {0} operands")]
     Operands(usize),
 }
-
-impl core::fmt::Display for BrTableErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Default => f.write_str("wasm.br_table needs a default successor"),
-            Self::Index => f.write_str("wasm.br_table index must be a signless i32"),
-            Self::Operands(count) => write!(
-                f,
-                "wasm.br_table needs one index and no successor operands, found {count} operands"
-            ),
-        }
-    }
-}
-
-impl core::error::Error for BrTableErr {}
 
 impl Verify for BrTableOp {
     fn verify(&self, ctx: &Context) -> Result<()> {

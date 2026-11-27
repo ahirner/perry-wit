@@ -1,0 +1,411 @@
+use super::*;
+
+impl<'s> FunctionBuilder<'s, '_> {
+    /// Lower `array.map(callback)` or `array.filter(callback)` (when `filter` is true),
+    /// expanding the callback inline once with `(item, index, array)`.
+    pub(crate) fn array_transform(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        callback: &'s Expr,
+        transform: Transform,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let callback = self.prepare_callback(ctx, callback)?;
+        let holes = match transform {
+            Transform::Map => self.preserve_holes(ctx),
+            Transform::Filter | Transform::FlatMap => Holes::Skip,
+        };
+        self.collect_items(
+            ctx,
+            Input::Array(array, holes),
+            |b, ctx, item, current, next| {
+                let mapped =
+                    b.array_callback(ctx, callback, &Pair(current, item).callback_args(array))?;
+                Ok(match transform {
+                    Transform::Map => ArrayOutput::Item(mapped),
+                    Transform::FlatMap => {
+                        let mapped = b.defined(ctx, mapped)?;
+                        ArrayOutput::Items(b.without_holes(ctx, mapped, Holes::Skip, false)?)
+                    }
+                    Transform::Filter => {
+                        let keep = b.truthy(ctx, mapped)?;
+                        let push = b.new_block(ctx, "array_keep");
+                        b.branch(ctx, keep, push, next);
+                        b.switch_to(push);
+                        ArrayOutput::Item(item)
+                    }
+                })
+            },
+        )
+    }
+
+    /// `array.sort(comparator?)` or `array.toSorted(comparator?)` when copied.
+    pub(crate) fn array_sort(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        comparator: Option<&'s Expr>,
+        mutation: Mutation,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let comparator = comparator
+            .map(|expr| self.prepare_callback(ctx, expr))
+            .transpose()?;
+        let original_len = self.array_length(ctx, array);
+        let in_place = matches!(mutation, Mutation::InPlace);
+        // In place, holes move to the end: sort the present elements, then write them back.
+        let target = if in_place {
+            self.without_holes(ctx, array, Holes::Skip, false)?
+        } else {
+            self.without_holes(ctx, array, Holes::Dense, true)?
+        };
+        let limit = self.array_length(ctx, target);
+        let one = self.number(ctx, 1.0);
+        self.index_loop(ctx, "sort_outer", one, limit, |b, ctx, i, _, _| {
+            let key = b.element_at(ctx, target, i)?;
+            let insert = b.entry_slot(ctx, i.get_type(ctx));
+            b.store(ctx, insert, i);
+            let zero = b.number(ctx, 0.0);
+            b.index_loop(ctx, "sort_inner", zero, i, |b, ctx, step, _, done| {
+                let position = b.binary(ctx, BinaryKind::Sub, i, step);
+                let j = b.binary(ctx, BinaryKind::Sub, position, one);
+                let candidate = b.element_at(ctx, target, j)?;
+                let compare = |b: &mut Self, ctx: &mut Context| {
+                    Ok(if let Some(comparator) = comparator {
+                        let cmp = b.array_callback(ctx, comparator, &[candidate, key])?;
+                        let cmp = b.arithmetic(ctx, cmp);
+                        ensure_diag!(
+                            kind(ctx, cmp)? == Kind::Number,
+                            codes::TYPE_MISMATCH,
+                            "sort comparator must return a number"
+                        );
+                        b.compare(ctx, CompareKind::Gt, cmp, zero)
+                    } else {
+                        let cand_str = b.display(ctx, candidate)?;
+                        let key_str = b.display(ctx, key)?;
+                        b.compare(ctx, CompareKind::Gt, cand_str, key_str)
+                    })
+                };
+                let gt = if b.is_optional(ctx, key) {
+                    let key_undefined = b.emit_value(IsUndefinedOp::new(ctx, key), ctx);
+                    let bool_ty = key_undefined.get_type(ctx);
+                    b.choose(
+                        ctx,
+                        bool_ty,
+                        key_undefined,
+                        |b, ctx| Ok(b.boolean(ctx, false)),
+                        |b, ctx| {
+                            let candidate_undefined =
+                                b.emit_value(IsUndefinedOp::new(ctx, candidate), ctx);
+                            b.choose(
+                                ctx,
+                                bool_ty,
+                                candidate_undefined,
+                                |b, ctx| Ok(b.boolean(ctx, true)),
+                                compare,
+                            )
+                        },
+                    )?
+                } else {
+                    compare(b, ctx)?
+                };
+                let shift = b.new_block(ctx, "sort_shift");
+                b.branch(ctx, gt, shift, done);
+                b.switch_to(shift);
+                b.emit(ArraySetOp::new(ctx, target, position, candidate), ctx);
+                b.store(ctx, insert, j);
+                Ok(())
+            })?;
+            let insert_pos = b.load(ctx, insert)?;
+            b.emit(ArraySetOp::new(ctx, target, insert_pos, key), ctx);
+            Ok(())
+        })?;
+        if !in_place {
+            return Ok(target);
+        }
+        if self.shapes.specialization.sparse_arrays {
+            let zero = self.number(ctx, 0.0);
+            self.index_loop(ctx, "sort_write", zero, limit, |b, ctx, index, _, _| {
+                let value = b.element_at(ctx, target, index)?;
+                b.emit(ArraySetOp::new(ctx, array, index, value), ctx);
+                Ok(())
+            })?;
+            self.index_loop(
+                ctx,
+                "sort_holes",
+                limit,
+                original_len,
+                |b, ctx, index, _, _| {
+                    b.emit(perry_mir::ArrayHoleOp::new(ctx, array, index), ctx);
+                    Ok(())
+                },
+            )?;
+        }
+        Ok(array)
+    }
+
+    /// `array.reduce(callback, initial?)` or `array.reduceRight(callback, initial?)`.
+    pub(crate) fn array_reduce(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        callback: &'s Expr,
+        initial: Option<&'s Expr>,
+        direction: Direction,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        self.array_element(ctx, array)?;
+        let callback = self.prepare_callback(ctx, callback)?;
+        let initial = initial
+            .map(|expr| self.expression_with(ctx, expr, callback.first_parameter(self.shapes)))
+            .transpose()?;
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        let (seed, start_step) = if let Some(value) = initial {
+            (value, zero)
+        } else {
+            let step = if self.shapes.specialization.sparse_arrays {
+                self.find_item(
+                    ctx,
+                    Input::UndefinedCount(len),
+                    |_, _| Ok(len),
+                    |b, ctx, _, step| {
+                        let index = direction.index(b, ctx, len, step);
+                        Ok(b.emit_value(perry_mir::ArrayPresentOp::new(ctx, array, index), ctx))
+                    },
+                    |_, _, _, step| Ok(step),
+                )?
+            } else {
+                zero
+            };
+            let empty = self.compare(ctx, CompareKind::Ge, step, len);
+            let nonempty = self.enter_case(ctx, empty);
+            self.raise_error(
+                ctx,
+                ErrorKind::TypeError,
+                "Reduce of empty array with no initial value",
+            );
+            self.switch_to(nonempty);
+            let index = direction.index(self, ctx, len, step);
+            let item = self.element_at(ctx, array, index)?;
+            (item, self.binary(ctx, BinaryKind::Add, step, one))
+        };
+        let acc_ty = seed.get_type(ctx);
+        let acc_slot = self.entry_slot(ctx, acc_ty);
+        self.store(ctx, acc_slot, seed);
+        self.iterate(
+            ctx,
+            Input::Slice(
+                array,
+                Span {
+                    start: start_step,
+                    limit: len,
+                    direction,
+                },
+                Holes::Skip,
+            ),
+            |b, ctx, item, current, _, _| {
+                let item = item.into_value(b, ctx)?;
+                let acc = b.load(ctx, acc_slot)?;
+                let next_acc =
+                    b.array_callback(ctx, callback, &Pair(current, item).reducer_args(array, acc))?;
+                let fitted = b.fit(ctx, next_acc, acc_ty)?;
+                b.store(ctx, acc_slot, fitted);
+                Ok(())
+            },
+        )?;
+        self.load(ctx, acc_slot)
+    }
+
+    /// `array.reverse()` or `array.toReversed()` when copied.
+    pub(crate) fn array_reverse(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        mutation: Mutation,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let element = self.array_element(ctx, array)?;
+        let len = self.array_length(ctx, array);
+        let zero = self.number(ctx, 0.0);
+        let one = self.number(ctx, 1.0);
+        if matches!(mutation, Mutation::Copy) {
+            self.collect_items(
+                ctx,
+                Input::Slice(
+                    array,
+                    Span {
+                        start: zero,
+                        limit: len,
+                        direction: Direction::Reverse,
+                    },
+                    Holes::Dense,
+                ),
+                |b, ctx, item, _, _| Ok(ArrayOutput::Item(b.hole_as_element(ctx, item, element)?)),
+            )
+        } else {
+            let two = self.number(ctx, 2.0);
+            let half_raw = self.binary(ctx, BinaryKind::Div, len, two);
+            let half = self.intrinsic(ctx, Intrinsic::MathFloor, vec![half_raw]);
+            self.index_loop(ctx, "reverse", zero, half, |b, ctx, step, _, _| {
+                let last = b.binary(ctx, BinaryKind::Sub, len, one);
+                let other_idx = b.binary(ctx, BinaryKind::Sub, last, step);
+                if !b.shapes.specialization.sparse_arrays {
+                    let left = b.element_at(ctx, array, step)?;
+                    let right = b.element_at(ctx, array, other_idx)?;
+                    b.emit(ArraySetOp::new(ctx, array, step, right), ctx);
+                    b.emit(ArraySetOp::new(ctx, array, other_idx, left), ctx);
+                    return Ok(());
+                }
+                let left = b.array_value(ctx, array, step)?;
+                let right = b.array_value(ctx, array, other_idx)?;
+                let left_present =
+                    b.emit_value(perry_mir::ArrayPresentOp::new(ctx, array, step), ctx);
+                let right_present =
+                    b.emit_value(perry_mir::ArrayPresentOp::new(ctx, array, other_idx), ctx);
+                b.copy_array_slot(ctx, array, step, right, right_present)?;
+                b.copy_array_slot(ctx, array, other_idx, left, left_present)?;
+                Ok(())
+            })?;
+            Ok(array)
+        }
+    }
+
+    /// `array.flat(depth?)`.
+    pub(crate) fn array_flat(
+        &mut self,
+        ctx: &mut Context,
+        array: Value,
+        depth: Option<&'s Expr>,
+    ) -> Result<Value> {
+        let array = self.defined(ctx, array)?;
+        let outer_elem_ty = self.array_element(ctx, array)?;
+        let depth_num = match depth {
+            None | Some(Expr::Undefined) => 1,
+            Some(Expr::Number(n)) if *n <= 0.0 => 0,
+            Some(Expr::Number(n)) if (*n as i32) == 1 => 1,
+            Some(Expr::Integer(n)) if *n <= 0 => 0,
+            Some(Expr::Integer(1)) => 1,
+            _ => {
+                bail_unsupported!("array.flat requires a constant depth of 0 or 1 in typed arrays")
+            }
+        };
+        let nested = perry_mir::typed::<ArrayType>(ctx, present_type(ctx, outer_elem_ty));
+        let Some(inner) = nested.filter(|_| depth_num == 1) else {
+            return self.without_holes(ctx, array, Holes::Skip, true);
+        };
+        let inner = inner.deref(ctx).element();
+        // Absent elements are kept as items, so `(T[] | undefined)[]` flattens to `(T | undefined)[]`.
+        let states = absence(ctx, outer_elem_ty);
+        let element = states.map_or(inner, |states| {
+            crate::lower::coerce::admitting(ctx, inner, states)
+        });
+        let target = ArrayType::get(ctx, element).into();
+        self.collect_items(
+            ctx,
+            Input::Array(array, Holes::Skip),
+            |b, ctx, item, _, _| {
+                let Some(states) = states else {
+                    return Ok(ArrayOutput::Items(b.without_holes(
+                        ctx,
+                        item,
+                        Holes::Skip,
+                        false,
+                    )?));
+                };
+                let absent = |null: bool| {
+                    move |b: &mut Self, ctx: &mut Context| {
+                        let value = if null && states.admits_null() {
+                            b.emit_value(NullOp::new(ctx, element), ctx)
+                        } else {
+                            b.emit_value(UndefinedOp::with_type(ctx, element), ctx)
+                        };
+                        Ok(b.emit_value(ArrayNewOp::new(ctx, element, vec![value]), ctx))
+                    }
+                };
+                let items = b.match_optional(
+                    ctx,
+                    item,
+                    target,
+                    absent(false),
+                    absent(true),
+                    |b, ctx, items| {
+                        let items = b.without_holes(ctx, items, Holes::Skip, false)?;
+                        b.fit(ctx, items, target)
+                    },
+                )?;
+                Ok(ArrayOutput::Items(items))
+            },
+        )
+    }
+
+    /// `Array.from(source, mapFn?)`.
+    pub(crate) fn array_from(
+        &mut self,
+        ctx: &mut Context,
+        source: &'s Expr,
+        map_fn: Option<&'s Expr>,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let map_fn = map_fn.filter(|f| !matches!(f, Expr::Undefined));
+        let src_val = self.expression(ctx, source)?;
+        let map_fn = map_fn
+            .map(|expr| self.prepare_callback(ctx, expr))
+            .transpose()?;
+        let src_val = self.defined(ctx, src_val)?;
+        let src_val = if src_val.get_type(ctx).deref(ctx).is::<StringType>() {
+            let characters = self.string_characters(ctx, src_val);
+            if map_fn.is_none() {
+                return Ok(characters);
+            }
+            characters
+        } else {
+            src_val
+        };
+        let src_ty = src_val.get_type(ctx);
+        let expected_elem = expected
+            .and_then(|ty| perry_mir::typed::<ArrayType>(ctx, ty))
+            .map(|array| array.deref(ctx).element());
+        let input = if self.shapes.collection(ctx, src_ty).is_some()
+            || perry_mir::typed::<ArrayType>(ctx, src_ty).is_some()
+        {
+            if map_fn.is_none() && src_ty.deref(ctx).is::<ArrayType>() {
+                let src_val = self.admit_holes(ctx, src_val, expected_elem)?;
+                return self.without_holes(ctx, src_val, Holes::Dense, true);
+            }
+            Input::Collection(src_val)
+        } else if let Some(rec) = perry_mir::typed::<RecordType>(ctx, src_ty)
+            && !rec.deref(ctx).is_tuple()
+            && rec.deref(ctx).field("length").is_some()
+        {
+            let op = FieldGetOp::new(ctx, src_val, "length".to_string()).to_diag(ctx)?;
+            let raw_len = self.field_read(ctx, op)?;
+            let raw_len = self.arithmetic(ctx, raw_len);
+            let len_trunc = self.integer_or_infinity(ctx, raw_len)?;
+            let zero = self.number(ctx, 0.0);
+            Input::UndefinedCount(self.intrinsic(ctx, Intrinsic::MathMax, vec![len_trunc, zero]))
+        } else {
+            bail_unsupported!(
+                "Array.from source must be a string, array, Set, Map, or {{ length }} object"
+            );
+        };
+        let expected_elem = expected_elem.filter(|_| matches!(input, Input::UndefinedCount(_)));
+        let mapper = map_fn.map(|callback| (callback, self.callback_ordinal(ctx)));
+        self.collect_items(ctx, input, |b, ctx, item, _, _| {
+            let item = if let Some((callback, index)) = mapper {
+                b.indexed_callback(ctx, callback, index, item)?
+            } else {
+                item
+            };
+            let item = match expected_elem {
+                Some(ty) => b.fit(ctx, item, ty)?,
+                None => item,
+            };
+            Ok(ArrayOutput::Item(item))
+        })
+    }
+}

@@ -44,15 +44,54 @@ fn interface_object_witness_resolves_its_member_lexically() -> Result<()> {
 }
 
 #[test]
+fn wit_rooted_class_calls_specialize_methods_and_accessors() -> Result<()> {
+    let mut guest = Instance::compile(
+        "package test:members; world boundary { export run:func(n:u32)->u32; export update:func()->u32; }",
+        "class Box {
+            constructor(value) { this.stored = value; }
+            get value() { return this.stored; }
+            set value(v) { this.stored = v; }
+            read() { return this.value; }
+            static read(box, v) { box.value = v; return box.read(); }
+        }
+        class Double {
+            stored = 0;
+            get value() { return this.stored; }
+            set value(v) { this.stored = 2 * v; }
+            read() { return this.value; }
+        }
+        let trace = 0;
+        class Counter {
+            count = 4;
+            get value() { trace = trace * 10 + 2; return this.count; }
+            set value(x) { trace = trace * 10 + 3; this.count = x; }
+        }
+        function receiver(c) { trace = trace * 10 + 1; return c; }
+        export function update() {
+            const c = new Counter();
+            const before = receiver(c).value++;
+            const after = ++receiver(c).count;
+            return trace * 100 + before * 10 + after;
+        }
+        const text = Box.read(new Box(''), 'abcd');
+        export function run(n) { return text.length + Box.read(new Box(0), n) + Box.read(new Double(), n); }",
+    )?;
+    guest.check("run", (7u32,), &25u32)?;
+    guest.check("update", (), &123146u32)
+}
+
+#[test]
 fn witness_instances_preserve_function_identity_and_internal_results() -> Result<()> {
     let mut guest = Instance::compile(
         "package test:witnesses; world boundary {
             export text:func(x:string)->u32; export raw:func(x:list<u8>)->u32;
             export echo:func(x:string)->list<u8>; export same:func()->bool;
             export byte:func(x:u8)->u8; export real:func(x:f64)->f64;
+            export small:func(x:u8,y:u8)->f64; export fraction:func(x:u8,y:f64)->f64;
         }",
         "function size(x) { return x.length; } export { size as text, size as raw };
          function identity(x) {return x;} export {identity as byte, identity as real};
+         function add(x:number,y:number) {return x+y;} export {add as small, add as fraction};
          export function echo(x) { return x; }
          const alias = size;
          export function same() { return alias === size && typeof echo('é') === 'string'; }",
@@ -62,19 +101,33 @@ fn witness_instances_preserve_function_identity_and_internal_results() -> Result
     guest.check("echo", ("é",), &"é".as_bytes().to_vec())?;
     guest.check("byte", (255u8,), &255u8)?;
     guest.check("real", (1.5f64,), &1.5f64)?;
+    guest.check("small", (255u8, 2u8), &257.0f64)?;
+    guest.check("fraction", (255u8, 0.5f64), &255.5f64)?;
     guest.check("same", (), &true)
 }
 
 #[test]
 fn witness_context_types_empty_list_returns() -> Result<()> {
-    for compiler in [Standard, crate::world::Compiler::MemoryChecked] {
-        let bytes = compiler.component(
+    for (compiler, tier) in [
+        (Standard, "task"),
+        (crate::world::Compiler::MemoryChecked, "instance"),
+    ] {
+        let compiled = compiler.compile(
             "package test:empty; world api {export empty:func()->list<string>; export numbers:func()->list<u32>;}",
             "api",
             "empty.js",
             "export function empty() {return [];} export {empty as numbers};",
         )?;
-        let (mut store, instance) = crate::world::instantiate(&Engine::default(), &bytes)?;
+        assert!(
+            compiled
+                .allocation_report
+                .lines()
+                .next()
+                .unwrap()
+                .contains(tier)
+        );
+        let (mut store, instance) =
+            crate::world::instantiate(&Engine::default(), &compiled.component.unwrap().stripped)?;
         let empty = instance.get_typed_func::<(), (Vec<String>,)>(&mut store, "empty")?;
         assert!(empty.call(&mut store, ())?.0.is_empty());
         let numbers = instance.get_typed_func::<(), (Vec<u32>,)>(&mut store, "numbers")?;
@@ -151,11 +204,11 @@ fn unbound_exports_do_not_require_async_hosts() -> Result<()> {
 #[test]
 fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
     boundary!(
-        "package test:indirect; world boundary {record input {a:string,b:string,c:string,d:string,e:string,f:string,g:string,h:string,i:option<string>,n:u64} export run:func(value:input)->string;}"
+        "package test:indirect; world boundary {record input {n:u64,i:option<string>,h:string,g:string,f:string,e:string,d:string,c:string,b:string,a:string} export run:func(value:input)->string; export echo:func(value:input)->input;}"
     );
     let mut component = Instance::compile(
         WIT,
-        "import type { Input } from './types/world'; export function run(value:Input) {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);}",
+        "import type { Input } from './types/world'; export function run(value:Input) {return value.a+value.b+value.c+value.d+value.e+value.f+value.g+value.h+value.i+String(value.n);} export function echo(value:Input) {return value;}",
     )?;
     let value = Input {
         a: "a".into(),
@@ -169,6 +222,7 @@ fn indirect_parameters_lift_nested_values_and_release_storage() -> Result<()> {
         i: Some("🙂".into()),
         n: u64::MAX,
     };
+    component.check("echo", (&value,), &value)?;
     let expected = "abcdefgh🙂18446744073709551615".to_owned();
     for _ in 0..1000 {
         component.check("run", (&value,), &expected)?;
@@ -197,7 +251,7 @@ boundary!(
     r#"
 package test:boundary;
 world boundary {
-  record point { x: f64, y-coord: f64 }
+  record point { y-coord: f64, x: f64 }
   record summary { count: u32, total: f64, label: string, positive: list<bool> }
   export scale: func(p: point, factor: f64) -> point;
   export describe: func(name: string, values: list<f64>) -> summary;
@@ -587,6 +641,7 @@ world boundary {
     record payload { text: list<u8>, parts: list<list<u8>> }
     export encode: func(text: string, bytes: list<u8>, text-first: bool) -> payload;
     export regular: func(bytes: list<u8>) -> payload;
+    export nested: func(text: string) -> list<u8>;
 }
 "#
     );
@@ -595,6 +650,9 @@ world boundary {
         r#"
 import type { Payload, PayloadInput, WitInput } from './types/world';
 interface Ordinary { text: Uint8Array; parts: Uint8Array[] }
+interface Link { data: Uint8Array; next?: Link }
+function head(link: WitInput<Link>): WitInput<Uint8Array> { return link.next ? link.next.data : link.data; }
+export function nested(text: string) { return text.length ? head({data: "root", next: {data: text}}) : head({data: "root"}); }
 function ordinary(value: Ordinary): WitInput<Payload> { return value; }
 export function regular(bytes: Uint8Array) {
     const record: Ordinary = {text: bytes, parts: [bytes]};
@@ -611,6 +669,8 @@ export function encode(text: string, bytes: Uint8Array, textFirst: boolean) {
 "#,
     )?;
     let bytes = |text: &str| text.as_bytes().to_vec();
+    component.check("nested", ("leaf",), &bytes("leaf"))?;
+    component.check("nested", ("",), &bytes("root"))?;
     component.check(
         "regular",
         ("é🙂".as_bytes(),),
@@ -726,6 +786,8 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
             record point { x: f64, label: string }
             variant value { empty, number(f64), text(string), point(point), bytes(list<u8>) }
             record packet { values: list<value>, optional: option<value> }
+            variant only { wide(tuple<u64, s64>) }
+            export single: func(v: option<only>) -> option<only>;
             variant narrow { small(f32), word(u32) }
             variant outer { narrow(narrow), wide(f64), empty }
             export joined: func(value: outer) -> outer;
@@ -739,7 +801,8 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
     let mut component = Instance::compile(
         WIT,
         r#"
-        import type { Outer, Packet, Value, WitInput } from './types/world';
+        import type { Only, Outer, Packet, Value, WitInput } from './types/world';
+        export function single(v: Only | null) { return v; }
         export function joined(value: Outer) { return value; }
         export function echo(values: Value[]) { return values; }
         export function inspect(value: Packet) { return value; }
@@ -761,6 +824,9 @@ fn heterogeneous_variants_keep_only_the_active_payload() -> Result<()> {
         }
         "#,
     )?;
+    for value in [None, Some(Only::Wide((u64::MAX, i64::MIN)))] {
+        component.check("single", (&value,), &value)?;
+    }
     let values = vec![
         Value::Empty,
         Value::Number(42.5),
@@ -859,7 +925,7 @@ fn generic_pages_and_results_use_concrete_wit_records() -> Result<()> {
     boundary!(
         r#"package test:generics;
 world boundary {
-  record page { data: list<f64>, next: option<string> }
+  record page { next: option<string>, data: list<f64> }
   export echo: func(value: page) -> result<page, string>;
   export parsed: func() -> result<page>;
   export stringify: func(value: page) -> result<string>;
@@ -890,7 +956,7 @@ export function stringify(value:Page<number>) {return JSON.stringify(value);}
     instance.check(
         "stringify",
         (&page,),
-        &Ok::<_, ()>("{\"data\":[1,2],\"next\":null}".to_owned()),
+        &Ok::<_, ()>("{\"next\":null,\"data\":[1,2]}".to_owned()),
     )?;
     Ok(())
 }
@@ -931,7 +997,9 @@ fn static_modules_preserve_pattern_bindings_and_property_keys() -> Result<()> {
     let declarations = r#"
         let calls = 0;
         function mark(n: number): number { calls += 1; return n; }
-        const [first, , ...rest] = [mark(1), 2, 3, 4];
+        let items: (number | undefined)[] = [undefined, 2, 3, 4];
+        function reset(): number { items = [9]; return mark(1); }
+        const [first = reset(), , ...rest] = items;
         interface Row { zero: number; absent?: number; nest: { key: number } }
         const row: Row = { zero: 0, nest: { key: 4 } };
         const {zero = mark(9), absent = mark(8), nest: {key: renamed}} = row;

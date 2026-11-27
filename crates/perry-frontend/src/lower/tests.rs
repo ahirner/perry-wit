@@ -1,0 +1,406 @@
+use pliron::{builtin::ops::ModuleOp, context::Context, op::Op, printable::Printable};
+
+/// Lower a source without foreign (WIT) types.
+fn lower_without_foreign(
+    ctx: &mut Context,
+    source: &str,
+    file: &str,
+) -> perry_wit_diagnostics::Result<ModuleOp> {
+    let sources = crate::source_files::load(source, file)?;
+    crate::lower_sources(ctx, source, file, &sources, &Default::default())
+}
+
+fn rejection(source: &str, file: &str) -> perry_wit_diagnostics::Diagnostic {
+    lower_without_foreign(&mut Context::new(), source, file)
+        .err()
+        .expect("rejection")
+}
+
+/// Verify diagnostic source spans alongside the message table in `diagnostics_test`.
+#[test]
+fn unsupported_forms_are_rejected_with_located_diagnostics() {
+    for (source, message, location) in [
+        (
+            "export function ff(a: number, b: number): number {\n  return a * b;\n}\nexport function fun(x: number, y: number): number {\n  return ff(a, b) + x + y;\n}",
+            "cannot find name 'a'",
+            (5, 13),
+        ),
+        (
+            "export function run(value) { return value; }",
+            "the value type cannot be inferred",
+            (1, 21),
+        ),
+        (
+            "export function run(x: number): string {\n  return x.toFixed(2);\n}",
+            "method toFixed is not supported on number yet",
+            (2, 10),
+        ),
+        (
+            "export function run(x: number): void {\n  (x as any)[0] = 1;\n}",
+            "computed property keys are only supported on arrays (subset rule R1)",
+            (2, 3),
+        ),
+    ] {
+        let diagnostic = rejection(source, "case.ts");
+        assert_eq!(diagnostic.message(), message);
+        let span = diagnostic.span().expect("source location");
+        assert_eq!((span.start_line, span.start_column), location);
+    }
+
+    for source in [
+        "export function run(): number { const reader = 3 as ReadableStreamDefaultReader; return reader; }",
+        "class ReadableStreamBYOBReader {} export function run(): number { const reader = new ReadableStreamBYOBReader() as ReadableStreamDefaultReader; return 1; }",
+    ] {
+        let diagnostic = rejection(source, "reader-assertion.ts");
+        assert_eq!(
+            diagnostic.code(),
+            perry_wit_diagnostics::codes::TYPE_MISMATCH,
+        );
+        assert!(diagnostic.span().is_some());
+    }
+}
+
+#[test]
+fn deferred_initialization_preserves_declared_write_types() {
+    for declaration in ["let x: string = undefined;", "let x: string; x = 42;"] {
+        let source = format!("export function run(): void {{ {declaration} }}");
+        assert_eq!(
+            rejection(&source, "writes.ts").code(),
+            perry_wit_diagnostics::codes::TYPE_MISMATCH
+        );
+    }
+}
+
+#[test]
+fn nullable_property_guards_follow_control_flow() {
+    for body in [
+        "if (values === null) return 0; return values.length;",
+        "return values !== null ? values.length : 0;",
+        "if (values === null) values = []; return values.length;",
+        "return values?.length ?? 0;",
+        "return values!.length;",
+        "return (values!).length;",
+        "const present = values!; return present.length;",
+        "const holder: {values: number[] | null} = {values}; return holder.values!.length;",
+        "const alias = values; if (alias === null) return 0; return alias.length;",
+        "if (values !== null && values.length > 0) return values.length; return 0;",
+        "while (values === null) { values = []; } return values.length;",
+        "if (!values) return 0; return values.length;",
+        "if (Math.random() > 0.5 || values === undefined || values === null) return 0; return values.length;",
+        "if (values === null) throw new Error('missing'); return values.length;",
+        "const alias = values; values = null; if (alias === null) return 0; return alias.length;",
+        "while (values !== null) { const count = values.length; values = null; } return 0;",
+        "const holder: {values: number[] | null} = {values}; if (holder.values === null) return 0; return holder.values.length;",
+        &format!(
+            "if (values === null) return 0; let n = 0; {} return values.length + n;",
+            "if (Math.random() > 0.5 && n >= 0) n++; ".repeat(64)
+        ),
+    ] {
+        let source = format!("export function count(values: number[] | null): number {{ {body} }}");
+        let ctx = &mut Context::new();
+        let module = lower_without_foreign(ctx, &source, "case.ts").unwrap();
+        perry_mir::canonicalize(module.get_operation(), ctx)
+            .unwrap_or_else(|error| panic!("{source}\n{}\n{}", error.disp(ctx), module.disp(ctx)));
+    }
+    for body in [
+        "if (values === null && false) return 0; return values.length;",
+        "const asserted = values!; return values.length;",
+        "const holder: {values: number[] | null} = {values}; return holder!.values.length;",
+        "if (values !== null || true) return values.length; return 0;",
+        "const present = values !== null; values = null; if (present) return values.length; return 0;",
+        "while (values !== null) { values = null; return values.length; } return 0;",
+        "const holder: {values: number[] | null} = {values}; if (holder.values === null) return 0; const alias = holder; alias.values = null; return holder.values.length;",
+        "const holder: {values: number[] | null} = JSON.parse('{\"values\":null}'); return holder.values.length;",
+        "const pick = (): number[] | null => values; return pick().length;",
+        "const rows: (number[] | null)[] = [values]; const row = rows[0]; if (row === undefined) return 0; return row.length;",
+        "for (let i = 0; i < 3; i++) { if (values === null) return 0; } return values.length;",
+    ] {
+        let source = format!("export function count(values: number[] | null): number {{ {body} }}");
+        let ctx = &mut Context::new();
+        let module = lower_without_foreign(ctx, &source, "case.ts").unwrap();
+        let error = perry_mir::canonicalize(module.get_operation(), ctx)
+            .err()
+            .expect(&source);
+        let diagnostic = error
+            .err
+            .downcast_ref::<perry_wit_diagnostics::Diagnostic>()
+            .unwrap_or_else(|| panic!("{source}\n{}", error.disp(ctx)));
+        assert_eq!(
+            diagnostic.message(),
+            "property access receiver is possibly null",
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn variant_narrowing_ends_at_closure_writes() {
+    // The loop reads `local` before `flip` assigns it, so the next iteration may hold case b.
+    let source = r#"type Shape = { tag: "a"; val: number } | { tag: "b"; val: string };
+export function run(flag: boolean): number {
+  let local: Shape = { tag: "a", val: 1 };
+  const flip = (): void => { local = { tag: "b", val: "x" }; };
+  const writer = CALLBACK;
+  let total = 0;
+  if (local.tag === "a") {
+    for (let i = 0; i < 2; i++) { total += local.val; writer(); }
+  }
+  return total;
+}"#;
+    for callback in ["flip", "flag ? flip : (): void => {}"] {
+        let diagnostic = rejection(&source.replace("CALLBACK", callback), "narrowing.ts");
+        assert_eq!(
+            diagnostic.message(),
+            "narrow a heterogeneous variant by its tag before reading val",
+            "{callback}"
+        );
+    }
+}
+
+#[test]
+fn frame_proofs_follow_reference_escape_through_calls() {
+    let ctx = &mut Context::new();
+    let source = r#"
+interface Cell { value: number }
+let retained: Cell | null = null;
+function read(cell: Cell, n: number): number { if (n < 0) return read(cell, -n); return cell.value; }
+function save(cell: Cell, n: number): void { if (n < 0) { save(cell, -n); return; } retained = cell; }
+export function local(x: number): number { const cell: Cell = { value: x }; return read(cell, x); }
+export function escaped(x: number): number { const cell: Cell = { value: x }; save(cell, x); return x; }
+"#;
+    let module = lower_without_foreign(ctx, source, "lifetimes.ts").unwrap();
+    perry_mir::canonicalize(module.get_operation(), ctx).unwrap();
+    let printed = module.disp(ctx).to_string();
+    assert!(printed.contains("perry.call read"), "{printed}");
+    assert!(printed.contains("perry.call save"), "{printed}");
+    assert!(printed.contains("perry.alloc Frame"), "{printed}");
+    assert!(printed.contains("perry.alloc Instance"), "{printed}");
+}
+
+#[test]
+fn generic_collections_keep_concrete_payloads()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use pliron::{
+        builtin::{
+            op_interfaces::SymbolOpInterface, type_interfaces::FunctionTypeInterface,
+            types::FunctionType,
+        },
+        r#type::TypedHandle,
+    };
+    let ctx = &mut Context::new();
+    let source = r#"
+function index<T extends {id:string}>(xs:T[]):Map<string,T> {
+    const result = new Map<string,T>();
+    for (const x of xs) {
+        if (result.has(x.id)) throw new Error("duplicate");
+        result.set(x.id,x);
+    }
+    return result;
+}
+function forward<T extends {id:string}>(xs:T[]):Map<string,T> { return index(xs); }
+interface Link { id:string; next:Link }
+interface LinkAlias { id:string; next:Link }
+export function recursiveAlias(value:LinkAlias):Map<string,LinkAlias> { return index([value]); }
+export function recursiveLink(value:Link):Map<string,Link> { return index([value]); }
+function unique<T>(xs:T[]) { return new Set<T>(xs); }
+function fromMap<T>(values:Map<string,T>):T|undefined { return values.get("a"); }
+function first<T>(xs:T[]):T { return xs[0]; }
+function defaulted<T>(value:T):T {
+    const read = (fallback:T = first([value].map((item:T):T => item))):T => fallback;
+    return read();
+}
+class Catalog {
+    cached: string = first(["cached"]);
+    static cached: number = first([7]);
+    value() { return [1, 2].at(0); }
+    defaulted(values: Map<string,{id:string,name:string}> = index([{id:"a",name:"default"}])): string {
+        return values.get("a")?.name ?? "";
+    }
+    find(input:string):string { return index([{id:"a",name:input}]).get("a")?.name ?? ""; }
+}
+export function catalogValue() { return new Catalog().value(); }
+export function run(input:string):string {
+    const named = index([{id:"a",name:defaulted(input)}]);
+    const counted = forward([{id:"a",count:defaulted(7)}]);
+    const empty = index<{id:string,name:string}>([]);
+    const names = unique([input]);
+    const lookup = (xs:{id:string,name:string}[]):Map<string,{id:string,name:string}> => index(xs);
+    const collided = ({x: 1}.x + {x: input}.x) + {x_2: 2}.x_2;
+    return (fromMap(named)?.name ?? "missing") + counted.get("a")?.count
+        + empty.size + names.has(input) + new Catalog().find(input)
+        + lookup([{id:"a",name:input}]).get("a")?.name + new Catalog().defaulted()
+        + (new Catalog().value() ?? 0) + collided;
+}
+"#;
+    let module = lower_without_foreign(ctx, source, "generic-collections.ts")?;
+    pliron::common_traits::Verify::verify(&*module.get_operation().deref(ctx), ctx)?;
+    let printed = module.disp(ctx).to_string();
+    for expected in [
+        "{ id: perry.string , name: perry.string  }",
+        "{ count: builtin.fp64 , id: perry.string  }",
+        "{ x: builtin.fp64  }",
+        "{ x: perry.string  }",
+        "{ x_2: builtin.fp64  }",
+    ] {
+        assert!(
+            printed.contains(expected),
+            "missing {expected} in:\n{printed}"
+        );
+    }
+    let functions = perry_mir::functions(module.get_operation(), ctx);
+    let mut recursive_type = None;
+    for name in ["recursiveAlias", "recursiveLink"] {
+        let function = functions
+            .iter()
+            .find(|function| function.get_symbol_name(ctx).as_ref() == name)
+            .unwrap();
+        let ty = TypedHandle::<FunctionType>::from_handle(function.get_type(ctx), ctx)?
+            .deref(ctx)
+            .arg_types()[0];
+        let record = TypedHandle::<perry_mir::RecordType>::from_handle(ty, ctx)?;
+        assert_eq!(record.deref(ctx).field("next").unwrap().1, ty);
+        if let Some(previous) = recursive_type {
+            assert_eq!(ty, previous);
+        }
+        recursive_type = Some(ty);
+    }
+    Ok(())
+}
+
+#[test]
+fn repeated_and_recursive_method_calls_share_a_body() {
+    use pliron::{builtin::op_interfaces::SymbolOpInterface, operation::Operation};
+    let ctx = &mut Context::new();
+    let module = lower_without_foreign(ctx, "class Counter {
+        count(n:number):number { return n <= 0 ? 0 : 1 + this.count(n-1); }
+    }
+    export function run(n:number):number { const c=new Counter(); return c.count(n) + c.count(1, 0); }", "classes.ts").unwrap();
+    let functions = perry_mir::functions(module.get_operation(), ctx);
+    let calls = |f| {
+        perry_mir::operations(ctx, f)
+            .into_iter()
+            .filter_map(|op| {
+                Operation::get_op::<perry_mir::CallOp>(op, ctx).map(|call| call.callee(ctx))
+            })
+            .collect::<Vec<_>>()
+    };
+    let run = functions
+        .iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == "run")
+        .unwrap();
+    let targets = calls(run);
+    let [factory, first, second] = targets.as_slice() else {
+        panic!("expected a constructor and two method calls: {targets:?}")
+    };
+    assert_ne!(factory, first);
+    assert_eq!(first, second);
+    let method = functions
+        .iter()
+        .find(|f| f.get_symbol_name(ctx) == *first)
+        .unwrap();
+    assert_eq!(calls(method), std::slice::from_ref(first));
+}
+
+#[test]
+fn class_members_can_call_their_own_mir_function() {
+    for (members, entry) in [
+        (
+            "first(n:number):number { return this.second(n); }
+             second(n:number):number { return this.first(n); }",
+            "return new Counter().first(3);",
+        ),
+        (
+            "count(n:number):number { return this.count(this.count(n-1)); }",
+            "return new Counter().count(3);",
+        ),
+        (
+            "static count(n:number):number { return Counter.count(n-1); }",
+            "return Counter.count(3);",
+        ),
+        (
+            "count(n:number=this.count()):number { return n; }",
+            "return new Counter().count();",
+        ),
+        (
+            "get count():number { return this.count; }",
+            "return new Counter().count;",
+        ),
+        (
+            "set count(n:number) { this.count=n; }",
+            "const c=new Counter(); c.count=3; return 0;",
+        ),
+        (
+            "constructor() { new Counter(); }",
+            "new Counter(); return 0;",
+        ),
+        (
+            "count:number=1;
+             constructor(n:number=new Counter().count) { this.count=n; }",
+            "return new Counter().count;",
+        ),
+        (
+            "count:number=new Counter().count;",
+            "return new Counter().count;",
+        ),
+        (
+            "count:number=new Counter().count; constructor() {}",
+            "return new Counter().count;",
+        ),
+    ] {
+        let source =
+            format!("class Counter {{ {members} }}\nexport function run():number {{ {entry} }}");
+        lower_without_foreign(&mut Context::new(), &source, "classes.ts").unwrap();
+    }
+}
+
+#[test]
+fn group_by_emits_one_key_search_per_input_item() {
+    use pliron::{
+        builtin::op_interfaces::{OneRegionInterface, SymbolOpInterface},
+        graph::{dominance::compute_dominator_tree, loop_tree::compute_loop_tree},
+    };
+    let ctx = &mut Context::new();
+    let module = lower_without_foreign(
+        ctx,
+        "export function grouped(xs: number[]): number { return Map.groupBy(xs, x => x).size; }",
+        "grouped.ts",
+    )
+    .unwrap();
+    let group = perry_mir::functions(module.get_operation(), ctx)
+        .into_iter()
+        .find(|f| f.get_symbol_name(ctx).as_ref() == "grouped")
+        .unwrap();
+    let region = group.get_region(ctx);
+    let loops = compute_loop_tree(ctx, &region, &compute_dominator_tree(ctx, &region));
+    assert_eq!(loops.num_loops(), 2);
+    assert_eq!(loops.top_level_loops().count(), 1);
+}
+
+#[test]
+fn map_iteration_materializes_only_observable_pairs() -> perry_wit_diagnostics::Result<()> {
+    use pliron::operation::Operation;
+    for (body, pairs) in [
+        ("entries.forEach(observe);", 0),
+        (
+            "for (const pair of entries) { observe(pair[1], pair[0]); }",
+            1,
+        ),
+    ] {
+        let ctx = &mut Context::new();
+        let source = format!(
+            "function observe(v:number, k:number) {{ if (v===k) throw new Error('same'); }}
+            export function run(entries:Map<number,number>) {{ {body} }}"
+        );
+        let module = lower_without_foreign(ctx, &source, "pairs.ts")?;
+        let allocations = perry_mir::functions(module.get_operation(), ctx)
+            .into_iter()
+            .flat_map(|f| perry_mir::operations(ctx, &f))
+            .filter(|&op| {
+                Operation::is_op::<perry_mir::AllocOp>(op, ctx)
+                    && op.deref(ctx).get_num_operands() == 2
+            });
+        // Both loops need a three-field cursor. Only the for-of body receives a pair.
+        assert_eq!(allocations.count(), pairs, "{body}");
+    }
+    Ok(())
+}

@@ -1,27 +1,19 @@
 //! Original source coordinates for merged AST and HIR declarations.
-use perry_hir::{
-    ir::{Expr, Function, Module, Stmt},
-    types::FuncId,
-    walker::{stmt_any_expr, walk_expr_children},
-};
+use perry_hir::ir::Expr;
 use perry_parser::swc_ecma_ast as ast;
-use perry_wit_diagnostics::{Diagnostic, Note, Result, SourceSpan, codes};
+use perry_wit_diagnostics::{Diagnostic, Result, SourceSpan, codes};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
 use swc_common::{Span, Spanned};
-use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
+use swc_ecma_visit::{Visit, VisitWith};
 
 const OPERATOR: &str = "\0perry_operator:";
 const NON_NULL: &str = "\0perry_non_null";
 
 pub(crate) fn has_source_offset(offset: u32) -> bool {
     offset != 0
-}
-
-pub(crate) fn mark_non_null(value: Expr) -> Expr {
-    Expr::Sequence(vec![Expr::String(NON_NULL.into()), value])
 }
 
 pub(crate) fn function_label(name: &str) -> &str {
@@ -37,7 +29,7 @@ pub(crate) fn function_label(name: &str) -> &str {
 /// wrappers (`__obj_method_<name>_<N>`) for user-facing diagnostic names.
 pub(crate) fn display_name(name: &str) -> &str {
     let name = name
-        .strip_prefix(super::names::MODULE_PREFIX)
+        .strip_prefix(crate::source::MODULE_PREFIX)
         .and_then(|rest| {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             (digits > 0)
@@ -62,12 +54,15 @@ struct CallerOrigin {
 enum CallSite {
     Instantiation {
         template: String,
-        note: Option<Note>,
+        offset: u32,
     },
-    Import(Note),
+    Import {
+        offset: u32,
+        priority: crate::source::CallerKind,
+    },
 }
 
-pub fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
+pub(crate) fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
     let Expr::Sequence(parts) = expr else {
         return None;
     };
@@ -77,8 +72,8 @@ pub fn non_null_assertion(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-#[derive(Clone, Copy)]
 struct FunctionInfo {
+    label: Option<String>,
     span: Span,
     explicit_return: bool,
 }
@@ -90,59 +85,46 @@ struct SourceFile<'s> {
 }
 
 #[derive(Default)]
-pub struct Locations<'s> {
+pub(crate) struct Locations<'s> {
     files: Vec<SourceFile<'s>>,
     functions: HashMap<String, FunctionInfo>,
-    calls: HashMap<u32, (Span, Option<Span>)>,
+    calls: HashMap<u32, Span>,
+    disposals: HashSet<(u32, u32)>,
     members: HashMap<u32, Span>,
     types: HashMap<String, Span>,
     imports: HashMap<String, Span>,
     operators: Vec<Span>,
-    pub(crate) generic_templates: Vec<(FuncId, String)>,
     origins: HashMap<String, CallerOrigin>,
 }
 
 impl<'s> Locations<'s> {
-    /// Preserve operator spans and non-null assertions as inert sequences before HIR erases them.
-    pub(super) fn preserve_expressions(&mut self, module: &mut ast::Module, spans: &HashSet<Span>) {
-        struct Preserver<'a>(&'a mut Vec<Span>, &'a HashSet<Span>);
-        impl VisitMut for Preserver<'_> {
-            // Enum initializers use the upstream constant evaluator, not MIR arithmetic.
-            fn visit_mut_ts_enum_decl(&mut self, _: &mut ast::TsEnumDecl) {}
-
-            fn visit_mut_expr(&mut self, expr: &mut ast::Expr) {
-                expr.visit_mut_children_with(self);
-                let span = expr.span();
-                let token = if matches!(expr, ast::Expr::TsNonNull(_)) {
-                    NON_NULL.to_owned()
-                } else if self.1.contains(&span)
-                    || matches!(expr, ast::Expr::Bin(binary) if matches!(
-                        binary.op,
-                        ast::BinaryOp::Exp | ast::BinaryOp::BitAnd | ast::BinaryOp::BitOr | ast::BinaryOp::BitXor
-                        | ast::BinaryOp::LShift | ast::BinaryOp::RShift | ast::BinaryOp::ZeroFillRShift
-                    ))
-                {
-                    let token = format!("{OPERATOR}{}", self.0.len());
-                    self.0.push(span);
-                    token
-                } else {
-                    return;
-                };
-                let token = ast::Expr::Lit(ast::Lit::Str(ast::Str {
-                    span,
-                    value: token.into(),
-                    raw: None,
-                }));
-                let original = std::mem::replace(expr, ast::Expr::Invalid(ast::Invalid { span }));
-                *expr = ast::Expr::Seq(ast::SeqExpr {
-                    span,
-                    exprs: vec![Box::new(token), Box::new(original)],
-                });
-            }
+    pub(crate) fn preserve_expression(&mut self, expr: &mut ast::Expr) {
+        use swc_common::util::take::Take;
+        let span = expr.span();
+        let token = if matches!(expr, ast::Expr::TsNonNull(_)) {
+            NON_NULL.to_owned()
+        } else {
+            let token = format!("{OPERATOR}{}", self.operators.len());
+            self.operators.push(span);
+            token
+        };
+        let original = expr.take();
+        *expr = ast::SeqExpr {
+            span,
+            exprs: vec![
+                Box::new(
+                    ast::Lit::Str(ast::Str {
+                        span,
+                        value: token.into(),
+                        raw: None,
+                    })
+                    .into(),
+                ),
+                Box::new(original),
+            ],
         }
-        module.visit_mut_with(&mut Preserver(&mut self.operators, spans));
+        .into();
     }
-
     pub(crate) fn operator_raw_span(&self, parts: &[Expr]) -> Option<Span> {
         let [Expr::String(token), _] = parts else {
             return None;
@@ -151,7 +133,7 @@ impl<'s> Locations<'s> {
         self.operators.get(index).copied()
     }
 
-    pub fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
+    pub(crate) fn operator_span(&self, parts: &[Expr]) -> Option<SourceSpan> {
         self.operator_raw_span(parts)
             .and_then(|span| self.span(span))
     }
@@ -192,8 +174,20 @@ impl<'s> Locations<'s> {
         name
     }
 
-    pub fn display_function_name<'a>(&'a self, name: &'a str) -> &'a str {
-        display_name(self.template_name(name))
+    pub(crate) fn display_function_name<'a>(&'a self, name: &'a str) -> &'a str {
+        let name = self.template_name(name);
+        self.functions
+            .get(name)
+            .and_then(|info| info.label.as_deref())
+            .unwrap_or_else(|| display_name(name))
+    }
+
+    pub(super) fn register_generated(&mut self, symbol: String, span: Span, label: String) {
+        self.functions.entry(symbol).or_insert(FunctionInfo {
+            span,
+            label: Some(label),
+            explicit_return: false,
+        });
     }
 
     pub(crate) fn record_instantiation(
@@ -203,105 +197,129 @@ impl<'s> Locations<'s> {
         call_byte_offset: u32,
         caller: Option<String>,
     ) {
-        let note = self.call_span(call_byte_offset).map(|span| {
-            Note::spanned(
-                span,
-                format!("while instantiating '{}'", display_name(&template)),
-            )
-        });
         self.origins.insert(
             instance,
             CallerOrigin {
-                site: CallSite::Instantiation { template, note },
+                site: CallSite::Instantiation {
+                    template,
+                    offset: call_byte_offset,
+                },
                 caller,
             },
         );
     }
 
-    /// Keep the first cross-file caller, giving exported functions priority.
-    pub(crate) fn record_call_origins(&mut self, module: &Module) {
-        if self.files.len() <= 1 {
+    pub(crate) fn has_imports(&self) -> bool {
+        self.files.len() > 1
+    }
+
+    pub(crate) fn record_cross_file_call(
+        &mut self,
+        (callee, declaration): (&str, &str),
+        offset: u32,
+        caller: Option<&str>,
+        priority: crate::source::CallerKind,
+    ) {
+        if self
+            .origins
+            .get(callee)
+            .is_some_and(|origin| match &origin.site {
+                CallSite::Instantiation { .. } => true,
+                CallSite::Import {
+                    priority: previous, ..
+                } => *previous <= priority,
+            })
+        {
             return;
         }
-        let names: HashMap<_, _> = module
+        let Some(declaration) = self
             .functions
-            .iter()
-            .map(|function| (function.id, function.name.as_str()))
-            .collect();
-        let mut record = |id: FuncId, offset: u32, caller: Option<&str>| {
-            let Some(&callee) = names.get(&id) else {
-                return;
-            };
-            if self.origins.contains_key(callee) {
-                return;
-            }
-            let Some(declaration) = self.functions.get(callee) else {
-                return;
-            };
-            if let (Some(call), Some(target)) =
-                (self.file_at(offset), self.file_at(declaration.span.lo.0))
-                && call.path != target.path
-                && let Some(span) = self.call_span(offset)
-            {
-                self.origins.insert(
-                    callee.to_owned(),
-                    CallerOrigin {
-                        site: CallSite::Import(Note::spanned(
-                            span,
-                            format!("called from here ('{}')", display_name(callee)),
-                        )),
-                        caller: caller.map(str::to_owned),
-                    },
-                );
-            }
+            .get(declaration)
+            .filter(|info| info.label.is_none())
+        else {
+            return;
         };
-        body_calls(&module.init, &mut |id, offset| record(id, offset, None));
-        for exported in [true, false] {
-            for function in module
-                .functions
-                .iter()
-                .filter(|f| f.is_exported == exported)
-            {
-                function_calls(function, &mut |id, offset| {
-                    record(id, offset, Some(&function.name))
-                });
-            }
-        }
-        let mut class_call = |id, offset| record(id, offset, None);
-        for class in &module.classes {
-            for field in class.fields.iter().chain(&class.static_fields) {
-                if let Some(init) = &field.init {
-                    expression_calls(init, &mut class_call);
-                }
-            }
-            for function in crate::shapes::class_functions(class) {
-                function_calls(function, &mut class_call);
-            }
+        if let (Some(call), Some(target)) =
+            (self.file_at(offset), self.file_at(declaration.span.lo.0))
+            && call.path != target.path
+        {
+            self.origins.insert(
+                callee.to_owned(),
+                CallerOrigin {
+                    site: CallSite::Import { priority, offset },
+                    caller: caller.map(str::to_owned),
+                },
+            );
         }
     }
 
-    pub fn caller_notes(&self, function_name: &str) -> Vec<Note> {
+    fn caller_site<'a>(
+        &'a self,
+        name: &'a str,
+        site: &'a CallSite,
+    ) -> (perry_mir::CallerRelation, &'a str, Option<SourceSpan>) {
+        let (kind, label, offset) = match site {
+            CallSite::Instantiation { template, offset } => (
+                perry_mir::CallerRelation::Instantiation,
+                template.as_str(),
+                *offset,
+            ),
+            CallSite::Import { offset, .. } => (perry_mir::CallerRelation::Import, name, *offset),
+        };
+        (
+            kind,
+            self.display_function_name(label),
+            self.call_span(offset),
+        )
+    }
+
+    pub(crate) fn set_mir_frames(
+        &self,
+        ctx: &mut pliron::context::Context,
+        module: &pliron::builtin::ops::ModuleOp,
+    ) {
+        perry_mir::set_caller_frames(
+            ctx,
+            module,
+            self.origins
+                .iter()
+                .map(|(name, origin)| {
+                    let (kind, label, span) = self.caller_site(name, &origin.site);
+                    perry_mir::CallerFrame::new(name, origin.caller.as_deref(), kind, label, span)
+                })
+                .collect(),
+        );
+    }
+
+    pub(crate) fn set_mir_location(
+        &self,
+        ctx: &mut pliron::context::Context,
+        function: &pliron::builtin::ops::FuncOp,
+        name: &str,
+    ) {
+        if let Some(span) = self.function_span(name) {
+            perry_mir::set_source_span(ctx, function, &span);
+        }
+        if self.origins.contains_key(name) {
+            perry_mir::set_caller_origin(ctx, function, name);
+        }
+    }
+
+    pub(crate) fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
         let mut notes = Vec::new();
         let mut seen = HashSet::new();
         let mut current = function_name;
         while let Some(origin) = self.origins.get(current)
             && seen.insert(current)
         {
-            let note = match &origin.site {
-                CallSite::Instantiation { note, .. } => note.as_ref(),
-                CallSite::Import(note) => Some(note),
-            };
-            notes.extend(note.cloned());
+            let (kind, label, span) = self.caller_site(current, &origin.site);
+            notes.extend(span.map(|span| kind.note(label, span)));
             let Some(caller) = origin.caller.as_deref() else {
                 break;
             };
             current = caller;
         }
-        notes
-    }
-
-    pub fn annotate_caller(&self, error: Diagnostic, function_name: &str) -> Diagnostic {
-        error.with_notes(self.caller_notes(function_name))
+        error.with_notes(notes)
     }
 
     pub(crate) fn has_explicit_return(&self, name: &str) -> bool {
@@ -310,19 +328,26 @@ impl<'s> Locations<'s> {
             .is_some_and(|info| info.explicit_return)
     }
 
-    pub fn function_span(&self, name: &str) -> Option<SourceSpan> {
+    pub(crate) fn declaration_span(&self, name: &str) -> Option<SourceSpan> {
         self.functions
             .get(self.template_name(name))
             .and_then(|info| self.span(info.span))
+            .or_else(|| self.function_span(name))
+    }
+
+    pub(crate) fn function_span(&self, name: &str) -> Option<SourceSpan> {
+        self.functions
+            .get(self.template_name(name))
+            .filter(|info| info.label.is_none())
+            .and_then(|info| self.span(info.span))
             .or_else(|| match self.origins.get(name)?.site {
-                CallSite::Instantiation { ref note, .. } => {
-                    note.as_ref().and_then(Note::span).cloned()
+                CallSite::Instantiation { offset, .. } | CallSite::Import { offset, .. } => {
+                    self.call_span(offset)
                 }
-                CallSite::Import(ref note) => note.span().cloned(),
             })
     }
 
-    pub fn source_at(&self, position: u32) -> Option<&'s str> {
+    pub(crate) fn source_at(&self, position: u32) -> Option<&'s str> {
         let file = self.file_at(position)?;
         file.source
             .get((position - file.positions.start()) as usize..)
@@ -337,7 +362,7 @@ impl<'s> Locations<'s> {
         self.source_text(*self.members.get(&offset)?)
     }
 
-    pub fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
+    pub(crate) fn offset_span(&self, start: u32, len: u32) -> Option<SourceSpan> {
         self.span(Span::new(
             swc_common::BytePos(start),
             swc_common::BytePos(start.saturating_add(len)),
@@ -345,46 +370,28 @@ impl<'s> Locations<'s> {
     }
 
     pub(crate) fn calls_dispose(&self, start: u32, end: u32) -> bool {
-        self.calls
-            .get(&start)
-            .and_then(|(_, dispose)| *dispose)
-            .is_some_and(|span| span.hi.0 == end)
+        self.disposals.contains(&(start, end))
     }
 
-    pub fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+    pub(crate) fn call_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.calls
             .get(&byte_offset)
-            .and_then(|(span, _)| self.span(*span))
+            .and_then(|span| self.span(*span))
             .or_else(|| self.offset_span(byte_offset, 1))
     }
 
-    pub fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
+    pub(crate) fn member_span(&self, byte_offset: u32) -> Option<SourceSpan> {
         self.members
             .get(&byte_offset)
             .and_then(|span| self.span(*span))
             .or_else(|| self.call_span(byte_offset))
     }
 
-    pub fn missing_function(&self, id: FuncId) -> Diagnostic {
-        if let Some((_, name)) = self
-            .generic_templates
-            .iter()
-            .find(|(template, _)| *template == id)
-        {
-            Diagnostic::unsupported(format!(
-                "generic function '{}' requires a direct call for specialization",
-                display_name(name)
-            ))
-        } else {
-            Diagnostic::internal("call to an unknown function")
-        }
-    }
-
-    pub fn type_span(&self, name: &str) -> Option<SourceSpan> {
+    pub(crate) fn type_span(&self, name: &str) -> Option<SourceSpan> {
         self.types.get(name).and_then(|span| self.span(*span))
     }
 
-    pub fn import_span(&self, source: &str) -> Option<SourceSpan> {
+    pub(crate) fn import_span(&self, source: &str) -> Option<SourceSpan> {
         self.imports
             .get(source.strip_prefix("node:").unwrap_or(source))
             .and_then(|span| self.span(*span))
@@ -394,7 +401,7 @@ impl<'s> Locations<'s> {
         error.with_fallback_span(self.call_span(byte_offset))
     }
 
-    pub(super) fn span(&self, span: Span) -> Option<SourceSpan> {
+    pub(crate) fn span(&self, span: Span) -> Option<SourceSpan> {
         let file = self.file_at(span.lo.0)?;
         let start = (span.lo.0 - file.positions.start()) as usize;
         let end = span.hi.0.checked_sub(*file.positions.start())? as usize;
@@ -430,6 +437,7 @@ impl<'s> Locations<'s> {
                 self.locations.functions.insert(
                     name,
                     FunctionInfo {
+                        label: None,
                         span: function.function.span,
                         explicit_return: function.function.return_type.is_some(),
                     },
@@ -440,10 +448,12 @@ impl<'s> Locations<'s> {
                 if let (ast::Pat::Ident(ident), Some(init)) = (&decl.name, &decl.init) {
                     let info = match &**init {
                         ast::Expr::Arrow(arrow) => Some(FunctionInfo {
+                            label: None,
                             span: arrow.span,
                             explicit_return: arrow.return_type.is_some(),
                         }),
                         ast::Expr::Fn(fn_expr) => Some(FunctionInfo {
+                            label: None,
                             span: fn_expr.function.span,
                             explicit_return: fn_expr.function.return_type.is_some(),
                         }),
@@ -458,12 +468,7 @@ impl<'s> Locations<'s> {
             }
             fn visit_call_expr(&mut self, call: &ast::CallExpr) {
                 if call.span.lo.0 != 0 {
-                    let entry = self
-                        .locations
-                        .calls
-                        .entry(call.span.lo.0)
-                        .or_insert((call.span, None));
-                    entry.0 = call.span;
+                    self.locations.calls.insert(call.span.lo.0, call.span);
                     if let ast::Callee::Expr(callee) = &call.callee
                         && let ast::Expr::Member(member) = callee.unwrap_parens()
                         && let ast::MemberProp::Computed(prop) = &member.prop
@@ -471,7 +476,9 @@ impl<'s> Locations<'s> {
                         && matches!(&*symbol.obj, ast::Expr::Ident(id) if id.sym == "Symbol" && id.ctxt == self.unresolved)
                         && matches!(&symbol.prop,ast::MemberProp::Ident(id) if id.sym=="dispose")
                     {
-                        entry.1 = Some(call.span);
+                        self.locations
+                            .disposals
+                            .insert((call.span.lo.0, call.span.hi.0));
                     }
                 }
                 call.visit_children_with(self);
@@ -484,9 +491,7 @@ impl<'s> Locations<'s> {
                 if new_expr.span.lo.0 != 0 {
                     self.locations
                         .calls
-                        .entry(new_expr.span.lo.0)
-                        .or_insert((new_expr.span, None))
-                        .0 = new_expr.span;
+                        .insert(new_expr.span.lo.0, new_expr.span);
                 }
                 new_expr.visit_children_with(self);
             }
@@ -515,6 +520,7 @@ impl<'s> Locations<'s> {
                     self.locations.functions.insert(
                         format!("{class_name}::constructor"),
                         FunctionInfo {
+                            label: None,
                             span: ctor.span,
                             explicit_return: false,
                         },
@@ -538,6 +544,7 @@ impl<'s> Locations<'s> {
                         self.locations.functions.insert(
                             format!("{class_name}::{prefix}{name}"),
                             FunctionInfo {
+                                label: None,
                                 span: method.function.span,
                                 explicit_return: method.function.return_type.is_some(),
                             },
@@ -559,37 +566,5 @@ impl<'s> Locations<'s> {
             locations: self,
             class_name: None,
         });
-    }
-}
-
-fn function_calls(function: &Function, visit: &mut impl FnMut(FuncId, u32)) {
-    for default in function.params.iter().filter_map(|p| p.default.as_ref()) {
-        expression_calls(default, visit);
-    }
-    body_calls(&function.body, visit);
-}
-
-fn body_calls(body: &[Stmt], visit: &mut impl FnMut(FuncId, u32)) {
-    for statement in body {
-        stmt_any_expr(statement, &mut |expr| {
-            expression_calls(expr, visit);
-            false
-        });
-    }
-}
-
-fn expression_calls(expr: &Expr, visit: &mut impl FnMut(FuncId, u32)) {
-    if let Expr::Closure { body, .. } = expr {
-        body_calls(body, visit);
-    }
-    walk_expr_children(expr, &mut |child| expression_calls(child, visit));
-    if let Expr::Call {
-        callee,
-        byte_offset,
-        ..
-    } = expr
-        && let Expr::FuncRef(id) = callee.as_ref()
-    {
-        visit(*id, *byte_offset);
     }
 }

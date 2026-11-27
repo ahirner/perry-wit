@@ -4,7 +4,6 @@ use pliron::{
     context::Context,
     r#type::{TypeHandle, TypedHandle},
 };
-use std::collections::HashSet;
 
 use crate::{ArrayType, JsonType, OptionalType, RecordKind, RecordType, StringType, VariantType};
 
@@ -24,7 +23,6 @@ pub enum JsonSchema {
     Array(TypeHandle),
     Dictionary {
         entry: TypedHandle<RecordType>,
-        key: TypeHandle,
         value: TypeHandle,
     },
     Variant(TypedHandle<VariantType>),
@@ -81,70 +79,52 @@ impl JsonSchema {
     }
 
     fn supports_input(ctx: &Context, root: TypeHandle, usage: Usage) -> bool {
-        let mut pending = vec![root];
-        let mut visited = HashSet::new();
-        while let Some(ty) = pending.pop() {
-            if !visited.insert(ty) {
-                continue;
-            }
+        crate::nested_types(ctx, [root]).all(|ty| {
             if usage != Usage::Reflection && ty.deref(ctx).is::<crate::NumericType>() {
-                continue;
+                return true;
             }
             let schema = if usage == Usage::Box {
                 if Self::scalar_descriptor(ctx, ty).is_some() {
-                    continue;
+                    return true;
                 }
                 crate::typed::<RecordType>(ctx, ty)
-                    .map(JsonSchema::Record)
+                    .map(Self::Record)
                     .or_else(|| Self::of(ctx, ty))
             } else {
                 Self::of(ctx, ty)
             };
             match schema {
-                Some(JsonSchema::Number | JsonSchema::Boolean | JsonSchema::String) => {}
-                Some(JsonSchema::Value) if usage != Usage::Reflection => {}
-                Some(JsonSchema::Integer { width, .. })
-                    if width == 64 || usage == Usage::Reflection => {}
-                Some(JsonSchema::Array(element) | JsonSchema::Optional(element)) => {
-                    pending.push(element)
-                }
-                Some(JsonSchema::Record(record)) => {
+                Some(
+                    Self::Number
+                    | Self::Boolean
+                    | Self::String
+                    | Self::Array(_)
+                    | Self::Optional(_),
+                ) => true,
+                Some(Self::Value) => usage != Usage::Reflection,
+                Some(Self::Integer { width, .. }) => width == 64 || usage == Usage::Reflection,
+                Some(Self::Dictionary { .. }) => usage != Usage::Cursor,
+                Some(Self::Record(record)) => {
                     let record = record.deref(ctx);
-                    if usage == Usage::Cursor
-                        && !matches!(record.kind(), RecordKind::Object | RecordKind::Tuple)
-                    {
-                        return false;
-                    }
-                    let Ok(fields) = record.fields() else {
-                        return false;
-                    };
-                    pending.extend(fields.iter().map(|(_, ty)| *ty));
+                    record.fields().is_ok()
+                        && (usage != Usage::Cursor
+                            || matches!(record.kind(), RecordKind::Object | RecordKind::Tuple))
                 }
-                Some(JsonSchema::Dictionary { entry, .. }) if usage != Usage::Cursor => {
-                    pending.push(entry.into())
+                Some(Self::ValueUnion(_)) => usage != Usage::Reflection,
+                Some(Self::Variant(variant)) => {
+                    // Variant payload storage has one scalar slot, unlike record/array slots.
+                    usage != Usage::Reflection
+                        && !variant.deref(ctx).cases().iter().any(|(_, payload)| {
+                            payload.is_some_and(|p| {
+                                crate::present_type(ctx, p)
+                                    .deref(ctx)
+                                    .is::<crate::NumericType>()
+                            })
+                        })
                 }
-                Some(JsonSchema::Variant(variant) | JsonSchema::ValueUnion(variant))
-                    if usage != Usage::Reflection =>
-                {
-                    for (_, payload) in variant.deref(ctx).cases() {
-                        if let Some(payload) = payload {
-                            // Variant payload storage has one scalar slot, unlike record/array slots.
-                            if crate::present_type(ctx, *payload)
-                                .deref(ctx)
-                                .is::<crate::NumericType>()
-                            {
-                                return false;
-                            }
-                            pending.push(*payload);
-                        }
-                    }
-                }
-                None if usage == Usage::Reflection
-                    && ty.deref(ctx).is::<crate::ExceptionType>() => {}
-                _ => return false,
+                None => usage == Usage::Reflection && ty.deref(ctx).is::<crate::ExceptionType>(),
             }
-        }
-        true
+        })
     }
 
     /// Classify a MIR type into its structural JSON schema kind.
@@ -167,21 +147,16 @@ impl JsonSchema {
             Self::String
         } else if let Some(optional) = definition.downcast_ref::<OptionalType>() {
             Self::Optional(optional.value())
-        } else if let Some(record) = crate::typed::<RecordType>(ctx, ty)
-            && matches!(
-                record.deref(ctx).kind(),
-                RecordKind::Object | RecordKind::Tuple | RecordKind::DictionaryEntry
-            )
-        {
+        } else if let Some(record) = RecordType::data_record(ctx, ty) {
             Self::Record(record)
         } else if let Some(array) = definition.downcast_ref::<ArrayType>() {
             let element = array.element();
             match TypedHandle::<RecordType>::from_handle(element, ctx) {
                 Ok(record) if record.deref(ctx).kind() == RecordKind::DictionaryEntry => {
                     let fields = record.deref(ctx);
+                    fields.field("_0")?;
                     Self::Dictionary {
                         entry: record,
-                        key: fields.field("_0")?.1,
                         value: fields.field("_1")?.1,
                     }
                 }
@@ -192,15 +167,6 @@ impl JsonSchema {
         } else {
             Self::Variant(crate::typed::<VariantType>(ctx, ty)?)
         })
-    }
-
-    /// Dictionaries use an array of entries as native storage, despite encoding as objects.
-    pub(crate) fn storage_element(self) -> Option<TypeHandle> {
-        match self {
-            Self::Array(element) => Some(element),
-            Self::Dictionary { entry, .. } => Some(entry.into()),
-            _ => None,
-        }
     }
 
     /// Whether every reachable type can be built directly from the JSON lexer.

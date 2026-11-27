@@ -21,10 +21,7 @@ impl Integer {
             .checked_mul(4)
             .and_then(|size| size.checked_add(16))
         else {
-            runtime::raise(
-                runtime::RANGE_ERROR,
-                perry_rt_sys::static_text!("BigInt exceeds addressable memory"),
-            );
+            perry_rt_sys::raise_static!(runtime::RANGE_ERROR, "BigInt exceeds addressable memory");
             return None;
         };
         let result = runtime::alloc(size).cast::<Self>();
@@ -94,11 +91,9 @@ impl Integer {
 pub(crate) extern "C" fn std_bigint_from_number(value: f64) -> *mut Integer {
     let magnitude = libm::fabs(value);
     if !value.is_finite() || libm::trunc(value) != value || magnitude >= 18446744073709551616.0 {
-        runtime::raise(
+        perry_rt_sys::raise_static!(
             runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!(
-                "BigInt conversion requires an integer within the 64-bit transport domain"
-            ),
+            "BigInt conversion requires an integer within the 64-bit transport domain"
         );
         return core::ptr::null_mut();
     }

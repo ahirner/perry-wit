@@ -1,7 +1,7 @@
 //! The native HTTP service remains a WASI contract with WIT-owned declarations.
 use crate::{
     execution::{Evidence, Outcome, check_equivalence, number},
-    registry::{Case, Contract, Witness},
+    registry::{Case, Contract},
 };
 use anyhow::{Result, ensure};
 use proptest::prelude::*;
@@ -52,21 +52,15 @@ fn check(case: &Case, evidence: &Evidence) -> Result<()> {
 }
 pub(crate) fn contract() -> Contract {
     let case = |bytes, status| Case::Handler(HandlerCase { bytes, status });
-    Contract::new(
+    Contract::checked(
         "wasi.http.handler",
-        vec![
-            Witness {
-                partition: "empty",
-                case: case(vec![], 200),
-            },
-            Witness {
-                partition: "binary-and-duplicates",
-                case: case(vec![0, 255, 128], 201),
-            },
-            Witness {
-                partition: "request-response-limit",
-                case: case((0..65536).map(|i| i as u8).collect(), 404),
-            },
+        [
+            ("empty", case(vec![], 200)),
+            ("binary-and-duplicates", case(vec![0, 255, 128], 201)),
+            (
+                "request-response-limit",
+                case((0..65536).map(|i| i as u8).collect(), 404),
+            ),
         ],
         (
             prop::collection::vec(any::<u8>(), 0..=256),

@@ -1,26 +1,18 @@
 //! Statement, instance, local-slot, cell, and finalization logic for solver instances.
 use super::*;
+use crate::completion::{EMPTY_RETURN, FALLTHROUGH};
 
 impl<'h, 'a> Solver<'h, 'a> {
     pub(super) fn evaluate_instance(&mut self, inst_id: InstanceId) -> Result<()> {
-        self.evaluating_inst = Some(inst_id);
-        self.current_reads.clear();
-        self.current_read_list.clear();
-        let res = self.evaluate_instance_inner(inst_id);
-        self.evaluating_inst = None;
-        self.commit_reads(inst_id);
-        res
-    }
-
-    fn evaluate_instance_inner(&mut self, inst_id: InstanceId) -> Result<()> {
+        self.subscriptions.forget(inst_id);
         let inst = &self.instances[inst_id];
         let is_witness = inst.is_witness;
-        let (template, receiver, return_loc, has_explicit_return, param_locs_span, args_ty) = (
+        let activation = inst.activation;
+        let (template, receiver, return_loc, has_explicit_return, args_ty) = (
             inst.template,
             inst.receiver,
             inst.return_loc,
             inst.has_explicit_return,
-            inst.param_locs,
             inst.args,
         );
         let view = self.index.view(template);
@@ -45,7 +37,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     || incoming == Ty::BOTTOM
                     || abs.is_some_and(Absence::admits_undefined);
                 let def_ty = self.eval_expr(&mut s, default_expr)?;
-                if default_runs && let Some(&ploc) = self.param_locs[param_locs_span].get(p_idx) {
+                if default_runs && let Some(ploc) = activation.locations().nth(p_idx) {
                     let norm = self
                         .types
                         .normalize_for_storage(self.ctx, self.decls, def_ty);
@@ -55,9 +47,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                         }
                     } else if !self.types.is_open_with(
                         norm,
-                        self.locations.as_slice(),
+                        |loc| self.facts.resolve(loc),
                         &self.dict_reads,
-                    ) || self.types.is_open(self.locations[ploc])
+                    ) || self.types.is_open(self.facts[ploc])
                     {
                         self.write_loc(ploc, norm);
                     }
@@ -65,21 +57,6 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        if template == TemplateId::INIT {
-            for (cid, f_idx, loc) in self.static_field_locs.clone() {
-                if let Some(init) = self
-                    .hir
-                    .classes
-                    .get(self.index.class(cid).hir_idx)
-                    .and_then(|c| c.static_fields.get(f_idx))
-                    .and_then(|f| f.init.as_ref())
-                {
-                    let ty = self.eval_expr(&mut s, init)?;
-                    let norm = self.types.normalize_for_storage(self.ctx, self.decls, ty);
-                    self.write_loc(loc, norm);
-                }
-            }
-        }
         if view.kind == TemplateKind::FieldInitializers {
             let Some(Receiver::Class(id)) = receiver else {
                 return Err(Diagnostic::internal(
@@ -87,13 +64,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 ));
             };
             let instance = &self.class_insts[id];
-            let info = &self.index.classes[instance.class];
-            let fields = &self
-                .hir
-                .classes
-                .get(info.hir_idx)
-                .ok_or_else(|| Diagnostic::internal("missing class fields"))?
-                .fields;
+            let info = self.index.class(instance.class);
+            let fields = &info.declaration.fields;
             let field_locs = instance.field_locs;
             for (f_idx, field) in fields.iter().enumerate() {
                 let Some(init) = &field.init else { continue };
@@ -101,15 +73,15 @@ impl<'h, 'a> Solver<'h, 'a> {
                     break;
                 };
                 if matches!(init, Expr::Array(items, _) if items.is_empty()) {
-                    if self.types.is_open(self.locations[loc])
-                        && !matches!(self.types.kind(self.locations[loc]), TyKind::Cell { .. })
+                    if self.types.is_open(self.facts[loc])
+                        && !matches!(self.types.kind(self.facts[loc]), TyKind::Cell { .. })
                     {
-                        let element = self.alloc_loc(Ty::BOTTOM);
+                        let element = self.facts.alloc(Ty::BOTTOM);
                         let cell = self.types.cell(element, CellKind::Array);
                         self.write_loc(loc, cell);
                     }
                     if matches!(
-                        self.types.kind(self.locations[loc]),
+                        self.types.kind(self.facts[loc]),
                         TyKind::Cell {
                             kind: CellKind::Array,
                             ..
@@ -128,8 +100,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Ok(());
         }
 
-        let body = hir_compat::strip_synthetic_default_guards(view.body, view.params.iter());
-        self.eval_stmts(&mut s, body)?;
+        self.eval_stmts(&mut s, view.body)?;
         if s.local_changed {
             self.enqueue(inst_id);
         }
@@ -137,31 +108,32 @@ impl<'h, 'a> Solver<'h, 'a> {
         if template == TemplateId::INIT
             || matches!(
                 view.kind,
-                TemplateKind::ClassConstructor | TemplateKind::ClassSetter(_)
+                TemplateKind::ClassConstructor | TemplateKind::ClassSetter
             )
         {
             return Ok(());
         }
         if !has_explicit_return {
             let mut result_ty = if s.has_return_value {
-                if crate::completion::returns_optional(body) {
+                if self.index.has_exit(view.body, FALLTHROUGH | EMPTY_RETURN) {
                     self.types.with_absences(s.returned, Absence::Undefined)
                 } else {
                     s.returned
                 }
-            } else if !crate::completion::falls_through(body) {
+            } else if !self.index.has_exit(view.body, FALLTHROUGH) {
                 Ty::NEVER
             } else {
                 Ty::VOID
             };
+            self.instances[inst_id].partial_record_result = (self.types.is_open(result_ty)
+                && matches!(self.types.kind(result_ty), TyKind::Object { .. }))
+            .then_some(result_ty);
             if view.is_async {
-                while let Some(inner) = self.unwrap_promise_once(inst_id, result_ty) {
-                    result_ty = inner;
-                }
+                result_ty = self.awaited_type(inst_id, result_ty);
                 if let TyKind::Cell {
                     loc: inner_loc,
                     kind: CellKind::Promise,
-                } = self.types.kind(self.locations[return_loc])
+                } = self.types.kind(self.facts[return_loc])
                 {
                     if result_ty != Ty::BOTTOM {
                         self.write_loc(inner_loc, result_ty);
@@ -177,89 +149,47 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
-    pub(super) fn local_frame_slot_in(
-        &self,
-        inst_id: InstanceId,
-        local: LocalIdx,
-    ) -> Option<usize> {
-        let info = self.index.locals[local];
-        let slot = info.frame_slot()?;
-        (info.owner == self.instances[inst_id].template).then_some(slot)
+    fn local_location(&self, inst: InstanceId, local: LocalIdx) -> Option<LocId> {
+        CaptureOwner::Instance(inst).location(
+            &self.instances,
+            self.index.locals.rows[local],
+            self.collapsed_locals[local],
+        )
     }
 
-    pub(super) fn read_local_value(&mut self, inst_id: InstanceId, local: LocalIdx) -> Option<Ty> {
-        if let Some(slot) = self.local_frame_slot_in(inst_id, local) {
-            return self.inst_frame_locals[inst_id].get(slot).copied();
-        }
-        let loc = self.local_loc_in_instance(inst_id, local)?;
-        Some(self.read_loc(loc, inst_id))
+    pub(super) fn read_local_value(&mut self, inst: InstanceId, local: LocalIdx) -> Option<Ty> {
+        let loc = self.local_location(inst, local)?;
+        Some(
+            if self.index.locals.rows[local]
+                .flags
+                .intersects(LocalFlags::SHARED)
+            {
+                self.read_loc(loc, inst)
+            } else {
+                self.facts[loc]
+            },
+        )
     }
 
-    pub(super) fn write_local_value(&mut self, s: &mut EvalState<'h>, local: LocalIdx, value: Ty) {
-        if let Some(cloc) = self.collapsed_local_locs[local] {
-            self.write_loc(cloc, value);
-        }
-        if let Some(slot) = self.local_frame_slot_in(s.inst, local) {
-            if let Some(cell) = self.inst_frame_locals[s.inst].get_mut(slot) {
-                let (next, self_nested) = self.types.join_bounded(*cell, value);
-                if self_nested {
-                    self.self_nested_locals.insert(local.index());
-                }
-                if next != *cell {
-                    *cell = next;
-                    s.local_changed = true;
-                }
-            }
-            return;
-        }
-        let loc = self
-            .local_loc_in_instance(s.inst, local)
-            .unwrap_or_else(|| self.ensure_instance_local(s.inst, local, Ty::BOTTOM));
-        self.write_loc(loc, value);
-        if self.self_nested_locs.contains(loc.index()) {
-            self.self_nested_locals.insert(local.index());
-        }
-    }
-
-    pub(super) fn local_loc_in_instance(
-        &self,
-        inst_id: InstanceId,
-        local: LocalIdx,
-    ) -> Option<LocId> {
-        let info = self.index.locals[local];
-        if info.flags.contains(LocalFlags::MODULE) {
-            return info.module_loc();
-        }
-        let mut cursor = CaptureOwner::Instance(inst_id);
-        loop {
-            match cursor {
-                CaptureOwner::Instance(cur) => {
-                    if let Some(slot) = self.inst_locals[cur].iter().find(|s| s.local == local) {
-                        return Some(slot.loc);
-                    }
-                    cursor = self.instances[cur].capture_owner;
-                }
-                CaptureOwner::Template(_) => return self.collapsed_local_locs[local],
-                CaptureOwner::None => return None,
-            }
-        }
-    }
-
-    pub(super) fn ensure_instance_local(
+    pub(super) fn write_local_value(
         &mut self,
-        inst_id: InstanceId,
+        s: &mut EvalState<'h>,
         local: LocalIdx,
-        initial: Ty,
-    ) -> LocId {
-        if let Some(loc) = self.index.locals[local].module_loc() {
-            return loc;
+        value: Ty,
+    ) -> Result<()> {
+        if let Some(loc) = self.collapsed_locals[local] {
+            self.write_loc(loc, value);
         }
-        if let Some(slot) = self.inst_locals[inst_id].iter().find(|s| s.local == local) {
-            return slot.loc;
+        let info = self.index.locals.rows[local];
+        let loc = self.local_location(s.inst, local).ok_or_else(|| {
+            perry_wit_diagnostics::internal!("missing storage for local {}", info.id)
+        })?;
+        if info.flags.intersects(LocalFlags::SHARED) {
+            self.write_loc(loc, value);
+        } else {
+            s.local_changed |= self.facts.join(self.types, loc, value);
         }
-        let loc = self.alloc_loc(initial);
-        self.inst_locals[inst_id].push(InstanceLocalSlot { local, loc });
-        loc
+        Ok(())
     }
 
     pub(super) fn invalidate_conservative_cell(&mut self, ty: Ty) {
@@ -275,11 +205,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         if val_ty == Ty::BOTTOM {
             return;
         }
+        let root = self.facts.root(elem_loc);
         let self_nested = self
             .types
-            .contains_cell(val_ty, elem_loc, self.locations.as_slice());
+            .contains_cell(val_ty, root, |loc| self.facts.resolve(loc));
         if self_nested {
-            self.self_nested_locs.insert(elem_loc.index());
+            self.facts.self_nested.insert(root.index());
         }
         let next = if self_nested || self.types.has_nested_unresolved(val_ty, false) {
             Ty::OPEN
@@ -290,7 +221,19 @@ impl<'h, 'a> Solver<'h, 'a> {
         self.write_loc(elem_loc, next);
     }
 
-    pub(super) fn push_into_cells(&mut self, stripped: Ty, vals: &[Ty]) -> bool {
+    pub(super) fn push_values(
+        &mut self,
+        inst: InstanceId,
+        target: Ty,
+        values: &[Expr],
+        types: &[Ty],
+    ) -> bool {
+        let pushed = self.push_into_cells(target, types);
+        self.coerce_array_write(inst, target, values, types);
+        pushed
+    }
+
+    fn push_into_cells(&mut self, stripped: Ty, vals: &[Ty]) -> bool {
         match self.types.kind(stripped) {
             TyKind::Cell { loc, kind } => {
                 if kind.is_array() {
@@ -321,29 +264,60 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn write_cell_indexed(&mut self, obj_def: Ty, idx_ty: Ty, val_ty: Ty) {
-        if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
-            let ok = if kind.is_array() {
-                matches!(idx_ty, Ty::NUMBER | Ty::INT32)
-            } else {
-                idx_ty == Ty::STRING
-            };
-            if ok {
-                self.write_cell(loc, val_ty);
-            } else if idx_ty != Ty::BOTTOM {
-                self.write_loc(loc, Ty::OPEN);
+    pub(super) fn push_argument(
+        &mut self,
+        inst: InstanceId,
+        target: Ty,
+        value: &Expr,
+        ty: Ty,
+        spread: bool,
+    ) {
+        if spread {
+            self.share_element_layouts(&[target, ty]);
+            let source = self.resolve_cell_read(inst, ty);
+            if let Some(element) = builtins::iterated_element(self.ctx, self.types, source) {
+                self.push_into_cells(target, &[element]);
             }
+        } else {
+            self.push_values(inst, target, std::slice::from_ref(value), &[ty]);
         }
     }
 
-    pub(super) fn unwrap_promise_once(&mut self, inst_id: InstanceId, ty: Ty) -> Option<Ty> {
+    pub(super) fn write_cell_indexed(&mut self, obj_def: Ty, idx_ty: Ty, val_ty: Ty) {
+        match self.types.kind(obj_def) {
+            TyKind::Union(span) => {
+                for member in self.types.ty_slice(span).to_vec() {
+                    self.write_cell_indexed(member, idx_ty, val_ty);
+                }
+            }
+            TyKind::Cell { loc, kind } => {
+                if kind.accepts_index(idx_ty) {
+                    self.write_cell(loc, val_ty);
+                } else if idx_ty != Ty::BOTTOM {
+                    self.write_loc(loc, Ty::OPEN);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn awaited_type(&mut self, inst: InstanceId, ty: Ty) -> Ty {
         match self.types.kind(ty) {
-            TyKind::Promise(inner) => Some(inner),
+            TyKind::Promise(value) => self.awaited_type(inst, value),
             TyKind::Cell {
                 loc,
                 kind: CellKind::Promise,
-            } => Some(self.read_loc(loc, inst_id)),
-            _ => None,
+            } => {
+                let value = self.read_loc(loc, inst);
+                self.awaited_type(inst, value)
+            }
+            TyKind::Union(_) => self
+                .try_map_children(ty, |solver, child| {
+                    let value = solver.awaited_type(inst, child);
+                    (value != Ty::BOTTOM).then_some(value).ok_or(())
+                })
+                .unwrap_or(Ty::BOTTOM),
+            _ => ty,
         }
     }
 
@@ -351,79 +325,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         if self.types.is_open(expected) {
             return;
         }
-        if self.locations[loc] != expected {
-            self.locations[loc] = expected;
-            self.dirty_locs.insert(loc.index());
-        }
-        self.declared_locs.insert(loc.index());
-    }
-
-    pub(super) fn resolve_promise_cells(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
-        match self.types.kind(ty) {
-            TyKind::Cell {
-                loc,
-                kind: CellKind::Promise,
-            } => {
-                let elem = self.read_loc(loc, inst_id);
-                if elem == Ty::BOTTOM {
-                    Ty::BOTTOM
-                } else {
-                    self.types.promise(elem)
-                }
-            }
-            TyKind::Cell { loc, kind } if kind.is_array() => {
-                let elem = self.read_loc(loc, inst_id);
-                if elem == Ty::BOTTOM {
-                    Ty::BOTTOM
-                } else {
-                    let elem = self.resolve_promise_cells(inst_id, elem);
-                    if elem == Ty::BOTTOM {
-                        Ty::BOTTOM
-                    } else {
-                        self.types.array(elem)
-                    }
-                }
-            }
-            TyKind::Array(elem) => {
-                let next = self.resolve_promise_cells(inst_id, elem);
-                if next == Ty::BOTTOM {
-                    Ty::BOTTOM
-                } else if next == elem {
-                    ty
-                } else {
-                    self.types.array(next)
-                }
-            }
-            TyKind::Tuple(span) => {
-                let items: Vec<Ty> = self.types.ty_slice(span).to_vec();
-                let mut out = Vec::with_capacity(items.len());
-                let mut changed = false;
-                for item in items {
-                    let next = self.resolve_promise_cells(inst_id, item);
-                    if next == Ty::BOTTOM {
-                        return Ty::BOTTOM;
-                    }
-                    changed |= next != item;
-                    out.push(next);
-                }
-                if changed { self.types.tuple(&out) } else { ty }
-            }
-            TyKind::Union(span) => {
-                let items: Vec<Ty> = self.types.ty_slice(span).to_vec();
-                let mut out = Vec::with_capacity(items.len());
-                let mut changed = false;
-                for item in items {
-                    let next = self.resolve_promise_cells(inst_id, item);
-                    if next == Ty::BOTTOM {
-                        return Ty::BOTTOM;
-                    }
-                    changed |= next != item;
-                    out.push(next);
-                }
-                if changed { self.types.union(&out) } else { ty }
-            }
-            _ => ty,
-        }
+        self.facts.declare(loc, expected);
     }
 
     pub(super) fn resolve_cell_read(&mut self, inst_id: InstanceId, ty: Ty) -> Ty {
@@ -462,7 +364,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                 {
                     return ty;
                 }
-                let members: Vec<Ty> = members.to_vec();
+                let members = members.to_vec();
+                self.share_element_layouts(&members);
                 let mut joined = Ty::BOTTOM;
                 for m in members {
                     let r = self.resolve_cell_read(inst_id, m);
@@ -495,14 +398,22 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    pub(super) fn record_site(&mut self, inst_id: InstanceId, expr: &Expr, res: SiteResolution) {
-        let template = self.instances[inst_id].template;
-        let Some(local_site) = self.index.site_of(template, expr) else {
-            debug_assert!(false, "unindexed site in template {}", template.index());
-            return;
-        };
-        if let Some(slot) = self.inst_sites[inst_id].get_mut(local_site) {
-            slot.resolution = Some(res);
+    pub(super) fn site_mut(&mut self, inst: InstanceId, expr: &Expr) -> Result<&mut SiteEntry> {
+        let site = self
+            .index
+            .expressions
+            .index(expr)
+            .ok_or_else(|| Diagnostic::internal("operand missing from lexical site index"))?;
+        Ok(self.inst_sites[inst].entry(site, SiteEntry::default))
+    }
+
+    pub(super) fn record_site(&mut self, inst: InstanceId, expr: &Expr, res: SiteResolution) {
+        if let Some(site) = self.index.expressions.index(expr) {
+            self.inst_sites[inst]
+                .entry(site, SiteEntry::default)
+                .resolution = Some(res);
+        } else {
+            debug_assert!(false, "unindexed resolution site");
         }
     }
 
@@ -510,45 +421,35 @@ impl<'h, 'a> Solver<'h, 'a> {
         let depth = s.guards.depth();
         let mut remaining = stmts;
         while let Some((stmt, rest)) = remaining.split_first() {
-            let mut handled = false;
-            if let Stmt::Let { id, name, init, .. } = stmt {
-                s.iteration.register_binding(*id, name, init.as_ref());
-                if let Some(init) = init {
-                    s.iteration.guard(*id, init);
-                    if let Some(hir_compat::RecordExpr::Value(mut value)) =
-                        s.iteration.expression(init)
-                    {
-                        while let Some(hir_compat::RecordExpr::Value(inner)) =
-                            s.iteration.expression(value)
-                        {
-                            value = inner;
-                        }
-                        let ty = self.eval_expr(s, value)?;
-                        if let Some(lidx) = self.index.local_idx(*id) {
-                            self.write_local_value(s, lidx, ty);
-                            self.mark_written(s.inst, lidx);
-                        }
-                        handled = true;
-                    } else if matches!(init, Expr::Undefined)
-                        && let Some(el) = s.iteration.element(remaining)
-                    {
-                        let ty = self.eval_expr(s, el.value)?;
-                        let ty = match el.available {
-                            hir_compat::Availability::Known(true) => ty,
-                            hir_compat::Availability::Known(false) => Ty::VOID,
-                            hir_compat::Availability::Test(_) => {
-                                self.types.with_absences(ty, Absence::Undefined)
-                            }
-                        };
-                        if let Some(lidx) = self.index.local_idx(el.id) {
-                            self.write_local_value(s, lidx, ty);
-                            self.mark_written(s.inst, lidx);
-                        }
-                        handled = true;
-                    }
+            let inferred = match stmt {
+                Stmt::Let {
+                    id,
+                    init: Some(init),
+                    ..
+                } if let Some(hir_compat::RecordExpr::Value(value)) =
+                    self.index.locals.expression(init) =>
+                {
+                    Some((*id, self.eval_expr(s, value)?))
                 }
-            }
-            if !handled {
+                _ if let Some((element, _)) = self.index.locals.element(remaining) => {
+                    let ty = self.eval_expr(s, element.value)?;
+                    let ty = match element.available {
+                        hir_compat::Availability::Known(true) => ty,
+                        hir_compat::Availability::Known(false) => Ty::VOID,
+                        hir_compat::Availability::Test(_) => {
+                            self.types.with_absences(ty, Absence::Undefined)
+                        }
+                    };
+                    Some((element.id, ty))
+                }
+                _ => None,
+            };
+            if let Some((id, ty)) = inferred {
+                if let Some(local) = self.index.local_idx(id) {
+                    self.write_local_value(s, local, ty)?;
+                    self.mark_written(s.inst, local);
+                }
+            } else {
                 self.eval_stmt(s, stmt)?;
             }
             remaining = rest;
@@ -559,35 +460,35 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn eval_stmt(&mut self, s: &mut EvalState<'h>, stmt: &'h Stmt) -> Result<()> {
         match stmt {
-            Stmt::Let { id, ty, init, .. } => {
+            Stmt::Let { id, init, .. } => {
                 let Some(lidx) = self.index.local_idx(*id) else {
                     if let Some(init) = init {
                         self.eval_expr(s, init)?;
                     }
                     return Ok(());
                 };
-                let local_flags = self.index.locals[lidx].flags;
-                let is_inferred = self.index.is_inferred_local(self.hir, *id, lidx);
-                let is_deferred = local_flags.contains(LocalFlags::DEFERRED);
-                let declared = self.types.intern_hir(self.ctx, ty, !is_inferred);
+                let local = self.index.locals.rows[lidx];
+                let is_inferred = !local.flags.is_explicit();
+                let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
+                let declared = local.declared;
                 let declared = if !is_inferred {
                     self.instantiate_annotated_class(declared, 0, Some(s.inst))?
                 } else {
                     declared
                 };
-                let needs_context = is_inferred || self.types.is_open(declared);
-                let initial = if !needs_context { declared } else { Ty::BOTTOM };
-                if self.local_frame_slot_in(s.inst, lidx).is_none() {
-                    let _ = self.ensure_instance_local(s.inst, lidx, initial);
-                }
+                let regex = !is_inferred && self.regex_annotation(declared);
+                let needs_context =
+                    is_inferred || self.types.is_open(declared) || regex && init.is_some();
                 if !needs_context {
-                    self.write_local_value(s, lidx, declared);
+                    self.write_local_value(s, lidx, declared)?;
                 }
                 let is_i64_cast = is_inferred
-                    && matches!(self.types.kind(declared), TyKind::Leaf(id)
-                    if matches!(id.hir(self.ctx), HirType::Named(n) if matches!(self.decls.integer_carrier(n), Some(HirType::BigInt))));
+                    && self
+                        .types
+                        .integer_domain(self.ctx, self.decls, declared)
+                        .is_some_and(|domain| domain.deref(self.ctx).width() == 64);
                 if is_i64_cast {
-                    self.write_local_value(s, lidx, declared);
+                    self.write_local_value(s, lidx, declared)?;
                 }
 
                 if let Some(init_expr) = init {
@@ -602,8 +503,8 @@ impl<'h, 'a> Solver<'h, 'a> {
                             None
                         }
                     } else if needs_context
-                        && !local_flags.contains(LocalFlags::REASSIGNED)
-                        && self.index.is_empty_object_expr(self.types, init_expr)
+                        && !local.flags.contains(LocalFlags::REASSIGNED)
+                        && self.index.is_empty_object_expr(init_expr)
                     {
                         Some(CellKind::Dict)
                     } else {
@@ -611,11 +512,18 @@ impl<'h, 'a> Solver<'h, 'a> {
                     };
                     if let Some(kind) = cell_kind {
                         let cell = self.alloc_expr_cell(s.inst, init_expr, kind)?;
-                        self.write_local_value(s, lidx, cell);
+                        self.write_local_value(s, lidx, cell)?;
                         self.mark_written(s.inst, lidx);
                         return Ok(());
                     }
-                    let init_ty = self.eval_expr(s, init_expr)?;
+                    let init_ty = if matches!(init_expr, Expr::MapNew)
+                        && matches!(self.types.kind(declared), TyKind::Generic { .. })
+                        && !self.types.is_open(declared)
+                    {
+                        self.instantiate_annotated_class(declared, 0, Some(s.inst))?
+                    } else {
+                        self.eval_expr(s, init_expr)?
+                    };
                     if !is_inferred
                         && let TyKind::Promise(expected_inner) = self.types.kind(declared)
                         && let TyKind::Cell {
@@ -631,13 +539,11 @@ impl<'h, 'a> Solver<'h, 'a> {
                     if matches!(self.types.kind(init_ty), TyKind::Func(_))
                         || self.is_tagged_func_union_in(init_ty, s.inst)
                     {
-                        self.write_local_value(s, lidx, init_ty);
+                        self.write_local_value(s, lidx, init_ty)?;
                     } else if !is_i64_cast && needs_context {
-                        let is_kind = |t, k| {
-                            matches!(self.types.kind(t), TyKind::Leaf(id)
-                            if matches!(id.hir(self.ctx), HirType::Named(n) if crate::methods::Kind::builtin(n) == Some(k)))
-                        };
+                        let is_kind = |t, k| matches!(self.types.kind(t), TyKind::Named(id) if crate::methods::Kind::builtin(id.get(self.ctx)) == Some(k));
                         let keep_declared = (init_ty == Ty::DYNAMIC
+                            || regex && !matches!(self.types.kind(init_ty), TyKind::Regex(_))
                             || (is_kind(declared, crate::methods::Kind::Reader)
                                 && !is_kind(init_ty, crate::methods::Kind::ByobReader)))
                             && !self.types.is_open(declared);
@@ -649,7 +555,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                             self.types
                                 .normalize_for_storage(self.ctx, self.decls, init_ty)
                         };
-                        self.write_local_value(s, lidx, stored);
+                        self.write_local_value(s, lidx, stored)?;
                     }
                     if let Some(cur) = self.read_local_value(s.inst, lidx) {
                         self.record_coercion(s.inst, init_expr, init_ty, cur);
@@ -681,7 +587,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(inst) = self.instances.get(s.inst)
                     && inst.has_explicit_return
                     && let TyKind::Promise(expected_inner) =
-                        self.types.kind(self.locations[inst.return_loc])
+                        self.types.kind(self.facts[inst.return_loc])
                     && let TyKind::Cell {
                         loc,
                         kind: CellKind::Promise,
@@ -690,9 +596,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     self.constrain_promise_loc(loc, expected_inner);
                 }
                 if self.index.view(self.instances[s.inst].template).is_async {
-                    while let Some(inner) = self.unwrap_promise_once(s.inst, ty) {
-                        ty = inner;
-                    }
+                    ty = self.awaited_type(s.inst, ty);
                 }
                 let norm = self.types.normalize_for_storage(self.ctx, self.decls, ty);
                 self.check_escaping_func(s.inst, norm, 0, s.current_span)?;
@@ -702,7 +606,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                     let dst = self
                         .instances
                         .get(s.inst)
-                        .and_then(|i| self.locations.get(i.return_loc).copied())
+                        .map(|i| self.facts[i.return_loc])
                         .map_or(s.returned, |r| self.types.join(r, s.returned));
                     self.record_coercion(s.inst, e, norm, dst);
                 }
@@ -715,37 +619,37 @@ impl<'h, 'a> Solver<'h, 'a> {
                 self.eval_expr(s, condition)?;
                 let otherwise = else_branch.as_deref().unwrap_or(&[]);
                 let (then_reaches, else_reaches) = (
-                    crate::completion::falls_through(then_branch),
-                    crate::completion::falls_through(otherwise),
+                    self.index.has_exit(then_branch, FALLTHROUGH),
+                    self.index.has_exit(otherwise, FALLTHROUGH),
                 );
                 let branch = s.guards.branch();
-                s.guards.exclude_absences(condition, true);
+                self.assume(s, condition, true);
                 self.eval_stmts(s, then_branch)?;
                 let then_writes = s.guards.other_arm(branch);
-                s.guards.exclude_absences(condition, false);
+                self.assume(s, condition, false);
                 self.eval_stmts(s, otherwise)?;
                 if let Some(truth) = s
                     .guards
                     .join(branch, then_writes, then_reaches, else_reaches)
                 {
-                    s.guards.exclude_absences(condition, truth);
-                    s.guards.assign_in(
+                    self.assume(s, condition, truth);
+                    self.invalidate_writes(
+                        s,
                         if then_reaches { then_branch } else { otherwise },
                         [],
-                        |_| None,
                     );
                 }
             }
             Stmt::While { condition, body } => {
-                s.guards.assign_in(body, [condition], |_| None);
+                self.invalidate_writes(s, body, [condition]);
                 let depth = s.guards.depth();
                 self.eval_expr(s, condition)?;
-                s.guards.exclude_absences(condition, true);
+                self.assume(s, condition, true);
                 self.eval_stmts(s, body)?;
                 s.guards.truncate(depth);
             }
             Stmt::DoWhile { condition, body } => {
-                s.guards.assign_in(body, [condition], |_| None);
+                self.invalidate_writes(s, body, [condition]);
                 self.eval_stmts(s, body)?;
                 self.eval_expr(s, condition)?;
             }
@@ -755,18 +659,33 @@ impl<'h, 'a> Solver<'h, 'a> {
                 update,
                 body,
             } => {
-                if let Some(init) = init {
+                if let Some((id, source)) = self.index.locals.for_of(init.as_deref()) {
+                    let iterable = self.eval_expr(s, source)?;
+                    let iterable = self.resolve_cell_read(s.inst, iterable);
+                    let element = if iterable == Ty::BOTTOM {
+                        Ty::BOTTOM
+                    } else {
+                        builtins::iterated_element(self.ctx, self.types, iterable)
+                            .unwrap_or(Ty::OPEN)
+                    };
+                    let local = self
+                        .index
+                        .local_idx(id)
+                        .ok_or_else(|| Diagnostic::internal("missing iteration binding"))?;
+                    self.write_local_value(s, local, element)?;
+                    self.mark_written(s.inst, local);
+                } else if let Some(init) = init {
                     self.eval_stmt(s, init)?;
                 }
-                s.guards.assign_in(
+                self.invalidate_writes(
+                    s,
                     body,
                     condition.as_ref().into_iter().chain(update.as_ref()),
-                    |_| None,
                 );
                 let depth = s.guards.depth();
                 if let Some(cond) = condition {
                     self.eval_expr(s, cond)?;
-                    s.guards.exclude_absences(cond, true);
+                    self.assume(s, cond, true);
                 }
                 self.eval_stmts(s, body)?;
                 s.guards.truncate(depth);
@@ -786,7 +705,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                         && let Some(lidx) = self.index.local_idx(*id)
                     {
                         let err_ty = self.types.named(self.ctx, "Error");
-                        self.write_local_value(s, lidx, err_ty);
+                        self.write_local_value(s, lidx, err_ty)?;
                     }
                     self.eval_stmts(s, &catch.body)?;
                 }
@@ -812,86 +731,38 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
+    pub(super) fn assume(&self, s: &mut EvalState<'h>, condition: &'h Expr, truth: bool) {
+        s.guards.exclude_absences(condition, truth);
+        self.invalidate_writes(s, &[], [condition]);
+    }
+
     pub(super) fn finish(self, init_inst: InstanceId) -> Solved {
-        let live_instances = self.compute_live_instances();
-
-        let inst_local_tys = self.inst_locals.map(|slots| {
-            slots
-                .iter()
-                .map(|sl| (self.index.locals[sl.local].id, self.locations[sl.loc]))
-                .collect()
+        let mut live_helpers = BitSet::default();
+        let live_instances = self.live_instances(|id| {
+            live_helpers.insert(id.index());
         });
-
-        let mut class_static_field_tys = self.index.classes.map(|c| {
-            vec![
-                Ty::OPEN;
-                self.hir
-                    .classes
-                    .get(c.hir_idx)
-                    .map_or(0, |hc| hc.static_fields.len())
-            ]
-        });
-        for &(cid, f_idx, loc) in &self.static_field_locs {
-            if let Some(slot) = class_static_field_tys[cid].get_mut(f_idx) {
-                *slot = self.locations[loc];
-            }
-        }
-
-        let mut class_inst_members = self.class_insts.filled(ClassInstMembers::default());
-        let mut class_static_methods = self.index.classes.filled(Vec::new());
-        for (id, inst) in self.instances.iter_enumerated() {
-            if !live_instances.contains(id.index()) {
-                continue;
-            }
-            let view = self.index.view(inst.template);
-            match view.kind {
-                TemplateKind::ClassMethod => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_members[ci].methods.push(id);
-                    }
-                }
-                TemplateKind::ClassGetter(getter_idx) => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_members[ci].getters.push((getter_idx, id));
-                    }
-                }
-                TemplateKind::ClassSetter(setter_idx) => {
-                    if let Some(ci) = inst.receiver.and_then(Receiver::class) {
-                        class_inst_members[ci].setters.push((setter_idx, id));
-                    }
-                }
-                TemplateKind::ClassStaticMethod(class) => {
-                    class_static_methods[class].push(id);
-                }
-                _ => {}
-            }
-        }
-
+        let writes = self.write_effects(init_inst, &live_instances);
+        let (locations, self_nested_locs, escaping_env_templates) = self.facts.finish();
         Solved {
-            witness_instances: self.witness_instances,
+            writes,
+            resources: self.resources,
             init_inst,
             instances: self.instances,
             class_insts: self.class_insts,
-            locations: self.locations,
-            param_locs: self.param_locs,
+            locations,
             field_locs: self.field_locs,
             dispatch_arms: self.dispatch_arms,
             helpers: self.helpers,
-            inst_local_tys,
-            inst_frame_locals: self.inst_frame_locals,
+            collapsed_locals: self.collapsed_locals,
             inst_sites: self.inst_sites,
-            inst_captures: self.inst_captures,
             live_instances,
-            escaping_env_templates: self.escaping_env_templates,
-            collapsed_closures: self.collapsed_closures,
+            live_helpers,
+            escaping_env_templates,
+
             boxed_locals: self.boxed_locals,
-            collapsed_local_locs: self.collapsed_local_locs,
-            class_static_field_tys,
-            class_inst_members,
-            class_static_methods,
+
             dict_reads: self.dict_reads,
-            self_nested_locs: self.self_nested_locs,
-            self_nested_locals: self.self_nested_locals,
+            self_nested_locs,
             deletes_array_elements: self.deletes_array_elements,
         }
     }

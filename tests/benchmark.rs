@@ -614,7 +614,7 @@ fn raw_module(workload: String, source: &str) -> Result<(Vec<u8>, Row)> {
     let wasm = compile_core(source, "bench.ts")?;
     // Inspect the same raw pipeline separately.
     let ctx = &mut Context::new();
-    let mir = perry_lower::lower_sources(
+    let mir = perry_frontend::lower_sources(
         ctx,
         source,
         "bench.ts",
@@ -624,13 +624,9 @@ fn raw_module(workload: String, source: &str) -> Result<(Vec<u8>, Row)> {
     let mut analyses = perry_mir::canonicalize(mir.get_operation(), ctx)
         .map_err(|error| anyhow::anyhow!("{}", error.disp(ctx)))?;
     let exports = perry_codegen::Exports::Raw;
-    let optimization = optimization_statistics(&perry_codegen::explain_tiers(
-        ctx,
-        &mir,
-        &exports,
-        &mut analyses,
-    )?)?;
-    let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses)?;
+    let mut report = String::new();
+    let emitted = perry_codegen::compile(ctx, &mir, &exports, &mut analyses, Some(&mut report))?;
+    let optimization = optimization_statistics(&report)?;
     let bytes = stripped_core_size(&wasm)?;
     let row = Row {
         workload,
@@ -813,6 +809,18 @@ async fn optimization_fixtures() -> Result<Vec<Row>> {
         "run",
         &[Val::F64(4.0f64.to_bits())],
         Val::F64(12.0f64.to_bits()),
+    )?);
+    let regex = component(
+        "export function run(n: number) { return 'x'.repeat(n).match(/x/g)?.length ?? 0; }",
+        "package test:regex; world test { export run: func(n: u32) -> u32; }",
+        "test",
+    )?;
+    rows.push(measure_core(
+        "1,024 adjacent global regex matches",
+        &regex,
+        "run",
+        &[Val::I32(1024)],
+        Val::I32(1024),
     )?);
     let asynchronous = component(
         include_str!("fixtures/optimization/async.ts"),

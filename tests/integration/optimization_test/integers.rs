@@ -230,8 +230,10 @@ fn perry_types_and_wit_sdk_integer_aliases_enforce_wrapping_and_width_widening()
         }
     "#;
     let source = r#"
-        import type { s8, s32, u64 } from "perry:types";
-        import type { Byte } from "wit:test:optimization/math";
+        import type { s8 as SignedByte, s32, u64 } from "perry:types";
+        type s8 = SignedByte;
+        import type { Byte as WitByte } from "wit:test:optimization/math";
+        type Byte = WitByte;
         function widenAfterAdd(a: s8, b: s8) { const sum: s8 = (a + b) as s8; return sum; }
         export function wrapByte(a: number, b: number) { const wrapped: Byte = (a + b) as Byte; return wrapped; }
         export function widenS8(a: s8, b: s8) { return widenAfterAdd(a, b); }

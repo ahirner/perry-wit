@@ -1,6 +1,6 @@
 //! Declaration identities, reachable WIT types and their TypeScript names.
 use std::collections::HashSet;
-use wit_parser::{Resolve, Type, TypeDefKind, TypeId, TypeOwner, World, WorldItem};
+use wit_parser::{LiveTypes, Resolve, Type, TypeDefKind, TypeId, TypeOwner, World};
 
 /// Converts a kebab-case or snake_case string into camelCase.
 pub fn to_camel_case(s: &str) -> String {
@@ -114,60 +114,13 @@ impl<'a> TsNames<'a> {
     }
 }
 
-pub fn collect_types(resolve: &Resolve, ty: &Type, ids: &mut HashSet<TypeId>) {
-    let Type::Id(id) = ty else {
-        return;
-    };
-    let id = declaration_id(resolve, *id);
-    if ids.insert(id) {
-        visit_type_children(&resolve.types[id].kind, |ty| {
-            collect_types(resolve, ty, ids)
-        });
-    }
-}
-
 pub fn collect_world_types(resolve: &Resolve, world: &World) -> HashSet<TypeId> {
-    let mut seen = HashSet::new();
-    let items = || world.imports.iter().chain(world.exports.iter());
-    for (_, item) in items() {
-        match item {
-            WorldItem::Interface { id, .. } => {
-                for &id in resolve.interfaces[*id].types.values() {
-                    collect_types(resolve, &Type::Id(id), &mut seen);
-                }
-            }
-            WorldItem::Type { id, .. } => collect_types(resolve, &Type::Id(*id), &mut seen),
-            WorldItem::Function(_) => {}
-        }
+    let mut live = LiveTypes::default();
+    for item in world.imports.values().chain(world.exports.values()) {
+        live.add_world_item(resolve, item);
     }
-    for entry in crate::world_functions(resolve, items()) {
-        for param in &entry.function.params {
-            collect_types(resolve, &param.ty, &mut seen);
-        }
-        if let Some(ret) = &entry.function.result {
-            collect_types(resolve, ret, &mut seen);
-        }
-    }
-    seen.retain(|id| resolve.types[*id].name.is_some());
-    seen
-}
-
-pub fn visit_type_children(kind: &TypeDefKind, mut visit: impl FnMut(&Type)) {
-    match kind {
-        TypeDefKind::Handle(wit_parser::Handle::Own(id) | wit_parser::Handle::Borrow(id)) => {
-            visit(&Type::Id(*id))
-        }
-        TypeDefKind::List(inner) | TypeDefKind::Option(inner) | TypeDefKind::Type(inner) => {
-            visit(inner);
-        }
-        TypeDefKind::Result(result) => result.ok.iter().chain(result.err.iter()).for_each(visit),
-        TypeDefKind::Tuple(tuple) => tuple.types.iter().for_each(visit),
-        TypeDefKind::Record(record) => record.fields.iter().map(|field| &field.ty).for_each(visit),
-        TypeDefKind::Variant(variant) => variant
-            .cases
-            .iter()
-            .filter_map(|case| case.ty.as_ref())
-            .for_each(visit),
-        _ => {}
-    }
+    live.iter()
+        .map(|id| declaration_id(resolve, id))
+        .filter(|&id| resolve.types[id].name.is_some())
+        .collect()
 }

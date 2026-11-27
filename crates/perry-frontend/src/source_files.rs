@@ -33,7 +33,7 @@ pub fn load(source: &str, entry: &str) -> Result<BTreeMap<String, String>> {
                 .get(identity.to_string_lossy().as_ref())
                 .ok_or_else(|| internal!("Missing queued source: {}", identity.display()))?
         };
-        let module = crate::hir_compat::parse(text, &identity.to_string_lossy())?;
+        let module = crate::source::parse(text, &identity.to_string_lossy())?;
         for import in super::modules::imports(&module) {
             let Some(path) = super::modules::candidates(&identity, &import)?
                 .into_iter()

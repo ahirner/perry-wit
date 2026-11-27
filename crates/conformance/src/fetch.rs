@@ -1,7 +1,7 @@
 //! Pure bounded Fetch scenarios, shared by the Node and component transports.
 use crate::{
     execution::{Evidence, Outcome, check_equivalence, number},
-    registry::{Case, Contract, Witness},
+    registry::{Case, Contract},
 };
 use anyhow::{Result, ensure};
 use proptest::prelude::*;
@@ -76,29 +76,20 @@ fn fetch_contract(id: &'static str, byob: bool) -> Contract {
             byob,
         })
     };
-    Contract::new(
+    Contract::checked(
         id,
-        vec![
-            Witness {
-                partition: "empty",
-                case: case(vec![], 200, 0, false),
-            },
-            Witness {
-                partition: "binary-exact-limit",
-                case: case(vec![0, 255, 128, 240, 159, 146], 200, 6, false),
-            },
-            Witness {
-                partition: "non-success-status",
-                case: case(b"missing".to_vec(), 404, 7, false),
-            },
-            Witness {
-                partition: "overflow-cancellation",
-                case: case(vec![7; 257], 200, 256, false),
-            },
-            Witness {
-                partition: "completion-error",
-                case: case(vec![17; 30], 200, 64, true),
-            },
+        [
+            ("empty", case(vec![], 200, 0, false)),
+            (
+                "binary-exact-limit",
+                case(vec![0, 255, 128, 240, 159, 146], 200, 6, false),
+            ),
+            (
+                "non-success-status",
+                case(b"missing".to_vec(), 404, 7, false),
+            ),
+            ("overflow-cancellation", case(vec![7; 257], 200, 256, false)),
+            ("completion-error", case(vec![17; 30], 200, 64, true)),
         ],
         (
             prop::collection::vec(any::<u8>(), 0..=256),

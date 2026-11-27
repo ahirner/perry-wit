@@ -2,6 +2,54 @@
 use super::*;
 
 impl<'h, 'a> Solver<'h, 'a> {
+    pub(super) fn eval_static_call(
+        &mut self,
+        s: &mut EvalState<'h>,
+        method: crate::methods::StaticMethod,
+        args: &'h [Expr],
+    ) -> Result<Ty> {
+        use crate::methods::StaticMethod::*;
+        let args_ty = self.eval_args(s, args)?;
+        let first = args_ty.first().copied().unwrap_or(Ty::VOID);
+        let settled = match method {
+            Resolve => self.awaited_type(s.inst, first),
+            Reject => Ty::NEVER,
+            Combine(combinator) => {
+                let source = self.resolve_cell_read(s.inst, first);
+                let element = match args {
+                    [Expr::Array(items, _)] if items.is_empty() => Ty::VOID,
+                    [_] if source == Ty::BOTTOM => return Ok(Ty::BOTTOM),
+                    [_] => {
+                        builtins::iterated_element(self.ctx, self.types, source).unwrap_or(Ty::OPEN)
+                    }
+                    _ => Ty::OPEN,
+                };
+                let value = self.awaited_type(s.inst, element);
+                if value == Ty::BOTTOM {
+                    return Ok(value);
+                }
+                let value = if value == Ty::NEVER { Ty::VOID } else { value };
+                match combinator {
+                    perry_mir::Combinator::All => self.types.array(value),
+                    perry_mir::Combinator::AllSettled => {
+                        let settled = self.types.generic(
+                            crate::shapes::TypeName::new(self.ctx, builtins::SETTLED.to_owned()),
+                            &[value],
+                        );
+                        self.types.array(settled)
+                    }
+                    perry_mir::Combinator::Race => value,
+                }
+            }
+            Temporal(factory) => {
+                return Ok(builtins::native_ty(self.ctx, self.types, factory.result()));
+            }
+            PerformanceNow => return Ok(Ty::NUMBER),
+            Unsupported(_) => return Ok(Ty::OPEN),
+        };
+        Ok(self.types.promise(settled))
+    }
+
     pub(super) fn apply_promise_handle_call(
         &mut self,
         s: &mut EvalState<'h>,
@@ -42,35 +90,6 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
     }
 
-    fn callback_target(
-        &mut self,
-        s: &mut EvalState<'h>,
-        ident: FuncIdentity,
-        recv_ty: Option<Ty>,
-        arg_tys: &[Ty],
-        byte_offset: u32,
-    ) -> Result<(InstanceId, Ty, bool)> {
-        let view = self.index.view(ident.template);
-        let is_promise_handle =
-            self.apply_promise_handle_call(s, ident, arg_tys, None, byte_offset)?;
-        self.check_callback_params(s.inst, view, arg_tys, byte_offset)?;
-        let recv = recv_ty.filter(|_| view.uses_this).map(Receiver::Object);
-        let call_args = if is_promise_handle {
-            arg_tys.get(..1).unwrap_or(&[])
-        } else {
-            arg_tys
-        };
-        let target = self.request_instance(
-            InstanceReq::new(ident.template, call_args, Some(s.inst))
-                .receiver(recv)
-                .owner(ident.capture_owner)
-                .at(byte_offset),
-        )?;
-        self.propagate_writes(s.inst, target);
-        let ret = self.read_loc(self.instances[target].return_loc, s.inst);
-        Ok((target, ret, recv.is_some()))
-    }
-
     fn resolve_callback_call(
         &mut self,
         s: &mut EvalState<'h>,
@@ -78,77 +97,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         recv_ty: Option<Ty>,
         arg_tys: &[Ty],
         byte_offset: u32,
-    ) -> Result<Option<(CallbackCall, Ty)>> {
-        if cb_ty == Ty::BOTTOM || arg_tys.contains(&Ty::BOTTOM) {
-            return Ok(None);
-        }
-        if matches!(cb_ty, Ty::NEVER | Ty::NULL | Ty::VOID) {
-            let helper = self.intern_helper(HelperSpec::ThrowTypeError, byte_offset);
-            return Ok(Some((CallbackCall::ThrowTypeError(helper), Ty::NEVER)));
-        }
-        let dispatch_idents = if let Some(idents) = self.types.func_union_members(cb_ty) {
-            Some(idents)
-        } else {
-            let (stripped, nullish) = self.types.strip_nullish(cb_ty);
-            if nullish.is_some()
-                && let TyKind::Func(ident) = self.types.kind(stripped)
-            {
-                Some(vec![ident])
-            } else {
-                None
-            }
-        };
-        if let Some(idents) = dispatch_idents {
-            for &a in arg_tys {
-                self.invalidate_conservative_cell(a);
-            }
-            let mut arms = Vec::with_capacity(idents.len());
-            let mut ret = Ty::BOTTOM;
-            let mut needs_recv = false;
-            for ident in idents {
-                let (target, r, pass_receiver) =
-                    self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
-                needs_recv |= pass_receiver;
-                ret = self.types.join(ret, r);
-                arms.push((ident, target));
-            }
-            let arms_span = self.intern_dispatch_arms(&arms);
-            let arg_tuple = self.types.tuple(arg_tys);
-            let helper = self.intern_helper(
-                HelperSpec::Dispatcher {
-                    callee_ty: cb_ty,
-                    arms: arms_span,
-                    arg_tys: arg_tuple,
-                    recv_ty: needs_recv.then_some(recv_ty).flatten(),
-                },
-                byte_offset,
-            );
-            return Ok(Some((CallbackCall::Dispatch { helper, needs_recv }, ret)));
-        }
-        let TyKind::Func(ident) = self.types.kind(cb_ty) else {
-            if !self.types.is_open(cb_ty) && cb_ty != Ty::DYNAMIC {
-                return Err(self.annotate_expr_error(
-                    s,
-                    diag!(codes::TYPE_MISMATCH, "expression is not callable"),
-                    byte_offset,
-                ));
-            }
-            return Ok(None);
-        };
-        for &a in arg_tys {
-            self.invalidate_conservative_cell(a);
-        }
-        let (target, ret, pass_receiver) =
-            self.callback_target(s, ident, recv_ty, arg_tys, byte_offset)?;
-        let pass_env = self.is_escaping_env(ident.template, s.inst);
-        Ok(Some((
-            CallbackCall::Direct {
-                target,
-                pass_env,
-                pass_receiver,
-            },
-            ret,
-        )))
+    ) -> Result<Option<(CallTarget, Ty)>> {
+        let (result, target) = self.resolve_invocation(
+            s,
+            cb_ty,
+            recv_ty,
+            arg_tys,
+            calls::CallOrigin::Callback(byte_offset, &[]),
+        )?;
+        Ok(target.map(|target| (target, result)))
     }
 
     pub(super) fn eval_new_promise(
@@ -162,7 +119,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         let owner = CaptureOwner::Instance(s.inst);
         let site = self
             .index
-            .site_of(self.instances[s.inst].template, expr)
+            .expressions
+            .index(expr)
             .ok_or_else(|| Diagnostic::internal("missing promise constructor site"))?;
         let Some(SiteResolution::PromiseNew {
             value_loc,
@@ -192,8 +150,8 @@ impl<'h, 'a> Solver<'h, 'a> {
             template: reject_tid,
             capture_owner: owner,
         });
-        self.mark_escaping_env(s.inst, resolve_ty);
-        self.mark_escaping_env(s.inst, reject_ty);
+        self.mark_escaping_env(resolve_ty);
+        self.mark_escaping_env(reject_ty);
 
         let Some((exec_expr, tail)) = args.split_first() else {
             return Err(self.annotate_expr_error(
@@ -216,8 +174,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let Some((executor, _)) =
             self.resolve_callback_call(s, exec_ty, None, &[resolve_ty, reject_ty], byte_offset)?
         {
-            let (pass_resolve, pass_reject) = match executor {
-                CallbackCall::Direct { target, .. } => {
+            let (pass_resolve, pass_reject) = match executor.callee() {
+                Some(FunctionTarget::Direct(target) | FunctionTarget::Closure(target)) => {
                     let view = self.index.view(self.instances[target].template);
                     let arity = if view.params.iter().any(|p| p.is_rest) {
                         2
@@ -226,19 +184,30 @@ impl<'h, 'a> Solver<'h, 'a> {
                     };
                     (arity >= 1, arity >= 2)
                 }
-                CallbackCall::Dispatch { .. } => (true, true),
-                CallbackCall::ThrowTypeError(_) => (false, false),
+                Some(FunctionTarget::Dispatcher(_)) => (true, true),
+                None => (false, false),
             };
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::PromiseNew {
-                    value_loc,
-                    resolve_tid,
-                    reject_tid,
-                    executor: Some((executor, pass_resolve, pass_reject)),
-                },
-            );
+            let entry = self.inst_sites[s.inst]
+                .get_mut(site)
+                .ok_or_else(|| Diagnostic::internal("missing promise constructor site"))?;
+            entry.resolution = Some(SiteResolution::PromiseNew {
+                value_loc,
+                resolve_tid,
+                reject_tid,
+                executor: Some(PromiseExecutor {
+                    call: executor,
+                    handles: [
+                        pass_resolve.then_some(resolve_tid),
+                        pass_reject.then_some(reject_tid),
+                    ]
+                    .map(|tid| {
+                        tid.map(|template| FuncIdentity {
+                            template,
+                            capture_owner: owner,
+                        })
+                    }),
+                }),
+            });
         }
         Ok(promise_cell)
     }
@@ -257,14 +226,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             "catch" => ReactionKind::Catch,
             _ => ReactionKind::Finally,
         };
-        let inner_raw = match self.types.kind(promise_ty) {
-            TyKind::Promise(i) => i,
-            TyKind::Cell {
-                loc,
-                kind: CellKind::Promise,
-            } => self.read_loc(loc, s.inst),
-            _ => Ty::OPEN,
-        };
+        let inner_raw = self.awaited_type(s.inst, promise_ty);
         let (fulfilled_expr, rejected_expr) = match kind {
             ReactionKind::Then => (args.first(), args.get(1)),
             ReactionKind::Catch => (None, args.first()),
@@ -292,7 +254,7 @@ impl<'h, 'a> Solver<'h, 'a> {
         let f_present = f_ty.filter(|&t| is_handler(t));
         let g_present = g_ty.filter(|&t| is_handler(t));
 
-        let mut on_fulfilled: Option<(CallbackCall, Ty)> = None;
+        let mut on_fulfilled: Option<(CallTarget, Ty)> = None;
         let mut f_ret = Ty::BOTTOM;
         if let Some(ft) = f_present {
             self.check_escaping_func(s.inst, ft, byte_offset, s.current_span)?;
@@ -319,13 +281,10 @@ impl<'h, 'a> Solver<'h, 'a> {
                         } else {
                             std::slice::from_ref(&inner_raw)
                         };
-                        if let Some((cb_call, mut r)) =
+                        if let Some((cb_call, r)) =
                             self.resolve_callback_call(s, ft, None, cb_args, byte_offset)?
                         {
-                            while let Some(u) = self.unwrap_promise_once(s.inst, r) {
-                                r = u;
-                            }
-                            f_ret = r;
+                            f_ret = self.awaited_type(s.inst, r);
                             on_fulfilled = Some((cb_call, ft));
                         }
                     }
@@ -334,18 +293,15 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
         }
 
-        let mut on_rejected: Option<(CallbackCall, Ty)> = None;
+        let mut on_rejected: Option<(CallTarget, Ty)> = None;
         let mut g_ret = Ty::BOTTOM;
         if let Some(gt) = g_present {
             self.check_escaping_func(s.inst, gt, byte_offset, s.current_span)?;
             let err_ty = self.types.named(self.ctx, "Error");
-            if let Some((cb_call, mut r)) =
+            if let Some((cb_call, r)) =
                 self.resolve_callback_call(s, gt, None, &[err_ty], byte_offset)?
             {
-                while let Some(u) = self.unwrap_promise_once(s.inst, r) {
-                    r = u;
-                }
-                g_ret = r;
+                g_ret = self.awaited_type(s.inst, r);
                 on_rejected = Some((cb_call, gt));
             }
         }
@@ -375,37 +331,21 @@ impl<'h, 'a> Solver<'h, 'a> {
             ReactionKind::Finally => inner_raw,
         };
 
-        let result = self.expr_cell_loc(s.inst, expr)?;
-        self.write_loc(result, ret_settled);
-        let pass_fulfilled = on_fulfilled.is_some_and(|(cb, _)| cb.needs_value());
-        let pass_rejected = on_rejected.is_some_and(|(cb, _)| cb.needs_value());
         let helper = self.intern_helper(
-            HelperSpec::PromiseReaction {
+            HelperSpec::PromiseReaction(PromiseReaction {
                 kind,
                 promise_ty,
                 inner_ty: inner_raw,
                 on_fulfilled,
                 on_rejected,
                 ret_ty: ret_settled,
-            },
+            }),
             byte_offset,
         );
-        self.record_site(
-            s.inst,
-            expr,
-            SiteResolution::PromiseReaction {
-                result,
-                helper,
-                pass_first: if kind == ReactionKind::Catch {
-                    pass_rejected
-                } else {
-                    pass_fulfilled
-                },
-                pass_second: kind == ReactionKind::Then && pass_rejected,
-            },
-        );
-
-        Ok(self.types.cell(result, CellKind::Promise))
+        let (site, result, cell) = self.storage_site(s.inst, expr, CellKind::Promise)?;
+        site.resolution = Some(SiteResolution::PromiseReaction { result, helper });
+        self.write_loc(result, ret_settled);
+        Ok(cell)
     }
 
     pub(super) fn eval_timer_start(
@@ -416,55 +356,45 @@ impl<'h, 'a> Solver<'h, 'a> {
         args: &'h [Expr],
         byte_offset: u32,
     ) -> Result<Ty> {
-        let is_immediate = name == "setImmediate";
-        let repeating = name == "setInterval";
-        let Some(cb_expr) = args.first() else {
+        let mut inputs = self.eval_args(s, args)?;
+        let Some((&mut cb_ty, tail)) = inputs.split_first_mut() else {
             return Err(self.annotate_expr_error(
                 s,
                 diag!(codes::TYPE_MISMATCH, "{name} requires a callback function"),
                 byte_offset,
             ));
         };
-        let cb_ty = self.eval_expr(s, cb_expr)?;
-        let has_delay = !is_immediate && args.len() >= 2;
-        if has_delay && let Some(delay_expr) = args.get(1) {
-            self.eval_expr(s, delay_expr)?;
-        }
-        let extra_start = if is_immediate { 1 } else { 2 };
-        let extra_args = args.get(extra_start..).unwrap_or(&[]);
-        let extra_arg_tys = self.eval_args(s, extra_args)?;
-        let timer_ty = self.types.named(self.ctx, crate::hir_compat::TIMER_CLASS);
-        if cb_ty == Ty::BOTTOM || extra_arg_tys.contains(&Ty::BOTTOM) {
-            return Ok(timer_ty);
+        let schedule = crate::engine::TimerSchedule {
+            repeats: name == "setInterval",
+            has_delay: name != "setImmediate" && !tail.is_empty(),
+        };
+        let extras = if schedule.has_delay
+            && let Some((delay, extras)) = tail.split_first_mut()
+        {
+            *delay = Ty::NUMBER;
+            extras
+        } else {
+            tail
+        };
+        if cb_ty == Ty::BOTTOM || extras.contains(&Ty::BOTTOM) {
+            return Ok(Ty::TIMER);
         }
         self.check_escaping_func(s.inst, cb_ty, byte_offset, s.current_span)?;
         if let Some((cb_call, _)) =
-            self.resolve_callback_call(s, cb_ty, Some(timer_ty), &extra_arg_tys, byte_offset)?
+            self.resolve_callback_call(s, cb_ty, Some(Ty::TIMER), extras, byte_offset)?
         {
-            let extra_tuple = self.types.tuple(&extra_arg_tys);
-            let pass_cb = cb_call.needs_value();
+            let inputs = self.types.tuple(&inputs);
             let helper = self.intern_helper(
                 HelperSpec::TimerRunner {
-                    repeating,
-                    is_immediate,
+                    schedule,
                     cb_call,
-                    cb_ty,
-                    extra_arg_tys: extra_tuple,
+                    inputs,
                 },
                 byte_offset,
             );
-            self.record_site(
-                s.inst,
-                expr,
-                SiteResolution::TimerStart {
-                    helper,
-                    has_delay,
-                    is_immediate,
-                    pass_cb,
-                },
-            );
+            self.record_site(s.inst, expr, SiteResolution::TimerStart { helper });
         }
-        Ok(timer_ty)
+        Ok(Ty::TIMER)
     }
 
     pub(super) fn eval_timer_clear(

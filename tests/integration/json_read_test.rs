@@ -844,6 +844,10 @@ fn dynamic_json_preserves_undefined_members() {
         r#"
 interface Box {value:unknown}
 export function presence() {
+ const base={initial:1}; const a={n:3}; const b={n:4};
+ const mixed={...base,...JSON.parse('{"initial":2}'),child:b};
+ if(mixed.initial!==2 || mixed.child.n!==4) return 20;
+ if(({...base,...{n:4}}).n!==4 || ({...base,...(base.initial===1 ? b : a)}).n!==4) return 19;
  const record:{a:number;b?:number;c?:string;d?:boolean;missing?:number} = {
    a:1,b:undefined,c:undefined,d:undefined
  };

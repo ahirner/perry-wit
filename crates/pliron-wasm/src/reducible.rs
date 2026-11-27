@@ -12,291 +12,188 @@
 //! component, the components nested within it (excluding its header) are processed recursively.
 use crate::{
     attrs::NumOpcode,
-    control::{BrOp, CondBrOp},
+    control::{BrOp, BrTableOp, CondBrOp},
     ops::NumOp,
-    types::{I32_BITS, I64_BITS, integer_attr, val_type},
+    types::{I32_BITS, integer_attr},
 };
 use pliron::{
     basic_block::BasicBlock,
     builtin::{
-        attr_interfaces::TypedAttrInterface,
-        attributes::{FPDoubleAttr, FPSingleAttr},
-        op_interfaces::{BranchOpInterface, OneRegionInterface},
+        op_interfaces::{BranchOpInterface, OneRegionInterface, OneResultInterface},
         ops::{ConstantOp, FuncOp},
         types::{IntegerType, Signedness},
     },
     context::{Context, Ptr},
-    graph::{
-        ControlFlowGraph,
-        traversals::region::{DFSTraversal, sccs_in_topological_order},
-    },
-    op::Op,
+    graph::traversals::region::DFSTraversal,
+    linked_list::ContainsLinkedList,
+    op::{Op, op_cast},
     operation::Operation,
     region::Region,
-    r#type::{TypeHandle, Typed},
-    utils::{table::ISet, vec_exns::IterExtns},
-    value::Value,
+    r#type::Typed,
+    utils::table::ISet,
 };
-use std::collections::{HashMap, HashSet};
-use wasm_encoder::ValType;
+use std::collections::HashSet;
 
 /// Make the CFG of `function` reducible. Returns the number of guard blocks inserted.
-///
-/// # Panics
-///
-/// Panics if a `wasm.br_table` branches directly to an entry of a multi-entry cycle rather
-/// than routing through an intermediate block.
-pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> usize {
+pub fn make_reducible(ctx: &mut Context, function: &FuncOp) -> Result<usize, &'static str> {
     let entry = function.get_entry_block(ctx);
     let region = function.get_region(ctx);
     let mut guards = 0;
-    let mut work = vec![DFSTraversal::new(ctx, &region).pre_order().collect()];
+    let reachable: ISet<_> = DFSTraversal::new(ctx, &region).pre_order().collect();
+    let unreachable: HashSet<_> = region
+        .deref(ctx)
+        .iter(ctx)
+        .filter(|block| !reachable.contains(block))
+        .collect();
+    let mut work = vec![reachable];
     while let Some(nodes) = work.pop() {
-        let subgraph = RegionSubset(nodes);
-        for component in sccs_in_topological_order(ctx, &subgraph).into_iter().rev() {
+        let edges: Vec<_> = nodes
+            .iter()
+            .map(|block| {
+                block
+                    .deref(ctx)
+                    .succs(ctx)
+                    .into_iter()
+                    .filter_map(|target| nodes.get_index_of(&target))
+                    .collect()
+            })
+            .collect();
+        for mut component in pliron_control::graph::components(&edges).into_iter().rev() {
             if !component.is_cyclic {
                 continue;
             }
-            let members: HashSet<_> = component.nodes.into_iter().collect();
-            // Subgraph order keeps entry and guard selection deterministic.
-            let component: Vec<_> = subgraph
-                .0
-                .iter()
-                .copied()
-                .filter(|block| members.contains(block))
+            // Source order keeps guard labels and generated blocks deterministic.
+            component.nodes.sort_unstable();
+            let mut members: ISet<_> = component
+                .nodes
+                .into_iter()
+                .map(|index| nodes[index])
                 .collect();
-            let preds = predecessors(ctx, region);
-            let entries: Vec<_> = component
+            let entries: Vec<_> = members
                 .iter()
                 .copied()
                 .filter(|block| {
                     *block == entry
-                        || preds
-                            .get(block)
-                            .is_some_and(|preds| preds.iter().any(|p| !members.contains(p)))
+                        || block
+                            .preds(ctx)
+                            .iter()
+                            .any(|pred| !unreachable.contains(pred) && !members.contains(pred))
                 })
                 .collect();
             let header = if entries.len() > 1 {
-                assert!(
-                    !entries.contains(&entry),
-                    "the function entry block cannot be a loop entry"
-                );
+                if entries.contains(&entry) {
+                    return Err("the function entry block cannot be a loop entry");
+                }
                 guards += 1;
-                insert_guard(ctx, region, &entries, &preds)
+                insert_guard(ctx, region, &entries)?
             } else {
-                entries[0]
+                *entries.first().ok_or("reachable component has no entry")?
             };
-            let inner: ISet<_> = component.into_iter().filter(|b| *b != header).collect();
-            if !inner.is_empty() {
-                work.push(inner);
+            members.shift_remove(&header);
+            if !members.is_empty() {
+                work.push(members);
             }
         }
     }
-    guards
+    Ok(guards)
 }
 
-fn predecessors(
-    ctx: &Context,
-    region: Ptr<Region>,
-) -> HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>> {
-    let mut preds: HashMap<_, Vec<_>> = HashMap::new();
-    for block in DFSTraversal::new(ctx, &region).pre_order() {
-        for succ in block.deref(ctx).succs(ctx) {
-            preds.entry(succ).or_default().push(block);
-        }
-    }
-    preds
+fn i32_constant(ctx: &mut Context, value: usize) -> ConstantOp {
+    let attr = integer_attr(ctx, I32_BITS, value as u64);
+    ConstantOp::new(ctx, Box::new(attr))
 }
 
-/// The induced CFG after removing an outer loop's header.
-struct RegionSubset(ISet<Ptr<BasicBlock>>);
-
-impl ControlFlowGraph<Context> for RegionSubset {
-    type Node = Ptr<BasicBlock>;
-
-    fn num_successors(&self, ctx: &Context, node: &Self::Node) -> usize {
-        node.deref(ctx)
-            .succs(ctx)
-            .iter()
-            .filter(|next| self.0.contains(*next))
-            .count()
-    }
-
-    fn get_successor(&self, ctx: &Context, node: &Self::Node, index: usize) -> Self::Node {
-        node.deref(ctx)
-            .succs(ctx)
-            .into_iter()
-            .filter(|next| self.0.contains(next))
-            .nth(index)
-            .expect("successor index below num_successors")
-    }
-
-    fn num_predecessors(&self, ctx: &Context, node: &Self::Node) -> usize {
-        node.preds(ctx)
-            .iter()
-            .filter(|previous| self.0.contains(*previous))
-            .count()
-    }
-
-    fn get_predecessor(&self, ctx: &Context, node: &Self::Node, index: usize) -> Self::Node {
-        node.preds(ctx)
-            .into_iter()
-            .filter(|previous| self.0.contains(previous))
-            .nth(index)
-            .expect("predecessor index below num_predecessors")
-    }
-
-    fn entry_node(&self, _ctx: &Context) -> Option<Self::Node> {
-        self.0.first().copied()
-    }
-
-    fn nodes<'a>(&'a self, _ctx: &'a Context) -> Box<dyn Iterator<Item = Self::Node> + 'a> {
-        Box::new(self.0.iter().copied())
-    }
-}
-
-fn i32_type(ctx: &mut Context) -> TypeHandle {
-    IntegerType::get(ctx, 32, Signedness::Signless).into()
-}
-
-/// A zero constant of `ty`, inserted before `mark`.
-fn zero_before(ctx: &mut Context, ty: TypeHandle, mark: Ptr<Operation>) -> Value {
-    let attr: Box<dyn TypedAttrInterface> = match val_type(ctx, ty) {
-        Some(ValType::I64) => Box::new(integer_attr(ctx, I64_BITS, 0)),
-        Some(ValType::F32) => Box::new(FPSingleAttr::from(0.0f32)),
-        Some(ValType::F64) => Box::new(FPDoubleAttr::from(0.0f64)),
-        _ => Box::new(integer_attr(ctx, I32_BITS, 0)),
-    };
-    let op = ConstantOp::new(ctx, attr).get_operation();
-    op.insert_before(ctx, mark);
-    op.deref(ctx).get_result(0)
-}
-
-fn i32_const(ctx: &mut Context, value: u32) -> Ptr<Operation> {
-    let attr = integer_attr(ctx, I32_BITS, value.into());
-    ConstantOp::new(ctx, Box::new(attr)).get_operation()
-}
-
-fn i32_const_at_back(ctx: &mut Context, block: Ptr<BasicBlock>, value: u32) -> Value {
-    let op = i32_const(ctx, value);
-    op.insert_at_back(block, ctx);
-    op.deref(ctx).get_result(0)
-}
-
-fn i32_const_before(ctx: &mut Context, value: u32, mark: Ptr<Operation>) -> Value {
-    let op = i32_const(ctx, value);
-    op.insert_before(ctx, mark);
-    op.deref(ctx).get_result(0)
-}
-
-/// Insert the guard for `entries` and redirect every edge into them through it.
 fn insert_guard(
     ctx: &mut Context,
     region: Ptr<Region>,
     entries: &[Ptr<BasicBlock>],
-    preds: &HashMap<Ptr<BasicBlock>, Vec<Ptr<BasicBlock>>>,
-) -> Ptr<BasicBlock> {
-    // Guard arguments: the label, then each entry's arguments.
-    let mut types = vec![i32_type(ctx)];
-    let mut ranges = Vec::new();
-    for entry in entries {
-        let start = types.len();
-        let args: Vec<_> = entry
-            .deref(ctx)
-            .arguments()
-            .map(|a| a.get_type(ctx))
-            .collect();
-        types.extend(args);
-        ranges.push(start..types.len());
-    }
+) -> Result<Ptr<BasicBlock>, &'static str> {
+    let mut types = vec![IntegerType::get(ctx, 32, Signedness::Signless).into()];
+    let ranges: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let start = types.len();
+            types.extend(entry.deref(ctx).arguments().map(|arg| arg.get_type(ctx)));
+            start..types.len()
+        })
+        .collect();
     let guard = BasicBlock::new(ctx, None, types.clone());
     guard.insert_at_back(region, ctx);
 
-    // Dispatch: entry i when label == i, the last entry otherwise.
+    // Rewrite original edges before adding the dispatcher's own edges to the entries.
+    let sources: ISet<_> = entries
+        .iter()
+        .flat_map(|entry| entry.uses(ctx).into_iter().map(|edge| edge.user_op()))
+        .collect();
+    for source in sources {
+        let successors: Vec<_> = source.deref(ctx).successors().collect();
+        for (arm, target) in successors.into_iter().enumerate() {
+            let Some(tag) = entries.iter().position(|&entry| entry == target) else {
+                continue;
+            };
+            let (term, arm) = if Operation::is_op::<BrTableOp>(source, ctx) {
+                // A table has no operands to carry the tag. Only this edge needs a bridge.
+                let bridge = BasicBlock::new(ctx, None, vec![]);
+                bridge.insert_at_back(region, ctx);
+                Operation::replace_successor(source, ctx, arm, bridge);
+                let jump = BrOp::new(ctx, guard, vec![]).get_operation();
+                jump.insert_at_back(bridge, ctx);
+                (jump, 0)
+            } else {
+                Operation::replace_successor(source, ctx, arm, guard);
+                (source, arm)
+            };
+            let dynamic = Operation::get_op_dyn(term, ctx);
+            let branch = op_cast::<dyn BranchOpInterface>(&*dynamic)
+                .ok_or("guard predecessor has no branch interface")?;
+            let supplied = branch.successor_operands(ctx, arm);
+            for (slot, &ty) in types.iter().enumerate() {
+                let value = if ranges[tag].contains(&slot) {
+                    supplied[slot - ranges[tag].start]
+                } else {
+                    let constant = if slot == 0 {
+                        i32_constant(ctx, tag)
+                    } else {
+                        crate::zero_constant(ctx, ty)
+                    };
+                    constant.get_operation().insert_before(ctx, term);
+                    constant.get_result(ctx)
+                };
+                if slot < supplied.len() {
+                    branch.set_successor_operand(ctx, arm, slot, value);
+                } else {
+                    branch.add_successor_operand(ctx, arm, value);
+                }
+            }
+        }
+    }
+
     let label = guard.deref(ctx).get_argument(0);
     let mut block = guard;
-    for (index, entry) in entries.iter().enumerate() {
-        let args: Vec<_> = ranges[index]
-            .clone()
-            .map(|i| guard.deref(ctx).get_argument(i))
+    for (tag, (&entry, slots)) in entries.iter().zip(ranges).enumerate() {
+        let args = slots
+            .map(|slot| guard.deref(ctx).get_argument(slot))
             .collect();
-        if index + 1 == entries.len() {
-            BrOp::new(ctx, *entry, args)
+        if tag + 1 == entries.len() {
+            BrOp::new(ctx, entry, args)
                 .get_operation()
                 .insert_at_back(block, ctx);
             break;
         }
-        let matches = if index == 0 {
-            let op = NumOp::new(ctx, NumOpcode::I32Eqz, vec![label]).get_operation();
-            op.insert_at_back(block, ctx);
-            op.deref(ctx).get_result(0)
+        let matches = if tag == 0 {
+            NumOp::new(ctx, NumOpcode::I32Eqz, vec![label])
         } else {
-            let expected = i32_const_at_back(ctx, block, index as u32);
-            let op = NumOp::new(ctx, NumOpcode::I32Eq, vec![label, expected]).get_operation();
-            op.insert_at_back(block, ctx);
-            op.deref(ctx).get_result(0)
+            let tag = i32_constant(ctx, tag);
+            tag.get_operation().insert_at_back(block, ctx);
+            NumOp::new(ctx, NumOpcode::I32Eq, vec![label, tag.get_result(ctx)])
         };
+        matches.get_operation().insert_at_back(block, ctx);
         let next = BasicBlock::new(ctx, None, vec![]);
         next.insert_at_back(region, ctx);
-        CondBrOp::new(ctx, matches, *entry, args, next, vec![])
+        CondBrOp::new(ctx, matches.get_result(ctx), entry, args, next, vec![])
             .get_operation()
             .insert_at_back(block, ctx);
         block = next;
     }
-
-    // Redirect every edge into an entry.
-    let sources: Vec<Ptr<BasicBlock>> = entries
-        .iter()
-        .flat_map(|entry| preds.get(entry).into_iter().flatten().copied())
-        .collect_unique();
-    // The edge to `succ` with `args`, through the guard if `succ` is an entry.
-    let redirect =
-        |ctx: &mut Context, succ: Ptr<BasicBlock>, args: Vec<Value>, terminator: Ptr<Operation>| {
-            let Some(index) = entries.iter().position(|e| *e == succ) else {
-                return (succ, args);
-            };
-            let mut guard_args = vec![i32_const_before(ctx, index as u32, terminator)];
-            let mut supplied = args.into_iter();
-            for (other, range) in ranges.iter().enumerate() {
-                for position in range.clone() {
-                    guard_args.push(if other == index {
-                        supplied
-                            .next()
-                            .expect("a verified branch passes one operand per block argument")
-                    } else {
-                        zero_before(ctx, types[position], terminator)
-                    });
-                }
-            }
-            (guard, guard_args)
-        };
-    for source in sources {
-        let terminator = source
-            .deref(ctx)
-            .get_terminator(ctx)
-            .expect("a predecessor block ends in a terminator");
-        let replacement = if let Some(cond_br) = Operation::get_op::<CondBrOp>(terminator, ctx) {
-            let condition = cond_br.get_operand_condition(ctx);
-            let [(then_dest, then_args), (else_dest, else_args)] = [0, 1].map(|succ| {
-                let dest = terminator.deref(ctx).get_successor(succ);
-                let args = cond_br.successor_operands(ctx, succ);
-                redirect(ctx, dest, args, terminator)
-            });
-            CondBrOp::new(ctx, condition, then_dest, then_args, else_dest, else_args)
-                .get_operation()
-        } else if Operation::get_op::<BrOp>(terminator, ctx).is_some() {
-            let dest = terminator.deref(ctx).get_successor(0);
-            let args = terminator.deref(ctx).operands().collect();
-            let (dest, args) = redirect(ctx, dest, args, terminator);
-            BrOp::new(ctx, dest, args).get_operation()
-        } else {
-            panic!(
-                "unexpected branch kind (a wasm.br_table must not target an irreducible loop \
-                 entry; branch to a block that does)"
-            )
-        };
-        replacement.insert_before(ctx, terminator);
-        Operation::erase(terminator, ctx);
-    }
-    guard
+    Ok(guard)
 }

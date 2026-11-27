@@ -9,7 +9,10 @@ use crate::{
     types::{ArrayType, RecordType},
 };
 use pliron::{
-    builtin::{attributes::StringAttr, op_interfaces::OneResultInterface},
+    builtin::{
+        attributes::{StringAttr, UnitAttr},
+        op_interfaces::OneResultInterface,
+    },
     common_traits::Verify,
     context::Context,
     op::Op,
@@ -20,60 +23,31 @@ use pliron::{
     verify_err,
 };
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum HeapErr {
+    #[error("{0} expects a perry.record, found another type")]
     NotRecord(&'static str),
+    #[error("record enumeration projection must be an array")]
     NotArray,
+    #[error("record enumeration order requires a non-tuple record")]
     NotObject,
+    #[error("record {record} has {expected} fields but perry.alloc supplies {found}")]
     FieldCount {
         record: String,
         expected: usize,
         found: usize,
     },
-    FieldType {
-        record: String,
-        field: String,
-    },
-    NoField {
-        record: String,
-        field: String,
-    },
+    #[error("record {record} field {field} has a different type than its value")]
+    FieldType { record: String, field: String },
+    #[error("record {record} has no field {field}")]
+    NoField { record: String, field: String },
+    #[error("perry.alloc tier {0:?} is not an allocation tier")]
     Tier(Tier),
+    #[error("perry.alloc is missing its allocation tier")]
     MissingTier,
+    #[error("record {0} has an invalid property insertion order")]
     FieldOrder(String),
 }
-
-impl core::fmt::Display for HeapErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::NotRecord(op) => write!(f, "{op} expects a perry.record, found another type"),
-            Self::NotArray => f.write_str("record enumeration projection must be an array"),
-            Self::NotObject => f.write_str("record enumeration order requires a non-tuple record"),
-            Self::FieldCount {
-                record,
-                expected,
-                found,
-            } => write!(
-                f,
-                "record {record} has {expected} fields but perry.alloc supplies {found}"
-            ),
-            Self::FieldType { record, field } => {
-                write!(
-                    f,
-                    "record {record} field {field} has a different type than its value"
-                )
-            }
-            Self::NoField { record, field } => write!(f, "record {record} has no field {field}"),
-            Self::Tier(tier) => write!(f, "perry.alloc tier {tier:?} is not an allocation tier"),
-            Self::MissingTier => f.write_str("perry.alloc is missing its allocation tier"),
-            Self::FieldOrder(record) => {
-                write!(f, "record {record} has an invalid property insertion order")
-            }
-        }
-    }
-}
-
-impl core::error::Error for HeapErr {}
 
 fn record<'a>(
     ctx: &'a Context,
@@ -83,6 +57,19 @@ fn record<'a>(
     match TypedHandle::<RecordType>::from_handle(ty, ctx) {
         Ok(record) => Ok(record.deref(ctx)),
         Err(_) => verify_err!(pliron::location::Location::Unknown, HeapErr::NotRecord(op)),
+    }
+}
+
+impl AllocOp {
+    pub fn ordered(
+        ctx: &mut Context,
+        record: TypedHandle<RecordType>,
+        fields: Vec<Value>,
+        order: Vec<u32>,
+    ) -> Self {
+        let alloc = Self::new(ctx, record, fields);
+        alloc.set_attr_perry_field_order(ctx, FieldOrder(order));
+        alloc
     }
 }
 
@@ -175,7 +162,10 @@ op_schema! {
     name = "perry.field_get";
     format = "$0 `.` attr($perry_get_field, $StringAttr) ` : ` type($0)";
     attributes = (perry_get_field: StringAttr);
-    constructors { pub new(reference: Value, field: String) => infer(reference, field.as_str()); }
+    constructors {
+        pub new(reference: Value, field: String) => infer(reference, field.as_str());
+        pub with_type(reference: Value, field: String, ty: TypeHandle) => explicit(ty);
+    }
     attribute(field: String, get_attr_perry_get_field, set_attr_perry_get_field) =
         StringAttr::new(field) => MissingProjectionField;
     prepare(_this) { let field = field.as_str(); }
@@ -212,8 +202,8 @@ op_schema! {
     /// Write one field of a record.
     pub FieldSetOp(reference, value) -> infallible;
     name = "perry.field_set";
-    format = "$0 `.` attr($perry_set_field, $StringAttr) ` = ` $1";
-    attributes = (perry_set_field: StringAttr);
+    format = "$0 `.` attr($perry_set_field, $StringAttr) ` = ` $1 opt_attr($perry_private_field, $UnitAttr, label($private))";
+    attributes = (perry_set_field: StringAttr, perry_private_field: UnitAttr);
     constructors { pub new(reference: Value, field: String, value: Value) => empty(); }
     attribute(field: String, get_attr_perry_set_field, set_attr_perry_set_field) =
         StringAttr::new(field) => MissingProjectionField;
@@ -225,6 +215,19 @@ op_schema! {
             record: record(ctx, reference.get_type(ctx), "perry.field_set")?.name().to_string(),
             field: field.to_owned(),
         };
+}
+
+impl FieldSetOp {
+    pub fn private(ctx: &mut Context, record: Value, field: String, value: Value) -> Self {
+        let op = Self::new(ctx, record, field, value);
+        op.set_attr_perry_private_field(ctx, UnitAttr::new());
+        op
+    }
+
+    pub fn updates_order(&self, ctx: &Context) -> bool {
+        let ty = self.get_operation().deref(ctx).get_operand(1).get_type(ctx);
+        self.get_attr_perry_private_field(ctx).is_none() && crate::field_order_may_change(ctx, ty)
+    }
 }
 
 op_schema! {

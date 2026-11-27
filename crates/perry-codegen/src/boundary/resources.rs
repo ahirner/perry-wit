@@ -2,61 +2,16 @@
 use super::*;
 use perry_wit_diagnostics::Diagnostic;
 use pliron::{context::Ptr, operation::Operation, r#type::Typed};
-use std::collections::HashSet;
-
-pub(crate) fn used_keys(ctx: &Context, functions: &[FuncOp]) -> HashSet<u32> {
-    fn visit(
-        ctx: &Context,
-        ty: TypeHandle,
-        seen: &mut HashSet<TypeHandle>,
-        keys: &mut HashSet<u32>,
-    ) {
-        if !seen.insert(ty) {
-            return;
-        }
-        let ty = ty.deref(ctx);
-        if let Some(resource) = ty.downcast_ref::<perry_mir::ResourceType>() {
-            keys.insert(resource.key());
-        } else if let Some(record) = ty.downcast_ref::<RecordType>() {
-            if let Ok(fields) = record.fields() {
-                for (_, field) in fields {
-                    visit(ctx, *field, seen, keys);
-                }
-            }
-        } else if let Some(array) = ty.downcast_ref::<ArrayType>() {
-            visit(ctx, array.element(), seen, keys);
-        } else if let Some(optional) = ty.downcast_ref::<perry_mir::OptionalType>() {
-            visit(ctx, optional.value(), seen, keys);
-        } else if let Some(promise) = ty.downcast_ref::<perry_mir::PromiseType>() {
-            visit(ctx, promise.value(), seen, keys);
-        } else if let Some(variant) = ty.downcast_ref::<perry_mir::VariantType>() {
-            for (_, payload) in variant.cases() {
-                if let Some(payload) = payload {
-                    visit(ctx, *payload, seen, keys);
-                }
-            }
-        }
-    }
-    let mut seen = HashSet::new();
-    let mut keys = HashSet::new();
-    for function in functions {
-        for value in crate::analysis::function_values(ctx, function) {
-            visit(ctx, value.get_type(ctx), &mut seen, &mut keys);
-        }
-    }
-    keys
-}
 
 impl AbiType {
     pub(super) fn has_resources(&self) -> bool {
-        match self {
-            Self::Resource { .. } => true,
-            Self::List(value) | Self::Option(value) => value.has_resources(),
-            Self::Record(fields) => fields.iter().any(|(_, ty)| ty.has_resources()),
-            Self::Result { ok, err } => ok.iter().chain(err).any(|ty| ty.has_resources()),
-            Self::Variant(cases) => cases
-                .iter()
-                .any(|(_, payload)| payload.as_ref().is_some_and(Self::has_resources)),
+        match &self.kind {
+            AbiKind::Resource { .. } => true,
+            AbiKind::List(value) => value.has_resources(),
+            AbiKind::Record(record) => record.fields.iter().any(|(_, ty)| ty.ty.has_resources()),
+            AbiKind::Sum(sum) => sum
+                .cases()
+                .any(|(_, ty)| ty.is_some_and(|field| field.ty.has_resources())),
             _ => false,
         }
     }
@@ -88,10 +43,7 @@ pub(crate) fn emit_drain(ctx: &mut Context, state: &mut ModuleState) {
     for resource in resources {
         let key = b.i32_const(ctx, resource.key as i32 + 1);
         let matches = b.num(ctx, NumOpcode::I32Eq, vec![kind, key]);
-        let selected = b.new_block(ctx, vec![]);
-        let other = b.new_block(ctx, vec![]);
-        b.cond_br(ctx, matches, (selected, vec![]), (other, vec![]));
-        b.block = selected;
+        let other = b.enter_if(ctx, matches);
         b.resource_drop(ctx, resource.key, handle);
         b.br(ctx, next, vec![]);
         b.block = other;
@@ -131,7 +83,7 @@ impl FunctionLowering<'_, '_> {
         operation: &str,
         argument: Value,
     ) -> Value {
-        let host = ValueHost::Foreign(self.resource_builtin(key, operation), Flat::I32);
+        let host = ValueHost::Foreign(self.resource_builtin(key, operation), WasmType::I32);
         self.preserving_task(ctx, |b, ctx| b.host(ctx, host, vec![argument]))
     }
 
@@ -152,7 +104,7 @@ impl FunctionLowering<'_, '_> {
         Foreign {
             module,
             name: format!("[resource-{operation}]{}", resource.name),
-            params: vec![Flat::I32],
+            params: vec![WasmType::I32],
         }
     }
 
@@ -187,10 +139,7 @@ impl FunctionLowering<'_, '_> {
     }
     fn resource_status(&mut self, ctx: &mut Context) {
         let status = self.runtime(ctx, Runtime::Status, vec![]);
-        let failed = self.new_block(ctx, vec![]);
-        let normal = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, status, (failed, vec![]), (normal, vec![]));
-        self.block = failed;
+        let normal = self.enter_if(ctx, status);
         if let Some((scope, roots)) = self.resource_scope {
             self.runtime_void(ctx, Runtime::ResourceScopeFinish, vec![scope]);
             if let Some(roots) = roots {
@@ -289,9 +238,7 @@ impl FunctionLowering<'_, '_> {
                 self.cond_br(ctx, rep, (done, vec![handle]), (lookup, vec![]));
                 self.block = lookup;
                 let representation = self.resource_value(ctx, key, "rep", handle);
-                self.br(ctx, done, vec![representation]);
-                self.block = done;
-                let value = done.deref(ctx).get_argument(0);
+                let value = self.join_value(ctx, done, representation);
                 let value = self.num(ctx, NumOpcode::F64ConvertI32U, vec![value]);
                 self.define(ctx, op, value);
             }
@@ -300,5 +247,32 @@ impl FunctionLowering<'_, '_> {
     }
     pub(super) fn discard_resource(&mut self, ctx: &mut Context, key: u32, raw: Value) {
         self.resource_drop(ctx, key, raw);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pliron::{irfmt::parsers::type_parser, parsable::parse_from_str};
+
+    #[test]
+    fn finds_resource_reachable_only_through_a_value_union() {
+        let ctx = &mut Context::new();
+        let union = parse_from_str(
+            type_parser(),
+            ctx,
+            r#"perry.value_union <perry.variant <
+                "string": perry.string,
+                "object": perry.record <Envelope { handle: perry.resource <7> }>
+            >>"#,
+        )
+        .unwrap();
+        union.deref(ctx).verify(ctx).unwrap();
+        let signature = FunctionType::get(ctx, vec![union], vec![]);
+        let function = FuncOp::new(ctx, pliron::ident!("receive"), signature);
+        assert_eq!(
+            RecordLayouts::prepare(ctx, &[function]).unwrap().resources,
+            std::collections::HashSet::from([7])
+        );
     }
 }

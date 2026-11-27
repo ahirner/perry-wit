@@ -200,9 +200,7 @@ primitive_semantics! { _ctx, _this;
         ConcatSegmentsOp => OperationKind::Concat { depth: 2 };
         NativeJsonOp, JsonBoxOp, VariantNewOp => OperationKind::Unknown;
     }
-    (if crate::field_order_may_change(
-        _ctx, _this.get_operation().deref(_ctx).get_operand(1).get_type(_ctx)
-    ) { Allocation::Atomic } else { Allocation::None }, None, true) {
+    (if _this.updates_order(_ctx) { Allocation::Atomic } else { Allocation::None }, None, true) {
         FieldSetOp => OperationKind::Mutate(Mutation::Field { slot:
             field_slot(_ctx, _this.get_operation().deref(_ctx).get_operand(0), _this.get_attr_perry_set_field(_ctx).as_deref()) });
     }

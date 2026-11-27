@@ -9,8 +9,8 @@ use crate::{
     control::ReturnOp,
     effects::Failure,
     facts::{
-        ProgramFacts, constrain_signature, specialize, specialized_implementation,
-        verify_lossless_module, with_fact_limits,
+        FactLimits, ProgramFacts, constrain_signature, specialize, specialized_implementation,
+        verify_lossless_module,
     },
     heap::FieldGetOp,
     intrinsics::{Combinator, IntrinsicOp, PromiseCombinatorOp},
@@ -172,6 +172,47 @@ fn temporary_record_loop_round_trips_and_verifies() -> Result<()> {
             ),
             perry_wit_diagnostics::Note::new("while compiling"),
         ],
+    );
+    let span = crate::SourceSpan::new("lib.ts", "call()", 0, 6);
+    crate::set_caller_frames(
+        ctx,
+        &Operation::get_op::<pliron::builtin::ops::ModuleOp>(module, ctx).unwrap(),
+        vec![
+            crate::CallerFrame::new(
+                "run",
+                Some("entry"),
+                crate::CallerRelation::Instantiation,
+                "run",
+                Some(span.clone()),
+            ),
+            crate::CallerFrame::new(
+                "entry",
+                None,
+                crate::CallerRelation::Import,
+                "entry",
+                Some(span),
+            ),
+        ],
+    );
+    crate::set_caller_origin(ctx, &run, "run");
+    let diagnostic = crate::attach_caller_notes(
+        ctx,
+        &run,
+        perry_wit_diagnostics::Diagnostic::internal("test"),
+    );
+    let messages: Vec<_> = diagnostic
+        .notes()
+        .iter()
+        .map(|note| note.message())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "called from here",
+            "while compiling",
+            "while instantiating 'run'",
+            "called from here ('entry')"
+        ]
     );
     alloc.set_attr_perry_field_order(ctx, crate::FieldOrder(vec![1, 0]));
     let printed = round_trip(ctx, module)?;
@@ -338,7 +379,10 @@ builtin.module @m {
 }
 "#;
     let ctx = &mut Context::new();
+    let node = crate::RecordType::get(ctx, pliron::ident!("Node"), None)?.into();
+    assert!(!crate::JsonSchema::supports_descriptor(ctx, node));
     let module = parse(ctx, input);
+    assert!(crate::JsonSchema::supports_descriptor(ctx, node));
     verify_operation(module, ctx)?;
     let printed = print(ctx, module);
     assert!(
@@ -443,6 +487,34 @@ fn calls_arrays_strings_and_async_round_trip() -> Result<()> {
         let module = parse(ctx, input);
         round_trip(ctx, module)?;
     }
+    Ok(())
+}
+
+#[test]
+fn json_copy_analysis_retries_a_forward_declaration() -> Result<()> {
+    let ctx = &mut Context::new();
+    let text = single_block("copy = perry.json_copy v : builtin.fp64;")
+        .replace("builtin.fp64", "perry.record <Forward>");
+    let root = parse(ctx, &text);
+    let mut analyses = AnalysisManager::default();
+    assert!(verify_operation(root, ctx).is_err());
+    assert!(analyses.get_analysis::<ProgramFacts>(root, ctx).is_err());
+
+    let record = crate::RecordType::get(ctx, pliron::ident!("Forward"), None)?.into();
+    let pair = (record, record);
+    assert!(crate::JsonCopyPlan::with(ctx, pair, |_, _| ())?.is_none());
+    let number = FP64Type::get(ctx).into();
+    crate::RecordType::get(
+        ctx,
+        pliron::ident!("Forward"),
+        Some(vec![("value".into(), number)]),
+    )?;
+    verify_operation(root, ctx)?;
+    analyses.compute_analysis::<ProgramFacts>(root, ctx)?;
+    assert_eq!(
+        crate::JsonCopyPlan::with(ctx, pair, |_, plan| plan.slots(pair).unwrap().len())?,
+        Some(1)
+    );
     Ok(())
 }
 

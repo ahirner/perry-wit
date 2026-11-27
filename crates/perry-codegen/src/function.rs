@@ -1,7 +1,6 @@
 //! The lowering of one function: its builder state, the mapping of MIR blocks and values,
 //! and the translation of its ops in reverse post-order.
 use crate::{
-    analysis::value_order,
     async_split,
     module::ModuleState,
     repr::i32_type,
@@ -171,7 +170,6 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
                 .reverse_post_order()
                 .collect();
         let live = self.state.live;
-        let order = value_order(ctx, mir);
         for mir_block in mir_blocks {
             self.block = self.blocks[&mir_block];
             let args: Vec<_> = mir_block.deref(ctx).arguments().collect();
@@ -181,9 +179,9 @@ impl<'s, 'e> FunctionLowering<'s, 'e> {
             while index < ops.len() {
                 let op = ops[index];
                 if Operation::get_op::<perry_mir::AwaitOp>(op, ctx).is_some() {
-                    self.clear_dead_frame_slots(ctx, op, live.after(op));
+                    self.clear_dead_frame_slots(ctx, live.before(op));
                 }
-                let root_mark = self.safe_point(ctx, op, live.after(op), &order)?;
+                let root_mark = self.safe_point(ctx, op)?;
                 // `op; status = perry.caught`: route the exception of `op` to `status`.
                 let caught = ops
                     .get(index + 1)

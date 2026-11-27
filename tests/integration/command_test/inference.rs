@@ -1,4 +1,5 @@
 use super::execute;
+use anyhow::Context as _;
 use anyhow::Result;
 
 #[tokio::test(flavor = "current_thread")]
@@ -26,13 +27,35 @@ function contract(value) {
     return first+" "+checks;
 }
 console.log(contract(3),contract(1));
+function cb(){console.log("cb");return inc;}
+function mark(n:number){console.log(n);return n;}
+function sum(f,x:number,...rest:number[]){return f(x)+rest[0];}
+function sub(f,x:number,...rest:number[]){return f(x)-rest[0];}
+class Apply { map(f, x: number) { return f(x); } }
+function receiver() { console.log("receiver"); return new Apply(); }
+console.log(receiver().map(cb(), mark(4), mark(9)));
+function test(flag:boolean){const fn=flag?sum:sub; console.log(fn(cb(),mark(3),mark(2)));}
+console.log(sum(cb(),mark(3),mark(2)));
+test(true); test(false);
+class Counter {
+    n: number;
+    constructor(n: number) { this.n = n; }
+    reader() { return () => () => this.n; }
+    get callback() { console.log("get"); return readArgument; }
+}
+function readArgument(value) { return this.n + value; }
+const left = new Counter(3), right = new Counter(11);
+const read = left.reader()(), other = { n: 99, read };
+console.log(left["callback"](mark(2)));
+left.n = 5;
+console.log(other.read(), right.reader()()(), read === left.reader()());
 "#,
     )
     .await?;
     assert!(run.ok, "{}", run.stderr);
     assert_eq!(
         run.stdout,
-        "Error: boom none 3\ntrue false 3 2,3\n6 1,2,3 A-B\nnone 2 Error: small 1\n"
+        "Error: boom none 3\ntrue false 3 2,3\n6 1,2,3 A-B\nnone 2 Error: small 1\nreceiver\ncb\n4\n9\n5\ncb\n3\n2\n6\ncb\n3\n2\n6\ncb\n3\n2\n2\nget\n2\n5\n5 11 false\n"
     );
     Ok(())
 }
@@ -46,28 +69,114 @@ async fn inference_engine_specializes_generics_classes_cells_and_fixed_points() 
     }
     chain.push_str("console.log(f300(0));\n");
 
+    let mut copies =
+        String::from("function inc(x){return x+1;} function twice(x){return 2*x;} const a0=[inc];");
+    for i in 1..=1030 {
+        writeln!(copies, "const a{i}=Array.from(a{});", i - 1)?;
+    }
+    copies.push_str("a1030.push(twice); console.log(a0.length, a0[0](4), a1030[1](4));");
+
     let cases: &[(&str, &str, &str)] = &[
+        ("late_write_through_array_copy_chain", &copies, "1 5 8\n"),
         (
             "static_generic_and_implicit_classes",
             r#"
-class Util { static wrap(x) { return [x]; } }
+class Util {
+  static mark = "u";
+  static label(s: string): string { return s + Util.mark; }
+  static wrap(x) { return [x]; }
+}
 class Box {
   constructor(v) { this.v = v; }
   get value() { return this.v; }
   set value(x) { this.v = x; }
   map(f) { return f(this.v); }
+  $$perryMethod_map() { return this.v; }
+  toString() { return "box"; }
 }
+console.log("before Pair");
+function mark(): number { console.log("Pair initialized"); return 2; }
 class Pair {
+  static first = mark();
+  static mark = Pair.first + 1;
+  static scale(n: number): number { return Pair.mark * n; }
   constructor(a, b) { this.a = a; this.b = b; }
   swap() { return new Pair(this.b, this.a); }
 }
 const bn = new Box(1);
 const bs = new Box("a");
+console.log(bn.value++, ++bn.value, String(bs));
 bn.value = 5;
 const swapped = new Pair(1, "x").swap();
-console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b);
+console.log(Util.wrap(2)[0], Util.wrap("a")[0] + "!", bn instanceof Box, bs instanceof Box, bn.value, bs.map(s => s + "!"), swapped.a, swapped.b, bs.$$perryMethod_map(), Util.label("x"), Pair.scale(2));
 "#,
-            "2 a! true true 5 a! x 1\n",
+            "before Pair\nPair initialized\n1 3 box\n2 a! true true 5 a! x 1 a xu 6\n",
+        ),
+        (
+            "class_and_method_type_parameters_have_separate_scopes",
+            r#"
+class Box<T> {
+  value: T;
+  constructor(value: T) { this.value = value; }
+  static empty<U>(): Set<U> { return new Set<U>(); }
+  contains<T>(value: T) {
+    const items = new Set<T>(); items.add(value);
+    console.log(this.value); return items.has(value);
+  }
+}
+const box = new Box(3);
+const args: [string] = ["x"];
+console.log(box.contains<string>(...args), box.contains(true));
+function outer<T>(value:T){
+  function inner<T>(items:T[]){const s=new Set<T>(); s.add(items[0]); console.log(value); return s.has(items[0]);}
+  return inner(["x"]);
+}
+console.log(outer(4));
+const set = Box.empty<string>(); set.add("x"); console.log(set.has("x"));
+function left<T>(): Set<T> { return new Set<T>(); }
+function right<T>(): Set<T> { return new Set<T>(); }
+function has(flag: boolean) {
+  const make = flag ? left : right;
+  const set = make<number>(); set.add(7); return set.has(7);
+}
+console.log(has(true), has(false));
+interface Map<T> { size: T }
+function label(entry: Map<string>) { return entry.size.toUpperCase(); }
+console.log(label(JSON.parse<Map<string>>('{"size":"box"}')));
+"#,
+            "3\n3\ntrue true\n4\ntrue\ntrue\ntrue true\nBOX\n",
+        ),
+        (
+            "generic_promise_settles_after_specialization",
+            r#"
+async function contains<T>(p: Promise<T>) {
+  const value = await p;
+  function matches(x: T) { const s = new Set<T>(); s.add(x); return s.has(value); }
+  return matches(value);
+}
+async function source() { return "abc"; }
+console.log(await contains(source()));
+class Gate {
+  constructor() {
+    this.open = null;
+    this.ready = new Promise(resolve => { this.open = resolve; });
+  }
+}
+const gate = new Gate();
+gate.open("go");
+console.log(await gate.ready);
+async function settle(flag: boolean) { return await (flag ? Promise.resolve(7) : null); }
+console.log(await settle(false), await settle(true));
+function tick(v: number) { console.log(v); return v; }
+try { await Promise.all([Promise.reject(tick(1)), Promise.resolve(tick(2))]); }
+catch (e) { console.log("caught", e); }
+async function recover(prefix: string) {
+  const rejected = (e: Error) => prefix + e.message;
+  return await Promise.reject(new Error("x")).then(undefined, rejected, tick(3));
+}
+console.log(await recover("caught:"));
+"#,
+            "true\ngo\nnull 7\n1\n2\ncaught 1\n3\ncaught:x\n",
         ),
         (
             "capture_owners_and_mutual_recursion",
@@ -167,13 +276,24 @@ console.log(new Mode("b").mode, late.n);
 function apply(f, x) { return f(x); }
 const twice = (n) => n * 2;
 const holder = { f: twice };
-const counter = { n: 0, bump(by) { this.n += by; return this.n; } };
+const counter = {
+  n: 0,
+  bump(by) { this.n += by; return this.n; },
+  offsets(xs: number[]) {
+    let calls = 0;
+    return xs.map((x, i, a, step = this.n) => {
+      calls++;
+      return x + step + calls;
+    }).join(",");
+  },
+};
 const greeter = { greet(name) { return "hi " + name; } };
 function getFn() { return twice; }
 function selfRef() { return selfRef; }
 class FnBox { constructor() { this.op = twice; } run(x) { return this.op(x); } }
 const fs = [(x) => x + 1];
 counter.bump(2);
+console.log(counter.offsets([1, 4]));
 console.log(
   apply(twice, 4),
   apply(holder.f, 5),
@@ -186,7 +306,7 @@ console.log(
   fs[0](1),
 );
 "#,
-            "8 10 12 5 hi a 14 true 16 2\n",
+            "4,8\n8 10 12 5 hi a 14 true 16 2\n",
         ),
         (
             "tagged_function_unions_dispatch_and_callbacks",
@@ -220,6 +340,17 @@ class FnHolder {
 }
 const h1 = new FnHolder(f0);
 const h2 = new FnHolder(f1);
+let selections = 0;
+function select(flag) { selections++; return pick(flag); }
+const empty: number[] = [];
+empty.map(select(true));
+const mapped = [3, 4].map(select(false));
+function counter(start, indexed) {
+  let n = start;
+  return indexed ? (x, i) => x + i + ++n : x => x + ++n;
+}
+const short = counter(0, false), long = counter(10, true);
+console.log([2, 2].map(short).join(","), [2, 2].map(long).join(","), short(1, 9));
 console.log(
   events.join(","),
   f0(3),
@@ -229,15 +360,57 @@ console.log(
   applyAll(f1, [3]).join(","),
   h1.run(5),
   h2.run(5),
+  selections, mapped.join(","),
 );
 "#,
-            "a,b,c 4 6 8 2,3 6 6 10\n",
+            "3,4 13,15 4\na,b,c 4 6 8 2,3 6 6 10 2 6,8\n",
+        ),
+        (
+            "callable_array_writes_through_aliases_and_parameters",
+            r#"
+function inc(x: number) { return x + 1; }
+function twice(x: number) { return x * 2; }
+function scale(n: number) { return (x: number) => x * n; }
+function append(fs: ((x: number) => number)[], f) { fs.push(f); }
+function forward(fs, f) { append(fs, f); }
+function identity(fs) { return fs; }
+function replace(fs, f) { fs[0] = f; }
+function replaceEither(flag, a, b, f) { (flag ? a : b)[0] = f; }
+const a = [inc], b = [inc];
+const alias = a;
+forward(alias, twice);
+forward(identity(b), twice);
+const triple = scale(3);
+append(a, triple);
+replace(identity(b), triple);
+console.log(a[0](4), alias[1](4), a[2](4), b[0](4), b[1](4));
+console.log(a.length, b.length, a[2] === b[0], b[0] === scale(3));
+replaceEither(false, a, b, twice);
+const copy = [...a];
+copy.push(...[twice]);
+const from = Array.from(copy);
+from[0] = twice;
+console.log(a[0](4), b[0](4), copy[3](4), from[0](4), a.length);
+const other = [twice];
+replaceEither(false, a, other, triple);
+console.log(other[0](4), a[0](4));
+const src = [inc];
+const filtered = src.slice().filter(() => true);
+filtered.push(twice);
+const joined = src.concat([triple]).toReversed();
+console.log(filtered[1](4), joined[0](4), joined[1](4), src.length);
+"#,
+            "5 8 12 12 8\n3 2 true false\n5 8 8 8 3\n12 5\n8 12 5 1\n",
         ),
         (
             "escaping_closures_environments_boxed_captures_and_equality",
             r#"
 function scale(k) {
   return (x) => x * k;
+}
+function slot(k) {
+  let current = scale(k);
+  return { read: () => current, replace: (n) => { current = scale(n); } };
 }
 function counter() {
   let n = 0;
@@ -274,6 +447,10 @@ function nestedInline(start) {
   });
 }
 
+const holder = slot(2);
+const first = holder.read();
+holder.replace(3);
+console.log(first(5), holder.read()(5), first === holder.read());
 const s3 = scale(3);
 const s3b = scale(3);
 const c1 = counter();
@@ -316,7 +493,7 @@ console.log(
   ni([1, 2, 3]).join(","),
 );
 "#,
-            "6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
+            "10 15 false\n6 1 2 1 1 1 2 2 11 12 7 3,6 5,10 4,8 11,12 true false true true false true true 2 6,8,11\n",
         ),
         (
             "erased_function_values_preserve_evaluation_order",
@@ -329,6 +506,9 @@ function num(label) { trace += label; return 2; }
 function apply(a, f, b) { return f(a + b); }
 function last(n, f) { return f(n); }
 function only(f) { trace += "n"; return f(1); }
+function forward(f) { return use(f); }
+function use(f) { return f(2) + ["ok"].map(f)[0]; }
+console.log(forward(id));
 const same = get("a") === get("b");
 const distinct = get("c") !== other;
 const obj = { first: num("d"), middle: get("e"), last: num("f"), end: get("g") };
@@ -341,9 +521,13 @@ const receiver = make(2);
 function getReceiver() { reads++; return receiver; }
 getReceiver().f(0);
 console.log(getReceiver().f(1), reads);
+class Runner { static run(f, n) { return f(n); } set callback(f) { trace += f(3); } }
+function choose(flag) { return flag ? id : other; }
+console.log(Runner.run(get("o"), num("p")), Runner["run"](choose(false), num("q")));
+const runner = new Runner(); runner.callback=get("r");
 console.log(trace, same, distinct, obj.first, obj.end(1), result, tail);
 "#,
-            "5 2\nabcdefghijklmn true true 2 1 4 2\n",
+            "2ok\n5 2\n2 -2\nabcdefghijklmnopqr3 true true 2 1 4 2\n",
         ),
         (
             "loop_let_boxes_nullable_functions_typeof_and_wide_objects",
@@ -404,8 +588,8 @@ console.log(
             "recursive_env_classes_identity_widening_and_class_field_init",
             r#"
 function wrap(f, k) { return () => f() + k; }
-function build(n) {
-  let g = () => 0;
+function build(n, base) {
+  let g = base;
   for (let i = 1; i <= n; i++) g = wrap(g, i);
   return g;
 }
@@ -443,9 +627,16 @@ const plainWide = {
   p60: 60, p61: 61, p62: 62, p63: 63, p64: 64, p65: 65, p66: 66, p67: 67, p68: 68, p69: 69,
 };
 const [e, o] = parity();
+const zero = () => 0;
+function counter(n) { return () => ++n; }
+const next = counter(10);
+const left = build(2, next);
+const right = build(2, next);
+const saved = [left, right, next];
+console.log(saved[0] === left, left === right, [1, 2].map(left).join(","), next(), right(), saved[0]());
 console.log(
-  build(3)(),
-  build(4)(),
+  build(3, zero)(),
+  build(4, zero)(),
   upTo(5)(0),
   e(4),
   o(4),
@@ -458,7 +649,7 @@ console.log(
   [() => 11, () => 22][1](),
 );
 "#,
-            "6 10 5 true false false 11:2 20 1 3 69 22\n",
+            "true false 14,15 13 17 18\n6 10 5 true false false 11:2 20 1 3 69 22\n",
         ),
         (
             "promise_operand_order_and_finally_rejection",
@@ -472,6 +663,9 @@ function extra(tag) { trace += tag; return 0; }
 function executor(resolve) { trace += "x"; resolve(4, extra("s")); }
 function makeExecutor() { trace += "e"; return executor; }
 function optionalExecutor(flag) { return flag ? executor : null; }
+class Ticket {
+  ready: Promise<number> = new Promise<number>(resolve => resolve(6)).then(n => n + 1);
+}
 async function verify() {
   try { new Promise(optionalExecutor(false)); } catch (e) { trace += "t"; }
   const p = new Promise(makeExecutor(), extra("a"));
@@ -479,17 +673,23 @@ async function verify() {
   const clear = () => clearTimeout(undefined, extra("c"));
   clear();
   const rejection = await p.finally(() => Promise.reject(new Error("override"))).catch(e => e.message);
-  console.log(trace, value, rejection, await p.then(optional(false)), await p.then(optional(true)));
+  console.log(trace, value, rejection, await p.then(optional(false)), await p.then(optional(true)),
+    await new Ticket().ready, clearTimeout(undefined) === undefined);
 }
 await verify();
 "#,
-            "teaxshbc 4 override 4 5\n",
+            "teaxshbc 4 override 4 5 7 true\n",
         ),
         (
             "conditional_evaluation_in_fields_defaults_and_lazy_operands",
             r#"
 let calls = 0;
 function hit(value: number): number { calls++; return value; }
+function fallback(value: number | undefined = undefined) {
+  if (value == undefined) value = 19;
+  return value ?? 0;
+}
+console.log(fallback(), fallback(4));
 class Counter {
   seed = hit(5);
   field = 1 + (this.seed === 5 ? hit(this.seed) : hit(100));
@@ -519,7 +719,7 @@ class Bucket<T> {
 }
 console.log(new Bucket<number>(42).selected[0], new Bucket<string>("ok").selected[0]);
 "#,
-            "6 2\n20 2\n7 3\nfalse 3\ntrue 4\nundefined undefined 0 3 undefined 4 undefined missing undefined\n7 0 0 3 1 0 0 0 0\n7 1 6 6 1 6 6 6 ok\n42 ok\n",
+            "19 4\n6 2\n20 2\n7 3\nfalse 3\ntrue 4\nundefined undefined 0 3 undefined 4 undefined missing undefined\n7 0 0 3 1 0 0 0 0\n7 1 6 6 1 6 6 6 ok\n42 ok\n",
         ),
         (
             "promise_handles_keep_their_constructor_instance",
@@ -540,7 +740,24 @@ console.log(await first.promise, await second.promise);
         (
             "guest_settled_promises_and_global_timers",
             r#"
+type __PerryTimer = { label: string };
+function readLabel(value: __PerryTimer) { return value.label; }
+async function dispatch(flag) {
+  const transform = flag ? (value) => value + 2 : (value) => value * 2;
+  const result = await Promise.resolve(5).then(transform);
+  const timer = await new Promise(resolve => {
+    const done = flag ? () => resolve(3) : () => resolve(7);
+    setImmediate(done);
+  });
+  return result + timer;
+}
+let order = "";
+function ignored(value: number) { order += "ran"; }
+function selectCallback() { order += "c"; return ignored; }
+function timerArgument(label: string) { order += label; return 1; }
 async function main() {
+  clearTimeout(setTimeout(selectCallback(), timerArgument("d"), timerArgument("a")));
+  await new Promise(resolve => setTimeout(() => resolve(1)));
   const immediate = await new Promise((resolve) => resolve(41 + 1));
   const delayed = await new Promise((resolve) => {
     setTimeout(() => resolve("later"), 5);
@@ -600,7 +817,7 @@ async function main() {
   });
 
   console.log(
-    immediate,
+    order, immediate,
     delayed,
     withArgs,
     caught,
@@ -615,15 +832,19 @@ async function main() {
     ticks,
     thisMatches,
     imm,
+    readLabel({label: "user"}),
+    await dispatch(true), await dispatch(false),
   );
 }
 await main();
 "#,
-            "42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm\n",
+            "cda 42 later 30 boom forwarded reaction sync-fail 13 ok bad f1,f2 false 3 true imm user 10 17\n",
         ),
     ];
     for &(name, source, expected) in cases {
-        let run = execute(source).await?;
+        let run = execute(source)
+            .await
+            .with_context(|| format!("compiling case {name}"))?;
         assert!(run.ok, "case {name} failed: {}", run.stderr);
         assert_eq!(run.stdout, expected, "case {name} output mismatch");
     }

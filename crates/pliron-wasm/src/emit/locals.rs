@@ -2,20 +2,16 @@
 //! coloring that coalesces branch arguments with the block parameters they move into.
 use super::{
     EmitResult,
-    function::{FunctionEmitter, successors},
+    function::FunctionEmitter,
     values::{TreeStep, value_tree},
 };
 use crate::types::val_type;
 use pliron::{
-    basic_block::BasicBlock, builtin::op_interfaces::BranchOpInterface, context::Ptr,
-    linked_list::ContainsLinkedList, op::op_cast, operation::Operation, r#type::Typed,
+    basic_block::BasicBlock, context::Ptr, linked_list::ContainsLinkedList, r#type::Typed,
     value::Value,
 };
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::ValType;
-
-/// Values with locals that a statement reads, and the values it defines.
-type Statement = (Vec<Value>, Vec<Value>);
 
 impl FunctionEmitter<'_> {
     /// Give every value that needs a local one, sharing locals between values of one type
@@ -26,35 +22,14 @@ impl FunctionEmitter<'_> {
         let ctx = self.ctx;
         // Values that need a local, in definition order, and their types.
         let mut values = Vec::new();
-        // Per block: its parameters with locals, and its statements in order.
-        let mut params: HashMap<Ptr<BasicBlock>, Vec<Value>> = HashMap::new();
-        let mut statements: HashMap<Ptr<BasicBlock>, Vec<Statement>> = HashMap::new();
         for &block in blocks.iter().rev() {
-            let defined: Vec<Value> = block
-                .deref(ctx)
-                .arguments()
-                .filter(|v| v.is_used(ctx))
-                .collect();
+            let body = block.deref(ctx);
             if block != self.entry {
-                values.extend(defined.iter().copied());
+                values.extend(body.arguments().filter(|v| v.is_used(ctx)));
             }
-            params.insert(block, defined);
-            let mut list = Vec::new();
-            for op in block.deref(ctx).iter(ctx) {
-                if self.in_place(op) {
-                    continue;
-                }
-                let defs: Vec<Value> = op.deref(ctx).results().filter(|v| v.is_used(ctx)).collect();
-                values.extend(defs.iter().copied());
-                let reads = value_tree(ctx, &self.folded, op)
-                    .filter_map(|step| match step {
-                        TreeStep::Local(value) => Some(value),
-                        TreeStep::Operation(_) => None,
-                    })
-                    .collect();
-                list.push((reads, defs));
+            for op in body.iter(ctx).filter(|&op| !self.in_place(op)) {
+                values.extend(op.deref(ctx).results().filter(|v| v.is_used(ctx)));
             }
-            statements.insert(block, list);
         }
         let mut types: HashMap<Value, ValType> = HashMap::new();
         for &value in values.iter().chain(self.locals.keys()) {
@@ -63,39 +38,8 @@ impl FunctionEmitter<'_> {
             types.insert(value, ty);
         }
         let tracked = |value: &Value| types.contains_key(value);
-        let live_out = |live_in: &HashMap<Ptr<BasicBlock>, HashSet<Value>>, block| {
-            successors(ctx, block)
-                .iter()
-                .filter_map(|succ| live_in.get(succ))
-                .flatten()
-                .copied()
-                .collect::<HashSet<Value>>()
-        };
-
-        // Live-in sets to a fixpoint (postorder converges fastest for backward flow).
-        let mut live_in: HashMap<Ptr<BasicBlock>, HashSet<Value>> = HashMap::new();
-        loop {
-            let mut changed = false;
-            for &block in blocks {
-                let mut live = live_out(&live_in, block);
-                for (reads, defs) in statements[&block].iter().rev() {
-                    for def in defs {
-                        live.remove(def);
-                    }
-                    live.extend(reads.iter().copied().filter(tracked));
-                }
-                for param in &params[&block] {
-                    live.remove(param);
-                }
-                if live_in.get(&block).map_or(0, HashSet::len) != live.len() {
-                    live_in.insert(block, live);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
+        // Scheduling moves reads within a block. SSA live-out is unchanged at every edge.
+        let intervals = pliron_control::liveness::LiveValues::for_blocks(ctx, blocks);
 
         // Interference: a definition overlaps everything live after it.
         let mut interferes: HashMap<Value, HashSet<Value>> = HashMap::new();
@@ -106,24 +50,35 @@ impl FunctionEmitter<'_> {
             }
         };
         for &block in blocks {
-            let mut live = live_out(&live_in, block);
-            for (reads, defs) in statements[&block].iter().rev() {
-                for (index, def) in defs.iter().enumerate() {
-                    for other in live.iter().chain(&defs[index + 1..]) {
-                        edge(*def, *other);
+            let body = block.deref(ctx);
+            let terminator = body
+                .get_terminator(ctx)
+                .ok_or_else(|| self.malformed("missing terminator"))?;
+            let mut live: HashSet<_> = intervals
+                .after(terminator)
+                .values()
+                .filter(tracked)
+                .collect();
+            let mut define = |defs: Vec<Value>, live: &mut HashSet<Value>| {
+                for (index, &def) in defs.iter().enumerate() {
+                    for &other in live.iter().chain(&defs[index + 1..]) {
+                        edge(def, other);
                     }
                 }
                 for def in defs {
-                    live.remove(def);
+                    live.remove(&def);
                 }
-                live.extend(reads.iter().copied().filter(tracked));
+            };
+            for op in body.iter(ctx).rev().filter(|&op| !self.in_place(op)) {
+                define(op.deref(ctx).results().filter(tracked).collect(), &mut live);
+                live.extend(
+                    value_tree(ctx, &self.folded, op).filter_map(|step| match step {
+                        TreeStep::Local(value) => Some(value),
+                        TreeStep::Operation(_) => None,
+                    }),
+                );
             }
-            let defined = &params[&block];
-            for (index, param) in defined.iter().enumerate() {
-                for other in live.iter().chain(&defined[index + 1..]) {
-                    edge(*param, *other);
-                }
-            }
+            define(body.arguments().filter(tracked).collect(), &mut live);
         }
 
         // Branch arguments and the parameters they move into prefer one local (the move is
@@ -133,21 +88,11 @@ impl FunctionEmitter<'_> {
             let Some(terminator) = block.deref(ctx).get_terminator(ctx) else {
                 continue;
             };
-            let op = Operation::get_op_dyn(terminator, ctx);
-            let Some(branch) = op_cast::<dyn BranchOpInterface>(op.as_ref()) else {
-                continue;
-            };
-            for succ in 0..terminator.deref(ctx).get_num_successors() {
-                let dest = terminator.deref(ctx).get_successor(succ);
-                for (param, arg) in dest
-                    .deref(ctx)
-                    .arguments()
-                    .zip(branch.successor_operands(ctx, succ))
-                {
-                    if tracked(&param) && tracked(&arg) {
-                        hints.entry(param).or_default().push(arg);
-                        hints.entry(arg).or_default().push(param);
-                    }
+            for (position, param) in pliron_control::forwarded_arguments(ctx, terminator) {
+                let arg = terminator.deref(ctx).get_operand(position);
+                if tracked(&param) && tracked(&arg) {
+                    hints.entry(param).or_default().push(arg);
+                    hints.entry(arg).or_default().push(param);
                 }
             }
         }

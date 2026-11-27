@@ -81,12 +81,10 @@ pub(crate) extern "C" fn web_body_stream(object: *mut u8) -> *mut u8 {
 fn consume(object: *mut u8, promise: *mut u8) -> Option<&'static [u8]> {
     let body = body(object);
     if body.used != 0 {
-        reject_with(
+        perry_rt_sys::reject_static!(
             promise,
             TYPE_ERROR,
-            from_static(perry_rt_sys::static_text!(
-                "Body is unusable: Body has already been read"
-            )),
+            "Body is unusable: Body has already been read"
         );
         return None;
     }
@@ -201,11 +199,9 @@ pub(crate) unsafe extern "C" fn web_response_new(
     h: *mut u8,
 ) -> *mut u8 {
     if !(200.0..=599.0).contains(&status) || status != (status as u32) as f64 {
-        perry_rt_sys::raise(
+        perry_rt_sys::raise_static!(
             RANGE_ERROR,
-            perry_rt_sys::static_text!(
-                "init[\"status\"] must be in the range of 200 to 599, inclusive."
-            ),
+            "init[\"status\"] must be in the range of 200 to 599, inclusive."
         );
         return core::ptr::null_mut();
     }
@@ -213,13 +209,13 @@ pub(crate) unsafe extern "C" fn web_response_new(
     let reason = unsafe { bytes(status_text) };
     // SAFETY: helper call on an input string.
     if unsafe { helper::fetch_status_text(reason.as_ptr(), reason.len() as u32) } == INVALID {
-        perry_rt_sys::raise(TYPE_ERROR, perry_rt_sys::static_text!("Invalid statusText"));
+        perry_rt_sys::raise_static!(TYPE_ERROR, "Invalid statusText");
         return core::ptr::null_mut();
     }
     if !view.is_null() && matches!(status as u32, 204 | 205 | 304) {
-        perry_rt_sys::raise(
+        perry_rt_sys::raise_static!(
             TYPE_ERROR,
-            perry_rt_sys::static_text!("Response constructor: Invalid response status code"),
+            "Response constructor: Invalid response status code"
         );
         return core::ptr::null_mut();
     }
@@ -239,28 +235,11 @@ pub(crate) unsafe extern "C" fn web_response_new(
     r as *mut u8
 }
 
-/// `response.status`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_status(r: *mut u8) -> f64 {
-    response(r).status
-}
-
-/// `response.statusText`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_status_text(r: *mut u8) -> *mut u8 {
-    response(r).status_text
-}
-
-/// `response.ok`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_ok(r: *mut u8) -> u32 {
-    u32::from((200.0..300.0).contains(&response(r).status))
-}
-
-/// `response.headers`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_response_headers(r: *mut u8) -> *mut u8 {
-    response(r).headers
+crate::web_getters! {
+    web_response_status(r: *mut u8) -> f64 => response(r).status;
+    web_response_status_text(r: *mut u8) -> *mut u8 => response(r).status_text;
+    web_response_ok(r: *mut u8) -> u32 => u32::from((200.0..300.0).contains(&response(r).status));
+    web_response_headers(r: *mut u8) -> *mut u8 => response(r).headers;
 }
 
 // --- Request ------------------------------------------------------------------------------
@@ -328,20 +307,8 @@ pub(crate) unsafe extern "C" fn web_request_new(
     r as *mut u8
 }
 
-/// `request.method`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_request_method(r: *mut u8) -> *mut u8 {
-    request(r).method
-}
-
-/// `request.url`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_request_url(r: *mut u8) -> *mut u8 {
-    request(r).url
-}
-
-/// `request.headers`.
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn web_request_headers(r: *mut u8) -> *mut u8 {
-    request(r).headers
+crate::web_getters! {
+    web_request_method(r: *mut u8) -> *mut u8 => request(r).method;
+    web_request_url(r: *mut u8) -> *mut u8 => request(r).url;
+    web_request_headers(r: *mut u8) -> *mut u8 => request(r).headers;
 }

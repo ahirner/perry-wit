@@ -2,7 +2,8 @@
 //! functions, drivers and boundary glue are emitted, and the raw (test) export wrappers.
 use crate::{
     DATA_BASE, Exports, HELPER_MODULE,
-    analysis::{ModuleAnalyses, module_analyses, reachable_functions},
+    aggregates::RecordLayouts,
+    analysis::reachable_functions,
     async_split, boundary,
     function::FunctionLowering,
     host::Host,
@@ -10,7 +11,7 @@ use crate::{
     repr::{Repr, i32_type, repr, slot_kind, wasm_type},
     runtime::Runtime,
 };
-use perry_mir::{PlironResultExt as _, is_exported};
+use perry_mir::{PlironResultExt as _, RecordType, RegexLiteral, is_exported};
 use perry_wit_diagnostics::{Diagnostic, Result, bail_internal, codes, diag, ensure_unsupported};
 use pliron::{
     builtin::{
@@ -26,7 +27,7 @@ use pliron::{
     op::Op,
     operation::Operation,
     pass::AnalysisManager,
-    r#type::{TypeHandle, Typed},
+    r#type::{TypeHandle, TypedHandle},
 };
 use pliron_wasm::{
     attrs::{MemKind, NumOpcode},
@@ -45,12 +46,20 @@ pub(crate) enum Initializer {
     Async(u32),
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub(super) enum StaticTable {
+    Regex(RegexLiteral),
+    FieldNames(TypedHandle<RecordType>),
+    PointerShape(TypedHandle<RecordType>, bool),
+}
+
 /// Static data placed at [DATA_BASE].
 #[derive(Default)]
 pub(crate) struct Data {
     pub(crate) bytes: Vec<u8>,
     strings: HashMap<String, u32>,
-    pub(crate) regexes: HashMap<(String, String), u32>,
+    constants: HashMap<(usize, Vec<u8>), u32>,
+    tables: HashMap<StaticTable, u32>,
 }
 
 impl Data {
@@ -78,8 +87,34 @@ impl Data {
         address
     }
 
+    /// Intern immutable data at its required alignment.
+    pub(crate) fn constant(&mut self, alignment: usize, bytes: Vec<u8>) -> u32 {
+        let key = (alignment, bytes);
+        if let Some(&address) = self.constants.get(&key) {
+            return address;
+        }
+        let address = self.append(alignment, &key.1);
+        self.constants.insert(key, address);
+        address
+    }
+
+    pub(crate) fn words(&mut self, words: impl IntoIterator<Item = u32>) -> u32 {
+        self.constant(4, words.into_iter().flat_map(u32::to_le_bytes).collect())
+    }
+
+    pub(crate) fn pointer_shape(&mut self, offsets: &[u32]) -> u32 {
+        if offsets.is_empty() {
+            return 0;
+        }
+        self.words(
+            [0, offsets.len() as u32]
+                .into_iter()
+                .chain(offsets.iter().copied()),
+        )
+    }
+
     /// Pad the data to a multiple of `alignment` and return the address of its end.
-    pub(crate) fn align(&mut self, alignment: usize) -> u32 {
+    fn align(&mut self, alignment: usize) -> u32 {
         while !self.bytes.len().is_multiple_of(alignment) {
             self.bytes.push(0);
         }
@@ -131,10 +166,11 @@ pub(crate) struct ModuleState<'e> {
     /// Operations whose previous results are dead whenever they run again (`lease`).
     pub(crate) leased: HashSet<Ptr<Operation>>,
     pub(crate) layout_descriptors: HashMap<TypeHandle, u32>,
+    pub(crate) record_layouts: &'e RecordLayouts,
+    pub(crate) wit_slots: crate::boundary::WitSlots,
     pub(crate) json_copy_plans: HashMap<(TypeHandle, TypeHandle), u32>,
     pub(crate) json_result: Option<u32>,
     pub(crate) json_write_data: Option<u32>,
-    pub(crate) json_fields: HashMap<TypeHandle, (u32, usize)>,
     pub(crate) retains_json: bool,
     /// Whether allocations use precise collectible storage.
     pub(crate) collectible: bool,
@@ -143,8 +179,6 @@ pub(crate) struct ModuleState<'e> {
     /// Whether to count compiled roots published at [DATA_BASE] for [Exports::RawChecked].
     pub(crate) count_roots: bool,
     pub(crate) memory_checks: bool,
-    /// Pointer-map addresses of record types in collectible storage.
-    pub(crate) pointer_maps: HashMap<TypeHandle, u32>,
     /// Address and slot type of each module binding.
     pub(crate) globals: HashMap<Identifier, (u32, TypeHandle)>,
     /// The initializer and the address of its state cell, if the module has one.
@@ -154,6 +188,36 @@ pub(crate) struct ModuleState<'e> {
 }
 
 impl ModuleState<'_> {
+    pub(super) fn static_table(&mut self, ctx: &Context, table: StaticTable) -> Result<u32> {
+        if let Some(&address) = self.data.tables.get(&table) {
+            return Ok(address);
+        }
+        let address = match table {
+            StaticTable::Regex(literal) => {
+                let bytes = crate::regex::compile(&mut self.data, ctx, literal)?;
+                self.data.append(4, &bytes)
+            }
+            StaticTable::FieldNames(record) => {
+                let layout = self.record_layouts.get(ctx, record)?;
+                self.data
+                    .field_names(layout.fields.keys().map(String::as_str))
+            }
+            StaticTable::PointerShape(record, retains_json) => {
+                let layout = self.record_layouts.get(ctx, record)?;
+                let offsets: Vec<_> = layout
+                    .fields
+                    .values()
+                    .filter(|field| repr(ctx, field.ty).is_ok_and(|kind| kind == Repr::Ref))
+                    .map(|field| field.offset)
+                    .chain(retains_json.then_some(perry_abi::layout::record::JSON))
+                    .collect();
+                self.data.pointer_shape(&offsets)
+            }
+        };
+        self.data.tables.insert(table, address);
+        Ok(address)
+    }
+
     pub(crate) fn may_throw(&self, function: &Identifier) -> bool {
         self.program_facts
             .effects(function)
@@ -174,6 +238,7 @@ pub(crate) fn lower(
     mir: &ModuleOp,
     exports: &Exports,
     analyses: &mut AnalysisManager,
+    allocation_report: Option<&mut String>,
 ) -> Result<(ModuleOp, Vec<u8>, bool)> {
     let name = mir.get_symbol_name(ctx);
     let functions = reachable_functions(ctx, mir, exports);
@@ -182,11 +247,21 @@ pub(crate) fn lower(
         .filter(|f| perry_mir::is_async(ctx, f))
         .map(|f| f.get_symbol_name(ctx))
         .collect();
-    let ModuleAnalyses {
-        facts: effects,
-        live,
-    } = module_analyses(ctx, mir, analyses)?;
-    let resource_keys = boundary::used_keys(ctx, &functions);
+    let root = mir.get_operation();
+    analyses
+        .compute_analysis::<perry_mir::ProgramFacts>(root, ctx)
+        .to_diag(ctx)?;
+    analyses
+        .compute_analysis::<perry_mir::LiveValues>(root, ctx)
+        .to_diag(ctx)?;
+    let effects = analyses
+        .try_get_analysis::<perry_mir::ProgramFacts>(root)
+        .ok_or_else(|| Diagnostic::internal("computed program facts are missing"))?;
+    let live = analyses
+        .try_get_analysis::<perry_mir::LiveValues>(root)
+        .ok_or_else(|| Diagnostic::internal("computed liveness is missing"))?;
+    let layouts = RecordLayouts::prepare(ctx, &functions)?;
+    let resource_keys = &layouts.resources;
     let raw = matches!(exports, Exports::Raw | Exports::RawChecked);
     let memory_checks = matches!(
         exports,
@@ -242,30 +317,24 @@ pub(crate) fn lower(
         json_copy_plans: HashMap::new(),
         json_result: None,
         json_write_data: None,
-        json_fields: HashMap::new(),
         retains_json: functions.iter().any(|function| {
-            crate::analysis::function_ops(ctx, function)
-                .into_iter()
-                .any(|op| {
-                    if Operation::is_op::<perry_mir::FieldSetOp>(op, ctx)
-                        && perry_mir::field_order_may_change(
-                            ctx,
-                            op.deref(ctx).get_operand(1).get_type(ctx),
+            perry_mir::operations(ctx, function).into_iter().any(|op| {
+                if Operation::get_op::<perry_mir::FieldSetOp>(op, ctx)
+                    .is_some_and(|set| set.updates_order(ctx))
+                {
+                    return true;
+                }
+                perry_mir::is_any::<(perry_mir::JsonDecodeOp, perry_mir::JsonCopyOp)>(ctx, op)
+                    || Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
+                        matches!(
+                            op.intrinsic(ctx),
+                            perry_mir::Intrinsic::JsonSpread
+                                | perry_mir::Intrinsic::JsonOrderCopy
+                                | perry_mir::Intrinsic::JsonInsert
+                                | perry_mir::Intrinsic::JsonExclude
                         )
-                    {
-                        return true;
-                    }
-                    perry_mir::is_any::<(perry_mir::JsonDecodeOp, perry_mir::JsonCopyOp)>(ctx, op)
-                        || Operation::get_op::<perry_mir::IntrinsicOp>(op, ctx).is_some_and(|op| {
-                            matches!(
-                                op.intrinsic(ctx),
-                                perry_mir::Intrinsic::JsonSpread
-                                    | perry_mir::Intrinsic::JsonOrderCopy
-                                    | perry_mir::Intrinsic::JsonInsert
-                                    | perry_mir::Intrinsic::JsonExclude
-                            )
-                        })
-                })
+                    })
+            })
         }),
         leased: HashSet::new(),
         collectible: !resource_keys.is_empty()
@@ -276,7 +345,8 @@ pub(crate) fn lower(
         program_facts: &effects,
         live: &live,
         count_roots: matches!(exports, Exports::RawChecked),
-        pointer_maps: HashMap::new(),
+        record_layouts: &layouts,
+        wit_slots: Default::default(),
         globals: HashMap::new(),
         initializer: None,
         numeric_result: None,
@@ -294,6 +364,9 @@ pub(crate) fn lower(
     }
     for function in &functions {
         state.leased.extend(lease::leased(ctx, function, &live));
+    }
+    if let Some(report) = allocation_report {
+        memory::explain_tiers(ctx, mir, &functions, &state, report)?;
     }
     let mut lowered_functions = HashMap::with_capacity(functions.len());
     for function in functions {
@@ -342,16 +415,14 @@ pub(crate) fn lower(
     boundary::emit_drain(ctx, &mut state);
     let memory = !state.data.bytes.is_empty()
         || !state.runtime.is_empty()
-        || crate::analysis::module_functions(ctx, &state.wasm)
+        || perry_mir::functions(state.wasm.get_operation(), ctx)
             .iter()
             .any(|function| {
-                crate::analysis::function_ops(ctx, function)
-                    .into_iter()
-                    .any(|op| {
-                        perry_mir::is_any::<(pliron_wasm::ops::LoadOp, pliron_wasm::ops::StoreOp)>(
-                            ctx, op,
-                        )
-                    })
+                perry_mir::operations(ctx, function).into_iter().any(|op| {
+                    perry_mir::is_any::<(pliron_wasm::ops::LoadOp, pliron_wasm::ops::StoreOp)>(
+                        ctx, op,
+                    )
+                })
             });
     // The imports come last: every function above may still add to them.
     for runtime in std::mem::take(&mut state.runtime) {
@@ -409,7 +480,7 @@ fn bind_exports(
     if exports.iter().any(|e| {
         e.params
             .iter()
-            .any(|p| matches!(p, boundary::AbiType::ByteStream))
+            .any(|p| matches!(p.ty.kind, boundary::AbiKind::ByteStream))
     }) {
         state.uses_streams = true;
     }
@@ -458,10 +529,7 @@ fn bind_exports(
                 || initialization.is_some_and(|summary| summary.effects.host_work))
                 && (effects.unhandled_await
                     || initialization.is_some_and(|summary| summary.effects.unhandled_await)))
-            && !export
-                .result
-                .as_ref()
-                .is_some_and(boundary::AbiType::accepts_exception)
+            && export.exception_result().is_none()
         {
             state.reports_rejection = true;
         }
@@ -478,10 +546,7 @@ fn bind_exports(
         }
         if !export.is_command()
             && (initialization_escapes || effects.failure.escapes())
-            && !export
-                .result
-                .as_ref()
-                .is_some_and(boundary::AbiType::accepts_exception)
+            && export.exception_result().is_none()
         {
             if export.is_async() && !stderr {
                 return Err(diag!(

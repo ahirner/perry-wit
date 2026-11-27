@@ -57,11 +57,7 @@ pub(crate) unsafe extern "C" fn perry_abort_watch(signal: *mut u8, handle: u32, 
         while !entry.is_null() {
             if (*entry).handle == handle && (*entry).promise == promise {
                 (*entry).signal = signal;
-                (*entry).watch_next = (*signal).head;
-                if !(*signal).head.is_null() {
-                    (*(*signal).head).watch_previous = entry;
-                }
-                (*signal).head = entry;
+                crate::dlist_push_front!((*signal).head, entry, watch_previous, watch_next);
                 return;
             }
             entry = (*entry).next;
@@ -77,18 +73,8 @@ pub(crate) unsafe fn detach(entry: *mut region::Subtask) {
         if signal.is_null() {
             return;
         }
-        let (previous, next) = ((*entry).watch_previous, (*entry).watch_next);
-        if previous.is_null() {
-            (*signal).head = next;
-        } else {
-            (*previous).watch_next = next;
-        }
-        if !next.is_null() {
-            (*next).watch_previous = previous;
-        }
+        crate::dlist_unlink!((*signal).head, entry, watch_previous, watch_next);
         (*entry).signal = ptr::null_mut();
-        (*entry).watch_previous = ptr::null_mut();
-        (*entry).watch_next = ptr::null_mut();
     }
 }
 

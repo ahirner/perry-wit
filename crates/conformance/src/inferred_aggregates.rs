@@ -1,7 +1,6 @@
 use crate::{
     emit::Emitter,
-    execution::check_equivalence,
-    registry::{Case, Contract, ExitStatus, Witness},
+    registry::{Case, Contract},
 };
 use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -315,22 +314,17 @@ fn strategy(storage: Storage) -> BoxedStrategy<Case> {
 }
 
 pub(crate) fn contract() -> Contract {
-    let inferred_arrays = Case::Command {
-        source: include_str!("../cases/inferred_arrays.ts").into(),
-        exit: ExitStatus::Success,
-    };
-    let mut witnesses = vec![
-        Witness {
-            partition: "uniform-records-and-aliases",
-            case: inferred_arrays,
-        },
-        Witness {
-            partition: "dependent-arrays",
-            case: Case::Command {
-                source: "const a:any[]=[];a.push(1);const b:any[]=[];b.push(a[0]);const c:any[]=[];c.push(b[0]+a.length);console.log(JSON.stringify(c));".into(),
-                exit: ExitStatus::Success,
-            },
-        },
+    let mut witnesses: Vec<(&'static str, Case)> = vec![
+        (
+            "uniform-records-and-aliases",
+            Case::command(include_str!("../cases/inferred_arrays.ts")),
+        ),
+        (
+            "dependent-arrays",
+            Case::command(
+                "const a:any[]=[];a.push(1);const b:any[]=[];b.push(a[0]);const c:any[]=[];c.push(b[0]+a.length);console.log(JSON.stringify(c));",
+            ),
+        ),
     ];
     for (partition, source) in [
         (
@@ -354,13 +348,7 @@ pub(crate) fn contract() -> Contract {
             "const a:any[]=[];a.push(1);function mutate():void{a.push('text');}mutate();console.log(JSON.stringify(a));",
         ),
     ] {
-        witnesses.push(Witness {
-            partition,
-            case: Case::Command {
-                source: source.into(),
-                exit: ExitStatus::Success,
-            },
-        });
+        witnesses.push((partition, Case::command(source)));
     }
     for (partition, source) in [
         ("string-key-write", "const a:any[]=[];a.push(1);a['k']=2;"),
@@ -397,25 +385,17 @@ pub(crate) fn contract() -> Contract {
             "const a:any[]=[];console.log(JSON.stringify(a));",
         ),
     ] {
-        witnesses.push(Witness {
-            partition,
-            case: Case::Reject {
-                wit: None,
-                source: source.into(),
-                diagnostic: if partition == "mutable-element-alias" {
-                    "differs from the expected type"
-                } else {
-                    REQUIRES_ELEMENT_TYPE
-                }
-                .into(),
-                form_sources: vec![],
-            },
-        });
+        let diagnostic = if partition == "mutable-element-alias" {
+            "differs from the expected type"
+        } else {
+            REQUIRES_ELEMENT_TYPE
+        };
+        witnesses.push((partition, Case::reject(source, diagnostic)));
     }
 
-    witnesses.push(Witness {
-        partition: "conditional-temporary",
-        case: AggregateCase {
+    witnesses.push((
+        "conditional-temporary",
+        AggregateCase {
             storage: Storage::Array,
             element: Element::Number,
             seed: 0,
@@ -424,25 +404,21 @@ pub(crate) fn contract() -> Contract {
             form: Form::Annotated,
         }
         .rejection(UnresolvedWrite::Conditional),
-    });
+    ));
 
     witnesses.extend(uniform_witnesses(Storage::Array));
-    Contract::new(
+    Contract::equivalence(
         "ecma.array.inferred_storage",
         witnesses,
         strategy(Storage::Array),
-        check_equivalence,
     )
 }
 
 pub(crate) fn dictionary_contract() -> Contract {
-    let mut witnesses = vec![Witness {
-        partition: "computed-keys-and-json-residue",
-        case: Case::Command {
-            source: include_str!("../cases/inferred_dictionaries.ts").into(),
-            exit: ExitStatus::Success,
-        },
-    }];
+    let mut witnesses: Vec<(&'static str, Case)> = vec![(
+        "computed-keys-and-json-residue",
+        Case::command(include_str!("../cases/inferred_dictionaries.ts")),
+    )];
     for (partition, source) in [
         (
             "conflicting-alias",
@@ -478,26 +454,17 @@ pub(crate) fn dictionary_contract() -> Contract {
             "const d:any=JSON.parse('{}');d['field_'+1]=1;",
         ),
     ] {
-        witnesses.push(Witness {
-            partition,
-            case: Case::Reject {
-                wit: None,
-                source: source.into(),
-                diagnostic: "subset rule R1".into(),
-                form_sources: vec![],
-            },
-        });
+        witnesses.push((partition, Case::reject(source, "subset rule R1")));
     }
     witnesses.extend(uniform_witnesses(Storage::Dictionary));
-    Contract::new(
+    Contract::equivalence(
         "ecma.object.inferred_storage",
         witnesses,
         strategy(Storage::Dictionary),
-        check_equivalence,
     )
 }
 
-fn uniform_witnesses(storage: Storage) -> impl Iterator<Item = Witness> {
+fn uniform_witnesses(storage: Storage) -> impl Iterator<Item = (&'static str, Case)> {
     [
         ("number-writes", Element::Number),
         ("string-writes", Element::Text),
@@ -506,28 +473,30 @@ fn uniform_witnesses(storage: Storage) -> impl Iterator<Item = Witness> {
         ("nested-array-writes", Element::Array),
     ]
     .into_iter()
-    .map(move |(partition, element)| Witness {
-        partition,
-        case: Case::InferredAggregate(AggregateCase {
-            storage,
-            element,
-            seed: 0,
-            aliases: 3,
-            form: Form::Annotated,
-            writes: vec![
-                Write {
-                    value: 1,
-                    index: None,
-                },
-                Write {
-                    value: -2,
-                    index: Some(0),
-                },
-                Write {
-                    value: 3,
-                    index: Some(1),
-                },
-            ],
-        }),
+    .map(move |(partition, element)| {
+        (
+            partition,
+            Case::InferredAggregate(AggregateCase {
+                storage,
+                element,
+                seed: 0,
+                aliases: 3,
+                form: Form::Annotated,
+                writes: vec![
+                    Write {
+                        value: 1,
+                        index: None,
+                    },
+                    Write {
+                        value: -2,
+                        index: Some(0),
+                    },
+                    Write {
+                        value: 3,
+                        index: Some(1),
+                    },
+                ],
+            }),
+        )
     })
 }

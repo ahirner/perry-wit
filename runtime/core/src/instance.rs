@@ -1,12 +1,13 @@
 /// Select the guest's static storage or a field of the explicitly active native instance.
 macro_rules! instance_state {
     ($name:ident, $access:ident, $field:ident, $state:ty, $initial:expr) => {
-        #[cfg(target_arch = "wasm32")]
-        static $name: Global = Global(UnsafeCell::new($initial));
-
         fn $access() -> *mut $state {
             #[cfg(target_arch = "wasm32")]
             {
+                struct Global(core::cell::UnsafeCell<$state>);
+                // SAFETY: one instance runs on a single thread.
+                unsafe impl Sync for Global {}
+                static $name: Global = Global(core::cell::UnsafeCell::new($initial));
                 $name.0.get()
             }
             #[cfg(not(target_arch = "wasm32"))]

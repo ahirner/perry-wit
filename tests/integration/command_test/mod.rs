@@ -256,7 +256,8 @@ await message(made('.'));
 await message(removed('nope/deeper'));
 await message(text('sub/../fixture.txt'));
 await mkdir('sub');
-console.log(await readFile('./sub/../fixture.txt', { encoding: 'utf8' }) === "é\0abc");
+async function readText(path: string) { return await readFile(path, { encoding: 'utf8' }); }
+console.log((await readText('./sub/../fixture.txt')).toUpperCase() === "É\0ABC");
 await writeFile('/sub/out.bin', new Uint8Array([104, 195, 169, 255]));
 console.log(await readFile('sub/out.bin', 'utf8'), (await readFile('sub/out.bin')).byteLength);
 const info = await stat('sub');

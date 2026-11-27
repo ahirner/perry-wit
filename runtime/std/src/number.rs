@@ -19,20 +19,29 @@ fn format_integer_radix(magnitude: u64, negative: bool, radix: u32) -> *mut u8 {
     ))
 }
 
-#[unsafe(no_mangle)]
-pub(crate) extern "C" fn std_number_to_string(tag: i32, bits: u64) -> *mut u8 {
-    match tag {
-        numeric::SIGNED => {
-            let value = bits as i64;
-            format_integer_radix(value.unsigned_abs(), value < 0, 10)
-        }
-        numeric::UNSIGNED => format_integer_radix(bits, false, 10),
-        _ => {
+fn number(tag: i32, bits: u64) -> Number {
+    Number::from_numeric(
+        numeric::Tag::try_from(tag).expect("invalid numeric tag"),
+        bits,
+    )
+}
+
+fn format_number(number: Number, radix: u32) -> *mut u8 {
+    match number {
+        Number::Signed(value) => format_integer_radix(value.unsigned_abs(), value < 0, radix),
+        Number::Unsigned(value) => format_integer_radix(value, false, radix),
+        Number::Float(value) if radix == 10 || !value.is_finite() || value == 0.0 => {
             let mut buf = [0u8; 40];
-            let len = crate::runtime::number_format(f64::from_bits(bits), &mut buf);
+            let len = crate::runtime::number_format(value, &mut buf);
             crate::runtime::from_bytes(&buf[..len])
         }
+        Number::Float(value) => format_float_radix(value.abs(), value < 0.0, radix),
     }
+}
+
+#[unsafe(no_mangle)]
+pub(crate) extern "C" fn std_number_to_string(tag: i32, bits: u64) -> *mut u8 {
+    format_number(number(tag, bits), 10)
 }
 
 type BigUint = perry_rt_sys::number::Big<40>;
@@ -150,30 +159,10 @@ fn format_float_radix(abs: f64, neg: bool, radix: u32) -> *mut u8 {
 pub(crate) extern "C" fn std_number_to_string_radix(tag: i32, bits: u64, radix: f64) -> *mut u8 {
     let r = crate::text::integer(radix);
     if !(2..=36).contains(&r) {
-        crate::runtime::raise(
-            crate::runtime::RANGE_ERROR,
-            perry_rt_sys::static_text!("Invalid radix"),
-        );
+        perry_rt_sys::raise_static!(crate::runtime::RANGE_ERROR, "Invalid radix");
         return crate::runtime::from_static(perry_rt_sys::static_text!(""));
     }
-    let radix_u32 = r as u32;
-    if radix_u32 == 10 {
-        return std_number_to_string(tag, bits);
-    }
-    match tag {
-        numeric::SIGNED => {
-            let value = bits as i64;
-            format_integer_radix(value.unsigned_abs(), value < 0, radix_u32)
-        }
-        numeric::UNSIGNED => format_integer_radix(bits, false, radix_u32),
-        _ => {
-            let val = f64::from_bits(bits);
-            if val.is_nan() || val.is_infinite() || val == 0.0 {
-                return std_number_to_string(tag, bits);
-            }
-            format_float_radix(val.abs(), val < 0.0, radix_u32)
-        }
-    }
+    format_number(number(tag, bits), r as u32)
 }
 
 #[unsafe(no_mangle)]
@@ -183,11 +172,7 @@ pub(crate) extern "C" fn std_parse_int(
     radix_bits: u64,
     output: *mut u64,
 ) -> i32 {
-    // Compiled code only emits tags it defines; an unknown one is a compiler bug.
-    let Ok(radix_tag) = numeric::Tag::try_from(radix_tag) else {
-        panic!("invalid numeric tag")
-    };
-    let radix = Number::from_numeric(radix_tag, radix_bits);
+    let radix = number(radix_tag, radix_bits);
     let (tag, bits) = parse_integer(view(string).text, radix).into_numeric();
     unsafe { *output = bits };
     tag

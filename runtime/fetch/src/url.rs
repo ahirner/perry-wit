@@ -14,18 +14,14 @@ impl Output<'_> {
         self.length = end;
         Ok(())
     }
-    fn number(&mut self, mut value: u32, radix: u32) -> Result<(), ()> {
-        let mut digits = [0u8; 10];
-        let mut start = digits.len();
-        loop {
-            start -= 1;
-            digits[start] = b"0123456789abcdef"[(value % radix) as usize];
-            value /= radix;
-            if value == 0 {
-                break;
-            }
-        }
-        self.bytes(&digits[start..])
+    fn number(&mut self, value: u32, radix: u32) -> Result<(), ()> {
+        let mut digits = [0u8; 66];
+        self.bytes(perry_rt_sys::number::format_integer(
+            u64::from(value),
+            false,
+            radix,
+            &mut digits,
+        ))
     }
     fn byte(&mut self, byte: u8) -> Result<(), ()> {
         *self.bytes.get_mut(self.length).ok_or(())? = byte;

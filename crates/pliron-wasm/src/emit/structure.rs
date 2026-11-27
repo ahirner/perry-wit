@@ -2,7 +2,7 @@
 //! `block`, conditional branches open an `if`, and branches lower to `br` targeting the matching label.
 use super::{
     EmitError, EmitResult,
-    function::{Frame, FunctionEmitter, successors},
+    function::{Frame, FunctionEmitter},
 };
 use crate::control::{BrOp, BrTableOp, CondBrOp, ReturnOp, UnreachableOp};
 use pliron::{
@@ -79,8 +79,9 @@ impl FunctionEmitter<'_> {
         } else if Operation::get_op::<BrTableOp>(terminator, ctx).is_some() {
             let index = terminator.deref(ctx).get_operand(0);
             self.value(index)?;
-            let mut labels = successors(ctx, block)
-                .into_iter()
+            let mut labels = terminator
+                .deref(ctx)
+                .successors()
                 .map(|dest| self.label(block, dest))
                 .collect::<EmitResult<Vec<_>>>()?;
             let default = labels

@@ -3,7 +3,7 @@ use crate::strings;
 use crate::{
     MONOTONIC_CLOCK,
     function::FunctionLowering,
-    repr::{Carriers, Repr, repr},
+    repr::{Repr, repr},
     runtime::{Runtime, W},
 };
 use perry_mir::{Intrinsic, NumericType, PlironResultExt as _, absence};
@@ -59,17 +59,14 @@ impl FunctionLowering<'_, '_> {
             let str_op = op.deref(ctx).get_operand(0);
             let str_val = self.mapped(ctx, str_op)?;
             let (radix_tag, radix_payload) = self.numeric_operand(ctx, op, 1)?;
-            let out_ptr = self.numeric_result_slot(ctx);
-            let tag = self.runtime(
+            let parsed = self.tagged_call(
                 ctx,
                 Runtime::StdParseInt,
-                vec![str_val, radix_tag, radix_payload, out_ptr],
+                vec![str_val, radix_tag, radix_payload],
             );
-            let payload = self.load(ctx, MemKind::I64, out_ptr, 0);
             let res_ty = op.deref(ctx).get_result(0).get_type(ctx);
             let numeric_ty = NumericType::get(ctx).into();
-            let value =
-                self.cast_value(ctx, Carriers::Numeric { tag, payload }, numeric_ty, res_ty)?;
+            let value = self.cast_value(ctx, parsed, numeric_ty, res_ty)?;
             self.define_value(ctx, op, value);
             return Ok(());
         }
@@ -82,25 +79,23 @@ impl FunctionLowering<'_, '_> {
             || (intrinsic == Intrinsic::NumberToString && exact_number(ctx))
         {
             let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
-            let norm_tag = self.canonical_numeric_tag(ctx, tag);
             let runtime = if intrinsic == Intrinsic::NumberInspect {
                 Runtime::StdNumberInspect
             } else {
                 Runtime::StdNumberToString
             };
-            let value = self.runtime(ctx, runtime, vec![norm_tag, payload]);
+            let value = self.runtime(ctx, runtime, vec![tag, payload]);
             self.define(ctx, op, value);
             return Ok(());
         }
         if intrinsic == Intrinsic::NumberToStringRadix {
             let (tag, payload) = self.numeric_operand(ctx, op, 0)?;
-            let norm_tag = self.canonical_numeric_tag(ctx, tag);
             let radix_op = op.deref(ctx).get_operand(1);
             let radix = self.mapped(ctx, radix_op)?;
             let value = self.runtime(
                 ctx,
                 Runtime::StdNumberToStringRadix,
-                vec![norm_tag, payload, radix],
+                vec![tag, payload, radix],
             );
             let status = self.runtime(ctx, Runtime::Status, vec![]);
             self.throw_status_if(ctx, status, status);
@@ -227,9 +222,7 @@ impl FunctionLowering<'_, '_> {
                 let scalars = self.num(ctx, NumOpcode::I32WrapI64, vec![scalars]);
                 let text =
                     self.runtime(ctx, Runtime::StringAdoptCounted, vec![out, bytes, scalars]);
-                self.br(ctx, done, vec![text]);
-                self.block = done;
-                Some(done.deref(ctx).get_argument(0))
+                Some(self.join_value(ctx, done, text))
             }
             Intrinsic::StringCharAtIndex | Intrinsic::StringScalarAtIndex => {
                 let representation = if intrinsic == Intrinsic::StringCharAtIndex {
@@ -276,14 +269,15 @@ impl FunctionLowering<'_, '_> {
                 if intrinsic == Intrinsic::JsonOrderCopy {
                     let record = TypedHandle::<perry_mir::RecordType>::from_handle(target_ty, ctx)
                         .to_diag(ctx)?;
-                    let fields = record.deref(ctx).fields().to_diag(ctx)?.to_vec();
-                    for (name, ty) in fields {
+                    let layout = self.state.record_layouts.get(ctx, record)?;
+                    for (name, field) in &layout.fields {
+                        let ty = field.ty;
                         if absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
-                            let (offset, _) = Self::record_type_field_slot(ctx, record, &name)?;
+                            let offset = field.offset;
                             let value = self.load_slot_value(ctx, args[0], offset, ty)?;
                             let omitted = self.is_omitted(ctx, value, ty)?;
                             let present = self.num(ctx, NumOpcode::I32Eqz, vec![omitted]);
-                            let key = self.state.data.string(&name);
+                            let key = self.state.data.string(name);
                             let key = self.i32_const(ctx, key as i32);
                             self.runtime_void(
                                 ctx,

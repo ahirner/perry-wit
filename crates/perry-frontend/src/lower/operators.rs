@@ -1,0 +1,642 @@
+//! Operators: arithmetic, comparison, logical, unary and truthiness.
+use super::*;
+use crate::lower::coerce::result_carrier;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Equality {
+    SameValue,
+    SameValueZero,
+}
+
+impl<'s> FunctionBuilder<'s, '_> {
+    pub(super) fn same_value(
+        &mut self,
+        ctx: &mut Context,
+        lhs: Value,
+        rhs: Value,
+        equality: Equality,
+    ) -> Result<Value> {
+        let equal = match equality {
+            Equality::SameValue => self.comparison_values(ctx, &CompareOp::Eq, lhs, rhs)?,
+            Equality::SameValueZero => self.compare(ctx, CompareKind::Eq, lhs, rhs),
+        };
+        let kind_of = |value: Value| Kind::of(ctx, present_type(ctx, value.get_type(ctx)));
+        let numbers = kind_of(lhs) == Some(Kind::Number) && kind_of(rhs) == Some(Kind::Number);
+        let may_be_number = |value: Value| {
+            matches!(
+                kind_of(value),
+                Some(Kind::Number | Kind::ValueUnion | Kind::Json | Kind::Exception)
+            )
+        };
+        if !numbers
+            && !(equality == Equality::SameValueZero && kind_of(lhs) == Some(Kind::ValueUnion))
+            && !(equality == Equality::SameValue && may_be_number(lhs) && may_be_number(rhs))
+        {
+            return Ok(equal);
+        }
+        let bool_ty = equal.get_type(ctx);
+        self.choose(
+            ctx,
+            bool_ty,
+            equal,
+            |b, ctx| {
+                if equality == Equality::SameValueZero {
+                    return Ok(equal);
+                }
+                let zero = b.number(ctx, 0.0);
+                let is_zero = if numbers {
+                    let lhs = b.arithmetic(ctx, lhs);
+                    b.compare(ctx, CompareKind::Eq, lhs, zero)
+                } else {
+                    b.comparison_values(ctx, &CompareOp::Eq, lhs, zero)?
+                };
+                b.choose(
+                    ctx,
+                    bool_ty,
+                    is_zero,
+                    |b, ctx| {
+                        let one = b.number(ctx, 1.0);
+                        let lhs = b.unwrapped_number(ctx, lhs)?;
+                        let rhs = b.unwrapped_number(ctx, rhs)?;
+                        let lhs = b.binary(ctx, BinaryKind::Div, one, lhs);
+                        let rhs = b.binary(ctx, BinaryKind::Div, one, rhs);
+                        Ok(b.compare(ctx, CompareKind::Eq, lhs, rhs))
+                    },
+                    |_, _| Ok(equal),
+                )
+            },
+            |b, ctx| {
+                let is_nan = |b: &mut Self, ctx: &mut Context, val: Value| -> Result<Value> {
+                    if numbers {
+                        Ok(b.compare(ctx, CompareKind::Ne, val, val))
+                    } else {
+                        b.comparison_values(ctx, &CompareOp::Ne, val, val)
+                    }
+                };
+                let lhs_nan = is_nan(b, ctx, lhs)?;
+                b.choose(
+                    ctx,
+                    bool_ty,
+                    lhs_nan,
+                    |b, ctx| is_nan(b, ctx, rhs),
+                    |_, _| Ok(lhs_nan),
+                )
+            },
+        )
+    }
+
+    fn unwrapped_number(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if Kind::of(ctx, present_type(ctx, value.get_type(ctx))) == Some(Kind::Number) {
+            return Ok(self.arithmetic(ctx, value));
+        }
+        let value = self.defined(ctx, value)?;
+        let f64_ty = FP64Type::get(ctx).into();
+        if crate::lower::value_unions::is_value_union(ctx, value.get_type(ctx)) {
+            return Ok(self.emit_value(perry_mir::VariantPayloadOp::new(ctx, value, f64_ty), ctx));
+        }
+        self.fit(ctx, value, f64_ty)
+    }
+
+    /// `left op right` for arithmetic operators and string concatenation.
+    pub(super) fn binary_expression(
+        &mut self,
+        ctx: &mut Context,
+        op: &BinaryOp,
+        left: &'s Expr,
+        right: &'s Expr,
+    ) -> Result<Value> {
+        let lhs = self.expression(ctx, left)?;
+        let rhs = self.expression(ctx, right)?;
+        self.binary_values(ctx, op, lhs, rhs)
+    }
+
+    fn binary_values(
+        &mut self,
+        ctx: &mut Context,
+        op: &BinaryOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value> {
+        if crate::lower::value_unions::is_value_union(ctx, lhs.get_type(ctx))
+            || crate::lower::value_unions::is_value_union(ctx, rhs.get_type(ctx))
+        {
+            let result = if matches!(op, BinaryOp::Add) {
+                perry_mir::ValueUnionType::number_string(ctx).into()
+            } else {
+                FP64Type::get(ctx).into()
+            };
+            return self.dispatch_value(ctx, lhs, result, &|b, ctx, lhs| {
+                b.dispatch_value(ctx, rhs, result, &|b, ctx, rhs| {
+                    let lhs = b.value_primitive(ctx, lhs)?;
+                    let rhs = b.value_primitive(ctx, rhs)?;
+                    let numeric = |b: &mut Self, ctx: &mut Context, value: Value| {
+                        if !matches!(op, BinaryOp::Add)
+                            && Kind::of(ctx, present_type(ctx, value.get_type(ctx)))
+                                == Some(Kind::String)
+                        {
+                            let value = b.arithmetic(ctx, value);
+                            b.intrinsic(ctx, Intrinsic::StringToNumber, vec![value])
+                        } else {
+                            value
+                        }
+                    };
+                    let lhs = numeric(b, ctx, lhs);
+                    let rhs = numeric(b, ctx, rhs);
+                    b.binary_values(ctx, op, lhs, rhs)
+                })
+            });
+        }
+        let string = |value: Value| {
+            present_type(ctx, value.get_type(ctx))
+                .deref(ctx)
+                .is::<StringType>()
+        };
+        if matches!(op, BinaryOp::Add) && (string(lhs) || string(rhs)) {
+            let lhs = self.display(ctx, lhs)?;
+            let rhs = self.display(ctx, rhs)?;
+            return Ok(self.emit_value(ConcatOp::new(ctx, lhs, rhs), ctx));
+        }
+        let boolean_number = |b: &mut Self, ctx: &mut Context, value: Value| -> Result<Value> {
+            if Kind::of(ctx, value.get_type(ctx)) == Some(Kind::Boolean) {
+                b.choose(
+                    ctx,
+                    FP64Type::get(ctx).into(),
+                    value,
+                    |b, ctx| Ok(b.number(ctx, 1.0)),
+                    |b, ctx| Ok(b.number(ctx, 0.0)),
+                )
+            } else {
+                Ok(value)
+            }
+        };
+        let lhs = boolean_number(self, ctx, lhs)?;
+        let rhs = boolean_number(self, ctx, rhs)?;
+        let lhs = self.arithmetic(ctx, lhs);
+        let rhs = self.arithmetic(ctx, rhs);
+        Ok(match (op, kind(ctx, lhs)?, kind(ctx, rhs)?) {
+            (op, Kind::Number, Kind::Number) => {
+                if let Some(intrinsic) = match op {
+                    BinaryOp::BitAnd => Some(Intrinsic::BitAnd),
+                    BinaryOp::BitOr => Some(Intrinsic::BitOr),
+                    BinaryOp::BitXor => Some(Intrinsic::BitXor),
+                    BinaryOp::Shl => Some(Intrinsic::ShiftLeft),
+                    BinaryOp::Shr => Some(Intrinsic::ShiftRight),
+                    BinaryOp::UShr => Some(Intrinsic::ShiftRightUnsigned),
+                    _ => None,
+                } {
+                    return Ok(self.intrinsic(ctx, intrinsic, vec![lhs, rhs]));
+                }
+                self.binary(ctx, Self::arithmetic_kind(op)?, lhs, rhs)
+            }
+            (
+                op
+                @ (BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod),
+                Kind::BigInt,
+                Kind::BigInt,
+            ) => self.binary(ctx, Self::arithmetic_kind(op)?, lhs, rhs),
+            (op, left_kind, right_kind) => {
+                bail_diag!(
+                    codes::UNSUPPORTED_OPERATOR,
+                    "operator {op:?} on {} and {} is not supported yet",
+                    left_kind.label(),
+                    right_kind.label()
+                )
+            }
+        })
+    }
+
+    fn arithmetic_kind(op: &BinaryOp) -> Result<BinaryKind> {
+        Ok(match op {
+            BinaryOp::Add => BinaryKind::Add,
+            BinaryOp::Sub => BinaryKind::Sub,
+            BinaryOp::Mul => BinaryKind::Mul,
+            BinaryOp::Div => BinaryKind::Div,
+            BinaryOp::Mod => BinaryKind::Rem,
+            other => bail_diag!(
+                codes::UNSUPPORTED_OPERATOR,
+                "operator {other:?} is not supported yet"
+            ),
+        })
+    }
+
+    /// Lower `left op right` for strict equality and relational ordering operators.
+    pub(super) fn comparison(
+        &mut self,
+        ctx: &mut Context,
+        op: &CompareOp,
+        left: &'s Expr,
+        right: &'s Expr,
+    ) -> Result<Value> {
+        let (equality, loose) = match op {
+            CompareOp::Eq => (Some(CompareKind::Eq), false),
+            CompareOp::Ne => (Some(CompareKind::Ne), false),
+            CompareOp::LooseEq => (Some(CompareKind::Eq), true),
+            CompareOp::LooseNe => (Some(CompareKind::Ne), true),
+            _ => (None, false),
+        };
+        if let Some(equality) = equality
+            && let Some(value) = self.absence_test(ctx, equality, loose, left, right)?
+        {
+            return Ok(value);
+        }
+        if loose {
+            bail_unsupported!("loose equality is not supported; use === or !==");
+        }
+        let lhs = self.expression(ctx, left)?;
+        let rhs = self.expression(ctx, right)?;
+        self.comparison_values(ctx, op, lhs, rhs)
+    }
+
+    pub(super) fn comparison_values(
+        &mut self,
+        ctx: &mut Context,
+        op: &CompareOp,
+        lhs: Value,
+        rhs: Value,
+    ) -> Result<Value> {
+        if crate::lower::value_unions::is_value_union(ctx, lhs.get_type(ctx))
+            || crate::lower::value_unions::is_value_union(ctx, rhs.get_type(ctx))
+        {
+            let result = IntegerType::get(ctx, 1, Signedness::Signless).into();
+            return self.dispatch_value(ctx, lhs, result, &|b, ctx, lhs| {
+                b.dispatch_value(ctx, rhs, result, &|b, ctx, rhs| {
+                    if matches!(op, CompareOp::Eq | CompareOp::Ne)
+                        && present_type(ctx, lhs.get_type(ctx))
+                            != present_type(ctx, rhs.get_type(ctx))
+                    {
+                        Ok(b.boolean(ctx, matches!(op, CompareOp::Ne)))
+                    } else {
+                        b.comparison_values(ctx, op, lhs, rhs)
+                    }
+                })
+            });
+        }
+        let equality = match op {
+            CompareOp::Eq => Some(CompareKind::Eq),
+            CompareOp::Ne => Some(CompareKind::Ne),
+            _ => None,
+        };
+        if let Some(equality) = equality {
+            let exception = |value: Value| value.get_type(ctx).deref(ctx).is::<ExceptionType>();
+            if exception(lhs) || exception(rhs) {
+                let equal = if exception(lhs) && exception(rhs) {
+                    self.intrinsic(ctx, Intrinsic::ExceptionEqual, vec![lhs, rhs])
+                } else {
+                    let (exception, value) = if exception(lhs) {
+                        (lhs, rhs)
+                    } else {
+                        (rhs, lhs)
+                    };
+                    if value.get_type(ctx).deref(ctx).is::<perry_mir::BigIntType>() {
+                        self.intrinsic(ctx, Intrinsic::ExceptionBigIntEqual, vec![exception, value])
+                    } else {
+                        let value = self.error_cause(ctx, value)?;
+                        self.intrinsic(ctx, Intrinsic::JsonExceptionEqual, vec![value, exception])
+                    }
+                };
+                return Ok(self.equality_result(ctx, equality, equal));
+            }
+            let json_left = self.json_operand(ctx, lhs)?;
+            let json_right = self.json_operand(ctx, rhs)?;
+            let operands = match (json_left, json_right) {
+                (Some(left), Some(right)) => {
+                    let equal = self.intrinsic(ctx, Intrinsic::JsonStrictEqual, vec![left, right]);
+                    return Ok(self.equality_result(ctx, equality, equal));
+                }
+                (Some(json), None) => Some((json, rhs)),
+                (None, Some(json)) => Some((json, lhs)),
+                (None, None) => None,
+            };
+            if let Some((json, scalar)) = operands {
+                let equal = self.json_scalar_equal(ctx, json, scalar)?;
+                return Ok(self.equality_result(ctx, equality, equal));
+            }
+            let states = perry_mir::Absence::join_optional(
+                absence(ctx, lhs.get_type(ctx)),
+                absence(ctx, rhs.get_type(ctx)),
+            );
+            if let Some(states) = states {
+                // Strict equality with `undefined` in play: compare as `T | undefined`.
+                let left_inner = present_type(ctx, lhs.get_type(ctx));
+                let right_inner = present_type(ctx, rhs.get_type(ctx));
+                ensure_unsupported!(
+                    left_inner == right_inner,
+                    "comparison of different types is not supported"
+                );
+                let target = perry_mir::OptionalType::get_with(ctx, left_inner, states).into();
+                let lhs = self.fit(ctx, lhs, target)?;
+                let rhs = self.fit(ctx, rhs, target)?;
+                ensure_unsupported!(
+                    lhs.get_type(ctx) == rhs.get_type(ctx),
+                    "comparison of different types is not supported"
+                );
+                return Ok(self.compare(ctx, equality, lhs, rhs));
+            }
+        }
+        let lhs = self.arithmetic(ctx, lhs);
+        let rhs = self.arithmetic(ctx, rhs);
+        let (left_kind, right_kind) = (kind(ctx, lhs)?, kind(ctx, rhs)?);
+        ensure_unsupported!(
+            left_kind != Kind::Regex && right_kind != Kind::Regex,
+            "regex object identity is outside the literal matching profile"
+        );
+        ensure_unsupported!(
+            left_kind == right_kind,
+            "comparison of different types ({} and {}) is not supported",
+            left_kind.label(),
+            right_kind.label()
+        );
+        let kind = match op {
+            CompareOp::Eq => CompareKind::Eq,
+            CompareOp::Ne => CompareKind::Ne,
+            CompareOp::Lt => CompareKind::Lt,
+            CompareOp::Le => CompareKind::Le,
+            CompareOp::Gt => CompareKind::Gt,
+            CompareOp::Ge => CompareKind::Ge,
+            CompareOp::LooseEq | CompareOp::LooseNe => {
+                bail_unsupported!("loose equality is not supported; use === or !==")
+            }
+        };
+        ensure_unsupported!(
+            matches!(left_kind, Kind::Number | Kind::String | Kind::BigInt)
+                || matches!(kind, CompareKind::Eq | CompareKind::Ne),
+            "ordered comparison is only supported on numbers and strings"
+        );
+        Ok(self.compare(ctx, kind, lhs, rhs))
+    }
+
+    /// Strict or loose (in)equality with a `null` or `undefined` literal: a test of the other
+    /// operand's absence state. `None` when neither side is such a literal.
+    pub(super) fn absence_test(
+        &mut self,
+        ctx: &mut Context,
+        equality: CompareKind,
+        loose: bool,
+        left: &'s Expr,
+        right: &'s Expr,
+    ) -> Result<Option<Value>> {
+        let absent = |expr: &'s Expr| matches!(expr, Expr::Null | Expr::Undefined);
+        if absent(left) && absent(right) {
+            let equal = loose || (matches!(left, Expr::Null) == matches!(right, Expr::Null));
+            return Ok(Some(
+                self.boolean(ctx, equal == (equality == CompareKind::Eq)),
+            ));
+        }
+        let other = match (left, right) {
+            (Expr::Undefined | Expr::Null, other) | (other, Expr::Undefined | Expr::Null) => other,
+            _ => return Ok(None),
+        };
+        let null = matches!(left, Expr::Null) || matches!(right, Expr::Null);
+        let value = self.expression(ctx, other)?;
+        let absent = self.absence_match(ctx, value, (!loose).then_some(null))?;
+        Ok(Some(self.equality_result(ctx, equality, absent)))
+    }
+
+    /// Whether `value` is `null` or `undefined`.
+    pub(super) fn is_nullish(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        self.absence_match(ctx, value, None)
+    }
+
+    /// Test `value` for `null` (`Some(true)`), `undefined` (`Some(false)`), or either (`None`).
+    fn absence_match(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        null_only: Option<bool>,
+    ) -> Result<Value> {
+        let pair = if let Some(json) = self.json_operand(ctx, value)? {
+            Some((
+                Some(json),
+                Intrinsic::JsonIsNull,
+                Intrinsic::JsonIsUndefined,
+            ))
+        } else if value.get_type(ctx).deref(ctx).is::<ExceptionType>() {
+            Some((
+                None,
+                Intrinsic::ExceptionIsNull,
+                Intrinsic::ExceptionIsUndefined,
+            ))
+        } else {
+            None
+        };
+        let check = |b: &mut Self, ctx: &mut Context, null: bool| match pair {
+            Some((json, null_op, undef_op)) => b.intrinsic(
+                ctx,
+                if null { null_op } else { undef_op },
+                vec![json.unwrap_or(value)],
+            ),
+            None if b.is_optional(ctx, value) && null => {
+                b.emit_value(IsNullOp::new(ctx, value), ctx)
+            }
+            None if b.is_optional(ctx, value) => b.emit_value(IsUndefinedOp::new(ctx, value), ctx),
+            None => b.boolean(ctx, false),
+        };
+        if let Some(null) = null_only {
+            return Ok(check(self, ctx, null));
+        }
+        if pair.is_none() && !self.is_optional(ctx, value) {
+            return Ok(self.boolean(ctx, false));
+        }
+        let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+        let first = check(self, ctx, true);
+        self.choose(
+            ctx,
+            ty,
+            first,
+            |b, ctx| Ok(b.boolean(ctx, true)),
+            |b, ctx| Ok(check(b, ctx, false)),
+        )
+    }
+
+    /// `equal` for `===` (`CompareKind::Eq`), its negation for `!==`.
+    fn equality_result(&mut self, ctx: &mut Context, equality: CompareKind, equal: Value) -> Value {
+        if equality == CompareKind::Eq {
+            equal
+        } else {
+            self.not(ctx, equal)
+        }
+    }
+
+    /// The negation of a boolean.
+    pub(super) fn not(&mut self, ctx: &mut Context, value: Value) -> Value {
+        let no = self.boolean(ctx, false);
+        self.compare(ctx, CompareKind::Eq, value, no)
+    }
+
+    /// `left && right`, `left || right` over truthiness, and `left ?? right` over nullishness.
+    pub(super) fn logical(
+        &mut self,
+        ctx: &mut Context,
+        op: &LogicalOp,
+        left: &'s Expr,
+        right: &'s Expr,
+        expected: Option<TypeHandle>,
+    ) -> Result<Value> {
+        let solved = expected
+            .ok_or_else(|| Diagnostic::internal("emitter omitted the logical result type"))?;
+        let (lhs, test) = if matches!(op, LogicalOp::Coalesce) {
+            if matches!(left, Expr::Null | Expr::Undefined) {
+                return self.branch_operand(ctx, right, solved);
+            }
+            let lhs = self.expression(ctx, left)?;
+            if !self.is_optional(ctx, lhs) && kind(ctx, lhs)? != Kind::Json {
+                return self.fit(ctx, lhs, solved);
+            }
+            (lhs, self.is_nullish(ctx, lhs)?)
+        } else {
+            let lhs = self.branch_operand(ctx, left, solved)?;
+            (lhs, self.truthy(ctx, lhs)?)
+        };
+        let short = |b: &mut Self, ctx: &mut Context| {
+            if matches!(op, LogicalOp::And) {
+                Ok(lhs)
+            } else {
+                b.defined(ctx, lhs)
+            }
+        };
+        let rhs = |b: &mut Self, ctx: &mut Context| {
+            let depth = b.variant_guards.depth();
+            if !matches!(op, LogicalOp::Coalesce) {
+                b.variant_guards
+                    .condition(left, matches!(op, LogicalOp::And));
+            }
+            let value = b.branch_operand(ctx, right, solved);
+            b.variant_guards.truncate(depth);
+            value
+        };
+        match op {
+            LogicalOp::Or => self.choose_with(ctx, test, short, rhs, |ctx, [_, r]| {
+                result_carrier(ctx, solved, &[r])
+            }),
+            LogicalOp::Coalesce => self.choose_with(ctx, test, rhs, short, |ctx, [r, _]| {
+                result_carrier(ctx, solved, &[r])
+            }),
+            LogicalOp::And => self.choose_with(ctx, test, rhs, short, |ctx, values| {
+                result_carrier(ctx, solved, &values)
+            }),
+        }
+    }
+
+    /// `!x`, `-x`, `+x` and `~x`.
+    pub(super) fn unary(
+        &mut self,
+        ctx: &mut Context,
+        op: &UnaryOp,
+        operand: &'s Expr,
+    ) -> Result<Value> {
+        if *op == UnaryOp::Not {
+            let value = self.condition(ctx, operand)?;
+            return Ok(self.not(ctx, value));
+        }
+        let value = self.expression(ctx, operand)?;
+        let value = self.arithmetic(ctx, value);
+        Ok(match (op, kind(ctx, value)?) {
+            (UnaryOp::Neg, Kind::BigInt) => {
+                self.intrinsic(ctx, Intrinsic::BigIntNegate, vec![value])
+            }
+            (UnaryOp::Neg, Kind::Number) => {
+                // `0 - x` loses the sign of zero; `-1 * x` keeps IEEE negation.
+                let minus_one = self.number(ctx, -1.0);
+                self.binary(ctx, BinaryKind::Mul, minus_one, value)
+            }
+            (UnaryOp::Pos, Kind::Number) => value,
+            (UnaryOp::BitNot, Kind::Number) => self.intrinsic(ctx, Intrinsic::BitNot, vec![value]),
+            (UnaryOp::Pos, Kind::String) => {
+                self.intrinsic(ctx, Intrinsic::StringToNumber, vec![value])
+            }
+            (op, _) => bail_diag!(
+                codes::UNSUPPORTED_OPERATOR,
+                "unary {op:?} on this type is not supported yet"
+            ),
+        })
+    }
+
+    /// The truthiness of `expr`, as a branch condition.
+    pub(super) fn condition(&mut self, ctx: &mut Context, expr: &'s Expr) -> Result<Value> {
+        if self
+            .shapes
+            .specialization
+            .instances
+            .reference(self.frame.owner, expr)?
+            .is_some()
+            || matches!(expr, Expr::Closure { .. })
+        {
+            return Ok(self.boolean(ctx, true));
+        }
+        if let Expr::Sequence(parts) = expr
+            && let Some((last, effects)) = parts.split_last()
+        {
+            if let Some(span) = self.shapes.locations.operator_span(parts) {
+                return self
+                    .condition(ctx, last)
+                    .map_err(|e| e.with_fallback_span(Some(span)));
+            }
+            for effect in effects {
+                self.effect(ctx, effect)?;
+            }
+            return self.condition(ctx, last);
+        }
+        if let Expr::Logical {
+            op: op @ (LogicalOp::And | LogicalOp::Or),
+            left,
+            right,
+        } = expr
+        {
+            let lhs = self.condition(ctx, left)?;
+            let is_and = *op == LogicalOp::And;
+            let eval_rhs = if is_and { lhs } else { self.not(ctx, lhs) };
+            return self.choose(
+                ctx,
+                lhs.get_type(ctx),
+                eval_rhs,
+                |b, ctx| {
+                    let mark = b.variant_guards.depth();
+                    b.variant_guards.condition(left, is_and);
+                    let value = b.condition(ctx, right);
+                    b.variant_guards.truncate(mark);
+                    value
+                },
+                |_, _| Ok(lhs),
+            );
+        }
+        let value = self.expression(ctx, expr)?;
+        self.truthy(ctx, value)
+    }
+
+    /// ECMAScript `ToBoolean`.
+    pub(super) fn truthy(&mut self, ctx: &mut Context, value: Value) -> Result<Value> {
+        if self.is_optional(ctx, value) {
+            let ty = IntegerType::get(ctx, 1, Signedness::Signless).into();
+            return self.match_optional(
+                ctx,
+                value,
+                ty,
+                |b, ctx| Ok(b.boolean(ctx, false)),
+                |b, ctx| Ok(b.boolean(ctx, false)),
+                |b, ctx, defined| b.truthy(ctx, defined),
+            );
+        }
+        match kind(ctx, value)? {
+            Kind::Boolean => Ok(value),
+            Kind::String => {
+                let length = self.emit_value(StringLenOp::new(ctx, value), ctx);
+                let zero = self.i32(ctx, 0);
+                Ok(self.compare(ctx, CompareKind::Ne, length, zero))
+            }
+            Kind::Number => {
+                let zero = self.number(ctx, 0.0);
+                let absolute = self.intrinsic(ctx, Intrinsic::MathAbs, vec![value]);
+                Ok(self.compare(ctx, CompareKind::Gt, absolute, zero))
+            }
+            Kind::Json => Ok(self.intrinsic(ctx, Intrinsic::JsonTruthy, vec![value])),
+            Kind::ValueUnion => {
+                let result = IntegerType::get(ctx, 1, Signedness::Signless).into();
+                self.dispatch_value(ctx, value, result, &|b, ctx, value| b.truthy(ctx, value))
+            }
+            Kind::BigInt => {
+                bail_unsupported!("narrow this scalar before testing truthiness")
+            }
+            _ => Ok(self.boolean(ctx, true)),
+        }
+    }
+}

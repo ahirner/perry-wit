@@ -12,114 +12,52 @@ use pliron::{
     },
     context::{Context, Ptr},
     operation::Operation,
-    r#type::{TypeHandle, Typed, TypedHandle},
+    r#type::{TypeHandle, Typed},
     utils::apint::{APInt, bw},
     value::Value,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Integer {
-    pub(super) bits: u32,
-    pub(super) signed: bool,
+pub(super) use perry_abi::layout::numeric::Integer;
+
+pub(super) trait MirInteger: Sized {
+    fn bounds(self) -> Interval;
+    fn from_type(ctx: &Context, ty: TypeHandle) -> Option<Self>;
+    fn ty(self, ctx: &Context) -> TypeHandle;
+    fn constant(self, ctx: &mut Context, bits: u64) -> ConstantOp;
 }
 
-impl Integer {
-    pub(super) const U8: Self = Self {
-        bits: 8,
-        signed: false,
-    };
-    pub(super) const U32: Self = Self {
-        bits: 32,
-        signed: false,
-    };
-    pub(super) const I32: Self = Self {
-        bits: 32,
-        signed: true,
-    };
-    pub(super) const I64: Self = Self {
-        bits: 64,
-        signed: true,
-    };
-
-    pub(super) fn bounds(self) -> Interval {
-        if self.signed {
+impl MirInteger for Integer {
+    fn bounds(self) -> Interval {
+        if self.signed() {
             Interval {
-                lower: -(1i128 << (self.bits - 1)),
-                upper: (1i128 << (self.bits - 1)) - 1,
+                lower: -(1i128 << (self.bits() - 1)),
+                upper: (1i128 << (self.bits() - 1)) - 1,
             }
         } else {
             Interval {
                 lower: 0,
-                upper: (1i128 << self.bits) - 1,
+                upper: (1i128 << self.bits()) - 1,
             }
         }
     }
-    pub(super) fn from_type(ctx: &Context, ty: TypeHandle) -> Option<Self> {
+    fn from_type(ctx: &Context, ty: TypeHandle) -> Option<Self> {
         let ty = ty.deref(ctx);
         let ty = ty.downcast_ref::<IntegerType>()?;
-        (matches!(ty.width(), 8 | 16 | 32 | 64) && ty.signedness() != Signedness::Signless)
-            .then_some(Self {
-                bits: ty.width(),
-                signed: ty.signedness() != Signedness::Unsigned,
-            })
+        if ty.signedness() == Signedness::Signless {
+            return None;
+        }
+        Self::new(ty.width(), ty.signedness() == Signedness::Signed)
     }
 
-    pub(super) fn ty(self, ctx: &Context) -> TypeHandle {
-        self.integer_type(ctx).into()
-    }
-
-    pub(super) fn integer_type(self, ctx: &Context) -> TypedHandle<IntegerType> {
-        let signedness = if self.signed {
-            Signedness::Signed
-        } else {
-            Signedness::Unsigned
-        };
-        IntegerType::get(ctx, self.bits, signedness)
+    fn ty(self, ctx: &Context) -> TypeHandle {
+        crate::integer_type(ctx, self).into()
     }
 
     /// The constant of this domain holding the two's-complement `bits`.
-    pub(super) fn constant(self, ctx: &mut Context, bits: u64) -> ConstantOp {
-        let ty = self.integer_type(ctx);
-        let value = APInt::from_u64(bits, bw(self.bits as usize));
+    fn constant(self, ctx: &mut Context, bits: u64) -> ConstantOp {
+        let ty = crate::integer_type(ctx, self);
+        let value = APInt::from_u64(bits, bw(self.bits() as usize));
         ConstantOp::new(ctx, Box::new(IntegerAttr::new(ty, value)))
-    }
-
-    pub(super) fn common(self, other: Self) -> Self {
-        if self.signed == other.signed {
-            return Self {
-                bits: self.bits.max(other.bits),
-                signed: self.signed,
-            };
-        }
-        let (signed, unsigned) = if self.signed {
-            (self, other)
-        } else {
-            (other, self)
-        };
-        if signed.bits > unsigned.bits {
-            return signed;
-        }
-        [8, 16, 32, 64]
-            .into_iter()
-            .find(|&bits| bits > unsigned.bits)
-            .map(|bits| Self { bits, signed: true })
-            .unwrap_or(Self {
-                bits: 64,
-                signed: false,
-            })
-    }
-
-    /// The Wasm register type holding this one: 8- and 16-bit types widen to 32 bits, so
-    /// values computed in them need no masking until they leave.
-    pub(super) fn register(self) -> Self {
-        Self {
-            bits: self.bits.max(32),
-            ..self
-        }
-    }
-
-    pub(super) fn unconstrained(self) -> Self {
-        Self { bits: 64, ..self }
     }
 }
 
@@ -141,7 +79,7 @@ impl Interval {
         }
         for bits in [8, 16, 32, 64] {
             for signed in [true, false] {
-                let common = domain.common(Integer { bits, signed });
+                let common = domain.common(Integer::new(bits, signed)?);
                 if self.fits(common) {
                     return Some(common);
                 }
@@ -319,7 +257,7 @@ impl Fact {
             (Self::Bottom, fact) | (fact, Self::Bottom) => fact,
             (Self::Numeric, _) | (_, Self::Numeric) => Self::Numeric,
             (Self::Original, Self::Integer(integer)) | (Self::Integer(integer), Self::Original)
-                if integer.bits == 64 =>
+                if integer.bits() == 64 =>
             {
                 Self::Numeric
             }
@@ -329,12 +267,9 @@ impl Fact {
             }
             (Self::Literal { negative }, Self::Integer(integer))
             | (Self::Integer(integer), Self::Literal { negative }) => {
-                if negative && !integer.signed {
-                    let widened = integer.common(Integer {
-                        bits: 8,
-                        signed: true,
-                    });
-                    if widened.signed {
+                if negative && !integer.signed() {
+                    let widened = integer.common(Integer::I8);
+                    if widened.signed() {
                         Self::Integer(widened)
                     } else {
                         Self::Numeric
@@ -356,7 +291,7 @@ impl Fact {
     }
 
     pub(super) fn needs_lossless_64(self) -> bool {
-        self == Self::Numeric || self.integer().is_some_and(|integer| integer.bits == 64)
+        self == Self::Numeric || self.integer().is_some_and(|integer| integer.bits() == 64)
     }
 }
 
@@ -375,69 +310,27 @@ impl From<Option<Integer>> for ResultDomain {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum ConstParsedInt {
-    Integer {
-        bits: u64,
-        domain: Integer,
-        interval: Interval,
-        needs_i64: bool,
-    },
-    Float(u64),
-}
-
-pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<ConstParsedInt> {
+pub(super) fn const_parsed_int(ctx: &Context, op: Ptr<Operation>) -> Option<NumericConstant> {
+    use perry_abi::number::{Number, parse_integer};
     if crate::intrinsics::intrinsic_of(ctx, op) != Some(crate::intrinsics::Intrinsic::ParseInt) {
         return None;
     }
     let operation = op.deref(ctx);
-    let str_op = operation.get_operand(0).defining_op()?;
-    let str_const = Operation::get_op::<crate::collections::StringConstOp>(str_op, ctx)?;
-    let text_attr = str_const.get_attr_perry_string_value(ctx)?;
-    let text: &str = text_attr.as_ref();
-    let radix_op = operation.get_operand(1).defining_op()?;
-    let radix_const = Operation::get_op::<ConstantOp>(radix_op, ctx)?;
-    let radix_attr = radix_const.get_attr_builtin_constant_value(ctx)?;
-    let radix = NumericConstant::of(ctx, &**radix_attr)?.number();
-    match perry_abi::number::parse_integer(text, radix) {
-        perry_abi::number::Number::Signed(value) => {
-            let magnitude = value.unsigned_abs();
-            let needs_i64 =
-                magnitude > 0 && (64 - magnitude.leading_zeros() - magnitude.trailing_zeros() > 53);
-            Some(ConstParsedInt::Integer {
-                bits: value as u64,
-                domain: Integer::I64,
-                interval: Interval {
-                    lower: value as i128,
-                    upper: value as i128,
-                },
-                needs_i64,
-            })
-        }
-        perry_abi::number::Number::Unsigned(value) => {
-            let needs_i64 = value > 0 && (64 - value.leading_zeros() - value.trailing_zeros() > 53);
-            Some(ConstParsedInt::Integer {
-                bits: value,
-                domain: Integer {
-                    bits: 64,
-                    signed: value <= i64::MAX as u64,
-                },
-                interval: Interval {
-                    lower: value as i128,
-                    upper: value as i128,
-                },
-                needs_i64,
-            })
-        }
-        perry_abi::number::Number::Float(f) => Some(ConstParsedInt::Float(f.to_bits())),
-    }
+    let string = operation.get_operand(0).defining_op()?;
+    let string = Operation::get_op::<crate::collections::StringConstOp>(string, ctx)?;
+    let text = string.get_attr_perry_string_value(ctx)?;
+    let radix = constant(ctx, operation.get_operand(1).defining_op()?)?;
+    Some(match parse_integer(text.as_ref(), radix.number()) {
+        Number::Signed(value) => NumericConstant::Signed(value),
+        Number::Unsigned(value) => NumericConstant::Unsigned(value),
+        Number::Float(value) => NumericConstant::Float(value.to_bits()),
+    })
 }
 
 pub(super) fn constant_range(ctx: &Context, op: Ptr<Operation>) -> Option<Interval> {
-    if let Some(ConstParsedInt::Integer { interval, .. }) = const_parsed_int(ctx, op) {
-        return Some(interval);
-    }
-    let value = if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
+    let value = if let Some(parsed) = const_parsed_int(ctx, op) {
+        parsed.integer()?
+    } else if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         constant.magnitude(ctx)? as i128
     } else {
         match constant(ctx, op)? {
@@ -573,8 +466,8 @@ pub(super) fn comparison_domain(ctx: &Context, state: &State, inputs: &[Value]) 
 }
 
 pub(super) fn literal(ctx: &Context, op: Ptr<Operation>) -> Option<u64> {
-    if let Some(ConstParsedInt::Integer { bits, .. }) = const_parsed_int(ctx, op) {
-        return Some(bits);
+    if let Some(parsed) = const_parsed_int(ctx, op) {
+        return parsed.integer().map(|value| value as u64);
     }
     if let Some(constant) = Operation::get_op::<BigIntConstOp>(op, ctx) {
         return constant.magnitude(ctx);
@@ -638,7 +531,7 @@ impl Solver {
                     all_literal = false;
                 }
                 Fact::Integer(int) => {
-                    has_64bit |= int.bits == 64;
+                    has_64bit |= int.bits() == 64;
                     all_literal = false;
                     common_int = Some(common_int.map_or(int, |acc| acc.common(int)));
                 }

@@ -5,6 +5,7 @@ use crate::{
     runtime::Runtime,
     values::is_numeric_type,
 };
+use indexmap::IndexMap;
 use perry_abi::layout::{array as layout, record, variant};
 use perry_mir::{
     AllocOp, ArrayAtOp, ArrayExtendOp, ArrayGetOp, ArrayHoleOp, ArrayLenOp, ArrayNewOp,
@@ -12,7 +13,7 @@ use perry_mir::{
     ConcatSegmentsOp, ErrorKind, FieldGetOp, FieldPresentOp, FieldSetOp, JsonSchema,
     PlironResultExt as _, RecordOrderOp, RecordType, VariantNewOp, VariantPayloadOp, VariantTagOp,
 };
-use perry_wit_diagnostics::{Diagnostic, Result, codes, diag, ensure_unsupported, internal};
+use perry_wit_diagnostics::{Diagnostic, Result, codes, diag, ensure_unsupported};
 use pliron::{
     builtin::types::FP64Type,
     context::{Context, Ptr},
@@ -21,6 +22,112 @@ use pliron::{
     value::Value,
 };
 use pliron_wasm::attrs::{MemKind, NumOpcode};
+use std::collections::{HashMap, HashSet};
+
+#[derive(Clone, Copy)]
+pub(crate) struct RecordField {
+    pub(crate) index: u32,
+    pub(crate) offset: u32,
+    pub(crate) ty: TypeHandle,
+}
+
+pub(crate) struct RecordLayout {
+    pub(crate) record: TypedHandle<RecordType>,
+    pub(crate) fields: IndexMap<String, RecordField>,
+    pub(crate) size: u32,
+}
+
+impl RecordLayout {
+    pub(crate) fn field(&self, ctx: &Context, name: &str) -> Result<RecordField> {
+        self.fields.get(name).copied().ok_or_else(|| {
+            diag!(
+                codes::CONTRACT_MISMATCH,
+                "TypeScript type {} has no field {name}",
+                self.record.deref(ctx).name()
+            )
+        })
+    }
+}
+
+pub(crate) struct RecordLayouts {
+    native: HashMap<TypedHandle<RecordType>, RecordLayout>,
+    pub(super) completion_error: TypedHandle<RecordType>,
+    pub(super) resources: HashSet<u32>,
+}
+
+impl RecordLayouts {
+    pub(super) fn prepare(
+        ctx: &Context,
+        functions: &[pliron::builtin::ops::FuncOp],
+    ) -> Result<Self> {
+        let string = perry_mir::StringType::get(ctx).into();
+        let completion_error = RecordType::get(
+            ctx,
+            pliron::ident!("perry_completion_error"),
+            Some(vec![("message".into(), string), ("name".into(), string)]),
+        )
+        .to_diag(ctx)?;
+        let roots = functions
+            .iter()
+            .flat_map(|f| perry_mir::function_values::<Vec<_>>(ctx, f))
+            .map(|value| value.get_type(ctx))
+            .chain([completion_error.into()]);
+        let mut native = HashMap::new();
+        let mut resources = HashSet::new();
+        for ty in perry_mir::nested_types(ctx, roots) {
+            if let Some(resource) = perry_mir::typed::<perry_mir::ResourceType>(ctx, ty) {
+                resources.insert(resource.deref(ctx).key());
+            }
+            let Some(record) = perry_mir::typed::<RecordType>(ctx, ty) else {
+                continue;
+            };
+            let definition = record.deref(ctx);
+            let Ok(members) = definition.fields() else {
+                continue;
+            };
+            let mut size = record::HEADER;
+            let fields = members
+                .iter()
+                .enumerate()
+                .map(|(index, (name, ty))| {
+                    let field = RecordField {
+                        index: index as u32,
+                        offset: size,
+                        ty: *ty,
+                    };
+                    size += slot_size(ctx, *ty);
+                    (name.clone(), field)
+                })
+                .collect();
+            native.insert(
+                record,
+                RecordLayout {
+                    record,
+                    fields,
+                    size,
+                },
+            );
+        }
+        Ok(Self {
+            native,
+            resources,
+            completion_error,
+        })
+    }
+
+    pub(crate) fn get(
+        &self,
+        ctx: &Context,
+        record: TypedHandle<RecordType>,
+    ) -> Result<&RecordLayout> {
+        self.native.get(&record).ok_or_else(|| {
+            Diagnostic::internal(format!(
+                "missing record layout for {}",
+                record.deref(ctx).name()
+            ))
+        })
+    }
+}
 
 /// The byte holding an element's hole bit, and the bit's mask within it.
 struct HoleBit {
@@ -42,15 +149,6 @@ impl FunctionLowering<'_, '_> {
         } else {
             Ok(layout::Elements::Scalar)
         }
-    }
-
-    /// Byte size of `record`: its header and every field slot.
-    pub(crate) fn record_size(ctx: &Context, record: TypedHandle<RecordType>) -> Result<u32> {
-        let record = record.deref(ctx);
-        let fields = record
-            .fields()
-            .map_err(|_| Diagnostic::internal("record without fields"))?;
-        Ok(record_offset(ctx, fields))
     }
 
     /// Store `value` into a `ty` slot at `addr + offset`.
@@ -128,14 +226,10 @@ impl FunctionLowering<'_, '_> {
                 (sources, None)
             };
             let count = self.i32_const(ctx, operands.len() as i32);
-            let indices = reuse
-                .iter()
-                .flat_map(|index| index.to_le_bytes())
-                .collect::<Vec<_>>();
-            let address = if indices.is_empty() {
+            let address = if reuse.is_empty() {
                 0
             } else {
-                self.state.data.append(4, &indices)
+                self.state.data.words(reuse.iter().copied())
             };
             let candidates = self.i32_const(ctx, address as i32);
             let candidate_count = self.i32_const(ctx, reuse.len() as i32);
@@ -183,15 +277,7 @@ impl FunctionLowering<'_, '_> {
             let record_ty = op.deref(ctx).get_result(0).get_type(ctx);
             let record = TypedHandle::<RecordType>::from_handle(record_ty, ctx)
                 .map_err(|_| Diagnostic::internal("expected a record"))?;
-            let fields: Vec<_> = record
-                .deref(ctx)
-                .fields()
-                .map_err(|_| Diagnostic::internal("record without fields"))?
-                .iter()
-                .map(|(_, ty)| *ty)
-                .collect();
-            let byte_size = Self::record_size(ctx, record)?;
-            let size = self.i32_const(ctx, byte_size as i32);
+            let layout = self.state.record_layouts.get(ctx, record)?;
             let object = if let Some(&offset) = self.frame_slots.get(&op) {
                 let base = self.local_frame.ok_or_else(|| {
                     Diagnostic::internal("frame-resident record without frame storage")
@@ -199,26 +285,27 @@ impl FunctionLowering<'_, '_> {
                 let offset = self.i32_const(ctx, offset as i32);
                 self.num(ctx, NumOpcode::I32Add, vec![base, offset])
             } else {
-                self.record_storage(ctx, record_ty, size)?
+                self.record_storage(ctx, layout)?
             };
             let order = {
                 let order = allocation.get_attr_perry_field_order(ctx);
-                self.record_order(ctx, record, order.as_ref().map(|order| order.0.as_slice()))?
+                self.record_order(
+                    layout.fields.len(),
+                    order.as_ref().map(|order| order.0.as_slice()),
+                )
             };
             self.record_header(ctx, object, order);
-            let mut offset = record::HEADER;
-            for (index, ty) in fields.into_iter().enumerate() {
-                let operand = op.deref(ctx).get_operand(index);
+            for field in layout.fields.values() {
+                let operand = op.deref(ctx).get_operand(field.index as usize);
                 let value = self.mapped_value(ctx, operand)?;
-                self.store_slot_value(ctx, object, offset, ty, value)?;
-                offset += slot_size(ctx, ty);
+                self.store_slot_value(ctx, object, field.offset, field.ty, value)?;
             }
             self.define(ctx, op, object);
             return Ok(true);
         }
         if let Some(get) = Operation::get_op::<FieldGetOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
-            let (offset, ty) = Self::field_slot(ctx, record, &get.field(ctx))?;
+            let RecordField { offset, ty, .. } = self.field_slot(ctx, record, &get.field(ctx))?;
             let object = self.mapped(ctx, record)?;
             let mut value = self.load_slot_value(ctx, object, offset, ty)?;
             if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
@@ -231,7 +318,8 @@ impl FunctionLowering<'_, '_> {
         }
         if let Some(present) = Operation::get_op::<FieldPresentOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
-            let (offset, ty) = Self::field_slot(ctx, record, &present.field(ctx))?;
+            let RecordField { offset, ty, .. } =
+                self.field_slot(ctx, record, &present.field(ctx))?;
             let value = if perry_mir::absence(ctx, ty).is_some_and(|a| a.admits_undefined()) {
                 let object = self.mapped(ctx, record)?;
                 let unpacked = self.load_slot_value(ctx, object, offset, ty)?;
@@ -246,10 +334,10 @@ impl FunctionLowering<'_, '_> {
         if let Some(set) = Operation::get_op::<FieldSetOp>(op, ctx) {
             let record = op.deref(ctx).get_operand(0);
             let val_opd = op.deref(ctx).get_operand(1);
-            let (offset, ty) = Self::field_slot(ctx, record, &set.field(ctx))?;
+            let RecordField { offset, ty, .. } = self.field_slot(ctx, record, &set.field(ctx))?;
             let object = self.mapped(ctx, record)?;
             let value = self.mapped_value(ctx, val_opd)?;
-            if perry_mir::field_order_may_change(ctx, ty) {
+            if set.updates_order(ctx) {
                 let (table, count) = self.json_field_table(ctx, record.get_type(ctx))?;
                 let table = self.i32_const(ctx, table as i32);
                 let count = self.i32_const(ctx, count as i32);
@@ -586,10 +674,7 @@ impl FunctionLowering<'_, '_> {
         let len = self.load(ctx, MemKind::I32, array, layout::LEN);
         let cap = self.load(ctx, MemKind::I32, array, layout::CAP);
         let full = self.num(ctx, NumOpcode::I32Eq, vec![len, cap]);
-        let grow = self.new_block(ctx, vec![]);
-        let write = self.new_block(ctx, vec![]);
-        self.cond_br(ctx, full, (grow, vec![]), (write, vec![]));
-        self.block = grow;
+        let write = self.enter_if(ctx, full);
         let elem_kind = Self::array_element_kind(ctx, element)?;
         if self.state.collectible {
             let references = self.i32_const(ctx, elem_kind as i32);
@@ -650,55 +735,26 @@ impl FunctionLowering<'_, '_> {
         Ok(ty.deref(ctx).element())
     }
 
-    pub(crate) fn record_type_field_slot(
-        ctx: &Context,
-        record: TypedHandle<RecordType>,
-        field: &str,
-    ) -> Result<(u32, TypeHandle)> {
-        let record = record.deref(ctx);
-        let fields = record
-            .fields()
-            .map_err(|_| internal!("record has no field {field}"))?;
-        let (index, (_, field_ty)) = fields
-            .iter()
-            .enumerate()
-            .find(|(_, (name, _))| name == field)
-            .ok_or_else(|| {
-                diag!(
-                    codes::CONTRACT_MISMATCH,
-                    "TypeScript type {} has no field {field}",
-                    record.name()
-                )
-            })?;
-        Ok((record_offset(ctx, &fields[..index]), *field_ty))
-    }
-
-    fn field_slot(ctx: &Context, record: Value, field: &str) -> Result<(u32, TypeHandle)> {
+    fn field_slot(&mut self, ctx: &Context, record: Value, field: &str) -> Result<RecordField> {
         let record = TypedHandle::<RecordType>::from_handle(record.get_type(ctx), ctx)
             .map_err(|_| Diagnostic::internal("expected a record"))?;
-        Self::record_type_field_slot(ctx, record, field)
+        self.state
+            .record_layouts
+            .get(ctx, record)?
+            .field(ctx, field)
     }
 
     /// Encode static insertion order before emitting operations into the context.
-    pub(crate) fn record_order(
-        &mut self,
-        ctx: &Context,
-        record: TypedHandle<RecordType>,
-        order: Option<&[u32]>,
-    ) -> Result<u32> {
-        let count = record.deref(ctx).fields().to_diag(ctx)?.len();
+    pub(crate) fn record_order(&mut self, count: usize, order: Option<&[u32]>) -> u32 {
         let length = order.map_or(count, <[_]>::len);
         let fields = (0..length).map(|index| order.map_or(index as u32, |order| order[index]));
-        Ok(if count <= perry_abi::json::PACKED_FIELDS {
+        if count <= perry_abi::json::PACKED_FIELDS {
             fields.fold(0, perry_abi::json::append_field)
         } else {
-            let mut bytes = Vec::with_capacity(4 * (length + 1));
-            bytes.extend_from_slice(&(length as u32).to_le_bytes());
-            for field in fields {
-                bytes.extend_from_slice(&field.to_le_bytes());
-            }
-            self.state.data.append(4, &bytes)
-        })
+            self.state
+                .data
+                .words(std::iter::once(length as u32).chain(fields))
+        }
     }
 
     /// Initialize insertion order and, when needed, the retained JSON graph.
@@ -710,13 +766,4 @@ impl FunctionLowering<'_, '_> {
         let order = self.i32_const(ctx, order as i32);
         self.store(ctx, MemKind::I32, object, record::ORDER, order);
     }
-}
-
-/// Offset of the field following `preceding`: the header plus their slots.
-fn record_offset(ctx: &Context, preceding: &[(String, TypeHandle)]) -> u32 {
-    record::HEADER
-        + preceding
-            .iter()
-            .map(|(_, ty)| slot_size(ctx, *ty))
-            .sum::<u32>()
 }

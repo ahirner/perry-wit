@@ -1,4 +1,4 @@
-//! Prove the absence states at optional reads and diagnose nullable property receivers.
+//! Prove receiver presence and regex layout requirements on the completed control-flow graph.
 use crate::{SourceSpan, aggregates::functions, facts::guards::GuardedFacts, optional::UnwrapOp};
 use perry_wit_diagnostics::{Diagnostic, codes};
 use pliron::{
@@ -50,7 +50,33 @@ fn violation(ctx: &Context, function: &FuncOp, unwrap: &UnwrapOp) -> Diagnostic 
     crate::attach_caller_notes(ctx, function, diagnostic)
 }
 
-pub(crate) fn prove_optional_reads(
+fn regex_violation(
+    ctx: &Context,
+    facts: &crate::ProgramFacts,
+    call: &crate::IntrinsicOp,
+) -> Option<&'static str> {
+    use crate::{Intrinsic::*, facts::RegexOrigin};
+    let operand =
+        |index| facts.regex_origin(ctx, call.get_operation().deref(ctx).get_operand(index));
+    match call.intrinsic(ctx) {
+        RegexSearch => match operand(1) {
+            RegexOrigin::Pattern(shape) if shape.global == Some(false) => None,
+            RegexOrigin::Pattern(shape) if shape.global == Some(true) => {
+                Some("Regex search supports only the u and s flags")
+            }
+            _ => Some(crate::RegexShape::UNKNOWN_FLAGS),
+        },
+        RegexSplitStrings if !matches!(operand(1), RegexOrigin::Pattern(shape) if shape.split() == RegexSplitStrings) => {
+            Some("string-only regex split requires a pattern without capture groups")
+        }
+        RegexIndex | RegexInput | RegexGroups if operand(0) != RegexOrigin::MatchArray => {
+            Some("regex result metadata requires an exec result or a non-global match result")
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn prove_receivers(
     root: Ptr<Operation>,
     ctx: &mut Context,
     analyses: &mut AnalysisManager,
@@ -68,6 +94,16 @@ pub(crate) fn prove_optional_reads(
         let mut guards = None;
         for block in function.get_region(ctx).deref(ctx).iter(ctx) {
             for op in block.deref(ctx).iter(ctx) {
+                if let Some(call) = Operation::get_op::<crate::IntrinsicOp>(op, ctx)
+                    && let Some(message) = regex_violation(ctx, &facts, &call)
+                {
+                    let span = crate::source_span(ctx, &call)
+                        .or_else(|| crate::source_span(ctx, &function));
+                    let error = Diagnostic::unsupported(message).with_optional_span(span);
+                    return pliron::input_err_noloc!(crate::attach_caller_notes(
+                        ctx, &function, error
+                    ));
+                }
                 let Some(unwrap) = Operation::get_op::<UnwrapOp>(op, ctx) else {
                     continue;
                 };

@@ -19,8 +19,6 @@ use crate::{
     instance::instance_state,
     region::current,
 };
-#[cfg(target_arch = "wasm32")]
-use core::cell::UnsafeCell;
 
 /// Growable byte buffer in the task region, reclaimed in bulk when the task ends.
 struct Bytes {
@@ -488,11 +486,6 @@ impl Process {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-struct Global(UnsafeCell<Process>);
-// SAFETY: one instance runs one thread.
-#[cfg(target_arch = "wasm32")]
-unsafe impl Sync for Global {}
 instance_state!(PROCESS, process_state, process, Process, Process::new());
 
 #[allow(clippy::mut_from_ref)]

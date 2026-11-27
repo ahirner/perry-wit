@@ -17,44 +17,66 @@ impl<'h, 'a> Solver<'h, 'a> {
         result
     }
 
-    pub(super) fn check_objlit_func_write(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn assign_property(
         &mut self,
-        inst_id: InstanceId,
+        s: &EvalState<'h>,
+        site: &'h Expr,
         obj_def: Ty,
         property: &str,
+        value: &'h Expr,
         val_ty: Ty,
         byte_offset: u32,
-        span: Option<swc_common::Span>,
-    ) -> Result<Option<Ty>> {
-        if !matches!(self.types.kind(obj_def), TyKind::Object { .. }) {
-            return Ok(None);
-        }
-        let prop_ty = builtins::property_type(self.ctx, self.decls, self.types, obj_def, property);
-        let touches_func =
-            self.types.has_func(val_ty) || prop_ty.is_some_and(|p| self.types.has_func(p));
-        if touches_func
-            && val_ty != Ty::BOTTOM
-            && !prop_ty.is_some_and(|p| self.types.accepts(self.ctx, p, val_ty))
-        {
-            let mut err = Diagnostic::unsupported(format!(
-                "reassigning function property '{property}' on an object literal is not supported yet"
-            ));
-            if hir_compat::has_source_offset(byte_offset) {
-                if let Some(sp) = self.metadata.locations.member_span(byte_offset) {
-                    err = err.with_span(sp);
+    ) -> Result<()> {
+        self.check_escaping_func(s.inst, val_ty, byte_offset, s.current_span)?;
+        let field_ty = match self.types.kind(obj_def) {
+            TyKind::Object { .. } => {
+                let declared =
+                    builtins::property_type(self.ctx, self.decls, self.types, obj_def, property);
+                let touches_func =
+                    self.types.has_func(val_ty) || declared.is_some_and(|p| self.types.has_func(p));
+                if touches_func
+                    && val_ty != Ty::BOTTOM
+                    && !declared.is_some_and(|p| self.types.accepts(p, val_ty))
+                {
+                    let mut err = Diagnostic::unsupported(format!(
+                        "reassigning function property '{property}' on an object literal is not supported yet"
+                    ));
+                    if hir_compat::has_source_offset(byte_offset) {
+                        err = err.with_fallback_span(self.hir.locations.member_span(byte_offset));
+                    }
+                    return Err(self.annotate_expr_error(s, err, byte_offset));
                 }
-            } else if let Some(sp) = span {
-                err = self.metadata.locations.annotate(err, sp);
+                declared.unwrap_or(val_ty)
             }
-            return Err(attach_inst_chain(
-                &self.instances,
-                self.index,
-                &self.metadata.locations,
-                err,
-                inst_id,
-            ));
+            TyKind::ClassInst(class) => {
+                let norm = self
+                    .types
+                    .normalize_for_storage(self.ctx, self.decls, val_ty);
+                if let Some(loc) = self.class_field_loc(class, property) {
+                    self.write_class_field(s.inst, loc, value, norm)?
+                } else if norm != Ty::BOTTOM
+                    && let Some(setter) =
+                        self.request_accessor(s.inst, class, property, Some(norm))?
+                {
+                    self.record_site(s.inst, site, SiteResolution::WriteMember(setter));
+                    return Ok(());
+                } else {
+                    val_ty
+                }
+            }
+            _ => val_ty,
+        };
+        if self
+            .types
+            .is_zero_sized_func(field_ty, &self.index.capture_free_templates)
+        {
+            self.record_site(s.inst, site, SiteResolution::ZeroSizedFieldSet);
+        } else {
+            self.clear_site(s.inst, site);
+            self.record_coercion(s.inst, value, val_ty, field_ty);
         }
-        Ok(prop_ty)
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -72,8 +94,8 @@ impl<'h, 'a> Solver<'h, 'a> {
         if matches!(l, Ty::NULL | Ty::VOID) || matches!(r, Ty::NULL | Ty::VOID) {
             return Ok(());
         }
-        self.mark_escaping_env(inst_id, l);
-        self.mark_escaping_env(inst_id, r);
+        self.mark_escaping_env(l);
+        self.mark_escaping_env(r);
         let same_local = matches!((left, right), (Expr::LocalGet(a), Expr::LocalGet(b)) if a == b);
         if !same_local {
             let shared: Vec<_> = self
@@ -88,7 +110,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 .collect();
             for tid in shared {
                 if !self.is_escaping_env(tid, inst_id)
-                    && self.index.view(tid).kind == TemplateKind::Closure
+                    && matches!(self.index.view(tid).kind, TemplateKind::Closure(_))
                     && (self.index.closure_in_loop.contains(tid.index())
                         || self
                             .index
@@ -99,13 +121,13 @@ impl<'h, 'a> Solver<'h, 'a> {
                         "cannot compare a capture-free closure literal that may be evaluated more than once",
                     );
                     let err = match span {
-                        Some(sp) => self.metadata.locations.annotate(err, sp),
+                        Some(sp) => self.hir.locations.annotate(err, sp),
                         None => err,
                     };
                     return Err(attach_inst_chain(
                         &self.instances,
                         self.index,
-                        &self.metadata.locations,
+                        &self.hir.locations,
                         err,
                         inst_id,
                     ));
@@ -133,88 +155,105 @@ impl<'h, 'a> Solver<'h, 'a> {
                 return Ok(());
             }
         }
-        let l_zero = self
-            .types
-            .is_zero_sized_func(l, &self.index.capture_free_templates);
-        let r_zero = self
-            .types
-            .is_zero_sized_func(r, &self.index.capture_free_templates);
-        let l_env = self.types.is_env_func(l, &self.escaping_env_templates);
-        let r_env = self.types.is_env_func(r, &self.escaping_env_templates);
-        let helper = (!(l_zero || r_zero || (l_env && r_env && l == r))).then(|| {
-            self.intern_helper(
-                HelperSpec::Comparer {
-                    left_ty: l,
-                    right_ty: r,
-                },
-                0,
-            )
-        });
-        self.record_site(
-            inst_id,
-            expr,
+        let erased = |ty| match self.types.kind(ty) {
+            TyKind::Func(id)
+                if self
+                    .types
+                    .is_zero_sized_func(ty, &self.index.capture_free_templates) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        };
+        let comparison = if let Some((identity, source, left_erased)) = erased(l)
+            .map(|id| (id, r, true))
+            .or_else(|| erased(r).map(|id| (id, l, false)))
+        {
+            if self
+                .types
+                .func_members(&source)
+                .any(|member| member == identity)
+            {
+                SiteResolution::Matches {
+                    identity,
+                    source,
+                    left_erased,
+                    equal: is_eq,
+                }
+            } else {
+                SiteResolution::FoldBool(!is_eq)
+            }
+        } else {
             SiteResolution::FuncCompare {
                 left_ty: l,
                 right_ty: r,
-                op,
-                helper,
-            },
-        );
+                equal: is_eq,
+                environments: l == r
+                    && matches!(self.types.kind(l), TyKind::Func(id) if self.is_escaping_env(id.template, inst_id)),
+            }
+        };
+        self.record_site(inst_id, expr, comparison);
         Ok(())
     }
 
-    pub(super) fn write_class_or_setter(
+    pub(super) fn write_class_field(
         &mut self,
         inst_id: InstanceId,
-        obj_def: Ty,
-        property: &str,
+        loc: LocId,
         value: &Expr,
-        val_ty: Ty,
-    ) -> Result<()> {
-        let TyKind::ClassInst(cinst_id) = self.types.kind(obj_def) else {
-            return Ok(());
-        };
-        let norm = self
-            .types
-            .normalize_for_storage(self.ctx, self.decls, val_ty);
-        if let Some(loc) = self.class_field_loc(cinst_id, property) {
-            let existing = self.locations[loc];
-            if matches!(value, Expr::Array(items, _) if items.is_empty()) {
-                if !matches!(
-                    self.types.kind(existing),
-                    TyKind::Cell {
-                        kind: CellKind::Array,
-                        ..
-                    }
-                ) && self.types.is_open(existing)
-                {
-                    let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array)?;
-                    self.write_loc(loc, cell);
+        norm: Ty,
+    ) -> Result<Ty> {
+        let existing = self.facts[loc];
+        if matches!(value, Expr::Array(items, _) if items.is_empty()) {
+            if !matches!(
+                self.types.kind(existing),
+                TyKind::Cell {
+                    kind: CellKind::Array,
+                    ..
                 }
-            } else if !self.types.is_open(norm) || self.types.is_open(existing) {
-                self.write_loc(loc, norm);
+            ) && self.types.is_open(existing)
+            {
+                let cell = self.alloc_expr_cell(inst_id, value, CellKind::Array)?;
+                self.write_loc(loc, cell);
             }
+        } else if !self.types.is_open(norm) || self.types.is_open(existing) {
+            self.write_loc(loc, norm);
         }
-        let prop_id = self.types.intern_name(property);
-        if norm != Ty::BOTTOM
-            && let Some(setter_tid) = ClassInfo::find(
-                &self.index.class(self.class_insts[cinst_id].class).setters,
-                prop_id,
-            )
-        {
-            self.request_instance(
-                InstanceReq::new(setter_tid, &[norm], Some(inst_id))
-                    .receiver(Some(Receiver::Class(cinst_id))),
-            )?;
-        }
-        Ok(())
+        Ok(self.read_loc(loc, inst_id))
+    }
+
+    pub(super) fn request_accessor(
+        &mut self,
+        caller: InstanceId,
+        receiver: ClassInstId,
+        property: &str,
+        assigned: Option<Ty>,
+    ) -> Result<Option<InstanceId>> {
+        let class = self.class_declaration(receiver);
+        let accessors = if assigned.is_some() {
+            &class.setters
+        } else {
+            &class.getters
+        };
+        let Some((_, member)) = accessors.iter().find(|(name, _)| name == property) else {
+            return Ok(None);
+        };
+        let template = self
+            .index
+            .template_of_func(member.id)
+            .ok_or_else(|| Diagnostic::internal("missing accessor declaration"))?;
+        self.request_instance(
+            InstanceReq::new(template, assigned.as_slice(), Some(caller))
+                .receiver(Some(Receiver::Class(receiver))),
+        )
+        .map(Some)
     }
 
     pub(super) fn eval_local_get(&mut self, s: &mut EvalState<'h>, id: LocalId) -> Result<Ty> {
         let Some(lidx) = self.index.local_idx(id) else {
             return Ok(Ty::OPEN);
         };
-        let local = self.index.locals[lidx];
+        let local = self.index.locals.rows[lidx];
         let Some(mut ty) = self.read_local_value(s.inst, lidx) else {
             return Ok(local.declared);
         };
@@ -236,53 +275,23 @@ impl<'h, 'a> Solver<'h, 'a> {
         &mut self,
         s: &mut EvalState<'h>,
         expr: &'h Expr,
+        constructor: crate::source::Constructor<'h>,
     ) -> Result<Ty> {
-        let (is_map, explicit_tys, init) = match self.metadata.constructors.get(expr) {
-            Some(hir_compat::Constructor::Map { types, init }) => (
-                true,
-                types.map(|(k, v)| {
-                    vec![
-                        self.types.intern_hir(self.ctx, k, true),
-                        self.types.intern_hir(self.ctx, v, true),
-                    ]
-                }),
-                init,
-            ),
-            Some(hir_compat::Constructor::Set { element, init }) => (
-                false,
-                element.map(|e| vec![self.types.intern_hir(self.ctx, e, true)]),
-                init,
-            ),
-            None => return Ok(Ty::OPEN),
-        };
+        let is_map = constructor.kind == crate::source::CollectionKind::Map;
+        let init = constructor.init;
         if let Some(init) = init {
             self.eval_expr(s, init)?;
         }
-        let base = shapes::TypeId::from_owned(
-            self.ctx,
-            HirType::Named(if is_map { "Map" } else { "Set" }.into()),
-        );
-        if let Some(mut arg_tys) = explicit_tys {
-            let bindings = self.active_instance_type_bindings(s.inst);
-            let mut specialized = false;
-            for ty in &mut arg_tys {
-                let bound = self.types.substitute(self.ctx, *ty, &bindings);
-                let concrete = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
-                specialized |= concrete != *ty;
-                *ty = concrete;
-            }
-            if specialized {
-                self.record_site(
-                    s.inst,
-                    expr,
-                    SiteResolution::CollectionNew {
-                        is_map,
-                        type_args: arg_tys.clone(),
-                    },
-                );
-            }
-            return Ok(self.types.generic(base, &arg_tys));
+        if let Some(SiteResolution::CollectionNew(declared)) = self.index.expressions.declared(expr)
+        {
+            let bound = self
+                .index
+                .substitute(self.types, declared, &self.type_bindings[s.inst]);
+            let ty = self.instantiate_annotated_class(bound, 0, Some(s.inst))?;
+            self.record_site(s.inst, expr, SiteResolution::CollectionNew(ty));
+            return Ok(ty);
         }
+        let base = shapes::TypeName::new(self.ctx, constructor.kind.name().into());
         if let Some(init) = init {
             if is_map {
                 if let Expr::Array(entries, _) = init
@@ -328,29 +337,9 @@ impl<'h, 'a> Solver<'h, 'a> {
         ))
     }
 
-    pub(super) fn active_instance_type_bindings(
-        &mut self,
-        inst_id: InstanceId,
-    ) -> Vec<(shapes::TypeId, Ty)> {
-        let Some(inst) = self.instances.get(inst_id) else {
-            return Vec::new();
-        };
-        let (template, receiver, capture_owner, args_ty, targs_ty) = (
-            inst.template,
-            inst.receiver,
-            inst.capture_owner,
-            inst.args,
-            inst.explicit_type_args,
-        );
-        let args = self.types.tuple_slice(args_ty).to_vec();
-        let explicit_targs = self.types.tuple_slice(targs_ty).to_vec();
-        self.compute_type_param_bindings(template, receiver, capture_owner, &args, &explicit_targs)
-    }
-
     pub(super) fn check_timer_member(&self, receiver: Ty, offset: u32) -> Result<()> {
-        if matches!(self.types.kind(receiver), TyKind::Leaf(id) if crate::hir_compat::is_timer_handle(id.hir(self.ctx)))
-        {
-            let locations = &self.metadata.locations;
+        if receiver == Ty::TIMER {
+            let locations = &self.hir.locations;
             let member = locations
                 .member_text(offset)
                 .ok_or_else(|| Diagnostic::internal("Timeout member has no source expression"))?;
@@ -362,15 +351,53 @@ impl<'h, 'a> Solver<'h, 'a> {
         Ok(())
     }
 
+    pub(super) fn eval_index(
+        &mut self,
+        s: &mut EvalState<'h>,
+        site: &'h Expr,
+        obj_ty: Ty,
+        index: &'h Expr,
+        element_offset: u32,
+    ) -> Result<Ty> {
+        let (obj_def, _) = self.types.strip_nullish(obj_ty);
+        self.check_timer_member(obj_def, element_offset)?;
+        let idx_ty = self.eval_expr(s, index)?;
+        if let TyKind::Cell { loc, kind } = self.types.kind(obj_def) {
+            if kind == CellKind::Dict && self.dict_reads.insert(loc.index()) {
+                self.facts.mark(Fact::Storage(loc));
+            }
+            if idx_ty != Ty::BOTTOM && !kind.accepts_index(idx_ty) {
+                self.write_loc(loc, Ty::OPEN);
+            }
+        }
+        let obj_ty = self.resolve_cell_read(s.inst, obj_ty);
+        if obj_ty == Ty::BOTTOM {
+            return Ok(Ty::BOTTOM);
+        }
+        if let Expr::String(name) = index {
+            let stripped = self.types.strip_nullish(obj_ty).0;
+            let class = self.resolve_class_inst(s.inst, stripped, element_offset)?;
+            if let Some(ty) = self.member_type(s.inst, site, stripped, name, class)? {
+                return Ok(ty);
+            }
+        }
+        let position = self.index.expressions.tuple_position(index);
+        Ok(
+            builtins::index_type(self.ctx, self.decls, self.types, obj_ty, position)
+                .unwrap_or(Ty::OPEN),
+        )
+    }
+
     pub(super) fn eval_property_get(
         &mut self,
         s: &mut EvalState<'h>,
+        site: &'h Expr,
         object: &'h Expr,
         property: &str,
         byte_offset: u32,
     ) -> Result<Ty> {
-        if let Expr::ClassRef(class_name) = object {
-            return Ok(self.read_static_field(s.inst, class_name, property));
+        if matches!(object, Expr::ClassRef(_)) {
+            return Ok(self.read_static_field(s.inst, object));
         }
         let mut obj_ty = self.eval_expr(s, object)?;
         if obj_ty == Ty::BOTTOM {
@@ -383,16 +410,11 @@ impl<'h, 'a> Solver<'h, 'a> {
             return Err(Diagnostic::unsupported(format!(
                 "property {property} is not supported on Error yet"
             ))
-            .with_fallback_span(
-                self.metadata
+            .with_fallback_span(self.hir.locations.member_span(byte_offset).or_else(|| {
+                self.hir
                     .locations
-                    .member_span(byte_offset)
-                    .or_else(|| {
-                        self.metadata
-                            .locations
-                            .offset_span(s.iteration.object_pattern_offset(object)?, 1)
-                    }),
-            ));
+                    .offset_span(self.index.locals.object_pattern_offset(object)?, 1)
+            })));
         }
         if let TyKind::Cell {
             loc,
@@ -400,39 +422,55 @@ impl<'h, 'a> Solver<'h, 'a> {
         } = self.types.kind(stripped)
         {
             if self.dict_reads.insert(loc.index()) {
-                self.dirty_locs.insert(loc.index());
+                self.facts.mark(Fact::Storage(loc));
             }
             obj_ty = self.resolve_cell_read(s.inst, obj_ty);
         }
-        let (stripped, _) = self.types.strip_nullish(obj_ty);
-        if let Some(cinst_id) = self.resolve_class_inst(s.inst, stripped, 0)? {
-            if let Some(loc) = self.class_field_loc(cinst_id, property) {
-                return Ok(self.read_loc(loc, s.inst));
+        let stripped = self.types.strip_nullish(obj_ty).0;
+        let class = self.resolve_class_inst(s.inst, stripped, byte_offset)?;
+        Ok(self
+            .member_type(s.inst, site, stripped, property, class)?
+            .unwrap_or_else(|| {
+                if self.types.closed_record(stripped).is_some()
+                    && self.index.locals.object_pattern_offset(object).is_some()
+                {
+                    Ty::VOID
+                } else {
+                    Ty::OPEN
+                }
+            }))
+    }
+
+    pub(super) fn member_type(
+        &mut self,
+        inst: InstanceId,
+        site: &'h Expr,
+        stripped: Ty,
+        property: &str,
+        class: Option<ClassInstId>,
+    ) -> Result<Option<Ty>> {
+        if let Some(class) = class {
+            if let Some(loc) = self.class_field_loc(class, property) {
+                return Ok(Some(self.read_loc(loc, inst)));
             }
-            let pname = self.types.intern_name(property);
-            if let Some(getter_tid) = ClassInfo::find(
-                &self.index.class(self.class_insts[cinst_id].class).getters,
-                pname,
-            ) {
-                let target = self.request_instance(
-                    InstanceReq::new(getter_tid, &[], Some(s.inst))
-                        .receiver(Some(Receiver::Class(cinst_id))),
-                )?;
-                return Ok(self.read_loc(self.instances[target].return_loc, s.inst));
+            if let Some(target) = self.request_accessor(inst, class, property, None)? {
+                self.record_site(inst, site, SiteResolution::ReadMember(target));
+                return Ok(Some(self.read_loc(self.instances[target].return_loc, inst)));
             }
         }
-        Ok(
-            builtins::property_type(self.ctx, self.decls, self.types, obj_ty, property)
-                .unwrap_or(Ty::OPEN),
-        )
+        Ok(builtins::property_type(
+            self.ctx, self.decls, self.types, stripped, property,
+        ))
+    }
+
+    pub(super) fn class_declaration(&self, id: ClassInstId) -> &'h perry_hir::ir::Class {
+        self.index.class(self.class_insts[id].class).declaration
     }
 
     pub(super) fn class_field_loc(&self, cinst_id: ClassInstId, property: &str) -> Option<LocId> {
         let cinst = &self.class_insts[cinst_id];
         let f_idx = self
-            .hir
-            .classes
-            .get(self.index.class(cinst.class).hir_idx)?
+            .class_declaration(cinst_id)
             .fields
             .iter()
             .position(|f| f.name == property)?;
@@ -443,32 +481,15 @@ impl<'h, 'a> Solver<'h, 'a> {
         if let TyKind::Object { props, .. } = self.types.kind(stripped) {
             return Some(self.types.object_slice(props).to_vec());
         }
-        if matches!(
-            self.types.kind(stripped),
-            TyKind::Leaf(_) | TyKind::Generic { .. }
-        ) {
-            let hir = self.types.materialize_hir(self.ctx, stripped);
-            return Some(
-                self.decls
-                    .object_properties(self.ctx, &hir)?
-                    .into_iter()
-                    .map(|(n, fh, optional)| {
-                        let name = self.types.intern_name(&n);
-                        let mut ty = self.types.intern_hir(self.ctx, &fh, true);
-                        if optional {
-                            ty = self.types.with_absences(ty, Absence::Undefined);
-                        }
-                        ObjectProp {
-                            name,
-                            ty,
-                            optional,
-                            readonly: false,
-                        }
-                    })
-                    .collect(),
-            );
+        let props = crate::shapes::generics::Resolver::new(self.ctx, self.decls, self.types)
+            .record(stripped, 0)?;
+        let mut props = self.types.object_slice(props).to_vec();
+        for p in &mut props {
+            if p.optional {
+                p.ty = self.types.with_absences(p.ty, Absence::Undefined);
+            }
         }
-        None
+        Some(props)
     }
 
     pub(super) fn eval_object_spread(
@@ -487,23 +508,18 @@ impl<'h, 'a> Solver<'h, 'a> {
             }
             if let Some(key) = hir_compat::static_property(part) {
                 self.check_escaping_func(s.inst, val_ty, 0, s.current_span)?;
-                let name = self.types.intern_name(key);
                 let norm = self
                     .types
                     .normalize_for_storage(self.ctx, self.decls, val_ty);
-                if let Some(ex) = props.iter_mut().find(|p| p.name == name) {
+                let field = self.types.property(key, norm, false);
+                if let Some(ex) = props.iter_mut().find(|p| p.name == field.name) {
                     ex.ty = match val_expr {
                         Expr::Null => self.types.with_absences(ex.ty, Absence::Null),
                         Expr::Undefined => self.types.with_absences(ex.ty, Absence::Undefined),
                         _ => norm,
                     };
                 } else {
-                    props.push(ObjectProp {
-                        name,
-                        ty: norm,
-                        optional: false,
-                        readonly: false,
-                    });
+                    props.push(field);
                 }
             } else if part.defines_key() {
                 return Ok(Ty::OPEN);

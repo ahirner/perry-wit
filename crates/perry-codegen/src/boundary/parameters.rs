@@ -2,46 +2,36 @@
 use super::*;
 use perry_wit_diagnostics::Diagnostic;
 
-pub(super) fn export_signature(params: &[AbiType]) -> Vec<Flat> {
-    let flat: Vec<_> = params.iter().flat_map(AbiType::flat).collect();
-    if flat.len() > MAX_FLAT_PARAMS {
-        vec![Flat::I32]
-    } else {
-        flat
-    }
-}
-
 impl FunctionLowering<'_, '_> {
     pub(super) fn lift_parameters(
         &mut self,
         ctx: &mut Context,
         export: &Export,
         mir: &[TypeHandle],
-        flat: &mut Vec<Value>,
+        mut flat: &[Value],
     ) -> Result<Vec<Value>> {
-        let params = &export.params;
-        if params.iter().map(|ty| ty.flat().len()).sum::<usize>() <= MAX_FLAT_PARAMS {
-            return params
-                .iter()
-                .zip(mir)
-                .enumerate()
-                .map(|(i, (ty, mir))| {
-                    self.lift_abi(ctx, ty, *mir, Canonical::Flat(flat))
-                        .map_err(|e| e.with_fallback_span(export.annotation(i)))
-                })
-                .collect();
-        }
-        let area = flat
-            .pop()
-            .ok_or_else(|| Diagnostic::internal("missing indirect parameter record"))?;
-        let mut args = Vec::with_capacity(params.len());
-        for ((ty, mir), offset) in params.iter().zip(mir).zip(record_offsets(params.iter())) {
+        let area = export
+            .indirect_size
+            .map(|_| {
+                flat.split_off_first()
+                    .copied()
+                    .ok_or_else(|| Diagnostic::internal("missing indirect parameter record"))
+            })
+            .transpose()?;
+        let mut source = match area {
+            Some(area) => Canonical::Memory(area, 0),
+            None => Canonical::Flat(&mut flat),
+        };
+        let mut args = Vec::with_capacity(export.params.len());
+        for (i, (ty, &mir)) in export.params.iter().zip(mir).enumerate() {
             args.push(
-                self.lift_abi(ctx, ty, *mir, Canonical::Memory(area, offset))
-                    .map_err(|e| e.with_fallback_span(export.annotation(args.len())))?,
+                self.lift_abi(ctx, &ty.ty, mir, source.at(ty.offset))
+                    .map_err(|e| e.with_fallback_span(export.annotation(i)))?,
             );
         }
-        if self.state.collectible {
+        if self.state.collectible
+            && let Some(area) = area
+        {
             self.runtime_void(ctx, Runtime::CabiRelease, vec![area]);
         }
         Ok(args)

@@ -1,12 +1,6 @@
 //! Compiler-generated synthetic calls recognized during HIR lowering.
 use super::*;
 
-const TYPED: &str = "\0perry_typed";
-const PENDING: &str = "\0perry_promise_pending";
-const RESOLVE: &str = "\0perry_promise_resolve";
-const REJECT: &str = "\0perry_promise_reject";
-const TIMER: &str = "\0perry_timer";
-
 pub(crate) fn is_source_extern(name: &str, offset: u32) -> bool {
     has_source_offset(offset) && !name.starts_with("js_") && !name.starts_with("__")
 }
@@ -15,39 +9,120 @@ pub(crate) fn is_array_insertion(method: &str) -> bool {
     matches!(method, "push" | "push_single" | "unshift")
 }
 
-pub enum GuestCall<E, T> {
-    Typed { value: E, ty: T },
-    Pending(T),
-    Resolve { promise: E, value: E },
-    Reject { promise: E, reason: E },
-    Timer { delay: E, signal: E },
+pub(crate) fn class_receiver(object: &Expr) -> Option<&str> {
+    match object {
+        Expr::ClassRef(name) | Expr::ExternFuncRef { name, .. } => Some(name),
+        _ => None,
+    }
 }
 
-impl GuestCall<Expr, HirType> {
-    pub(crate) fn into_hir(self) -> Expr {
-        let (name, args, type_args) = match self {
-            Self::Typed { value, ty } => (TYPED, vec![value], vec![ty]),
-            Self::Pending(settled) => (PENDING, vec![], vec![settled]),
-            Self::Resolve { promise, value } => (RESOLVE, vec![promise, value], vec![]),
-            Self::Reject { promise, reason } => (REJECT, vec![promise, reason], vec![]),
-            Self::Timer { delay, signal } => (TIMER, vec![delay, signal], vec![]),
-        };
-        Expr::Call {
-            callee: Box::new(Expr::ExternFuncRef {
-                name: name.to_owned(),
-                param_types: Vec::new(),
-                return_type: HirType::Any,
-            }),
-            args,
-            type_args,
-            byte_offset: 0,
-            byte_end: 0,
+#[derive(Clone, Copy)]
+pub(crate) enum MemberKey<'h> {
+    Named(&'h str, u32),
+    Computed(&'h Expr, u32),
+}
+
+impl<'h> MemberKey<'h> {
+    pub(crate) fn offset(self) -> u32 {
+        match self {
+            Self::Named(_, offset) | Self::Computed(_, offset) => offset,
+        }
+    }
+    pub(crate) fn name(self) -> Option<&'h str> {
+        match self {
+            Self::Named(name, _) => Some(name),
+            Self::Computed(..) => None,
         }
     }
 }
 
-pub enum RuntimeCall<'a> {
-    Guest(GuestCall<&'a Expr, &'a HirType>),
+pub(crate) fn member(callee: &Expr) -> Option<(&Expr, MemberKey<'_>)> {
+    match callee {
+        Expr::PropertyGet {
+            object,
+            property,
+            byte_offset,
+            ..
+        } => Some((object, MemberKey::Named(property, *byte_offset))),
+        Expr::IndexGet {
+            object,
+            index,
+            element_offset,
+            ..
+        } => Some((object, MemberKey::Computed(index, *element_offset))),
+        _ => None,
+    }
+}
+
+pub(crate) fn member_assignment(expr: &Expr) -> Option<(&Expr, MemberKey<'_>, &Expr)> {
+    use MemberKey::{Computed, Named};
+    match expr {
+        Expr::PropertySet {
+            object,
+            property,
+            value,
+            byte_offset,
+            ..
+        } => Some((object, Named(property, *byte_offset), value)),
+        Expr::IndexSet {
+            object,
+            index,
+            value,
+            element_offset,
+            ..
+        } => Some((object, Computed(index, *element_offset), value)),
+        Expr::PutValueSet {
+            target,
+            key,
+            value,
+            element_offset,
+            ..
+        } => {
+            let key = match key.as_ref() {
+                Expr::String(name) => Named(name, *element_offset),
+                expr => Computed(expr, *element_offset),
+            };
+            Some((target, key, value))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn map_group_by(expr: &Expr) -> Result<Option<(&Expr, &Expr)>> {
+    match expr {
+        Expr::MapGroupBy { items, key_fn } => Ok(Some((items, key_fn))),
+        Expr::Call { callee, args, .. }
+            if let Some((class, MemberKey::Named(name, _))) = member(callee)
+                && method(name).name() == "groupBy"
+                && let Some((global, MemberKey::Named("Map", _))) = member(class)
+                && matches!(global, Expr::GlobalGet(_)) =>
+        {
+            let [items, key_fn] = args.as_slice() else {
+                perry_wit_diagnostics::bail_diag!(
+                    codes::TYPE_MISMATCH,
+                    "Map.groupBy requires (items, callbackFn)"
+                );
+            };
+            Ok(Some((items, key_fn)))
+        }
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn call_arguments(expr: &Expr) -> Option<(&[Expr], u32)> {
+    match expr {
+        Expr::New {
+            args, byte_offset, ..
+        }
+        | Expr::Call {
+            args, byte_offset, ..
+        } => Some((args, *byte_offset)),
+        Expr::StaticMethodCall { args, .. } => Some((args, 0)),
+        _ => None,
+    }
+}
+
+pub(crate) enum RuntimeCall<'a> {
     Unresolved(&'a str),
     CheckInitialized {
         local: LocalId,
@@ -61,31 +136,12 @@ pub enum RuntimeCall<'a> {
     ExitCode(&'a [Expr]),
 }
 
-pub fn runtime_call<'a>(
-    callee: &'a Expr,
-    args: &'a [Expr],
-    type_args: &'a [HirType],
-) -> Option<RuntimeCall<'a>> {
+pub(crate) fn runtime_call<'a>(callee: &'a Expr, args: &'a [Expr]) -> Option<RuntimeCall<'a>> {
     use perry_hir::tdz_check::{TDZ_CHECK, TDZ_CHECK_THEN};
     let Expr::ExternFuncRef { name, .. } = callee else {
         return None;
     };
     Some(match (name.as_str(), args) {
-        (TYPED, [value]) => {
-            let [ty] = type_args else {
-                return None;
-            };
-            RuntimeCall::Guest(GuestCall::Typed { value, ty })
-        }
-        (PENDING, []) => {
-            let [ty] = type_args else {
-                return None;
-            };
-            RuntimeCall::Guest(GuestCall::Pending(ty))
-        }
-        (RESOLVE, [promise, value]) => RuntimeCall::Guest(GuestCall::Resolve { promise, value }),
-        (REJECT, [promise, reason]) => RuntimeCall::Guest(GuestCall::Reject { promise, reason }),
-        (TIMER, [delay, signal]) => RuntimeCall::Guest(GuestCall::Timer { delay, signal }),
         (
             "js_global_get_or_throw_unresolved"
             | "js_global_assign_existing_or_throw"

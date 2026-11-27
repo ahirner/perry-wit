@@ -1,7 +1,8 @@
 use super::{
-    ArgumentDomain, Constraint, Demand, Fact, Integer, Interval, Key, Outcomes, Presence, Range,
-    Representation, ResultDomain, Solver, ValueFacts, Work, arithmetic_range, comparison_domain,
-    constant_range, declared, guards::orders, integer_arithmetic, literal,
+    ArgumentDomain, Constraint, Demand, Fact, Integer, Interval, Key, MirInteger, Outcomes,
+    Presence, Range, RegexOrigin, Representation, ResultDomain, Solver, ValueFacts, Work,
+    arithmetic_range, comparison_domain, constant_range, declared, guards::orders,
+    integer_arithmetic, literal,
 };
 use crate::{
     attrs::BinaryKind,
@@ -61,15 +62,9 @@ fn constant_bigint_domain(ctx: &Context, kind: BinaryKind, inputs: [Value; 2]) -
             _ => return None,
         },
     };
-    [
-        Integer::I64,
-        Integer {
-            bits: 64,
-            signed: false,
-        },
-    ]
-    .into_iter()
-    .find(|&domain| [a, b, range].into_iter().all(|range| range.fits(domain)))
+    [Integer::I64, Integer::U64]
+        .into_iter()
+        .find(|&domain| [a, b, range].into_iter().all(|range| range.fits(domain)))
 }
 
 impl Solver {
@@ -217,15 +212,13 @@ impl Solver {
             if block.num_preds(ctx) != 1 {
                 return ranges;
             }
-            let Some(predecessor) = block.preds(ctx).into_iter().next() else {
-                return ranges;
-            };
+            let predecessor = block.get_pred(ctx, 0);
             let Some(terminator) = predecessor.deref(ctx).get_terminator(ctx) else {
                 return ranges;
             };
             let operation = terminator.deref(ctx);
-            if Operation::get_op::<CondBrOp>(terminator, ctx).is_some() {
-                let Some(order) = orders(ctx, predecessor)
+            if let Some(branch) = Operation::get_op::<CondBrOp>(terminator, ctx) {
+                let Some(order) = orders(ctx, &branch)
                     .into_iter()
                     .flatten()
                     .find(|order| order.target == block)
@@ -344,7 +337,7 @@ impl Solver {
                 }
                 let mut fact = self.arithmetic(ctx, id, inputs.clone(), result);
                 if matches!(self.analysis.states[id].usage(result), Demand::Observed(_))
-                    && fact.integer().is_some_and(|integer| integer.bits <= 32)
+                    && fact.integer().is_some_and(|integer| integer.bits() <= 32)
                 {
                     fact = Fact::Original;
                 }
@@ -377,7 +370,7 @@ impl Solver {
                         let unsigned = self.analysis.states[id]
                             .fact(input)
                             .integer()
-                            .is_some_and(|integer| !integer.signed);
+                            .is_some_and(|integer| !integer.signed());
                         let required = if unsigned { Integer::U32 } else { Integer::I32 };
                         self.require(id, input, Demand::Truncated(Some(required)));
                     }
@@ -396,25 +389,30 @@ impl Solver {
                 } else {
                     Fact::Original
                 };
-                let parsed = (intrinsic == Intrinsic::ParseInt)
-                    .then(|| super::domains::const_parsed_int(ctx, op));
-                match parsed {
-                    Some(Some(super::domains::ConstParsedInt::Integer {
-                        interval,
-                        needs_i64,
-                        ..
-                    })) => {
-                        let fact = if needs_i64 {
-                            numeric
-                        } else {
-                            Fact::Literal {
-                                negative: interval.lower < 0,
-                            }
-                        };
-                        (fact, Range::Bounds(interval))
+                if intrinsic != Intrinsic::ParseInt {
+                    (Fact::Original, Range::Unknown)
+                } else if let Some(parsed) = super::domains::const_parsed_int(ctx, op) {
+                    match parsed.integer() {
+                        Some(value) => {
+                            let fact = if value as f64 as i128 == value {
+                                Fact::Literal {
+                                    negative: value < 0,
+                                }
+                            } else {
+                                numeric
+                            };
+                            (
+                                fact,
+                                Range::Bounds(Interval {
+                                    lower: value,
+                                    upper: value,
+                                }),
+                            )
+                        }
+                        None => (Fact::Original, Range::Unknown),
                     }
-                    Some(None) => (numeric, Range::Unknown),
-                    _ => (Fact::Original, Range::Unknown),
+                } else {
+                    (numeric, Range::Unknown)
                 }
             }
         })
@@ -555,13 +553,9 @@ impl Solver {
             }
         }
         let heap_facts = self.heap_operation(ctx, id, index, op, kind)?;
-        if let Some(branch) = branch {
+        if branch.is_some() {
             for (position, input) in operation.operands().enumerate() {
-                if !(0..operation.get_num_successors()).any(|successor| {
-                    branch
-                        .successor_operand_range(ctx, successor)
-                        .contains(&position)
-                }) {
+                if pliron_control::forwarded_operand(ctx, op, position).is_none() {
                     self.require(id, input, Demand::Observed(None));
                 }
             }
@@ -704,6 +698,45 @@ impl Solver {
         }
         for result in operation.results() {
             let mut facts = self.result_facts(ctx, id, op, result, (kind, heap_facts), arithmetic);
+            facts.regex = if let Some(re) = dynamic.downcast_ref::<crate::RegexConstOp>() {
+                match re.literal(ctx).shape(ctx) {
+                    Ok(shape) => RegexOrigin::Pattern(shape),
+                    Err(error) => return pliron::input_err_noloc!(error),
+                }
+            } else {
+                match kind {
+                    OperationKind::Intrinsic(Intrinsic::RegexExec | Intrinsic::RegexExecFrom) => {
+                        RegexOrigin::MatchArray
+                    }
+                    OperationKind::Intrinsic(Intrinsic::RegexMatch) => match self.analysis.states
+                        [id]
+                        .value(operation.get_operand(1))
+                        .regex
+                    {
+                        RegexOrigin::Pattern(shape) if shape.global == Some(false) => {
+                            RegexOrigin::MatchArray
+                        }
+                        RegexOrigin::Bottom => RegexOrigin::Bottom,
+                        _ => RegexOrigin::Other,
+                    },
+                    _ if dynamic.is::<crate::NullOp>()
+                        || dynamic.is::<crate::UndefinedOp>()
+                        || dynamic.is::<crate::OmittedOp>() =>
+                    {
+                        RegexOrigin::Bottom
+                    }
+                    OperationKind::Read { .. }
+                    | OperationKind::Combine(crate::Combinator::Race) => {
+                        heap_facts.map_or(RegexOrigin::Other, |facts| facts.regex)
+                    }
+                    _ if let Some(operand) = kind.aliased_operand() => {
+                        self.analysis.states[id]
+                            .value(operation.get_operand(operand))
+                            .regex
+                    }
+                    _ => RegexOrigin::Other,
+                }
+            };
             facts.presence = if dynamic.is::<crate::NullOp>() {
                 Presence::absent(crate::Absence::Null)
             } else if dynamic.is::<crate::UndefinedOp>() || dynamic.is::<crate::OmittedOp>() {

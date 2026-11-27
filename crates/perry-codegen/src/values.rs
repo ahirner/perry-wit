@@ -3,12 +3,13 @@ use crate::{function::FunctionLowering, repr::wasm_type};
 use perry_mir::NumericType;
 use perry_wit_diagnostics::{Diagnostic, Result, ensure_internal, internal};
 use pliron::{
-    builtin::types::{IntegerType, Signedness},
+    builtin::types::{FP32Type, FP64Type, IntegerType, Signedness},
     context::{Context, Ptr},
     operation::Operation,
     r#type::{TypeHandle, Typed},
     value::Value,
 };
+use pliron_wasm::attrs::NumOpcode;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Carriers<T> {
@@ -117,6 +118,49 @@ pub(crate) fn signature(
 }
 
 impl FunctionLowering<'_, '_> {
+    /// Preserve the low bits when moving a core value between Wasm numeric carriers.
+    pub(super) fn repack_bits(
+        &mut self,
+        ctx: &mut Context,
+        value: Value,
+        target: TypeHandle,
+    ) -> Value {
+        let from = value.get_type(ctx);
+        if from == target {
+            return value;
+        }
+        let f32 = FP32Type::get(ctx).into();
+        let f64 = FP64Type::get(ctx).into();
+        let i64 = IntegerType::get(ctx, 64, Signedness::Signless).into();
+        let bits = if from == f32 {
+            self.num(ctx, NumOpcode::I32ReinterpretF32, vec![value])
+        } else if from == f64 {
+            self.num(ctx, NumOpcode::I64ReinterpretF64, vec![value])
+        } else {
+            value
+        };
+        let bits = match (bits.get_type(ctx) == i64, target == i64 || target == f64) {
+            (false, true) => self.num(ctx, NumOpcode::I64ExtendI32U, vec![bits]),
+            (true, false) => self.num(ctx, NumOpcode::I32WrapI64, vec![bits]),
+            _ => bits,
+        };
+        if target == f32 {
+            self.num(ctx, NumOpcode::F32ReinterpretI32, vec![bits])
+        } else if target == f64 {
+            self.num(ctx, NumOpcode::F64ReinterpretI64, vec![bits])
+        } else {
+            bits
+        }
+    }
+
+    pub(crate) fn slot_bits(&mut self, ctx: &mut Context, value: Value) -> Value {
+        self.repack_bits(
+            ctx,
+            value,
+            IntegerType::get(ctx, 64, Signedness::Signless).into(),
+        )
+    }
+
     pub(crate) fn bind_values(
         &mut self,
         ctx: &Context,

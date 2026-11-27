@@ -15,10 +15,10 @@ TypeScript ──► Source ──► Frontend ──► Elaborate ──► Con
 
 | Stage | Representation | Role |
 | :--- | :--- | :--- |
-| 1. Source analysis | TypeScript AST | Binds `import { f } from "pkg:iface"` against the WIT world before import syntax is erased. |
-| 2. Frontend | Specialized Perry HIR | Applies HIR compatibility rewrites, binds WIT export witnesses and exported resource classes to source declarations, solves types in a data-oriented fixed-point engine over dense indices, and emits monomorphic HIR including closure environments, boxed mutable captures, tagged function dispatchers, and promise/timer helpers. |
-| 3. Elaboration | HIR to MIR | Consumes solved frontend types, fixes eager evaluation order, and chooses MIR representations. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
-| 4. Contract binding | pliron MIR and WIT | Binds WIT exports to MIR functions, checks their signatures and async requirements, and constrains numeric domains from the contract. |
+| 1. Source analysis | TypeScript AST | Binds WIT imports against the resolved world and records source locations. Upstream Perry HIR normalizes lexical bindings, destructuring, closures and class syntax. |
+| 2. Frontend | Perry HIR and solved instances | The source module owns lexical declarations and source locations. Each WIT export carries its declaration and selected implementation through specialization and MIR emission. A fixed-point solver determines each reachable instance’s types, capture layout, dispatch targets, and resource operations. Generic declarations and inferred types share one interned type table. Specializations borrow each function body, parameter default and class field from its source declaration. MIR lowering reads the solved operation at each expression site. |
+| 3. Elaboration | Typed SSA MIR | Projects solved types into MIR and emits closure environments, captured-variable reads and writes, function dispatchers, promise reactions, timers and resource operations. Preserves JavaScript evaluation order. Lowers `try`/`catch`/`finally` to shared unwinding blocks using a status-return convention. Callers retain root ownership of pointer arguments while callees borrow parameters and return fresh allocations. |
+| 4. Contract binding | pliron MIR and WIT | Checks each emitted export against its WIT declaration and constrains numeric domains from the contract. |
 | 5. Optimization | SSA MIR | Promotes local slots with `mem2reg`, specializes callees from `ProgramFacts`, and repeats canonicalization, SCCP, record SROA + `mem2reg`, DCE, and CFG simplification to fixed point (guarded by a lexicographical IR complexity measure). |
 | 6. Code generation | Core Wasm (`pliron-wasm`) | Splits `async` functions into stackless ramp and step functions, structures control flow with Ramsey's dominator-tree method [[1]](#ref-1), folds single-use values into operand-stack trees, emits Canonical ABI marshalling, and links referenced runtime and standard-library functions. |
 | 7. Component encoding | WASI 0.3 component | Emits Canonical ABI [[2]](#ref-2) lift and lower adapters, `cabi_realloc`, `cabi_post_<export>`, and for each async export the callback ABI entry points `[async-lift]<export>`, `[callback][async-lift]<export>`, and `finish_<export>`. |
@@ -40,8 +40,7 @@ The compiler workspace separates these responsibilities:
 | Crate | Responsibility |
 | --- | --- |
 | `perry-contract` | Traverses resolved WIT contracts and defines source naming conventions. |
-| `perry-frontend` | Loads source modules, reads Perry HIR, binds WIT export witnesses and resource classes, runs the dense fixed-point inference and specialization engine, and generates the TypeScript view of WIT. |
-| `perry-lower` | Elaborates solved frontend HIR into eager MIR and selects MIR representations. |
+| `perry-frontend` | Loads source modules, reads Perry HIR, binds WIT export witnesses and resource classes, runs the dense fixed-point inference and specialization engine, selects eager MIR representations, and generates the TypeScript view of WIT. |
 | `perry-mir` | Defines typed executable IR and its analyses. |
 | `perry-codegen` | Lowers MIR to Wasm and implements Canonical ABI operations. |
 | `perry-wit-diagnostics` | Holds source spans and portable diagnostics. |
@@ -49,14 +48,14 @@ The compiler workspace separates these responsibilities:
 | `perry-rt-build` | Builds the runtime workspace's artifacts for the compiler build script. |
 | `perry-wit` | Loads WIT, binds exports, links runtime artifacts and encodes components. |
 
-The frontend returns a read-only monomorphic program and metadata. Type inference, record identity, closure lowering, and function specialization belong to the frontend. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the stages below it.
+The frontend returns an eager MIR module and the functions bound to world exports. Type inference, record identity, closure lowering, and function specialization belong to the frontend. Evaluation order, numeric refinement, effect analysis, allocation, ABI marshalling and linking belong to the stages below it.
 
 ## Type inference
 
 The frontend indexes templates, locals, storage cells, and call sites into dense tables and iterates a monotone worklist solver to fixed point.
 Empty arrays and objects become storage cells whose element or value types are inferred from writes across branches, loops, local aliases, and helper returns. Numeric indices infer an array, and string keys or property names infer a dictionary. An array storing several types widens to a value union, while a dictionary requires a single value type.
 
-Escaping function values are represented by template-and-capture identities. Capture-free functions lower to zero-sized identities or tagged function unions with synthesized dispatchers, while escaping closures allocate environment classes and box mutable captures shared across calls.
+A function identity names its template and capture owner. Capture-free functions lower to zero-sized values or tagged function unions with MIR dispatchers. An escaping closure allocates a nominal MIR record. Its entry point receives that record as an implicit parameter and uses the same layout to read captures. Closures that share a mutable binding access it through a common cell.
 
 A dictionary is an array of key-value entries, so the MIR heap analysis treats its values like array elements. That analysis also tracks which parsed JSON records carry undeclared fields, preserving them when stored in a dictionary.
 

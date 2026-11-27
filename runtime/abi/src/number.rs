@@ -108,7 +108,57 @@ pub enum Number {
     Unsigned(u64),
 }
 
+/// One bit per possible comparison outcome. Equal nullish values admit equality only.
+#[repr(i32)]
+#[derive(Clone, Copy)]
+pub enum Relation {
+    Less = 1,
+    Equal = 2,
+    Greater = 4,
+    Unordered = 8,
+    SameAbsence = 16,
+}
+
+impl Relation {
+    pub fn order_mask(order: Option<core::cmp::Ordering>) -> i32 {
+        order.map_or(Self::Unordered as i32, |order| 1 << (order as i32 + 1))
+    }
+}
+
 impl Number {
+    /// Exact order across integer and floating representations, including integers above 2^53.
+    pub fn order(self, other: Self) -> Option<core::cmp::Ordering> {
+        use core::cmp::Ordering::{self, Equal, Greater, Less};
+        fn unsigned_float(integer: u64, float: f64) -> Option<Ordering> {
+            if float.is_nan() {
+                return None;
+            }
+            if float < 0.0 {
+                return Some(Greater);
+            }
+            if float >= u64::MAX as f64 {
+                return Some(Less);
+            }
+            let floor = float as u64;
+            Some(match integer.cmp(&floor) {
+                Equal if (floor as f64) < float => Less,
+                order => order,
+            })
+        }
+        match (self, other) {
+            (Self::Signed(a), Self::Signed(b)) => Some(a.cmp(&b)),
+            (Self::Unsigned(a), Self::Unsigned(b)) => Some(a.cmp(&b)),
+            (Self::Signed(a), Self::Unsigned(b)) => Some(i128::from(a).cmp(&i128::from(b))),
+            (Self::Float(a), Self::Float(b)) => a.partial_cmp(&b),
+            (Self::Signed(a), Self::Float(b)) if a < 0 => {
+                unsigned_float(a.unsigned_abs(), -b).map(Ordering::reverse)
+            }
+            (Self::Signed(a), Self::Float(b)) => unsigned_float(a as u64, b),
+            (Self::Unsigned(a), Self::Float(b)) => unsigned_float(a, b),
+            _ => other.order(self).map(Ordering::reverse),
+        }
+    }
+
     /// Explicit numeric conversion may round exact integer payloads.
     pub fn as_f64(self) -> f64 {
         match self {

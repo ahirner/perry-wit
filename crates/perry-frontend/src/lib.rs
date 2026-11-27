@@ -1,91 +1,44 @@
 //! TypeScript parsing, Perry HIR compatibility, specialization and source metadata.
 use perry_wit_diagnostics::Result;
 use pliron::context::Context;
-use std::collections::{BTreeMap, HashMap};
-mod absence;
-pub mod collections;
+use std::collections::BTreeMap;
+
+mod lower;
+pub use lower::{ExportTarget, LoweredProgram, MAIN};
+mod collections;
 mod completion;
 pub(crate) mod engine;
-pub mod hir_compat;
-pub mod methods;
+mod hir_compat;
+mod methods;
 mod modules;
-pub mod narrowing;
+mod narrowing;
 pub mod sdk;
-pub mod shapes;
+mod shapes;
+mod source;
 pub mod source_files;
 pub mod wit;
-pub use absence::Absence;
-/// HIR types and structural foreign (WIT) symbol descriptors.
-pub mod hir {
-    pub use perry_hir::types::{FunctionType, ObjectType, PropertyInfo, Type};
-    pub use perry_hir::*;
-    pub use pliron::builtin::types::Signedness;
-
-    /// A foreign (WIT) symbol in the world's symbol table.
-    #[derive(Clone, Debug, PartialEq)]
-    pub enum Foreign {
-        Type(Type),
-        Integer { width: u32, signedness: Signedness },
-        Resource(u32),
-        Input(Box<Foreign>),
-        Function(FunctionType),
-    }
-}
-
-/// Resolved, specialized HIR and source facts, shared read-only with elaboration.
-pub struct Program<'s> {
-    module: hir::ir::Module,
-    metadata: hir_compat::Metadata<'s>,
-    foreign: &'s HashMap<String, hir::Foreign>,
-}
-impl<'s> Program<'s> {
-    pub fn module(&self) -> &hir::ir::Module {
-        &self.module
-    }
-    pub fn metadata(&self) -> &hir_compat::Metadata<'s> {
-        &self.metadata
-    }
-    pub fn foreign(&self) -> &HashMap<String, hir::Foreign> {
-        self.foreign
-    }
-}
-
-pub fn load_sources<'s>(
+use perry_mir::Absence;
+pub fn lower_sources(
     ctx: &mut Context,
-    source: &'s str,
+    source: &str,
     identity: &str,
-    sources: &'s BTreeMap<String, String>,
-    foreign: &'s HashMap<String, hir::Foreign>,
-) -> Result<Program<'s>> {
-    load_world(ctx, source, identity, sources, foreign, None)
+    sources: &BTreeMap<String, String>,
+    types: &wit::WorldTypes,
+) -> Result<pliron::builtin::ops::ModuleOp> {
+    Ok(lower_world(ctx, source, identity, sources, types, None)?.module)
 }
 
-pub fn load_world<'s>(
+pub fn lower_world<'r>(
     ctx: &mut Context,
-    source: &'s str,
+    source: &str,
     identity: &str,
-    sources: &'s BTreeMap<String, String>,
-    foreign: &'s HashMap<String, hir::Foreign>,
-    world: Option<(&wit_parser::Resolve, wit_parser::WorldId)>,
-) -> Result<Program<'s>> {
-    let loaded = modules::load(source, identity, sources, foreign)?;
-    let mut lowered = hir_compat::lower(loaded, identity, world)?;
-    engine::run_engine(
-        ctx,
-        &mut lowered.module,
-        &mut lowered.metadata,
-        &lowered.facts,
-        foreign,
-    )?;
-    lowered
-        .metadata
-        .locations
-        .record_call_origins(&lowered.module);
-    Ok(Program {
-        module: lowered.module,
-        metadata: lowered.metadata,
-        foreign,
-    })
+    sources: &BTreeMap<String, String>,
+    types: &wit::WorldTypes,
+    world: Option<(&'r wit_parser::Resolve, wit_parser::WorldId)>,
+) -> Result<LoweredProgram<'r>> {
+    let loaded = modules::load(source, identity, sources, types.foreign())?;
+    let (source, exports) = hir_compat::lower(loaded, identity, world)?;
+    engine::lower_module(ctx, source, exports, types)
 }
 
 pub(crate) fn is_identifier(name: &str) -> bool {

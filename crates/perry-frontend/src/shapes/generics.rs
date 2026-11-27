@@ -1,197 +1,103 @@
 //! Instantiation of generic interfaces, type aliases, and classes.
 use super::*;
-use perry_hir::ir::{Class, Interface, TypeAlias};
-use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported, unsupported};
+use crate::engine::types::{Ty, TyKind, TypeListId, TypeTable};
+use perry_hir::ir::{Interface, TypeAlias};
+use perry_wit_diagnostics::{codes, diag, ensure_diag, ensure_unsupported};
 use pliron::utils::vec_exns::VecExtns;
 
 mod resolution;
-pub use resolution::Query;
-pub use resolution::Resolver;
+pub(crate) use resolution::{Query, Resolver};
 
 const RESOLUTION_DEPTH: usize = 32;
 pub(crate) const ARGUMENT_LIMIT: usize = 4096;
 
-pub trait DeclarationLookup<'h> {
-    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)>;
-    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)>;
-    fn class(&self, _name: &str) -> Option<(usize, &'h Class)> {
-        None
-    }
-}
+pub(crate) type InstanceKey = (TypeName, TypeListId);
 
-impl<'h> DeclarationLookup<'h> for Declarations<'h> {
-    fn interface(&self, name: &str) -> Option<(usize, &'h Interface)> {
-        self.interfaces.get(name).copied()
-    }
-    fn type_alias(&self, name: &str) -> Option<(usize, &'h TypeAlias)> {
-        self.type_aliases.get(name).copied()
-    }
+#[derive(Clone, Copy)]
+pub(crate) struct Application {
+    pub(crate) key: InstanceKey,
+    pub(crate) ty: Ty,
+    pub(crate) reads_class_fields: bool,
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Utility {
-    Partial,
-    Required,
-    Pick,
-    Omit,
-}
-
-impl Utility {
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "Partial" => Some(Self::Partial),
-            "Required" => Some(Self::Required),
-            "Pick" => Some(Self::Pick),
-            "Omit" => Some(Self::Omit),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DeclarationId {
-    Interface(usize),
-    Alias(usize),
-    Class(usize),
-    Utility(Utility),
-}
-
-pub type InstanceKey = (DeclarationId, Vec<TypeId>);
 
 /// The generic declaration an instantiation expands.
 #[derive(Clone, Copy)]
-pub enum Declaration<'a> {
+pub(crate) enum Declaration<'a> {
     Interface(&'a Interface),
     Alias(&'a TypeAlias),
-    Class(&'a Class),
+    Class(crate::shapes::ClassShape<'a>),
 }
 
-fn charge_budget(ty: &HirType, remaining: &mut usize) -> Result<()> {
-    let mut exceeded = false;
-    let _ = ty.any(&mut |_| {
-        if *remaining <= 1 {
-            exceeded = true;
-            true
-        } else {
-            *remaining -= 1;
-            false
+fn validate(types: &TypeTable, ctx: &Context, ty: Ty, remaining: &mut usize) -> Result<Ty> {
+    ensure_unsupported!(*remaining > 1, "generic type arguments expand indefinitely");
+    *remaining -= 1;
+    let kind = types.kind(ty);
+    if let TyKind::TypeVar(name) = kind {
+        return Err(diag!(
+            codes::TYPE_MISMATCH,
+            "unresolved type argument {}",
+            name.get(ctx)
+        ));
+    }
+    if !matches!(kind, TyKind::Variant(_)) {
+        for child in types.children(kind) {
+            validate(types, ctx, child, remaining)?;
         }
-    });
-    ensure_unsupported!(!exceeded, "generic type arguments expand indefinitely");
-    Ok(())
+    }
+    Ok(ty)
 }
 
-fn check_subst(
+pub(crate) fn substitute(
     ctx: &Context,
-    ty: &HirType,
-    bindings: &HashMap<&str, TypeId>,
+    types: &mut TypeTable,
+    source: &HirType,
+    bindings: &[(TypeName, Ty)],
     remaining: &mut usize,
-) -> Result<bool> {
-    let mut subst = false;
-    let mut err = None;
-    let _ = ty.any(&mut |node| {
-        if *remaining <= 1 {
-            err = Some(unsupported!("generic type arguments expand indefinitely"));
-            return true;
-        }
-        *remaining -= 1;
-        if let HirType::Named(name) | HirType::TypeVar(name) = node {
-            match bindings.get(name.as_str()) {
-                Some(&bound) => {
-                    if let Err(e) = charge_budget(bound.hir(ctx), remaining) {
-                        err = Some(e);
-                        return true;
-                    }
-                    subst = true;
-                }
-                None if matches!(node, HirType::TypeVar(_)) => {
-                    err = Some(diag!(
-                        codes::TYPE_MISMATCH,
-                        "unresolved type argument {name}"
-                    ));
-                    return true;
-                }
-                None => {}
-            }
-        }
-        false
-    });
-    match err {
-        Some(e) => Err(e),
-        None => Ok(subst),
-    }
+) -> Result<Ty> {
+    let declared = types.intern_hir(ctx, source, true);
+    let bound = types.substitute(declared, bindings);
+    validate(types, ctx, bound, remaining)
 }
 
-fn validate_id(ctx: &Context, id: TypeId, remaining: &mut usize) -> Result<TypeId> {
-    check_subst(ctx, id.hir(ctx), &HashMap::new(), remaining)?;
-    Ok(id)
-}
-
-pub fn substitute_id(
-    ctx: &Context,
-    ty: &HirType,
-    bindings: &HashMap<&str, TypeId>,
-    remaining: &mut usize,
-) -> Result<TypeId> {
-    let needs_subst = check_subst(ctx, ty, bindings, remaining)?;
-    if !needs_subst {
-        return Ok(TypeId::intern(ctx, ty));
+impl<'a> Symbol<'a> {
+    pub(crate) fn declaration(&self) -> Option<Declaration<'a>> {
+        self.interface
+            .map(Declaration::Interface)
+            .or_else(|| self.class.map(Declaration::Class))
+            .or_else(|| self.alias.map(Declaration::Alias))
     }
-    if let HirType::Named(name) | HirType::TypeVar(name) = ty
-        && let Some(&bound) = bindings.get(name.as_str())
-    {
-        return Ok(bound);
-    }
-    let mut out = ty.clone();
-    out.transform(&mut |node| {
-        if let HirType::Named(name) | HirType::TypeVar(name) = node
-            && let Some(&bound) = bindings.get(name.as_str())
-        {
-            *node = bound.hir(ctx).clone();
-        }
-    });
-    Ok(TypeId::from_owned(ctx, out))
 }
 
 impl<'a> Declaration<'a> {
-    pub fn find<L: DeclarationLookup<'a>>(lookup: &L, base: &str) -> Option<(DeclarationId, Self)> {
-        if let Some((index, interface)) = lookup.interface(base) {
-            return Some((DeclarationId::Interface(index), Self::Interface(interface)));
-        }
-        if let Some((index, class)) = lookup.class(base) {
-            return Some((DeclarationId::Class(index), Self::Class(class)));
-        }
-        let (index, alias) = lookup.type_alias(base)?;
-        Some((DeclarationId::Alias(index), Self::Alias(alias)))
-    }
-
-    pub fn parameters(self) -> &'a [perry_hir::types::TypeParam] {
+    pub(crate) fn parameters(self) -> &'a [perry_hir::types::TypeParam] {
         match self {
             Self::Interface(interface) => &interface.type_params,
             Self::Alias(alias) => &alias.type_params,
-            Self::Class(class) => &class.type_params,
+            Self::Class(class) => class.parameters(),
         }
     }
 
-    pub fn bind(
+    fn bind(
         self,
         ctx: &Context,
         base: &str,
-        arguments: &[TypeId],
-    ) -> Result<HashMap<&'a str, TypeId>> {
+        types: &mut TypeTable,
+        arguments: TypeListId,
+    ) -> Result<Vec<(TypeName, Ty)>> {
         let parameters = self.parameters();
         ensure_diag!(
-            arguments.len() <= parameters.len(),
+            types.ty_slice(arguments).len() <= parameters.len(),
             codes::TYPE_MISMATCH,
             "too many type arguments for {base}"
         );
-        let mut bindings = HashMap::with_capacity(parameters.len());
+        let mut bindings = Vec::with_capacity(parameters.len());
         let mut remaining = ARGUMENT_LIMIT;
         for (index, parameter) in parameters.iter().enumerate() {
-            let argument = match arguments.get(index) {
-                Some(&argument) => validate_id(ctx, argument, &mut remaining)?,
-                None => substitute_id(
+            let argument = match types.ty_slice(arguments).get(index) {
+                Some(&argument) => validate(types, ctx, argument, &mut remaining)?,
+                None => substitute(
                     ctx,
+                    types,
                     parameter
                         .default
                         .as_deref()
@@ -207,108 +113,8 @@ impl<'a> Declaration<'a> {
                     &mut remaining,
                 )?,
             };
-            bindings.insert(parameter.name.as_str(), argument);
+            bindings.push((TypeName::new(ctx, parameter.name.clone()), argument));
         }
         Ok(bindings)
-    }
-}
-
-fn generic_parts(ty: &HirType) -> Option<(&str, &[HirType])> {
-    match ty {
-        HirType::Named(name) => Some((name, &[])),
-        HirType::Generic { base, type_args } => Some((base, type_args)),
-        _ => None,
-    }
-}
-
-fn union_of(ctx: &Context, members: Vec<TypeId>) -> TypeId {
-    match members.len() {
-        0 => TypeId::intern(ctx, &HirType::Never),
-        1 => members[0],
-        _ => TypeId::from_owned(
-            ctx,
-            HirType::Union(members.into_iter().map(|m| m.hir(ctx).clone()).collect()),
-        ),
-    }
-}
-
-fn strip_void(ctx: &Context, ty: TypeId) -> TypeId {
-    let HirType::Union(items) = ty.hir(ctx) else {
-        return ty;
-    };
-    if !items.contains(&HirType::Void) {
-        return ty;
-    }
-    let filtered: Vec<TypeId> = items
-        .iter()
-        .filter(|item| !matches!(item, HirType::Void))
-        .map(|item| TypeId::intern(ctx, item))
-        .collect();
-    if filtered.is_empty() {
-        TypeId::intern(ctx, &HirType::Void)
-    } else {
-        union_of(ctx, filtered)
-    }
-}
-
-pub(crate) fn optional_property(ty: HirType, optional: bool) -> HirType {
-    if !optional {
-        return ty;
-    }
-    match ty {
-        HirType::Union(mut items) => {
-            items.push_unique(HirType::Void);
-            HirType::Union(items)
-        }
-        other => HirType::Union(vec![other, HirType::Void]),
-    }
-}
-
-impl Declarations<'_> {
-    /// HIR compatibility result for a selected member.
-    pub(crate) fn property_type(
-        &self,
-        ctx: &Context,
-        base: &str,
-        arguments: &[HirType],
-        property: &str,
-    ) -> Option<HirType> {
-        if arguments
-            .iter()
-            .any(|ty| ty.any(&mut |n| matches!(n, HirType::TypeVar(_))))
-        {
-            return None;
-        }
-        let arg_ids = TypeId::intern_slice(ctx, arguments);
-        let (ty, optional) = Resolver::new(ctx, self).property(base, &arg_ids, property)?;
-        Some(optional_property(ty.hir(ctx).clone(), optional))
-    }
-
-    /// Extract `(key_ty, value_ty)` if `ty` resolves to `Record<K, V>`, `{ [key: string]: V }`, or a
-    /// closed record/interface whose properties share a uniform value type.
-    pub fn dict_entry_types(&self, ctx: &Context, ty: &HirType) -> Option<(HirType, HirType)> {
-        if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
-            return None;
-        }
-        let id = TypeId::intern(ctx, ty);
-        Resolver::new(ctx, self).dictionary(id)
-    }
-
-    pub(crate) fn object_properties(
-        &self,
-        ctx: &Context,
-        ty: &HirType,
-    ) -> Option<Vec<(String, HirType, bool)>> {
-        if ty.any(&mut |n| matches!(n, HirType::TypeVar(_))) {
-            return None;
-        }
-        let id = TypeId::intern(ctx, ty);
-        Some(
-            Resolver::new(ctx, self)
-                .record(id, 0)?
-                .into_iter()
-                .map(|(name, ty, optional)| (name, ty.hir(ctx).clone(), optional))
-                .collect(),
-        )
     }
 }

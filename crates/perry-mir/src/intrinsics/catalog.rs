@@ -103,6 +103,13 @@ macro_rules! intrinsic_catalog {
                 ArrayExtend = "perry_array_extend" (I32, I32, I32);
                 ArrayHole = "perry_array_hole" (I32, I32, I32);
                 ArrayConcat = "perry_array_concat" (I32, I32, I32, I32) -> I32;
+                NumberAdd = "perry_number_add" (I32, I64, I32, I64, I32, I32) -> I32;
+                NumberSub = "perry_number_sub" (I32, I64, I32, I64, I32, I32) -> I32;
+                NumberMul = "perry_number_mul" (I32, I64, I32, I64, I32, I32) -> I32;
+                NumberRem = "perry_number_rem" (I32, I64, I32, I64, I32, I32) -> I32;
+                NumberAbs = "perry_number_abs" (I32, I64, I32) -> I32;
+                NumberExtremum = "perry_number_extremum" (I32, I64, I32, I64, I32, I32) -> I32;
+                NumberRelation = "perry_number_relation" (I32, I64, I32, I64) -> I32;
                 F64Rem = "perry_f64_rem" (F64, F64) -> F64;
                 TaskEnter = "perry_task_enter" () -> I32;
                 TaskResume = "perry_task_resume" (I32);
@@ -302,15 +309,17 @@ macro_rules! intrinsic_catalog {
                 StdRaiseInvalidDate = "std_raise_invalid_date" () -> I32;
                 StdRandomUuid = "std_random_uuid" [RandomUuid = "random_uuid" () -> (String), Effectful, Conservative;];
                 StdRegexExecFrom = "std_regex_exec_from" [RegexExecFrom = "regex_exec_from" (String, Regex, Number) -> (NullOptStringArray), Pure, Atomic;];
-                StdRegexGroups = "std_regex_groups" [RegexGroups = "regex_groups" (OptStringArray) -> (Json), Pure, None;];
-                StdRegexIndex = "std_regex_index" [RegexIndex = "regex_index" (OptStringArray) -> (Number), Pure, None;];
-                StdRegexNext = "std_regex_next" [RegexNext = "regex_next" (OptStringArray) -> (Number), Pure, None;];
-                StdRegexInput = "std_regex_input" [RegexInput = "regex_input" (OptStringArray) -> (String), Pure, None;];
+                StdRegexGroups = "std_regex_groups" [RegexGroups = "regex_groups" (MatchArray) -> (Json), Pure, None;];
+                StdRegexIndex = "std_regex_index" [RegexIndex = "regex_index" (MatchArray) -> (Number), Pure, None;];
+                StdRegexInput = "std_regex_input" [RegexInput = "regex_input" (MatchArray) -> (String), Pure, None;];
                 StdRegexExec = "std_regex_exec" [RegexExec = "regex_exec" (String, Regex) -> (NullOptStringArray), Pure, Atomic;];
                 StdRegexMatch = "std_regex_match" [RegexMatch = "regex_match" (String, Regex) -> (NullOptStringArray), Pure, Atomic;];
                 StdRegexReplace = "std_regex_replace" [RegexReplace = "regex_replace" (String, Regex, String) -> (String), Pure, Atomic;];
                 StdRegexSearch = "std_regex_search" [RegexSearch = "regex_search" (String, Regex) -> (Number), Pure, None;];
-                StdRegexSplit = "std_regex_split" [RegexSplit = "regex_split" (String, Regex) -> (StringArray), Pure, Atomic;];
+                StdRegexSplit = "std_regex_split" [
+                    RegexSplit = "regex_split" (String, Regex) -> (OptStringArray), Pure, Atomic;
+                    RegexSplitStrings = "regex_split_strings" (String, Regex) -> (StringArray), Pure, Atomic;
+                ];
                 StdStringByteInput = "std_string_byte_input" [StringByteInput = "string_byte_input" (String) -> (ByteInput), Effectful, Conservative;];
                 StdAsciiStrings = "std_ascii_strings" () -> I32;
                 StdStringAt = "std_string_at" [StringAt = "string_at" (String, Number) -> (OptString), Pure, Atomic;];

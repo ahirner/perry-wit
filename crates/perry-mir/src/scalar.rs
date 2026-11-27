@@ -128,21 +128,10 @@ op_schema! {
     error = ScalarErr::NumericCast;
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum ScalarErr {
+    #[error("perry.compare must produce a signless i1")]
     CompareResult,
+    #[error("perry.numeric_cast requires numeric conversion or integer/bigint boxing")]
     NumericCast,
 }
-
-impl core::fmt::Display for ScalarErr {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::CompareResult => f.write_str("perry.compare must produce a signless i1"),
-            Self::NumericCast => f.write_str(
-                "perry.numeric_cast requires numeric conversion or integer/bigint boxing",
-            ),
-        }
-    }
-}
-
-impl core::error::Error for ScalarErr {}

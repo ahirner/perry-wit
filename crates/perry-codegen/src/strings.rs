@@ -21,13 +21,10 @@ impl FunctionLowering<'_, '_> {
     fn string_prefix(&mut self, ctx: &mut Context, string: Value, length: Value) -> Value {
         let word = IntegerType::get(ctx, 64, Signedness::Signless).into();
         let done = self.new_block(ctx, vec![word]);
-        let wide = self.new_block(ctx, vec![]);
-        let short = self.new_block(ctx, vec![]);
         let data = self.load(ctx, MemKind::I32, string, DATA);
         let eight = self.i32_const(ctx, 8);
         let enough = self.num(ctx, NumOpcode::I32GeU, vec![length, eight]);
-        self.cond_br(ctx, enough, (wide, vec![]), (short, vec![]));
-        self.block = wide;
+        let short = self.enter_if(ctx, enough);
         let prefix = self.load(ctx, MemKind::I64, data, 0);
         self.br(ctx, done, vec![prefix]);
         self.block = short;
@@ -57,13 +54,9 @@ impl FunctionLowering<'_, '_> {
             let shift = self.num(ctx, NumOpcode::I64ExtendI32U, vec![shift]);
             let shifted = self.num(ctx, NumOpcode::I64Shl, vec![loaded, shift]);
             let combined = self.num(ctx, NumOpcode::I64Or, vec![prefix, shifted]);
-            self.br(ctx, next, vec![combined]);
-            self.block = next;
-            prefix = next.deref(ctx).get_argument(0);
+            prefix = self.join_value(ctx, next, combined);
         }
-        self.br(ctx, done, vec![prefix]);
-        self.block = done;
-        done.deref(ctx).get_argument(0)
+        self.join_value(ctx, done, prefix)
     }
 
     /// String equality decided inline by identity, length and the first eight bytes; only
@@ -96,9 +89,7 @@ impl FunctionLowering<'_, '_> {
         self.block = long;
         let order = self.runtime(ctx, Runtime::StringCompare, vec![a, b]);
         let equal = self.num(ctx, NumOpcode::I32Eqz, vec![order]);
-        self.br(ctx, done, vec![equal]);
-        self.block = done;
-        done.deref(ctx).get_argument(0)
+        self.join_value(ctx, done, equal)
     }
 
     /// Inline comparison of a string with a literal operand: (in)equality with at most eight
@@ -175,9 +166,7 @@ impl FunctionLowering<'_, '_> {
                         equal = self.num(ctx, NumOpcode::I32And, vec![equal, same]);
                         offset += width;
                     }
-                    self.br(ctx, join, vec![equal]);
-                    self.block = join;
-                    join.deref(ctx).get_argument(0)
+                    self.join_value(ctx, join, equal)
                 };
                 return Some(if kind == CompareKind::Ne {
                     self.num(ctx, NumOpcode::I32Eqz, vec![equal])
@@ -199,9 +188,7 @@ impl FunctionLowering<'_, '_> {
             let difference = self.num(ctx, NumOpcode::I32Sub, vec![first, byte]);
             let tail = self.num(ctx, NumOpcode::I32Ne, vec![size, expected]);
             let order = self.select(ctx, difference, difference, tail);
-            self.br(ctx, join, vec![order]);
-            self.block = join;
-            let order = join.deref(ctx).get_argument(0);
+            let order = self.join_value(ctx, join, order);
             let zero = self.i32_const(ctx, 0);
             return Some(self.num(ctx, opcode, vec![order, zero]));
         }
@@ -328,9 +315,7 @@ impl FunctionLowering<'_, '_> {
             Character::Scalar => Runtime::StdStringScalarAt,
         };
         let character = self.runtime(ctx, runtime, vec![string, position]);
-        self.br(ctx, join, vec![character]);
-        self.block = join;
-        join.deref(ctx).get_argument(0)
+        self.join_value(ctx, join, character)
     }
 
     /// Decode one valid UTF-8 scalar at a proven scalar boundary. Loads stop at its width.
@@ -366,9 +351,7 @@ impl FunctionLowering<'_, '_> {
                 self.block = next;
             }
         }
-        self.br(ctx, join, vec![scalar]);
-        self.block = join;
-        join.deref(ctx).get_argument(0)
+        self.join_value(ctx, join, scalar)
     }
 
     /// Append one byte to an exclusively owned header's spare tail capacity. When capacity is
@@ -435,9 +418,7 @@ impl FunctionLowering<'_, '_> {
         self.br(ctx, join, vec![one]);
         self.block = fail;
         let no = self.i32_const(ctx, 0);
-        self.br(ctx, join, vec![no]);
-        self.block = join;
-        join.deref(ctx).get_argument(0)
+        self.join_value(ctx, join, no)
     }
 
     /// Materialize an ASCII character into a string when required by MIR, keeping the raw byte for scalar users.

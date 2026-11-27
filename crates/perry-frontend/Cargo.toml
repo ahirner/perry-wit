@@ -3,16 +3,20 @@ name = "perry-frontend"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "TypeScript source resolution and specialized Perry HIR"
+description = "TypeScript module resolution, specialization and lowering to Perry MIR"
 
 [dependencies]
+bit-set = "0.11"
+perry-mir.workspace = true
 perry-hir.workspace = true
 perry-parser.workspace = true
 perry-wit-diagnostics.workspace = true
 perry-contract.workspace = true
 wit-parser.workspace = true
 pliron.workspace = true
+indexmap = "2"
 serde_json.workspace = true
+swc_ecma_utils = "35.1"
 swc_ecma_visit = "29.0"
 swc_ecma_parser = "45.1"
 swc_common = "26.0"
