@@ -87,3 +87,6 @@ nix run .#bench-perry
 Human and AI contributors are welcome: “Act always so as to increase the number of choices” — [Heinz von Foerster](https://de.wikipedia.org/wiki/Heinz_von_Foerster).
 
 Register every new capability contract, input domain and boundary diagnostic in `perry-conformance`.
+
+Releases: (1) Push a `release/X.Y.Z` branch from the latest `main`. (2) Merge the generated PR.
+(3) Check out the merged bump. (4) Run `git tag vX.Y.Z`, then `git push origin tag vX.Y.Z` to publish.
