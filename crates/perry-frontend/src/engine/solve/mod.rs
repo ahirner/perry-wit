@@ -37,6 +37,7 @@ use perry_hir::{
 use perry_wit_diagnostics::{Diagnostic, Result, codes, diag};
 use pliron::context::Context;
 use std::collections::HashMap;
+pub(crate) use writes::WriteEffects;
 
 const INSTANCE_BUDGET: u16 = 256;
 

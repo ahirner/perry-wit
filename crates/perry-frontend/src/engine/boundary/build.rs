@@ -41,7 +41,7 @@ impl<'h> ModuleIndex<'h> {
             defined_locals: BitSet::default(),
             pending_captures: Vec::new(),
         };
-        idx.scan_stmts(&mut scan, &bodies.init, init_tid, false);
+        idx.layouts[init_tid].exits = idx.scan_stmts(&mut scan, &bodies.init, init_tid, false);
 
         for f in &bodies.functions {
             idx.register_member(

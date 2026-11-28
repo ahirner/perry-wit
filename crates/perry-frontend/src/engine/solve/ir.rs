@@ -379,7 +379,7 @@ pub(crate) enum ExportRoot {
 }
 
 pub(crate) struct Solved {
-    pub(crate) writes: crate::narrowing::WriteEffects,
+    pub(crate) writes: super::WriteEffects,
     pub(crate) resources: crate::hir_compat::ResourceClasses<ClassInstId>,
     pub(crate) init_inst: InstanceId,
     pub(crate) instances: IdxVec<InstanceId, Instance>,

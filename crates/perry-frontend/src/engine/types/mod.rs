@@ -195,13 +195,9 @@ impl TypeTable {
         PropertiesId::intern(&mut self.properties, props)
     }
 
-    pub(crate) fn object_type(&mut self, props: PropertiesId, index: Option<Ty>) -> Ty {
-        self.intern_kind(TyKind::Object { props, index })
-    }
-
     pub(crate) fn object(&mut self, props: &[ObjectProp], index: Option<Ty>) -> Ty {
-        let span = self.intern_properties(props);
-        self.object_type(span, index)
+        let props = self.intern_properties(props);
+        self.intern_kind(TyKind::Object { props, index })
     }
 
     fn finish_union(&mut self, flat: &mut Vec<Ty>) -> Ty {
@@ -360,10 +356,7 @@ impl TypeTable {
         let mut flat = std::mem::take(&mut self.scratch);
         flat.clear();
         for &m in self.ty_slice(span) {
-            let n = self.normalize_atom(ctx, decls, m);
-            if n != Ty::BOTTOM && n != Ty::NEVER {
-                flat.push(n);
-            }
+            flat.push(self.normalize_atom(ctx, decls, m));
         }
         flat.sort_unstable();
         flat.dedup();
@@ -377,23 +370,14 @@ impl TypeTable {
             TyKind::Null => (Ty::VOID, Some(Absence::Null)),
             TyKind::Void => (Ty::VOID, Some(Absence::Undefined)),
             TyKind::Union(span) => {
-                let mut defined = std::mem::take(&mut self.scratch);
-                defined.clear();
-                let mut abs = None;
-                for &m in self.ty_slice(span) {
-                    match m {
-                        Ty::NULL => abs = Absence::join_optional(abs, Some(Absence::Null)),
-                        Ty::VOID => abs = Absence::join_optional(abs, Some(Absence::Undefined)),
-                        other => defined.push(other),
-                    }
-                }
-                let inner = if defined.is_empty() {
-                    Ty::VOID
-                } else {
-                    self.intern_sorted_union(&defined)
+                let members = self.ty_slice(span);
+                let null = members.contains(&Ty::NULL).then_some(Absence::Null);
+                let undefined = members.contains(&Ty::VOID).then_some(Absence::Undefined);
+                let inner = match self.exclude_absences(ty, Absence::Both) {
+                    Ty::NEVER => Ty::VOID,
+                    inner => inner,
                 };
-                self.scratch = defined;
-                (inner, abs)
+                (inner, Absence::join_optional(null, undefined))
             }
             _ => (ty, None),
         }
@@ -408,17 +392,10 @@ impl TypeTable {
             return inner;
         }
         let states = existing.map_or(states, |e| e.join(states));
-        let mut members = Vec::with_capacity(4);
-        self.push_union_member(&mut members, inner);
-        if states.admits_null() {
-            members.push(Ty::NULL);
-        }
-        if states.admits_undefined() {
-            members.push(Ty::VOID);
-        }
-        members.sort_unstable();
-        members.dedup();
-        self.intern_sorted_union(&members)
+        let mut members = vec![inner];
+        members.extend(states.admits_null().then_some(Ty::NULL));
+        members.extend(states.admits_undefined().then_some(Ty::VOID));
+        self.union(&members)
     }
 
     pub(crate) fn exclude_absences(&mut self, ty: Ty, excluded: Absence) -> Ty {
@@ -617,14 +594,8 @@ impl TypeTable {
 
     pub(crate) fn intern_hir(&mut self, ctx: &Context, ty: &HirType, explicit: bool) -> Ty {
         match ty {
-            HirType::Any => Ty::OPEN,
-            HirType::Unknown => {
-                if explicit {
-                    Ty::DYNAMIC
-                } else {
-                    Ty::OPEN
-                }
-            }
+            HirType::Unknown if explicit => Ty::DYNAMIC,
+            HirType::Any | HirType::Unknown => Ty::OPEN,
             HirType::Never => Ty::NEVER,
             HirType::Void => Ty::VOID,
             HirType::Null => Ty::NULL,
@@ -688,7 +659,7 @@ impl TypeTable {
                 self.generic(base_id, &args)
             }
             HirType::Object(obj) => {
-                let mut keys: Vec<&String> = match &obj.property_order {
+                let keys: Vec<&String> = match &obj.property_order {
                     Some(order) => order.iter().collect(),
                     None => {
                         let mut k: Vec<&String> = obj.properties.keys().collect();
@@ -696,7 +667,6 @@ impl TypeTable {
                         k
                     }
                 };
-                keys.retain(|k| obj.properties.contains_key(*k));
                 let props: Vec<ObjectProp> = keys
                     .into_iter()
                     .filter_map(|name| {
@@ -744,13 +714,6 @@ impl TypeTable {
         }
     }
 
-    pub(crate) fn is_env_func(&self, ty: Ty, escaping_env: &BitSet) -> bool {
-        matches!(
-            self.kind(ty),
-            TyKind::Func(id) if escaping_env.contains(id.template.index())
-        )
-    }
-
     pub(crate) fn is_tagged_func_union(
         &self,
         ty: Ty,
@@ -766,7 +729,9 @@ impl TypeTable {
             if matches!(m, Ty::NULL | Ty::VOID) {
                 continue;
             }
-            if self.is_zero_sized_func(m, capture_free) || self.is_env_func(m, escaping_env) {
+            if self.is_zero_sized_func(m, capture_free)
+                || matches!(self.kind(m), TyKind::Func(id) if escaping_env.contains(id.template.index()))
+            {
                 func_count += 1;
             } else {
                 return false;
@@ -960,17 +925,10 @@ impl TypeTable {
             }
             TyKind::Union(s) => {
                 let ms = self.ty_slice(s);
-                let all_funcs = ms
-                    .iter()
-                    .filter(|&&m| m != Ty::NULL && m != Ty::VOID)
-                    .all(|&m| matches!(self.kind(m), TyKind::Func(_)));
+                let mut defined = ms.iter().filter(|&&m| m != Ty::NULL && m != Ty::VOID);
                 (nested
-                    && !all_funcs
-                    && ms
-                        .iter()
-                        .filter(|&&m| m != Ty::NULL && m != Ty::VOID)
-                        .count()
-                        > 1)
+                    && defined.clone().nth(1).is_some()
+                    && !defined.all(|&m| matches!(self.kind(m), TyKind::Func(_))))
                     || ms
                         .iter()
                         .any(|&t| self.has_nested_unresolved_walk(t, nested, seen))

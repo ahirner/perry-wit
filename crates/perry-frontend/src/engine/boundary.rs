@@ -1,14 +1,14 @@
 //! Single-pass boundary indexing over Perry HIR.
 use super::BitSet;
-use super::plans::ExprIdx;
+use super::plans::{ExprIdx, Expressions, SiteRows};
 use super::solve::SiteResolution;
 pub(crate) use super::types::LocalFlags;
 use super::types::{
     BindingSpan, CaptureSpan, ClassId, Idx, IdxVec, LocId, LocalIdx, LocalInfo, LocalStorage, Pool,
-    TemplateId, Ty, TypeTable,
+    RegionId, TemplateId, Ty, TypeTable,
 };
+use crate::completion::FALLTHROUGH;
 use crate::hir_compat;
-use crate::narrowing::Region;
 use crate::source::{CallerKind, ConstructorSites};
 use perry_hir::{
     ir::{Expr, Function, Param, Stmt},
@@ -149,6 +149,8 @@ struct TemplateLayout {
     references: CaptureSpan,
     activation_slots: u32,
     closure_owner: Option<TemplateId>,
+    /// How the body can complete, as [`crate::completion`] flags.
+    exits: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -157,15 +159,139 @@ pub(super) enum GenericOwner {
     Class(ClassId),
 }
 
+/// The expression sites one template registers while scanning a statement list or a test.
 pub(super) struct SourceRegion {
     pub(super) template: TemplateId,
-    pub(super) sites: std::ops::Range<super::plans::ExprIdx>,
-    exits: u8,
+    pub(super) sites: std::ops::Range<ExprIdx>,
+}
+
+/// Source regions whose writes end narrowing guards. A test is keyed by its expression. A
+/// statement list is keyed by its anchor, the first expression the index scans directly in one of
+/// its statements, which no other list holds directly. A list without an anchor holds no
+/// expression outside its nested lists, so their regions cover its writes.
+#[derive(Default)]
+pub(crate) struct Regions {
+    pub(super) rows: IdxVec<RegionId, SourceRegion>,
+    bodies: SiteRows<RegionId>,
+    tests: SiteRows<RegionId>,
+}
+
+/// What the index scans for a statement outside its nested statement lists: an expression, or
+/// else the lists that hold all of the statement's expressions.
+enum Scanned<'a> {
+    Expression(&'a Expr),
+    Lists([&'a [Stmt]; 3]),
+}
+
+impl<'a> Scanned<'a> {
+    fn of(locals: &hir_compat::Locals<'_>, stmt: &'a Stmt) -> Self {
+        if let Some(branch) = locals.dense_statements(stmt) {
+            return Self::Lists([branch, &[], &[]]);
+        }
+        let expression = match stmt {
+            Stmt::Let { init: value, .. } | Stmt::Return(value, _) => value.as_ref(),
+            Stmt::Throw(value) => Some(value),
+            Stmt::If { condition, .. }
+            | Stmt::While { condition, .. }
+            | Stmt::DoWhile { condition, .. } => Some(condition),
+            Stmt::Switch { discriminant, .. } => Some(discriminant),
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+            } => match condition.as_ref().or(update.as_ref()) {
+                Some(test) => Some(test),
+                None => {
+                    let init = init.as_deref().map(std::slice::from_ref);
+                    return Self::Lists([init.unwrap_or_default(), body, &[]]);
+                }
+            },
+            Stmt::Try {
+                body,
+                catch,
+                finally,
+                ..
+            } => {
+                let catch = catch.as_ref().map(|catch| catch.body.as_slice());
+                let finally = finally.as_deref();
+                return Self::Lists([body, catch.unwrap_or_default(), finally.unwrap_or_default()]);
+            }
+            Stmt::Labeled { body, .. } => {
+                return Self::Lists([std::slice::from_ref(body), &[], &[]]);
+            }
+            Stmt::Break
+            | Stmt::Continue
+            | Stmt::LabeledBreak(_)
+            | Stmt::LabeledContinue(_)
+            | Stmt::ReleaseBoxes(_) => None,
+            other => {
+                let mut first = None;
+                stmt_any_expr(other, &mut |expr| {
+                    first = Some(expr);
+                    true
+                });
+                first
+            }
+        };
+        expression.map_or(Self::Lists([&[]; 3]), Self::Expression)
+    }
+}
+
+impl Regions {
+    fn anchor(
+        locals: &hir_compat::Locals<'_>,
+        expressions: &Expressions<'_>,
+        body: &[Stmt],
+    ) -> Option<ExprIdx> {
+        body.iter()
+            .find_map(|stmt| match Scanned::of(locals, stmt) {
+                Scanned::Expression(expr) => expressions.index(expr),
+                Scanned::Lists(_) => None,
+            })
+    }
+
+    /// Calls `found` with the regions that hold the writes of `body` and of each of `tests`.
+    pub(crate) fn of<'t>(
+        &self,
+        locals: &hir_compat::Locals<'_>,
+        expressions: &Expressions<'_>,
+        body: &[Stmt],
+        tests: impl IntoIterator<Item = &'t Expr>,
+        found: &mut impl FnMut(RegionId),
+    ) {
+        match Self::anchor(locals, expressions, body) {
+            Some(anchor) => {
+                if let Some(&region) = self.bodies.get(anchor) {
+                    found(region);
+                }
+            }
+            None => {
+                for stmt in body {
+                    if let Scanned::Lists(lists) = Scanned::of(locals, stmt) {
+                        for list in lists {
+                            self.of(locals, expressions, list, [], found);
+                        }
+                    }
+                }
+            }
+        }
+        for test in tests {
+            if let Some(&region) = expressions
+                .index(test)
+                .and_then(|site| self.tests.get(site))
+            {
+                found(region);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct ModuleIndex<'h> {
-    pub(super) regions: HashMap<Region, SourceRegion>,
+    pub(super) regions: Regions,
+    /// Whether each arm of an `if` statement falls through, by the statement's condition.
+    arms: SiteRows<[bool; 2]>,
     pub(super) type_slots: HashMap<(GenericOwner, crate::shapes::TypeName), usize>,
     external_uses: Vec<(TemplateId, LocalId)>,
     pub(super) expressions: super::plans::Expressions<'h>,
@@ -251,7 +377,10 @@ impl<'h> ModuleIndex<'h> {
     }
 
     fn add_template(&mut self, view: TemplateView<'h>) -> TemplateId {
-        self.layouts.push(TemplateLayout::default());
+        self.layouts.push(TemplateLayout {
+            exits: FALLTHROUGH,
+            ..TemplateLayout::default()
+        });
         self.views.push(view)
     }
 
@@ -284,7 +413,7 @@ impl<'h> ModuleIndex<'h> {
         ));
         self.set_func_template(func.id, tid);
         self.scan_params(scan, &func.params, tid);
-        self.scan_stmts(scan, self.view(tid).body, tid, false);
+        self.layouts[tid].exits = self.scan_stmts(scan, self.view(tid).body, tid, false);
         tid
     }
 
@@ -355,29 +484,26 @@ impl<'h> ModuleIndex<'h> {
         }
     }
 
-    pub(super) fn has_exit(&self, body: &[Stmt], mask: u8) -> bool {
-        self.regions
-            .get(&Region::Body(body))
-            .map_or(crate::completion::FALLTHROUGH, |r| r.exits)
-            & mask
-            != 0
+    /// Whether the body of `template` can complete in one of the `mask` ways.
+    pub(super) fn has_exit(&self, template: TemplateId, mask: u8) -> bool {
+        self.layouts[template].exits & mask != 0
     }
 
-    fn record_region(
-        &mut self,
-        region: Region,
-        template: TemplateId,
-        start: super::plans::ExprIdx,
-        exits: u8,
-    ) {
-        self.regions.insert(
-            region,
-            SourceRegion {
-                template,
-                sites: start..self.expressions.end(),
-                exits,
-            },
-        );
+    /// Whether each arm of the `if` statement testing `condition` falls through.
+    pub(super) fn arms_fall_through(
+        &self,
+        condition: &Expr,
+    ) -> perry_wit_diagnostics::Result<[bool; 2]> {
+        self.expressions
+            .index(condition)
+            .and_then(|site| self.arms.get(site))
+            .copied()
+            .ok_or_else(|| perry_wit_diagnostics::internal!("unindexed if statement"))
+    }
+
+    fn record_region(&mut self, template: TemplateId, start: ExprIdx) -> RegionId {
+        let sites = start..self.expressions.end();
+        self.regions.rows.push(SourceRegion { template, sites })
     }
 
     fn scan_stmts(
@@ -453,11 +579,14 @@ impl<'h> ModuleIndex<'h> {
                     then_branch,
                     else_branch,
                 } => {
-                    self.scan_test(scan, condition, owner, in_loop);
-                    self.scan_stmts(scan, then_branch, owner, in_loop)
-                        | else_branch
-                            .as_ref()
-                            .map_or(FALLTHROUGH, |b| self.scan_stmts(scan, b, owner, in_loop))
+                    let test = self.scan_test(scan, condition, owner, in_loop);
+                    let then_exits = self.scan_stmts(scan, then_branch, owner, in_loop);
+                    let else_exits = else_branch
+                        .as_ref()
+                        .map_or(FALLTHROUGH, |b| self.scan_stmts(scan, b, owner, in_loop));
+                    let arms = [then_exits, else_exits].map(|exits| exits & FALLTHROUGH != 0);
+                    self.arms.set(test, arms);
+                    then_exits | else_exits
                 }
                 Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
                     self.scan_test(scan, condition, owner, true);
@@ -556,7 +685,10 @@ impl<'h> ModuleIndex<'h> {
                 let site = self.expressions.register(index);
                 self.expressions.tuple_positions.set(site, position);
             });
-            self.record_region(Region::Body(stmts), owner, start, exits);
+            if let Some(anchor) = Regions::anchor(&self.locals, &self.expressions, stmts) {
+                let region = self.record_region(owner, start);
+                self.regions.bodies.set(anchor, region);
+            }
         }
         exits
     }
@@ -567,15 +699,13 @@ impl<'h> ModuleIndex<'h> {
         expr: &'h Expr,
         owner: TemplateId,
         in_loop: bool,
-    ) {
+    ) -> ExprIdx {
         let start = self.expressions.end();
         self.scan_expr(scan, expr, owner, in_loop);
-        self.record_region(
-            Region::Expression(expr),
-            owner,
-            start,
-            crate::completion::FALLTHROUGH,
-        );
+        let region = self.record_region(owner, start);
+        let site = self.expressions.register(expr);
+        self.regions.tests.set(site, region);
+        site
     }
 
     fn scan_expr(
@@ -760,7 +890,7 @@ impl<'h> ModuleIndex<'h> {
                     scan.pending_captures.push((cap, true, forward));
                 }
                 self.scan_params(scan, params, tid);
-                self.scan_stmts(scan, body, tid, false);
+                self.layouts[tid].exits = self.scan_stmts(scan, body, tid, false);
                 let lexical_this = *is_arrow && (*captures_this || self.views[tid].uses_this);
                 self.views[tid].captures_this = lexical_this;
                 self.views[owner].uses_this |= lexical_this;
@@ -831,6 +961,8 @@ impl<'h> ModuleIndex<'h> {
 
 struct ScanCtx<'h, 'a> {
     static_uses: Vec<(ExprIdx, &'h str, &'h str)>,
+    /// Fields of object-literal classes by name, the only identity `new` has for them. These
+    /// classes have no [`ClassId`]; each `new` site records its fields by site.
     literals: HashMap<&'h str, &'h [perry_hir::ir::ClassField]>,
     decls: &'a crate::shapes::Declarations<'h>,
     strings: crate::source::ConstantStrings<'h>,
