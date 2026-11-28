@@ -40,11 +40,11 @@ http-body-util = "0.1"
 perry-abi = { path = "runtime/abi" }
 perry-contract = { path = "crates/perry-contract" }
 perry-frontend = { path = "crates/perry-frontend" }
-perry-hir = { git = "https://github.com/PerryTS/perry", rev = "1b63a1b5b4d13b219fab16119872c4317d4fbd5c" }
+perry-hir = { git = "https://github.com/PerryTS/perry", rev = "19405df1d06c400bf4dda6bd821c0403b9a948a9" }
 perry-mir = { path = "crates/perry-mir" }
 perry-wit-diagnostics = { path = "crates/perry-diagnostics" }
-perry-parser = { git = "https://github.com/PerryTS/perry", rev = "1b63a1b5b4d13b219fab16119872c4317d4fbd5c" }
-pliron = { git = "https://github.com/pliron-org/pliron", rev = "0a5e07b46607fd9b5740474581753aa927cadfc7", default-features = false }
+perry-parser = { git = "https://github.com/PerryTS/perry", rev = "19405df1d06c400bf4dda6bd821c0403b9a948a9" }
+pliron = { git = "https://github.com/pliron-org/pliron", rev = "2268ed608e7058f59df9eedd7d66691cbca66253", default-features = false }
 pliron-control = { path = "crates/pliron-control" }
 serde = "1.0"
 serde_json = "1.0"
