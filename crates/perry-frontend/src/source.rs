@@ -32,6 +32,9 @@ impl ClassId {
     }
 }
 
+/// Lexical facts about one binding name or pattern, keyed by its start offset.
+/// The scanner records a site only when it learns a fact there. A declaration without a record,
+/// such as an unannotated parameter, a `catch` binding or a nested function name, has no facts.
 #[derive(Clone, Copy, Default)]
 struct SourceBinding {
     inferred_end: Option<u32>,

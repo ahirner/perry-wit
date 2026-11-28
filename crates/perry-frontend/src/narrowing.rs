@@ -1,12 +1,10 @@
 //! Facts a branch condition proves about the values read in each arm, recovered from source
 //! guards because Perry HIR carries no flow-sensitive types.
 use crate::Absence;
-use crate::engine::BodyOwner;
 use perry_hir::{
-    ir::{CompareOp, Expr, LogicalOp, Stmt, UnaryOp},
+    ir::{CompareOp, Expr, LogicalOp, UnaryOp},
     types::LocalId,
 };
-use std::collections::HashMap;
 
 /// Access path rooted at a local through property reads, such as `x` or `x.a.b`.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -333,21 +331,3 @@ impl<'s> Guards<'s> {
         revived
     }
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Region {
-    Body(*const [Stmt]),
-    Expression(*const Expr),
-}
-
-impl Region {
-    pub(crate) fn of<'s>(
-        body: &[Stmt],
-        exprs: impl IntoIterator<Item = &'s Expr>,
-    ) -> impl Iterator<Item = Self> {
-        std::iter::once(Self::Body(std::ptr::from_ref(body)))
-            .chain(exprs.into_iter().map(|expr| Self::Expression(expr)))
-    }
-}
-
-pub(crate) type WriteEffects = HashMap<(BodyOwner, Region), Vec<LocalId>>;

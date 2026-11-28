@@ -115,12 +115,12 @@ impl<'h, 'a> Solver<'h, 'a> {
         }
         if !has_explicit_return {
             let mut result_ty = if s.has_return_value {
-                if self.index.has_exit(view.body, FALLTHROUGH | EMPTY_RETURN) {
+                if self.index.has_exit(template, FALLTHROUGH | EMPTY_RETURN) {
                     self.types.with_absences(s.returned, Absence::Undefined)
                 } else {
                     s.returned
                 }
-            } else if !self.index.has_exit(view.body, FALLTHROUGH) {
+            } else if !self.index.has_exit(template, FALLTHROUGH) {
                 Ty::NEVER
             } else {
                 Ty::VOID
@@ -624,10 +624,7 @@ impl<'h, 'a> Solver<'h, 'a> {
             } => {
                 self.eval_expr(s, condition)?;
                 let otherwise = else_branch.as_deref().unwrap_or(&[]);
-                let (then_reaches, else_reaches) = (
-                    self.index.has_exit(then_branch, FALLTHROUGH),
-                    self.index.has_exit(otherwise, FALLTHROUGH),
-                );
+                let [then_reaches, else_reaches] = self.index.arms_fall_through(condition)?;
                 let branch = s.guards.branch();
                 self.assume(s, condition, true);
                 self.eval_stmts(s, then_branch)?;

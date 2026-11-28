@@ -35,6 +35,7 @@ impl ControlFlowGraph<Labels> for Adjacency<'_> {
     fn get_successor(&self, _: &Labels, node: &usize, index: usize) -> usize {
         self.0[*node][index]
     }
+    // pliron's Tarjan SCC walks successors only. These scans answer the trait lazily.
     fn num_predecessors(&self, _: &Labels, node: &usize) -> usize {
         self.incoming(*node).count()
     }

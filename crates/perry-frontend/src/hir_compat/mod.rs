@@ -152,8 +152,7 @@ pub(crate) fn declaration_flags(
     id: LocalId,
 ) -> crate::engine::types::LocalFlags {
     source
-        .locals
-        .get(&id)
+        .local(id)
         .map_or(crate::engine::types::LocalFlags::GENERATED, |local| {
             local.flags
         })
@@ -252,7 +251,8 @@ function walk<T>(items: T[]) {
         let adapted: Vec<_> = lowered
             .declarations
             .locals
-            .values()
+            .iter()
+            .flatten()
             .filter(|local| {
                 local
                     .flags

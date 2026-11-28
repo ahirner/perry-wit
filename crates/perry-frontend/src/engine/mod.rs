@@ -156,7 +156,8 @@ pub(crate) struct InstancePlans<'s> {
 pub(crate) struct Specialization<'s> {
     pub(crate) templates: types::IdxVec<types::TemplateId, boundary::TemplateView<'s>>,
     function_templates: Vec<Option<types::TemplateId>>,
-    pub(crate) writes: crate::narrowing::WriteEffects,
+    regions: boundary::Regions,
+    writes: solve::WriteEffects,
     pub(crate) bodies: crate::source::InstanceBodies<'s>,
     pub(crate) sparse_arrays: bool,
     pub(crate) locations: types::IdxVec<types::LocId, types::Ty>,
@@ -182,6 +183,25 @@ impl<'s> Specialization<'s> {
             return None;
         };
         Some((view, site))
+    }
+    /// Calls `write` with each local that `owner` assigns while it runs `body` or `tests`.
+    pub(crate) fn written<'t>(
+        &self,
+        owner: BodyOwner,
+        body: &[perry_hir::ir::Stmt],
+        tests: impl IntoIterator<Item = &'t perry_hir::ir::Expr>,
+        mut write: impl FnMut(perry_hir::types::LocalId),
+    ) {
+        let expressions = self.instances.expressions();
+        self.regions.of(
+            &self.instances.locals,
+            expressions,
+            body,
+            tests,
+            &mut |region| {
+                self.writes.locals(region, owner).for_each(&mut write);
+            },
+        );
     }
     pub(crate) fn closure_value(
         &self,
@@ -242,6 +262,7 @@ pub(crate) fn lower_module<'r>(
         resources: solved.resources,
         templates: index.views,
         function_templates: index.functions,
+        regions: index.regions,
         writes: solved.writes,
         bodies,
         sparse_arrays: source.sparse_arrays || solved.deletes_array_elements,
@@ -275,13 +296,6 @@ impl<'s> InstancePlans<'s> {
         self.decisions.storage(owner, self.locals.index(id)?)
     }
 
-    pub(crate) fn globals(&self) -> impl Iterator<Item = perry_hir::types::LocalId> + '_ {
-        self.locals
-            .rows
-            .iter()
-            .filter(|local| local.flags.contains(types::LocalFlags::GLOBAL_SLOT))
-            .map(|local| local.id)
-    }
     pub(crate) fn local(&self, id: perry_hir::types::LocalId) -> Result<&types::LocalInfo<'s>> {
         Ok(&self.locals.rows[self.local_id(id)?])
     }

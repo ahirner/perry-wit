@@ -16,14 +16,9 @@ impl<'s> FunctionBuilder<'s, '_> {
         exprs: impl IntoIterator<Item = &'s Expr>,
     ) {
         if self.variant_guards.depth() != 0 {
-            let writes = &self.shapes.specialization.writes;
-            for region in crate::narrowing::Region::of(body, exprs) {
-                if let Some(locals) = writes.get(&(self.frame.owner, region)) {
-                    for &local in locals {
-                        self.variant_guards.assign(local);
-                    }
-                }
-            }
+            let guards = &mut self.variant_guards;
+            let specialization = &self.shapes.specialization;
+            specialization.written(self.frame.owner, body, exprs, |local| guards.assign(local));
         }
     }
 

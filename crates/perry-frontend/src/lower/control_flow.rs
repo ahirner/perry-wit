@@ -191,7 +191,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             if let Some((id, _)) = &clause.param {
                 let binding = self.initialized_local(ctx, exception);
                 self.variant_guards.assign(*id);
-                self.locals.insert(*id, binding);
+                self.locals.insert(*id, binding)?;
             }
             let handler = rethrow_block.or(self.handler);
             self.with_handler(ctx, handler, finally, |b, ctx| {
@@ -287,7 +287,7 @@ impl<'s> FunctionBuilder<'s, '_> {
             Some((id, input)) => self.iterate(ctx, input, |b, ctx, item, _, next, done| {
                 let item = item.into_value(b, ctx)?;
                 let local = b.initialized_local(ctx, item);
-                b.locals.insert(id, local);
+                b.locals.insert(id, local)?;
                 emit_body(b, ctx, next, done)
             }),
             None => self.repeat(ctx, "source", condition, update, None, emit_body),

@@ -14,10 +14,12 @@ use pliron::{
     identifier::Identifier,
     r#type::{TypeHandle, TypedHandle},
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 mod collection_types;
-use crate::engine::types::{LocId, ObjectProp, PropertiesId, Ty, TyKind};
+use crate::engine::types::{
+    IdxVec, LocId, LocalFlags, LocalIdx, ObjectProp, PropertiesId, Ty, TyKind,
+};
 use crate::shapes::{Declarations, TypeName, generics::InstanceKey};
 
 mod generics;
@@ -90,7 +92,9 @@ pub(super) struct Shapes<'h, T = Prepared<'h>> {
     pub(super) types: T,
     pub(super) module: pliron::builtin::ops::ModuleOp,
     pub(super) foreign_wrappers: HashMap<(&'h str, Vec<TypeHandle>), Identifier>,
-    pub(super) globals: BTreeMap<perry_hir::types::LocalId, Option<LocalBinding<TypeHandle>>>,
+    /// Per local: `Some` for a module binding shared through a global slot, with its layout
+    /// once declared.
+    globals: IdxVec<LocalIdx, Option<Option<LocalBinding<TypeHandle>>>>,
     pub(super) decls: &'h Declarations<'h>,
     callables: crate::engine::BitSet,
     pub(super) class_records: HashMap<TypeHandle, crate::shapes::ClassShape<'h>>,
@@ -113,7 +117,6 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             perry_mir::RecordLayouts,
         ),
     ) -> Self {
-        let global_ids = specialization.instances.globals();
         Shapes {
             records: layouts.1,
             specialization,
@@ -127,7 +130,12 @@ impl<'h> Shapes<'h, Preparing<'h>> {
             },
             module,
             foreign_wrappers: HashMap::new(),
-            globals: global_ids.map(|id| (id, None)).collect(),
+            globals: specialization.instances.locals.rows.map(|local| {
+                local
+                    .flags
+                    .contains(LocalFlags::GLOBAL_SLOT)
+                    .then_some(None)
+            }),
             decls,
             callables: Default::default(),
             class_records: HashMap::default(),
@@ -233,6 +241,36 @@ impl<'h, T> Shapes<'h, T> {
 }
 
 impl<'h, T> Shapes<'h, T> {
+    /// The global slot of module binding `id`: `None` for a function-local binding, and
+    /// `Some(None)` until a function declares its layout.
+    pub(super) fn global(
+        &self,
+        id: perry_hir::types::LocalId,
+    ) -> Option<Option<LocalBinding<TypeHandle>>> {
+        self.globals[self.specialization.instances.locals.index(id)?]
+    }
+
+    pub(super) fn global_mut(
+        &mut self,
+        id: perry_hir::types::LocalId,
+    ) -> Option<&mut Option<LocalBinding<TypeHandle>>> {
+        let local = self.specialization.instances.locals.index(id)?;
+        self.globals[local].as_mut()
+    }
+
+    /// The module bindings shared through global slots, in `LocalId` order.
+    pub(super) fn global_bindings(
+        &self,
+    ) -> impl Iterator<Item = (perry_hir::types::LocalId, Option<LocalBinding<TypeHandle>>)> + '_
+    {
+        let locals = &self.specialization.instances.locals;
+        locals
+            .ids
+            .iter()
+            .flatten()
+            .filter_map(|&local| Some((locals.rows[local].id, self.globals[local]?)))
+    }
+
     pub(super) fn deferred_storage(
         &self,
         ctx: &mut Context,

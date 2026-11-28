@@ -160,7 +160,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 if let Some(lidx) = self.index.local_idx(*id) {
                     if let Some(existing) = self.read_local_value(s.inst, lidx) {
                         let is_inferred = !self.index.locals.rows[lidx].flags.is_explicit();
-                        let local_span = self.hir.declarations.locals.get(id).map(|sp| sp.span);
+                        let local_span = self.hir.declarations.local(*id).map(|sp| sp.span);
                         if matches!(self.types.kind(existing), TyKind::Func(_))
                             || self.is_tagged_func_union_in(existing, s.inst)
                         {

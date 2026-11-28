@@ -147,8 +147,7 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let span = self
                     .hir
                     .declarations
-                    .locals
-                    .get(id)
+                    .local(*id)
                     .and_then(|s| self.hir.locations.span(s.span));
                 return Err(Diagnostic::unsupported(
                     "using declarations for imported resources are unsupported",

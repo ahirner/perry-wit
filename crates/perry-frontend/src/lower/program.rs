@@ -242,8 +242,7 @@ pub(crate) fn build_module<'r>(
                 .native_param(crate::engine::NativeParam::Value(ty))
                 .map_err(|error| {
                     let source = declarations
-                        .locals
-                        .get(&param.id)
+                        .local(param.id)
                         .and_then(|span| locations.source_at(span.span.lo.0));
                     let label = if source.is_some_and(|source| source.starts_with(['{', '['])) {
                         format!("{}", idx + 1)
@@ -291,7 +290,7 @@ pub(crate) fn build_module<'r>(
                 && declaration
                     .captures
                     .iter()
-                    .any(|id| !shapes.globals.contains_key(id)))
+                    .any(|&id| shapes.global(id).is_none()))
         {
             Body::Inline(function)
         } else {
@@ -389,7 +388,7 @@ pub(crate) fn build_module<'r>(
                         || specialization.templates[f.template]
                             .captures
                             .iter()
-                            .all(|id| shapes.globals.get(id).is_some_and(Option::is_some)),
+                            .all(|&id| shapes.global(id).flatten().is_some()),
                     "closures capturing activation-local values are unsupported: {name}"
                 );
                 f.is_exported

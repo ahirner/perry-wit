@@ -125,6 +125,7 @@ id_type!(
     LocId,
     LocalIdx,
     HelperId,
+    RegionId,
 );
 
 /// Stable IDs into append-only sets. A duplicate lookup borrows the key without allocating.
@@ -225,6 +226,7 @@ span_type!(
     CaptureConversionSpan,
     CaptureSpan,
     ActivationSpan,
+    WriteSpan,
 );
 
 impl IdxVec<LocId, Ty> {
