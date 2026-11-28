@@ -68,7 +68,7 @@ macro_rules! method_catalog {
                 StringSubstring "substring" Upstream Method [args:rest] => intrinsic(StringSubstring, args, [Number(0.0), Number(f64::INFINITY)], Value), "accepts method arguments";
                 StringIndexOf "indexOf" Upstream Method [args:rest] => intrinsic(StringIndexOf, args, [SearchString, Number(0.0)], Value), "accepts method arguments";
                 StringLastIndexOf "lastIndexOf" Always Method [args:rest] => intrinsic(StringLastIndexOf, args, [SearchString, Number(f64::INFINITY)], Value), "accepts method arguments";
-                StringIncludes "includes" Upstream Method [args:rest] => intrinsic(StringIndexOf, args, [SearchString, Number(0.0)], Found), "accepts method arguments";
+                StringIncludes "includes" Always Method [args:rest] => intrinsic(StringIndexOf, args, [SearchString, Number(0.0)], Found), "accepts method arguments";
                 StringStartsWith "startsWith" Upstream Method [args:rest] => intrinsic(StringStartsWith, args, [SearchString, Number(0.0)], Value), "accepts method arguments";
                 StringEndsWith "endsWith" Upstream Method [args:rest] => intrinsic(StringEndsWith, args, [SearchString, Number(f64::INFINITY)], Value), "accepts method arguments";
                 StringTrim "trim" Upstream Method [args:rest] => intrinsic(StringTrim, args, [], Value), "accepts method arguments";

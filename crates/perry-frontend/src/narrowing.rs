@@ -195,7 +195,7 @@ impl<'s> Guards<'s> {
         });
     }
 
-    fn facts<'a>(&'a self, path: &'a Path<'s>) -> impl Iterator<Item = Fact<'s>> + 'a {
+    fn facts<'a>(&'a self, path: &'a Path<'s>) -> impl Iterator<Item = Fact<'s>> + Clone + 'a {
         self.stack
             .iter()
             .filter(move |g| !g.killed && &g.path == path)
@@ -206,7 +206,7 @@ impl<'s> Guards<'s> {
         &'a self,
         path: &'a Path<'s>,
         discriminant: Discriminant,
-    ) -> impl Iterator<Item = (&'s str, bool)> + 'a {
+    ) -> impl Iterator<Item = (&'s str, bool)> + Clone + 'a {
         self.facts(path).filter_map(move |fact| match fact {
             Fact::Tag(d, tag, equal) if d == discriminant => Some((tag, equal)),
             _ => None,

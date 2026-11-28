@@ -996,6 +996,13 @@ impl TypeTable {
                 }))
     }
 
+    pub(crate) fn has_type_parameter(&self, ty: Ty) -> bool {
+        self.is_open(ty)
+            && self.any_descendant(ty, &mut BitSet::default(), &|child| {
+                matches!(self.kind(child), TyKind::TypeVar(_))
+            })
+    }
+
     pub(crate) fn contains_ty(&self, haystack: Ty, needle: Ty) -> bool {
         self.any_descendant(haystack, &mut BitSet::default(), &|ty| ty == needle)
     }

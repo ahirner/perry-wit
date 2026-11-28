@@ -572,8 +572,16 @@ pub(crate) fn property_type(
                 }
             }
             dict_value_ty(ctx, decls, types, stripped).or_else(|| {
-                receiver_of(ctx, decls, types, stripped)
-                    .and_then(|r| Method::lookup(r, property))
+                let receiver = receiver_of(ctx, decls, types, stripped)?;
+                if receiver == Receiver::Value(Kind::Url) {
+                    if property == "searchParams" {
+                        return Some(native_ty(ctx, types, Kind::SearchParams));
+                    }
+                    if crate::methods::URL_STRING_FIELDS.contains(&property) {
+                        return Some(Ty::STRING);
+                    }
+                }
+                Method::lookup(receiver, property)
                     .filter(|m| m.is_property())
                     .map(|m| {
                         apply_method_result(
@@ -644,10 +652,7 @@ pub(crate) fn logical_result(types: &mut TypeTable, op: LogicalOp, left: Ty, rig
         LogicalOp::Coalesce => match l_abs {
             None => left,
             Some(_) if l_in == Ty::VOID => right,
-            Some(_) => {
-                let j = types.join(l_in, r_in);
-                types.with_absences(j, r_abs)
-            }
+            Some(_) => types.join(l_in, right),
         },
         LogicalOp::Or => {
             let j = types.join(l_in, r_in);

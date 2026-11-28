@@ -208,3 +208,32 @@ function nestedConstructorInference(n: number): number {
     return pair.value + pair.extra + inferred.size + inferredMap.size;
 }
 for (const n of [0, 7]) console.log("nested-constructors", nestedConstructorInference(n));
+
+function byCode<T extends { code: string }>(values: T[]): Map<string, T> {
+  return new Map(values.map(value => [value.code, value] as const));
+}
+const weights = byCode([{ code: "b", weight: 1 }, { code: "a", weight: 2 }]);
+for (const [code, value] of [...weights.entries()].toSorted(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+  console.log(code, value.weight);
+}
+
+function palette(warm: boolean, extra: [string, string][]) {
+  let colors: [string, string][] = [];
+  colors = warm ? [["top", "red"], ...extra] : [["base", "blue"], ...extra];
+  return JSON.stringify(colors);
+}
+console.log("tuple-spread", palette(true, [["edge", "green"]]), palette(false, []));
+
+function pitches(layers: { label: string; notes: number[] }[], label: string) {
+  const notes = layers.find(layer => layer.label === label)?.notes ?? [];
+  return notes.map(note => note + 1).join(",");
+}
+console.log("fallback-array", pitches([{ label: "alto", notes: [2, 4] }], "alto"), pitches([], "bass"));
+
+function alphabet(keys: string[]) {
+  const letters = new Map(keys.map(key => [key, key.toUpperCase()]));
+  const result: string[] = [];
+  for (const [key, letter] of letters) result.push(key + letter);
+  return result.join(",");
+}
+console.log("mapped-entries", alphabet(["b", "a"]));

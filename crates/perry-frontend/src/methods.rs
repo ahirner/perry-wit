@@ -5,6 +5,11 @@ pub(crate) use perry_mir::ValueKind as Kind;
 use perry_wit_diagnostics::Result;
 use perry_wit_diagnostics::unsupported;
 
+pub(crate) const URL_STRING_FIELDS: &[&str] = &[
+    "href", "protocol", "pathname", "username", "password", "hash", "search", "host", "hostname",
+    "port", "origin",
+];
+
 pub(crate) enum CallReceiver<'s> {
     Expression(&'s Expr),
     Local(LocalId),

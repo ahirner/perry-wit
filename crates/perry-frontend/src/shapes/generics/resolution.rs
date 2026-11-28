@@ -205,6 +205,19 @@ impl<'a, 'h> Resolver<'a, 'h> {
         Some((ty, depth))
     }
 
+    pub(crate) fn structure(&mut self, ty: Ty) -> Option<Ty> {
+        if let TyKind::Named(name) = self.types.kind(ty)
+            && let Some(value) = self.decls.foreign_type(self.ctx, name)
+        {
+            Some(
+                self.types
+                    .wit_type(self.ctx, value, crate::engine::types::WitView::Definition),
+            )
+        } else {
+            Some(self.resolve(ty, Query::Record, 0)?.0)
+        }
+    }
+
     pub(crate) fn record(&mut self, ty: Ty, depth: usize) -> Option<PropertiesId> {
         let (ty, _) = self.resolve(ty, Query::Record, depth)?;
         self.types.closed_record(ty)

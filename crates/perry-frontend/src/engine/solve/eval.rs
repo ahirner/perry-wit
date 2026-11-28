@@ -475,6 +475,9 @@ impl<'h, 'a> Solver<'h, 'a> {
                 let is_deferred = local.flags.contains(LocalFlags::DEFERRED);
                 let declared = local.declared;
                 let declared = if !is_inferred {
+                    let declared =
+                        self.index
+                            .substitute(self.types, declared, &self.type_bindings[s.inst]);
                     self.instantiate_annotated_class(declared, 0, Some(s.inst))?
                 } else {
                     declared
@@ -722,6 +725,7 @@ impl<'h, 'a> Solver<'h, 'a> {
 
     pub(super) fn assume(&self, s: &mut EvalState<'h>, condition: &'h Expr, truth: bool) {
         s.guards.exclude_absences(condition, truth);
+        s.guards.condition(condition, truth);
         self.invalidate_writes(s, &[], [condition]);
     }
 

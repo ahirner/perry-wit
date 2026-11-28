@@ -74,7 +74,22 @@ impl super::Prepare<'_> {
                 ast::Ident::new_no_ctxt(format!("{prefix}element").into(), iteration.span);
             self.analysis.record_iteration(iteration.span);
             let init = source.into_var_decl(ast::VarDeclKind::Const, element.clone().into());
-            let item = element.into_var_decl(kind, binding);
+            // The synthetic initializer carries the whole iterable. Perry must
+            // select the destructuring protocol for its element instead.
+            let item: ast::Expr = if matches!(binding, ast::Pat::Array(_)) {
+                ast::TsAsExpr {
+                    span: DUMMY_SP,
+                    expr: Box::new(element.into()),
+                    type_ann: Box::new(ast::TsType::TsKeywordType(ast::TsKeywordType {
+                        span: DUMMY_SP,
+                        kind: ast::TsKeywordTypeKind::TsUnknownKeyword,
+                    })),
+                }
+                .into()
+            } else {
+                element.into()
+            };
+            let item = item.into_var_decl(kind, binding);
             return Ok(ast::ForStmt {
                 span: iteration.span,
                 init: Some(ast::VarDeclOrExpr::VarDecl(Box::new(init))),
